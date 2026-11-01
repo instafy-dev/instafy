@@ -15,6 +15,7 @@ import {
 import type { RunStatus } from "../../../../types";
 import type { ChatMessage } from "../../types";
 import {
+  BROWSER_BUILD_REQUEST_NOTE_KEY,
   BROWSER_HAND_BACK_CLAIM_KEY,
   BROWSER_HAND_BACK_PROMPT,
   BROWSER_HAND_BACK_RECORD_KEY,
@@ -38,7 +39,7 @@ const fixtures = JSON.parse(readFileSync(
   resolve(repo, "packages/runtime-controller/src/browser_hand_back_fixtures.json"), "utf8",
 )) as {
   claimKey: string; recordKey: string; handBackPrompt: string; browserReply: string; postedReply: string;
-  findingLines: string[]; letOctoContinuePrompt: string;
+  findingLines: string[]; letOctoContinuePrompt: string; buildRequestNoteKey: string;
 };
 
 const CARD_JOB = "job-card";
@@ -62,6 +63,37 @@ function findingsNote(jobId: string, timestamp: number, pagesRead = 2): ChatMess
     messageType: "status",
     details: { kind: "agent_message", browserFindings: { pages: fixtures.findingLines.length, pagesRead } },
   });
+}
+
+/**
+ * The runtime's note on a browser turn that carried on the person's own
+ * message, opened no page and asked Octo to make what it asks; its reply is
+ * empty.
+ */
+function buildRequestNote(jobId: string, timestamp: number): ChatMessage {
+  return reply(jobId, "This needs no website: Octo makes it in the chat.", timestamp, {
+    messageType: "status",
+    details: { kind: "agent_message", [BROWSER_BUILD_REQUEST_NOTE_KEY]: { version: 1 } },
+  });
+}
+
+/**
+ * The person's message, which the routing step sent straight to the browser
+ * with a routed card that does not continue building, and its browser turn,
+ * which opened no page and asked Octo to make it.
+ */
+function routedBuildRequest(now: number, note = true): ChatMessage[] {
+  return [
+    sent(CARD_JOB, {}, now - 60_000, "Plan three days in the old town, on a map."),
+    reply(CARD_JOB, "Continue this task in Instafy's browser.", now - 50_000, {
+      messageType: "action_request",
+      details: { browserRequest: { task: "Plan three days in the old town, on a map.", location: "auto", routed: true } },
+    }),
+    sent(BROWSER_JOB, { browserRequestOf: `job:${CARD_JOB}`, browserTransport: "shared", browserAutoStarted: true },
+      now - 40_000, "Plan three days in the old town, on a map."),
+    ...(note ? [buildRequestNote(BROWSER_JOB, now - 1_100)] : []),
+    reply(BROWSER_JOB, "", now - 1_000),
+  ];
 }
 
 /** Card, browser turn, its findings note and reply: the chain as this page sent it. */
@@ -112,6 +144,23 @@ describe("browser hand-back: when Studio sends one", () => {
 
   it("hands back a finished browser turn that continued this page's card", () => {
     expect(browserHandBackCandidate(input)).toBe(BROWSER_JOB);
+  });
+
+  it("names the build request note the runtime and the controller use", () => {
+    expect(BROWSER_BUILD_REQUEST_NOTE_KEY).toBe(fixtures.buildRequestNoteKey);
+  });
+
+  // A message the routing step sent to the browser asked for a map, which a
+  // browser turn cannot make: it opened no page and asked Octo to make it. The
+  // controller sends that hand-back itself as the turn ends, whichever page or
+  // device is open, so this page sends none, even the page that sent it all.
+  it("never hands back a message the browser turn asked Octo to make: the controller sends that one", () => {
+    forgetPromptsSentFromThisPageForTests();
+    input.messages = routedBuildRequest(now);
+    expect(browserHandBackCandidate(input)).toBeNull();
+    forgetPromptsSentFromThisPageForTests();
+    input.messages = routedBuildRequest(now, false);
+    expect(browserHandBackCandidate(input)).toBeNull();
   });
 
   it.each([
@@ -259,6 +308,15 @@ describe("useBrowserHandBack", () => {
     root = createRoot(container);
     await render();
     expect(value.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends nothing for a message the browser turn asked Octo to make", async () => {
+    await render();
+    vi.advanceTimersByTime(5_000);
+    value.messages = routedBuildRequest(Date.now());
+    value.runStatuses = new Map([[BROWSER_JOB, "success"]]);
+    await render();
+    expect(value.send).not.toHaveBeenCalled();
   });
 
   it("waits while the person holds it (a draft, or a step of theirs in the browser) or a turn runs", async () => {

@@ -7625,6 +7625,28 @@ impl JobProcessor {
         suppress_multi_agent_plan_actions_for_worker(job, &mut outcome);
         log_browser_requests_dropped_as_read(job, &output.final_json);
         suppress_browser_requests_where_unsupported(job, &mut outcome);
+        // A browser turn that carries on the person's own message, opened no
+        // page and asks Octo to make what the message asks hands the message
+        // to the building turn (`browser_hand_back`): it is not tried again in
+        // the browser, posts nothing of its answer, and ends with the note the
+        // controller hands the message back on.
+        let hands_the_message_to_the_building_turn = (shared_browser_execution_missing_after_attempt(
+            explicit_shared_browser_execution,
+            &interim_messages,
+            first_shared_browser_terminal_consent_failure,
+            shared_browser_action_log_before,
+            crate::shared_browser::action_log_len(),
+        )
+            || (explicit_personal_browser_execution
+                && !has_successful_personal_browser_mcp_message(&interim_messages)))
+            && browser_hand_back::hands_the_message_to_the_building_turn(job, &output.final_json);
+        if hands_the_message_to_the_building_turn {
+            outcome.actions.clear();
+            tracing::info!(
+                job_id = %job_id,
+                "browser turn opened no page and asked for a build: the message goes to the building turn"
+            );
+        }
         let mut codex_fallback_summary_kind =
             classify_internal_codex_fallback_summary(&outcome.summary);
         apply_terminal_shared_browser_summary(
@@ -7636,10 +7658,11 @@ impl JobProcessor {
         augment_summary_for_onboarding_actions(&mut outcome.summary, &outcome.actions);
         let expects_workspace_file_changes_after_actions =
             workspace_file_changes_still_required(expects_workspace_file_changes, &outcome);
-        let final_messages = with_runtime_metadata_vec(
-            build_final_messages_from_outcome(&outcome, Some(&workspace_dir)),
-            &registration.runtime_id,
-        );
+        let mut final_messages = build_final_messages_from_outcome(&outcome, Some(&workspace_dir));
+        if hands_the_message_to_the_building_turn {
+            final_messages.push(browser_hand_back::build_request_note());
+        }
+        let final_messages = with_runtime_metadata_vec(final_messages, &registration.runtime_id);
         let reported_file_paths = outcome
             .files
             .iter()
@@ -7796,14 +7819,16 @@ impl JobProcessor {
         let generic_mcp_tool_execution_missing =
             expects_generic_mcp_tool_execution && !has_mcp_tool_call_message(&interim_messages);
         let personal_browser_execution_missing = explicit_personal_browser_execution
-            && !has_successful_personal_browser_mcp_message(&interim_messages);
-        let shared_browser_execution_missing = shared_browser_execution_missing_after_attempt(
-            explicit_shared_browser_execution,
-            &interim_messages,
-            first_shared_browser_terminal_consent_failure,
-            shared_browser_action_log_before,
-            crate::shared_browser::action_log_len(),
-        );
+            && !has_successful_personal_browser_mcp_message(&interim_messages)
+            && !hands_the_message_to_the_building_turn;
+        let shared_browser_execution_missing = !hands_the_message_to_the_building_turn
+            && shared_browser_execution_missing_after_attempt(
+                explicit_shared_browser_execution,
+                &interim_messages,
+                first_shared_browser_terminal_consent_failure,
+                shared_browser_action_log_before,
+                crate::shared_browser::action_log_len(),
+            );
         let evidence_recovery_plan = routing_recovery::plan(
             evidence_requirements,
             observed_evidence,
@@ -7843,7 +7868,10 @@ impl JobProcessor {
             && outcome.files.is_empty()
             && !workspace_file_changes_satisfied_by_patch_apply;
 
+        // A browser turn that hands the person's message to the building turn
+        // has its answer: no reason to run it again.
         let recovery_retry_required = !clean_ambient_decline
+            && !hands_the_message_to_the_building_turn
             && (reported_file_changes_missing
                 || workspace_file_changes_missing
                 || codex_fallback_summary_kind.is_some()
@@ -7965,13 +7993,18 @@ impl JobProcessor {
                 format!(
                     "{prompt}\n\nIMPORTANT PERSONAL BROWSER RETRY REQUIREMENT:\n\
                     - Your previous response did not execute the dedicated Personal Browser tools.\n\
+                    {}\
                     - Use `instafy_personal_browser.snapshot` now, then complete the requested action with fresh snapshot indices.\n\
                     - Do not use shell, Playwright, CDP, noVNC, or Shared Browser.\n\
                     - Stop if the user paused control, denied the site origin, or the capability was revoked.\n\n\
-                    Retry the latest user request now."
+                    Retry the latest user request now.",
+                    browser_hand_back::build_request_retry_line(job)
                 )
             } else if shared_browser_execution_missing {
-                shared_browser_execution_retry_prompt(&prompt)
+                shared_browser_execution_retry_prompt(
+                    &prompt,
+                    browser_hand_back::build_request_retry_line(job),
+                )
             } else if command_execution_missing {
                 evidence_recovery_plan.map_or_else(
                     || prompt.to_string(),
@@ -8430,6 +8463,31 @@ impl JobProcessor {
                     shared_browser_action_log_before_retry,
                     crate::shared_browser::action_log_len(),
                 );
+            // The retry of a browser turn that carries on the person's own
+            // message, opened no page and asks Octo to make what the message
+            // asks: the message goes to the building turn, as after a first
+            // attempt that did, and the turn does not fail for the page it
+            // never opened. A first attempt that said so in words alone gets
+            // here, its retry asked to decide first
+            // (`browser_hand_back::build_request_retry_line`).
+            let retry_hands_the_message_to_the_building_turn =
+                (retry_shared_browser_execution_missing
+                    || retry_personal_browser_execution_missing)
+                    && browser_hand_back::hands_the_message_to_the_building_turn(
+                        job,
+                        &retry_output.final_json,
+                    );
+            if retry_hands_the_message_to_the_building_turn {
+                retry_outcome.actions.clear();
+                tracing::info!(
+                    job_id = %job_id,
+                    "browser retry opened no page and asked for a build: the message goes to the building turn"
+                );
+            }
+            let retry_shared_browser_execution_missing = retry_shared_browser_execution_missing
+                && !retry_hands_the_message_to_the_building_turn;
+            let retry_personal_browser_execution_missing = retry_personal_browser_execution_missing
+                && !retry_hands_the_message_to_the_building_turn;
             let retry_reported_file_changes_missing = reported_workspace_file_changes_missing(
                 tracks_workspace_file_changes,
                 retry_reported_files_len,
@@ -8672,10 +8730,13 @@ impl JobProcessor {
                     }
                     None => false,
                 };
-            let retry_final_messages = with_runtime_metadata_vec(
-                build_final_messages_from_outcome(&retry_outcome, Some(&workspace_dir)),
-                &registration.runtime_id,
-            );
+            let mut retry_final_messages =
+                build_final_messages_from_outcome(&retry_outcome, Some(&workspace_dir));
+            if retry_hands_the_message_to_the_building_turn {
+                retry_final_messages.push(browser_hand_back::build_request_note());
+            }
+            let retry_final_messages =
+                with_runtime_metadata_vec(retry_final_messages, &registration.runtime_id);
             if retry_generic_mcp_tool_execution_missing {
                 retry_artifacts.push(json!({
                     "kind": "mcp/tool-missing-after-retry",
@@ -8973,6 +9034,10 @@ impl JobProcessor {
                 retry_messages,
             );
             post_only_the_card(job, &mut retry_outcome);
+            if retry_hands_the_message_to_the_building_turn {
+                // An empty reply is no reply: the building turn answers.
+                retry_outcome.summary.clear();
+            }
             save_report::append_not_saved(&mut retry_outcome.summary, &retry_not_saved);
             user_input_request::append_outcome_artifact(&mut retry_artifacts, &retry_outcome);
             return Ok(JobExecution {
@@ -9185,6 +9250,10 @@ impl JobProcessor {
             interim_messages,
         );
         post_only_the_card(job, &mut outcome);
+        if hands_the_message_to_the_building_turn {
+            // An empty reply is no reply: the building turn answers.
+            outcome.summary.clear();
+        }
         save_report::append_not_saved(&mut outcome.summary, &not_saved);
         user_input_request::append_outcome_artifact(&mut artifacts, &outcome);
         Ok(JobExecution {
@@ -13508,7 +13577,9 @@ const SHARED_BROWSER_NO_PAGE_RETRY_STATUS: &str =
 const PERSONAL_BROWSER_NOT_USED_RETRY_STATUS: &str =
     "Trying again: Octo hadn't used the browser on this device yet.";
 
-fn shared_browser_execution_retry_prompt(prompt: &str) -> String {
+/// `build_request` is what a retry of a browser turn that carries on the
+/// person's own message reads first ([`browser_hand_back::build_request_retry_line`]).
+fn shared_browser_execution_retry_prompt(prompt: &str, build_request: &str) -> String {
     // A browser that has just started is on a blank page: the snapshot says so
     // and the agent has to navigate before there is anything to act on. A
     // task that names no address (research, a comparison) gets no address
@@ -13516,6 +13587,7 @@ fn shared_browser_execution_retry_prompt(prompt: &str) -> String {
     format!(
         "{prompt}\n\nIMPORTANT SHARED BROWSER RETRY REQUIREMENT:\n\
         - Your previous response did not produce any instrumented Shared Browser action evidence.\n\
+        {build_request}\
         - Use `instafy_shared_browser.snapshot` now. If it reports a blank page, call `instafy_shared_browser.navigate` before anything else: with the http(s) address the task names, or, when it names none, with the official site of what the task is about. A blank page is never a reason to stop.\n\
         - Complete the requested interaction with the same dedicated MCP server and fresh snapshot indices.\n\
         - Do not use shell, Playwright, direct CDP, or merely narrate the action.\n\
@@ -18327,8 +18399,11 @@ fn resolve_exact_owned_write_scope_path(workspace_dir: &Path, raw: &str) -> Opti
 /// read one page and stopped "because this turn is read-only", and a browser
 /// turn asked for a page told the person "in this run: it's read-only" (local
 /// tests, Oct 31). A browser turn that hands back is told which turn makes the
-/// page; any other read-only job is told it is read-only.
-fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> &'static str {
+/// page; any other read-only job is told it is read-only. A browser turn that
+/// carries on the person's own message is also told how to hand a message
+/// that asks Octo to make something to the building turn
+/// ([`browser_hand_back::BUILD_REQUEST_LINE`]).
+fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> String {
     let browser = metadata
         .and_then(|metadata| {
             metadata
@@ -18337,7 +18412,7 @@ fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> &'static str {
         })
         .and_then(JsonValue::as_str)
         .map(|transport| transport.trim().to_ascii_lowercase().replace('_', "-"));
-    if metadata.is_some_and(browser_hand_back::hands_back) {
+    let line = if metadata.is_some_and(browser_hand_back::hands_back) {
         "- This turn reads pages; the building turn after it makes the page.\n"
     } else if browser.as_deref() == Some("shared") {
         "- This turn reads pages in Instafy's browser; Octo builds in the chat.\n"
@@ -18345,6 +18420,11 @@ fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> &'static str {
         "- This turn reads pages in the browser on this device; Octo builds in the chat.\n"
     } else {
         "- This job is read-only. Do not create, edit, move, delete, or return workspace file changes.\n"
+    };
+    if metadata.is_some_and(browser_hand_back::carries_on_a_routed_card) {
+        format!("{line}{}", browser_hand_back::BUILD_REQUEST_LINE)
+    } else {
+        line.to_string()
     }
 }
 
@@ -18463,7 +18543,7 @@ fn format_write_scope_guardrail_section(metadata: Option<&JsonValue>) -> Option<
         let _ = writeln!(formatted, "- Rationale: {rationale}");
     }
     if mode.eq_ignore_ascii_case("read_only") || mode.eq_ignore_ascii_case("readonly") {
-        formatted.push_str(read_only_write_scope_line(metadata));
+        formatted.push_str(&read_only_write_scope_line(metadata));
     }
     if !owned_paths.is_empty() {
         let _ = writeln!(formatted, "- Owned paths: {}", owned_paths.join(", "));
@@ -26968,9 +27048,49 @@ mod tests {
         }
     }
 
+    /// A look at the blank page of a browser that has just started opens nothing: a turn that
+    /// carries on the person's own message may check the browser's state or snapshot its blank
+    /// page before it answers that the message asks Octo to make something, and it still hands
+    /// the message back (`browser_hand_back::hands_the_message_to_the_building_turn` reads this).
+    /// A blank snapshot adds nothing to the action log; a page it opened would.
+    #[test]
+    fn a_look_at_a_blank_page_opens_no_page() {
+        let looked = extract_codex_messages(&[
+            json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "call-status", "type": "mcp_tool_call",
+                    "server": "instafy_shared_browser", "tool": "status", "status": "completed",
+                }
+            }),
+            json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "call-snapshot", "type": "mcp_tool_call",
+                    "server": "instafy_shared_browser", "tool": "snapshot", "status": "completed",
+                }
+            }),
+        ]);
+        assert!(has_successful_shared_browser_mcp_message(&looked));
+        assert!(shared_browser_execution_missing_after_attempt(
+            true,
+            &looked,
+            None,
+            Some(7),
+            7
+        ));
+        assert!(!shared_browser_execution_missing_after_attempt(
+            true,
+            &looked,
+            None,
+            Some(7),
+            9
+        ));
+    }
+
     #[test]
     fn shared_browser_retry_prompt_navigates_away_from_a_blank_page() {
-        let retry = shared_browser_execution_retry_prompt("Open https://app.example.test");
+        let retry = shared_browser_execution_retry_prompt("Open https://app.example.test", "");
         assert!(retry.starts_with("Open https://app.example.test\n\n"));
         assert!(retry.contains("Use `instafy_shared_browser.snapshot` now."));
         assert!(retry.contains(
@@ -26986,6 +27106,7 @@ mod tests {
         // task provides no page address to open"), so the turn failed.
         let retry = shared_browser_execution_retry_prompt(
             "Research the three latest robot vacuums under 600 euros and build a comparison page.",
+            "",
         );
         assert!(
             retry.contains(
@@ -32290,6 +32411,110 @@ mod tests {
             ), "{section}");
             assert!(!section.contains("This turn reads pages"), "{section}");
         }
+    }
+
+    /// A browser turn that carries on the person's own message (a card the routing step
+    /// posted, as the controller stamped its send) is told how to hand a message that asks
+    /// Octo to make something with no website to use first back to the building turn: a
+    /// browser turn sent a request for a map said it could not make one, and the retry for a
+    /// turn that opened no page made it browse instead (a local test, Nov 1). Any other turn
+    /// is not: its build request would hand nothing back.
+    #[test]
+    fn a_routed_browser_turn_is_told_to_hand_a_build_back() {
+        let routed = |transport: &str, hands_back: bool, routed: JsonValue| {
+            json!({
+                "browserTransport": transport,
+                "browserHandsBack": hands_back,
+                "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                "browserCardTurn": {"version": 1, "routed": routed},
+                "writeScope": {"mode": "read_only"},
+            })
+        };
+        let section = |metadata: &JsonValue| {
+            format_write_scope_guardrail_section(Some(metadata)).expect("write scope section")
+        };
+        for (transport, hands_back, line) in [
+            (
+                "shared",
+                false,
+                "- This turn reads pages in Instafy's browser; Octo builds in the chat.\n",
+            ),
+            (
+                "shared",
+                true,
+                "- This turn reads pages; the building turn after it makes the page.\n",
+            ),
+            (
+                "desktop-personal",
+                false,
+                "- This turn reads pages in the browser on this device; Octo builds in the chat.\n",
+            ),
+        ] {
+            let told = section(&routed(transport, hands_back, json!(true)));
+            assert!(
+                told.contains(&format!("{line}{}", browser_hand_back::BUILD_REQUEST_LINE)),
+                "{told}"
+            );
+            for stamp in [json!(false), json!("true"), JsonValue::Null] {
+                let section = section(&routed(transport, hands_back, stamp));
+                assert!(section.contains(line), "{section}");
+                assert!(!section.contains("request_build"), "{section}");
+            }
+        }
+        assert!(
+            browser_hand_back::BUILD_REQUEST_LINE.contains(
+                "only asks Octo to make or change something in this space (a page, a map, a table) and needs no website first"
+            )
+        );
+        // It decides before any browser step: the run text sends a turn that
+        // finds a blank page to the official site of what the task is about,
+        // and a turn that opened a page hands nothing back.
+        assert!(
+            browser_hand_back::BUILD_REQUEST_LINE
+                .contains("decide so before any browser step and open no page, blank or not")
+        );
+    }
+
+    /// A browser turn that carries on the person's own message and opened no page is tried
+    /// again once in the browser, as any is, unless its answer asked Octo to make the message.
+    /// That retry reads the build request first, ahead of its own requirement to open a page: a
+    /// first answer that said in words alone it could not make the map (as one did in a local
+    /// test, Oct 31) gets one more chance to hand the message back, where the retry's
+    /// requirement alone would send it to a website. A retry of any other turn reads nothing of
+    /// it: its build request would hand nothing back.
+    #[test]
+    fn the_browser_retry_of_a_routed_turn_reads_the_build_request_first() {
+        let job = |routed: JsonValue| {
+            test_lease_job(
+                Some("feature"),
+                json!({
+                    "metadata": {
+                        "browserTransport": "shared",
+                        "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                        "browserCardTurn": {"version": 1, "routed": routed},
+                    }
+                }),
+            )
+        };
+        let line = browser_hand_back::build_request_retry_line(&job(json!(true)));
+        assert_eq!(line, browser_hand_back::BUILD_REQUEST_RETRY_LINE);
+        let retry = shared_browser_execution_retry_prompt("Plan three days, on a map.", line);
+        let decide = retry
+            .find("answer with the action `{type: 'request_build'}` alone, with no browser step.")
+            .expect("the build request");
+        let navigate = retry
+            .find("Use `instafy_shared_browser.snapshot` now.")
+            .expect("the retry requirement");
+        assert!(decide < navigate, "{retry}");
+        assert!(
+            retry.contains("Every other request:\n- Use `instafy_shared_browser.snapshot` now.")
+        );
+        for stamp in [json!(false), json!("true"), JsonValue::Null] {
+            assert_eq!(browser_hand_back::build_request_retry_line(&job(stamp)), "");
+        }
+        let plain = shared_browser_execution_retry_prompt("Open https://app.example.test", "");
+        assert!(!plain.contains("request_build"), "{plain}");
+        assert!(plain.contains("action evidence.\n- Use `instafy_shared_browser.snapshot` now."));
     }
 
     #[test]
