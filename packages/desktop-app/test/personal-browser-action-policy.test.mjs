@@ -52,6 +52,23 @@ test("the case table covers every ask category and every refusal in English and 
   }
 });
 
+// Buying, paying, ordering, sending, deleting, cancelling, confirming and
+// saving ask in the languages the consent words cover too.
+test("the case table covers the risk words in French, Spanish, Italian, Portuguese and Dutch", () => {
+  for (const language of ["FR", "ES", "IT", "PT", "NL"]) {
+    const asked = table.cases.filter((entry) => entry.name.startsWith(`${language} `) && entry.verdict === "ask");
+    for (const category of ["purchase", "message", "destructive"]) {
+      assert.ok(asked.some((entry) => entry.category === category), `missing ${language} case for ${category}`);
+    }
+    assert.ok(asked.some((entry) => entry.commit === true), `missing ${language} commit button`);
+    assert.ok(
+      table.cases.some((entry) => entry.name.startsWith(`${language} `) &&
+        (entry.verdict === "allow" || (entry.category === "change" && entry.commit !== true))),
+      `missing ${language} control that stays ordinary`,
+    );
+  }
+});
+
 test("sensitive fields are refused for typing and submitting in every mode", () => {
   for (const op of ["type", "submit"]) {
     const result = security.classifyPersonalBrowserStep(op, { tag: "input", type: "password" });
@@ -77,7 +94,10 @@ test("dialog labels show both names when the accessible name and visible text di
 test("the fixture pages hold no key-shaped literal", () => {
   const folder = path.join(packageRoot, "test/fixtures/risky-steps");
   const redaction = require(path.join(packageRoot, "dist/personalBrowserRedaction.js"));
-  for (const file of ["index.html", "ff/index.html", "ff/verbundene-apps.html", "ff/login.html", "cases.json"]) {
+  for (const file of [
+    "index.html", "ff/index.html", "ff/verbundene-apps.html", "ff/login.html", "cases.json",
+    "shops/pt.html", "shops/fr.html", "shops/es.html", "shops/it.html", "shops/nl.html",
+  ]) {
     const content = fs.readFileSync(path.join(folder, file), "utf8");
     assert.equal(redaction.matchesKnownFormat(content), false, file);
   }

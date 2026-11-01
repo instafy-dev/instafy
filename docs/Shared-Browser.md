@@ -537,7 +537,22 @@ Stornobuchung, Zahlungen) stays navigation. Buttons whose label fills in,
 reconciles, closes or voids a record (Beleg erfassen, Abgleichen, Erledigt,
 Fakturieren, Verrechnen, Stornobuchung, Reconcile, Void, Write off, Issue
 refund, File tax return) also ask as commit buttons; "Issue" and "File" count
-only with such an object, so a "File" menu or "Choose file" does not. Secret entry,
+only with such an object, so a "File" menu or "Choose file" does not. Buying,
+paying, ordering, sending, deleting, cancelling, confirming and saving count in
+French, Spanish, Italian, Portuguese and Dutch too, the languages of the cookie
+banner words: a script button "Comprar", "Finalizar compra", "Pagar", "Enviar
+mensagem" or "Eliminar conta" asks in its category, and "Guardar",
+"Enregistrer", "Salva" or "Opslaan" asks as Speichern does, on a menu item too,
+while "Planear Viagem" or "Ver horários" does not. An order or a purchase as a
+noun counts only with its verb, so "Minhas encomendas" stays navigation. A word
+that is also a headline's verb or an English word ("elimina", "paga",
+"acquista", "invia", "salva", "commander", "payer") counts only where a
+button puts its verb, first in the control's name or right after an "and"
+("Elimina account", "Paga ora", "Sì, elimina", "Prenota e paga"), and never in
+an address, which holds an article's headline: a news link "Governo elimina
+portagens" or "Commander of the Order of the British Empire" reads like any
+link, in Octo's own tabs too. Dutch "verzenden" counts last ("Bericht
+verzenden"), so "Verzenden en retourneren" does too. Secret entry,
 fresh-target checks, exact authority, denial and cancellation boundaries are
 unchanged. Stopping or completing the turn ends the grant.
 
@@ -633,7 +648,11 @@ Routine mode deliberately relaxes universal confirmation. Its consequence
 classifier uses page descriptors and URL text; it cannot prove that arbitrary
 website JavaScript has no side effects or recognize every language/custom control.
 A plain link whose address has side effects but is not on the risky-address list,
-a control with neither a risky nor a commit word in its label, or a menu item,
+a control with neither a risky nor a commit word in its label (the words are
+English and German, plus buying, paying, ordering, sending, deleting,
+cancelling, confirming and saving in French, Spanish, Italian, Portuguese and
+Dutch, so a "Reservar" or "Publicar" button is not one, and a word that is
+also a headline's verb counts only where a button puts it), or a menu item,
 tab or navigation item whose only risky word is a commit word outside the
 consequential list (such as "Neu", "Weiter", "Erfassen" or "Abgleichen" in a
 menu), can still act without a prompt. **Ask** reviews every click, typing,

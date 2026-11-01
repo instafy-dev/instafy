@@ -429,12 +429,19 @@ if (mode.startsWith("long-label-")) {
 // "button:<label>": a script-driven button with that label and no form
 // (add "-typeless" for one without a type attribute). "post-form-button:<label>":
 // a type="button" control inside a page-wide POST form whose own submit is
-// "Speichern". "menu-item:<label>": a menu item with that label.
-const labelled = /^(button|post-form-button|menu-item):(.+)$/u.exec(specialMode);
+// "Speichern". "menu-item:<label>": a menu item with that label. "link:<label>":
+// a link to an article on the same site whose address holds its label, as a
+// news site's does.
+const labelled = /^(button|post-form-button|menu-item|link):(.+)$/u.exec(specialMode);
+const slugOf = (label) => label.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+  .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 if (labelled) {
   const [, kind, label] = labelled;
+  const article = `https://example.test/2026/10/31/${slugOf(label)}`;
   special[specialMode] = kind === "menu-item"
     ? { description: control(label, { tag: "li", role: "menuitem", inputType: "" }), policy: { areas: "menu" } }
+    : kind === "link"
+    ? { description: control(label, { tag: "a", inputType: "", href: article }), policy: { href: article, linkSelf: true } }
     : kind === "post-form-button"
       ? {
           description: control(label, {
@@ -6518,6 +6525,257 @@ fn a_routine_start_asks_for_menu_items_that_write_and_frees_menu_items_that_name
             fixture.action_log().contains("\"type\":\"click\""),
             "{mode}"
         );
+    }
+}
+
+/// Buying, paying, ordering, sending, deleting, cancelling, confirming and
+/// saving ask under routine browsing in French, Spanish, Italian, Portuguese
+/// and Dutch too, the languages the cookie banner words cover. On a
+/// Portuguese shop page a script-driven "Comprar", "Finalizar compra",
+/// "Pagar", "Enviar mensagem" or "Eliminar conta" asks with its category, a
+/// save asks as a commit, on a menu item too as "Speichern" does, and an
+/// address with those words asks before it opens. A journey planner's
+/// "Planear Viagem", "Ver horários", a sort by price and a list of houses for
+/// sale ("te koop") run without a prompt.
+#[test]
+fn a_routine_start_asks_for_risk_words_in_the_cookie_banner_languages() {
+    for (label, category) in [
+        ("Comprar", "Purchase or payment"),
+        ("Finalizar compra", "Purchase or payment"),
+        ("Pagar", "Purchase or payment"),
+        ("Enviar mensagem", "Send a message"),
+        ("Eliminar conta", "Delete, cancel or sign out"),
+        ("Guardar alterações", "Change something"),
+        ("Passer la commande", "Purchase or payment"),
+        ("Supprimer le compte", "Delete, cancel or sign out"),
+        ("Valider", "Change something"),
+        ("Tramitar pedido", "Purchase or payment"),
+        ("Cancelar suscripción", "Delete, cancel or sign out"),
+        ("Acquista ora", "Purchase or payment"),
+        ("Invia messaggio", "Send a message"),
+        ("Afrekenen", "Purchase or payment"),
+        ("Opslaan", "Change something"),
+        ("Je valide ma commande", "Purchase or payment"),
+        ("Je paie", "Purchase or payment"),
+        ("Procedi all'ordine", "Purchase or payment"),
+        ("Fechar pedido", "Purchase or payment"),
+        ("Naar de kassa", "Purchase or payment"),
+        ("Paga ora", "Purchase or payment"),
+        ("Sì, elimina", "Delete, cancel or sign out"),
+        ("Bericht verzenden", "Send a message"),
+        ("Reserva y paga", "Purchase or payment"),
+        ("Envía tu mensaje", "Send a message"),
+    ] {
+        let mode = format!("button:{label}");
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(&mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        let (output, requests) = fixture.decide_prepared(
+            fixture.command_for(&mode, "page-target", "POST", "/v1/click", Some(&body)),
+            &["deny"],
+        );
+        assert!(!output.status.success(), "{mode} ran without asking");
+        assert_eq!(requests.len(), 1, "{mode}");
+        assert_eq!(requests[0]["kind"], "action", "{mode}");
+        assert_eq!(
+            requests[0]["display"]["label"],
+            format!("{category}: {label}"),
+            "{mode}"
+        );
+        assert!(
+            !fixture.action_log().contains("\"type\":\"click\""),
+            "{mode} clicked"
+        );
+    }
+
+    for label in [
+        "Guardar",
+        "Enregistrer",
+        "Salva",
+        "Opslaan",
+        "Modifica e salva",
+    ] {
+        let mode = format!("menu-item:{label}");
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(&mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        // "100" fails the prompt this click must publish as unanswered.
+        let output = fixture
+            .command_for_with_timeout(
+                &mode,
+                "page-target",
+                "POST",
+                "/v1/click",
+                Some(&body),
+                "100",
+            )
+            .output()
+            .expect("routine click");
+        assert!(!output.status.success(), "{mode} ran without asking");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("approval_timeout_non_retryable"),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    for url in [
+        "https://example.test/carrinho/finalizar-compra",
+        "https://example.test/conta/eliminar",
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        fixture.prepare_routine_start("page-target");
+        let body = json!({ "url": url }).to_string();
+        let (output, requests) = fixture.decide_prepared(
+            fixture.command_for("safe", "page-target", "POST", "/v1/navigate", Some(&body)),
+            &["deny"],
+        );
+        assert!(!output.status.success(), "{url} opened without asking");
+        assert_eq!(requests.len(), 1, "{url}");
+        assert_eq!(requests[0]["operation"], "navigate");
+        assert!(!fixture.action_log().contains("\"type\":\"navigate\""));
+    }
+
+    for mode in [
+        "button:Planear Viagem",
+        "button:Ver horários",
+        "button:Ordina per prezzo",
+        "button:Huizen te koop",
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        let output = fixture
+            .command_for_with_timeout(mode, "page-target", "POST", "/v1/click", Some(&body), "100")
+            .output()
+            .expect("routine click");
+        assert!(
+            output.status.success(),
+            "{mode} asked: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            fixture.action_log().contains("\"type\":\"click\""),
+            "{mode}"
+        );
+    }
+}
+
+/// A word that is also a headline's verb ("Governo elimina portagens", "Apple
+/// acquista una startup") asks only first in a control's name, where a button
+/// puts it, and never in an address, which holds an article's headline; Dutch
+/// "verzenden" is also shipping, and "commander" and "payer" are English too.
+/// So under a routine start such headlines, a shipping page and an English
+/// title open and click without a prompt, in the person's tab and in Octo's
+/// own, which are for reading.
+#[test]
+fn a_routine_start_reads_headlines_whose_verb_is_also_a_button_word() {
+    const HEADLINES: [&str; 9] = [
+        "Governo elimina portagens nas antigas SCUT",
+        "Apple acquista una startup di intelligenza artificiale",
+        "Quem paga a conta da luz?",
+        "Sciopero: Trenitalia cancella 200 treni",
+        "La NASA invia una sonda verso Europa",
+        "Decreto Salva Casa",
+        "Salva-Milano: cosa prevede la legge",
+        "Verzenden en retourneren",
+        "Commander of the Order of the British Empire",
+    ];
+    for label in HEADLINES {
+        let mode = format!("link:{label}");
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(&mode);
+        fixture.prepare_routine_start("page-target");
+        let body = json!({"index": 0, "snapshotId": snapshot_id}).to_string();
+        let output = fixture
+            .command_for_with_timeout(
+                &mode,
+                "page-target",
+                "POST",
+                "/v1/click",
+                Some(&body),
+                "100",
+            )
+            .output()
+            .expect("routine click");
+        assert!(
+            output.status.success(),
+            "{mode} asked: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            fixture.action_log().contains("\"type\":\"click\""),
+            "{mode}"
+        );
+    }
+
+    for url in [
+        "https://example.test/2026/10/31/governo-elimina-portagens-nas-antigas-scut",
+        "https://example.test/2026/10/31/apple-acquista-una-startup",
+        "https://example.test/verzenden-en-retourneren",
+        "https://example.test/betaal-en-verzendmethoden",
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        fixture.prepare_routine_start("page-target");
+        let body = json!({ "url": url }).to_string();
+        let output = fixture
+            .command_for_with_timeout(
+                "safe",
+                "page-target",
+                "POST",
+                "/v1/navigate",
+                Some(&body),
+                "100",
+            )
+            .output()
+            .expect("routine navigate");
+        assert!(
+            output.status.success(),
+            "{url} asked: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            fixture.action_log().contains("\"type\":\"navigate\""),
+            "{url}"
+        );
+    }
+
+    // Octo's own tabs are for reading: an article's address opens one, and
+    // its headline links click there.
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    let opened = fixture.open_tab("https://example.test/2026/10/31/apple-acquista-una-startup");
+    assert!(opened["tabId"].as_str().is_some(), "{opened}");
+    let snapshot_in = |mode: &str| {
+        payload_of(&fixture.call(mode, "GET", "/v1/snapshot", None))["snapshotId"]
+            .as_str()
+            .expect("snapshot id")
+            .to_string()
+    };
+    for label in HEADLINES {
+        let mode = format!("link:{label}");
+        let body = json!({ "index": 0, "snapshotId": snapshot_in(&mode) }).to_string();
+        let (output, requests) =
+            fixture.call_deciding(&mode, "POST", "/v1/click", Some(&body), &["deny"]);
+        payload_of(&output);
+        assert!(requests.is_empty(), "{mode} asked: {requests:?}");
+    }
+    // The same words where a button puts its verb still ask, so Octo's tab
+    // refuses them.
+    for mode in [
+        "button:Elimina account",
+        "button:Paga ora",
+        "button:Invia messaggio",
+    ] {
+        let body = json!({ "index": 0, "snapshotId": snapshot_in(mode) }).to_string();
+        let (output, requests) =
+            fixture.call_deciding(mode, "POST", "/v1/click", Some(&body), &["deny"]);
+        let refused = failure_of(&output);
+        assert!(refused.contains("for reading"), "{mode}: {refused}");
+        assert!(requests.is_empty(), "{mode} asked: {requests:?}");
     }
 }
 
