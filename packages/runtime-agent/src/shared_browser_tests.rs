@@ -502,8 +502,10 @@ const controlsFor = (targetId) => {
   }
   // A sign-in form as the page describer reports it: the account's email
   // (the field right before the password), the password, "Keep me signed in"
-  // and the form's submit button.
-  if (mode === "sign-in-page") {
+  // and the form's submit button. "sign-in-page-drawn" is the same page once
+  // its script drew the rest of it: a passkey button under the form.
+  // "sign-in-page-changed" has a one-time code field where the password was.
+  if (mode === "sign-in-page" || mode === "sign-in-page-drawn" || mode === "sign-in-page-changed") {
     const field = (label, inputType, autocomplete, policy = {}) => ({
       ...descriptionFor(targetId), idAttribute: label, ariaLabel: label, labels: label, placeholder: "",
       nameAttribute: label, inputType, autocomplete, formAction: "https://example.test/session",
@@ -513,9 +515,16 @@ const controlsFor = (targetId) => {
     });
     return [
       field("Email", "email", "username", { signInIdentifier: true }),
-      field("Password", "password", "current-password"),
+      mode === "sign-in-page-changed"
+        ? field("One-time code", "text", "one-time-code")
+        : field("Password", "password", "current-password"),
       field("Keep me signed in", "checkbox", "off"),
       { ...field("Sign in", "submit", "off"), tag: "button", ariaLabel: "", labels: "", text: "Sign in" },
+      ...(mode === "sign-in-page-drawn"
+        ? [{ ...descriptionFor(targetId), tag: "button", inputType: "button", autocomplete: "", ariaLabel: "",
+          labels: "", placeholder: "", nameAttribute: "", idAttribute: "", text: "Sign in with a passkey",
+          formAction: "", formMethod: "", formActionText: "" }]
+        : []),
     ];
   }
   // A signed-out page: a site's own links, a federated sign-in button, an
@@ -3051,6 +3060,63 @@ async fn the_call_that_ends_the_run_names_its_step_in_its_answer() {
     assert_eq!(server.terminal_step.lock().await.take(), None);
 }
 
+/// A browser turn goes on past a step that failed on the page rather than on
+/// the person: a stale snapshot, a site that did not answer in time and a
+/// refused address each fail only their own call, and the next call (another
+/// snapshot, the next source) answers in the same run. Only an approval's own
+/// outcome ends the run; the run's policy says the same.
+#[tokio::test]
+async fn a_stale_unanswered_or_refused_step_fails_only_its_own_call() {
+    let server = SharedBrowserMcpServer::new();
+    let request = |path: &str, body: JsonValue| SharedBrowserRequest {
+        method: "POST".to_string(),
+        path: path.to_string(),
+        body: Some(body),
+    };
+    let click = request(
+        "/v1/click",
+        json!({ "index": 8, "snapshotId": SNAPSHOT_ID }),
+    );
+    let navigate = request("/v1/navigate", json!({ "url": "https://example.test/" }));
+    for (step, message) in [
+        (
+            &click,
+            "Shared Browser snapshot is stale; take a fresh snapshot before acting",
+        ),
+        (
+            &navigate,
+            "The site did not answer in time, so nothing was opened and the page is still blank.",
+        ),
+        (
+            &navigate,
+            "Google search, Maps, Travel and Hotels is link-only: Octo never opens it, in any tab. Nothing was opened.",
+        ),
+    ] {
+        let failed = server
+            .execute_with_failure_latch(step, || async move {
+                Err(ControllerFailure {
+                    message: message.to_string(),
+                    step: None,
+                    approval: None,
+                    changed_after_yes: false,
+                }
+                .into())
+            })
+            .await;
+        assert!(
+            matches!(failed, Err(SharedBrowserMcpExecutionFailure::Other(_))),
+            "{message}"
+        );
+        let next = server
+            .execute_with_failure_latch(&navigate, || async {
+                Ok(json!({ "ok": true, "url": "https://example.test/" }))
+            })
+            .await
+            .expect("the next call answers");
+        assert_eq!(next["url"], "https://example.test/", "{message}");
+    }
+}
+
 /// A yes the page's change left unused (the control changed while the prompt
 /// waited) is asked about again once in a run. The second ends the run with
 /// `approval_stale`, its answer names the step's kind, and nothing runs after
@@ -4966,6 +5032,85 @@ fn a_sign_in_page_names_its_fields_and_says_to_pause_on_them() {
     assert!(in_tab.get("signIn").is_none(), "{in_tab}");
     let in_tab = payload_of(&fixture.call("sign-in-link", "GET", "/v1/snapshot", None));
     assert!(in_tab.get("signIn").is_none(), "{in_tab}");
+}
+
+/// Live drive, Nov 1: the click that opened a sign-in page read it with its two
+/// fields, then the page drew more buttons under its form (other ways to sign
+/// in, a passkey). The pause on the two fields, 2 s later, failed with "The
+/// page changed; take a fresh snapshot before requesting human input": it
+/// checked every control on the page. It checks only the fields it highlights
+/// now, each at its index with the same label and kind, so the turn pauses on
+/// both. A field that changed still fails the pause, and every step's own
+/// check of the whole page stays.
+#[test]
+fn a_sign_in_page_that_draws_more_controls_after_it_loads_still_pauses_on_its_fields() {
+    let fixture = EmbeddedControllerFixture::new();
+    // One run: the record of the observed fields lasts from step to step.
+    fixture.prepare_authority("page-target", &["https://example.test"]);
+    let snapshot = payload_of(&fixture.call("sign-in-page", "GET", "/v1/snapshot", None));
+    assert_eq!(snapshot["signIn"]["fields"], json!([0, 1]));
+    assert!(
+        snapshot["signIn"]["next"]
+            .as_str()
+            .is_some_and(|next| next.contains("choose Let Octo continue")),
+        "{snapshot}"
+    );
+    let snapshot_id = snapshot["snapshotId"].as_str().expect("snapshot id");
+    let pause = json!({ "indices": [0, 1], "snapshotId": snapshot_id }).to_string();
+
+    // The page drew a passkey button under its form: a step on that snapshot
+    // is stale, as before.
+    let clicked = fixture.call(
+        "sign-in-page-drawn",
+        "POST",
+        "/v1/click",
+        Some(&json!({ "index": 2, "snapshotId": snapshot_id }).to_string()),
+    );
+    assert!(
+        failure_of(&clicked).contains("Shared Browser snapshot is stale"),
+        "{}",
+        failure_of(&clicked)
+    );
+
+    // A field it would highlight changed (a one-time code where the password
+    // was): nothing is highlighted, and the turn takes a fresh snapshot.
+    let changed = fixture.call(
+        "sign-in-page-changed",
+        "POST",
+        "/v1/request-human-input",
+        Some(&pause),
+    );
+    let error = failure_of(&changed);
+    assert!(
+        error.contains("The page changed; take a fresh snapshot before requesting human input"),
+        "{error}"
+    );
+    assert!(!error.contains("_non_retryable"), "{error}");
+    assert!(!fixture.action_log().contains("human_input"));
+
+    // The two fields are as they were: the pause highlights them and ends the
+    // turn for the person.
+    let paused = fixture.call(
+        "sign-in-page-drawn",
+        "POST",
+        "/v1/request-human-input",
+        Some(&pause),
+    );
+    assert!(
+        String::from_utf8_lossy(&paused.stderr).contains("[human_input_required_non_retryable]"),
+        "{}",
+        String::from_utf8_lossy(&paused.stderr)
+    );
+    let request = fixture
+        .action_log()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<JsonValue>(line).ok())
+        .find(|action| action["type"] == "human_input")
+        .expect("the pause asks the person");
+    assert_eq!(
+        request["humanInputRequest"]["fields"],
+        json!([{ "label": "Highlighted field 1" }, { "label": "Highlighted field 2" }])
+    );
 }
 
 /// The same task stopped on the site's home page, whose header has only a
@@ -9073,6 +9218,50 @@ fn octo_never_opens_or_reads_a_link_only_site_on_the_page_the_person_chose() {
         !fixture.action_log().contains("booking"),
         "{}",
         fixture.action_log()
+    );
+}
+
+/// Live drive, Nov 1: a comparison's browser turn read the maker's home page,
+/// tried a search engine for reviews, and replied 3.7 s after the refusal,
+/// which said only "Give the person the plain link". A refused address ends
+/// that address, not the task: the refusal sends the turn on to the maker's,
+/// venue's or reviewer's own site, and gives the person the link only when
+/// they asked for that site. Nothing is opened or asked, the refusal does not
+/// end the run, and the next source opens in the same run.
+#[test]
+fn a_refused_search_the_turn_chose_goes_on_to_the_next_source() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    let (refused, requests) = fixture.call_deciding(
+        "safe",
+        "POST",
+        "/v1/navigate",
+        Some(&json!({ "url": "https://www.google.com/search?q=laptop+13+review" }).to_string()),
+        &[],
+    );
+    let error = failure_of(&refused);
+    for words in [
+        "is link-only: Octo never opens it, in any tab. Nothing was opened.",
+        "Go on with the maker's, venue's or reviewer's own site; give the person this link only if they asked for this site",
+        "Send page to Octo",
+    ] {
+        assert!(error.contains(words), "{words}: {error}");
+    }
+    assert!(!error.contains("Give the person the plain link"), "{error}");
+    assert!(!error.contains("_non_retryable"), "{error}");
+    assert!(requests.is_empty(), "the refusal asked: {requests:?}");
+
+    let (next, requests) = fixture.call_deciding(
+        "safe",
+        "POST",
+        "/v1/navigate",
+        Some(&json!({ "url": "https://example.test/reviews/laptop-13" }).to_string()),
+        &[],
+    );
+    assert!(requests.is_empty(), "{requests:?}");
+    assert_eq!(
+        payload_of(&next)["url"],
+        "https://example.test/reviews/laptop-13"
     );
 }
 

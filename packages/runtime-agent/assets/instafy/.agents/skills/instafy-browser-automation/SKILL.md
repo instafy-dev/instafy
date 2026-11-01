@@ -99,9 +99,9 @@ For every reader, browser or not:
   its stations chosen), not a listing or a kiosk page: those only lead to it.
 - Anything not read on a page this turn (from memory or a search result) says
   "not checked" next to it.
-- Comparing: list the models a page you read names, and mark one only a search
-  result names "not checked". Never names from memory, never placeholders such
-  as "candidate 1".
+- Comparing: list the models a page you read names, its menu included, then
+  open each one's own page; mark one only a search result names "not checked".
+  Never names from memory, never placeholders such as "candidate 1".
 - A cookie banner with a reject button ("Reject all", "Only necessary"): press
   it so it does not cover the page the person watches. With no reject button on
   the banner itself, leave it up and read on. Refuse through its settings only

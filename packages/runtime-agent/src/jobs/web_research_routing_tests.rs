@@ -694,6 +694,32 @@ fn a_route_comes_from_the_operators_journey_planner() {
     assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
+/// Live drive, Nov 1: a comparison's browser turn read the maker's home page, whose menu names four laptops and links
+/// their pages, tried a search engine (refused, link-only) and stopped with 4 of 15 cells: "Comparing" said only to
+/// list the models a page names. It now lists the ones the page's menu names too, then opens each model's own page,
+/// in "Finding a page" within the part a snapshot carries, without pushing the sign-in rules out of it. An unedited
+/// earlier copy is upgraded.
+#[test]
+fn a_comparison_opens_each_models_own_page_the_menu_names_too() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let start = BROWSER_SKILL.find("## Finding a page").expect("section");
+    let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
+    let section = flat(&BROWSER_SKILL[start..end]);
+    let line = "- Comparing: list the models a page you read names, its menu included, then open each one's own page; mark one only a search result names \"not checked\".";
+    assert!(section.contains(line), "{section}");
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
+    assert!(carried.contains(line));
+    assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
+
+    let previous = include_str!("legacy/browser-automation-v22.md");
+    assert!(!previous.contains("its menu included"));
+    let tmp = scaffolded_space();
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+}
+
 /// A comparison's first turn read a maker's listing page that robots.txt closes, then built a page with every spec
 /// "not checked: <maker>'s product page blocks automated reads": the research skill told it to list a stop by its host
 /// and "try a different source", which reads as "leave this site". A stop is listed by the page that stopped, and the
@@ -1177,7 +1203,7 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
         "A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.",
         "A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner, its stations chosen), not a listing or a kiosk page",
         "Anything not read on a page this turn (from memory or a search result) says \"not checked\" next to it.",
-        "Comparing: list the models a page you read names, and mark one only a search result names \"not checked\". Never names from memory, never placeholders such as \"candidate 1\".",
+        "Comparing: list the models a page you read names, its menu included, then open each one's own page; mark one only a search result names \"not checked\". Never names from memory, never placeholders such as \"candidate 1\".",
         "A cookie banner with a reject button (\"Reject all\", \"Only necessary\"): press it so it does not cover the page the person watches.",
     ] {
         assert!(carried.contains(needle), "{needle}");

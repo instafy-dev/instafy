@@ -97,6 +97,10 @@ const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 // secret" step ran on, so the page it opens stays withheld; it is run-scoped
 // like the rest of this directory.
 //
+// `observed-fields.json` records the editable fields of Octo's latest snapshot
+// of the page the person chose, so a pause on fields checks only the fields it
+// highlights; it is run-scoped too.
+//
 // `tabs.json` lists the tabs Octo opened in the run (written by the
 // controller script) and `kept-tabs.json` the ones the person kept (written by
 // the origin). The guard reads both when the run ends, to close the rest.
@@ -109,11 +113,12 @@ const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 // tab record names the tab each run left open as its chat's page (see
 // `tab_kept_for_the_chat`), so every viewer of the chat finds that page, after
 // a reload or on another device too. Neither grants anything.
-const APPROVAL_FIXED_FILES: [&str; 8] = [
+const APPROVAL_FIXED_FILES: [&str; 9] = [
     "request.json",
     "decision.json",
     "state.json",
     "withhold-next.json",
+    "observed-fields.json",
     AGENT_TABS_FILE,
     KEPT_AGENT_TABS_FILE,
     LEFTOVER_AGENT_TABS_FILE,

@@ -393,6 +393,9 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     include_str!("legacy/browser-automation-v20.md"),
     // From before a route came from the operator's journey planner, its stations chosen.
     include_str!("legacy/browser-automation-v21.md"),
+    // From before a comparison listed the models a page's menu names too, then opened each
+    // one's own page.
+    include_str!("legacy/browser-automation-v22.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
