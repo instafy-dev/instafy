@@ -504,11 +504,13 @@ const controlsFor = (targetId) => {
   // (the field right before the password), the password, "Keep me signed in"
   // and the form's submit button. "sign-in-page-drawn" is the same page once
   // its script drew the rest of it: a passkey button under the form.
-  // "sign-in-page-changed" has a one-time code field where the password was.
-  if (mode === "sign-in-page" || mode === "sign-in-page-drawn" || mode === "sign-in-page-changed") {
+  // "sign-in-page-changed" has a one-time code field where the password was,
+  // and "sign-in-page-sent-elsewhere" a form that now sends to another site.
+  if (mode === "sign-in-page" || mode.startsWith("sign-in-page-")) {
     const field = (label, inputType, autocomplete, policy = {}) => ({
       ...descriptionFor(targetId), idAttribute: label, ariaLabel: label, labels: label, placeholder: "",
-      nameAttribute: label, inputType, autocomplete, formAction: "https://example.test/session",
+      nameAttribute: label, inputType, autocomplete,
+      formAction: mode === "sign-in-page-sent-elsewhere" ? "https://elsewhere.example/session" : "https://example.test/session",
       formMethod: "post", formActionText: "Sign in",
       policy: { ...basePolicy, formName: "Sign in", formSubmitLabels: "Sign in", formHasPassword: true,
         formPasswordCount: 1, formFieldCount: 2, ...policy },
@@ -5073,20 +5075,18 @@ fn a_sign_in_page_that_draws_more_controls_after_it_loads_still_pauses_on_its_fi
     );
 
     // A field it would highlight changed (a one-time code where the password
-    // was): nothing is highlighted, and the turn takes a fresh snapshot.
-    let changed = fixture.call(
-        "sign-in-page-changed",
-        "POST",
-        "/v1/request-human-input",
-        Some(&pause),
-    );
-    let error = failure_of(&changed);
-    assert!(
-        error.contains("The page changed; take a fresh snapshot before requesting human input"),
-        "{error}"
-    );
-    assert!(!error.contains("_non_retryable"), "{error}");
-    assert!(!fixture.action_log().contains("human_input"));
+    // was), or its form now sends elsewhere: nothing is highlighted, and the
+    // turn takes a fresh snapshot.
+    for mode in ["sign-in-page-changed", "sign-in-page-sent-elsewhere"] {
+        let changed = fixture.call(mode, "POST", "/v1/request-human-input", Some(&pause));
+        let error = failure_of(&changed);
+        assert!(
+            error.contains("The page changed; take a fresh snapshot before requesting human input"),
+            "{mode}: {error}"
+        );
+        assert!(!error.contains("_non_retryable"), "{mode}: {error}");
+        assert!(!fixture.action_log().contains("human_input"), "{mode}");
+    }
 
     // The two fields are as they were: the pause highlights them and ends the
     // turn for the person.

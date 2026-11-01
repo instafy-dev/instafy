@@ -1933,9 +1933,10 @@ function targetFingerprint(description) {
 const EDITABLE_FIELD_TAGS = new Set(["input", "textarea", "select"]);
 
 // One editable field as a pause on fields checks it: its index, label and
-// kind on the page's address. Unlike a snapshot's fingerprint, nothing else on
-// the page is in it, so controls a page adds or changes elsewhere after it
-// loads (a passkey button, a banner) leave it as it was.
+// kind, and where its form sends, on the page's address. Unlike a snapshot's
+// fingerprint, nothing else on the page is in it, so controls a page adds or
+// changes elsewhere after it loads (a passkey button, a banner) leave it as it
+// was.
 function fieldFingerprint(url, description) {
   return crypto
     .createHash("sha256")
@@ -1948,6 +1949,8 @@ function fieldFingerprint(url, description) {
         tag: description.tag,
         role: description.role,
         inputType: description.inputType,
+        formAction: description.formAction,
+        formMethod: description.formMethod,
       }),
     )
     .digest("hex");
@@ -1972,8 +1975,9 @@ function recordObservedFields(snapshotId, url, interactive) {
 }
 
 // Whether the fields a pause highlights are the ones Octo saw in the snapshot
-// it names: each at its index with the same label and kind, on the same
-// address. The rest of the page may have changed since. A snapshot with no
+// it names: each at its index with the same label and kind, in a form that
+// sends to the same place, on the same address. The rest of the page may have
+// changed since. A snapshot with no
 // record of those fields is checked whole, as every step is.
 function humanInputFieldsAsObserved(url, interactive, body) {
   const observed = approvalProtocol.observedFields(body.snapshotId);

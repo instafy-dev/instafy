@@ -1593,7 +1593,8 @@ Canceling leaves control unchanged; confirming starts the existing handoff.
 preferences use a static edge glow. Agent-requested handoff
 uses `request_human_input` with one to eight indices from a fresh snapshot. It
 checks only the fields it highlights: each must still be at its index with the
-same label and kind, on the same address. The controller records the editable
+same label and kind, in a form that sends to the same place, on the same
+address. The controller records the editable
 fields of its latest snapshot of the page the person chose that way, as
 fingerprints, in the run's approval directory (`observed-fields.json`). So a
 sign-in page that draws more buttons under its form after it loads (a passkey)
