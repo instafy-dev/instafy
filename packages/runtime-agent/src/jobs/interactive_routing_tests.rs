@@ -174,8 +174,8 @@ fn research_execution_policy_upgrades_unedited_skills_but_keeps_local_edits() {
 /// A page written by hand follows light and dark as the starters' `theme.css` does (a visit page written by hand set
 /// `color-scheme: light` and stayed light in a dark Studio, and so did its card's picture): the device's mode, and
 /// Studio's theme, which the bind client puts on `<html data-theme>` and which wins over the device's (a framed
-/// page's `prefers-color-scheme` follows the device, not Studio). An unedited earlier copy of the hub is upgraded; an
-/// edited one is kept.
+/// page's `prefers-color-scheme` can follow the device instead of Studio). An unedited earlier copy of the hub is
+/// upgraded; an edited one is kept.
 #[test]
 fn a_page_written_by_hand_follows_light_and_dark() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");

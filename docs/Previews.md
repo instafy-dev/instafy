@@ -457,10 +457,11 @@ Studio → site, on every frame load and when Studio's theme changes:
 
 `caps.location: "host"` means the person's location is available through Studio: ask Studio, not
 `navigator.geolocation`, which the frame may not use. `theme` is Studio's, so a site can match it: the bind client
-puts it on `<html data-theme>`, which the starters' `theme.css` reads. A framed page's `prefers-color-scheme` follows
-the device, not Studio's theme. A site that speaks before it got the layout is sent it again. In a conversation's preview pane the layout also carries `caps.ask`: `true`
-when this person may send messages there, so a site's Ask Octo click (`ask`) is sent as their own message, or the
-plain reason they may not (Bound-Sites.md §2a).
+puts it on `<html data-theme>`, which the starters' `theme.css` reads. A framed page's `prefers-color-scheme` can
+follow the device instead of Studio's theme (it does in Chromium and WebKit), so a page that reads only it can differ
+from Studio. A site that speaks before it got the layout is sent it again. In a conversation's preview pane the layout
+also carries `caps.ask`: `true` when this person may send messages there, so a site's Ask Octo click (`ask`) is sent
+as their own message, or the plain reason they may not (Bound-Sites.md §2a).
 
 Site → Studio:
 
