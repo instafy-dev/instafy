@@ -8,6 +8,10 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
   const DECISION_MAX_BYTES = 8 * 1024;
   const STATE_MAX_BYTES = 16 * 1024;
   const WITHHOLD_MAX_BYTES = 4 * 1024;
+  const OBSERVED_FIELDS_MAX_BYTES = 8 * 1024;
+  // The most fields a snapshot's record keeps (observedFields): a pause on
+  // fields further down the page checks the whole page instead.
+  const MAX_OBSERVED_FIELDS = 64;
   const MAX_APPROVED_ORIGINS = 32;
   // A site the person declined stays closed for the rest of the run, without
   // another prompt. The first site declined in a run leaves the run going, so
@@ -54,6 +58,9 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     "decision.json",
     "state.json",
     "withhold-next.json",
+    // The editable fields of Octo's latest snapshot of the page the person
+    // chose, so a pause on fields checks only the fields it highlights.
+    "observed-fields.json",
     // The tabs Octo opened in this run, each with its number and its own site
     // approvals.
     "tabs.json",
@@ -376,6 +383,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     const decisionPath = path.join(approvalDir, "decision.json");
     const statePath = path.join(approvalDir, "state.json");
     const withholdPath = path.join(approvalDir, "withhold-next.json");
+    const observedFieldsPath = path.join(approvalDir, "observed-fields.json");
 
     function readAuthority(expected = null) {
       const marker = exactObject(
@@ -920,6 +928,85 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       removeRegularFile(withholdPath, false);
     }
 
+    // The editable fields Octo's latest snapshot of the page the person chose
+    // showed: each field's index and a fingerprint of its label and kind
+    // (`field`). A pause on fields (request_human_input) checks the fields it
+    // highlights against this, so a control the page adds elsewhere after it
+    // loads (a passkey button under a sign-in form) does not stop the pause.
+    // Run-scoped like the rest of the directory.
+    function recordObservedFields(snapshotId, fields) {
+      if (
+        typeof snapshotId !== "string" ||
+        !HEX_64_PATTERN.test(snapshotId) ||
+        !Array.isArray(fields) ||
+        fields.length > MAX_OBSERVED_FIELDS ||
+        fields.some(
+          (entry) =>
+            !entry ||
+            !Number.isSafeInteger(entry.index) ||
+            entry.index < 0 ||
+            typeof entry.field !== "string" ||
+            !HEX_64_PATTERN.test(entry.field),
+        )
+      ) {
+        fail("approval_protocol_invalid", "Shared Browser observed fields are out of bounds");
+      }
+      const authority = readAuthority(initialAuthority);
+      atomicWriteJson(
+        observedFieldsPath,
+        {
+          version: 1,
+          ...authority,
+          snapshotId,
+          fields: fields.map(({ index, field }) => ({ index, field })),
+        },
+        OBSERVED_FIELDS_MAX_BYTES,
+      );
+    }
+
+    // The fields recorded for `snapshotId` as a map of index to fingerprint,
+    // or null when there is no such record (none yet, another snapshot's, or
+    // one this run cannot read): the pause then checks the whole page.
+    function observedFields(snapshotId) {
+      const authority = readAuthority(initialAuthority);
+      let raw;
+      try {
+        raw = readJson(observedFieldsPath, OBSERVED_FIELDS_MAX_BYTES, false);
+      } catch (_) {
+        return null;
+      }
+      if (
+        raw === null ||
+        typeof raw !== "object" ||
+        Array.isArray(raw) ||
+        Object.keys(raw).length !== 7 ||
+        raw.version !== 1 ||
+        Object.keys(authority).some((key) => raw[key] !== authority[key]) ||
+        raw.snapshotId !== snapshotId ||
+        !Array.isArray(raw.fields) ||
+        raw.fields.length > MAX_OBSERVED_FIELDS
+      ) {
+        return null;
+      }
+      const fields = new Map();
+      for (const entry of raw.fields) {
+        if (
+          !entry ||
+          typeof entry !== "object" ||
+          Object.keys(entry).length !== 2 ||
+          !Number.isSafeInteger(entry.index) ||
+          entry.index < 0 ||
+          typeof entry.field !== "string" ||
+          !HEX_64_PATTERN.test(entry.field) ||
+          fields.has(entry.index)
+        ) {
+          return null;
+        }
+        fields.set(entry.index, entry.field);
+      }
+      return fields;
+    }
+
     function redactedPageResult(extra = {}) {
       return {
         ...extra,
@@ -947,6 +1034,9 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       withholdNextDocumentAfter,
       withholdNextDocument,
       clearWithholdNextDocument,
+      recordObservedFields,
+      observedFields,
+      maxObservedFields: MAX_OBSERVED_FIELDS,
       redactedPageResult,
       readTabs,
       writeTabs,
