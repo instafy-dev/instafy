@@ -56,7 +56,10 @@ sha1 = "0.10"
 hex = "0.4"
 aes-gcm = "0.10"
 p256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
-zip = { version = "1", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }
+# Picks zip's deflate backend: miniz_oxide, as zip 1.x's "deflate" did. zip 9's own
+# "deflate" feature would switch to zlib-rs and add zopfli.
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 unicode-normalization = "0.1"
 
 [dev-dependencies]

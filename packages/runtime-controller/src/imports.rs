@@ -3261,6 +3261,11 @@ fn repack_github_zip_with_limits(
     let cursor = Cursor::new(zip_bytes);
     let mut archive =
         ZipArchive::new(cursor).map_err(|error| format!("invalid zipball: {error}"))?;
+    // zip keeps only the last entry for a repeated name and reads local headers without
+    // comparing them to the central directory unless asked.
+    archive
+        .validate_header_consistency()
+        .map_err(|error| format!("invalid zipball: {error}"))?;
 
     let root_prefix = find_root_prefix(&mut archive)
         .ok_or_else(|| "zipball is missing root folder".to_string())?;
@@ -3285,7 +3290,10 @@ fn repack_github_zip_with_limits(
                 limits.file_count
             ));
         }
-        let name = file.name().to_string();
+        let name = file
+            .name()
+            .map_err(|error| format!("zip entry read failed: {error}"))?
+            .into_owned();
         let stripped = strip_root_prefix(&root_prefix, &name)
             .ok_or_else(|| format!("zip entry missing expected prefix: {}", name))?;
         let normalized = normalize_relative_path(stripped)
@@ -3378,7 +3386,7 @@ fn executable_archive_mode(unix_mode: Option<u32>) -> Option<u32> {
 fn find_root_prefix(archive: &mut ZipArchive<Cursor<Vec<u8>>>) -> Option<String> {
     for i in 0..archive.len() {
         let file = archive.by_index(i).ok()?;
-        let name = file.name();
+        let name = file.name().ok()?;
         let trimmed = name.trim_start_matches('/');
         let first = trimmed.split('/').next().unwrap_or("").trim();
         if !first.is_empty() {
@@ -4467,6 +4475,91 @@ mod tests {
         let source = source.finish().unwrap().into_inner();
         let reserved = repack_github_zip(source, Some("repos/example".to_string())).unwrap_err();
         assert!(reserved.contains("reserved"));
+    }
+
+    fn zipball(paths: &[&str]) -> Vec<u8> {
+        let mut source = ZipWriter::new(Cursor::new(Vec::new()));
+        for path in paths {
+            source
+                .start_file(
+                    *path,
+                    FileOptions::<()>::default().compression_method(zip::CompressionMethod::Stored),
+                )
+                .unwrap();
+            source.write_all(b"content").unwrap();
+        }
+        source.finish().unwrap().into_inner()
+    }
+
+    /// zip will not write a repeated name or a local header that disagrees with the central
+    /// directory, so tests write a same-length stand-in and patch it: in both of its places,
+    /// or only in the local header, which comes first.
+    fn patch_member_name(
+        archive: &[u8],
+        from: &[u8],
+        to: &[u8],
+        local_header_only: bool,
+    ) -> Vec<u8> {
+        assert_eq!(from.len(), to.len(), "a patched name must keep its length");
+        let offsets: Vec<usize> = archive
+            .windows(from.len())
+            .enumerate()
+            .filter_map(|(offset, window)| (window == from).then_some(offset))
+            .collect();
+        assert_eq!(
+            offsets.len(),
+            2,
+            "{} must appear in one local header and the central directory",
+            String::from_utf8_lossy(from)
+        );
+        let mut patched = archive.to_vec();
+        for offset in &offsets[..if local_header_only { 1 } else { 2 }] {
+            patched[*offset..*offset + to.len()].copy_from_slice(to);
+        }
+        patched
+    }
+
+    #[test]
+    fn repack_github_zip_rejects_entries_outside_the_root_folder() {
+        for (path, expected) in [
+            ("owner-repo-sha/../escape.txt", "invalid path"),
+            ("owner-repo-sha//etc/passwd", "invalid path"),
+            ("owner-repo-sha/dir\\file.txt", "invalid path"),
+            ("owner-repo-sha-other/file.txt", "missing expected prefix"),
+            ("other-root/file.txt", "missing expected prefix"),
+        ] {
+            let source = zipball(&["owner-repo-sha/README.md", path]);
+            let error = repack_github_zip(source, Some("repos/example".to_string())).unwrap_err();
+            assert!(error.contains(expected), "{path:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn repack_github_zip_rejects_repeated_and_mismatched_entry_names() {
+        let two = zipball(&["owner-repo-sha/a.txt", "owner-repo-sha/b.txt"]);
+        let one = zipball(&["owner-repo-sha/a.txt"]);
+        let cases = [
+            // The central directory names one path twice.
+            (
+                patch_member_name(
+                    &two,
+                    b"owner-repo-sha/b.txt",
+                    b"owner-repo-sha/a.txt",
+                    false,
+                ),
+                "duplicate file names",
+            ),
+            // The local header names a different file than the central directory.
+            (
+                patch_member_name(&one, b"owner-repo-sha/a.txt", b"owner-repo-sha/z.txt", true),
+                "filename mismatch",
+            ),
+        ];
+        for (source, expected) in cases {
+            let error = repack_github_zip(source, None).unwrap_err();
+            assert!(error.contains("invalid zipball"), "{error}");
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[test]

@@ -52,7 +52,10 @@ origin-http-server = { path = "../origin-http-server" }
 jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 sysinfo = "0.30"
-zip = { version = "1", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }
+# Picks zip's deflate backend: miniz_oxide, as zip 1.x's "deflate" did. zip 9's own
+# "deflate" feature would switch to zlib-rs and add zopfli.
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 unicode-normalization = "0.1"
 rmcp = { version = "1.7.0", default-features = false, features = ["server", "transport-async-rw"] }
 # The Shared Browser window watch: target discovery on the browser's loopback

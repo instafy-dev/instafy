@@ -1061,6 +1061,11 @@ fn validate_profile_archive(
             limits.entries
         );
     }
+    // zip keeps only the last entry for a repeated name, so `seen` below cannot catch exact
+    // duplicates, and it reads local headers without comparing them to the central directory.
+    archive
+        .validate_header_consistency()
+        .context("invalid browser profile archive")?;
 
     let mut validated = Vec::with_capacity(archive.len());
     let mut seen = HashSet::with_capacity(archive.len());
@@ -1069,7 +1074,10 @@ fn validate_profile_archive(
         let entry = archive
             .by_index(archive_index)
             .with_context(|| format!("failed to read archive entry {archive_index}"))?;
-        let name = entry.name().to_string();
+        let name = entry
+            .name()
+            .with_context(|| format!("failed to read archive entry {archive_index}"))?
+            .into_owned();
         let relative = safe_relative_path(&name)
             .with_context(|| format!("unsafe browser profile archive path {name:?}"))?;
         if !seen.insert(relative.clone()) {
@@ -1816,6 +1824,34 @@ mod tests {
         zip.finish().expect("finish test ZIP").into_inner()
     }
 
+    /// zip will not write a repeated name or a local header that disagrees with the central
+    /// directory, so tests write a same-length stand-in and patch it: in both of its places,
+    /// or only in the local header, which comes first.
+    fn patch_member_name(
+        archive: &[u8],
+        from: &[u8],
+        to: &[u8],
+        local_header_only: bool,
+    ) -> Vec<u8> {
+        assert_eq!(from.len(), to.len(), "a patched name must keep its length");
+        let offsets: Vec<usize> = archive
+            .windows(from.len())
+            .enumerate()
+            .filter_map(|(offset, window)| (window == from).then_some(offset))
+            .collect();
+        assert_eq!(
+            offsets.len(),
+            2,
+            "{} must appear in one local header and the central directory",
+            String::from_utf8_lossy(from)
+        );
+        let mut patched = archive.to_vec();
+        for offset in &offsets[..if local_header_only { 1 } else { 2 }] {
+            patched[*offset..*offset + to.len()].copy_from_slice(to);
+        }
+        patched
+    }
+
     #[test]
     fn safe_relative_path_rejects_traversal_and_absolute() {
         assert!(safe_relative_path("Default/Cookies").is_some());
@@ -1903,6 +1939,54 @@ mod tests {
                 .expect_err("non-allowlisted path must be rejected");
         assert!(error.to_string().contains("file is not allowlisted"));
         assert!(!restore.path().join("Default").exists());
+    }
+
+    #[test]
+    fn restore_rejects_symlink_entries() {
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        zip.add_symlink(
+            "Default/Cookies",
+            "/etc/passwd",
+            FileOptions::<()>::default(),
+        )
+        .expect("add test symlink");
+        let packed = zip.finish().expect("finish test ZIP").into_inner();
+
+        let restore = tempfile::tempdir().expect("restore tempdir");
+        let error = unpack_profile(&packed, restore.path())
+            .expect_err("an allowlisted path stored as a symlink must be rejected");
+        assert!(error.to_string().contains("symlink entry"), "{error:#}");
+        assert!(!restore.path().join("Default").exists());
+    }
+
+    #[test]
+    fn restore_rejects_repeated_and_mismatched_entry_names() {
+        let two = profile_zip(&[("Default/Cookies", 8, b'a'), ("Default/Cookiez", 8, b'b')]);
+        let one = profile_zip(&[("Default/Cookies", 8, b'a')]);
+        let cases = [
+            // The central directory names one path twice.
+            (
+                patch_member_name(&two, b"Default/Cookiez", b"Default/Cookies", false),
+                "duplicate file names",
+            ),
+            // Two names that differ only in spelling restore to one path.
+            (
+                profile_zip(&[("Default/Cookies", 8, b'a'), ("Default//Cookies", 8, b'b')]),
+                "duplicate browser profile archive path",
+            ),
+            // The local header names a different file than the central directory.
+            (
+                patch_member_name(&one, b"Default/Cookies", b"Default/Cookiez", true),
+                "filename mismatch",
+            ),
+        ];
+        for (packed, expected) in cases {
+            let restore = tempfile::tempdir().expect("restore tempdir");
+            let error = unpack_profile(&packed, restore.path())
+                .expect_err("an ambiguous archive must be rejected");
+            assert!(format!("{error:#}").contains(expected), "{error:#}");
+            assert!(!restore.path().join("Default").exists());
+        }
     }
 
     #[test]
