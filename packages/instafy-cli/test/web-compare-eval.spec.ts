@@ -410,7 +410,7 @@ describe("the shopping comparison eval (fixtures)", () => {
       "a link-only shop gets `instafy web link <site> query=<name>` (Guided mode)",
       "never a remembered or guessed price",
       "that many per item, each on that exact model, by a publisher other than the maker, the shops and each other (a sibling model's review does not count)",
-      "Short: \"<item>: 1 of 2 reviews found\", in the reply and on the page.",
+      "Short: \"<item>: 1 of 2 reviews found\", in the reply and on the page, citing only those reviews.",
       "an item with no price read this turn is listed as \"price unknown\", never as within it",
       "each fact not read marked unknown with why.",
       "and an item's name as its official page gives it",
@@ -429,7 +429,7 @@ describe("the shopping comparison eval (fixtures)", () => {
     for (const rule of [
       "## Finding a page",
       "A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.",
-      "Comparing: list the models a page you read names, and mark one only a search result names \"not checked\". Never names from memory, never placeholders such as \"candidate 1\".",
+      "Comparing: list the models a page you read names, its menu included, then open each one's own page; mark one only a search result names \"not checked\". Never names from memory, never placeholders such as \"candidate 1\".",
       // a stopped page ends that page, never the research: the next source is "Finding a page"'s
       "ends that page, not the task: \"Finding a page\" says what comes next. Never retry that page another way.",
     ]) {

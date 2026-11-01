@@ -491,7 +491,7 @@ export async function runSharedBrowserCobrowsingFixture() {
     let authority;
     function freshTurn() {
       assert.equal(children.size, 0, "A fresh fixture turn requires previous CLI process exit");
-      for (const name of ["request.json", "decision.json", "state.json", "withhold-next.json"]) {
+      for (const name of ["request.json", "decision.json", "state.json", "withhold-next.json", "observed-fields.json"]) {
         fs.rmSync(path.join(approvalDirectory, name), { force: true });
       }
       authority = {

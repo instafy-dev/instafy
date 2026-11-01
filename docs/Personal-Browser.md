@@ -600,7 +600,10 @@ only in the visible browser, so the rules are the ones a person sees:
   asks, like a link. Without a
   valid list, every agent-driven step on a web page fails closed with
   `link_only_list_unavailable`. The person opens such a site themselves and may
-  use **Send page to Octo**, which is their own action.
+  use **Send page to Octo**, which is their own action. A refusal of a link-only
+  site ends that address, not the task: it tells the agent to go on with the
+  maker's, venue's or reviewer's own site, and to give the person the plain link
+  only when they asked for that site.
 - **Stopped pages are reported.** A page Desktop stopped in a driven tab leaves
   the browser ready and is reported once, to the agent's next page step in that
   tab, which then does not run and says so: the refusal is the earlier load's,

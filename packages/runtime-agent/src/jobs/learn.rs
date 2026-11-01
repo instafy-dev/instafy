@@ -321,6 +321,9 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     include_str!("legacy/interactive-artifacts-v3.md"),
     // From before a page written by hand followed light and dark mode.
     include_str!("legacy/interactive-artifacts-v4.md"),
+    // From before a value cited only a page that gives it, a lede said only what a page read
+    // says, and no sort was by a value no row has.
+    include_str!("legacy/interactive-artifacts-v5.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),
@@ -393,10 +396,13 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     include_str!("legacy/browser-automation-v20.md"),
     // From before a route came from the operator's journey planner, its stations chosen.
     include_str!("legacy/browser-automation-v21.md"),
+    // From before a comparison listed the models a page's menu names too, then opened each
+    // one's own page.
+    include_str!("legacy/browser-automation-v22.md"),
     // From before a request to make a page, a map or a table with no site to use first stayed
     // out of the browser, research that ends in a page went to it from the first message, and
     // browser work that did not find its answer still carried on there.
-    include_str!("legacy/browser-automation-v22.md"),
+    include_str!("legacy/browser-automation-v23.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
@@ -437,6 +443,8 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     // From before a stop was listed by the page that stopped, not its site, and the turn went on
     // as its `tell` says instead of to "a different source".
     include_str!("legacy/web-research-v11.md"),
+    // From before a count of the reviews found cited only those reviews.
+    include_str!("legacy/web-research-v12.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

@@ -10172,7 +10172,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             "- For nearby/location-dependent browsing requests (for example \"good coffee nearby\"), do not stop at a generic search-results page if the user asked for a recommendation. Continue until you can report at least one concrete candidate or the exact blocker.\n\
             - For recommendation-seeking browser tasks, prefer map/listing/review pages over repeating search-result links. If needed, inspect a few likely candidates and summarize the strongest observed option with concrete details.\n\
             - Use loaded skills and learned blocks for workflow behavior. Treat Rust/runtime prompts as execution invariants only, not as the source of task-specific strategy.\n\
-            - If a browser tool fails, say in plain words what did not work (never paste raw error codes such as `net::ERR_…`); do not claim success without real execution.",
+            - If a browser tool fails or refuses a page, that ends that page, not the task: go on to the next source in this turn. When nothing is left to try, say in plain words what did not work (never paste raw error codes such as `net::ERR_…`); do not claim success without real execution.",
             if offers_browser_card {
                 " No browser tools on this turn is not a failure: emit `request_browser`."
             } else {

@@ -2311,7 +2311,51 @@ fn check(harness: &Harness) -> Result<()> {
     check_routed_messages(harness)?;
     // (ix) A message typed in the chat right after a browser turn.
     check_follow_ups_from_the_chat(harness)?;
+    // (x) A page that fails, is refused or changed in a browser turn.
+    check_browser_turns_go_on_past_a_page(harness)?;
     println!("every turn read its own run instructions");
+    Ok(())
+}
+
+/// (x) Chains B, H, G and F: what every request of a Shared Browser turn reads about a page that
+/// fails, is refused or changed under it. A local test, Nov 1: a tourism site that did not answer in
+/// time, a refused search engine and a sign-in page that was still drawing each ended a browser
+/// turn with no answer ("Tell me to continue"), while the next source, or one more snapshot, was a
+/// step away. A failed or refused page ends that page, not the task, and only an approval's own
+/// outcome is final: a stale target or a changed page is looked at again.
+fn check_browser_turns_go_on_past_a_page(harness: &Harness) -> Result<()> {
+    for label in ["B2", "B5", "H2", "H3", "H4", "H5", "G2", "G3", "F2"] {
+        let turn = harness.turn(label);
+        ensure!(
+            matches!(turn.lane, Lane::Shared(_)),
+            "{label} is not a Shared Browser turn"
+        );
+        for (index, request) in sampling_requests(turn) {
+            let text = instructions_text(request);
+            for words in [
+                "A failed or refused page ends that page, not the task: go on to the next source in this turn",
+                "It ends that page, not the task: go on to the next source in this turn.",
+                "- A denial, an approval that ran out of time, or a replayed approval is final for that attempted action.",
+                "If the page or indexed target set changes, take another snapshot instead of retrying a stale target.",
+            ] {
+                ensure!(text.contains(words), "{label}#{index} never read: {words}");
+            }
+            ensure!(
+                !text.contains("a stale target, a changed page"),
+                "{label}#{index} reads a stale target or a changed page as final"
+            );
+            // The turn's own reply rules say the same.
+            let input = input_text(request);
+            ensure!(
+                input.contains("If a browser tool fails or refuses a page, that ends that page, not the task: go on to the next source in this turn."),
+                "{label}#{index} never read that a failed page ends that page in its reply rules"
+            );
+            ensure!(
+                !input.contains("If a browser tool fails, say in plain words"),
+                "{label}#{index} reads a failed browser tool as the end of the turn"
+            );
+        }
+    }
     Ok(())
 }
 
