@@ -804,8 +804,12 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   A stopped URL is never read again in the turn, even with `--fresh`, and the workspace cache keeps the stop for a
   day. The other scheme, a leading `www.`, a trailing slash or dot, and (for stops the site answered with) another
   query are the same URL. After a 429 or a bot check, nothing more is read from that site (its `www.` form included)
-  in the turn. Do not read a stopped URL another
-  way (another tool, address, user agent or browser): give the person the plain link and use a different source.
+  in the turn. A stop covers the URL asked for and each address it redirected to: do not read them another way
+  (another tool, user agent or browser, or a copy at another address), and give the person the plain link. The
+  `tell` says what is still open: the site's other pages (such as each product's own page, when a listing page
+  stopped), each checked on its own, and other sources; only other sources after a refused address or a stop of the
+  whole site (a link-only site, a 429 or bot check, or a robots.txt that refuses every page: one that cannot be read,
+  or whose rules keep any of the agents above out of every path, as `Disallow: /` does).
 - **Redaction.** The browsers' `redaction.js` (`packages/browser-action-policy`) masks keys and tokens in the text,
   title, links, addresses and structured data before anything is printed or cached. A page that shows a credential is
   withheld as `secret_screen`.

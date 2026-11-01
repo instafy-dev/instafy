@@ -19,6 +19,7 @@ declare module "@instafy/bind/web" {
   export const AI_AGENTS: string[];
   export function parseRobots(text: string): RobotsGroup[];
   export function robotsAllows(groups: RobotsGroup[], agent: string, pathWithQuery: string): boolean;
+  export function robotsRefusesAll(groups: RobotsGroup[], agent: string): boolean;
   export function challengeReason(status: number, html: string): string | null;
   export function jsonLdBlocks(html: string, max?: number): string[];
 }
