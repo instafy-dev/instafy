@@ -1244,6 +1244,16 @@ from a page that had loaded, after about 20 seconds; a link clicked on a page
 once the click stops waiting, after about 15): the next step reaches the
 browser at once, and the site's late answer never loads.
 
+Each read of a page finds its controls with one query and describes them all in
+one call to the page, so the describer's source (over 50 KB with the rules it
+carries) goes out once per read, not once per control. A choice or a click
+reads the page twice (its check, then its result): on a page with a few hundred
+links, such as a transport operator's menus, timetables and footer, one call
+per control took about 9 s locally for a choice, and 12 s on the operator's own
+site; one call per read takes about 2 s, with the same read, control for
+control. The step-time fixture counts what goes to the page on the browser's
+own socket: one description for a read, at most three for a choice.
+
 In a Shared or Personal Browser turn, a code-mode cell that waits on a browser
 step yields to the model only after the browser server's tool timeout (180
 seconds for the Shared Browser, 40 for the Personal Browser), not after Codex's

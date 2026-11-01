@@ -800,8 +800,13 @@ const makePage = (targetId, opened = null) => {
     // fixture's pages have none that wait for a site.
     on: () => {},
     off: () => {},
-    // Page-side helpers identify themselves by their argument.
+    // Page-side helpers identify themselves by their argument. Every control
+    // described in one call (DESCRIBE_ALL_IN_PAGE) answers as each control's
+    // own handle answers the describer.
     evaluate: async (_fn, arg) => {
+      if (arg && Array.isArray(arg.elements) && arg.sources && arg.sources.kind === "page-policy") {
+        return Promise.all(arg.elements.map((element) => element.evaluate(undefined, arg.sources)));
+      }
       if (arg && arg.kind === "shown-text") return shownTextFor(currentUrl, targetId);
       if (arg && arg.kind === "page-policy") return signalsFor();
       if (arg && arg.kind === "withheld-read") return Boolean(markPath && fs.existsSync(markPath));
@@ -854,6 +859,7 @@ const makePage = (targetId, opened = null) => {
       : {
           count: async () => controlsFor(targetId).length,
           nth: (ordinal) => ({ elementHandle: async () => handleAt(ordinal) }),
+          elementHandles: async () => controlsFor(targetId).map((_, ordinal) => handleAt(ordinal)),
         },
     mouse: { wheel: async () => {} },
     keyboard: { press: async () => {} },
