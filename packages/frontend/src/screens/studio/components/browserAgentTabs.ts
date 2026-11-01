@@ -78,6 +78,18 @@ export function shownBrowserPageTitle(title: string | null | undefined): string 
 }
 
 /**
+ * Whether a page has answered: its tab has a title of its own. Until the page
+ * arrives, its tab lists the new address with no title, or with the blank
+ * tab's "about:blank", and Instafy's browser lists no title for a tab still
+ * loading another address (the title it had is the page it is leaving). A
+ * page with no title of its own is named by its address, so it answers too.
+ */
+export function browserPageAnswered(page: Pick<BrowserSessionPage, "title">): boolean {
+  const title = page.title?.trim() ?? "";
+  return title.length > 0 && !browserSessionPageIsPlaceholder({ url: title });
+}
+
+/**
  * The page's own title, shortened for one line. Page titles are page data:
  * they are only ever shown as text, never followed.
  */

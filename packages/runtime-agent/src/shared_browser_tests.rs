@@ -2891,6 +2891,7 @@ fn a_search_said_no_to_names_its_step_a_search() {
         Some(FailedStep {
             step,
             approval,
+            refused: None,
             changed_after_yes: false,
         })
     };
@@ -2898,7 +2899,16 @@ fn a_search_said_no_to_names_its_step_a_search() {
         Some(FailedStep {
             step,
             approval,
+            refused: None,
             changed_after_yes: true,
+        })
+    };
+    let refused = |refused, approval| {
+        Some(FailedStep {
+            step: None,
+            approval,
+            refused: Some(refused),
+            changed_after_yes: false,
         })
     };
     for (stdout, expected) in [
@@ -2952,6 +2962,21 @@ fn a_search_said_no_to_names_its_step_a_search() {
             None,
         ),
         (r#"{"ok":false,"changedAfterYes":true}"#, None),
+        // Which of the person's own steps the browser refused, as one of its
+        // words, and nothing else.
+        (
+            r#"{"ok":false,"activity":{"refused":"consent"}}"#,
+            refused("consent", None),
+        ),
+        (
+            r#"{"ok":false,"activity":{"refused":"sign_in","approval":"once"}}"#,
+            refused("sign_in", Some("once")),
+        ),
+        (
+            r#"{"ok":false,"activity":{"refused":"Aceitar todos os cookies"}}"#,
+            None,
+        ),
+        (r#"{"ok":false,"activity":{"refused":true}}"#, None),
         ("search", None),
         ("", None),
     ] {
@@ -2968,12 +2993,14 @@ fn a_failed_step_keeps_the_persons_yes_in_its_result() {
         let FailedStep {
             step,
             approval,
+            refused,
             changed_after_yes,
         } = failed_step(stdout.as_bytes()).unwrap_or_default();
         ControllerFailure {
             message: "Shared Browser command exited with exit status: 1: The page changed after the person said yes".to_string(),
             step,
             approval,
+            refused,
             changed_after_yes,
         }
         .into()
@@ -2984,6 +3011,13 @@ fn a_failed_step_keeps_the_persons_yes_in_its_result() {
         allowed.structured_content.expect("structured"),
         json!({"activity": {"approval": "once"}})
     );
+    // A step refused as the person's says which it was.
+    let consent = failed_call_result(&failure(r#"{"ok":false,"activity":{"refused":"consent"}}"#));
+    assert_eq!(consent.is_error, Some(true));
+    assert_eq!(
+        consent.structured_content.expect("structured"),
+        json!({"activity": {"refused": "consent"}})
+    );
     let plain = failed_call_result(&failure(""));
     assert_eq!(plain.is_error, Some(true));
     assert_eq!(plain.structured_content, None);
@@ -2992,6 +3026,7 @@ fn a_failed_step_keeps_the_persons_yes_in_its_result() {
         message: "page.goto: net::ERR_CONNECTION_REFUSED at https://example.test/".to_string(),
         step: None,
         approval: Some("once"),
+        refused: None,
         changed_after_yes: false,
     }
     .into();
@@ -3021,6 +3056,7 @@ async fn the_call_that_ends_the_run_names_its_step_in_its_answer() {
                 message: "the person denied it [approval_denied_non_retryable]".to_string(),
                 step: Some("search"),
                 approval: None,
+                refused: None,
                 changed_after_yes: false,
             }
             .into())
@@ -3071,6 +3107,7 @@ async fn a_second_yes_left_unused_by_a_changing_page_ends_the_run() {
                 message: "The page changed after the person said yes".to_string(),
                 step: Some("submit"),
                 approval,
+                refused: None,
                 changed_after_yes,
             }
             .into())
@@ -5264,17 +5301,32 @@ fn routine_asks_for_named_categories_with_the_category_in_the_label() {
     assert_eq!(requests.len(), 2);
 }
 
+/// The failed step also says which of the person's steps it was, in the
+/// controller's own word, for the turn's Details.
 #[test]
 fn reveal_sign_in_and_upload_steps_are_refused_without_a_prompt_in_every_mode() {
-    for (mode, path, extra, code) in [
-        ("reveal-key", "/v1/click", json!({}), "step_refused_secret"),
+    for (mode, path, extra, code, refused) in [
+        (
+            "reveal-key",
+            "/v1/click",
+            json!({}),
+            "step_refused_secret",
+            "reveal_secret",
+        ),
         (
             "sign-in-email",
             "/v1/type",
             json!({"text": "person@example.test"}),
             "step_refused_sign_in",
+            "sign_in",
         ),
-        ("file-input", "/v1/click", json!({}), "step_refused_upload"),
+        (
+            "file-input",
+            "/v1/click",
+            json!({}),
+            "step_refused_upload",
+            "upload",
+        ),
     ] {
         // Ask mode.
         let fixture = EmbeddedControllerFixture::new();
@@ -5298,6 +5350,12 @@ fn reveal_sign_in_and_upload_steps_are_refused_without_a_prompt_in_every_mode() 
             String::from_utf8_lossy(&output.stderr).contains(code),
             "{mode}: {}",
             String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            failed_step(&output.stdout).and_then(|failed| failed.refused),
+            Some(refused),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stdout)
         );
 
         // Routine browsing.
@@ -10490,7 +10548,8 @@ fn a_cookie_banners_refusal_never_asks_while_the_same_words_elsewhere_still_do()
 /// any prompt, in Ask, under routine browsing and on a run that starts in it,
 /// and nothing is clicked. Before, the link went through as plain navigation,
 /// the "Accept all" button asked, and "Consent" was clicked under routine
-/// browsing without a prompt.
+/// browsing without a prompt. The failed step says, in its own word, that it
+/// was a consent refused, so the turn's Details names it for what it was.
 #[test]
 fn a_cookie_banners_accept_is_refused_without_a_prompt_even_as_a_link() {
     for mode in ["cookie-accept", "cookie-accept-link", "cookie-consent"] {
@@ -10517,6 +10576,12 @@ fn a_cookie_banners_accept_is_refused_without_a_prompt_even_as_a_link() {
             "{mode}: {}",
             failure_of(&output)
         );
+        assert_eq!(
+            failed_step(&output.stdout).and_then(|failed| failed.refused),
+            Some("consent"),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
         assert!(
             !fixture.action_log().contains("\"type\":\"click\""),
             "{mode}"
@@ -10533,6 +10598,11 @@ fn a_cookie_banners_accept_is_refused_without_a_prompt_even_as_a_link() {
         assert!(!output.status.success(), "{mode} routine");
         assert!(
             failure_of(&output).contains("[step_refused_consent]"),
+            "{mode} routine"
+        );
+        assert_eq!(
+            failed_step(&output.stdout).and_then(|failed| failed.refused),
+            Some("consent"),
             "{mode} routine"
         );
         assert!(
@@ -10842,6 +10912,7 @@ async fn mcp_wire_carries_each_kind_of_browser_result_whole() {
         message: "The page changed after the person said yes".to_string(),
         step: Some("submit"),
         approval: Some("once"),
+        refused: None,
         changed_after_yes: false,
     }
     .into();

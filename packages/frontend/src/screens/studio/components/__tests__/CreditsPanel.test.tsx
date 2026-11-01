@@ -9,8 +9,10 @@ type LedgerRow = {
   delta: number; reason: string; metadata: Record<string, unknown> | null; createdAt: string; chatName?: string;
   spaceName?: string;
 };
+const TEAM_SPACE = [{ id: "project-a", orgName: "Acme Research" }];
 const mocks = vi.hoisted(() => ({ checkout: vi.fn(), portal: vi.fn(), planChange: vi.fn(), showStatus: vi.fn(),
-  billing: { creditBalance: 1000, creditLimit: 2000, subscription: null }, ledger: [] as LedgerRow[] }));
+  billing: { creditBalance: 1000, creditLimit: 2000, subscription: null }, ledger: [] as LedgerRow[],
+  projectList: [] as { id: string; orgName: string }[] }));
 vi.mock("../../../../credits/useCredits", () => ({ CREDITS_UPDATED_EVENT: "credits-updated", useCredits: () => ({
   billing: mocks.billing, controllerEnabled: false,
   hasLoaded: true, lastError: null, ledger: mocks.ledger, ledgerError: null, refresh: async () => {},
@@ -18,9 +20,23 @@ vi.mock("../../../../credits/useCredits", () => ({ CREDITS_UPDATED_EVENT: "credi
 vi.mock("../../../../credits/creditService", () => ({ fetchCreditPolicy: vi.fn() }));
 vi.mock("../../../../credits/checkoutService", () => ({ requestCheckoutSession: mocks.checkout,
   requestBillingPortalSession: mocks.portal, requestPlanChange: mocks.planChange }));
-vi.mock("../../../../projects/useProjects", () => ({ useProjects: () => ({ activeProjectId: "project-a" }) }));
+vi.mock("../../../../projects/useProjects", () => ({
+  useProjects: () => ({ activeProjectId: "project-a", projectList: mocks.projectList }),
+}));
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: mocks.showStatus }) }));
-vi.mock("../SettingsShell", () => ({ SettingsShell: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
+vi.mock("../SettingsShell", () => ({ SettingsShell: ({ title, categories, onCategoryChange, children }: {
+  title: string; categories: { id: string; label: string }[]; onCategoryChange: (id: string) => void; children: ReactNode;
+}) => (
+  <div>
+    <h1 data-testid="settings-title">{title}</h1>
+    <nav>{categories.map((category) => (
+      <button key={category.id} type="button" data-testid={`section-${category.id}`} onClick={() => onCategoryChange(category.id)}>
+        {category.label}
+      </button>
+    ))}</nav>
+    {children}
+  </div>
+) }));
 
 describe("Credits display choices", () => {
   let root: Root;
@@ -30,6 +46,7 @@ describe("Credits display choices", () => {
     vi.clearAllMocks();
     mocks.billing = { creditBalance: 1000, creditLimit: 2000, subscription: null };
     mocks.ledger = [];
+    mocks.projectList = TEAM_SPACE;
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
   });
   afterEach(async () => {
@@ -163,6 +180,40 @@ describe("Credits display choices", () => {
       `Last week's space · ${new Date("2026-10-29T10:00:00Z").toLocaleString()}`,
       new Date("2026-10-29T09:00:00Z").toLocaleString(),
     ]);
+  });
+
+  // A local drive, in a space of the person's own: "Team credits", "Shared
+  // team balance" and "AI, runtime, and live access spend all land in this
+  // shared ledger". Nobody shares that balance. A team's space keeps its words.
+  it("says Credits and Balance in a personal space, with no team, shared ledger or live access", async () => {
+    mocks.projectList = [{ id: "project-a", orgName: "Personal" }];
+    mocks.ledger = [{ delta: -1, reason: "managed_ai_prompt", metadata: null, createdAt: "2026-10-29T09:00:00Z" }];
+    await act(async () => root.render(<MemoryRouter><CreditsPanel /></MemoryRouter>));
+    expect(container.querySelector('[data-testid="settings-title"]')?.textContent).toBe("Credits");
+    expect(container.querySelector('[data-testid="credits-balance-label"]')?.textContent).toBe("Balance");
+    expect(container.textContent).toContain("Recent balance activity");
+    expect(container.textContent).not.toMatch(/team|shared|ledger|live access/i);
+    // Plans and Usage say whose balance it is the same way (a plan made for
+    // teams still says so).
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="section-plans"]')!.click());
+    expect(container.textContent).toContain("Your balance tops back up daily (UTC) to the selected plan limit.");
+    expect(container.textContent).not.toMatch(/shared|team-specific|your team/i);
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="section-usage"]')!.click());
+    expect(container.textContent).toContain("hosted runtimes all burn from the same balance.");
+    expect(container.textContent).not.toMatch(/team|shared/i);
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    mocks.projectList = TEAM_SPACE;
+    await act(async () => root.render(<MemoryRouter><CreditsPanel /></MemoryRouter>));
+    expect(container.querySelector('[data-testid="settings-title"]')?.textContent).toBe("Team credits");
+    expect(container.querySelector('[data-testid="credits-balance-label"]')?.textContent).toBe("Shared team balance");
+    expect(container.textContent).toContain("AI, runtime, and live access spend all land in this shared ledger.");
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="section-plans"]')!.click());
+    expect(container.textContent).toContain("Your shared balance tops back up daily (UTC)");
+    expect(container.textContent).toContain("team-specific overrides may apply.");
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="section-usage"]')!.click());
+    expect(container.textContent).toContain("hosted runtimes all burn from the same team balance.");
   });
 
   // Local drive 3: Activity showed only the newest 8 rows, with no way to see more.

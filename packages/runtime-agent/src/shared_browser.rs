@@ -3438,12 +3438,14 @@ fn controller_failure(
         let FailedStep {
             step,
             approval,
+            refused,
             changed_after_yes,
         } = failed_step(stdout).unwrap_or_default();
         ControllerFailure {
             message,
             step,
             approval,
+            refused,
             changed_after_yes,
         }
         .into()
@@ -3452,20 +3454,25 @@ fn controller_failure(
 
 /// A controller command that failed, with the step's kind when the command
 /// said it (a search, or a form sent) before it asked the person, `once`
-/// when the person allowed the step at its prompt, and `changed_after_yes`
-/// when that yes was not used because the step's control changed.
+/// when the person allowed the step at its prompt, which of the person's own
+/// steps the browser refused to take (`refused`, one of
+/// [`REFUSED_STEPS`](crate::shared_browser_activity::REFUSED_STEPS)), and
+/// `changed_after_yes` when that yes was not used because the step's control
+/// changed.
 #[derive(Debug)]
 struct ControllerFailure {
     message: String,
     step: Option<&'static str>,
     approval: Option<&'static str>,
+    refused: Option<&'static str>,
     changed_after_yes: bool,
 }
 
 impl ControllerFailure {
     /// What the failed call's result says of its step (`activity`), for the
     /// turn's line and Details: a step the person allowed that then did not
-    /// happen still lists their yes.
+    /// happen still lists their yes, and a step the browser refused because
+    /// it is the person's is named for what it was.
     fn activity(&self) -> Option<JsonValue> {
         let mut activity = serde_json::Map::new();
         if let Some(step) = self.step {
@@ -3473,6 +3480,9 @@ impl ControllerFailure {
         }
         if let Some(approval) = self.approval {
             activity.insert("approval".to_string(), JsonValue::from(approval));
+        }
+        if let Some(refused) = self.refused {
+            activity.insert("refused".to_string(), JsonValue::from(refused));
         }
         (!activity.is_empty()).then_some(JsonValue::Object(activity))
     }
@@ -3491,16 +3501,18 @@ impl std::error::Error for ControllerFailure {}
 struct FailedStep {
     step: Option<&'static str>,
     approval: Option<&'static str>,
+    refused: Option<&'static str>,
     changed_after_yes: bool,
 }
 
 /// What a failed command printed of its step: exactly `{"ok":false,"activity":
 /// {...}}` on stdout, with `step` (one of the few kinds the controller names
-/// there), `approval` (`once`), or both, and `"changedAfterYes":true` beside
-/// `activity` when the person's yes was not used because the step's control
-/// changed (only with `approval`). Anything else names nothing. The
-/// controller writes nothing else to stdout before it fails, and never page
-/// text there.
+/// there), `approval` (`once`), `refused` (which of the person's own steps the
+/// browser refused, one of [`REFUSED_STEPS`](crate::shared_browser_activity::REFUSED_STEPS)),
+/// or several, and `"changedAfterYes":true` beside `activity` when the
+/// person's yes was not used because the step's control changed (only with
+/// `approval`). Anything else names nothing. The controller writes nothing
+/// else to stdout before it fails, and never page text there.
 fn failed_step(stdout: &[u8]) -> Option<FailedStep> {
     const KINDS: &[&str] = &["search", "submit"];
     const APPROVALS: &[&str] = &["once"];
@@ -3523,7 +3535,7 @@ fn failed_step(stdout: &[u8]) -> Option<FailedStep> {
     if activity.is_empty()
         || activity
             .keys()
-            .any(|key| key != "step" && key != "approval")
+            .any(|key| !matches!(key.as_str(), "step" | "approval" | "refused"))
     {
         return None;
     }
@@ -3539,6 +3551,7 @@ fn failed_step(stdout: &[u8]) -> Option<FailedStep> {
     let failed = FailedStep {
         step: known("step", KINDS)?,
         approval: known("approval", APPROVALS)?,
+        refused: known("refused", crate::shared_browser_activity::REFUSED_STEPS)?,
         changed_after_yes,
     };
     // Only a yes can go unused.

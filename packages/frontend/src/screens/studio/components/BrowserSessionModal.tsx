@@ -3655,6 +3655,8 @@ export function BrowserSessionModal({
         <BrowserReadingRow
           pages={agentReadingPages}
           agentName={effectiveAgentControlOwner.displayName}
+          // The prompt sheet below asks this viewer, who can answer it.
+          waitingForYou={sharedBrowserApprovalRequest !== null}
           canTakeOver={readingRowCanTakeOver}
           takingOver={browserHumanInputState.busy === "takeover"}
           // The toolbar's take-over controls already say why a take-over failed.

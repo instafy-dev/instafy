@@ -14,6 +14,8 @@ interface CreditsUsageRatesProps {
   managedAiUsage: ManagedAiUsageRate | null;
   unitLabel: string;
   displayCurrency: string;
+  /** A space of the person's own, whose ledger no team shares. */
+  personal?: boolean;
 }
 
 export function formatIntervalSeconds(seconds: number): string {
@@ -75,6 +77,7 @@ export function CreditsUsageRates({
   managedAiUsage,
   unitLabel,
   displayCurrency,
+  personal = false,
 }: CreditsUsageRatesProps) {
   const managedAiProviderLabel = formatProviderLabel(managedAiUsage?.provider);
 
@@ -251,7 +254,7 @@ export function CreditsUsageRates({
           <Text variant="caption" tone="muted">
             Managed AI prompt usage is charged from actual input/cached/output tokens after the run
             completes. The reserve prompt debit is reconciled against the final token-based cost on the
-            shared ledger.
+            {personal ? " ledger." : " shared ledger."}
           </Text>
         </div>
       ) : null}

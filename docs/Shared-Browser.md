@@ -124,7 +124,11 @@ bound to (`browserPageId`) and every tab the page list reports with
 kept, and an absent value is the person's tab. A compact **Octo is reading**
 row under the toolbar lists those tabs as host and title text (page titles are
 shown as text only, never followed; never a tab's number such as "Octo's tab 1",
-the label Octo's own prompts use) with one **Take over** button. A tab still
+the label Octo's own prompts use) with one **Take over** button. It says only what
+is so: until one of those tabs has a title of its own (a page that has answered;
+one with no title is named by its address), it reads **Opening visitporto.travel…**
+with no list, and while a prompt in the view waits for the person viewing, it reads
+**Waiting for you** beside the pages. A tab still
 loading another address is named by the site it opens, with no title until that
 page arrives: DevTools' tab list gives the new address with the title of the page
 the tab is leaving (a blank tab's "about:blank"), so `GET /browser/pages` drops a

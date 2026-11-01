@@ -215,6 +215,39 @@ describe("preview check: pure parts", () => {
     expect(incompleteBlankCheck(0.4, 0)).toBeNull();
   });
 
+  // A turn replied "The page is open in Studio and displays correctly on phone and desktop." two seconds after a
+  // check that ended "No problems found. Open the screenshots and check layout…": nobody had opened them. The last
+  // line says what was checked, and that how the page looks was not.
+  it("a check with no errors says the page loaded on the sizes it loaded, and that how it looks isn't checked", () => {
+    const size = (name: "desktop" | "phone", errors: string[] = []) => ({
+      name, width: name === "desktop" ? 1280 : 390, height: name === "desktop" ? 800 : 844,
+      colorScheme: name === "desktop" ? "dark" as const : "light" as const, screenshot: `/tmp/out/${name}.png`,
+      title: "Coffee walk", status: 200, ms: 900, blank: { blank: false, reason: null }, errors, warnings: [], blocked: [],
+    });
+    const report = (viewports: ReturnType<typeof size>[]) => {
+      const problems = viewports.reduce((n, v) => n + v.errors.length, 0);
+      return {
+        ok: problems === 0, url: "http://127.0.0.1:4173/", title: "Coffee walk", framed: false,
+        engine: { playwright: "/pw", chromium: "/chromium" }, viewports, problems, offSite: "proxy" as const,
+      };
+    };
+    const last = (r: ReturnType<typeof report>) => formatSiteCheck(r).split("\n").at(-1);
+    expect(last(report([size("desktop"), size("phone")]))).toBe(
+      "Loaded on both sizes with no errors; how it looks isn't checked until someone opens the screenshots.",
+    );
+    expect(last(report([size("phone")]))).toBe(
+      "Loaded on the phone size with no errors; how it looks isn't checked until someone opens the screenshot.",
+    );
+    expect(last(report([size("desktop")]))).toBe(
+      "Loaded on the desktop size with no errors; how it looks isn't checked until someone opens the screenshot.",
+    );
+    const text = formatSiteCheck(report([size("desktop"), size("phone")]));
+    expect(text).not.toMatch(/No problems found|check layout, legibility/);
+    expect(last(report([size("desktop", ["console.error: boom"]), size("phone")]))).toBe(
+      "Fix every error above, reload the site, and run the check again. Open the screenshots either way.",
+    );
+  });
+
   it("each run's default screenshot folder is new and private to this user", () => {
     const a = makeDefaultOutDir(4173);
     const b = makeDefaultOutDir(4173);
@@ -421,7 +454,7 @@ describe.skipIf(!browserOk)("preview check: in a browser", () => {
       expect(v.blank.blank).toBe(false);
       expect(v.status).toBe(200);
     }
-    expect(formatSiteCheck(r)).toMatch(/No problems found/);
+    expect(formatSiteCheck(r)).toMatch(/Loaded on both sizes with no errors; how it looks isn't checked/);
   });
 
   it("console errors, uncaught exceptions and the site's own failed requests are problems (exit 1)", { timeout: 90_000 }, async () => {

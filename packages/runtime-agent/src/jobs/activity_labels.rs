@@ -223,6 +223,40 @@ const BROWSER_BROWSE: BuiltinLabel = BuiltinLabel {
     live: "Browsing {host}",
     done: single("browsed {host}"),
 };
+// A step the browser refused because it is the person's own (the controller's `refused`, kept
+// by shared_browser_activity): Details names it for what it was, "Tried accepting cookies on
+// metrodoporto.pt", not "Tried browsing metrodoporto.pt". It never happens, so it has no done
+// form, and the line never names it.
+const BROWSER_REFUSED_CONSENT: BuiltinLabel = BuiltinLabel {
+    key: "browser/refused/consent",
+    role: ActivityRole::Quiet,
+    live: "Accepting cookies on {host}",
+    done: None,
+};
+const BROWSER_REFUSED_SIGN_IN: BuiltinLabel = BuiltinLabel {
+    key: "browser/refused/sign-in",
+    role: ActivityRole::Quiet,
+    live: "Signing in on {host}",
+    done: None,
+};
+const BROWSER_REFUSED_UPLOAD: BuiltinLabel = BuiltinLabel {
+    key: "browser/refused/upload",
+    role: ActivityRole::Quiet,
+    live: "Choosing a file on {host}",
+    done: None,
+};
+const BROWSER_REFUSED_SECRET: BuiltinLabel = BuiltinLabel {
+    key: "browser/refused/secret",
+    role: ActivityRole::Quiet,
+    live: "Showing a password or key on {host}",
+    done: None,
+};
+const BROWSER_REFUSED_PRIVATE: BuiltinLabel = BuiltinLabel {
+    key: "browser/refused/private",
+    role: ActivityRole::Quiet,
+    live: "Entering private details on {host}",
+    done: None,
+};
 const TOOL: BuiltinLabel = BuiltinLabel {
     key: "tool/use",
     role: ActivityRole::Content,
@@ -1209,19 +1243,38 @@ pub fn mcp_tool_activity(server: &str) -> Option<JsonValue> {
     activity_json(vec![Found::builtin(label, Some(1))])
 }
 
+/// The label of a step the browser refused because it is the person's (`refused`, one of
+/// `shared_browser_activity::REFUSED_STEPS`).
+fn browser_refused_label(refused: &str) -> Option<&'static BuiltinLabel> {
+    Some(match refused {
+        "consent" => &BROWSER_REFUSED_CONSENT,
+        "sign_in" => &BROWSER_REFUSED_SIGN_IN,
+        "upload" => &BROWSER_REFUSED_UPLOAD,
+        "reveal_secret" => &BROWSER_REFUSED_SECRET,
+        "sensitive" => &BROWSER_REFUSED_PRIVATE,
+        _ => return None,
+    })
+}
+
 /// A Shared Browser step, from the facts runtime-agent kept of the browser's own result
 /// (`shared_browser_activity::browser_step_facts`): its kind, the host it names, a key of the
-/// page and how it was allowed. A step that names no host yet is "Using the browser".
+/// page, how it was allowed and, for a step the browser refused because it is the person's,
+/// which one it was. A step that names no host yet is "Using the browser".
 pub fn browser_step_activity(step: &JsonValue) -> Option<JsonValue> {
     let facts = step.as_object()?;
     let kind = facts.get("step")?.as_str()?;
     let host = facts.get("host").and_then(JsonValue::as_str);
-    let label = match (kind, host) {
-        (_, None) => &BROWSER,
-        ("navigate" | "open_tab", Some(_)) => &BROWSER_OPEN,
-        ("snapshot", Some(_)) => &BROWSER_READ,
-        ("search", Some(_)) => &BROWSER_SEARCH,
-        (_, Some(_)) => &BROWSER_BROWSE,
+    let refused = facts
+        .get("refused")
+        .and_then(JsonValue::as_str)
+        .and_then(browser_refused_label);
+    let label = match (kind, host, refused) {
+        (_, None, _) => &BROWSER,
+        (_, Some(_), Some(refused)) => refused,
+        ("navigate" | "open_tab", Some(_), None) => &BROWSER_OPEN,
+        ("snapshot", Some(_), None) => &BROWSER_READ,
+        ("search", Some(_), None) => &BROWSER_SEARCH,
+        (_, Some(_), None) => &BROWSER_BROWSE,
     };
     let mut found = Found::builtin(label, Some(1));
     // A step that did not happen (refused, said no to, left unanswered, failed) opened, read and
@@ -1875,6 +1928,65 @@ mod tests {
         ] {
             assert_eq!(browser_step_activity(&facts), None, "{facts}");
         }
+    }
+
+    // A local drive: a turn tried to press Metro do Porto's "Aceitar todos os cookies", the
+    // browser refused it as the person's step, and Details said only "Tried browsing
+    // metrodoporto.pt". A refused step is named for what it was, from the controller's own word,
+    // never the button's; it never happened, so the line never names it.
+    #[test]
+    fn a_step_the_browser_refused_as_the_persons_is_named_for_what_it_was() {
+        for (refused, key, live) in [
+            (
+                "consent",
+                "browser/refused/consent",
+                "Accepting cookies on {host}",
+            ),
+            ("sign_in", "browser/refused/sign-in", "Signing in on {host}"),
+            (
+                "upload",
+                "browser/refused/upload",
+                "Choosing a file on {host}",
+            ),
+            (
+                "reveal_secret",
+                "browser/refused/secret",
+                "Showing a password or key on {host}",
+            ),
+            (
+                "sensitive",
+                "browser/refused/private",
+                "Entering private details on {host}",
+            ),
+        ] {
+            let activity = browser_step_activity(&json!({
+                "step": "click", "host": "metrodoporto.pt", "refused": refused,
+            }))
+            .expect("labelled");
+            assert_eq!(activity["key"], json!(key), "{refused}");
+            assert_eq!(activity["live"], json!(live), "{refused}");
+            assert_eq!(activity["role"], json!("quiet"), "{refused}");
+            assert!(activity.get("done").is_none(), "{refused}");
+            assert_eq!(activity["step"], json!("click"), "{refused}");
+            assert_eq!(activity["host"], json!("metrodoporto.pt"), "{refused}");
+            // The word chooses the label and is not itself part of the activity.
+            assert!(activity.get("refused").is_none(), "{refused}");
+        }
+        // Every refused label is shared_browser_activity's vocabulary, and nothing else is.
+        for word in crate::shared_browser_activity::REFUSED_STEPS {
+            assert!(browser_refused_label(word).is_some(), "{word}");
+        }
+        for facts in [
+            json!({"step": "click", "host": "metrodoporto.pt", "refused": "Aceitar todos os cookies"}),
+            json!({"step": "click", "host": "metrodoporto.pt"}),
+        ] {
+            let activity = browser_step_activity(&facts).expect("labelled");
+            assert_eq!(activity["key"], json!("browser/browse"), "{facts}");
+        }
+        // With no site known yet, it is a step in the browser, as any other.
+        let unnamed =
+            browser_step_activity(&json!({"step": "click", "refused": "consent"})).unwrap();
+        assert_eq!(unnamed["key"], json!("browser/use"));
     }
 
     // A browser step that did not happen (the person said no, no answer came, a link-only site,

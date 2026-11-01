@@ -411,6 +411,12 @@ let stepAllowedAtPrompt = false;
 // line says ("you said no to a search"). Only these words, never page text.
 const FAILED_STEP_KINDS = new Set(["search", "submit"]);
 let stepKind = null;
+// Which of the person's own steps the browser refused to take (the action
+// policy's category: accepting a consent banner, signing in, choosing a
+// file, showing a credential, typing a password, code or payment detail), so
+// the turn's Details names it for what it was. Only these words.
+const REFUSED_STEP_KINDS = new Set(["consent", "sign_in", "upload", "reveal_secret", "sensitive"]);
+let refusedStep = null;
 
 async function ensureSiteApproved(rawUrl, label, { destinationUrl = null } = {}) {
   assertStepOnTime();
@@ -1703,6 +1709,9 @@ function refuseUserStep(classification) {
   if (classification.verdict !== "refuse") {
     return;
   }
+  if (REFUSED_STEP_KINDS.has(classification.category)) {
+    refusedStep = classification.category;
+  }
   const refusal = actionPolicy.refusalFor(classification.category);
   const message = refusal ? refusal.message : "This step is the user's.";
   throw new Error(`${message} [${classification.code || "step_refused"}]`);
@@ -2460,6 +2469,7 @@ function assertSafeTypeTarget(description, step = "type") {
     ) ||
     sensitiveLabel.test(content)
   ) {
+    refusedStep = "sensitive";
     throw new Error(
       step === "choose"
         ? "Shared Browser does not choose options in authentication, payment, or identity fields; let the user choose this value directly"
@@ -4672,10 +4682,12 @@ main().then(
     // "once" when the person said yes at its prompt: a step they allowed that
     // then did not happen still lists their yes. `changedAfterYes` when that
     // yes was not used because the control changed (controlChanged), which
-    // runtime-agent counts for the run.
+    // runtime-agent counts for the run. `refused` when the browser refused
+    // the step as the person's own.
     const activity = {
       ...(FAILED_STEP_KINDS.has(stepKind) ? { step: stepKind } : {}),
       ...(stepAllowedAtPrompt ? { approval: "once" } : {}),
+      ...(REFUSED_STEP_KINDS.has(refusedStep) ? { refused: refusedStep } : {}),
     };
     if (Object.keys(activity).length) {
       await writeStdout(

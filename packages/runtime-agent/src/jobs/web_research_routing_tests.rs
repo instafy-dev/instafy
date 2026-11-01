@@ -1549,7 +1549,7 @@ fn a_browser_turn_on_a_restored_thread_is_given_finding_a_page() {
 /// The space's `AGENTS.md` is a turn's instructions only while the turn has the workspace: Codex tells a browser turn
 /// that resumes its chat's thread "The previously provided AGENTS.md instructions no longer apply". So a browser
 /// turn's replies read "this turn is read-only", "504 Gateway Time-out" and "listed in the findings below", which
-/// the replies guide rules out by name. A browser turn on a restored thread is given `AGENTS.md`'s "Replies" again,
+/// the replies guide rules out. A browser turn on a restored thread is given `AGENTS.md`'s "Replies" again,
 /// from the space's own copy, and only that section. An ordinary restored turn keeps `AGENTS.md` and is not, and a
 /// space's copy without the section gives nothing.
 #[test]
@@ -1585,7 +1585,10 @@ fn a_browser_turn_on_a_restored_thread_is_given_the_replies_guide() {
     let agents_doc = fs::read_to_string(tmp.path().join(learn::AGENTS_DOC_FILENAME)).unwrap();
     let start = agents_doc.find("## Replies").expect("section");
     let replies = agents_doc[start..].trim_end();
-    assert!(replies.contains("\"this turn is read-only\""), "{replies}");
+    assert!(
+        replies.contains("Never describe the turn itself"),
+        "{replies}"
+    );
     for transport in ["shared", "desktop-personal"] {
         let (prompt, metrics) = restored(json!({ "browserTransport": transport }));
         assert!(prompt.contains(replies), "{transport}");

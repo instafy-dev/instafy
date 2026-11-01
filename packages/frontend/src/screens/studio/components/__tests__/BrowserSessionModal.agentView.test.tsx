@@ -333,6 +333,34 @@ describe("Shared Browser view while Octo drives", () => {
     expect(takeOverButtons()).toBe(1);
   });
 
+  // A local drive: while the view asked the person about a step, the row of
+  // pages above the prompt said "Octo is reading httpbin.org ·
+  // httpbin.org/forms/post". Octo reads nothing while it waits for them.
+  it("says Waiting for you in the row of pages while the view's prompt asks, and what Octo reads once answered", async () => {
+    const prompt = { runtimeId, request: {
+      version: 1, approvalId: "22222222-2222-4222-8222-222222222222", kind: "origin",
+      ownerId: "33333333-3333-4333-8333-333333333333", runId: "44444444-4444-4444-8444-444444444444",
+      initiatorUserId: "user-1", browserPageId: "PAGE1", operation: "approve-origin", sourceOrigin: null,
+      destinationOrigin: "https://httpbin.org", destinationFingerprint: "a".repeat(64), snapshotId: null,
+      targetFingerprint: null, payloadFingerprint: null, requestedAtMs: Date.now(), expiresAtMs: Date.now() + 120_000,
+      requestFingerprint: "e".repeat(64),
+      display: { label: "Open https://httpbin.org/forms/post", destinationOrigin: "https://httpbin.org" },
+    } };
+    const readingLabel = () => document.querySelector('[data-testid="browser-reading-row"] span[id]')?.textContent ?? null;
+    const sheet = () => document.querySelector('[data-testid="shared-browser-approval-prompt"]');
+    mocks.fetchPendingApproval.mockResolvedValue(prompt);
+    await octoTakesControl({ agentPageIds: ["PAGE1"] });
+    await advance(2_000);
+    expect(sheet()?.textContent).toContain("Octo wants to open httpbin.org/forms/post.");
+    expect(readingLabel()).toBe("Waiting for you");
+    expect(document.querySelector('[data-testid="browser-reading-row"]')?.textContent).not.toContain("reading");
+    // Answered elsewhere: the prompt goes, and the row says what Octo does.
+    mocks.fetchPendingApproval.mockResolvedValue(null);
+    await advance(2_000);
+    expect(sheet()).toBeNull();
+    expect(readingLabel()).toBe("Octo is reading 1 page");
+  });
+
   it("never captions an earlier turn's step when the view opens during Octo's turn", async () => {
     // Drive, Oct 28: the view opened as the card was pressed, read the log
     // once Octo held the browser, and captioned the earlier chat's last step

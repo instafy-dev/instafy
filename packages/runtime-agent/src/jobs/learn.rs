@@ -112,6 +112,9 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     include_str!("legacy/agents-doc-v6.md"),
     // From before `exec` printed a command's whole result (`text(r)`), not `r.output` alone.
     include_str!("legacy/agents-doc-v7.md"),
+    // From before one rule (never describe the turn itself) replaced the examples of what tools saw
+    // and inside words, and a reply said which page it didn't reach.
+    include_str!("legacy/agents-doc-v8.md"),
 ];
 const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -2118,72 +2121,73 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), theirs);
     }
 
-    /// A reply says what Octo did, not what its tools saw (29 Oct drive: "The browser was blank,
-    /// so I opened…", "The page check returned no output, so I can't confirm its visual
-    /// rendering"). The copy from before says neither and is upgraded.
+    /// A reply says what happened, never how the turn works. Examples of what tools saw and of
+    /// inside words came back reworded: after "passed the desktop and phone checks" was named as
+    /// a don't, a reply said the page "displays correctly on phone and desktop" after a check that
+    /// only loaded it, and others said "in this browser run", "this pass" and "the page snapshot
+    /// was stale". `AGENTS.md` gives one rule in place of those examples. What could not be looked
+    /// at still stays in the reply, in plain words (the builder skill's "what is unverified").
+    /// The copies from before, with the examples or from before them, are upgraded.
     #[test]
-    fn agents_doc_says_what_was_done_not_what_the_tools_saw() {
+    fn agents_doc_says_never_to_describe_the_turn_itself() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
         let doc = flat(AGENTS_DOC_TEMPLATE);
-        for needle in [
-            "Say what you did, not what your tools saw:",
-            "\"I opened the museum's own site\", not \"The browser was blank, so I opened…\"",
-            "\"I couldn't check how the page looks yet\", not \"The page check returned no output…\"",
+        let replies = doc
+            .split("## Replies")
+            .nth(1)
+            .and_then(|rest| rest.split("## ").next())
+            .expect("Replies section");
+        assert!(
+            replies.contains(
+                "- Never describe the turn itself: its run, pass, snapshot, tools or checks."
+            ),
+            "{replies}"
+        );
+        for example in [
+            "what your tools saw",
+            "The browser was blank",
+            "The page check",
+            "passed the desktop and phone checks",
+            "the shared browser",
+            "placeholder rows",
+            "this turn is read-only",
         ] {
-            assert!(doc.contains(needle), "{needle}");
+            assert!(!replies.contains(example), "{example}");
         }
-        let previous = include_str!("legacy/agents-doc-v2.md");
-        assert!(!previous.contains("The browser was blank"));
-        let workspace = tempdir().expect("workspace");
-        let path = workspace.path().join(AGENTS_DOC_FILENAME);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
-    }
-
-    /// A reply leaves out inside words ("in the shared browser", "needs a validation pass", "The page check
-    /// produced no visible report", "I could not visually inspect those images", "placeholder rows"): `AGENTS.md`
-    /// gives each as a don't, next to what to say. The copy from before is upgraded.
-    #[test]
-    fn agents_doc_names_the_inside_words_a_reply_leaves_out() {
-        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let doc = flat(AGENTS_DOC_TEMPLATE);
-        for needle in [
-            "\"I couldn't check how the page looks yet\", not \"The page check returned no output…\", \"produced no visible report\" or \"I could not visually inspect those images\"",
-            "\"Instafy's browser\", not \"the shared browser\"",
-            "not \"the map needs a validation pass\"",
-            "\"models I couldn't confirm, marked not checked\", not \"placeholder rows\"",
-        ] {
-            assert!(doc.contains(needle), "{needle}");
-        }
-        // What could not be looked at stays in the reply, in plain words (the builder skill's "what is unverified").
         assert!(!doc.contains("Leave out what you could not look at"));
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-        let previous = include_str!("legacy/agents-doc-v3.md");
-        assert!(!previous.contains("the shared browser"));
-        let workspace = tempdir().expect("workspace");
-        let path = workspace.path().join(AGENTS_DOC_FILENAME);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
+        let previous = include_str!("legacy/agents-doc-v8.md");
+        assert!(previous.contains("passed the desktop and phone checks"));
+        assert!(!previous.contains("Never describe the turn itself"));
+        for previous in [
+            include_str!("legacy/agents-doc-v2.md"),
+            include_str!("legacy/agents-doc-v3.md"),
+            include_str!("legacy/agents-doc-v6.md"),
+            previous,
+        ] {
+            let workspace = tempdir().expect("workspace");
+            let path = workspace.path().join(AGENTS_DOC_FILENAME);
+            fs::write(&path, previous).unwrap();
+            ensure_project_memory_scaffold(workspace.path());
+            assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
+        }
     }
 
     /// A reply states only what a page read in its turn says, else "not checked"; it never says a place, stop,
-    /// route or time doesn't exist unless a page says so; it names only steps its turn started ("I'm sending
-    /// Instafy's browser…" with no browser card is a promise nobody keeps); and it says "I can't search the whole
-    /// web here", not "this turn is read-only", "web-search capability", "search key" or "alternate search".
-    /// `AGENTS.md` is what web turns carry, and a browser turn is given its "Replies" too. The copy from before
-    /// is upgraded.
+    /// route, time or page doesn't exist or didn't load unless a page says so, and says which page it didn't
+    /// reach ("the planner itself didn't load in the page", of a planner whose own page the turn never opened);
+    /// and it names only steps its turn started ("I'm sending Instafy's browser…" with no browser card is a
+    /// promise nobody keeps). `AGENTS.md` is what web turns carry, and a browser turn is given its "Replies"
+    /// too. The copy from before is upgraded.
     #[test]
     fn agents_doc_says_unread_facts_are_not_checked_and_names_only_steps_the_turn_started() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
         let doc = flat(AGENTS_DOC_TEMPLATE);
         for needle in [
             "A fact no page you read this turn states says \"not checked\", or stays out.",
-            "Never say a place, stop, route or time doesn't exist unless a page you read says so.",
+            "Never say a place, stop, route, time or page doesn't exist or didn't load unless a page you read says so: say which page you didn't reach.",
             "Say only steps this turn did or started.",
             "offer it as a next step instead",
-            "\"I can't search the whole web here\", not \"this turn is read-only\", \"web-search capability\", \"search key\" or \"alternate search\"",
         ] {
             assert!(doc.contains(needle), "{needle}");
         }
@@ -2257,32 +2261,6 @@ mod tests {
         let previous = include_str!("legacy/agents-doc-v7.md");
         assert!(previous.contains("(shown as \"Process running with session ID …\")"));
         assert!(!previous.contains("text(r)"));
-        let workspace = tempdir().expect("workspace");
-        let path = workspace.path().join(AGENTS_DOC_FILENAME);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
-    }
-
-    /// A reply says what Octo made, not what a page check found or passed: replies ended "The page
-    /// check found all four models, and the open view was reloaded." and "The page is up in Studio
-    /// and passed the desktop and phone checks." `AGENTS.md` gives both as don'ts beside what to
-    /// say. The copy from before is upgraded.
-    #[test]
-    fn agents_doc_says_what_was_made_not_what_a_page_check_found() {
-        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let doc = flat(AGENTS_DOC_TEMPLATE);
-        let replies = doc
-            .split("## Replies")
-            .nth(1)
-            .and_then(|rest| rest.split("## ").next())
-            .expect("Replies section");
-        assert!(replies.contains(
-            "\"I put all four models on the page\", not \"The page check found all four models, and the open view was reloaded\" or \"passed the desktop and phone checks\""
-        ), "{replies}");
-        assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-        let previous = include_str!("legacy/agents-doc-v6.md");
-        assert!(!previous.contains("passed the desktop and phone checks"));
         let workspace = tempdir().expect("workspace");
         let path = workspace.path().join(AGENTS_DOC_FILENAME);
         fs::write(&path, previous).unwrap();

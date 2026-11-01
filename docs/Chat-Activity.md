@@ -229,7 +229,8 @@ Exit status reaches Studio through the step's own `status` and `exitCode`; a lab
 - `when: "success"` counts the step only when it exits 0. Studio counts any step only once it
   ended, so this is the runtime's word for older Studios.
 - Browser steps may also carry `host`, `pageKey` (16 hex characters, never the URL), `step` and
-  `approval`.
+  `approval`. Which of the person's own steps the browser refused chooses the label and is not
+  carried itself.
 
 ## Browser steps
 
@@ -266,6 +267,12 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   which the step asks about again, and which also prints `"changedAfterYes":true` beside
   `activity` for runtime-agent to count) keeps both in its own result, so Details list the yes:
   "You allowed a click on visitlisboa.com" beside "Tried browsing visitlisboa.com".
+- **A step the browser refused as the person's** (accepting a consent banner, signing in,
+  choosing a file, showing a credential, typing a password, code or payment detail) also prints
+  `"refused"` with the action policy's word for it (`consent`, `sign_in`, `upload`,
+  `reveal_secret`, `sensitive`), and runtime-agent keeps it as a fifth fact, so Details name the
+  step for what it was: "Tried accepting cookies on metrodoporto.pt", not "Tried browsing
+  metrodoporto.pt". Any other word names nothing.
 - **The labels** (`jobs/activity_labels.rs`):
 
   | Step | Running | Done (one / other / some) | Role |
@@ -274,6 +281,7 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   | `snapshot` | Reading {host} | read a page on {host} / read {n} pages on {host} / read pages on {host} | content |
   | `search` (typing with submit, or Enter, in a search field) | Searching {host} | searched {host} / searched {host} {n} times / searched {host} | content |
   | `submit`, `click`, `type`, `choose`, `press`, `scroll`, `tabs`, `status` | Browsing {host} | browsed {host} (Details only) | quiet |
+  | a step refused as the person's: `consent`, `sign_in`, `upload`, `reveal_secret`, `sensitive` | Accepting cookies on {host}, Signing in on {host}, Choosing a file on {host}, Showing a password or key on {host}, Entering private details on {host} | none: it never happens (Details: "Tried accepting cookies on {host}") | quiet |
   | no host known yet | Using the browser | used the browser | content |
 
   Opening, reading and searching carry `when: "success"`: a step the person said no to, left
