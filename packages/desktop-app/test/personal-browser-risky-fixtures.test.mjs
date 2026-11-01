@@ -197,15 +197,17 @@ test("bookkeeping write steps ask as commits through the real bridge; list names
 // no form: only their words tell buying, paying, ordering, sending,
 // deleting, cancelling and saving from an ordinary step. Each asks under
 // routine browsing in its category; a list of orders, a timetable and a
-// journey planner's button stay ordinary.
+// journey planner's button stay ordinary, and so do news headlines whose
+// verb is a button's word too ("Governo elimina portagens") and shipping
+// pages ("Verzenden en retourneren").
 const SHOP_PAGES = {
   "shops/pt.html": {
     asks: [
       ["Comprar", "purchase"], ["Finalizar compra", "purchase"], ["Pagar", "purchase"],
       ["Comprar bilhete", "purchase"], ["Enviar mensagem", "message"], ["Cancelar encomenda", "destructive"],
-      ["Eliminar conta", "destructive"], ["Guardar alterações", "change", true],
+      ["Eliminar conta", "destructive"], ["Guardar alterações", "change", true], ["Fechar pedido", "purchase"],
     ],
-    links: ["Minhas encomendas", "Ver horários"],
+    links: ["Minhas encomendas", "Ver horários", "Governo elimina portagens nas antigas SCUT", "Quem paga a conta da luz?"],
     ordinary: ["Planear Viagem"],
   },
   "shops/fr.html": {
@@ -213,6 +215,7 @@ const SHOP_PAGES = {
       ["Ajouter au panier", "purchase"], ["Passer la commande", "purchase"], ["Payer", "purchase"],
       ["Envoyer le message", "message"], ["Annuler la réservation", "destructive"],
       ["Supprimer le compte", "destructive"], ["Enregistrer", "change", true],
+      ["Je valide ma commande", "purchase"], ["Je paie", "purchase"], ["Payer 49,90 €", "purchase"],
     ],
     links: ["Mes commandes", "Voir les horaires"],
     ordinary: ["Voir le plan"],
@@ -223,16 +226,20 @@ const SHOP_PAGES = {
       ["Enviar mensaje", "message"], ["Cancelar suscripción", "destructive"], ["Eliminar cuenta", "destructive"],
       ["Guardar cambios", "change", true],
     ],
-    links: ["Mis pedidos", "Ver horarios"],
+    links: ["Mis pedidos", "Ver horarios", "El Gobierno elimina el IVA de los alimentos"],
     ordinary: ["Cómo llegar"],
   },
   "shops/it.html": {
     asks: [
       ["Acquista ora", "purchase"], ["Procedi all'acquisto", "purchase"], ["Paga ora", "purchase"],
       ["Invia messaggio", "message"], ["Annulla prenotazione", "destructive"], ["Elimina account", "destructive"],
-      ["Salva", "change", true],
+      ["Salva", "change", true], ["Procedi all'ordine", "purchase"], ["Compra", "purchase"],
+      ["Sì, elimina", "destructive"],
     ],
-    links: ["I miei ordini", "Orari"],
+    links: [
+      "I miei ordini", "Orari", "Apple acquista una startup di intelligenza artificiale",
+      "Sciopero: Trenitalia cancella 200 treni",
+    ],
     ordinary: ["Ordina per prezzo"],
   },
   "shops/nl.html": {
@@ -240,8 +247,9 @@ const SHOP_PAGES = {
       ["In winkelwagen", "purchase"], ["Afrekenen", "purchase"], ["Nu betalen", "purchase"],
       ["Bericht versturen", "message"], ["Abonnement opzeggen", "destructive"],
       ["Account verwijderen", "destructive"], ["Opslaan", "change", true],
+      ["Bericht verzenden", "message"], ["Naar de kassa", "purchase"],
     ],
-    links: ["Mijn bestellingen", "Huizen te koop"],
+    links: ["Mijn bestellingen", "Huizen te koop", "Verzenden en retourneren", "Betaal- en verzendmethoden"],
     ordinary: ["Openingstijden bekijken"],
   },
 };

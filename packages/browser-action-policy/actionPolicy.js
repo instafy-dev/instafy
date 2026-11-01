@@ -88,39 +88,43 @@
   // cancel, confirm and save are there in French, Spanish, Italian,
   // Portuguese and Dutch too, the languages of the consent words below, in
   // the words buttons use ("Comprar", "Finalizar compra", "Pagar", "Enviar
-  // mensagem", "Eliminar conta"), and match whole words like the rest. An
-  // order or a purchase as a noun counts only with its verb, so "Mes
-  // commandes" and "Ordina per prezzo" (sort by price) stay ordinary, and so
-  // do "Huizen te koop" (for sale), German "wissen" (know) and "stain
-  // remover": "koop", "wissen" and "remover" are left out.
+  // mensagem", "Eliminar conta", "Je valide ma commande"), and match whole
+  // words like the rest. An order or a purchase as a noun counts only with
+  // its verb, so "Mes commandes" and "Ordina per prezzo" (sort by price)
+  // stay ordinary, and so do "Huizen te koop" (for sale), German "wissen"
+  // (know) and "stain remover": "koop", "wissen" and "remover" are left
+  // out. A Dutch verb before a hyphen starts a shortened compound ("Betaal-
+  // en verzendmethoden", "Verzend- en retourbeleid"), so it is no verb there.
+  // Words that are also a headline's verb or an English word count only
+  // first in a name (the FIRST_* lists below).
   const PURCHASE = words([
     "buy", "buy\\s+now", "purchase", "pay", "pay\\s+now", "payment", "checkout", "check\\s+out",
     "place\\s+order", "order\\s+now", "subscribe", "upgrade", "add\\s+to\\s+(?:cart|basket|bag)",
     "kaufen", "jetzt\\s+kaufen", "bezahlen", "zahlen", "zahlungspflichtig", "bestellen", "abonnieren",
     "zur\\s+kasse", "upgraden", "in\\s+den\\s+warenkorb",
     // French.
-    "acheter", "achetez", "j['’]ach[èe]te", "payer", "payez", "paiement", "commander", "commandez",
+    "acheter", "achetez", "j['’]ach[èe]te", "payez", "paiement", "commandez", "je\\s+(?:commande|pa(?:ie|ye))",
     "(?:passer|valider|finaliser|confirmer|terminer)\\s+(?:(?:la|ma|votre|une)\\s+)?commande",
+    "je\\s+(?:passe|valide|confirme|finalise|termine)\\s+(?:(?:la|le|ma|mon|votre)\\s+|l['’]\\s*)?" +
+      "(?:commande|panier|achat|paiement)",
     "(?:valider|finaliser|confirmer)\\s+(?:l['’]\\s*|mon\\s+|votre\\s+)?achat",
     "valider\\s+(?:(?:le|mon|votre)\\s+)?panier", "ajouter\\s+au\\s+panier",
     // Spanish and Portuguese.
-    "comprar", "compre", "c[óo]mpralo", "compra\\s+(?:ahora|ya)", "pagar", "pague", "paga", "pagamento",
-    "encomendar", "pedir\\s+(?:ahora|ya)",
+    "comprar", "c[óo]mpralo", "pagar", "pagamento", "encomendar", "pedir\\s+(?:ahora|ya)",
     "(?:finalizar|concluir|tramitar|realizar|hacer|fazer|confirmar|completar|efe(?:c)?tuar)\\s+" +
       "(?:(?:el|la|mi|tu|su|a|o|sua|seu|minha|meu)\\s+)?(?:compra|pedido|encomenda)",
+    "fechar\\s+(?:(?:o|a)\\s+)?(?:pedido|compra|encomenda)",
     "(?:realizar|efectuar|confirmar|finalizar)\\s+(?:el\\s+)?pago", "(?:ir|proceder|continuar)\\s+al\\s+pago",
     "(?:a[ñn]adir|agregar)\\s+(?:al\\s+carrito|a\\s+la\\s+(?:cesta|bolsa))",
     "adicionar\\s+(?:ao\\s+(?:carrinho|cesto)|[àa]\\s+(?:cesta|sacola))",
     // Italian.
-    "acquista", "acquistare", "compra\\s+(?:ora|adesso|subito)", "pagare",
-    "(?:procedi\\s+all['’]\\s*|(?:conferma|completa|finalizza)\\s+(?:l['’]\\s*)?)acquisto",
-    "ordina\\s+(?:ora|adesso|subito)",
-    "(?:effettua|conferma|completa|invia|procedi\\s+con)\\s+(?:l['’]\\s*)?ordine",
-    "aggiungi\\s+al\\s+carrello",
+    "acquistare", "pagare", "procedi\\s+all['’]\\s*(?:acquisto|ordine)", "procedi\\s+con\\s+(?:l['’]\\s*)?ordine",
+    "concludi\\s+(?:l['’]\\s*)?(?:acquisto|ordine)", "vai\\s+alla\\s+cassa", "aggiungi\\s+al\\s+carrello",
     // Dutch.
-    "kopen", "koop\\s+nu", "betalen", "betaal", "betaling", "bestel", "afrekenen", "reken\\s+af",
+    "kopen", "koop\\s+nu", "betalen", "betaal(?!-)", "betaling", "bestel(?!-)", "afrekenen", "reken\\s+af",
+    "naar\\s+de\\s+kassa",
     "bestelling\\s+(?:plaatsen|afronden|bevestigen)", "(?:plaats|bevestig)\\s+(?:(?:je|jouw|uw|de)\\s+)?bestelling",
-    "(?:in|toevoegen\\s+aan)\\s+(?:(?:de|je|mijn)\\s+)?winkel(?:wagen|mand)(?:tje|je)?",
+    "(?:in|toevoegen\\s+aan|voeg\\s+toe\\s+aan)\\s+(?:(?:de|je|mijn)\\s+)?winkel(?:wagen|mand)(?:tje|je)?",
   ]);
   const TRANSFER = new RegExp(
     `${START}(?:transfer|transfers|withdraw|withdrawal|payout|send\\s+money|wire)${END}|überweis|auszahl`,
@@ -153,10 +157,10 @@
     "widerrufen", "zurücksetzen", "(?:konto|account|abo|abonnement|mandant|firma|unternehmen)\\s+schließen",
     "papierkorb", "in\\s+den\\s+papierkorb", "blockieren", "sperren", "melden", "als\\s+spam\\s+markieren",
     // Delete and cancel in French, Spanish, Italian, Portuguese and Dutch.
-    "supprimer", "effacer", "annuler", "r[ée]silier",
+    "supprimer", "effacer", "annuler", "r[ée]silier", "je\\s+(?:supprime|r[ée]silie)", "j['’](?:annule|efface)",
     "eliminar", "borrar", "suprimir", "apagar", "excluir", "cancelar", "anular", "dar(?:me|se)?\\s+de\\s+baja",
-    "elimina", "eliminare", "cancella", "cancellare", "annulla", "annullare", "disdici", "disdire",
-    "verwijderen", "verwijder", "annuleren", "annuleer", "opzeggen",
+    "eliminare", "cancellare", "annullare", "disdici", "disdire",
+    "verwijderen", "verwijder(?!-)", "annuleren", "annuleer", "opzeggen",
   ]);
   const DOWNLOAD = new RegExp(
     `${START}(?:backup|herunterladen|exportieren|datev|csv|tsv|xlsx?|pdf|ofx|qif|zip|mt940|camt)${END}|export|download`,
@@ -166,7 +170,7 @@
     "send", "post", "publish", "reply", "comment", "tweet", "share\\s+post",
     "senden", "absenden", "versenden", "verschicken", "veröffentlichen", "antworten", "kommentieren", "posten",
     // Send in French, Spanish, Italian, Portuguese and Dutch.
-    "envoyer", "envoyez", "enviar", "invia", "inviare", "verzenden", "verzend", "versturen", "verstuur",
+    "envoyer", "envoyez", "j['’]envoie", "enviar", "inviare", "verzend(?!-)", "versturen", "verstuur",
   ]);
   // Commit words keep a labelled control out of the free menu, tab and
   // navigation rules. Bookkeeping verbs that change records belong here.
@@ -189,11 +193,39 @@
     "issue\\s+(?:an?\\s+)?(?:invoices?|refunds?|credit\\s+notes?)",
     "file\\s+(?:a\\s+|the\\s+)?(?:(?:tax\\s+)?returns?|reports?|tax(?:es)?)",
     // Confirm and save in French, Spanish, Italian, Portuguese and Dutch.
-    "confirmer", "valider", "enregistrer", "sauvegarder",
+    "confirmer", "valider", "enregistrer", "sauvegarder", "je\\s+(?:confirme|valide|sauvegarde)", "j['’]enregistre",
     "confirmar", "guardar", "salvar",
-    "conferma", "confermare", "salva", "salvare",
-    "bevestigen", "bevestig", "opslaan",
+    "confermare", "salvare",
+    "bevestigen", "bevestig(?!-)", "opslaan",
   ]);
+  // Words that are also a headline's verb ("Apple acquista una startup",
+  // "Governo elimina portagens", "Quem paga a conta?") or an English word
+  // ("Commander of the Order", "single-payer"). They count only where a
+  // button puts its verb: first in one of the control's own names, after
+  // marks, an icon font's name or a "yes", or right after an "and"
+  // ("Elimina account", "Paga ora", "Sì, elimina", "Prenota e paga", "Payer
+  // 49,90 €"), and never before a hyphen ("Commander-in-chief"). On a link to
+  // another page the English ones count only as its whole name ("Commander").
+  // Dutch "verzenden" is shipping too ("Verzenden en retourneren"), so it
+  // counts last in a name, where Dutch puts the verb ("Bericht verzenden").
+  // Italian "guarda" (look), French "envie" (wish) and "salve" (hello) are
+  // left out.
+  const FIRST_IN_NAME =
+    "(?:^(?:[^\\p{L}\\p{N}]|[a-z]+(?:_[a-z]+)+(?![\\p{L}\\p{N}])|(?:yes|ok|oui|s[iìí]|sim|ja)(?![\\p{L}\\p{N}]))*" +
+    "|(?<![\\p{L}\\p{N}])(?:e|ed|y|et)\\s+)";
+  const first = (list) => new RegExp(`${FIRST_IN_NAME}(?:${list.join("|")})(?![\\p{L}\\p{N}-])`, "iu");
+  const FIRST_PURCHASE = first([
+    "compra", "compre", "paga", "pague", "acquista", "ordina\\s+(?:ora|adesso|subito)",
+    "(?:conferma|completa|finalizza)\\s+(?:l['’]\\s*)?acquisto", "(?:effettua|conferma|completa|invia)\\s+(?:l['’]\\s*)?ordine",
+  ]);
+  const FIRST_PURCHASE_ENGLISH = first(["commander", "payer"]);
+  const WHOLE_PURCHASE_ENGLISH = /^[^\p{L}\p{N}]*(?:commander|payer)[^\p{L}\p{N}]*$/iu;
+  const FIRST_DESTRUCTIVE = first([
+    "elimina", "elimine", "cancella", "annulla", "cancela", "cancele", "borra", "borre", "apague", "exclua",
+  ]);
+  const FIRST_MESSAGE = first(["invia", "env[íi]a", "envíe"]);
+  const LAST_MESSAGE = new RegExp(`${START}verzenden[^\\p{L}\\p{N}]*$`, "iu");
+  const FIRST_COMMIT = first(["salva", "conferma", "confirma", "confirme"]);
   // Bookkeeping nouns that name a step on a button ("Stornobuchung" posts a
   // reversal) but a list on a menu item, tab or navigation entry. They only
   // mark a button as a commit and leave the free navigation rules alone.
@@ -447,6 +479,17 @@
     return cleanText([target.ariaLabel, target.text, target.title, target.value].filter(Boolean).join(" "));
   }
 
+  // A control's own names, each on its own, for the words that count only
+  // first or last in a name.
+  function namesOf(...values) {
+    return values.map(cleanText).filter(Boolean);
+  }
+
+  // The labels of a form's submit buttons, which a host joins with " | ".
+  function submitNamesOf(target) {
+    return namesOf(...cleanText(target.formSubmitLabels).split("|"));
+  }
+
   // A bare media type ("image/svg+xml", "image/png"): what an svg's metadata,
   // an <object> or a CMS's alt text leaves where a name would be.
   // Software writes the type in lower case, so a person's label that joins
@@ -594,17 +637,32 @@
     return target.credentialContext === true || target.nearMaskedText === true || credentialNoun.test(label);
   }
 
-  /** The named category of a label, or null for a label with no risk words. */
-  function categoryOfLabel(label) {
+  /**
+   * The named category of a label, or null for a label with no risk words.
+   * `names` are the label's names one by one, for the words that count only
+   * first or last in a name; `link` is true for a link to another page.
+   */
+  function categoryOfLabel(label, names = [label], link = false) {
     if (!label) return null;
-    if (PURCHASE.test(label)) return "purchase";
+    const some = (pattern) => names.some((name) => pattern.test(name));
+    if (PURCHASE.test(label) || some(FIRST_PURCHASE) ||
+      some(link ? WHOLE_PURCHASE_ENGLISH : FIRST_PURCHASE_ENGLISH)) return "purchase";
     if (TRANSFER.test(label)) return "transfer";
-    if (credentialNoun.test(label)) return CREDENTIAL_VERB.test(label) || DESTRUCTIVE.test(label) ? "credential" : "may_show_secret";
-    if (DESTRUCTIVE.test(label)) return "destructive";
+    const destructive = DESTRUCTIVE.test(label) || some(FIRST_DESTRUCTIVE);
+    if (credentialNoun.test(label)) return CREDENTIAL_VERB.test(label) || destructive ? "credential" : "may_show_secret";
+    if (destructive) return "destructive";
     if (PERMISSION.test(label)) return "permission";
     if (DOWNLOAD.test(label)) return "download";
-    if (MESSAGE.test(label)) return "message";
+    if (isMessageLabel(label, names)) return "message";
     return null;
+  }
+
+  function isMessageLabel(label, names = [label]) {
+    return MESSAGE.test(label) || names.some((name) => FIRST_MESSAGE.test(name) || LAST_MESSAGE.test(name));
+  }
+
+  function isCommitLabel(label, names = [label]) {
+    return COMMIT.test(label) || names.some((name) => FIRST_COMMIT.test(name));
   }
 
   // The name without the marks after its words, one character at a time:
@@ -635,8 +693,8 @@
     return limited ? "limited" : "accept";
   }
 
-  function riskyLabel(label) {
-    return categoryOfLabel(label) !== null || COMMIT.test(label);
+  function riskyLabel(label, names = [label]) {
+    return categoryOfLabel(label, names) !== null || isCommitLabel(label, names);
   }
 
   /** The risk an icon or class name adds: a category, "commit", or null. */
@@ -987,6 +1045,7 @@
     const role = lower(target.role);
     const type = lower(target.type);
     const label = labelOf(target);
+    const names = namesOf(target.ariaLabel, target.text, target.title, target.value);
     const areas = areasOf(target);
     const inDialog = areas.includes("dialog");
 
@@ -1057,7 +1116,7 @@
       if (plain) {
         // Words only add risk: a link named "Delete", "Pay now" or "Abmelden"
         // can run a script or a data-method request whatever its address.
-        const linkCategory = categoryOfLabel(label);
+        const linkCategory = categoryOfLabel(label, names, true);
         if (linkCategory && linkCategory !== "may_show_secret") return ask(linkCategory, "labelled link");
         return allow("navigation", "plain link");
       }
@@ -1067,15 +1126,17 @@
     // button that also opens a menu still submits its form.
     if (isSubmitControl(target)) {
       const risky = submissionAddressRisk(target);
-      return ask(categoryOfLabel(`${label} ${cleanText(target.formSubmitLabels)}`) || (risky && risky.category) || "change", "form submit");
+      const submitLabel = `${label} ${cleanText(target.formSubmitLabels)}`;
+      const named = categoryOfLabel(submitLabel, [...names, ...submitNamesOf(target)]);
+      return ask(named || (risky && risky.category) || "change", "form submit");
     }
 
-    const namedCategory = categoryOfLabel(label);
+    const namedCategory = categoryOfLabel(label, names);
     // An icon-only control's icon adds risk the way a label word does. A
     // labelled control is judged by its words, so a navigation entry with a
     // cart or credit-card icon stays navigation.
     const iconCategory = !label && !rowTarget ? categoryOfIcon(target.iconHint) : null;
-    const risky = riskyLabel(label) || iconCategory !== null;
+    const risky = riskyLabel(label, names) || iconCategory !== null;
     const editable = isEditable(target);
     if (!editable && !isValueWidget(target)) {
       if ((role === "tab" || tag === "summary" || target.menuOpener === true) && !risky && !inDialog) {
@@ -1093,7 +1154,7 @@
         return allow("navigation", "page number or next/previous");
       }
       const navigationItem = ["menuitem", "treeitem", "tab"].includes(role) || areas.some((area) => NAVIGATION_AREAS.includes(area));
-      if (navigationItem && label && !riskyLabel(label) && !inDialog && target.credentialContext !== true) {
+      if (navigationItem && label && !riskyLabel(label, names) && !inDialog && target.credentialContext !== true) {
         return allow("navigation", "menu, tree, tab or navigation item");
       }
       // A cookie or consent banner's refusal, judged by where it sits (the
@@ -1126,7 +1187,7 @@
       tag === "summary" ||
       target.menuOpener === true ||
       areas.some((area) => NAVIGATION_AREAS.includes(area));
-    if (!structural && (COMMIT.test(label) || COMMIT_NOUN.test(label) || iconCategory === "commit")) {
+    if (!structural && (isCommitLabel(label, names) || COMMIT_NOUN.test(label) || iconCategory === "commit")) {
       return { ...ask("change", "control"), commit: true };
     }
     return ask("change", "control");
@@ -1152,7 +1213,9 @@
     }
     if (isSearchField(target)) return allow("search", "search field");
     const labels = cleanText(`${cleanText(target.formSubmitLabels)} ${cleanText(target.formActionText)}`);
-    if ((target.contentEditable === true || tag === "textarea") && MESSAGE.test(labels)) return ask("message", "message field");
+    if ((target.contentEditable === true || tag === "textarea") && isMessageLabel(labels, submitNamesOf(target))) {
+      return ask("message", "message field");
+    }
     return ask("change", "field");
   }
 
@@ -1179,7 +1242,7 @@
       if (consent === "accept") return refuse("consent", "accepting option in a consent banner");
       if (consent === "limited") return { ...ask("change", "limited accept in a consent banner"), commit: true };
     }
-    const named = categoryOfLabel(label);
+    const named = categoryOfLabel(label, namesOf(target.ariaLabel, target.title, option));
     if (named) return ask(named, "labelled list choice");
     if (credentialish(target, label)) return ask("may_show_secret", "list in a credential context");
     return ask("change", "choose an option");
@@ -1218,11 +1281,11 @@
     if (isSignInForm(target)) return refuse("sign_in", "sign-in form submit");
     const labels = cleanText(`${cleanText(target.formSubmitLabels)} ${cleanText(target.formActionText)}`);
     const owned = Boolean(cleanText(target.formOwnerIdentity));
-    if (isSearchField(target) && !categoryOfLabel(labels)) {
+    const named = categoryOfLabel(labels, submitNamesOf(target));
+    if (isSearchField(target) && !named) {
       if (!owned) return allow("search", "search without a form");
       if (isSameSiteGetSubmission(target, ctx)) return allow("search", "same-site GET search");
     }
-    const named = categoryOfLabel(labels);
     if (named) return ask(named, "form submit");
     const risky = submissionAddressRisk(target);
     if (risky) return ask(risky.category, "form submit to a risky address");

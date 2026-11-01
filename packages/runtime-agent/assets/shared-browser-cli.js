@@ -2455,7 +2455,9 @@ function assertSafeTypeTarget(description, step = "type") {
 // "stornieren" does. A bare cancel ("Annuler", "Cancelar"), which also closes
 // a dialog, stays out as "cancel" does, and so do "commander" and "payer",
 // which are English words too ("Jeep Commander", "single-payer"); the
-// classifier still asks for those on a control.
+// classifier still asks for those on a control. A Dutch verb before a hyphen
+// starts a shortened compound ("Verzend- en retourbeleid"), so it is no verb
+// there.
 const CONSEQUENTIAL_ACTION_PATTERN = new RegExp(
   `(?<![\\p{L}\\p{N}])(?:${[
     "buy", "purchase", "pay", "checkout", "place[\\s_-]*order", "delete", "remove", "erase", "destroy", "send",
@@ -2466,33 +2468,55 @@ const CONSEQUENTIAL_ACTION_PATTERN = new RegExp(
     "abgeben", "ausstellen", "festschreiben", "als[\\s_-]*bezahlt", "bezahlen", "überweisen", "freigeben", "absenden",
     "versenden", "löschen", "stornieren",
     // French.
-    "acheter", "achetez", "j['’]ach[èe]te", "payez", "commandez",
+    "acheter", "achetez", "j['’]ach[èe]te", "payez", "commandez", "je[\\s_-]*(?:commande|pa(?:ie|ye))",
     "(?:passer|valider|finaliser|confirmer|terminer)[\\s_-]*(?:(?:la|ma|votre|une)[\\s_-]*)?commande",
+    "je[\\s_-]*(?:passe|valide|confirme|finalise|termine)[\\s_-]*(?:(?:la|le|ma|mon|votre)[\\s_-]*|l['’]\\s*)?" +
+      "(?:commande|panier|achat|paiement)",
     "(?:valider|finaliser|confirmer)[\\s_-]*(?:l['’]\\s*|mon[\\s_-]*|votre[\\s_-]*)?achat",
     "valider[\\s_-]*(?:(?:le|mon|votre)[\\s_-]*)?panier", "confirmer[\\s_-]*(?:le[\\s_-]*)?paiement",
-    "envoyer", "envoyez", "supprimer", "effacer", "r[ée]silier", "enregistrer", "sauvegarder",
+    "envoyer", "envoyez", "j['’]envoie", "supprimer", "effacer", "r[ée]silier", "je[\\s_-]*(?:supprime|r[ée]silie)",
+    "j['’]efface", "enregistrer", "sauvegarder", "j['’]enregistre", "je[\\s_-]*sauvegarde",
     // Spanish and Portuguese.
-    "comprar", "compre", "c[óo]mpralo", "compra[\\s_-]*(?:ahora|ya)", "pagar", "pague", "paga", "encomendar",
+    "comprar", "c[óo]mpralo", "pagar", "encomendar",
     "pedir[\\s_-]*(?:ahora|ya)", "(?:ir|proceder|continuar)[\\s_-]*al[\\s_-]*pago",
     "(?:finalizar|concluir|tramitar|realizar|hacer|fazer|confirmar|completar|efe(?:c)?tuar)[\\s_-]*" +
       "(?:(?:el|la|mi|tu|su|a|o|sua|seu|minha|meu)[\\s_-]*)?(?:compra|pedido|encomenda|pago|pagamento)",
+    "fechar[\\s_-]*(?:(?:o|a)[\\s_-]*)?(?:pedido|compra|encomenda)",
     "enviar", "eliminar", "borrar", "suprimir", "apagar", "excluir", "dar(?:me|se)?[\\s_-]*de[\\s_-]*baja",
     "guardar", "salvar",
     // Italian.
-    "acquista", "acquistare", "compra[\\s_-]*(?:ora|adesso|subito)", "pagare",
-    "(?:procedi[\\s_-]*all['’]\\s*|(?:conferma|completa|finalizza)[\\s_-]*(?:l['’]\\s*)?)acquisto",
-    "ordina[\\s_-]*(?:ora|adesso|subito)",
-    "(?:effettua|conferma|completa|invia|procedi[\\s_-]*con)[\\s_-]*(?:l['’]\\s*)?ordine",
-    "conferma[\\s_-]*(?:il[\\s_-]*)?pagamento",
-    "invia", "inviare", "elimina", "eliminare", "cancella", "cancellare", "disdici", "disdire", "salva", "salvare",
+    "acquistare", "pagare", "procedi[\\s_-]*all['’]\\s*(?:acquisto|ordine)",
+    "procedi[\\s_-]*con[\\s_-]*(?:l['’]\\s*)?ordine", "concludi[\\s_-]*(?:l['’]\\s*)?(?:acquisto|ordine)",
+    "vai[\\s_-]*alla[\\s_-]*cassa",
+    "inviare", "eliminare", "cancellare", "disdici", "disdire", "salvare",
     // Dutch.
-    "kopen", "koop[\\s_-]*nu", "betalen", "betaal", "bestel", "afrekenen", "reken[\\s_-]*af",
-    "bestelling[\\s_-]*(?:plaatsen|afronden|bevestigen)",
+    "kopen", "koop[\\s_-]*nu", "betalen", "betaal(?!-)", "bestel(?!-)", "afrekenen", "reken[\\s_-]*af",
+    "naar[\\s_-]*de[\\s_-]*kassa", "bestelling[\\s_-]*(?:plaatsen|afronden|bevestigen)",
     "(?:plaats|bevestig)[\\s_-]*(?:(?:je|jouw|uw|de)[\\s_-]*)?(?:bestelling|betaling)", "betaling[\\s_-]*bevestigen",
-    "verzenden", "verzend", "versturen", "verstuur", "verwijderen", "verwijder", "opzeggen", "opslaan",
+    "verzend(?!-)", "versturen", "verstuur", "verwijderen", "verwijder(?!-)", "opzeggen", "opslaan",
   ].join("|")})(?![\\p{L}\\p{N}])`,
   "iu",
 );
+// Words that are also a headline's verb ("Apple acquista una startup",
+// "Governo elimina portagens") count only where a button puts its verb, first
+// in one of a control's own names, after marks, an icon font's name or a
+// "yes", or right after an "and" ("Elimina account", "Paga ora", "Sì,
+// elimina", "Prenota e paga"), and never in an address: an article's address
+// holds its headline. Dutch "verzenden" is shipping too ("Verzenden en
+// retourneren"), so it counts last in a name, where Dutch puts the verb
+// ("Bericht verzenden"). The classifier has the same words.
+const CONSEQUENTIAL_FIRST_IN_NAME = new RegExp(
+  "(?:^(?:[^\\p{L}\\p{N}]|[a-z]+(?:_[a-z]+)+(?![\\p{L}\\p{N}])|(?:yes|ok|oui|s[iìí]|sim|ja)(?![\\p{L}\\p{N}]))*" +
+    "|(?<![\\p{L}\\p{N}])(?:e|ed|y|et)\\s+)" +
+    `(?:${[
+      "compra", "compre", "paga", "pague", "acquista", "ordina[\\s_-]*(?:ora|adesso|subito)",
+      "(?:conferma|completa|finalizza)[\\s_-]*(?:l['’]\\s*)?acquisto",
+      "(?:effettua|conferma|completa|invia)[\\s_-]*(?:l['’]\\s*)?ordine", "conferma[\\s_-]*(?:il[\\s_-]*)?pagamento",
+      "invia", "env[íi]a", "envíe", "elimina", "elimine", "cancella", "borra", "borre", "apague", "exclua", "salva",
+    ].join("|")})(?![\\p{L}\\p{N}-])`,
+  "iu",
+);
+const CONSEQUENTIAL_LAST_IN_NAME = /(?<![\p{L}\p{N}])verzenden[^\p{L}\p{N}]*$/iu;
 
 // The control's own names and address, the fields the Desktop Personal
 // Browser's high-impact check reads, plus its id and name attributes. Never
@@ -2503,6 +2527,14 @@ const CONSEQUENTIAL_ACTION_PATTERN = new RegExp(
 // form, ask under routine browsing. Form submission is checked on its own
 // (isFormSubmissionControl).
 function controlNameContent(description) {
+  return [...controlOwnNames(description), description.href]
+    .filter((value) => typeof value === "string")
+    .join(" ")
+    .trim();
+}
+
+// The same names one by one, without the address.
+function controlOwnNames(description) {
   const hints = description.nameHints || nameHintsOf(null);
   return [
     description.label,
@@ -2515,17 +2547,19 @@ function controlNameContent(description) {
     description.valueAttribute,
     description.labels,
     description.text,
-    description.href,
     hints.tooltip,
     hints.image,
-  ]
-    .filter((value) => typeof value === "string")
-    .join(" ")
-    .trim();
+  ].filter((value) => typeof value === "string");
+}
+
+// A word that counts only first or last in one name.
+function hasPlacedConsequentialWord(name) {
+  return CONSEQUENTIAL_FIRST_IN_NAME.test(name) || CONSEQUENTIAL_LAST_IN_NAME.test(name);
 }
 
 function isConsequentialAction(description) {
-  return CONSEQUENTIAL_ACTION_PATTERN.test(controlNameContent(description));
+  return CONSEQUENTIAL_ACTION_PATTERN.test(controlNameContent(description)) ||
+    controlOwnNames(description).some(hasPlacedConsequentialWord);
 }
 
 function isFormSubmissionControl(description) {
@@ -4371,7 +4405,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // The older consequential words count for the option a person would
     // click, as they do for a control's own name.
     const readingStep = routineCovers(step, target.description, { consequential: false }) &&
-      !CONSEQUENTIAL_ACTION_PATTERN.test(option.label);
+      !CONSEQUENTIAL_ACTION_PATTERN.test(option.label) && !hasPlacedConsequentialWord(option.label);
     refuseUnlessReadingStep(readingStep);
     const approvedTargetFingerprint = targetFingerprint(target.description);
     const destination = approvalProtocol.destinationBinding(null);
