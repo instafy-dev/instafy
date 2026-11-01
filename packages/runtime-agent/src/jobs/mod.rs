@@ -7627,8 +7627,8 @@ impl JobProcessor {
         // A browser turn that carries on the person's own message, opened no
         // page and asks Octo to make what the message asks hands the message
         // to the building turn (`browser_hand_back`): it is not tried again in
-        // the browser, posts nothing of its answer, and ends with the note
-        // Studio hands the message back on.
+        // the browser, posts nothing of its answer, and ends with the note the
+        // controller hands the message back on.
         let hands_the_message_to_the_building_turn = (shared_browser_execution_missing_after_attempt(
             explicit_shared_browser_execution,
             &interim_messages,

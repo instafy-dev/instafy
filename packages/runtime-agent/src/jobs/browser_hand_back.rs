@@ -1058,8 +1058,8 @@ mod tests {
         }
     }
 
-    /// Such a browser turn ends with a Details note in place of its reply: the key Studio
-    /// hands the message back on and the controller checks.
+    /// Such a browser turn ends with a Details note in place of its reply: the key the
+    /// controller hands the message back on.
     #[test]
     fn the_build_request_note_is_a_status_note_with_its_key() {
         let note = build_request_note();
