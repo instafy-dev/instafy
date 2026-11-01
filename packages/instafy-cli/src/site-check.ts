@@ -3,8 +3,9 @@
 // `instafy preview check`: let the agent look at a site it is serving in this space before the person sees it.
 // Any site, nothing site-specific: it loads http://127.0.0.1:<port><path> (or [::1]) in a headless Chromium, waits
 // for it to settle, and reports the page title, console and page errors, failed requests and a blank page. It writes
-// a desktop and a phone screenshot the agent can open. `--framed` loads the site inside a frame on another origin
-// instead, for a caller that will show it that way. It is local only: it calls no Instafy server.
+// a desktop screenshot in dark mode and a phone one in light mode, which the agent can open. `--framed` loads the site
+// inside a frame on another origin instead, for a caller that will show it that way. It is local only: it calls no
+// Instafy server.
 //
 // What the page may load is Instafy's decision, not the page's: the site's own origin directly; every other public
 // address through the runtime image's egress proxy (public addresses on ports 80 and 443 only, connected to the address
@@ -60,16 +61,30 @@ const SOFTWARE_GL_NOISE =
 const PHONE_UA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
+export type ColorScheme = "light" | "dark";
+
+/**
+ * The mode a preview card's picture shows the site in (`prefers-color-scheme`). A preview keeps one picture, which
+ * Studio shows in its light and dark themes alike, so it is taken in dark mode: a light picture of a page that follows
+ * the person's mode was a bright block in a dark Studio. A page with no dark look of its own is pictured light, as it
+ * shows.
+ */
+export const THUMBNAIL_COLOR_SCHEME: ColorScheme = "dark";
+
 export type CheckViewport = {
   name: "desktop" | "phone";
   width: number;
   height: number;
   mobile: boolean;
+  /** the mode the page is loaded in */
+  colorScheme: ColorScheme;
 };
 
+// One check shows both looks: the desktop size in the mode the card's picture is taken in (it comes from that size),
+// the phone size in light.
 export const VIEWPORTS: CheckViewport[] = [
-  { name: "desktop", width: 1280, height: 800, mobile: false },
-  { name: "phone", width: 390, height: 844, mobile: true },
+  { name: "desktop", width: 1280, height: 800, mobile: false, colorScheme: THUMBNAIL_COLOR_SCHEME },
+  { name: "phone", width: 390, height: 844, mobile: true, colorScheme: "light" },
 ];
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -679,6 +694,7 @@ export type ViewportReport = {
   name: CheckViewport["name"];
   width: number;
   height: number;
+  colorScheme: ColorScheme;
   screenshot: string | null;
   title: string;
   status: number | null;
@@ -909,6 +925,7 @@ async function checkViewport(
     isMobile: vp.mobile,
     hasTouch: vp.mobile,
     ...(vp.mobile ? { userAgent: PHONE_UA } : {}),
+    colorScheme: vp.colorScheme,
     reducedMotion: "reduce",
     serviceWorkers: "block",
     acceptDownloads: false,
@@ -1035,6 +1052,7 @@ async function checkViewport(
       name: vp.name,
       width: vp.width,
       height: vp.height,
+      colorScheme: vp.colorScheme,
       screenshot: file,
       title: snap.title.slice(0, 200),
       status,
@@ -1051,6 +1069,7 @@ async function checkViewport(
       name: vp.name,
       width: vp.width,
       height: vp.height,
+      colorScheme: vp.colorScheme,
       screenshot: null,
       title: "",
       status,
@@ -1162,7 +1181,7 @@ export function formatSiteCheck(report: SiteCheckReport): string {
   lines.push(`${report.ok ? "✓" : "✗"} ${report.url}${report.framed ? " (framed)" : ""} · "${report.title || "(no title)"}"`);
   for (const r of report.viewports) {
     const timing = `${(r.ms / 1000).toFixed(1)} s${r.status ? `, HTTP ${r.status}` : ""}`;
-    lines.push(`${r.errors.length ? "✗" : "✓"} ${r.name} ${r.width}×${r.height}: ${r.screenshot ?? "no screenshot"} (${timing})`);
+    lines.push(`${r.errors.length ? "✗" : "✓"} ${r.name} ${r.width}×${r.height}, ${r.colorScheme} mode: ${r.screenshot ?? "no screenshot"} (${timing})`);
     for (const e of r.errors) lines.push(`    error: ${e}`);
     for (const w of r.warnings.slice(0, 8)) lines.push(`    warn:  ${w}`);
     for (const b of r.blocked.slice(0, 8)) lines.push(`    blocked: ${b}`);
@@ -1328,14 +1347,14 @@ export function registerPreviewCheckCommand(
     .command("check")
     .description(
       "Load a local site in a headless browser and report its title, errors, failed requests and a blank page; " +
-        "writes desktop and phone screenshots, and refreshes the picture on the card of a preview open on that port " +
-        "(exit 1: problems, 2: nothing answering, 3: port not allowed, 4: no browser, 64: bad options, " +
-        "70: the check itself failed)",
+        "writes desktop (dark mode) and phone (light mode) screenshots, and refreshes the picture on the card of a " +
+        "preview open on that port (exit 1: problems, 2: nothing answering, 3: port not allowed, 4: no browser, " +
+        "64: bad options, 70: the check itself failed)",
     )
     .option("--port <port>", "Local port the site listens on (1024-65535)")
     .option("--path <path>", "Path to load (default /); a ?query and #hash are fine")
-    .option("--phone", "Only the phone size (390×844); default: desktop 1280×800 and phone")
-    .option("--desktop", "Only the desktop size (1280×800), the one the card's picture is taken from")
+    .option("--phone", "Only the phone size (390×844, light mode); default: desktop 1280×800 in dark mode and phone")
+    .option("--desktop", "Only the desktop size (1280×800, dark mode), the one the card's picture is taken from")
     .option("--framed", "Load the site inside a frame on another origin, and report a site that refuses to be framed")
     .option("--workspace-playwright", "Also look for Playwright in this project's node_modules (runs the project's own copy)")
     .option("--out <dir>", "Folder for desktop.png and phone.png (default: a new private folder under the temp folder each run; the report names it)")
