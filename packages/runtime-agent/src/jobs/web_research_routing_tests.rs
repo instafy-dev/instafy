@@ -697,8 +697,9 @@ fn a_route_comes_from_the_operators_journey_planner() {
 /// Live drive, Nov 1: a comparison's browser turn read the maker's home page, whose menu names four laptops and links
 /// their pages, tried a search engine (refused, link-only) and stopped with 4 of 15 cells: "Comparing" said only to
 /// list the models a page names. It now lists the ones the page's menu names too, then opens each model's own page,
-/// in "Finding a page" within the part a snapshot carries, without pushing the sign-in rules out of it. An unedited
-/// earlier copy is upgraded.
+/// in "Finding a page" within the part a snapshot carries, without pushing the sign-in rules out of it. The part a
+/// snapshot carries never tells a turn to report a failed step instead of going on: it says what did not work only
+/// when nothing is left to try, as the browser run's own text does. An unedited earlier copy is upgraded.
 #[test]
 fn a_comparison_opens_each_models_own_page_the_menu_names_too() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -710,6 +711,12 @@ fn a_comparison_opens_each_models_own_page_the_menu_names_too() {
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(line));
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
+    assert!(!BROWSER_SKILL.contains("When a step fails, tell the person"));
+    assert!(
+        BROWSER_SKILL.contains(
+            "- Report observed state. When nothing is left to try, tell the person in plain words what did not work"
+        )
+    );
 
     let previous = include_str!("legacy/browser-automation-v22.md");
     assert!(!previous.contains("its menu included"));

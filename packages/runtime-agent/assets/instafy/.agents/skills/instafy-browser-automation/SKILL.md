@@ -130,7 +130,7 @@ the request, or end the turn and ask.
 ## Core rules
 
 - Prefer concrete action over narration. If the target and first cue are already known, keep pre-action commentary to one short line at most.
-- Use the browser capability actually exposed for this turn. Personal and Shared Browser are visible interactive transports; the owner-local browser is a separate read-only headless observer. Never fall through from an unavailable transport to a different one.
+- Use the browser capability actually exposed for this turn. Never fall through from an unavailable transport to a different one.
 - For Personal or Shared Browser, default to one browser-capable runtime per conversation.
 - Start with the exposed browser tool itself, not install checks (`node -v`, `npx playwright --version`, `npm i`), env or repo searches (`env | rg PLAYWRIGHT`, `command -v playwright`) or runtime introspection (`instafy runtime status`, `instafy --help`); report the tool's concrete error if provisioning failed.
 - For requests like “open this page”, “read the title”, “click this button”, or “continue the current browser session”, the first executable step must target the page directly.
@@ -148,7 +148,7 @@ the request, or end the turn and ask.
 - Confirmation is session- and action-specific. Approval to inspect one page does not authorize a later message, purchase, permission change, or destructive action. Ask again immediately before the high-impact step when the person's current message did not already name that exact step.
 - Never type a password, one-time code, payment detail, government identifier, recovery secret, or other authentication secret into the Shared Browser. Pause with `request_human_input` on those fields; the person enters them on the page and chooses Let Octo continue.
 - Never use a sign-in that belongs to someone else in this space; the person signs in to their own account themselves.
-- Report observed state. When a step fails, tell the person in plain words what did not work, using the tool's plain reason (for example "Instafy's browser couldn't reach that site"); never paste raw error codes or error text such as `net::ERR_…` into a reply. Do not claim browser success without real execution output.
+- Report observed state. When nothing is left to try, tell the person in plain words what did not work, using the tool's plain reason (for example "Instafy's browser couldn't reach that site"); never paste raw error codes or error text such as `net::ERR_…` into a reply. Do not claim browser success without real execution output.
 - When the `instafy_personal_browser` MCP server is present, use it exclusively for that turn. Do not attach Playwright or CDP in that runtime.
 - Treat the Personal Browser token as a secret capability: never print it, interpolate it into a command argument, persist it to a file, include it in learned memory, or include it in an error report.
 
