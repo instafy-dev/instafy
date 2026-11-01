@@ -486,7 +486,9 @@ the moment it sets `data-instafy-ready="true"` (see
 
 A bound site says it through the bind client: `instafyBind.drawsLater()` as the page starts, `instafyBind.drawn()` once
 its first view is drawn. The starters' `site.start()` calls both, the second once its data is drawn (or the notice that
-it did not load), so a comparison's pane says it is opening the site while the page fetches its data.
+it did not load), so a comparison's pane says it is opening the site while the page fetches its data. It says so on the
+next frame, or on a 100 ms timer when no frame comes first: a page out of sight gets no frames, and its view is there
+all the same (the browser may hold such a page's timers for up to about a second).
 
 Until then the pane goes on saying it is opening the site ("Loading…" after Reload), for at most 15 s, and a page that
 listed `ready` stays out of sight under that line: what it shows meanwhile, such as a starter's placeholder rows and
