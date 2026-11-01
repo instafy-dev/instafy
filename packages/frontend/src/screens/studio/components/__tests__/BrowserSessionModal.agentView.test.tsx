@@ -333,7 +333,7 @@ describe("Shared Browser view while Octo drives", () => {
     expect(takeOverButtons()).toBe(1);
   });
 
-  // A local drive: while the view asked the person about a step, the row of
+  // A local test: while the view asked the person about a step, the row of
   // pages above the prompt said "Octo is reading httpbin.org ·
   // httpbin.org/forms/post". Octo reads nothing while it waits for them.
   it("says Waiting for you in the row of pages while the view's prompt asks, and what Octo reads once answered", async () => {

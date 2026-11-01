@@ -942,7 +942,7 @@ describe("browser rows in Details", () => {
     expect(label("failed")).toBe("Tried looking at the tabs");
   });
 
-  // A local drive: a turn tried to accept Metro do Porto's cookies, the
+  // A local test: a turn tried to accept Metro do Porto's cookies, the
   // browser refused it, and Details said "Tried browsing metrodoporto.pt".
   // The runtime labels a refused step for what it was (activity_labels.rs).
   it("name a step the browser refused for what it was, and leave it off the line", () => {

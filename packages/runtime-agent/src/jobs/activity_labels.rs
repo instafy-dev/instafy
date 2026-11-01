@@ -1930,7 +1930,7 @@ mod tests {
         }
     }
 
-    // A local drive: a turn tried to press Metro do Porto's "Aceitar todos os cookies", the
+    // A local test: a turn tried to press Metro do Porto's "Aceitar todos os cookies", the
     // browser refused it as the person's step, and Details said only "Tried browsing
     // metrodoporto.pt". A refused step is named for what it was, from the controller's own word,
     // never the button's; it never happened, so the line never names it.

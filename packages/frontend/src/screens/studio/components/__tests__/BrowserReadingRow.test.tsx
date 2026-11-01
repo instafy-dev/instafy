@@ -100,7 +100,7 @@ describe("BrowserReadingRow", () => {
   });
 
   // A local test: the row read "visitporto.travel · about:blank" for 27 s
-  // while a blank tab loaded a slow site, and in a later drive "Octo is
+  // while a blank tab loaded a slow site, and in a later test "Octo is
   // reading 1 page visitporto.travel" for 17 s while the site never answered.
   // Until the page arrives, the browser reports the new address with the blank
   // tab's title, or with none.
@@ -142,7 +142,7 @@ describe("BrowserReadingRow", () => {
     expect(container.querySelector('[data-testid="browser-reading-opening"]')).toBeNull();
   });
 
-  // A local drive: while a prompt waited for the person, the row said "Octo
+  // A local test: while a prompt waited for the person, the row said "Octo
   // is reading httpbin.org · httpbin.org/forms/post" above it.
   it("says it is waiting for you while a prompt waits, beside the page it is about", async () => {
     const form = page("httpbin", { url: "https://httpbin.org/forms/post", host: "httpbin.org", title: "httpbin.org/forms/post" });

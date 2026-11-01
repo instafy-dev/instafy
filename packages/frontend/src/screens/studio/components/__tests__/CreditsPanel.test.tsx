@@ -182,7 +182,7 @@ describe("Credits display choices", () => {
     ]);
   });
 
-  // A local drive, in a space of the person's own: "Team credits", "Shared
+  // A local test, in a space of the person's own: "Team credits", "Shared
   // team balance" and "AI, runtime, and live access spend all land in this
   // shared ledger". Nobody shares that balance. A team's space keeps its words.
   it("says Credits and Balance in a personal space, with no team, shared ledger or live access", async () => {
