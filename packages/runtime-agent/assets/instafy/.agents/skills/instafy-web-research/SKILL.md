@@ -72,7 +72,7 @@ When the task needs a `no-agents` site (hotel prices on Booking.com):
 
 ## How much to read
 
-- For larger or delegated work, inspect `instafy web budget --json`. Parent, helpers and continued workers share the allowance; spawning never replenishes it.
+- For larger or delegated work, inspect `instafy web budget --json`. Parent, helpers and continued workers share the allowance; spawning adds none.
 - Stop when material facts are supported; never crawl, paginate results or sweep listings.
 - Reuse excerpts and cached pages. Failed fresh reads and new redirect sites count. Never use `--fresh` just to reformat.
 - Budget exhausted or unavailable: use gathered evidence and name gaps. Never bypass the reader or raise limits; only managers change new-task budgets.
@@ -89,7 +89,7 @@ Say per item what you found:
 
 - Name: the exact model and generation its official page gives, else the page naming it.
 - Price: the maker's or a shop's own page. None there, or a stop: say so ("no price on <page>", "<page> is closed to automated reads"), then try a shop robots.txt allows: `instafy web search "<name> price" --json`, or `--chain reference-search` for shops' official sites; a link-only shop gets `instafy web link <site> query=<name>` (Guided mode). Still none: "price unknown", and the page for the person to open and send to Octo; never a remembered or guessed price.
-- Sources asked for ("two independent reviews"): that many per item, each on that exact model, by a publisher other than the maker, the shops and each other (a sibling model's review does not count). Short: "<item>: 1 of 2 reviews found", in the reply and on the page.
+- Sources asked for ("two independent reviews"): that many per item, each on that exact model, by a publisher other than the maker, the shops and each other (a sibling model's review does not count). Short: "<item>: 1 of 2 reviews found", in the reply and on the page, citing only those reviews.
 - A limit ("under €600"): an item with no price read this turn is listed as "price unknown", never as within it.
 - A failed search or site never ends the turn without the page: every item stays on it, each fact not read marked unknown with why.
 

@@ -3,12 +3,16 @@
  *
  * data.json:
  *   title, lede            the page title and its one-line answer: the verdict, and the biggest unknown about the
- *                          title's question if there is one ("Option B costs least. None was tested in the rain.")
+ *                          title's question if there is one ("Option B costs least. None was tested in the rain.").
+ *                          Only what a page you read says: how many a page lists, or that these are all of them or the
+ *                          latest, only when it says so.
  *   sort: [{key, label, dir: "asc"|"desc"}]   the first entry is the person's main criterion: phones show its value
- *                          on the right of each row. A "Sort by" select appears only with 5 or more options and more
- *                          than one entry, and only then are rows sorted (fresh values first, then ones that may have
- *                          changed, then missing ones). Otherwise rows keep the order of "items", before and after a
- *                          price check: put them in the order the lede talks about them.
+ *                          on the right of each row. An entry whose column no row has a value for (nor, for a price, a
+ *                          store that can be checked) orders nothing and is left out. A "Sort by" select appears only
+ *                          with 5 or more options and more than one entry left, and only then are rows sorted (fresh
+ *                          values first, then ones that may have changed, then missing ones). Otherwise rows keep the
+ *                          order of "items", before and after a price check: put them in the order the lede talks
+ *                          about them.
  *   columns: [{key, label, type: "price"|"number"|"text"}]   at most 5; a "price" column can be checked live
  *   filter (only for a constraint the person stated): {key, max, label: "Under $160", rest: "over $160",
  *                          unknown?: "Price unknown"}. Only a value the page shows counts: a row whose value is
@@ -25,7 +29,8 @@
  *   Each value cites its page and day ("checked 17 Oct on maker.com ↗"), and no cell is blank: a source you read that
  *   does not give the value is the fact without "v" ({"src", "url", "date"}): "Not listed · checked 17 Oct on
  *   maker.com ↗"; any other missing value reads "Unknown", with {"note": "the store blocks price checks"} saying why.
- *   Never a dash.
+ *   Never a dash. A value cites only a page that gives it: a count of what you found ("1 of 2 reviews found") cites a
+ *   page it counts, and with none found it is {"note": "no review of this model read"}, citing no page.
  * When one page gives most of a column on one date, the cells show just the value and one line under the list cites
  * that page; so does a row whose own values come from one other page ("Option C (Support and Ride): checked 16 Oct on
  * fleetfeet.com ↗"). Any other cell keeps its own caption.
@@ -133,12 +138,29 @@
   /** The site of the search result that alone names this row ("found"), or "". */
   function found(item) { return typeof item.found === "string" ? item.found.trim().slice(0, 100) : ""; }
 
+  /** The page's sorts that order something: one whose column no row has a value for (nor, for a price, a store that
+   * can be checked) is left out. Sorted by it, the rows would keep their order under a label saying otherwise, and a
+   * phone would show "Unknown" on the right of every row. */
+  function sorts(data) {
+    var items = data.items || [];
+    return (data.sort || []).filter(function (s) {
+      var col = s && s.key ? colOf(data, s.key) || { key: s.key } : null;
+      return !!col && items.some(function (i) {
+        return site.known(valueOf(i, col)) != null || (isPrice(col) && !!(i.store && i.store.readable));
+      });
+    });
+  }
+  /** The sort in use: the chosen one when it orders something, else the first that does; null when none does. */
+  function sortDef(data, st) {
+    var list = sorts(data);
+    return list.filter(function (s) { return s.key === st.sort; })[0] || list[0] || null;
+  }
   /** The "Sort by" select shows (and rows are sorted) only with 5 or more options and more than one way to sort. */
-  function sortShown(data) { return (data.sort || []).length > 1 && (data.items || []).length >= 5; }
+  function sortShown(data) { return sorts(data).length > 1 && (data.items || []).length >= 5; }
   /** Sorted by the chosen key: fresh values first, then values that may have changed (an old price never leads), then
    * rows without one. */
   function sortItems(data, items, st) {
-    var def = (data.sort || []).filter(function (s) { return s.key === st.sort; })[0] || (data.sort || [])[0];
+    var def = sortDef(data, st);
     if (!def) return items;
     var col = colOf(data, def.key) || { key: def.key };
     var tier = function (i) { var v = valueOf(i, col); return site.known(v) == null ? 2 : site.old(v, isPrice(col)) ? 1 : 0; };
@@ -188,7 +210,7 @@
     var bar = document.getElementById("bar");
     bar.replaceChildren();
     if (sortShown(data)) {
-      bar.appendChild(site.selectField("sort", "Sort by", data.sort.map(function (s) { return { value: s.key, label: s.label }; }), st.sort,
+      bar.appendChild(site.selectField("sort", "Sort by", sorts(data).map(function (s) { return { value: s.key, label: s.label }; }), sortDef(data, st).key,
         function (v) { site.setState({ sort: v }); }));
     }
     if (data.filter) {
@@ -246,7 +268,7 @@
 
   /** "2 without a price are listed last." when the sort key is missing for some rows. */
   function missingLine(data, items, st) {
-    var def = (data.sort || []).filter(function (s) { return s.key === st.sort; })[0] || (data.sort || [])[0];
+    var def = sortDef(data, st);
     if (!def) return null;
     var col = colOf(data, def.key) || { key: def.key, label: def.key };
     var n = items.filter(function (i) { return site.known(valueOf(i, col)) == null; }).length;
@@ -334,7 +356,8 @@
    * scanning down the right edge; the other columns follow as facts in the same order on every row. */
   function cards(data, items, st, shared) {
     var cols = columns(data);
-    var sortCol = colOf(data, st.sort) || colOf(data, ((data.sort || [])[0] || {}).key);
+    var def = sortDef(data, st);
+    var sortCol = def ? colOf(data, def.key) : null;
     return h("ol", { "class": "list cards" }, items.map(function (item) {
       var open = st.open === site.slug(item.ref);
       var rest = cols.filter(function (c) { return c !== sortCol; });

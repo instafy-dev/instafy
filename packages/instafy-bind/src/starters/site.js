@@ -976,15 +976,22 @@
       return data;
     }, function () { /* fail() already showed the notice */ drawnSoon(); });
   }
-  /** The first view is on the page (or the notice saying why not): told once it is painted. */
+  // A page out of sight (a hidden tab, a pane that is not shown) gets no frames until it is shown, so its next frame
+  // may never come; its first view is on the page all the same.
+  var DRAWN_WAIT_MS = 100;
+  /** The first view is on the page (or the notice saying why not): told once, on the next frame or after
+   * DRAWN_WAIT_MS, whichever comes first. */
   function drawnSoon() {
     var b = bind();
     if (!b || typeof b.drawn !== "function") return;
-    (window.requestAnimationFrame || setTimeout)(function () { b.drawn(); });
+    var told = false;
+    var tell = function () { if (!told) { told = true; b.drawn(); } };
+    if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(tell);
+    setTimeout(tell, DRAWN_WAIT_MS);
   }
 
   window.site = {
-    version: "1.6.0",
+    version: "1.6.1",
     h: h, append: append, icon: icon, link: link, slug: slug, rowAttrs: rowAttrs, safeUrl: safeUrl,
     date: date, dayDate: dayDate, ago: ago, money: money, num: num, valueText: valueText, host: host, seen: seenText,
     cite: cite, known: known, within: within, byFilter: byFilter, old: isOld, expired: expired,

@@ -410,7 +410,7 @@ describe("the shopping comparison eval (fixtures)", () => {
       "a link-only shop gets `instafy web link <site> query=<name>` (Guided mode)",
       "never a remembered or guessed price",
       "that many per item, each on that exact model, by a publisher other than the maker, the shops and each other (a sibling model's review does not count)",
-      "Short: \"<item>: 1 of 2 reviews found\", in the reply and on the page.",
+      "Short: \"<item>: 1 of 2 reviews found\", in the reply and on the page, citing only those reviews.",
       "an item with no price read this turn is listed as \"price unknown\", never as within it",
       "each fact not read marked unknown with why.",
       "and an item's name as its official page gives it",
