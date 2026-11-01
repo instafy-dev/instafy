@@ -11,8 +11,11 @@
 // whose browser turn failed or was stopped before it showed anything: nothing
 // is opening any more. A message that asked Octo to make something, which its
 // browser turn handed back without opening a page (the runtime's build request
-// note), reads as the building turn alone: the card and the hand-back's notice
-// go as soon as that note arrives.
+// note), reads as the building turn alone: the card goes as soon as that note
+// arrives, and once the hand-back the controller sends for it is in the chat,
+// the browser turn and the hand-back's notice go too. Until then, or when that
+// hand-back was refused, the browser turn shows what it has (the controller
+// leaves a refusal's reason as its reply).
 
 import { hasFailedRunMetadata } from "../../../conversations/runFailurePresentation";
 import type { ChatMessage } from "../types";
@@ -54,9 +57,14 @@ export type RoutedBrowserFold = {
   waitingCardKeys: ReadonlySet<string>;
   /**
    * Browser turns of routed cards that handed the person's message to the
-   * building turn: their card and the hand-back's notice show nothing.
+   * building turn: their card shows nothing.
    */
   buildRequestJobIds: ReadonlySet<string>;
+  /**
+   * Those of {@link buildRequestJobIds} whose hand-back is in the chat: the
+   * browser turn and the hand-back's notice show nothing either.
+   */
+  handedBackBuildRequestJobIds: ReadonlySet<string>;
 };
 
 /**
@@ -97,7 +105,10 @@ export function resolveRoutedBrowserFold(messages: readonly ChatMessage[]): Rout
   const cardIdByBrowserJobId = new Map<string, string>();
   const waitingCardKeys = new Set<string>();
   const buildRequestJobIds = new Set<string>();
-  if (routedCards.size === 0) return { hiddenPromptIds, cardIdByBrowserJobId, waitingCardKeys, buildRequestJobIds };
+  const handedBackBuildRequestJobIds = new Set<string>();
+  if (routedCards.size === 0) {
+    return { hiddenPromptIds, cardIdByBrowserJobId, waitingCardKeys, buildRequestJobIds, handedBackBuildRequestJobIds };
+  }
   for (const message of messages) {
     const key = readBrowserRequestOf(message);
     const card = key ? routedCards.get(key) : undefined;
@@ -115,9 +126,12 @@ export function resolveRoutedBrowserFold(messages: readonly ChatMessage[]): Rout
   // The hand-back that took such a message to the building turn.
   for (const message of messages) {
     const handedBack = readBrowserHandBackOf(message);
-    if (handedBack && buildRequestJobIds.has(handedBack)) hiddenPromptIds.add(message.id);
+    if (handedBack && buildRequestJobIds.has(handedBack)) {
+      hiddenPromptIds.add(message.id);
+      handedBackBuildRequestJobIds.add(handedBack);
+    }
   }
-  return { hiddenPromptIds, cardIdByBrowserJobId, waitingCardKeys, buildRequestJobIds };
+  return { hiddenPromptIds, cardIdByBrowserJobId, waitingCardKeys, buildRequestJobIds, handedBackBuildRequestJobIds };
 }
 
 /** Routed cards still opening by themselves ({@link RoutedBrowserFold.waitingCardKeys}). */

@@ -1756,6 +1756,8 @@ const M_MAP: &str = "Plan three days in the old town for a first visit: where to
 const M_MAP_REPLY: &str = "I can't build the map in this turn because the required workspace command tool isn't available.";
 const M_HOURS: &str = "Find the old bookshop's opening hours on the city's tourism site.";
 const SHARED_BROWSER_RETRY: &str = "IMPORTANT SHARED BROWSER RETRY REQUIREMENT";
+/// What the browser retry of a turn that carries on the person's own message reads first.
+const BUILD_REQUEST_FIRST: &str = "answer with the action `{type: 'request_build'}` alone, with no browser step. Every other request:";
 
 /// The metadata of the Shared Browser turn that carries on the routed card the turn `card` posted:
 /// Studio's continuation, and the controller's check that it asks the card's task, the person's own
@@ -1788,10 +1790,12 @@ fn answer_with(summary: &str, actions: &[(&str, Option<&str>, Option<&str>)]) ->
 
 /// M: messages the routing step sent straight to the browser. M2 carries on M1's routed card,
 /// opens no page and answers with a team plan for the map M1 asked Octo to make: it is not tried
-/// again in the browser, posts no reply, and ends with the note Studio hands the message back on.
-/// M3 is that hand-back, as the controller stamps it: one building turn, which reads the message's
-/// words and nothing of M2. M5 carries on M4's, opens no page and answers in words alone: it is
-/// tried again in the browser, as before.
+/// again in the browser, posts no reply, and ends with the note the controller hands the message
+/// back on. M3 is that hand-back, as the controller sends and stamps it: one building turn, which
+/// reads the message's words and nothing of M2. M5 carries on M4's, opens no page and answers in
+/// words alone: it is tried again in the browser, as before, and fails when that try opens no page
+/// either. M7 carries on M6's map and says in words alone that it cannot make it: its retry reads
+/// the build request first, answers with it, and hands the message back instead of failing.
 async fn run_messages_the_browser_could_not_make(harness: &mut Harness) {
     let cm = Uuid::new_v4();
     let m1 = harness
@@ -1840,7 +1844,7 @@ async fn run_messages_the_browser_could_not_make(harness: &mut Harness) {
         )
         .await;
     let card = harness.turn("M4").job_id;
-    harness
+    let m5 = harness
         .run(
             "M5",
             Spec::new(cm, Lane::Shared("page-m"), m4)
@@ -1848,6 +1852,24 @@ async fn run_messages_the_browser_could_not_make(harness: &mut Harness) {
                 .with_metadata(routed_card_turn(card)),
         )
         .await;
+
+    let m6 = harness
+        .run(
+            "M6",
+            Spec::new(cm, Lane::Default, m5).asking(M_MAP).routed(false),
+        )
+        .await;
+    let card = harness.turn("M6").job_id;
+    let mut m7 = Spec::new(cm, Lane::Shared("page-m"), m6)
+        .asking(M_MAP)
+        .with_metadata(routed_card_turn(card));
+    m7.script = vec![
+        Step::Answer(answer_with(M_MAP_REPLY, &[])),
+        Step::Answer(answer_with("", &[("request_build", None, None)])),
+    ];
+    // It ends by itself: no thread to make up for it.
+    m7.emulate_success = false;
+    harness.run("M7", m7).await;
 }
 
 /// (x) Chain M: a browser turn that carries on the person's own message, opened no page and asks
@@ -1927,6 +1949,10 @@ fn check_messages_the_browser_could_not_make(harness: &Harness) -> Result<()> {
         requests.len()
     );
     ensure!(
+        input_text(requests[1]).contains(BUILD_REQUEST_FIRST),
+        "M5's retry did not read the build request first"
+    );
+    ensure!(
         m5.outcome
             .as_ref()
             .is_err_and(|error| error.contains("Octo couldn't open a page in the browser")),
@@ -1937,6 +1963,37 @@ fn check_messages_the_browser_could_not_make(harness: &Harness) -> Result<()> {
         m5.final_messages.is_empty(),
         "M5 ended with messages: {:?}",
         m5.final_messages
+    );
+
+    let m7 = harness.turn("M7");
+    let requests: Vec<&Value> = sampling_requests(m7).map(|(_, request)| request).collect();
+    ensure!(
+        requests.len() == 2,
+        "M7 made {} model requests: it was not tried again once",
+        requests.len()
+    );
+    let retry = input_text(requests[1]);
+    let decide = retry.find(BUILD_REQUEST_FIRST);
+    let navigate = retry.find("Use `instafy_shared_browser.snapshot` now.");
+    ensure!(
+        matches!((decide, navigate), (Some(decide), Some(navigate)) if decide < navigate),
+        "M7's retry did not read the build request ahead of its own requirement"
+    );
+    ensure!(m7.outcome.is_ok(), "M7 failed: {:?}", m7.outcome);
+    ensure!(
+        m7.final_messages.len() == 1
+            && m7.final_messages[0]["summary"] == ""
+            && m7.final_messages[0]["metadata"]["browserBuildRequest"].is_object(),
+        "M7 did not hand the message back: {:?}",
+        m7.final_messages
+    );
+    // What the person could read: the note's words, what Studio reads off it, and the reply. The
+    // turn's run log keeps both answers, as any turn's does.
+    let note = &m7.final_messages[0];
+    ensure!(
+        !note["content"].to_string().contains(M_MAP_REPLY)
+            && !note["metadata"].to_string().contains(M_MAP_REPLY),
+        "M7's note carries its first answer: {note}"
     );
     Ok(())
 }

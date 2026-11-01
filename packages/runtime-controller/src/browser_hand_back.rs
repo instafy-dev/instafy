@@ -31,7 +31,11 @@
 //! message asked for something a browser turn cannot make, so its words go to
 //! the building turn as the person's request, whether or not the card
 //! continues building, and the record carries nothing of the browser turn
-//! ([`BUILD_REQUEST_RECORD_KEY`]).
+//! ([`BUILD_REQUEST_RECORD_KEY`]). The person's message has no answer until
+//! that building turn gives one, so the controller sends this hand-back itself,
+//! in the person's name, as soon as the browser turn's completion is committed
+//! ([`hand_back_build_request`]): it never waits for a page of theirs to be
+//! open. Its send goes through the same checks as Studio's.
 //!
 //! The record carries the browser turn's last reply (bounded) and labelled
 //! findings `{url, title, readAt, viewer}`: the address and title come from
@@ -59,6 +63,7 @@ use uuid::Uuid;
 
 use crate::auth::RequestContext;
 use crate::{bad_request, forbidden, internal_error, ApiError};
+use tracing::{info, warn};
 
 pub(crate) const HAND_BACK_KEY: &str = "browserHandBack";
 const HAND_BACK_ALIASES: [&str; 2] = [HAND_BACK_KEY, "browser_hand_back"];
@@ -113,6 +118,10 @@ pub(crate) const HAND_BACK_NOTHING_READ_CODE: &str = "browser_hand_back_nothing_
 pub(crate) const BUILD_REQUEST_NOTE_KEY: &str = "browserBuildRequest";
 /// The key a hand-back record that carries such a message has.
 pub(crate) const BUILD_REQUEST_RECORD_KEY: &str = "buildRequest";
+/// What a hand-back the controller sends for such a message records in place
+/// of its prompt, after the agent's name. Studio leaves it out: the person
+/// reads their message and then the building turn.
+const BUILD_REQUEST_NOTICE_SUFFIX: &str = "continued in the chat";
 
 /// Removes every client-supplied hand-back claim and record, top level and
 /// nested, and returns the top-level claim for [`require_hand_back`].
@@ -867,6 +876,282 @@ async fn card_continues_building(
         .map_err(|error| internal_error(format!("failed to read the browser card: {error}")))
 }
 
+/// Sends the hand-back of a message the routing step sent straight to the
+/// browser, once its browser turn `browser_job_id` (whose payload is
+/// `job_payload`) has finished successfully and its completion is committed:
+/// that turn carried on a routed card and, having opened no page, asked Octo
+/// to make what the message asks ([`BUILD_REQUEST_NOTE_KEY`]). It goes out in
+/// the name of the person who sent the browser turn, to the agent that
+/// answered their message, as Studio sends any other hand-back: Studio's
+/// words, the claim, and no attachments, browser or words of the person's
+/// own; dispatch checks it with [`require_hand_back`] and charges it as any
+/// hand-back. Every other completion returns at once.
+///
+/// A refusal for a conversation that moved on (someone wrote after the
+/// browser turn, or the building lane is busy) changes nothing: the newer
+/// turn answers. Any other refusal (no prompts or credits left, say) leaves
+/// its plain reason as the browser turn's reply, so the person's message is
+/// never left with no answer at all.
+pub(crate) async fn hand_back_build_request(
+    state: &crate::AppState,
+    project_id: &Uuid,
+    conversation_id: &Uuid,
+    browser_job_id: &Uuid,
+    job_payload: &JsonValue,
+) {
+    let metadata = job_payload.get("metadata").unwrap_or(&JsonValue::Null);
+    let routed = metadata
+        .get(crate::system_turns::BROWSER_CARD_TURN_KEY)
+        .and_then(|stamp| stamp.get("routed"))
+        == Some(&JsonValue::Bool(true));
+    if !routed || browser_transport_of(metadata).is_none() {
+        return;
+    }
+    let Some(card_job_id) = card_job_of(metadata) else {
+        return;
+    };
+    let turn = match build_request_turn(state, conversation_id, browser_job_id, &card_job_id).await
+    {
+        Ok(Some(turn)) => turn,
+        Ok(None) => return,
+        Err((_, Json(error))) => {
+            warn!(
+                job_id = %browser_job_id,
+                error = %error.message,
+                "could not read how a routed browser turn ended"
+            );
+            return;
+        }
+    };
+    let notice = format!(
+        "{} {BUILD_REQUEST_NOTICE_SUFFIX}",
+        turn.agent_name.as_deref().unwrap_or("Octo")
+    );
+    let request = crate::dispatch::normalize_dispatch_request(
+        crate::dispatch::DispatchPromptRequest {
+            project_id: Some(project_id.to_string()),
+            session_id: turn.session_id.map(|id| id.to_string()),
+            prompt_text: Some(HAND_BACK_PROMPT.to_string()),
+            intent: Some("feature".to_string()),
+            plan_seed: None,
+            metadata: Some(json!({
+                HAND_BACK_CLAIM_KEY: browser_job_id.to_string(),
+                // One send per browser turn: dispatch answers a second with the first.
+                "clientMessageId": format!("browser-build-request:{browser_job_id}"),
+                "displayContent": notice,
+                "agentSelection": { "active": [turn.agent_handle], "mentions": [turn.agent_handle] },
+            })),
+            conversation_metadata: None,
+            parent_conversation_id: None,
+            thread_kind: None,
+            tool_limits: None,
+            repo: None,
+            ui: None,
+            priority: None,
+            runtime_type: None,
+            idle_ttl_seconds: None,
+            conversation_id: Some(conversation_id.to_string()),
+            runtime_id: None,
+            runtime_display_name: None,
+            prefer_runtime: None,
+        },
+    );
+    let result = match request {
+        Ok(mut request) => {
+            request.conversation_is_new = false;
+            // It resumes an idle building lane or is refused, as Studio's does.
+            request.expected_lane_idle = true;
+            let person = RequestContext {
+                user_id: Some(turn.sender),
+                is_service_role: false,
+                scoped_claims: None,
+            };
+            crate::dispatch::process_dispatch_prompt(state, &person, request).await
+        }
+        Err(error) => Err(error),
+    };
+    let (status, Json(error)) = match result {
+        Ok(_) => {
+            info!(
+                job_id = %browser_job_id,
+                "a routed browser turn asked for a build: the message went to the building turn"
+            );
+            return;
+        }
+        Err(refusal) => refusal,
+    };
+    match reason_left_as_the_reply(status, &error) {
+        None => info!(
+            job_id = %browser_job_id,
+            code = error.code.as_deref().unwrap_or_default(),
+            "the build request's hand-back was not sent: the conversation moved on"
+        ),
+        Some(reason) => {
+            warn!(
+                job_id = %browser_job_id,
+                status = status.as_u16(),
+                error = %error.message,
+                "the build request's hand-back was refused; its reason is the browser turn's reply"
+            );
+            leave_the_reason_as_the_reply(
+                state,
+                project_id,
+                conversation_id,
+                browser_job_id,
+                &turn,
+                reason,
+            )
+            .await;
+        }
+    }
+}
+
+/// What a refused build request hand-back leaves as its browser turn's reply:
+/// nothing when the conversation moved on (a conflict: someone wrote after the
+/// browser turn, it was handed back already, or the building lane is busy),
+/// whose newer turn answers; otherwise the refusal's own words, which a send
+/// of the person's would show them too (no prompts or credits left, no AI
+/// connection), or a plain line when it has none.
+pub(crate) fn reason_left_as_the_reply(status: StatusCode, error: &ApiError) -> Option<String> {
+    if status == StatusCode::CONFLICT {
+        return None;
+    }
+    let words = error.message.trim();
+    Some(if words.is_empty() || status.is_server_error() {
+        "Octo couldn't start on this in the chat. Send it again to try once more.".to_string()
+    } else {
+        words.to_string()
+    })
+}
+
+/// What [`hand_back_build_request`] reads about a browser turn that asked Octo
+/// to make the person's message.
+struct BuildRequestTurn {
+    /// Who sent the browser turn, whose own message it carried on.
+    sender: Uuid,
+    session_id: Option<Uuid>,
+    run_id: Option<Uuid>,
+    prompt_id: Option<Uuid>,
+    /// The agent that answered the person's message with the routed card.
+    agent_handle: String,
+    agent_name: Option<String>,
+}
+
+/// The browser turn `browser_job_id` and the card turn `card_job_id` it
+/// carried on, when the browser turn ended with the runtime's build request
+/// note; None for any other.
+async fn build_request_turn(
+    state: &crate::AppState,
+    conversation_id: &Uuid,
+    browser_job_id: &Uuid,
+    card_job_id: &Uuid,
+) -> Result<Option<BuildRequestTurn>, (StatusCode, Json<ApiError>)> {
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+    if !browser_turn_requested_a_build(&transaction, conversation_id, browser_job_id).await? {
+        return Ok(None);
+    }
+    let row = transaction
+        .query_opt(
+            "select prompt.user_id as sender, job.run_id, job.prompt_id,
+                    job.payload #>> '{session_id}' as session_id,
+                    card.payload #>> '{metadata,agent,handle}' as agent_handle,
+                    card.payload #>> '{metadata,agent,displayName}' as agent_name
+               from agent_jobs job
+               join prompts prompt on prompt.id = job.prompt_id
+               join agent_jobs card on card.id = $3 and card.conversation_id = job.conversation_id
+              where job.id = $1 and job.conversation_id = $2",
+            &[browser_job_id, conversation_id, card_job_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load the browser turn: {error}")))?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let Some(sender) = row.get::<_, Option<Uuid>>("sender") else {
+        return Ok(None);
+    };
+    let agent_handle = row
+        .get::<_, Option<String>>("agent_handle")
+        .map(|handle| handle.trim().trim_start_matches('@').to_ascii_lowercase())
+        .filter(|handle| !handle.is_empty())
+        .unwrap_or_else(|| "octo".to_string());
+    Ok(Some(BuildRequestTurn {
+        sender,
+        session_id: row
+            .get::<_, Option<String>>("session_id")
+            .and_then(|raw| Uuid::parse_str(raw.trim()).ok()),
+        run_id: row.get("run_id"),
+        prompt_id: row.get("prompt_id"),
+        agent_handle,
+        agent_name: row
+            .get::<_, Option<String>>("agent_name")
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty()),
+    }))
+}
+
+/// Leaves `reason`, a refused send's own plain words, as the reply of the
+/// browser turn whose hand-back it refused.
+async fn leave_the_reason_as_the_reply(
+    state: &crate::AppState,
+    project_id: &Uuid,
+    conversation_id: &Uuid,
+    browser_job_id: &Uuid,
+    turn: &BuildRequestTurn,
+    reason: String,
+) {
+    let recorded = async {
+        let mut connection = state
+            .pool
+            .get()
+            .await
+            .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+        let transaction = connection
+            .transaction()
+            .await
+            .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+        let mut metadata = json!({ "jobId": browser_job_id.to_string() });
+        if let Some(run_id) = turn.run_id {
+            metadata["runId"] = json!(run_id.to_string());
+        }
+        let message = crate::agent::record_agent_conversation_message(
+            &transaction,
+            project_id,
+            conversation_id,
+            turn.session_id,
+            turn.prompt_id,
+            turn.run_id,
+            reason,
+            metadata,
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| internal_error(format!("failed to commit the reply: {error}")))?;
+        Ok::<_, (StatusCode, Json<ApiError>)>(message)
+    }
+    .await;
+    match recorded {
+        Ok(message) => {
+            crate::conversations::publish_conversation_message_event(&state.events, &message)
+        }
+        Err((_, Json(error))) => warn!(
+            job_id = %browser_job_id,
+            error = %error.message,
+            "could not leave the refused hand-back's reason as the reply"
+        ),
+    }
+}
+
 /// Whether a browser turn asked Octo to make the person's message: the
 /// runtime's Details note for that job carries [`BUILD_REQUEST_NOTE_KEY`]
 /// (runtime-agent `browser_hand_back::build_request_note`).
@@ -1322,6 +1607,49 @@ mod tests {
     #[test]
     fn a_hand_back_asks_what_studio_sends() {
         assert_eq!(json!(HAND_BACK_PROMPT), fixtures()["handBackPrompt"]);
+    }
+
+    /// A build request hand-back the conversation moved past leaves nothing:
+    /// the newer turn answers. One refused for anything else leaves its own
+    /// plain words as the browser turn's reply, or a plain line for an error
+    /// of the controller's own, so the person's message never goes without an
+    /// answer.
+    #[test]
+    fn a_refused_build_request_leaves_its_reason_unless_the_chat_moved_on() {
+        let error = |message: &str, code: &str| ApiError {
+            message: message.to_string(),
+            code: Some(code.to_string()),
+            details: None,
+        };
+        assert_eq!(
+            reason_left_as_the_reply(
+                StatusCode::CONFLICT,
+                &error(
+                    "Someone wrote after that browser turn.",
+                    HAND_BACK_SUPERSEDED_CODE
+                )
+            ),
+            None
+        );
+        let limit = "Connect your own AI to continue. You have used all 20 Instafy AI prompts available today.";
+        assert_eq!(
+            reason_left_as_the_reply(StatusCode::BAD_REQUEST, &error(limit, "bad_request"))
+                .as_deref(),
+            Some(limit)
+        );
+        for status in [StatusCode::INTERNAL_SERVER_ERROR, StatusCode::BAD_REQUEST] {
+            let message = if status.is_server_error() {
+                "failed to load browser turn: db"
+            } else {
+                " "
+            };
+            let reason =
+                reason_left_as_the_reply(status, &error(message, "internal")).expect("a reason");
+            assert_eq!(
+                reason,
+                "Octo couldn't start on this in the chat. Send it again to try once more."
+            );
+        }
     }
 
     /// The note a browser turn that asked Octo to make the person's message

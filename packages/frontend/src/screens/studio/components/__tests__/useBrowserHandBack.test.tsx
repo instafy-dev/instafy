@@ -16,11 +16,9 @@ import type { RunStatus } from "../../../../types";
 import type { ChatMessage } from "../../types";
 import {
   BROWSER_BUILD_REQUEST_NOTE_KEY,
-  BROWSER_BUILD_REQUEST_RECORD_KEY,
   BROWSER_HAND_BACK_CLAIM_KEY,
   BROWSER_HAND_BACK_PROMPT,
   BROWSER_HAND_BACK_RECORD_KEY,
-  browserBuildRequestNotice,
   browserHandBackCandidate,
   browserHandBackNotice,
   forgetBrowserHandBacksForTests,
@@ -41,7 +39,7 @@ const fixtures = JSON.parse(readFileSync(
   resolve(repo, "packages/runtime-controller/src/browser_hand_back_fixtures.json"), "utf8",
 )) as {
   claimKey: string; recordKey: string; handBackPrompt: string; browserReply: string; postedReply: string;
-  findingLines: string[]; letOctoContinuePrompt: string; buildRequestNoteKey: string; buildRequestRecordKey: string;
+  findingLines: string[]; letOctoContinuePrompt: string; buildRequestNoteKey: string;
 };
 
 const CARD_JOB = "job-card";
@@ -148,43 +146,20 @@ describe("browser hand-back: when Studio sends one", () => {
     expect(browserHandBackCandidate(input)).toBe(BROWSER_JOB);
   });
 
-  it("names the build request note and record the runtime and controller use", () => {
+  it("names the build request note the runtime and the controller use", () => {
     expect(BROWSER_BUILD_REQUEST_NOTE_KEY).toBe(fixtures.buildRequestNoteKey);
-    expect(BROWSER_BUILD_REQUEST_RECORD_KEY).toBe(fixtures.buildRequestRecordKey);
   });
 
   // A message the routing step sent to the browser asked for a map, which a
   // browser turn cannot make: it opened no page and asked Octo to make it. The
-  // message goes to the building turn, though its card does not continue
-  // building and no page was read; without the runtime's note it does not.
-  it("hands back a message the browser turn asked Octo to make, from a card that does not continue building", () => {
+  // controller sends that hand-back itself as the turn ends, whichever page or
+  // device is open, so this page sends none, even the page that sent it all.
+  it("never hands back a message the browser turn asked Octo to make: the controller sends that one", () => {
     forgetPromptsSentFromThisPageForTests();
     input.messages = routedBuildRequest(now);
-    expect(browserHandBackCandidate(input)).toBe(BROWSER_JOB);
+    expect(browserHandBackCandidate(input)).toBeNull();
     forgetPromptsSentFromThisPageForTests();
     input.messages = routedBuildRequest(now, false);
-    expect(browserHandBackCandidate(input)).toBeNull();
-  });
-
-  it.each([
-    ["the person wrote after it", () => {
-      input.messages = [...input.messages, { id: "later", role: "user", content: "Never mind", timestamp: now }];
-    }],
-    ["the browser turn failed", () => { statuses.set(BROWSER_JOB, "failed"); }],
-    ["another page sent the browser continuation", () => {
-      forgetPromptsSentFromThisPageForTests();
-      sent(CARD_JOB, {}, now - 60_000);
-    }],
-    ["it was handed back already", () => {
-      input.messages = [...input.messages.slice(0, -1), {
-        id: "hand-back", role: "user", content: browserBuildRequestNotice("Octo"), timestamp: now - 900,
-        metadata: { prompt_metadata: { [BROWSER_HAND_BACK_RECORD_KEY]: { browserJobId: BROWSER_JOB } } },
-      }, input.messages.at(-1)!];
-    }],
-  ] as const)("hands no build request back when %s", (_name, arrange) => {
-    forgetPromptsSentFromThisPageForTests();
-    input.messages = routedBuildRequest(now);
-    arrange();
     expect(browserHandBackCandidate(input)).toBeNull();
   });
 
@@ -335,16 +310,13 @@ describe("useBrowserHandBack", () => {
     expect(value.send).toHaveBeenCalledTimes(1);
   });
 
-  it("sends a build request with its own notice", async () => {
+  it("sends nothing for a message the browser turn asked Octo to make", async () => {
     await render();
     vi.advanceTimersByTime(5_000);
     value.messages = routedBuildRequest(Date.now());
     value.runStatuses = new Map([[BROWSER_JOB, "success"]]);
     await render();
-    expect(value.send).toHaveBeenCalledExactlyOnceWith(fixtures.handBackPrompt, {
-      display: "Octo continued in the chat",
-      metadata: { [fixtures.claimKey]: BROWSER_JOB },
-    });
+    expect(value.send).not.toHaveBeenCalled();
   });
 
   it("waits while the person holds it (a draft, or a step of theirs in the browser) or a turn runs", async () => {

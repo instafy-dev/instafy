@@ -6,7 +6,9 @@
 //!
 //! - a browser hand-back ([`crate::browser_hand_back`]): after a browser turn
 //!   read pages for something Octo is building, Studio sends what it found
-//!   back to the building turn;
+//!   back to the building turn; after a routed message's browser turn asked
+//!   Octo to make the message instead, the controller sends the message there
+//!   itself, in the person's name;
 //! - an automatic retry: after a turn fails for a passing reason (a dropped
 //!   reply, a short rate limit), Studio sends the person's prompt again once,
 //!   marked `retryAutomatic: true` with `retryOfMessageId` naming the failed

@@ -134,7 +134,7 @@ macro_rules! shared_browser_developer_instructions {
 - A headed browser in the project's isolated hosted runtime is available. Use the dedicated tools from the `instafy_shared_browser` MCP server: `status`, `snapshot`, `navigate`, `click`, `type`, `choose`, `press`, `scroll`, `request_human_input`, `list_tabs`, `open_tab`, `select_tab`, and `close_tab`.
 - Work on the page the person chose with `navigate`: it is this chat's own tab, and the page you leave there is the one the person sees after this turn. Open a tab of your own with `open_tab` only to keep a second page open at the same time (up to three, in the same visible browser: everyone watching sees them with your badge, and the person can take any of them over). The other tools act on the tab `select_tab` (or `open_tab`) last chose; `snapshot` and `navigate` also take a `tabId`. Use only those tabs, never another tab the person or a page opened. A site's approval holds in the tab it was given in. Your own tabs are for reading: a sign-in, a step that may show a secret, a field the person must fill, a form submission or a purchase stays on the page the person chose or with the person. Close a tab you are done with; the rest close when this turn ends unless the person keeps them.
 - Take a snapshot and pass both its `snapshotId` and one indexed element to each interaction. If the page or indexed target set changes, take another snapshot instead of retrying a stale target. Arbitrary CSS selectors are not accepted. Set a select with `choose` and its option's label, never by clicking it.
-- The browser may start on a blank page. When `status` or `snapshot` reports `blank: true`, call `navigate` first: with the http(s) address the task names, or, when it names none, with the official site of what the task is about (for a product, its maker's site); any approval the browser asks for applies there. Never end the turn on a blank page for want of an address. A blank page has nothing to read or act on. An `[origin_not_approvable]` error means the same for any other page without an http(s) address.
+- The browser may start on a blank page. When `status` or `snapshot` reports `blank: true`, call `navigate` first: with the http(s) address the task names, or, when it names none, with the official site of what the task is about (for a product, its maker's site); any approval the browser asks for applies there. Never end the turn on a blank page for want of an address, unless the person's message only asks Octo to make something and this turn's write-scope line offers `request_build` for that: then answer with it and open no page. A blank page has nothing to read or act on. An `[origin_not_approvable]` error means the same for any other page without an http(s) address.
 - Do not invoke Shared Browser through shell commands or write an ad-hoc Playwright/CDP script. The capability is deliberately exposed only through the bounded MCP server for this turn.
 - The controller automatically emits the visible AI cursor and action-ticker events. Do not bypass it.
 - Never type authentication, payment, or identity secrets. A sign-in, one-time code or consent step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let Octo continue. When the user asked to sign in, or a step they asked for needs it, open the site's sign-in page (a snapshot's `signIn` names the control that opens it, then its fields) and pause there; never end the turn telling them to sign in themselves. Any other sign-in, such as a page read for research, ends that page, not the task. Never ask for those values in chat.
@@ -6690,8 +6690,20 @@ mod tests {
         );
         assert!(
             SHARED_BROWSER_DEVELOPER_INSTRUCTIONS
-                .contains("Never end the turn on a blank page for want of an address.")
+                .contains("Never end the turn on a blank page for want of an address, unless")
         );
+        // A turn sent the person's own message that only asks Octo to make
+        // something is offered `request_build` instead of a page (a local
+        // test, Nov 1: such a turn's retry opened the city's tourism site and
+        // browsed). Its blank page is no reason to open one.
+        for instructions in [
+            SHARED_BROWSER_DEVELOPER_INSTRUCTIONS,
+            SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS,
+        ] {
+            assert!(instructions.contains(
+                "unless the person's message only asks Octo to make something and this turn's write-scope line offers `request_build` for that: then answer with it and open no page."
+            ));
+        }
         assert!(PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS.contains("`secretScreen: true`"));
         assert!(
             PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS

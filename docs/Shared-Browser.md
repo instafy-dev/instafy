@@ -2264,19 +2264,31 @@ unless the policy is `"covered"`.
   send stamped `browserCardTurn.routed`), opened no page, and answered that the
   message asks Octo to make or change something with no website to use first
   (the `request_build` action its write-scope line offers, or a team plan,
-  which a browser turn cannot start either). A browser turn cannot make it, so
-  the runtime does not try it again in the browser: the turn posts no reply and
-  nothing of its answer, and ends with a Details note (`browserBuildRequest`)
-  that Studio leaves out of Details. Studio hands the message back on that
-  note, as above, and the chat shows neither the card nor the hand-back's
-  notice: the person reads their message and then the building turn. The
-  controller checks the same chain, except that the card need not continue
+  which a browser turn cannot start either). The write-scope line has it decide
+  that before any browser step, and the run text's blank-page rule leaves it
+  that answer. A browser turn cannot make it, so the runtime does not try it
+  again in the browser: the turn posts no reply and nothing of its answer, and
+  ends with a Details note (`browserBuildRequest`) that Studio leaves out of
+  Details. One that answered in words alone is tried again once, as any browser
+  turn that opened no page is; that try reads the build request first, and its
+  build request ends the turn the same way instead of failing it. The person's
+  message has no answer until the building turn gives one, so the controller
+  sends this hand-back itself, in the name of the person who sent the browser
+  turn, as soon as that turn's completion is committed
+  (`browser_hand_back::hand_back_build_request`): it never waits for a page of
+  theirs to be open, and Studio sends none for it. It goes through the same
+  dispatch and checks as Studio's, except that the card need not continue
   building and the browser turn need not have read a page or replied, and only
   for a card the routing step posted; it stamps `buildRequest` with the
   message's own words as `personRequest`, an empty reply and no findings. The
-  building turn reads those words as the person's request and makes what they
-  ask, reading any public page it needs itself. Any other browser turn that
-  opened no page is tried again in the browser, as before.
+  chat shows neither the card nor, once the hand-back is in it, the browser
+  turn or the hand-back's notice: the person reads their message and then the
+  building turn. The building turn reads those words as the person's request
+  and makes what they ask, reading any public page it needs itself. A refusal
+  because the conversation moved on (someone wrote after the browser turn, or
+  the building lane is busy) changes nothing; any other refusal (no prompts or
+  credits left) leaves its plain reason as the browser turn's reply. Any other
+  browser turn that opened no page is tried again in the browser, as before.
 - **Stale pins.** A pin to a session that is gone moves to the space's own live
   browser when there is one.
 - **Clear data restarts the same machine.** The controller call is unchanged.

@@ -26,11 +26,15 @@
 //! build request ([`BUILD_REQUEST_ACTION`], or a team plan), and the runtime
 //! does not try it again in the browser
 //! ([`hands_the_message_to_the_building_turn`]): the turn posts no reply and
-//! ends with a Details note ([`build_request_note`]). Studio hands the message
-//! back on that note, the controller checks it and stamps the record with
-//! `buildRequest` and the message's words, and the building turn makes what
-//! the message asks ([`format_browser_hand_back_section`]), with nothing of
-//! the browser turn.
+//! ends with a Details note ([`build_request_note`]). One that answered in
+//! words alone is tried again once, as any browser turn that opened no page
+//! is, and that try is asked to decide first ([`BUILD_REQUEST_RETRY_LINE`]):
+//! its build request hands the message back the same way. As soon as such a
+//! turn ends, the controller sends the hand-back itself, in the person's name
+//! (runtime-controller `browser_hand_back::hand_back_build_request`), checks
+//! it and stamps the record with `buildRequest` and the message's words, and
+//! the building turn makes what the message asks
+//! ([`format_browser_hand_back_section`]), with nothing of the browser turn.
 
 use serde_json::{Value as JsonValue, json};
 
@@ -65,9 +69,8 @@ If a page stopped you (a manual step, a refused or challenge page), say so in yo
 /// and no website is needed first ([`BUILD_REQUEST_LINE`]).
 pub(super) const BUILD_REQUEST_ACTION: &str = "request_build";
 
-/// The key of the Details note such a browser turn ends with: Studio hands the
-/// message back on it and the controller checks it (runtime-controller
-/// `browser_hand_back.rs`).
+/// The key of the Details note such a browser turn ends with: the controller
+/// hands the message back on it (runtime-controller `browser_hand_back.rs`).
 pub(super) const BUILD_REQUEST_NOTE_KEY: &str = "browserBuildRequest";
 
 /// What that note says. Studio leaves it out of Details; a later replay of the
@@ -81,8 +84,17 @@ const BUILD_REQUEST_RECORD_KEY: &str = "buildRequest";
 /// its write-scope line ([`carries_on_a_routed_card`]). A browser turn has no
 /// way to make anything: told only that Octo builds in the chat, one sent a
 /// request for a map said it could not make one, and the browser retry then
-/// made it browse instead.
-pub(super) const BUILD_REQUEST_LINE: &str = "- When the person's message only asks Octo to make or change something in this space (a page, a map, a table) and needs no website first, open no page: answer with the action `{type: 'request_build'}` alone, and Octo makes it in the chat.\n";
+/// made it browse instead. It decides before any browser step, because the
+/// browser's run text sends a turn that finds a blank page to the official
+/// site of what the task is about, and a turn that opened a page hands
+/// nothing back.
+pub(super) const BUILD_REQUEST_LINE: &str = "- When the person's message only asks Octo to make or change something in this space (a page, a map, a table) and needs no website first, decide so before any browser step and open no page, blank or not: answer with the action `{type: 'request_build'}` alone, and Octo makes it in the chat.\n";
+
+/// What the browser retry of such a turn reads first, ahead of its own
+/// requirement to open a page: a turn that answered in words alone that it
+/// could not make the thing asked for gets one more chance to say so with the
+/// build request, which hands the message back instead of browsing.
+pub(super) const BUILD_REQUEST_RETRY_LINE: &str = "- First, as this turn's write-scope line says: when the person's message only asks Octo to make or change something in this space and needs no website first, answer with the action `{type: 'request_build'}` alone, with no browser step. Every other request:\n";
 
 fn metadata_string<'a>(metadata: &'a JsonValue, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
@@ -156,6 +168,21 @@ pub(super) fn hands_the_message_to_the_building_turn(
         .get("metadata")
         .is_some_and(carries_on_a_routed_card)
         && answer_asks_for_a_build(final_json)
+}
+
+/// The line a browser retry of `job` reads first: [`BUILD_REQUEST_RETRY_LINE`]
+/// when the turn carries on the person's own message, and nothing for any
+/// other turn, whose build request would hand nothing back.
+pub(super) fn build_request_retry_line(job: &LeaseJob) -> &'static str {
+    if job
+        .payload
+        .get("metadata")
+        .is_some_and(carries_on_a_routed_card)
+    {
+        BUILD_REQUEST_RETRY_LINE
+    } else {
+        ""
+    }
 }
 
 /// The Details note such a browser turn ends with, in place of its reply.

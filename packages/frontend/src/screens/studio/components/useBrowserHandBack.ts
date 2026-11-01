@@ -5,10 +5,8 @@ import type { ChatMessage } from "../types";
 import {
   BROWSER_HAND_BACK_CLAIM_KEY,
   BROWSER_HAND_BACK_PROMPT,
-  browserBuildRequestNotice,
   browserHandBackCandidate,
   browserHandBackNotice,
-  browserTurnRequestedABuild,
   claimBrowserHandBack,
 } from "./browserHandBack";
 
@@ -73,11 +71,8 @@ export function useBrowserHandBack(options: Options) {
       sentPromptForRun: findPromptSentFromThisPageForRun,
     });
     if (!jobId || !claimBrowserHandBack(jobId)) return;
-    const agentName = current.agentName ?? "Octo";
     void current.send(BROWSER_HAND_BACK_PROMPT, {
-      display: browserTurnRequestedABuild(current.messages, jobId)
-        ? browserBuildRequestNotice(agentName)
-        : browserHandBackNotice(agentName),
+      display: browserHandBackNotice(current.agentName ?? "Octo"),
       metadata: { [BROWSER_HAND_BACK_CLAIM_KEY]: jobId },
     }).catch(() => false);
   }, [

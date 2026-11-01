@@ -427,6 +427,14 @@ export function synthesizeAgentJobThreadMessages(
       hiddenIds.add(cardId);
     }
   }
+  // Once the building turn has the message, nothing of the browser turn that
+  // handed it over shows: the person reads their message, then that turn.
+  if (routedFold.handedBackBuildRequestJobIds.size > 0) {
+    for (const message of collapsedVisible) {
+      const jobId = extractAgentJobId(message);
+      if (jobId && routedFold.handedBackBuildRequestJobIds.has(jobId)) hiddenIds.add(message.id);
+    }
+  }
   const visible =
     hiddenIds.size > 0
       ? collapsedVisible.filter((message) => !hiddenIds.has(message.id))
