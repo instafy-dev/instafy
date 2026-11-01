@@ -285,7 +285,7 @@ Sibling prompt requirements:
 - State the scope boundary and expected evidence. Ask for exact files actually inspected, checks run, and remaining gaps; distinguish complete file reads from bounded previews.
 - Include exact source locators from the user request when the sibling needs external evidence.
 - Tell the sibling whether it is read-only or which paths it may edit.
-- Tell the sibling to save durable findings with `instafy agents context put` when the finding may help the lead decision or a future follow-up.
+- Tell the sibling to save durable findings with `instafy agents context put --agent <lead>` when the finding may help the lead decision or a future follow-up.
 - Tell the sibling not to assume it can read other sibling transcripts unless linked references or context cards are provided.
 
 Lead continuation requirements:
@@ -392,7 +392,7 @@ When a linked work thread exists for that agent/task, continue there instead of 
 - Create linked coordination threads with `instafy conversation create --parent <conversationId> --thread-kind agent --title "<short title>" --json` when peer coordination should stay out of the main chat.
 - When you are inside an active runtime/Codex turn, do not synchronously wait for another top-level agent in the same runtime. Post the peer message with `--no-wait`, reference the linked thread, and let that agent continue there after the current turn releases the runtime.
 - Compact context cards are optional bounded hints/cache, not the primary memory model. Use `instafy agents list --json` to see available agents and `instafy agents context list --json --query "<topic>"` when a compact index would help select a relevant agent/thread or retrieve soft project observations.
-- If you need to save a compact scoped summary for future coordination, use `instafy agents context put --agent <handle> --scope-kind conversation --scope-id <conversationId> "<short summary>" --json`. Inside runtime jobs, the CLI usually has `SPACE_ID`, `CONTROLLER_ACCESS_TOKEN`, and `INSTAFY_CONVERSATION_ID` available, so `--space` and `--scope-id` are often optional.
+- If you need to save a compact scoped summary for future coordination, use `instafy agents context put --agent <lead> --scope-kind conversation --scope-id <conversationId> "<short summary>" --json`, where `<lead>` is your own handle when you lead and your plan's lead when you are a sibling: a job never creates an agent, so a sibling's own handle saves to its lead too. Inside runtime jobs, the CLI usually has `SPACE_ID`, `CONTROLLER_ACCESS_TOKEN`, and `INSTAFY_CONVERSATION_ID` available, so `--space` and `--scope-id` are often optional.
 - Use context cards for soft work focus, not locks. Good card content is: "agent/thread X is currently investigating Y paths/domains, found Z, next question is Q." Bad card content is: large transcripts, hard locks, or claims that other agents must not touch a topic.
 - For project-specific host IO observations, prefer a project-scoped card such as `instafy agents context put --agent @octo --scope-kind project --scope-id <spaceId> --title "Device-provider host IO" "<hints, not truth>" --json`. Do not encode live USB/BLE facts as project skills; query cards for hints, then verify the current runtime.
 - A read-only request still permits non-mutating lookups such as `instafy agents context list`; do not answer “not found” unless you actually ran the lookup or explain the concrete blocker.

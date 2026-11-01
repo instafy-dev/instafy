@@ -37,6 +37,36 @@ fn questions_reject_secret_duplicate_and_unbounded_content() {
 }
 
 #[test]
+fn a_question_wears_its_lanes_face_and_name() {
+    let payload = json!({"metadata": {"agent": {
+        "handle": "reading_list",
+        "id": "3f6c1f0e-8a1b-4c55-9d1e-2b7a6c9e4f10",
+        "displayName": "Reading list",
+        "avatarSeed": "hatchling:3",
+        "description": "not for the question",
+    }}});
+    assert_eq!(
+        question_agent(&payload, "reading_list"),
+        json!({
+            "handle": "reading_list",
+            "id": "3f6c1f0e-8a1b-4c55-9d1e-2b7a6c9e4f10",
+            "displayName": "Reading list",
+            "avatarSeed": "hatchling:3",
+        })
+    );
+    // A job stamped before faces were carries its handle as its seed; blanks are not copied.
+    let legacy = json!({"metadata": {"agent": {"handle": "tester", "displayName": " ", "avatarSeed": "tester"}}});
+    assert_eq!(
+        question_agent(&legacy, "tester"),
+        json!({"handle": "tester", "avatarSeed": "tester"})
+    );
+    assert_eq!(
+        question_agent(&json!({}), "worker"),
+        json!({"handle": "worker"})
+    );
+}
+
+#[test]
 fn answers_require_exact_ids_but_allow_free_text() {
     let q = question();
     let answer = Answers::from([("device".into(), vec!["Tablet instead".into()])]);
@@ -767,6 +797,36 @@ async fn lost_resume_transition_cancels_only_its_exact_continuation() -> anyhow:
         assert_eq!(db.query_one("select status from agent_jobs where id=$1",&[&unrelated]).await?.get::<_,String>(0),"leased");
         assert_eq!(db.query_one("select status from agent_jobs where id=$1",&[&next]).await?.get::<_,String>(0),"canceled");
         assert_eq!(db.query_one("select resumed_job_id from agent_user_input_requests where id=$1",&[&request]).await?.get::<_,Option<Uuid>>(0),Some(next));
+        Ok(())
+    }).await
+}
+
+#[tokio::test]
+async fn a_question_and_its_resumed_turn_wear_the_lanes_face() -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    f.run(async {
+        // The lane as dispatch stamped its job: its name and its face in the chat.
+        let lane = json!({"handle":"tester","displayName":"Mobile check","avatarSeed":"hatchling:3"});
+        let job=f.job(None,Some(f.owner)).await?;
+        f.state.pool.get().await?.execute("update agent_jobs set payload=jsonb_set(payload,'{metadata,agent}',$2) where id=$1",&[&job,&PgJson(&lane)]).await?;
+        let (status,created)=f.create(job).await?;
+        assert_eq!(status,StatusCode::OK,"{created}");
+        let request=created["requestId"].as_str().unwrap();
+        let db=f.state.pool.get().await?;
+        let message:Uuid=db.query_one("select message_id from agent_user_input_requests where id=$1",&[&Uuid::parse_str(request)?]).await?.get(0);
+        let metadata=db.query_one("select metadata from conversation_messages where id=$1",&[&message]).await?.get::<_,PgJson<Value>>(0).0;
+        assert_eq!(metadata["agent"],lane,"{metadata}");
+        // Home's row for the question names the same AI.
+        let actor=db.query_one("select actor_agent from activity_events where kind='conversation.reply' and conversation_id=$1",&[&f.conversation]).await?.get::<_,PgJson<Value>>(0).0;
+        assert_eq!(actor,lane);
+        // Answered once its turn ended, the question resumes the lane with its face.
+        db.execute("update agent_jobs set status='completed' where id=$1",&[&job]).await?;
+        let (status,result)=f.call("POST",&format!("/user-input-requests/{request}/answer"),&f.owner_token,json!({"answers":{"device":["Tablet"]}})).await?;
+        assert_eq!(status,StatusCode::OK,"{result}");
+        assert_eq!(result["status"],"resumed","{result}");
+        let resumed=db.query_one("select payload from agent_jobs where project_id=$1 and payload #>> '{metadata,multiAgentPlan,userInputContinuation,requestId}'=$2",&[&f.project,&request]).await?.get::<_,PgJson<Value>>(0).0;
+        assert_eq!(resumed["metadata"]["agent"]["handle"],"tester");
+        assert_eq!(resumed["metadata"]["agent"]["avatarSeed"],"hatchling:3","{resumed}");
         Ok(())
     }).await
 }

@@ -1283,6 +1283,10 @@ where
                 .get::<_, Option<String>>("input_expired_reason")
                 .or_else(|| row.get("error_message")),
             handle: extract_agent_handle(&payload),
+            avatar_seed: payload
+                .pointer("/metadata/agent/avatarSeed")
+                .and_then(JsonValue::as_str)
+                .map(str::to_string),
             lease_metrics: Some(build_plan_job_lease_metrics(
                 &payload,
                 row.get("created_at"),
@@ -1360,6 +1364,7 @@ pub(crate) fn sibling_snapshot_to_json(worker: &SiblingJobSnapshot) -> JsonValue
     json!({
         "jobId": worker.id,
         "handle": worker.handle,
+        "avatarSeed": worker.avatar_seed,
         "status": worker.status,
         "outcome": worker.outcome,
         "summary": worker.summary,
@@ -2253,7 +2258,11 @@ async fn load_parent_job_leased_runtime_id(state: &AppState, job_id: Uuid) -> Op
 
 fn build_worker_dispatch_prompt(plan: &SkillMultiAgentPlan, content: &str) -> String {
     let mut lines = Vec::new();
-    lines.push("Skill-authored multi-agent plan. Each sibling agent must follow its assigned prompt segment, keep work scoped, and save compact context with `instafy agents context put` when it finds durable facts.".to_string());
+    // A helper has no saved profile, and a job never makes one: its cards are its lead's.
+    lines.push(format!(
+        "Skill-authored multi-agent plan. Each sibling agent must follow its assigned prompt segment, keep work scoped, and save compact context with `instafy agents context put --agent @{}`, its lead's handle, when it finds durable facts.",
+        plan.lead.lead_handle
+    ));
     if let Some(rationale) = plan.rationale.as_ref() {
         lines.push(format!("Rationale: {rationale}"));
     }
@@ -2315,6 +2324,9 @@ pub(crate) struct SiblingJobSnapshot {
     summary: Option<String>,
     error_message: Option<String>,
     handle: Option<String>,
+    /// The face the worker's job carries (`metadata.agent.avatarSeed`), for the plan card's
+    /// legend.
+    avatar_seed: Option<String>,
     scope_summary: Option<String>,
     lease_metrics: Option<JsonValue>,
     paths: Vec<String>,
@@ -2358,8 +2370,9 @@ impl RerunReason {
     }
 
     /// Where the rerun is recorded in the new job's `metadata.multiAgentPlan`. A retry of a
-    /// continuation turn carries both; the retry is what replaced the failed run.
-    fn of(plan_meta: &JsonMap<String, JsonValue>) -> Option<(Uuid, Self)> {
+    /// continuation turn carries both; the retry is what replaced the failed run. Dispatch reads
+    /// it too, so a rerun keeps its lane's face.
+    pub(crate) fn of(plan_meta: &JsonMap<String, JsonValue>) -> Option<(Uuid, Self)> {
         [
             ("rateLimitRetry", Self::RateLimit),
             ("continuation", Self::TurnContinuation),
@@ -3924,6 +3937,7 @@ mod tests {
             summary: Some(summary.to_string()),
             error_message: None,
             handle: Some(handle.to_string()),
+            avatar_seed: None,
             scope_summary: None,
             lease_metrics: None,
             paths: Vec::new(),
@@ -4041,6 +4055,7 @@ mod tests {
                 summary: Some("Frontend found no auth/session files.".to_string()),
                 error_message: None,
                 handle: Some("front".to_string()),
+                avatar_seed: None,
                 scope_summary: Some("frontend auth".to_string()),
                 lease_metrics: Some(json!({
                     "queuedAt": "2026-05-31T15:00:00Z",
@@ -4076,6 +4091,7 @@ mod tests {
                         .to_string(),
                 ),
                 handle: Some("api".to_string()),
+                avatar_seed: None,
                 scope_summary: Some("controller authz".to_string()),
                 lease_metrics: Some(json!({
                     "queuedAt": "2026-05-31T15:00:00Z",
@@ -4169,6 +4185,7 @@ mod tests {
                 summary: None,
                 error_message: Some("lane exploded".to_string()),
                 handle: Some("api".to_string()),
+                avatar_seed: None,
                 scope_summary: Some("controller authz".to_string()),
                 lease_metrics: None,
                 paths: Vec::new(),
@@ -4187,6 +4204,7 @@ mod tests {
                 summary: None,
                 error_message: None,
                 handle: Some("front".to_string()),
+                avatar_seed: None,
                 scope_summary: Some("frontend auth".to_string()),
                 lease_metrics: None,
                 paths: Vec::new(),
@@ -4289,5 +4307,63 @@ mod tests {
             .map(|agent| agent.handle.as_str())
             .collect();
         assert_eq!(handles, vec!["sea", "land"]);
+    }
+
+    #[test]
+    fn a_stored_plan_seed_names_its_lanes_as_it_was_written() {
+        // The runtime renames a lane named like Octo before it posts the plan. A seed stored by
+        // an older runtime, with a lane `ai`, still parses as written, so the lane's job finds
+        // itself in it when the controller starts it again.
+        let plan = json!({
+            "agents": [
+                { "handle": "ai", "prompt": "check the build" },
+                { "handle": "web", "prompt": "check the site" },
+            ],
+            "lead": { "leadHandle": "pia", "continuationPrompt": "summarize" }
+        });
+        let parsed = parse_skill_multi_agent_plan(&plan).expect("plan should parse");
+        let handles: Vec<&str> = parsed
+            .agents
+            .iter()
+            .map(|agent| agent.handle.as_str())
+            .collect();
+        assert_eq!(handles, ["ai", "web"]);
+        let payload = json!({
+            "plan_seed": plan,
+            "metadata": { "agent": { "handle": "ai", "avatarSeed": "ai" } },
+        });
+        let agent = turn_continuation::plan_job_agent(&payload).expect("the lane");
+        assert_eq!(agent.prompt, "check the build");
+        let seed = turn_continuation::redispatch_seed(&plan, &agent, "go on", "continued");
+        let rerun = parse_skill_multi_agent_plan(&seed).expect("one-lane plan");
+        assert_eq!(rerun.agents[0].handle, "ai");
+    }
+
+    #[test]
+    fn a_helper_saves_its_cards_under_its_lead() {
+        let plan = parse_skill_multi_agent_plan(&json!({
+            "agents": [{ "handle": "scout", "prompt": "check the docs" }],
+            "lead": { "leadHandle": "ben", "continuationPrompt": "summarize" }
+        }))
+        .expect("plan should parse");
+        let prompt = build_worker_dispatch_prompt(&plan, "Splitting the reading.");
+        assert!(
+            prompt.contains("`instafy agents context put --agent @ben`"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn the_group_status_names_each_workers_face() {
+        let mut worker = lane("reading_list", "leased", "Reading");
+        assert_eq!(
+            sibling_snapshot_to_json(&worker)["avatarSeed"],
+            JsonValue::Null
+        );
+        worker.avatar_seed = Some("hatchling:4".to_string());
+        assert_eq!(
+            sibling_snapshot_to_json(&worker)["avatarSeed"],
+            "hatchling:4"
+        );
     }
 }
