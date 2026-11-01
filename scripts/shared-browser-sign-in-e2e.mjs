@@ -18,8 +18,11 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // pause there; Octo cannot type into them; the pause highlights them and ends
 // the turn; the person signs in on the page; the next turn (what "Let Octo
 // continue" starts) carries on and stars the repository, asking before the
-// form post. No model, Studio, controller, account or external
-// site is used, and Chromium resolves no other host.
+// form post. The sign-in page draws more buttons under its form after it has
+// loaded (a passkey, as a code host's does), after the step that opened it
+// read it: the pause on its fields still goes through in that turn. No model,
+// Studio, controller, account or external site is used, and Chromium resolves
+// no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
 const playwrightRequire = createRequire(frontendRequire.resolve("@playwright/test"));
@@ -59,10 +62,25 @@ function writeProtectedJson(destination, value) {
 }
 
 const page = (title, body) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><link rel="icon" href="data:,">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'${body.script ? "; script-src 'unsafe-inline'; connect-src 'self'" : ""}">
 <title>${title}</title><style>body{font:16px system-ui;margin:0}header{display:flex;gap:16px;padding:12px 16px;background:#24292f}
 header a{color:#fff}main{padding:16px}label{display:block;margin:12px 0}input{display:block;padding:6px;margin-top:4px}</style></head>
-<body><header><a href="/">Example code host</a>${body.header ?? ""}</header><main><h1>${title}</h1>${body.main}</main></body></html>`;
+<body><header><a href="/">Example code host</a>${body.header ?? ""}</header><main><h1>${title}</h1>${body.main}</main>${body.script ? `<script>${body.script}</script>` : ""}</body></html>`;
+
+// The sign-in page's script draws the rest of the page once its own request
+// answers, as a code host's sign-in page adds its passkey button after it has
+// loaded: under the form, after the fields.
+const DRAWS_MORE_CONTROLS = `fetch("/login/more").then((answer) => answer.ok && answer.text()).then((drawn) => {
+  if (!drawn) return;
+  const more = document.createElement("p");
+  for (const label of ["Sign in with a passkey", "Use a security key"]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    more.append(button);
+  }
+  document.querySelector("main").append(more);
+});`;
 
 // What a code host's signed-out pages carry besides the task: a product card
 // whose heading names a secret, and a live feed of project names that look
@@ -75,7 +93,7 @@ const SIGNED_OUT_EXTRAS = '<section><h3>Secret scanning</h3><p>Catch leaked secr
 
 // A code host: a repository page whose Star needs a sign-in, and its sign-in
 // page. The person's session is a cookie the sign-in sets.
-function fixtureSite(requests) {
+function fixtureSite(requests, heldControls) {
   let starred = false;
   return createServer((request, response) => {
     const url = new URL(request.url, "http://fixture.invalid");
@@ -108,7 +126,13 @@ function fixtureSite(requests) {
 <label>Username or email address<input type="text" name="login" autocomplete="username"></label>
 <label>Password<input type="password" name="password" autocomplete="current-password"></label>
 <button type="submit">Sign in</button></form>`,
+        script: DRAWS_MORE_CONTROLS,
       }));
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/login/more") {
+      // Held until the test lets the page draw the rest of itself.
+      heldControls.push(response);
       return;
     }
     if (request.method === "POST" && url.pathname === "/session") {
@@ -155,9 +179,17 @@ export async function runSharedBrowserSignInFixture() {
   const outputs = [];
   let server;
   let context;
+  // The sign-in page's late requests, answered when the test says so.
+  const heldControls = [];
+  const drawMoreControls = () => {
+    for (const response of heldControls.splice(0)) {
+      response.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
+      response.end("drawn");
+    }
+  };
   try {
     const requests = [];
-    server = fixtureSite(requests);
+    server = fixtureSite(requests, heldControls);
     await new Promise((resolve, reject) => {
       server.once("error", reject);
       server.listen(0, "127.0.0.1", resolve);
@@ -195,7 +227,7 @@ export async function runSharedBrowserSignInFixture() {
     // continue" starts on the same page.
     function freshTurn() {
       assert.equal(children.size, 0, "A fresh turn starts after the previous tool exited");
-      for (const name of ["request.json", "decision.json", "state.json", "withhold-next.json"]) {
+      for (const name of ["request.json", "decision.json", "state.json", "withhold-next.json", "observed-fields.json"]) {
         fs.rmSync(path.join(approvalDirectory, name), { force: true });
       }
       authority = {
@@ -310,9 +342,17 @@ export async function runSharedBrowserSignInFixture() {
     assert.equal(typed.code, 1, "Typing into the sign-in fields is refused");
     assert.match(typed.stderr, /step_refused_sign_in|refuses to type authentication/u);
     assert.equal(await personPage.locator('input[name="login"]').inputValue(), "");
-    // The pause on the named fields highlights them and ends the turn.
+    // Now the page draws the rest of itself: buttons under its form, after the
+    // step that opened it read it. That read no longer matches the page, yet the
+    // fields it named are as they were.
+    assert.ok(!observed.interactiveElements.some((element) => element.label === "Sign in with a passkey"), "The click read the page before it drew the rest");
+    drawMoreControls();
+    await personPage.getByRole("button", { name: "Sign in with a passkey" }).waitFor();
+    // The pause on the named fields highlights them and ends the turn, with
+    // the result the step that opened the page returned.
     const paused = await runTool("POST", "/v1/request-human-input", { indices: observed.signIn.fields, snapshotId: observed.snapshotId });
     assert.equal(paused.code, 1, "The pause ends the tool turn");
+    assert.doesNotMatch(paused.stderr, /The page changed/u, "Buttons drawn under the form do not stop the pause");
     assert.match(paused.stderr, /\[human_input_required_non_retryable\]/u);
     const pauses = actions().filter((action) => action.type === "human_input");
     assert.equal(pauses.length, 1);
@@ -328,7 +368,7 @@ export async function runSharedBrowserSignInFixture() {
     // The person signs in on the page.
     await personPage.locator('input[name="login"]').fill(PERSON_LOGIN);
     await personPage.locator('input[name="password"]').fill(PERSON_PASSWORD);
-    await personPage.getByRole("button", { name: "Sign in" }).click();
+    await personPage.getByRole("button", { name: "Sign in", exact: true }).click();
     await personPage.waitForURL(`${origin}/fixture/repository`);
     assert.equal(requests.filter((entry) => entry === "POST /session").length, 1, "The person's own sign-in");
 
@@ -356,13 +396,14 @@ export async function runSharedBrowserSignInFixture() {
 
     const result = {
       status: "passed",
-      fixtureVersion: 3,
+      fixtureVersion: 4,
       checks: [
         "a signed-out page with no sign-in fields names its Sign in link, which opens the sign-in page without a prompt",
         "a product card whose heading names a secret, beside project names that look random, does not make that page a secret screen",
         "the sign-in page's result names its username and password fields and says to pause there with request_human_input",
         "typing into those fields is refused before any prompt",
         "the pause highlights exactly those fields, asks the run's person and ends the turn, with nothing sent",
+        "buttons the sign-in page draws under its form after the step that opened it read it do not stop the pause on its fields in that turn",
         "after the person signs in, the next run on the same page goes on with the task: the form post asks once, then stars the repository",
         "the person's values never reach a tool's output or the action feed",
       ],
@@ -372,6 +413,7 @@ export async function runSharedBrowserSignInFixture() {
     return result;
   } finally {
     for (const child of children) child.kill("SIGKILL");
+    drawMoreControls();
     await context?.close().catch(() => {});
     if (server) await new Promise((resolve) => server.close(resolve));
     fs.rmSync(temporary, { recursive: true, force: true });
@@ -384,7 +426,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.log(JSON.stringify(result, null, 2));
   }).catch((error) => {
     fs.mkdirSync(resultDirectory, { recursive: true });
-    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 3 })}\n`);
+    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 4 })}\n`);
     console.error(error.stack || error.message);
     process.exitCode = 1;
   });

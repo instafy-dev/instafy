@@ -164,11 +164,14 @@ test("a missing, unknown or empty list fails closed for every web page", () => {
   }
 });
 
-test("the agent is told the site, that nothing was read, and to give the person the link", () => {
+// A local test, Nov 1: a comparison's browser turn tried a search engine for reviews and replied right after the
+// refusal, which said only to give the person the plain link. A refused address ends that address, not the task.
+test("the agent is told the site, that nothing was read, to go on with the source's own site, and to give the person the link only for a site they asked for", () => {
   const message = linkOnly.personalBrowserLinkOnlyMessage({ code: "link_only_site", site: "Booking.com" }, "Nothing was opened.");
   assert.match(message, /^Booking\.com is link-only/);
   assert.match(message, /Nothing was opened\./);
-  assert.match(message, /plain link/);
+  assert.match(message, /Go on with the maker's, venue's or reviewer's own site; give the person this link only if they asked for this site/);
+  assert.doesNotMatch(message, /Give the person the plain link/);
   assert.match(message, /Send page to Octo/);
   assert.match(linkOnly.personalBrowserLinkOnlyMessage({ code: "link_only_list_unavailable" }, "x"), /list is unavailable/);
 });

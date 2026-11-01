@@ -288,8 +288,11 @@ function linkOnlyCopyOf(headers, rawUrl) {
 
 const LIST_UNAVAILABLE_MESSAGE =
   "The link-only site list is unavailable, so Octo opens, reads and does nothing in any tab. Nothing was opened, read or done.";
+// A refused address ends that address, not the task: a search engine or a
+// listing the turn chose itself leads on to the source's own site, and only a
+// site the person asked for is theirs to open.
 const SEND_PAGE_HINT =
-  'Give the person the plain link: they may open it themselves and, if they want Octo to see it, use "Send page to Octo".';
+  'Go on with the maker\'s, venue\'s or reviewer\'s own site; give the person this link only if they asked for this site: they may open it themselves and, if they want Octo to see it, use "Send page to Octo".';
 
 // Octo opens an address, in any tab, only when it is not on a site the skill
 // keeps link-only, and only while that list is known. Called before any prompt.
@@ -1935,6 +1938,67 @@ function targetFingerprint(description) {
     .digest("hex");
 }
 
+// A field the person may be asked to fill (request_human_input).
+const EDITABLE_FIELD_TAGS = new Set(["input", "textarea", "select"]);
+
+// One editable field as a pause on fields checks it: its index, label and
+// kind, and where its form sends, on the page's address. Unlike a snapshot's
+// fingerprint, nothing else on the page is in it, so controls a page adds or
+// changes elsewhere after it loads (a passkey button, a banner) leave it as it
+// was.
+function fieldFingerprint(url, description) {
+  return crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify({
+        pageId: activePageId,
+        url,
+        index: description.index,
+        label: description.label,
+        tag: description.tag,
+        role: description.role,
+        inputType: description.inputType,
+        formAction: description.formAction,
+        formMethod: description.formMethod,
+      }),
+    )
+    .digest("hex");
+}
+
+// Records the editable fields a snapshot of the page the person chose shows,
+// for request_human_input (approvalProtocol.recordObservedFields). Octo's own
+// tabs are for reading and never ask the person to fill a field. Without the
+// record, a pause checks the whole page, as before.
+function recordObservedFields(snapshotId, url, interactive) {
+  if (inAgentTab()) return;
+  const fields = interactive
+    .filter(({ description }) => EDITABLE_FIELD_TAGS.has(description.tag))
+    .slice(0, approvalProtocol.maxObservedFields)
+    .map(({ description }) => ({ index: description.index, field: fieldFingerprint(url, description) }));
+  if (!fields.length) return;
+  try {
+    approvalProtocol.recordObservedFields(snapshotId, fields);
+  } catch (_) {
+    // The pause checks the whole page instead.
+  }
+}
+
+// Whether the fields a pause highlights are the ones Octo saw in the snapshot
+// it names: each at its index with the same label and kind, in a form that
+// sends to the same place, on the same address. The rest of the page may have
+// changed since. A snapshot with no
+// record of those fields is checked whole, as every step is.
+function humanInputFieldsAsObserved(url, interactive, body) {
+  const observed = approvalProtocol.observedFields(body.snapshotId);
+  if (observed && body.indices.every((index) => observed.has(index))) {
+    return body.indices.every((index) => {
+      const entry = interactive[index];
+      return Boolean(entry) && observed.get(index) === fieldFingerprint(url, entry.description);
+    });
+  }
+  return snapshotFingerprint(url, interactive) === body.snapshotId;
+}
+
 // What the model reads about one control. Empty fields are left out to keep
 // the observation small; the box stays internal, where the visible cursor
 // uses it. A select says which option it holds (`chosen`), as a person sees it
@@ -2164,8 +2228,10 @@ async function snapshot(page, { withhold = false } = {}) {
   // the control that opens the sign-in page ("Sign in" in its header). Octo's
   // own tabs are for reading and never ask the person to fill fields.
   const signInHint = inAgentTab() || view.secretScreen ? null : signInHintOf(interactive);
+  const snapshotId = snapshotFingerprint(rawUrl, interactive);
+  recordObservedFields(snapshotId, rawUrl, interactive);
   return {
-    snapshotId: snapshotFingerprint(rawUrl, interactive),
+    snapshotId,
     browserPageId: EXPECTED_BROWSER_PAGE_ID,
     ...tabField(),
     url: view.url,
@@ -2304,6 +2370,7 @@ async function emitNavigationResult(page) {
 async function targetLocator(page, body) {
   const interactive = await collectInteractiveElements(page);
   if (body.snapshotId !== snapshotFingerprint(page.url(), interactive)) {
+    pageChangedUnderStep = true;
     throw new Error(
       "Shared Browser snapshot is stale; take a fresh snapshot before acting",
     );
@@ -2393,6 +2460,14 @@ async function controlPlace(locator) {
 // a chain of prompts.
 let changedAfterYes = false;
 
+// Set when a step was not done because the page changed under it while nobody
+// was asked: its snapshot no longer reads as the page, or the control or the
+// fields it was for are not there as they were. The failed command says so on
+// stdout, and runtime-agent counts such steps in a row, so a page that never
+// holds still (a live count, a ticker) ends that page instead of a loop of
+// snapshots.
+let pageChangedUnderStep = false;
+
 // The control a step is for is not on the page as it was when the step was
 // judged, so nothing was done. This does not end the run: Octo looks at the
 // page again and, if the step still fits, does it again, which asks the person
@@ -2400,6 +2475,8 @@ let changedAfterYes = false;
 function controlChanged() {
   if (stepAllowedAtPrompt) {
     changedAfterYes = true;
+  } else {
+    pageChangedUnderStep = true;
   }
   return new Error(
     stepAllowedAtPrompt
@@ -4097,11 +4174,14 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     const interactive = await collectInteractiveElements(page);
-    if (snapshotFingerprint(page.url(), interactive) !== body.snapshotId) {
+    // Only the fields it highlights must be as Octo saw them: a sign-in page
+    // that adds a button under its form after it loads still pauses on them.
+    if (!humanInputFieldsAsObserved(page.url(), interactive, body)) {
+      pageChangedUnderStep = true;
       throw new Error("The page changed; take a fresh snapshot before requesting human input");
     }
     const selected = body.indices.map((index) => interactive[index]);
-    if (selected.some((entry) => !entry || !["input", "textarea", "select"].includes(entry.description.tag))) {
+    if (selected.some((entry) => !entry || !EDITABLE_FIELD_TAGS.has(entry.description.tag))) {
       throw new Error("Human input targets must be observed editable fields");
     }
     await clearHumanInputHighlights(page);
@@ -4682,16 +4762,23 @@ main().then(
     // "once" when the person said yes at its prompt: a step they allowed that
     // then did not happen still lists their yes. `changedAfterYes` when that
     // yes was not used because the control changed (controlChanged), which
-    // runtime-agent counts for the run. `refused` when the browser refused
-    // the step as the person's own.
+    // runtime-agent counts for the run, and `pageChanged` when the page changed
+    // under a step nobody was asked about, which it counts in a row.
+    // `refused` when the browser refused the step as the person's own.
     const activity = {
       ...(FAILED_STEP_KINDS.has(stepKind) ? { step: stepKind } : {}),
       ...(stepAllowedAtPrompt ? { approval: "once" } : {}),
       ...(REFUSED_STEP_KINDS.has(refusedStep) ? { refused: refusedStep } : {}),
     };
-    if (Object.keys(activity).length) {
+    const pageChanged = pageChangedUnderStep && !changedAfterYes;
+    if (Object.keys(activity).length || pageChanged) {
       await writeStdout(
-        `${JSON.stringify({ ok: false, activity, ...(changedAfterYes ? { changedAfterYes: true } : {}) })}\n`,
+        `${JSON.stringify({
+          ok: false,
+          ...(Object.keys(activity).length ? { activity } : {}),
+          ...(changedAfterYes ? { changedAfterYes: true } : {}),
+          ...(pageChanged ? { pageChanged: true } : {}),
+        })}\n`,
       ).catch(() => {});
     }
     const message = error && error.message ? error.message : String(error);

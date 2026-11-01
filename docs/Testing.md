@@ -1646,11 +1646,12 @@ signed-out repository page has no sign-in fields, so its result names its "Sign
 in" link, which opens the sign-in page without a prompt; the sign-in page's
 result names its username and password fields and says to pause there with
 `request_human_input`;
-typing into them is refused; the pause highlights exactly those fields and ends
-the turn with nothing sent. The person then signs in on the page, and a fresh run
-on the same page (what **Let Octo continue** starts) stars the repository, asking
-once before the form post. The person's values never reach a tool's output or
-the action feed.
+typing into them is refused; the page then draws more buttons under its form (a
+passkey), after the click that opened it read it, and the pause with that read
+still highlights exactly those fields and ends the turn with nothing sent. The
+person then signs in on the page, and a fresh run on the same page (what **Let
+Octo continue** starts) stars the repository, asking once before the form post.
+The person's values never reach a tool's output or the action feed.
 
 Last, `scripts/shared-browser-allowed-step-e2e.mjs` answers prompts on loopback
 pages that change by themselves while a prompt waits. On a journey planner, a

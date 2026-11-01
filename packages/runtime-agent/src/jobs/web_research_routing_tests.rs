@@ -694,6 +694,39 @@ fn a_route_comes_from_the_operators_journey_planner() {
     assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
+/// A local test, Nov 1: a comparison's browser turn read the maker's home page, whose menu names four laptops and links
+/// their pages, tried a search engine (refused, link-only) and stopped with 4 of 15 cells: "Comparing" said only to
+/// list the models a page names. It now lists the ones the page's menu names too, then opens each model's own page,
+/// in "Finding a page" within the part a snapshot carries, without pushing the sign-in rules out of it. The part a
+/// snapshot carries never tells a turn to report a failed step instead of going on: it says what did not work only
+/// when nothing is left to try, as the browser run's own text does. An unedited earlier copy is upgraded.
+#[test]
+fn a_comparison_opens_each_models_own_page_the_menu_names_too() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let start = BROWSER_SKILL.find("## Finding a page").expect("section");
+    let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
+    let section = flat(&BROWSER_SKILL[start..end]);
+    let line = "- Comparing: list the models a page you read names, its menu included, then open each one's own page; mark one only a search result names \"not checked\".";
+    assert!(section.contains(line), "{section}");
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
+    assert!(carried.contains(line));
+    assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
+    assert!(!BROWSER_SKILL.contains("When a step fails, tell the person"));
+    assert!(
+        BROWSER_SKILL.contains(
+            "- Report observed state. When nothing is left to try, tell the person in plain words what did not work"
+        )
+    );
+
+    let previous = include_str!("legacy/browser-automation-v22.md");
+    assert!(!previous.contains("its menu included"));
+    let tmp = scaffolded_space();
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+}
+
 /// A comparison's first turn read a maker's listing page that robots.txt closes, then built a page with every spec
 /// "not checked: <maker>'s product page blocks automated reads": the research skill told it to list a stop by its host
 /// and "try a different source", which reads as "leave this site". A stop is listed by the page that stopped, and the
@@ -1249,7 +1282,7 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
         "A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.",
         "A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner, its stations chosen), not a listing or a kiosk page",
         "Anything not read on a page this turn (from memory or a search result) says \"not checked\" next to it.",
-        "Comparing: list the models a page you read names, and mark one only a search result names \"not checked\". Never names from memory, never placeholders such as \"candidate 1\".",
+        "Comparing: list the models a page you read names, its menu included, then open each one's own page; mark one only a search result names \"not checked\". Never names from memory, never placeholders such as \"candidate 1\".",
         "A cookie banner with a reject button (\"Reject all\", \"Only necessary\"): press it so it does not cover the page the person watches.",
     ] {
         assert!(carried.contains(needle), "{needle}");
@@ -1353,9 +1386,23 @@ fn a_failed_page_ends_that_page_and_never_the_research() {
         json!({}),
     );
     assert!(prompt.contains(BROWSER_CHOICE_CONTRACT));
-    assert!(prompt.contains(
-        "If a browser tool fails, say in plain words what did not work (never paste raw error codes"
-    ));
+    // A browser turn's reply rules say the same as its run's text: a failed or refused page ends that page,
+    // and what did not work is said only when nothing is left to try (a local test, Nov 1: research turns
+    // replied about the first page that failed or was refused).
+    for transport in ["shared", "desktop-personal"] {
+        let browser_turn = fresh_prompt(
+            tmp.path(),
+            "Compare the three latest robot vacuums under 600 euros and give me a comparison page.",
+            json!({ "browserTransport": transport }),
+        );
+        assert!(browser_turn.contains(
+            "If a browser tool fails or refuses a page, that ends that page, not the task: go on to the next source in this turn. When nothing is left to try, say in plain words what did not work (never paste raw error codes"
+        ), "{transport}");
+        assert!(
+            !browser_turn.contains("If a browser tool fails, say in plain words"),
+            "{transport}"
+        );
+    }
     assert!(BROWSER_CHOICE_CONTRACT.contains("Write `task` as the person's request: what to do."));
     for stop in ["what did not work and stop", "where to stop"] {
         assert!(!prompt.contains(stop), "{stop}");
