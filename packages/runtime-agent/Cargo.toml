@@ -54,7 +54,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 sysinfo = "0.30"
 zip = { version = "1", default-features = false, features = ["deflate"] }
 unicode-normalization = "0.1"
-rmcp = { version = "1.7.0", default-features = false, features = ["server", "transport-async-rw"] }
+rmcp = { version = "3.2.0", default-features = false, features = ["server", "transport-async-rw"] }
 # The Shared Browser window watch: target discovery on the browser's loopback
 # DevTools socket. The same version origin-http-server already uses.
 tokio-tungstenite = "0.24"

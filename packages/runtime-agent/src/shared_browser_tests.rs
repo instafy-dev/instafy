@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use serde_json::json;
 
 use super::*;
+use crate::mcp_test_wire::{McpWire, wire_result};
 
 const SNAPSHOT_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -5071,7 +5072,7 @@ fn mcp_results_carry_compact_json_text_beside_the_structured_payload() {
     let result = successful_tool_result(payload.clone());
     assert_eq!(result.is_error, Some(false));
     assert_eq!(result.content.len(), 1);
-    let text = &result.content[0].raw.as_text().expect("text content").text;
+    let text = &result.content[0].as_text().expect("text content").text;
     assert_eq!(
         text,
         &serde_json::to_string(&payload).expect("compact JSON")
@@ -9939,7 +9940,7 @@ fn a_page_the_network_did_not_deliver_fails_with_a_plain_reason_and_the_code_onl
     );
     let result = failed_tool_result(&format!("{error:#}"));
     assert_eq!(result.is_error, Some(true));
-    let text = &result.content[0].raw.as_text().expect("text content").text;
+    let text = &result.content[0].as_text().expect("text content").text;
     assert!(
         text.starts_with("Instafy's browser couldn't reach that site"),
         "{text}"
@@ -10008,7 +10009,7 @@ fn network_codes_map_to_a_few_plain_reasons() {
     let other =
         failed_tool_result("Shared Browser command exited with exit status: 1: stale snapshot");
     assert_eq!(
-        other.content[0].raw.as_text().expect("text content").text,
+        other.content[0].as_text().expect("text content").text,
         "Shared Browser action failed: Shared Browser command exited with exit status: 1: stale snapshot"
     );
     assert_eq!(other.structured_content, None);
@@ -10410,5 +10411,202 @@ fn a_cookie_banners_refusal_lets_no_form_post_leave_the_tab() {
     assert!(
         refused.contains("the page sent a form to https://example.test/, which the step was not approved to send to"),
         "{refused}"
+    );
+}
+
+#[tokio::test]
+async fn mcp_wire_offers_the_bounded_operations_and_refuses_any_other_call() {
+    let mut wire = McpWire::connect(SharedBrowserMcpServer::new()).await;
+    assert_eq!(
+        wire.initialized["result"],
+        json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": { "tools": {} },
+            "serverInfo": { "name": "rmcp", "version": "3.2.0" },
+            "instructions": "Control the visible Instafy Shared Browser through bounded, instrumented actions. Take a fresh snapshot before using element indices.",
+        }),
+        "{}",
+        wire.initialized
+    );
+    let listed = wire.request("tools/list", json!({})).await;
+    let tools: JsonValue = serde_json::from_str(include_str!(
+        "../tests/fixtures/mcp/shared_browser_tools.json"
+    ))
+    .unwrap();
+    assert_eq!(listed["result"], tools, "{listed:#}");
+    for (name, arguments, message) in [
+        ("upload", json!({}), "unknown Shared Browser tool upload"),
+        (
+            "status",
+            json!({ "verbose": true }),
+            "Shared Browser status does not accept arguments",
+        ),
+    ] {
+        let answer = wire.call(name, arguments).await;
+        assert_eq!(
+            answer["error"],
+            json!({ "code": -32602, "message": message }),
+            "{answer}"
+        );
+        assert!(answer.get("result").is_none(), "{answer}");
+    }
+}
+
+#[tokio::test]
+async fn mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result() {
+    let server = SharedBrowserMcpServer::new();
+    let latch = server.clone();
+    let mut wire = McpWire::connect(server).await;
+    let signal = |code: &str| json!({ "state": "blocked", "terminal": true, "retryable": false, "code": code });
+    for (code, text, is_error) in [
+        (
+            "human_input_required",
+            "Human input is needed. End this turn now. The user will fill the highlighted fields directly after confirmed shutdown, then explicitly continue in a fresh browser turn. Never request or repeat their values.",
+            false,
+        ),
+        (
+            BROWSER_UNAVAILABLE_CODE,
+            "Instafy's browser closed or stopped responding on this space's machine. End this turn now: do not retry or call another browser tool. Say in one short sentence that the browser closed and that they can open it again and send a message to continue.",
+            true,
+        ),
+        (
+            "approval_timeout",
+            "The person has not answered the browser's approval prompt yet, so the step was not performed. End this turn now: do not retry or call another browser tool. Say in one short sentence what you were waiting for their OK on. They will continue in a new message when they are ready.",
+            false,
+        ),
+        (
+            "approval_denied",
+            "Shared Browser consent is blocked for this run (approval_denied). Start a fresh browser run before requesting another browser action.",
+            true,
+        ),
+    ] {
+        *latch.terminal_consent_failure.lock().await = Some(code);
+        let blocked = wire.call("snapshot", json!({})).await;
+        assert_eq!(
+            blocked["result"],
+            json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": { "terminalConsent": signal(code) },
+                "isError": is_error,
+            }),
+            "{blocked}"
+        );
+        // Status still answers, with the run's blocked state and nothing of the page.
+        let ready = code != BROWSER_UNAVAILABLE_CODE;
+        let status = wire.call("status", json!({})).await;
+        assert_eq!(
+            status["result"],
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!(r#"{{"originApproved":false,"ready":{ready},"redacted":true,"terminalConsent":{{"code":"{code}","retryable":false,"state":"blocked","terminal":true}},"title":null,"url":null}}"#),
+                }],
+                "structuredContent": {
+                    "terminalConsent": signal(code),
+                    "ready": ready,
+                    "originApproved": false,
+                    "redacted": true,
+                    "url": null,
+                    "title": null,
+                },
+                "isError": false,
+            }),
+            "{status}"
+        );
+    }
+
+    // The call that ended the run names its step's kind.
+    *latch.terminal_consent_failure.lock().await = Some("approval_denied");
+    *latch.terminal_step.lock().await = Some("search");
+    let blocked = wire.call("snapshot", json!({})).await;
+    assert_eq!(
+        blocked["result"],
+        json!({
+            "content": [{
+                "type": "text",
+                "text": "Shared Browser consent is blocked for this run (approval_denied). Start a fresh browser run before requesting another browser action.",
+            }],
+            "structuredContent": {
+                "terminalConsent": signal("approval_denied"),
+                "activity": { "step": "search" },
+            },
+            "isError": true,
+        }),
+        "{blocked}"
+    );
+}
+
+#[tokio::test]
+async fn mcp_wire_carries_each_kind_of_browser_result_whole() {
+    // A step's payload, as compact JSON text beside the payload itself.
+    let payload = json!({ "ok": true, "url": "https://example.test/", "title": "Example" });
+    assert_eq!(
+        wire_result(successful_tool_result(payload.clone())).await,
+        json!({
+            "content": [{
+                "type": "text",
+                "text": r#"{"ok":true,"title":"Example","url":"https://example.test/"}"#,
+            }],
+            "structuredContent": payload,
+            "isError": false,
+        })
+    );
+    // A failure keeps the controller's own text, and a page the network did not deliver says
+    // so in plain words.
+    assert_eq!(
+        wire_result(failed_tool_result("the run's tab closed")).await,
+        json!({
+            "content": [{ "type": "text", "text": "Shared Browser action failed: the run's tab closed" }],
+            "isError": true,
+        })
+    );
+    assert_eq!(
+        wire_result(failed_tool_result(
+            "page.goto: net::ERR_NAME_NOT_RESOLVED at https://example.invalid/"
+        ))
+        .await,
+        json!({
+            "content": [{ "type": "text", "text": SITE_NOT_FOUND_REASON }],
+            "structuredContent": {
+                "error": { "reason": SITE_NOT_FOUND_REASON, "details": "net::ERR_NAME_NOT_RESOLVED" },
+            },
+            "isError": true,
+        })
+    );
+    // A step the person allowed lists their yes; a browser that never answered says so.
+    let allowed: anyhow::Error = ControllerFailure {
+        message: "The page changed after the person said yes".to_string(),
+        step: Some("submit"),
+        approval: Some("once"),
+        changed_after_yes: false,
+    }
+    .into();
+    assert_eq!(
+        wire_result(failed_call_result(&allowed)).await,
+        json!({
+            "content": [{
+                "type": "text",
+                "text": "Shared Browser action failed: The page changed after the person said yes",
+            }],
+            "structuredContent": { "activity": { "step": "submit", "approval": "once" } },
+            "isError": true,
+        })
+    );
+    use std::os::unix::process::ExitStatusExt;
+    let unreachable = controller_failure(
+        std::process::ExitStatus::from_raw(BROWSER_UNAVAILABLE_EXIT_CODE << 8),
+        b"Shared Browser command failed: Instafy's browser could not be reached",
+        b"",
+    );
+    assert_eq!(
+        wire_result(failed_call_result(&unreachable)).await,
+        json!({
+            "content": [{
+                "type": "text",
+                "text": "Shared Browser action failed: Shared Browser command exited with exit status: 75: Shared Browser command failed: Instafy's browser could not be reached",
+            }],
+            "structuredContent": { "browserUnavailable": true },
+            "isError": true,
+        })
     );
 }

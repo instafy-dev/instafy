@@ -24,8 +24,8 @@ use rmcp::ErrorData as McpError;
 use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, JsonObject, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, JsonObject,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use serde_json::{Value as JsonValue, json};
 use tokio::sync::Mutex as AsyncMutex;
@@ -364,20 +364,14 @@ impl ServerHandler for Broker {
     ) -> impl std::future::Future<Output = std::result::Result<ListToolsResult, McpError>> + Send + '_
     {
         let tools = self.tools.clone();
-        async move {
-            Ok(ListToolsResult {
-                tools: (*tools).clone(),
-                next_cursor: None,
-                meta: None,
-            })
-        }
+        async move { Ok(ListToolsResult::with_all_items((*tools).clone())) }
     }
 
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> std::result::Result<CallToolResult, McpError> {
+    ) -> std::result::Result<CallToolResponse, McpError> {
         let name = request.name.as_ref();
         let arguments = request.arguments.unwrap_or_default();
         if name == MESSAGE_SEARCH_TOOL {
@@ -385,7 +379,10 @@ impl ServerHandler for Broker {
             let limit = arguments.get("limit").and_then(JsonValue::as_u64);
             let limit = limit.map_or(SEARCH_MAX_RESULTS, |limit| limit.min(SEARCH_MAX_RESULTS));
             let _call = self.call_lock.lock().await;
-            return Ok(self.search_messages(query.unwrap_or_default(), limit).await);
+            return Ok(self
+                .search_messages(query.unwrap_or_default(), limit)
+                .await
+                .into());
         }
         let Some(grant) = self.routes.get(name).map(|index| &self.grants[*index]) else {
             return Err(McpError::invalid_params(
@@ -394,7 +391,7 @@ impl ServerHandler for Broker {
             ));
         };
         let _call = self.call_lock.lock().await;
-        Ok(self.call_device_tool(grant, name, arguments).await)
+        Ok(self.call_device_tool(grant, name, arguments).await.into())
     }
 }
 
@@ -433,9 +430,9 @@ fn transport_failure(name: &str, error: &str, may_have_reached: bool) -> CallToo
 fn tool_result(failed: bool, body: JsonValue) -> CallToolResult {
     let text = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
     let mut result = if failed {
-        CallToolResult::error(vec![Content::text(text)])
+        CallToolResult::error(vec![ContentBlock::text(text)])
     } else {
-        CallToolResult::success(vec![Content::text(text)])
+        CallToolResult::success(vec![ContentBlock::text(text)])
     };
     if body.is_object() {
         result.structured_content = Some(body);

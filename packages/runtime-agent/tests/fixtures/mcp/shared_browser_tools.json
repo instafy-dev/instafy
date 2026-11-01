@@ -1,0 +1,308 @@
+{
+  "tools": [
+    {
+      "name": "request_human_input",
+      "description": "End this turn and ask the user to fill one to eight highlighted fields from a fresh snapshot. Never include field values. The user explicitly continues in a fresh turn.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "indices": {
+            "items": {
+              "maximum": 199,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "snapshotId": {
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "indices",
+          "snapshotId"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "status",
+      "description": "Read Shared Browser readiness and current page identity.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    {
+      "name": "snapshot",
+      "description": "Read what a person can see on the page: title, URL, visible text, and indexed interactive elements. Controls a person cannot see yet, such as those in closed menus and drawers, are left out; `omittedControls` counts them, and opening a menu or scrolling may reveal them. `expanded` tells whether a toggle is open, `area` is the part of the page a control sits in, a select's `chosen` is the option it holds, and links on the page's own site are paths. With `tabId`, that tab becomes the one later tools act on first.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "tabId": {
+            "description": "A tab id from list_tabs.",
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "navigate",
+      "description": "Navigate the visible page to a credential-free HTTP(S) URL, or to a path on the current page's site such as a snapshot link's href. With `tabId`, that tab becomes the one later tools act on first.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "tabId": {
+            "description": "A tab id from list_tabs.",
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          },
+          "url": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "click",
+      "description": "Click one element from a fresh snapshot, emitting the visible AI cursor and action ticker.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "index": {
+            "maximum": 199,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "snapshotId": {
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "snapshotId"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "type",
+      "description": "Type non-sensitive text into one observed element, optionally submitting it.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "index": {
+            "maximum": 199,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "snapshotId": {
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "submit": {
+            "type": "boolean"
+          },
+          "text": {
+            "maxLength": 16384,
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "snapshotId",
+          "text"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "choose",
+      "description": "Choose one option of a select from a fresh snapshot by the option's label, as the open list shows it. Use it instead of clicking the list. Choosing does not send the form, though some pages send it when a list changes; the form's own button sends it. When no option has that label, the error lists the options.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "index": {
+            "maximum": 199,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "option": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "snapshotId": {
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "snapshotId",
+          "option"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "press",
+      "description": "Press one allowlisted key on one element from a fresh snapshot.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "index": {
+            "maximum": 199,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "key": {
+            "enum": [
+              "Enter",
+              "Tab",
+              "Escape",
+              "ArrowUp",
+              "ArrowDown",
+              "ArrowLeft",
+              "ArrowRight",
+              "Backspace",
+              "Delete",
+              "Home",
+              "End",
+              "PageUp",
+              "PageDown",
+              " ",
+              "Space"
+            ],
+            "type": "string"
+          },
+          "snapshotId": {
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "snapshotId",
+          "key"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "scroll",
+      "description": "Scroll the visible page by bounded horizontal and vertical deltas.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "x": {
+            "maximum": 10000.0,
+            "minimum": -10000.0,
+            "type": "number"
+          },
+          "y": {
+            "maximum": 10000.0,
+            "minimum": -10000.0,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_tabs",
+      "description": "List the tabs this run may use: the page the person chose and the tabs Octo opened, with which one later tools act on. A tab's address and title show once its site is approved in that tab. Each of Octo's tabs has a `label` (\"Octo's tab 2\") that it keeps while it is open; the person's prompts and browser use the same label, so name tabs by it.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    {
+      "name": "open_tab",
+      "description": "Open a full credential-free HTTP(S) address in a new visible tab of the shared browser and act on it from now on. Octo may have at most three tabs of its own open; they close when this turn ends unless the person keeps them. The site's approval applies in that tab only.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "select_tab",
+      "description": "Bring one tab from list_tabs to the front and act on it from now on. Take a fresh snapshot there before using element indices.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "tabId": {
+            "description": "A tab id from list_tabs.",
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tabId"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "close_tab",
+      "description": "Close one tab Octo opened in this turn. The page the person chose, their other tabs and tabs they kept are never closed.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "tabId": {
+            "description": "A tab id from list_tabs.",
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tabId"
+        ],
+        "type": "object"
+      }
+    }
+  ]
+}
