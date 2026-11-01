@@ -505,7 +505,10 @@ const controlsFor = (targetId) => {
   // and the form's submit button. "sign-in-page-drawn" is the same page once
   // its script drew the rest of it: a passkey button under the form.
   // "sign-in-page-changed" has a one-time code field where the password was,
-  // and "sign-in-page-sent-elsewhere" a form that now sends to another site.
+  // "sign-in-page-relabelled" a phone number field where the email was, of
+  // the same kind, "sign-in-page-sent-elsewhere" a form that now sends to
+  // another site, and "sign-in-page-moved" the same form at another address
+  // of the site.
   if (mode === "sign-in-page" || mode.startsWith("sign-in-page-")) {
     const field = (label, inputType, autocomplete, policy = {}) => ({
       ...descriptionFor(targetId), idAttribute: label, ariaLabel: label, labels: label, placeholder: "",
@@ -516,7 +519,7 @@ const controlsFor = (targetId) => {
         formPasswordCount: 1, formFieldCount: 2, ...policy },
     });
     return [
-      field("Email", "email", "username", { signInIdentifier: true }),
+      field(mode === "sign-in-page-relabelled" ? "Phone number" : "Email", "email", "username", { signInIdentifier: true }),
       mode === "sign-in-page-changed"
         ? field("One-time code", "text", "one-time-code")
         : field("Password", "password", "current-password"),
@@ -678,6 +681,8 @@ const makePage = (targetId, opened = null) => {
               ? "chrome://settings/"
               : mode === "link-only-page"
                 ? "https://www.booking.com/hotel/fixture.html"
+              : mode === "sign-in-page-moved"
+                ? "https://example.test/login/verify"
               : targetId === "decoy-target" && !decoyLooksIdentical
                 ? "https://decoy.example.test/"
                 : "https://example.test/";
@@ -5329,8 +5334,9 @@ fn a_sign_in_page_names_its_fields_and_says_to_pause_on_them() {
 /// page changed; take a fresh snapshot before requesting human input": it
 /// checked every control on the page. It checks only the fields it highlights
 /// now, each at its index with the same label and kind, so the turn pauses on
-/// both. A field that changed still fails the pause, and every step's own
-/// check of the whole page stays.
+/// both. A field that changed still fails the pause (its kind, or its label
+/// alone), as does a form that now sends elsewhere or the same form at another
+/// address of the site, and every step's own check of the whole page stays.
 #[test]
 fn a_sign_in_page_that_draws_more_controls_after_it_loads_still_pauses_on_its_fields() {
     let fixture = EmbeddedControllerFixture::new();
@@ -5362,9 +5368,15 @@ fn a_sign_in_page_that_draws_more_controls_after_it_loads_still_pauses_on_its_fi
     );
 
     // A field it would highlight changed (a one-time code where the password
-    // was), or its form now sends elsewhere: nothing is highlighted, and the
-    // turn takes a fresh snapshot.
-    for mode in ["sign-in-page-changed", "sign-in-page-sent-elsewhere"] {
+    // was), or only its label did (a phone number where the email was), its
+    // form now sends elsewhere, or the same form is at another address of the
+    // site: nothing is highlighted, and the turn takes a fresh snapshot.
+    for mode in [
+        "sign-in-page-changed",
+        "sign-in-page-relabelled",
+        "sign-in-page-sent-elsewhere",
+        "sign-in-page-moved",
+    ] {
         let changed = fixture.call(mode, "POST", "/v1/request-human-input", Some(&pause));
         let error = failure_of(&changed);
         assert!(
