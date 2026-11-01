@@ -22,6 +22,8 @@ pub mod jobs;
 pub mod local_browser;
 pub mod loopback_proxy;
 pub mod mcp_process_groups;
+#[cfg(test)]
+mod mcp_test_wire;
 mod model_environment;
 pub mod origin;
 pub mod personal_browser;

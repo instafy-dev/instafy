@@ -1,0 +1,90 @@
+{
+  "tools": [
+    {
+      "name": "observe",
+      "description": "Open one public HTTP(S) page in a fresh read-only headless browser, return bounded CSS/text observations, and optionally save a PNG screenshot under artifacts/browser/.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "observations": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "computedStyles": {
+                  "items": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "maxItems": 16,
+                  "type": "array"
+                },
+                "name": {
+                  "maxLength": 80,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "selector": {
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "text": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "name",
+                "selector"
+              ],
+              "type": "object"
+            },
+            "maxItems": 24,
+            "minItems": 1,
+            "type": "array"
+          },
+          "screenshot": {
+            "additionalProperties": false,
+            "properties": {
+              "fullPage": {
+                "type": "boolean"
+              },
+              "path": {
+                "maxLength": 240,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          },
+          "timeoutMs": {
+            "maximum": 60000,
+            "minimum": 1000,
+            "type": "integer"
+          },
+          "url": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "waitUntil": {
+            "enum": [
+              "domcontentloaded",
+              "load",
+              "networkidle"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "observations"
+        ],
+        "type": "object"
+      }
+    }
+  ]
+}

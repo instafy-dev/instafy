@@ -1798,7 +1798,7 @@ dependencies = [
  "codex-utils-path-uri",
  "codex-utils-redacted-string",
  "inventory",
- "rmcp 3.2.0",
+ "rmcp",
  "serde",
  "serde_json",
  "serde_with",
@@ -2163,7 +2163,7 @@ dependencies = [
  "openssl-sys",
  "rand 0.9.3",
  "regex-lite",
- "rmcp 3.2.0",
+ "rmcp",
  "serde",
  "serde_json",
  "sha1 0.10.6",
@@ -2669,7 +2669,7 @@ dependencies = [
  "futures",
  "lru",
  "regex-lite",
- "rmcp 3.2.0",
+ "rmcp",
  "serde",
  "serde_json",
  "sha1 0.10.6",
@@ -2972,7 +2972,7 @@ dependencies = [
  "libc",
  "memchr",
  "oauth2",
- "rmcp 3.2.0",
+ "rmcp",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3229,7 +3229,7 @@ dependencies = [
  "codex-utils-path-uri",
  "codex-utils-string",
  "jsonptr",
- "rmcp 3.2.0",
+ "rmcp",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -9968,26 +9968,6 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "1.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d1f571c72940a19d9532fe52dbea8bc9912bf1d766c2970bb824056b86f3f59"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "pastey",
- "pin-project-lite",
- "schemars 1.2.1",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "rmcp"
 version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42b6914fac0be956fe704a38239c3f44a9f841d1b06a5713d2f638065593f5b5"
@@ -10073,7 +10053,7 @@ dependencies = [
  "parking_lot",
  "reqwest 0.11.27",
  "ring",
- "rmcp 1.8.0",
+ "rmcp",
  "runtime-contracts",
  "serde",
  "serde_json",
