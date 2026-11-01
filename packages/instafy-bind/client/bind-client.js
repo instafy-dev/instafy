@@ -40,7 +40,7 @@
  * First draw: a page that draws its first view after it loads (it fetches its data first, as the starters' site.start
  * does) calls instafyBind.drawsLater() as it starts, and instafyBind.drawn() once that view is drawn (or it shows why
  * it cannot draw). The layout's ack then lists "ready", and "ready" goes to the host once drawn: Studio goes on
- * saying it is opening the site until then, instead of showing an empty page.
+ * saying it is opening the site until then, with the page out of sight under that line.
  *
  * The viewer token arrives once as #k=<token>. The client trades it for an HttpOnly cookie (POST __bind/session),
  * removes it from the address bar and never exposes it to other scripts.

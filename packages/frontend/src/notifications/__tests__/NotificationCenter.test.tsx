@@ -307,7 +307,7 @@ describe("notification center", () => {
     }
   });
 
-  // Local drive, Oct 31: a reply in another chat toasted "There is a new reply
+  // Local test, Oct 31: a reply in another chat toasted "There is a new reply
   // in your conversation." without saying which chat.
   it("names the chat a reply's toast is about when Studio knows it", async () => {
     const PROJECT = "55555555-5555-4555-8555-555555555555";

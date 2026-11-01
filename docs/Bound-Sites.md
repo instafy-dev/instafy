@@ -240,7 +240,8 @@ frame at an origin the binder lists (§4 Frames) that sent a `layout`. Studio's 
 - **First draw.** A page that draws its first view after it loads (it fetches its data first) calls
   `instafyBind.drawsLater()` as it starts and `instafyBind.drawn()` once that view, or the notice saying why it cannot
   draw, is on the page. Its acknowledgement of the layout then lists `ready`, and `ready` goes to the host once, so
-  Studio's pane goes on saying it is opening the site until then instead of showing an empty page. The starters'
+  Studio's pane goes on saying it is opening the site until then, with the page out of sight under that line, instead
+  of showing what the page shows meanwhile (the starters' placeholder rows and "Loading…"). The starters'
   `site.start()` calls both.
 
 ## 3. `bound.json`

@@ -166,7 +166,8 @@ pub(super) fn changed_paths(files: &[CodexFileDescriptor]) -> Vec<String> {
 /// after the site was last pictured. A changed path is a site's when no other
 /// site of the space has a folder inside that site's that holds it: a site
 /// served from the workspace itself (a server started there that serves a
-/// folder of it) is not pictured again for a change to another site.
+/// folder of it) is not pictured again for a change in the folder of another
+/// open preview, though any other change in the workspace still counts for it.
 pub(super) fn stale_pictures(
     state: &JsonValue,
     project_id: &Uuid,

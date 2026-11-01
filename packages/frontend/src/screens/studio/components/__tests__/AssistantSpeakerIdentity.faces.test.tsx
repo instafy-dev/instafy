@@ -33,7 +33,7 @@ describe("assistant speaker identity faces", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  // Local drive, Oct 31: on a phone the speaker read "octo" above replies
+  // Local test, Oct 31: on a phone the speaker read "octo" above replies
   // that say "Octo", as Studio names it everywhere else.
   it.each([
     ["Octo", "octo", "Octo"],

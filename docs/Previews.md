@@ -107,7 +107,8 @@ A member can **Present** a site whose page says it can share its view, and the o
   picture comes from (`instafy preview check --desktop`), from the workspace: at most three previews and 30 s in all,
   a check starting only with 15 s of that left, none once the turn is stopped or its changes could not be saved. A
   file in the folder of another of the space's previews, inside a preview's own folder, is that other site's change
-  only: a comparison served from the workspace itself is not pictured again for a turn that built another site. The
+  only: a comparison served from the workspace itself is not pictured again for a turn that changed only another open
+  preview's site. Any other file the turn changed still counts for it, since its folder is the whole workspace. The
   reply does not wait for it: the check goes on after the reply is posted, and the card's picture changes in place
   once it is sent (`preview.thumbnail_updated`). The check keeps the picture in a file (`--picture-to <file>`, for
   the runtime only, with the preview's id, the page's description and when the page began loading in
@@ -482,7 +483,9 @@ A bound site says it through the bind client: `instafyBind.drawsLater()` as the 
 its first view is drawn. The starters' `site.start()` calls both, the second once its data is drawn (or the notice that
 it did not load), so a comparison's pane says it is opening the site while the page fetches its data.
 
-Until then the pane goes on saying it is opening the site ("Loading…" after Reload), for at most 15 s. It waits once
+Until then the pane goes on saying it is opening the site ("Loading…" after Reload), for at most 15 s, and a page that
+listed `ready` stays out of sight under that line: what it shows meanwhile, such as a starter's placeholder rows and
+its own "Loading…", would be a second loading signal. It waits once
 each time it loads the frame fresh (the press, Reload): a `ready` said before the frame's load event counts, and a page
 that moves on inside the frame after that shows as it loads. Its line stays through the frame's load until the page
 answers the layout sent then, so it does not go off for that moment: a page that does not list `ready` is shown at that

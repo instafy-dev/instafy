@@ -49,7 +49,7 @@ type SessionState = "opening" | "ready" | "ended" | "busy" | SitePreviewProblem;
 
 /**
  * What the pane says from the record, as the card does (a tunnel not active
- * yet, or one the broker could not probe, reads Checking and the frame stays,
+ * yet, or one the broker could not probe, is checking and the frame stays,
  * so the person sees for themselves), or why it could not ask.
  */
 type HealthState = SitePreviewShownState | Exclude<SitePreviewProblem, "unavailable">;
@@ -99,8 +99,11 @@ function problemText(state: SitePreviewPaneState): ProblemText | null {
   return (PROBLEM_TEXT as Partial<Record<SitePreviewPaneState, ProblemText>>)[state] ?? null;
 }
 
-/** The pill's words while the site is on its way or there; in place of the site, the pane's message says the rest. */
-const PILL_DETAIL: Partial<Record<SitePreviewPaneState, string>> = { opening: "Opening", starting: "Starting", checking: "Checking", live: "Live" };
+/**
+ * The pill's words while the site is on its way or there; in place of the site, the pane's message says the rest, and
+ * while it is checked, its page or the pane's line does.
+ */
+const PILL_DETAIL: Partial<Record<SitePreviewPaneState, string>> = { opening: "Opening", starting: "Starting", live: "Live" };
 
 /**
  * One running site in a conversation's side pane, inside upstream's browser bar.
@@ -458,6 +461,10 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
   // has drawn (useSiteHost's `drawing`): the pane goes on saying it is opening
   // the site meanwhile. Any other page shows once it has loaded.
   const drawing = frameShown && !frameLoading && host.drawing;
+  // Until then that page stays under the line, out of sight: the placeholder
+  // rows and "Loading…" a starter page shows while it fetches its data would
+  // be a second loading signal. The line takes the clicks meant for it.
+  const pageCovered = frameShown && host.undrawn;
   // A card that started the site says "Starting…" until a pane shows its
   // page: this one while it holds the page, or none once it closes.
   const pageShown = frameShown && !frameLoading;
@@ -493,11 +500,11 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
         status={<>
           <LocationBarControl site={host.location.site} status={host.location.status} />
           <SitePreviewFollowControls follow={follow} supportsView={host.supportsView && frameOnScreen} />
-          {/* While opening or starting, the pane's own line is the one loading signal on screen; while the site is
-              being checked, its page or that line is. Nothing is starting then, so no pill says "Starting…". */}
-          {problemShown ? null : (
+          {/* While opening or starting, the pane's own line is the one loading signal on screen. While the site is
+              being checked, its page or that line is, and nothing is starting: no pill, not even for screen readers. */}
+          {problemShown || shown === "checking" ? null : (
             <BrowserStatusPill state={shown === "live" ? "ready" : "starting"} detail={PILL_DETAIL[shown] ?? null} testId="site-preview-status"
-              startingShownInView={shown === "opening" || shown === "starting" || shown === "checking"} />
+              startingShownInView={shown === "opening" || shown === "starting"} />
           )}
         </>}
         actions={
@@ -535,7 +542,8 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
         ) : followNote ? <FollowToast text={followNote} />
           : follow.locationLeftOut && follow.state.role === "presenting" ? <FollowToast text="📍 Your location is left out" testId="follow-location-toast" /> : null}
         {shown === "opening" || shown === "starting" || frameLoading || drawing ? (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 text-sm text-slate-500 dark:text-slate-400" data-testid="site-preview-progress">
+          <div className={`absolute inset-0 flex items-center justify-center gap-2 text-sm text-slate-500 dark:text-slate-400 ${
+            pageCovered ? "bg-white dark:bg-[var(--color-studio-dark-canvas)]" : "pointer-events-none"}`} data-testid="site-preview-progress">
             <Spinner aria-hidden="true" tone="slate" size="sm" />{" "}
             {/* One line from the press to the site's first page, never a blank pane in between. */}
             {shown === "starting" ? `Starting ${title}…`

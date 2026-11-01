@@ -132,6 +132,8 @@ describe("a chat's Browser view and another chat's page", () => {
     compact?: boolean;
     /** A space this page has not connected a browser view in yet (after a reload). */
     project?: string;
+    /** A browser turn of this chat on its way, to the site its card named. */
+    arrivalSite?: string;
   }) {
     const viewer = options.viewer ?? "cdp-screencast";
     await act(async () => root.render(<BrowserSessionModal isOpen transportActive={options.shown ?? true}
@@ -141,6 +143,7 @@ describe("a chat's Browser view and another chat's page", () => {
       sharedBrowserViewerKind={viewer} sharedBrowserAvailableViewerKinds={[viewer]}
       conversationId="chat-lello" chatPageIds={options.chatPageIds ?? [CHAT_TAB]}
       anotherChatTurn={options.anotherChatTurn ?? false}
+      agentArrival={options.arrivalSite ? { site: options.arrivalSite } : null}
       sharedBrowserChrome={{ pages: options.pages, resolved: true, pendingAction: null, error: null, compact: options.compact,
         onNavigate: noop, onBack: noop, onForward: noop, onReload: noop, onFocusPage: noop, onClearError: noop }} />));
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
@@ -373,8 +376,8 @@ describe("a chat's Browser view and another chat's page", () => {
   // "Reconnecting…" over its first picture since that turn, whose first frame
   // took 2 s: the space's browser had connected in this Studio before, so the
   // view counted itself as open. It had drawn no picture of the chat's page
-  // since the turn, so there was nothing to reconnect.
-  it("says nothing of reconnecting while the chat's first picture after another chat's turn loads, in a browser that connected before", async () => {
+  // since the turn, so there was nothing to reconnect: it is opening it.
+  it("says it is opening, never reconnecting, while the chat's first picture after another chat's turn loads, in a browser that connected before", async () => {
     const space = "ffffffff-ffff-4fff-8fff-ffffffffffff";
     await render({ pages: [own(), other()], project: space });
     await drawFrame(pictures()[0]!.socket);
@@ -386,18 +389,21 @@ describe("a chat's Browser view and another chat's page", () => {
     await render({ pages: [own(), other()], project: space });
     await act(async () => { await vi.advanceTimersByTimeAsync(RECONNECTING_GRACE_MS + 500); });
     expect(reconnecting()).toBeNull();
+    expect(text()).toContain("Opening Instafy's browser");
     await drawFrame(pictures()[0]!.socket);
     expect(pictureShown()).toBe(true);
+    expect(text()).not.toContain("Opening Instafy's browser");
     // A picture of the chat's page it drew that goes is a reconnect.
     await closeFromBrowser(pictures()[0]!.socket);
     await act(async () => { await vi.advanceTimersByTimeAsync(RECONNECTING_GRACE_MS + 100); });
     expect(reconnecting()).not.toBeNull();
+    expect(text()).not.toContain("Opening Instafy's browser");
   });
 
   // The same when the chat's own tab stayed in front through another chat's
   // turn (one that ended before it brought its own tab forward): the picture
   // the view closed for that turn is not one it holds.
-  it("says nothing of reconnecting after another chat's turn that left the chat's tab in front", async () => {
+  it("says it is opening, never reconnecting, after another chat's turn that left the chat's tab in front", async () => {
     const space = "abababab-abab-4bab-8bab-abababababab";
     await render({ pages: [own(), other()], project: space });
     await drawFrame(pictures()[0]!.socket);
@@ -407,7 +413,65 @@ describe("a chat's Browser view and another chat's page", () => {
     await render({ pages: [own(), other()], project: space });
     await act(async () => { await vi.advanceTimersByTimeAsync(RECONNECTING_GRACE_MS + 500); });
     expect(reconnecting()).toBeNull();
+    expect(text()).toContain("Opening Instafy's browser");
     await drawFrame(pictures()[0]!.socket);
     expect(pictureShown()).toBe(true);
+    expect(text()).not.toContain("Opening Instafy's browser");
+  });
+
+  // Review: when that first picture failed again and again, the stage stayed
+  // blank with nothing said until the view gave up, 20 s later.
+  it("says it is opening while the chat's first picture after another chat's turn keeps failing, until it gives up", async () => {
+    const space = "12121212-1212-4212-8212-121212121212";
+    await render({ pages: [own(), other()], project: space });
+    await drawFrame(pictures()[0]!.socket);
+    await render({ pages: [own(false), other(true)], anotherChatTurn: true, project: space });
+    await render({ pages: [own(), other()], project: space });
+    const said: string[] = [];
+    for (let second = 1; second <= 25; second += 1) {
+      // Every picture the view asks for closes before its first frame.
+      for (const picture of pictures()) await closeFromBrowser(picture.socket);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      said.push(reconnecting() ? "reconnecting" : text().includes("Opening Instafy's browser") ? "opening"
+        : document.querySelector('[data-testid="browser-session-error-notice"]') ? "error" : "nothing");
+    }
+    const gaveUp = said.indexOf("error");
+    expect(gaveUp, said.join(" ")).toBeGreaterThan(1);
+    // Within the grace period nothing; then that it is opening, up to the end.
+    expect(said.slice(0, gaveUp), said.join(" ")).toEqual(["nothing", ...Array(gaveUp - 1).fill("opening")]);
+  });
+
+  // A still of the chat's page, kept from before another chat's turn, is a
+  // picture the view drew: over it, the wait is a reconnect.
+  it("says it is reconnecting over a still of the chat's page kept through another chat's turn", async () => {
+    const space = "56565656-5656-4565-8565-565656565656";
+    await render({ pages: [own(), other()], viewer: "webrtc", project: space });
+    await act(async () => mocks.webRtcConnected!());
+    await render({ pages: [own(), other()], viewer: "webrtc", shown: false, project: space });
+    await render({ pages: [own(), other()], viewer: "webrtc", shown: false, anotherChatTurn: true, project: space });
+    await render({ pages: [own(), other()], viewer: "webrtc", project: space });
+    expect(still()).not.toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(RECONNECTING_GRACE_MS + 500); });
+    expect(reconnecting()).not.toBeNull();
+    expect(text()).not.toContain("Opening Instafy's browser");
+    await act(async () => mocks.webRtcConnected!());
+    expect(still()).toBeNull();
+    expect(reconnecting()).toBeNull();
+  });
+
+  // Over the blank tab a turn of the chat starts on, the stage already says
+  // where Octo is going: one line, not that one and the opening line too.
+  it("says only where Octo is going while the first picture of the blank tab a turn of the chat starts on loads", async () => {
+    const space = "34343434-3434-4434-8434-343434343434";
+    const blank = (isActive = true) => tab("PAGE-BLANK", "about:blank", isActive);
+    const chatPageIds = [CHAT_TAB, "PAGE-BLANK"];
+    await render({ pages: [own(), other(), blank(false)], chatPageIds, project: space });
+    await drawFrame(pictures()[0]!.socket);
+    await render({ pages: [own(false), other(), blank()], chatPageIds, project: space, arrivalSite: "visitporto.travel" });
+    expect(pictures().map((picture) => picture.pageId)).toEqual(["PAGE-BLANK"]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(RECONNECTING_GRACE_MS + 500); });
+    expect(note()).toBe("Octo is opening visitporto.travel…");
+    expect(reconnecting()).toBeNull();
+    expect(text()).not.toContain("Opening Instafy's browser");
   });
 });

@@ -251,8 +251,8 @@ describe("HomePanel activity states", () => {
     expect(query("home-continue-working")).toBeNull();
   });
 
-  // Local drive, Oct 31: Continue working read "Personal team · local drive 9"
-  // beside Recent activity's "Personal · local drive 9", for the same team.
+  // Local test, Oct 31: Continue working read "Personal team · My space"
+  // beside Recent activity's "Personal · My space", for the same team.
   it("names the personal team as every other row does under Continue working", async () => {
     mocks.organizations.mockResolvedValue([{ id: "team-personal", name: "Personal team", slug: "user-1" }]);
     mocks.projects = [{ id: "project-personal", name: "My space", orgId: "team-personal", orgName: "Personal team" }];
