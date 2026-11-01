@@ -1723,7 +1723,7 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "research ending in a page goes to the browser from the first message",
             ),
             (
-                "A request to make one with no site to use first (\"on a map\", \"as a page\") is `direct`.",
+                "A request to make one with no site to use first (\"on a map\", \"put this on a page\") is `direct`.",
                 "a request to make something with no site to use first stays direct",
             ),
         ] {

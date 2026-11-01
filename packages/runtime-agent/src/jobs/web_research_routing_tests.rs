@@ -854,7 +854,7 @@ fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_b
         "says not to use the browser",
         "attachments",
         "or it carries on browser work this chat started, whether or not that found the answer.",
-        "Research whose answer is a reply (facts, opening hours, reviews) stays `direct` when the message does not name the browser, unless it carries on this chat's browser work:",
+        "Research whose answer is a reply (facts, a price, opening hours, reviews) stays `direct` when the message does not name the browser, unless it carries on this chat's browser work:",
     ] {
         assert!(section.contains(words), "{words}");
     }
@@ -899,7 +899,7 @@ fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() 
         "- `browser_then_build`: the same, and Octo then makes or changes something in this space \
          (a page, a map, a table). So is research whose answer ends in a page (a comparison, \
          prices, a route), from the first message. A request to make one with no site to use \
-         first (\"on a map\", \"as a page\") is `direct`."
+         first (\"on a map\", \"put this on a page\") is `direct`."
     );
     let reply = section
         .lines()

@@ -1145,10 +1145,10 @@ when Octo then makes or changes something in the space (a page, a map, a
 table); the browser skill's last section, "Routing preflight", says when, and
 a space whose copy of the skill lacks it keeps today's routes. Research whose
 answer ends in a page (a comparison, prices, a route) is `browser_then_build`
-from the first message too, while research answered in a reply stays with
-Octo, whose turn reads public pages itself. A request to make something with
-no site to use first ("on a map", "as a page") stays with Octo: a browser turn
-cannot make it. A message that names the browser still stays with Octo
+from the first message too, while research answered in a reply (facts, a
+price, opening hours, reviews) stays with Octo, whose turn reads public pages
+itself. A request to make something with no site to use first ("on a map",
+"put this on a page") stays with Octo: a browser turn cannot make it. A message that names the browser still stays with Octo
 when the browser turn could not do it alone: it sees only the person's words
 and the chat's earlier browser turns, so a message that needs what this space
 or another chat holds, a site that runs in this space, or a message that says
