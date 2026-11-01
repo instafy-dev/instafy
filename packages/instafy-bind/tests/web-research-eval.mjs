@@ -176,7 +176,9 @@ export async function gradeAnswer(answer, { web, keyFacts = [], ask = "" }) {
   ]);
   check("prices_link_out", items.filter((item) => item.price && web.siteOf(item.url || "")?.kind !== "official")
     .map((item) => `${item.name}: a price links to ${item.url || "nothing"}, not the seller's own page`));
-  check("not_read_listed", stopped.filter((f) => !sentences.some((s) => /not read/i.test(s) && s.includes(hostOf(f.url))))
+  // Listed by the page that stopped (a site's home page by its host), never by its site alone for one of its pages.
+  const pageNamed = (url) => { const at = new URL(url); return `${at.host}${at.pathname.replace(/\/+$/, "")}`; };
+  check("not_read_listed", stopped.filter((f) => !sentences.some((s) => /not read/i.test(s) && s.includes(pageNamed(f.url))))
     .map((f) => `${f.url} (${f.stopped}) is not listed as not read`));
   const listingText = Object.values(SITES).filter((site) => site.kind === "aggregator")
     .flatMap((site) => Object.values(site.pages).map((p) => words(p.body.replace(/<[^>]+>/g, " "))));
@@ -292,7 +294,7 @@ export const CASES = [
     plan: [["hotel", "/rooms/double"], ["hotel", "/members"]],
     facts: { "hotel/rooms/double": ["Double room from 129 EUR per night, breakfast included."] },
     keyFacts: [{ name: "room price", pattern: /\d+ EUR/ }],
-    reply: "A double room at the Harbour Grand Hotel is from 129 EUR per night with breakfast, seen {date} on the hotel's own page (checked {date} on {host:hotel}). Member rates need a sign-in, so they are not read: {host:hotel} (login). Book on the hotel's site.",
+    reply: "A double room at the Harbour Grand Hotel is from 129 EUR per night with breakfast, seen {date} on the hotel's own page (checked {date} on {host:hotel}). Member rates need a sign-in, so they are not read: {url:hotel/members} (login). Book on the hotel's site.",
     items: [{ name: "Harbour Grand Hotel, double room", url: "{url:hotel/rooms/double}", price: { amount: 129, currency: "EUR", seen: "{today}" } }],
   },
   // 29 Oct drive 4, in a browser turn: a sight's opening hours on the tourism office's site. The turn starts on the

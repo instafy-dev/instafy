@@ -76,6 +76,8 @@ const BROKEN = {
     }, ["key_facts_supported"]],
     ["stores a price without the date it was seen", (a) => { delete a.items[0].price.seen; return a; }, ["prices_seen"]],
     ["links a price to an aggregator", (a, web) => { a.items[0].url = web.url("deals", "/harbour-grand"); return a; }, ["prices_link_out"]],
+    // One page stopped (the members' page asks for a sign-in), not the site: naming only the site blames all of it.
+    ["lists the page that stopped by its site alone", (a, web) => ({ ...a, reply: a.reply.replace(web.url("hotel", "/members"), web.host("hotel")) }), ["not_read_listed"]],
   ],
   "sight-hours-site-search": [
     // The drive: a guessed address that says "Are you lost?", no use of the site's search, and no hours.
