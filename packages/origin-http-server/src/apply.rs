@@ -346,6 +346,12 @@ pub(crate) fn stage_archive<R: Read + Seek>(
             "archive exceeds entry count limit ({MAX_APPLY_ENTRY_COUNT})"
         )));
     }
+    // zip keeps only the last entry for a repeated name, so the member count below cannot see
+    // duplicates, and it reads local headers without comparing them to the central directory.
+    // Both have to be asked for.
+    archive
+        .validate_header_consistency()
+        .map_err(|error| OriginError::bad_request(format!("invalid workspace archive: {error}")))?;
 
     let selected_paths = validated_files
         .iter()
@@ -356,10 +362,11 @@ pub(crate) fn stage_archive<R: Read + Seek>(
         let zip_file = archive.by_index(index).map_err(|error| {
             OriginError::bad_request(format!("invalid workspace archive entry: {error}"))
         })?;
-        if selected_paths.contains(zip_file.name()) {
-            let count = archive_member_counts
-                .entry(zip_file.name().to_string())
-                .or_default();
+        let name = zip_file.name().map_err(|error| {
+            OriginError::bad_request(format!("invalid workspace archive entry: {error}"))
+        })?;
+        if selected_paths.contains(name.as_ref()) {
+            let count = archive_member_counts.entry(name.into_owned()).or_default();
             *count = count
                 .checked_add(1)
                 .ok_or_else(|| OriginError::bad_request("archive entry count overflow"))?;
@@ -2283,6 +2290,34 @@ mod tests {
         (staging, result)
     }
 
+    /// zip will not write a repeated name or a local header that disagrees with the central
+    /// directory, so tests write a same-length stand-in and patch it: in both of its places,
+    /// or only in the local header, which comes first.
+    fn patch_member_name(
+        archive: &[u8],
+        from: &[u8],
+        to: &[u8],
+        local_header_only: bool,
+    ) -> Vec<u8> {
+        assert_eq!(from.len(), to.len(), "a patched name must keep its length");
+        let offsets: Vec<usize> = archive
+            .windows(from.len())
+            .enumerate()
+            .filter_map(|(offset, window)| (window == from).then_some(offset))
+            .collect();
+        assert_eq!(
+            offsets.len(),
+            2,
+            "{} must appear in one local header and the central directory",
+            String::from_utf8_lossy(from)
+        );
+        let mut patched = archive.to_vec();
+        for offset in &offsets[..if local_header_only { 1 } else { 2 }] {
+            patched[*offset..*offset + to.len()].copy_from_slice(to);
+        }
+        patched
+    }
+
     #[cfg(unix)]
     #[test]
     fn staging_extracts_only_into_the_given_folder_with_sizes_and_exec_bits() {
@@ -2386,5 +2421,39 @@ mod tests {
         // A partly written file is all that remains, in the caller's
         // folder; the gateway removes the folder.
         assert!(std::fs::read_dir(staging.path()).unwrap().count() <= 1);
+    }
+
+    #[test]
+    fn staging_refuses_repeated_and_mismatched_member_names() {
+        let two = zip_archive(&[("a.txt", b"one"), ("b.txt", b"two")]);
+        let two_spellings = zip_archive(&[("\u{e9}.txt", b"one"), ("X.txt", b"two")]);
+        let one = zip_archive(&[("a.txt", b"one")]);
+        let cases = [
+            // The central directory names one path twice.
+            (
+                "a.txt",
+                patch_member_name(&two, b"b.txt", b"a.txt", false),
+                "duplicate file names",
+            ),
+            // A UTF-8 name and a CP437 one that both read as the manifest path.
+            (
+                "\u{e9}.txt",
+                patch_member_name(&two_spellings, b"X.txt", b"\x82.txt", false),
+                "duplicate manifest file",
+            ),
+            // The local header names a different file than the central directory.
+            (
+                "a.txt",
+                patch_member_name(&one, b"a.txt", b"z.txt", true),
+                "filename mismatch",
+            ),
+        ];
+        for (path, archive, expected) in cases {
+            let (staging, staged) = stage(&archive, entries(&[path]), &[], 1 << 20);
+            let error = staged.expect_err("an ambiguous archive must be refused");
+            assert!(matches!(error, OriginError::BadRequest(_)), "{error}");
+            assert!(error.to_string().contains(expected), "{error}");
+            assert_eq!(std::fs::read_dir(staging.path()).unwrap().count(), 0);
+        }
     }
 }
