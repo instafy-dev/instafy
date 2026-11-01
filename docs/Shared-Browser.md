@@ -1149,9 +1149,14 @@ runs in it or is starting it (see "How Studio opens it" below and
 A message that names Instafy's browser, or whose work happens on a website,
 goes to the browser from its first message. The routing step that runs before
 each of the person's messages may answer `browser`, or `browser_then_build`
-when Octo builds from what it finds; the browser skill's last section,
-"Routing preflight", says when, and a space whose copy of the skill lacks it
-keeps today's routes. A message that names the browser still stays with Octo
+when Octo then makes or changes something in the space (a page, a map, a
+table); the browser skill's last section, "Routing preflight", says when, and
+a space whose copy of the skill lacks it keeps today's routes. Research whose
+answer ends in a page (a comparison, prices, a route) is `browser_then_build`
+from the first message too, while research answered in a reply (facts, a
+price, opening hours, reviews) stays with Octo, whose turn reads public pages
+itself. A request to make something with no site to use first ("on a map",
+"put this on a page") stays with Octo: a browser turn cannot make it. A message that names the browser still stays with Octo
 when the browser turn could not do it alone: it sees only the person's words
 and the chat's earlier browser turns, so a message that needs what this space
 or another chat holds, a site that runs in this space, or a message that says
@@ -1666,10 +1671,13 @@ A follow-up typed in the chat keeps them too. A message from the chat
 composer is an ordinary message, also right after a browser turn: the routing
 step decides whether it goes to the browser, as for any message, and a message
 that carries on this chat's browser work ("Now find how to get there by
-metro", "keep going") goes there (the browser skill's "Routing preflight"). A
+metro", "keep going") goes there, whether or not that work found its answer
+(the browser skill's "Routing preflight"). A
 browser turn has only the browser's tools, so a message that asks Octo to build
-("Put the hours and the route on a small page I can share") goes to the
-building turn, which reads the chat's browser turns as page data. When the
+("Put the hours and the route on a small page I can share") is made by a
+building turn, right away or once the browser has done its part
+(`browser_then_build`), and that turn reads the chat's browser turns as page
+data. When the
 routing step sends the message to the browser and the conversation's newest
 run before that message is the person's own Shared Browser run on that
 browser, it succeeded less than ten minutes ago, its tab is still open and no
