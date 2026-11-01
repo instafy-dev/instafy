@@ -28,7 +28,7 @@ Public web addresses only: its safety policy blocks this space's own addresses (
 
 ## When to use this skill
 
-Use this skill whenever a web page would help, whether or not the person mentioned a browser: to look something up, check or verify a page, or walk them through a site's screens. Open the browser yourself, without asking in chat first. Follow the browser tools exposed for the current turn. When interactive tools are absent, use the Studio handoff below.
+Use this skill whenever a web page would help, whether or not the person mentioned a browser: to look something up, check or verify a page, or walk them through a site's screens. Open the browser yourself, without asking in chat first. When interactive tools are absent, use the Studio handoff below.
 
 ## Open or resume from Chat
 
@@ -94,8 +94,9 @@ For every reader, browser or not:
 - A page that fails (busy, blank, or an error page such as 504): open the
   place's own site now, in this turn. After that, another official
   source.
-- A sight, stop, opening hours or price comes from its own page (the venue's,
-  operator's or shop's), not a listing or a kiosk page: those only lead to it.
+- A sight, stop, opening hours, price or route comes from its own page (the
+  venue's, operator's or shop's; a route from the operator's journey planner,
+  its stations chosen), not a listing or a kiosk page: those only lead to it.
 - Anything not read on a page this turn (from memory or a search result) says
   "not checked" next to it.
 - Comparing: list the models a page you read names, and mark one only a search

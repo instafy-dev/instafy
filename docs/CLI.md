@@ -673,9 +673,10 @@ It loads `http://127.0.0.1:<port><path>` in a headless Chromium (or `http://[::1
 `localhost` answers), waits for the page to settle, and lists the page title, console errors, uncaught errors,
 failed requests and HTTP errors (the site's own are errors; other origins' are warnings) and a blank page (when the
 screenshot cannot be read, the report says the blank check is incomplete; on a page with no text that is an error). It writes
-`desktop.png` (1280×800) and `phone.png` (390×844) to `--out <dir>` (default: a new folder under the temp folder
-for each run, readable only by you; the report names the files). `--phone` loads only the phone size, `--desktop`
-only the desktop size, which the card's picture comes from.
+`desktop.png` (1280×800, the page in dark mode) and `phone.png` (390×844, in light mode) to `--out <dir>` (default: a
+new folder under the temp folder for each run, readable only by you; the report names the files and each size's
+mode), so one check shows both looks. `--phone` loads only the phone size, `--desktop` only the desktop size, which
+the card's picture comes from.
 `--framed` loads the site inside a frame on another origin instead, and then also reports a site that refuses to be
 framed (`X-Frame-Options` or CSP `frame-ancestors`).
 
@@ -804,8 +805,12 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   A stopped URL is never read again in the turn, even with `--fresh`, and the workspace cache keeps the stop for a
   day. The other scheme, a leading `www.`, a trailing slash or dot, and (for stops the site answered with) another
   query are the same URL. After a 429 or a bot check, nothing more is read from that site (its `www.` form included)
-  in the turn. Do not read a stopped URL another
-  way (another tool, address, user agent or browser): give the person the plain link and use a different source.
+  in the turn. A stop covers the URL asked for and each address it redirected to: do not read them another way
+  (another tool, user agent or browser, or a copy at another address), and give the person the plain link. The
+  `tell` says what is still open: the site's other pages (such as each product's own page, when a listing page
+  stopped), each checked on its own, and other sources; only other sources after a refused address or a stop of the
+  whole site (a link-only site, a 429 or bot check, or a robots.txt that refuses every page: one that cannot be read,
+  or whose rules keep any of the agents above out of every path, as `Disallow: /` does).
 - **Redaction.** The browsers' `redaction.js` (`packages/browser-action-policy`) masks keys and tokens in the text,
   title, links, addresses and structured data before anything is printed or cached. A page that shows a credential is
   withheld as `secret_screen`.

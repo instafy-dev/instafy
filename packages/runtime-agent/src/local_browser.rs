@@ -12,8 +12,8 @@ use rmcp::ErrorData as McpError;
 use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, JsonObject, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, JsonObject,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use tokio::process::Child;
@@ -403,20 +403,14 @@ impl ServerHandler for LocalBrowserMcpServer {
     ) -> impl std::future::Future<Output = std::result::Result<ListToolsResult, McpError>> + Send + '_
     {
         let tools = self.tools.clone();
-        async move {
-            Ok(ListToolsResult {
-                tools: (*tools).clone(),
-                next_cursor: None,
-                meta: None,
-            })
-        }
+        async move { Ok(ListToolsResult::with_all_items((*tools).clone())) }
     }
 
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> std::result::Result<CallToolResult, McpError> {
+    ) -> std::result::Result<CallToolResponse, McpError> {
         if request.name.as_ref() != "observe" {
             return Err(McpError::invalid_params(
                 "unknown owner-local browser tool",
@@ -426,18 +420,27 @@ impl ServerHandler for LocalBrowserMcpServer {
         let parsed = parse_observe_request(request.arguments)
             .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
         let _guard = self.execution_lock.lock().await;
-        match execute_observation(&self.config, &self.workspace, parsed).await {
-            Ok(payload) => {
-                let mut result = CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&payload).unwrap_or_default(),
-                )]);
-                result.structured_content = Some(payload);
-                Ok(result)
-            }
-            Err(error) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Owner-local browser observation failed: {error:#}"
-            ))])),
+        Ok(
+            observation_result(execute_observation(&self.config, &self.workspace, parsed).await)
+                .into(),
+        )
+    }
+}
+
+/// An observation's tool result: its payload as pretty JSON text beside the payload itself, or
+/// why the observation failed.
+fn observation_result(outcome: Result<JsonValue>) -> CallToolResult {
+    match outcome {
+        Ok(payload) => {
+            let mut result = CallToolResult::success(vec![ContentBlock::text(
+                serde_json::to_string_pretty(&payload).unwrap_or_default(),
+            )]);
+            result.structured_content = Some(payload);
+            result
         }
+        Err(error) => CallToolResult::error(vec![ContentBlock::text(format!(
+            "Owner-local browser observation failed: {error:#}"
+        ))]),
     }
 }
 
@@ -944,6 +947,7 @@ pub fn mcp_environment(config: &LocalBrowserConfig, workspace: &Path) -> HashMap
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp_test_wire::{McpWire, wire_result};
 
     fn write_executable(path: &Path) {
         std::fs::write(path, b"test executable").unwrap();
@@ -1212,5 +1216,107 @@ mod tests {
         let mut valid = PNG_SIGNATURE.to_vec();
         valid.extend_from_slice(b"bounded test payload");
         assert!(validate_png_bytes(&valid).is_ok());
+    }
+    /// A server whose observations can only fail: no browser program is at these paths.
+    fn server_without_a_browser(workspace: &Path) -> LocalBrowserMcpServer {
+        let missing = workspace.join("missing");
+        LocalBrowserMcpServer::new(
+            LocalBrowserConfig {
+                node_path: missing.join("node"),
+                playwright_path: missing.join("playwright"),
+                chromium_path: missing.join("chromium"),
+                egress_proxy_path: missing.join("egress-proxy"),
+            },
+            workspace.to_path_buf(),
+        )
+    }
+
+    #[tokio::test]
+    async fn mcp_wire_offers_only_observe_and_refuses_any_other_call() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut wire = McpWire::connect(server_without_a_browser(workspace.path())).await;
+        assert_eq!(
+            wire.initialized["result"],
+            json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "rmcp", "version": "3.2.0" },
+                "instructions": "Observe a public HTTP(S) page in a fresh owner-local headless browser. This capability is read-only and has no saved login state.",
+            }),
+            "{}",
+            wire.initialized
+        );
+        let listed = wire.request("tools/list", json!({})).await;
+        let tools: JsonValue = serde_json::from_str(include_str!(
+            "../tests/fixtures/mcp/local_browser_tools.json"
+        ))
+        .unwrap();
+        assert_eq!(listed["result"], tools, "{listed:#}");
+        for (name, arguments, message) in [
+            ("navigate", json!({}), "unknown owner-local browser tool"),
+            (
+                "observe",
+                json!({ "observations": [] }),
+                "observe requires a URL string",
+            ),
+        ] {
+            let answer = wire.call(name, arguments).await;
+            assert_eq!(
+                answer["error"],
+                json!({ "code": -32602, "message": message }),
+                "{answer}"
+            );
+            assert!(answer.get("result").is_none(), "{answer}");
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_wire_answers_an_observation_beside_its_payload_or_with_why_it_failed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut wire = McpWire::connect(server_without_a_browser(workspace.path())).await;
+        let failed = wire
+            .call(
+                "observe",
+                json!({
+                    "url": "https://example.com/",
+                    "observations": [{ "name": "heading", "selector": "h1", "text": true }],
+                }),
+            )
+            .await;
+        assert_eq!(
+            failed["result"],
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Owner-local browser observation failed: failed to launch the browser egress proxy: No such file or directory (os error 2)",
+                }],
+                "isError": true,
+            }),
+            "{failed}"
+        );
+
+        let payload = json!({
+            "url": "https://example.com/",
+            "title": "Example Domain",
+            "observations": [{ "name": "heading", "text": "Example Domain" }],
+        });
+        let text = r#"{
+  "observations": [
+    {
+      "name": "heading",
+      "text": "Example Domain"
+    }
+  ],
+  "title": "Example Domain",
+  "url": "https://example.com/"
+}"#;
+        assert_eq!(
+            wire_result(observation_result(Ok(payload.clone()))).await,
+            json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": payload,
+                "isError": false,
+            })
+        );
     }
 }

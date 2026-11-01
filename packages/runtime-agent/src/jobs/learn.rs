@@ -319,6 +319,8 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     include_str!("legacy/interactive-artifacts-v2.md"),
     // From before one `instafy preview open --start` picked the port, served the site and showed it.
     include_str!("legacy/interactive-artifacts-v3.md"),
+    // From before a page written by hand followed light and dark mode.
+    include_str!("legacy/interactive-artifacts-v4.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),
@@ -328,6 +330,8 @@ const LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES: &[&str] = &[
     // From before a lane read with the research skill and compared a product by its "Comparing items".
     include_str!("legacy/research-team-researcher-v1.md"),
     include_str!("legacy/research-team-researcher-v2.md"),
+    // From before a page robots.txt refuses left the site's other pages open, as its `tell` says.
+    include_str!("legacy/research-team-researcher-v3.md"),
 ];
 const SKILL_ROUTER_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -387,6 +391,8 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // From before a message that carries on the chat's browser work went to the browser even when
     // public pages answer it.
     include_str!("legacy/browser-automation-v20.md"),
+    // From before a route came from the operator's journey planner, its stations chosen.
+    include_str!("legacy/browser-automation-v21.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
@@ -424,6 +430,9 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     include_str!("legacy/web-research-v9.md"),
     // From before reviews came from a reviewer's home page and its links, never a guessed address.
     include_str!("legacy/web-research-v10.md"),
+    // From before a stop was listed by the page that stopped, not its site, and the turn went on
+    // as its `tell` says instead of to "a different source".
+    include_str!("legacy/web-research-v11.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

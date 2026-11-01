@@ -16,8 +16,8 @@ use rmcp::ErrorData as McpError;
 use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, JsonObject, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, JsonObject,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use serde_json::Map as JsonMap;
 use serde_json::Value as JsonValue;
@@ -2498,14 +2498,14 @@ fn terminal_consent_call_result_with_step(
 
 fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
     if code == "human_input_required" {
-        let mut result = CallToolResult::success(vec![Content::text(
+        let mut result = CallToolResult::success(vec![ContentBlock::text(
             "Human input is needed. End this turn now. The user will fill the highlighted fields directly after confirmed shutdown, then explicitly continue in a fresh browser turn. Never request or repeat their values.",
         )]);
         result.structured_content = Some(terminal_consent_signal(code));
         return result;
     }
     if code == BROWSER_UNAVAILABLE_CODE {
-        let mut result = CallToolResult::error(vec![Content::text(
+        let mut result = CallToolResult::error(vec![ContentBlock::text(
             "Instafy's browser closed or stopped responding on this space's machine. End this turn now: do not retry or call another browser tool. Say in one short sentence that the browser closed and that they can open it again and send a message to continue.",
         )]);
         result.structured_content = Some(terminal_consent_signal(code));
@@ -2514,13 +2514,13 @@ fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
     if code == "approval_timeout" {
         // Unanswered is not a denial, but it still ends the browser for this
         // turn, so prompts never chain while the person is away.
-        let mut result = CallToolResult::success(vec![Content::text(
+        let mut result = CallToolResult::success(vec![ContentBlock::text(
             "The person has not answered the browser's approval prompt yet, so the step was not performed. End this turn now: do not retry or call another browser tool. Say in one short sentence what you were waiting for their OK on. They will continue in a new message when they are ready.",
         )]);
         result.structured_content = Some(terminal_consent_signal(code));
         return result;
     }
-    let mut result = CallToolResult::error(vec![Content::text(format!(
+    let mut result = CallToolResult::error(vec![ContentBlock::text(format!(
         "Shared Browser consent is blocked for this run ({code}). Start a fresh browser run before requesting another browser action."
     ))]);
     result.structured_content = Some(terminal_consent_signal(code));
@@ -2659,20 +2659,14 @@ impl ServerHandler for SharedBrowserMcpServer {
     ) -> impl std::future::Future<Output = std::result::Result<ListToolsResult, McpError>> + Send + '_
     {
         let tools = self.tools.clone();
-        async move {
-            Ok(ListToolsResult {
-                tools: (*tools).clone(),
-                next_cursor: None,
-                meta: None,
-            })
-        }
+        async move { Ok(ListToolsResult::with_all_items((*tools).clone())) }
     }
 
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> std::result::Result<CallToolResult, McpError> {
+    ) -> std::result::Result<CallToolResponse, McpError> {
         let browser_request = mcp_tool_request(request.name.as_ref(), request.arguments)
             .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
         // rmcp may dispatch independent requests concurrently. The approval
@@ -2685,12 +2679,14 @@ impl ServerHandler for SharedBrowserMcpServer {
             .execute_with_failure_latch(&browser_request, || execute_request(&browser_request))
             .await
         {
-            Ok(payload) => Ok(successful_tool_result(payload)),
+            Ok(payload) => Ok(successful_tool_result(payload).into()),
             Err(SharedBrowserMcpExecutionFailure::TerminalConsent(code)) => {
                 let step = self.terminal_step.lock().await.take();
-                Ok(terminal_consent_call_result_with_step(code, step))
+                Ok(terminal_consent_call_result_with_step(code, step).into())
             }
-            Err(SharedBrowserMcpExecutionFailure::Other(error)) => Ok(failed_call_result(&error)),
+            Err(SharedBrowserMcpExecutionFailure::Other(error)) => {
+                Ok(failed_call_result(&error).into())
+            }
         }
     }
 }
@@ -2803,14 +2799,14 @@ fn network_failure(message: &str) -> Option<NetworkFailure> {
 fn failed_tool_result(message: &str) -> CallToolResult {
     match network_failure(message) {
         Some(failure) => network_failure_tool_result(&failure),
-        None => CallToolResult::error(vec![Content::text(format!(
+        None => CallToolResult::error(vec![ContentBlock::text(format!(
             "Shared Browser action failed: {message}"
         ))]),
     }
 }
 
 fn network_failure_tool_result(failure: &NetworkFailure) -> CallToolResult {
-    let mut result = CallToolResult::error(vec![Content::text(failure.reason)]);
+    let mut result = CallToolResult::error(vec![ContentBlock::text(failure.reason)]);
     result.structured_content = Some(json!({
         "error": {
             "reason": failure.reason,
@@ -2826,7 +2822,7 @@ fn network_failure_tool_result(failure: &NetworkFailure) -> CallToolResult {
 fn successful_tool_result(payload: JsonValue) -> CallToolResult {
     let text = serde_json::to_string(&payload)
         .unwrap_or_else(|_| "Shared Browser returned an unreadable result".to_string());
-    let mut result = CallToolResult::success(vec![Content::text(text)]);
+    let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
     result.structured_content = Some(payload);
     result
 }

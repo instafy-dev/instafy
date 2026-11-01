@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // The picture on a preview's card. `instafy preview open` takes one once the site is live: the site's own page at
-// 1280×800 in the runtime's headless Chromium, as a 640×400 JPEG, with the page's own `<meta name="description">`. The
-// page loads as an anonymous first visit (no person's session, cookies, location or browser profile) under the same
-// request rules as `instafy preview check`: the site's own loopback origin directly, other public addresses through
-// Instafy's gate and the image's egress proxy, never another local port, a private address or a link-only site, not
-// even through a redirect.
+// 1280×800 in dark mode (THUMBNAIL_COLOR_SCHEME, as `instafy preview check` takes it) in the runtime's headless
+// Chromium, as a 640×400 JPEG, with the page's own `<meta name="description">`. The page loads as an anonymous first
+// visit (no person's session, cookies, location or browser profile) under the same request rules as `instafy preview
+// check`: the site's own loopback origin directly, other public addresses through Instafy's gate and the image's
+// egress proxy, never another local port, a private address or a link-only site, not even through a redirect.
 //
 // Without a browser (a self-hosted machine without Chromium) the page's HTML is read from 127.0.0.1 and its `og:image`
 // is used when it is on the site's own origin and is a real JPEG, PNG or WebP; an image anywhere else is never fetched.
@@ -17,6 +17,7 @@ import http from "node:http";
 import {
   NoBrowserError,
   READY_MARK_WAIT_MS,
+  THUMBNAIL_COLOR_SCHEME,
   THUMBNAIL_HEIGHT,
   THUMBNAIL_WIDTH,
   applyRequestRules,
@@ -318,6 +319,7 @@ export async function captureSiteThumbnail(options: CaptureOptions): Promise<Thu
     const context = await launched.browser.newContext({
       viewport: { width: THUMBNAIL_WIDTH * 2, height: THUMBNAIL_HEIGHT * 2 },
       deviceScaleFactor: 1,
+      colorScheme: THUMBNAIL_COLOR_SCHEME,
       reducedMotion: "reduce",
       serviceWorkers: "block",
       acceptDownloads: false,

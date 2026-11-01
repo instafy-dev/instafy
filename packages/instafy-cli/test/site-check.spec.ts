@@ -86,6 +86,18 @@ const BROKEN = `<!doctype html><html><head><title>Broken</title></head><body><p>
 
 const BLANK = `<!doctype html><html><head><title>Nothing</title></head><body></body></html>`;
 
+// A page that follows the person's light or dark mode, and says which one it found in its title and description.
+const FOLLOWS_MODE = `<!doctype html><html><head><title>Visit notes</title><meta name="color-scheme" content="light dark">
+<meta name="description" content="Visit notes"><meta name="viewport" content="width=device-width">
+<style>body{margin:0;font:16px system-ui;background:#fbfaf7;color:#0f172a}
+@media (prefers-color-scheme: dark){body{background:#141414;color:#fbfaf7}}</style></head>
+<body><h1 style="padding:24px">Visit notes</h1><p>Open daily, 09:00 to 19:30.</p>
+<script>
+  const mode = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark mode' : 'light mode';
+  document.title = mode;
+  document.querySelector('meta[name="description"]').setAttribute('content', 'Visit notes in ' + mode);
+</script></body></html>`;
+
 // The browser cases drive this checkout's own Playwright, handed over the way the runtime image hands over its
 // trusted copy: as an absolute path in INSTAFY_SHARED_BROWSER_PLAYWRIGHT_PATH.
 const checkoutEngine = locateBrowserEngine({ env: {}, globalRoots: [], workspace: true }).engine;
@@ -593,6 +605,38 @@ describe.skipIf(!browserOk)("preview check: in a browser", () => {
     expect(uploads).toHaveLength(1);
     expect(fs.existsSync(path.join(outDir, "desktop.png"))).toBe(true);
     expect(fs.existsSync(path.join(outDir, "phone.png"))).toBe(false);
+  });
+
+  // A preview keeps one picture, which Studio shows in its dark theme too: a page that follows the person's mode is
+  // pictured dark. The desktop size, which the picture comes from, loads in dark mode and the phone size in light, so
+  // one check shows both looks.
+  it("loads the desktop size in dark mode and the phone size in light, and takes the card's picture in dark mode", { timeout: 90_000 }, async () => {
+    const port = await serve({ "/": { body: FOLLOWS_MODE } });
+    const out: string[] = [];
+    const pictures: Array<string | null> = [];
+    const code = await runPreviewCheckCli(
+      { port: String(port), out: path.join(tmp, "modes"), json: true },
+      {
+        out: (s: string) => out.push(s),
+        err: () => {},
+        env: browserEnv,
+        hasOpenPreview: () => true,
+        uploadThumbnail: async ({ description }) => {
+          pictures.push(description);
+          return { status: "uploaded" };
+        },
+      },
+    );
+    expect(code).toBe(CHECK_EXIT_OK);
+    const r = JSON.parse(out[0]!);
+    // Each size's title is the mode the page found itself in.
+    expect(r.viewports.map((v: { name: string; colorScheme: string; title: string }) => [v.name, v.colorScheme, v.title])).toEqual([
+      ["desktop", "dark", "dark mode"],
+      ["phone", "light", "light mode"],
+    ]);
+    expect(pictures).toEqual(["Visit notes in dark mode"]);
+    expect(formatSiteCheck(r)).toMatch(/✓ desktop 1280×800, dark mode: .*desktop\.png/);
+    expect(formatSiteCheck(r)).toMatch(/✓ phone 390×844, light mode: .*phone\.png/);
   });
 
   // A turn that ends after its own check tried, and failed, to picture the site is not checked again for nothing.

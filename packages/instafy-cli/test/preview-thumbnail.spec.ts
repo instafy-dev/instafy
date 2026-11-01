@@ -414,6 +414,51 @@ describe.skipIf(!browserOk)("with a browser: the site's own page", () => {
     expect(result).toMatchObject({ ok: false, status: "skipped", reason: expect.stringMatching(/^the page still said it was drawing after \d+ s$/) });
   });
 
+  /** A picture's average brightness, from 0 (black) to 1 (white), read by drawing it in this checkout's Chromium. */
+  async function brightness(jpeg: Buffer): Promise<number> {
+    const { browser } = await launchChromium(loadPlaywright(checkoutEngine!));
+    try {
+      const page = await browser.newPage();
+      return await page.evaluate(async (b64: string) => {
+        const img = new Image();
+        img.src = `data:image/jpeg;base64,${b64}`;
+        await img.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const g = canvas.getContext("2d")!;
+        g.drawImage(img, 0, 0);
+        const data = g.getImageData(0, 0, canvas.width, canvas.height).data;
+        let sum = 0;
+        for (let i = 0; i < data.length; i += 4) sum += (data[i]! + data[i + 1]! + data[i + 2]!) / 3;
+        return sum / (data.length / 4) / 255;
+      }, jpeg.toString("base64"));
+    } finally {
+      await browser.close();
+    }
+  }
+
+  // A preview keeps one picture, which Studio shows in its dark theme too: a page that follows the person's light or
+  // dark mode is pictured dark. A page with only a light look is pictured light, as it shows.
+  it("takes the picture in dark mode: a page that follows the person's mode is pictured dark, a light-only one light", { timeout: 120_000 }, async () => {
+    const page = (dark: boolean) => `<!doctype html><title>Visit notes</title><meta name="color-scheme" content="${dark ? "light dark" : "light"}">
+<meta name="description" content="Visit notes">
+<style>body{margin:0;font:16px system-ui;background:#fbfaf7;color:#0f172a}${dark ? "@media (prefers-color-scheme: dark){body{background:#141414;color:#fbfaf7}}" : ""}</style>
+<body><h1 style="padding:24px">Visit notes</h1><p>Open daily, 09:00 to 19:30.</p>
+<script>document.querySelector('meta[name="description"]').setAttribute('content',
+  'Visit notes in ' + (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark mode' : 'light mode'));</script></body>`;
+    const port = await serve({ "/": { body: page(true) }, "/light": { body: page(false) } });
+    const follows = await captureSiteThumbnail({ port, path: "/", env: browserEnv, budgetMs: 30_000 });
+    expect(follows.ok, JSON.stringify(follows)).toBe(true);
+    if (!("thumbnail" in follows)) return;
+    expect(follows.thumbnail.description).toBe("Visit notes in dark mode");
+    expect(await brightness(follows.thumbnail.image)).toBeLessThan(0.3);
+    const lightOnly = await captureSiteThumbnail({ port, path: "/light", env: browserEnv, budgetMs: 30_000 });
+    expect(lightOnly.ok, JSON.stringify(lightOnly)).toBe(true);
+    if (!("thumbnail" in lightOnly)) return;
+    expect(await brightness(lightOnly.thumbnail.image)).toBeGreaterThan(0.8);
+  });
+
   it(
     "capture blocks another loopback port, a private address and a link-only host, and loads a public one through the proxy",
     { timeout: 180_000 },

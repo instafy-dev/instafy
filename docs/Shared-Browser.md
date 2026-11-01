@@ -789,7 +789,8 @@ read, or the official site's home page, never a search engine or a guessed
 path; a missing page's own site search; a page that fails (busy, blank or an
 error page such as a 504) sends the turn to the place's own site at once, in the
 same turn, and then to another official source; facts from a place's
-own page, not a listing or a kiosk page; "not checked" on anything not read this
+own page, and a route from the operator's journey planner with its stations
+chosen, not a listing or a kiosk page; "not checked" on anything not read this
 turn; and a cookie banner's refusal, so the banner does not cover the page. A
 sign-in, a bot check, a paywall or a refused read ends that page, never the task:
 nothing a turn carries tells it to stop there, so neither a card's task nor the

@@ -342,7 +342,8 @@ export function webDirs(what: string, env: NodeJS.ProcessEnv, cwd: string): WebD
 // ---------------------------------------------------------------------------------------------------------------
 // Turn budget and stop memory
 
-export type StopRecord<Code extends string = string> = { code: Code; message: string; at: number };
+/** `wholeSite`: the stop covers every page of the site (its robots.txt refused the read), not just this address. */
+export type StopRecord<Code extends string = string> = { code: Code; message: string; at: number; wholeSite?: true };
 export type TurnState<Code extends string = string> = {
   v: 1;
   turn: string;

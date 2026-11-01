@@ -64,18 +64,34 @@ function ruleMatches(rule, p) {
   return re.test(normalizeRobotsPath(p));
 }
 
-/** Is `pathWithQuery` allowed for one agent? Longest matching rule wins; Allow wins a tie. */
-export function robotsAllows(groups, agent, pathWithQuery) {
+/** The rules one agent follows: the groups that name it, else the "*" groups. */
+function agentRules(groups, agent) {
   const a = agent.toLowerCase();
   const named = (g) => g.agents.some((x) => x !== "*" && (a === x || a.startsWith(x)));
-  let rules = groups.filter(named).flatMap((g) => g.rules);
-  if (!groups.some(named)) rules = groups.filter((g) => g.agents.includes("*")).flatMap((g) => g.rules);
+  if (groups.some(named)) return groups.filter(named).flatMap((g) => g.rules);
+  return groups.filter((g) => g.agents.includes("*")).flatMap((g) => g.rules);
+}
+
+/** Is `pathWithQuery` allowed for one agent? Longest matching rule wins; Allow wins a tie. */
+export function robotsAllows(groups, agent, pathWithQuery) {
   let best = null;
-  for (const r of rules) {
+  for (const r of agentRules(groups, agent)) {
     if (!ruleMatches(r.path, pathWithQuery)) continue;
     if (!best || r.path.length > best.path.length || (r.path.length === best.path.length && r.allow)) best = r;
   }
   return !best || best.allow;
+}
+
+/**
+ * Does robots.txt keep one agent out of every page of the site ("Disallow: /")? A Disallow with no "$" that matches
+ * "/" matches every path, and only an Allow at least as long could win over it somewhere.
+ */
+export function robotsRefusesAll(groups, agent) {
+  const rules = agentRules(groups, agent);
+  const everyPath = rules.filter((r) => !r.allow && !r.path.includes("$") && ruleMatches(r.path, "/"));
+  if (!everyPath.length) return false;
+  const longest = Math.max(...everyPath.map((r) => r.path.length));
+  return !rules.some((r) => r.allow && r.path.length >= longest);
 }
 
 /** The first agent (of "*" and the AI agents) that robots.txt keeps out of this path, or null. */

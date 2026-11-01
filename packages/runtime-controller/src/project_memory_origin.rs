@@ -929,7 +929,7 @@ pub(crate) mod test_support {
             let mut entry = archive.by_index(index).expect("zip entry");
             let mut content = String::new();
             entry.read_to_string(&mut content).expect("UTF-8 entry");
-            files.insert(entry.name().to_string(), content);
+            files.insert(entry.name().expect("zip entry name").into_owned(), content);
         }
         files
     }
