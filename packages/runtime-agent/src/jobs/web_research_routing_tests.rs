@@ -1101,7 +1101,10 @@ fn a_page_of_options_cites_only_pages_that_give_a_value_and_its_lede_only_what_t
         ),
     ] {
         assert!(flat(skill).contains(needle), "{needle}");
-        assert!(!flat(previous).contains(needle), "new in this version: {needle}");
+        assert!(
+            !flat(previous).contains(needle),
+            "new in this version: {needle}"
+        );
     }
     assert!(
         RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
