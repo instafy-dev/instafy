@@ -352,7 +352,8 @@ A turn Instafy starts by itself, not the person, costs nothing unless it does wh
 charged for. There are three:
 
 - a browser hand-back, which takes what a browser turn read back to the turn that is building a
-  page or a map ("Hand-back" in [Shared Browser](Shared-Browser.md));
+  page or a map, or takes the person's message there when the browser turn the routing step sent
+  it to opened no page and asked Octo to make it ("Hand-back" in [Shared Browser](Shared-Browser.md));
 - an automatic retry, which Studio sends once when a turn fails for a passing reason, a dropped
   reply or a short rate limit ([Chat activity](Chat-Activity.md));
 - a card's browser turn: the browser turn that carries on Octo's `request_browser` card with the

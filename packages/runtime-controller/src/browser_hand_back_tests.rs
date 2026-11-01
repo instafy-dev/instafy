@@ -11,9 +11,10 @@
 
 use super::*;
 use crate::browser_hand_back::{
-    HAND_BACK_CLAIM_KEY, HAND_BACK_KEY, HAND_BACK_NOTHING_READ_CODE, HAND_BACK_NOT_BUILDING_CODE,
-    HAND_BACK_PAUSED_CODE, HAND_BACK_SECOND_HOP_CODE, HAND_BACK_SUPERSEDED_CODE,
-    HAND_BACK_USED_CODE, LET_OCTO_CONTINUE_LINE, LET_OCTO_CONTINUE_PROMPT,
+    BUILD_REQUEST_NOTE_KEY, BUILD_REQUEST_RECORD_KEY, HAND_BACK_CLAIM_KEY, HAND_BACK_KEY,
+    HAND_BACK_NOTHING_READ_CODE, HAND_BACK_NOT_BUILDING_CODE, HAND_BACK_PAUSED_CODE,
+    HAND_BACK_SECOND_HOP_CODE, HAND_BACK_SUPERSEDED_CODE, HAND_BACK_USED_CODE,
+    LET_OCTO_CONTINUE_LINE, LET_OCTO_CONTINUE_PROMPT,
 };
 
 fn fixtures() -> serde_json::Value {
@@ -1484,6 +1485,37 @@ impl Chain {
         Ok(job)
     }
 
+    /// The runtime's Details note on a browser turn that opened no page and
+    /// asked Octo to make the person's message (runtime-agent
+    /// `browser_hand_back::build_request_note`).
+    async fn post_build_request(&self, job_id: &Uuid) -> anyhow::Result<()> {
+        let mut metadata = json!({ "kind": "agent_message" });
+        metadata[BUILD_REQUEST_NOTE_KEY] = json!({ "version": 1 });
+        self.post(
+            job_id,
+            "This needs no website: Octo makes it in the chat.",
+            "status",
+            metadata,
+        )
+        .await
+    }
+
+    /// The browser turn that carries on the routed card `routed` posted for
+    /// `words`, as Studio sends it.
+    async fn routed_browser_turn(&self, routed: &Uuid, words: &str) -> anyhow::Result<Uuid> {
+        let browser = self
+            .send(
+                &self.owner,
+                words,
+                json!({ "browserRequestOf": format!("job:{routed}") }),
+            )
+            .await
+            .map_err(|error| controller_error("browser turn", error))?;
+        let browser = self.job_of(&browser).await?;
+        self.make_browser_turn(&browser).await?;
+        Ok(browser)
+    }
+
     async fn assistant_messages_of(&self, job_id: &Uuid) -> anyhow::Result<Vec<String>> {
         Ok(self
             .pool
@@ -1585,6 +1617,86 @@ async fn a_routed_message_ends_with_its_card_and_its_browser_turn_is_the_cards(
                     String::new()
                 ]
             );
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A message the routing step sent straight to the browser asked Octo to make
+/// something, which a browser turn cannot do: its browser turn opened no page,
+/// posted no reply and ended with the runtime's build request note. The
+/// hand-back takes the message's words to the building turn as the person's
+/// request, with nothing of the browser turn, though the card does not
+/// continue building and no page was read; it is a hand-back as any other for
+/// billing. The names are the ones the runtime and Studio use.
+#[tokio::test]
+async fn a_message_the_browser_turn_could_not_make_goes_to_the_building_turn() -> anyhow::Result<()>
+{
+    with_chain("routed-build-request", |chain| {
+        Box::pin(async move {
+            let fixtures = fixtures();
+            assert_eq!(fixtures["buildRequestNoteKey"], BUILD_REQUEST_NOTE_KEY);
+            assert_eq!(fixtures["buildRequestRecordKey"], BUILD_REQUEST_RECORD_KEY);
+            let words = "Plan three days in the old town for a first visit, on a map.";
+            let routed = chain.routed_message(words, false).await?;
+            let browser = chain.routed_browser_turn(&routed, words).await?;
+            chain.post_build_request(&browser).await?;
+            chain.finish(&browser, Some(""), "succeeded").await?;
+            let response = chain
+                .hand_back(&chain.owner, &browser, json!({}))
+                .await
+                .map_err(|error| controller_error("hand-back", error))?;
+            let hand_back = chain.job_of(&response).await?;
+            let metadata = chain.payload_metadata(&hand_back).await?;
+            let record = &metadata[HAND_BACK_KEY];
+            assert_eq!(record["verified"], json!(true), "{record}");
+            assert_eq!(record[BUILD_REQUEST_RECORD_KEY], json!(true), "{record}");
+            assert_eq!(record["browserJobId"], json!(browser.to_string()));
+            assert_eq!(record["cardJobId"], json!(routed.to_string()));
+            assert_eq!(record["personRequest"], json!(words));
+            assert_eq!(record["reply"], json!(""));
+            assert_eq!(record["findings"], json!([]));
+            assert_eq!(
+                crate::system_turns::system_turn_of(&json!({ "metadata": metadata })),
+                Some(crate::system_turns::SystemTurn::BrowserHandBack)
+            );
+            // Once.
+            let (status, body) = refused(chain.hand_back(&chain.owner, &browser, json!({})).await);
+            assert_eq!(status, StatusCode::CONFLICT, "{}", body.message);
+            assert_eq!(body.code.as_deref(), Some(HAND_BACK_USED_CODE));
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Without the runtime's note, the same browser turn hands nothing back: its
+/// card does not continue building and it read no page. A card from an
+/// ordinary turn hands no build request back either: its task is Octo's, not
+/// the person's message.
+#[tokio::test]
+async fn only_a_routed_message_with_the_note_hands_a_build_request_back() -> anyhow::Result<()> {
+    with_chain("routed-build-request-refused", |chain| {
+        Box::pin(async move {
+            let words = "Plan three days in the old town for a first visit, on a map.";
+            let routed = chain.routed_message(words, false).await?;
+            let browser = chain.routed_browser_turn(&routed, words).await?;
+            chain.finish(&browser, Some(""), "succeeded").await?;
+            let (status, body) = refused(chain.hand_back(&chain.owner, &browser, json!({})).await);
+            assert_eq!(status, StatusCode::CONFLICT, "{}", body.message);
+            assert_eq!(body.code.as_deref(), Some(HAND_BACK_NOT_BUILDING_CODE));
+
+            let (_, card_browser) = chain.card_and_running_browser_turn().await?;
+            chain.post_build_request(&card_browser).await?;
+            chain.finish(&card_browser, Some(""), "succeeded").await?;
+            let (status, body) = refused(
+                chain
+                    .hand_back(&chain.owner, &card_browser, json!({}))
+                    .await,
+            );
+            assert_eq!(status, StatusCode::CONFLICT, "{}", body.message);
+            assert_eq!(body.code.as_deref(), Some(HAND_BACK_NOT_BUILDING_CODE));
             Ok(())
         })
     })

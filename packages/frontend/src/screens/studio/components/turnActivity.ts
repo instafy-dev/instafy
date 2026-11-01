@@ -14,6 +14,7 @@
 import { resolveRetryingStatusPresentation } from "../../../conversations/runFailurePresentation";
 import type { ChatMessage } from "../types";
 import { displayActivityHost } from "./activityHost";
+import { BROWSER_BUILD_REQUEST_NOTE_KEY } from "./browserHandBack";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 
 export type ActivityRole = "content" | "outcome" | "quiet";
@@ -982,6 +983,11 @@ export function isDetailsNote(message: ChatMessage): boolean {
   }
   const details = extractMessageDetails(metadata);
   if (isRecord(metadata?.browserFindings) || isRecord(details?.browserFindings)) {
+    return false;
+  }
+  // A browser turn that handed the person's message to the building turn:
+  // the building turn answers.
+  if (isRecord(metadata?.[BROWSER_BUILD_REQUEST_NOTE_KEY]) || isRecord(details?.[BROWSER_BUILD_REQUEST_NOTE_KEY])) {
     return false;
   }
   return !JSON_NOTE.test(message.content);

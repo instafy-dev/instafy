@@ -27,6 +27,15 @@ export const BROWSER_HAND_BACK_CLAIM_KEY = "continuesFromBrowserJob";
 export const BROWSER_HAND_BACK_RECORD_KEY = "browserHandBack";
 /** What the hand-back turn is asked; the findings come from the controller. */
 export const BROWSER_HAND_BACK_PROMPT = "Continue building with what the browser turn found.";
+/**
+ * The runtime's Details note on a browser turn that carried on a card the
+ * routing step posted for the person's own message, opened no page, and asked
+ * Octo to make what the message asks: a browser turn cannot make it. The
+ * message goes to the building turn as a hand-back, and the controller stamps
+ * the record with {@link BROWSER_BUILD_REQUEST_RECORD_KEY}.
+ */
+export const BROWSER_BUILD_REQUEST_NOTE_KEY = "browserBuildRequest";
+export const BROWSER_BUILD_REQUEST_RECORD_KEY = "buildRequest";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -87,6 +96,15 @@ export function browserHandBackNotice(agentName: string): string {
   return `${agentName.trim() || "Octo"} continued with what it found in the browser`;
 }
 
+/**
+ * What a hand-back of a message the browser turn could not make records in
+ * place of its prompt. The chat leaves it out (routedBrowserFold.ts): the
+ * person reads their message and then the building turn.
+ */
+export function browserBuildRequestNotice(agentName: string): string {
+  return `${agentName.trim() || "Octo"} continued in the chat`;
+}
+
 function promptMetadataString(metadata: unknown, keys: readonly string[]): string | null {
   for (const record of promptMetadataRecords(metadata)) {
     for (const key of keys) {
@@ -111,6 +129,17 @@ export function browserTurnStoppedForPerson(messages: readonly ChatMessage[], jo
     const consent = details.terminalConsent;
     if (isRecord(consent) && consent.state === "blocked") return true;
     return details.tool === "request_human_input" && details.status === "completed";
+  });
+}
+
+/**
+ * The browser turn asked Octo to make the person's message in the chat
+ * ({@link BROWSER_BUILD_REQUEST_NOTE_KEY}): the runtime's note on it.
+ */
+export function browserTurnRequestedABuild(messages: readonly ChatMessage[], jobId: string): boolean {
+  return messages.some((message) => {
+    if (message.role !== "assistant" || browserRequestJobId(message) !== jobId) return false;
+    return isRecord(extractMessageDetails(message.metadata)?.[BROWSER_BUILD_REQUEST_NOTE_KEY]);
   });
 }
 
@@ -154,6 +183,9 @@ export type BrowserHandBackInput = {
  *   was opened here, read at least one page, and did not stop for a step of
  *   the person's;
  * - no hand-back for it was sent yet.
+ * A browser turn that asked Octo to make the person's message
+ * ({@link browserTurnRequestedABuild}) needs neither a building card nor a
+ * page read: it hands the message itself back.
  * The controller checks the same chain again and refuses anything else.
  */
 export function browserHandBackCandidate(input: BrowserHandBackInput): string | null {
@@ -171,6 +203,7 @@ export function browserHandBackCandidate(input: BrowserHandBackInput): string | 
     }
   }
   if (!newest || !jobId) return null;
+  const requestedABuild = browserTurnRequestedABuild(messages, jobId);
   // This page sent the browser turn: a continuation of a card, in a browser.
   const continuation = input.sentPromptForRun(jobId);
   const cardKey = continuation
@@ -178,7 +211,8 @@ export function browserHandBackCandidate(input: BrowserHandBackInput): string | 
     : null;
   if (!continuation || !cardKey?.startsWith("job:") ||
       !promptMetadataString(continuation.metadata, ["browserTransport", "browser_transport"]) ||
-      !promptMetadataRecords(continuation.metadata).some((record) => record[BROWSER_HANDS_BACK_METADATA_KEY] === true)) {
+      (!requestedABuild &&
+        !promptMetadataRecords(continuation.metadata).some((record) => record[BROWSER_HANDS_BACK_METADATA_KEY] === true))) {
     return null;
   }
   const card = input.sentPromptForRun(cardKey.slice("job:".length));
@@ -189,7 +223,10 @@ export function browserHandBackCandidate(input: BrowserHandBackInput): string | 
   if (!isRunFailureRecentForAutoRetry(newest, input.nowMs) || newest.timestamp < input.openedAtMs - 1_000) {
     return null;
   }
-  if (browserTurnStoppedForPerson(messages, jobId) || !browserTurnReadAPage(messages, jobId)) return null;
+  if (browserTurnStoppedForPerson(messages, jobId) ||
+      !(requestedABuild || browserTurnReadAPage(messages, jobId))) {
+    return null;
+  }
   if (messages.some((message) => readBrowserHandBackOf(message) === jobId)) return null;
   return jobId;
 }

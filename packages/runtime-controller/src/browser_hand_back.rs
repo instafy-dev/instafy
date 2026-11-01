@@ -24,6 +24,15 @@
 //! - no other hand-back for that browser job is queued, running or done;
 //! - nobody sent a prompt in the conversation after the browser turn.
 //!
+//! One browser turn hands back without reading a page: one that carries on a
+//! card the routing step posted for the person's own message, opened no page
+//! and asked Octo to make what the message asks (the runtime's Details note,
+//! [`BUILD_REQUEST_NOTE_KEY`]; runtime-agent `jobs/browser_hand_back.rs`). The
+//! message asked for something a browser turn cannot make, so its words go to
+//! the building turn as the person's request, whether or not the card
+//! continues building, and the record carries nothing of the browser turn
+//! ([`BUILD_REQUEST_RECORD_KEY`]).
+//!
 //! The record carries the browser turn's last reply (bounded) and labelled
 //! findings `{url, title, readAt, viewer}`: the address and title come from
 //! the reply's lines, `readAt` and `viewer` from the job itself. The runtime
@@ -99,6 +108,11 @@ pub(crate) const HAND_BACK_PAUSED_CODE: &str = "browser_hand_back_paused";
 pub(crate) const HAND_BACK_SUPERSEDED_CODE: &str = "browser_hand_back_superseded";
 pub(crate) const HAND_BACK_NOT_BUILDING_CODE: &str = "browser_hand_back_not_building";
 pub(crate) const HAND_BACK_NOTHING_READ_CODE: &str = "browser_hand_back_nothing_read";
+/// The key of the runtime's Details note on a browser turn that asked Octo to
+/// make the person's message (runtime-agent `BUILD_REQUEST_NOTE_KEY`).
+pub(crate) const BUILD_REQUEST_NOTE_KEY: &str = "browserBuildRequest";
+/// The key a hand-back record that carries such a message has.
+pub(crate) const BUILD_REQUEST_RECORD_KEY: &str = "buildRequest";
 
 /// Removes every client-supplied hand-back claim and record, top level and
 /// nested, and returns the top-level claim for [`require_hand_back`].
@@ -677,10 +691,21 @@ pub(crate) async fn require_hand_back(
             "Octo already continued once from the browser in this chain. Open the browser from Octo's message to keep going.",
         ));
     }
+    // A browser turn that asked Octo to make the person's message hands it
+    // back only from a card the routing step posted for that message.
+    let build_request =
+        browser_turn_requested_a_build(transaction, conversation_id, &browser_job_id).await?;
+    let routed_card =
+        job_posted_routed_browser_card(transaction, conversation_id, &card_job_id).await?;
     // Only a card that continues building something hands back: a question's
     // browser turn already answered it. The card is the runtime's own message
     // for that job, which says so (runtime-agent `browser_request.rs`).
-    if !card_continues_building(transaction, conversation_id, &card_job_id).await? {
+    let builds = if build_request {
+        routed_card
+    } else {
+        card_continues_building(transaction, conversation_id, &card_job_id).await?
+    };
+    if !builds {
         return Err(hand_back_refused(
             StatusCode::CONFLICT,
             HAND_BACK_NOT_BUILDING_CODE,
@@ -735,6 +760,35 @@ pub(crate) async fn require_hand_back(
         ));
     }
 
+    let request = payload
+        .get("prompt_text")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    // The message asked for something the browser turn cannot make: its words
+    // go to the building turn, and nothing of the browser turn, which opened
+    // no page and posted no reply.
+    if build_request {
+        let person_request = card_payload.get("prompt_text").and_then(JsonValue::as_str);
+        let mut record = hand_back_record(
+            &browser_job_id,
+            &card_job_id,
+            viewer,
+            completed_at,
+            request,
+            person_request,
+            "",
+        );
+        if record.get("personRequest").is_none() {
+            return Err(hand_back_refused(
+                StatusCode::CONFLICT,
+                "browser_hand_back_empty",
+                "That browser turn returned nothing to hand back.",
+            ));
+        }
+        record[BUILD_REQUEST_RECORD_KEY] = json!(true);
+        return Ok(record);
+    }
+
     // The turn's final answer is its completion summary; a turn that streamed
     // its answer instead has it as its last streamed message.
     let summary = browser_job
@@ -755,20 +809,15 @@ pub(crate) async fn require_hand_back(
     })?;
 
     let finding_lines = finding_lines_note(transaction, conversation_id, &browser_job_id).await?;
-    let request = payload
-        .get("prompt_text")
-        .and_then(JsonValue::as_str)
-        .unwrap_or_default();
     // A card the routing step posted for the person's own message: the
     // building thread never saw that message (its job ran no model turn), so
     // the record gives the build its words, from the message's own job, as the
     // person's request.
-    let person_request =
-        if job_posted_routed_browser_card(transaction, conversation_id, &card_job_id).await? {
-            card_payload.get("prompt_text").and_then(JsonValue::as_str)
-        } else {
-            None
-        };
+    let person_request = if routed_card {
+        card_payload.get("prompt_text").and_then(JsonValue::as_str)
+    } else {
+        None
+    };
     let record = hand_back_record(
         &browser_job_id,
         &card_job_id,
@@ -816,6 +865,39 @@ async fn card_continues_building(
         .await
         .map(|row| row.get::<_, bool>(0))
         .map_err(|error| internal_error(format!("failed to read the browser card: {error}")))
+}
+
+/// Whether a browser turn asked Octo to make the person's message: the
+/// runtime's Details note for that job carries [`BUILD_REQUEST_NOTE_KEY`]
+/// (runtime-agent `browser_hand_back::build_request_note`).
+async fn browser_turn_requested_a_build(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: &Uuid,
+    browser_job_id: &Uuid,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let sql = format!(
+        "select exists (
+             select 1 from conversation_messages
+              where conversation_id = $1
+                and role = 'assistant'
+                and created_by is null
+                and metadata #>> '{{jobId}}' = $2
+                and coalesce(metadata #> '{{details,{BUILD_REQUEST_NOTE_KEY}}}',
+                             metadata #> '{{details,details,{BUILD_REQUEST_NOTE_KEY}}}') is not null
+         )"
+    );
+    transaction
+        .query_one(
+            sql.as_str(),
+            &[conversation_id, &browser_job_id.to_string()],
+        )
+        .await
+        .map(|row| row.get::<_, bool>(0))
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to read how the browser turn ended: {error}"
+            ))
+        })
 }
 
 /// Whether a job posted the card of a message the runtime sent straight to
@@ -1240,6 +1322,16 @@ mod tests {
     #[test]
     fn a_hand_back_asks_what_studio_sends() {
         assert_eq!(json!(HAND_BACK_PROMPT), fixtures()["handBackPrompt"]);
+    }
+
+    /// The note a browser turn that asked Octo to make the person's message
+    /// ends with, and the record of its hand-back, go by the names the runtime
+    /// and Studio use.
+    #[test]
+    fn the_build_request_goes_by_the_runtimes_and_studios_names() {
+        let fixtures = fixtures();
+        assert_eq!(fixtures["buildRequestNoteKey"], BUILD_REQUEST_NOTE_KEY);
+        assert_eq!(fixtures["buildRequestRecordKey"], BUILD_REQUEST_RECORD_KEY);
     }
 
     #[test]

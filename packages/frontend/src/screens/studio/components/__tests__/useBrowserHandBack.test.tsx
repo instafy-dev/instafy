@@ -15,9 +15,12 @@ import {
 import type { RunStatus } from "../../../../types";
 import type { ChatMessage } from "../../types";
 import {
+  BROWSER_BUILD_REQUEST_NOTE_KEY,
+  BROWSER_BUILD_REQUEST_RECORD_KEY,
   BROWSER_HAND_BACK_CLAIM_KEY,
   BROWSER_HAND_BACK_PROMPT,
   BROWSER_HAND_BACK_RECORD_KEY,
+  browserBuildRequestNotice,
   browserHandBackCandidate,
   browserHandBackNotice,
   forgetBrowserHandBacksForTests,
@@ -38,7 +41,7 @@ const fixtures = JSON.parse(readFileSync(
   resolve(repo, "packages/runtime-controller/src/browser_hand_back_fixtures.json"), "utf8",
 )) as {
   claimKey: string; recordKey: string; handBackPrompt: string; browserReply: string; postedReply: string;
-  findingLines: string[]; letOctoContinuePrompt: string;
+  findingLines: string[]; letOctoContinuePrompt: string; buildRequestNoteKey: string; buildRequestRecordKey: string;
 };
 
 const CARD_JOB = "job-card";
@@ -62,6 +65,37 @@ function findingsNote(jobId: string, timestamp: number, pagesRead = 2): ChatMess
     messageType: "status",
     details: { kind: "agent_message", browserFindings: { pages: fixtures.findingLines.length, pagesRead } },
   });
+}
+
+/**
+ * The runtime's note on a browser turn that carried on the person's own
+ * message, opened no page and asked Octo to make what it asks; its reply is
+ * empty.
+ */
+function buildRequestNote(jobId: string, timestamp: number): ChatMessage {
+  return reply(jobId, "This needs no website: Octo makes it in the chat.", timestamp, {
+    messageType: "status",
+    details: { kind: "agent_message", [BROWSER_BUILD_REQUEST_NOTE_KEY]: { version: 1 } },
+  });
+}
+
+/**
+ * The person's message, which the routing step sent straight to the browser
+ * with a routed card that does not continue building, and its browser turn,
+ * which opened no page and asked Octo to make it.
+ */
+function routedBuildRequest(now: number, note = true): ChatMessage[] {
+  return [
+    sent(CARD_JOB, {}, now - 60_000, "Plan three days in the old town, on a map."),
+    reply(CARD_JOB, "Continue this task in Instafy's browser.", now - 50_000, {
+      messageType: "action_request",
+      details: { browserRequest: { task: "Plan three days in the old town, on a map.", location: "auto", routed: true } },
+    }),
+    sent(BROWSER_JOB, { browserRequestOf: `job:${CARD_JOB}`, browserTransport: "shared", browserAutoStarted: true },
+      now - 40_000, "Plan three days in the old town, on a map."),
+    ...(note ? [buildRequestNote(BROWSER_JOB, now - 1_100)] : []),
+    reply(BROWSER_JOB, "", now - 1_000),
+  ];
 }
 
 /** Card, browser turn, its findings note and reply: the chain as this page sent it. */
@@ -112,6 +146,46 @@ describe("browser hand-back: when Studio sends one", () => {
 
   it("hands back a finished browser turn that continued this page's card", () => {
     expect(browserHandBackCandidate(input)).toBe(BROWSER_JOB);
+  });
+
+  it("names the build request note and record the runtime and controller use", () => {
+    expect(BROWSER_BUILD_REQUEST_NOTE_KEY).toBe(fixtures.buildRequestNoteKey);
+    expect(BROWSER_BUILD_REQUEST_RECORD_KEY).toBe(fixtures.buildRequestRecordKey);
+  });
+
+  // A message the routing step sent to the browser asked for a map, which a
+  // browser turn cannot make: it opened no page and asked Octo to make it. The
+  // message goes to the building turn, though its card does not continue
+  // building and no page was read; without the runtime's note it does not.
+  it("hands back a message the browser turn asked Octo to make, from a card that does not continue building", () => {
+    forgetPromptsSentFromThisPageForTests();
+    input.messages = routedBuildRequest(now);
+    expect(browserHandBackCandidate(input)).toBe(BROWSER_JOB);
+    forgetPromptsSentFromThisPageForTests();
+    input.messages = routedBuildRequest(now, false);
+    expect(browserHandBackCandidate(input)).toBeNull();
+  });
+
+  it.each([
+    ["the person wrote after it", () => {
+      input.messages = [...input.messages, { id: "later", role: "user", content: "Never mind", timestamp: now }];
+    }],
+    ["the browser turn failed", () => { statuses.set(BROWSER_JOB, "failed"); }],
+    ["another page sent the browser continuation", () => {
+      forgetPromptsSentFromThisPageForTests();
+      sent(CARD_JOB, {}, now - 60_000);
+    }],
+    ["it was handed back already", () => {
+      input.messages = [...input.messages.slice(0, -1), {
+        id: "hand-back", role: "user", content: browserBuildRequestNotice("Octo"), timestamp: now - 900,
+        metadata: { prompt_metadata: { [BROWSER_HAND_BACK_RECORD_KEY]: { browserJobId: BROWSER_JOB } } },
+      }, input.messages.at(-1)!];
+    }],
+  ] as const)("hands no build request back when %s", (_name, arrange) => {
+    forgetPromptsSentFromThisPageForTests();
+    input.messages = routedBuildRequest(now);
+    arrange();
+    expect(browserHandBackCandidate(input)).toBeNull();
   });
 
   it.each([
@@ -259,6 +333,18 @@ describe("useBrowserHandBack", () => {
     root = createRoot(container);
     await render();
     expect(value.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends a build request with its own notice", async () => {
+    await render();
+    vi.advanceTimersByTime(5_000);
+    value.messages = routedBuildRequest(Date.now());
+    value.runStatuses = new Map([[BROWSER_JOB, "success"]]);
+    await render();
+    expect(value.send).toHaveBeenCalledExactlyOnceWith(fixtures.handBackPrompt, {
+      display: "Octo continued in the chat",
+      metadata: { [fixtures.claimKey]: BROWSER_JOB },
+    });
   });
 
   it("waits while the person holds it (a draft, or a step of theirs in the browser) or a turn runs", async () => {

@@ -418,8 +418,12 @@ export function synthesizeAgentJobThreadMessages(
   const routedFold = resolveRoutedBrowserFold(collapsedAll);
   const hiddenIds = new Set([...retryFold.hiddenPromptIds, ...routedFold.hiddenPromptIds]);
   for (const [browserJobId, cardId] of routedFold.cardIdByBrowserJobId) {
-    // The card says the browser is opening until its browser turn shows something.
-    if (collapsedVisible.some((message) => message.id !== cardId && extractAgentJobId(message) === browserJobId)) {
+    // The card says the browser is opening until its browser turn shows
+    // something, or hands the message to the building turn.
+    if (
+      routedFold.buildRequestJobIds.has(browserJobId) ||
+      collapsedVisible.some((message) => message.id !== cardId && extractAgentJobId(message) === browserJobId)
+    ) {
       hiddenIds.add(cardId);
     }
   }

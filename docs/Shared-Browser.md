@@ -1527,7 +1527,9 @@ could not reach the browser at all is no such answer (its result is marked
 ends the run instead. A tool
 event from another MCP server, a status-only narration, or prose success is not
 accepted. Missing evidence gets one browser-specific retry that again requires
-the bounded server and a fresh snapshot. If the retry still has no instrumented
+the bounded server and a fresh snapshot, except for a browser turn that carries
+on the person's own message and asked Octo to make it: that message goes to the
+building turn instead (see "Hand-back"). If the retry still has no instrumented
 action evidence, the job fails closed instead of presenting an unverified prose
 success. The person reads one plain sentence for it ("Octo couldn't open a page
 in the browser, so this turn stopped."); the artifact beside it keeps the
@@ -2257,6 +2259,24 @@ unless the policy is `"covered"`.
   what the browser turn did not read. The fixtures in
   `packages/runtime-controller/src/browser_hand_back_fixtures.json` pin the
   three halves together.
+  One browser turn hands back without a building card or a page read: one that
+  carries on a card the routing step posted for the person's own message (its
+  send stamped `browserCardTurn.routed`), opened no page, and answered that the
+  message asks Octo to make or change something with no website to use first
+  (the `request_build` action its write-scope line offers, or a team plan,
+  which a browser turn cannot start either). A browser turn cannot make it, so
+  the runtime does not try it again in the browser: the turn posts no reply and
+  nothing of its answer, and ends with a Details note (`browserBuildRequest`)
+  that Studio leaves out of Details. Studio hands the message back on that
+  note, as above, and the chat shows neither the card nor the hand-back's
+  notice: the person reads their message and then the building turn. The
+  controller checks the same chain, except that the card need not continue
+  building and the browser turn need not have read a page or replied, and only
+  for a card the routing step posted; it stamps `buildRequest` with the
+  message's own words as `personRequest`, an empty reply and no findings. The
+  building turn reads those words as the person's request and makes what they
+  ask, reading any public page it needs itself. Any other browser turn that
+  opened no page is tried again in the browser, as before.
 - **Stale pins.** A pin to a session that is gone moves to the space's own live
   browser when there is one.
 - **Clear data restarts the same machine.** The controller call is unchanged.

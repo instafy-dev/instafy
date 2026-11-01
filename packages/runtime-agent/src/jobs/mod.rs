@@ -7624,6 +7624,28 @@ impl JobProcessor {
         suppress_multi_agent_plan_actions_for_worker(job, &mut outcome);
         log_browser_requests_dropped_as_read(job, &output.final_json);
         suppress_browser_requests_where_unsupported(job, &mut outcome);
+        // A browser turn that carries on the person's own message, opened no
+        // page and asks Octo to make what the message asks hands the message
+        // to the building turn (`browser_hand_back`): it is not tried again in
+        // the browser, posts nothing of its answer, and ends with the note
+        // Studio hands the message back on.
+        let hands_the_message_to_the_building_turn = (shared_browser_execution_missing_after_attempt(
+            explicit_shared_browser_execution,
+            &interim_messages,
+            first_shared_browser_terminal_consent_failure,
+            shared_browser_action_log_before,
+            crate::shared_browser::action_log_len(),
+        )
+            || (explicit_personal_browser_execution
+                && !has_successful_personal_browser_mcp_message(&interim_messages)))
+            && browser_hand_back::hands_the_message_to_the_building_turn(job, &output.final_json);
+        if hands_the_message_to_the_building_turn {
+            outcome.actions.clear();
+            tracing::info!(
+                job_id = %job_id,
+                "browser turn opened no page and asked for a build: the message goes to the building turn"
+            );
+        }
         let mut codex_fallback_summary_kind =
             classify_internal_codex_fallback_summary(&outcome.summary);
         apply_terminal_shared_browser_summary(
@@ -7635,10 +7657,11 @@ impl JobProcessor {
         augment_summary_for_onboarding_actions(&mut outcome.summary, &outcome.actions);
         let expects_workspace_file_changes_after_actions =
             workspace_file_changes_still_required(expects_workspace_file_changes, &outcome);
-        let final_messages = with_runtime_metadata_vec(
-            build_final_messages_from_outcome(&outcome, Some(&workspace_dir)),
-            &registration.runtime_id,
-        );
+        let mut final_messages = build_final_messages_from_outcome(&outcome, Some(&workspace_dir));
+        if hands_the_message_to_the_building_turn {
+            final_messages.push(browser_hand_back::build_request_note());
+        }
+        let final_messages = with_runtime_metadata_vec(final_messages, &registration.runtime_id);
         let reported_file_paths = outcome
             .files
             .iter()
@@ -7795,14 +7818,16 @@ impl JobProcessor {
         let generic_mcp_tool_execution_missing =
             expects_generic_mcp_tool_execution && !has_mcp_tool_call_message(&interim_messages);
         let personal_browser_execution_missing = explicit_personal_browser_execution
-            && !has_successful_personal_browser_mcp_message(&interim_messages);
-        let shared_browser_execution_missing = shared_browser_execution_missing_after_attempt(
-            explicit_shared_browser_execution,
-            &interim_messages,
-            first_shared_browser_terminal_consent_failure,
-            shared_browser_action_log_before,
-            crate::shared_browser::action_log_len(),
-        );
+            && !has_successful_personal_browser_mcp_message(&interim_messages)
+            && !hands_the_message_to_the_building_turn;
+        let shared_browser_execution_missing = !hands_the_message_to_the_building_turn
+            && shared_browser_execution_missing_after_attempt(
+                explicit_shared_browser_execution,
+                &interim_messages,
+                first_shared_browser_terminal_consent_failure,
+                shared_browser_action_log_before,
+                crate::shared_browser::action_log_len(),
+            );
         let evidence_recovery_plan = routing_recovery::plan(
             evidence_requirements,
             observed_evidence,
@@ -9184,6 +9209,10 @@ impl JobProcessor {
             interim_messages,
         );
         post_only_the_card(job, &mut outcome);
+        if hands_the_message_to_the_building_turn {
+            // An empty reply is no reply: the building turn answers.
+            outcome.summary.clear();
+        }
         save_report::append_not_saved(&mut outcome.summary, &not_saved);
         user_input_request::append_outcome_artifact(&mut artifacts, &outcome);
         Ok(JobExecution {
@@ -18326,8 +18355,11 @@ fn resolve_exact_owned_write_scope_path(workspace_dir: &Path, raw: &str) -> Opti
 /// read one page and stopped "because this turn is read-only", and a browser
 /// turn asked for a page told the person "in this run: it's read-only" (local
 /// tests, Oct 31). A browser turn that hands back is told which turn makes the
-/// page; any other read-only job is told it is read-only.
-fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> &'static str {
+/// page; any other read-only job is told it is read-only. A browser turn that
+/// carries on the person's own message is also told how to hand a message
+/// that asks Octo to make something to the building turn
+/// ([`browser_hand_back::BUILD_REQUEST_LINE`]).
+fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> String {
     let browser = metadata
         .and_then(|metadata| {
             metadata
@@ -18336,7 +18368,7 @@ fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> &'static str {
         })
         .and_then(JsonValue::as_str)
         .map(|transport| transport.trim().to_ascii_lowercase().replace('_', "-"));
-    if metadata.is_some_and(browser_hand_back::hands_back) {
+    let line = if metadata.is_some_and(browser_hand_back::hands_back) {
         "- This turn reads pages; the building turn after it makes the page.\n"
     } else if browser.as_deref() == Some("shared") {
         "- This turn reads pages in Instafy's browser; Octo builds in the chat.\n"
@@ -18344,6 +18376,11 @@ fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> &'static str {
         "- This turn reads pages in the browser on this device; Octo builds in the chat.\n"
     } else {
         "- This job is read-only. Do not create, edit, move, delete, or return workspace file changes.\n"
+    };
+    if metadata.is_some_and(browser_hand_back::carries_on_a_routed_card) {
+        format!("{line}{}", browser_hand_back::BUILD_REQUEST_LINE)
+    } else {
+        line.to_string()
     }
 }
 
@@ -18462,7 +18499,7 @@ fn format_write_scope_guardrail_section(metadata: Option<&JsonValue>) -> Option<
         let _ = writeln!(formatted, "- Rationale: {rationale}");
     }
     if mode.eq_ignore_ascii_case("read_only") || mode.eq_ignore_ascii_case("readonly") {
-        formatted.push_str(read_only_write_scope_line(metadata));
+        formatted.push_str(&read_only_write_scope_line(metadata));
     }
     if !owned_paths.is_empty() {
         let _ = writeln!(formatted, "- Owned paths: {}", owned_paths.join(", "));
@@ -32289,6 +32326,61 @@ mod tests {
             ), "{section}");
             assert!(!section.contains("This turn reads pages"), "{section}");
         }
+    }
+
+    /// A browser turn that carries on the person's own message (a card the routing step
+    /// posted, as the controller stamped its send) is told how to hand a message that asks
+    /// Octo to make something with no website to use first back to the building turn: a
+    /// browser turn sent a request for a map said it could not make one, and the retry for a
+    /// turn that opened no page made it browse instead (a local test, Nov 1). Any other turn
+    /// is not: its build request would hand nothing back.
+    #[test]
+    fn a_routed_browser_turn_is_told_to_hand_a_build_back() {
+        let routed = |transport: &str, hands_back: bool, routed: JsonValue| {
+            json!({
+                "browserTransport": transport,
+                "browserHandsBack": hands_back,
+                "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                "browserCardTurn": {"version": 1, "routed": routed},
+                "writeScope": {"mode": "read_only"},
+            })
+        };
+        let section = |metadata: &JsonValue| {
+            format_write_scope_guardrail_section(Some(metadata)).expect("write scope section")
+        };
+        for (transport, hands_back, line) in [
+            (
+                "shared",
+                false,
+                "- This turn reads pages in Instafy's browser; Octo builds in the chat.\n",
+            ),
+            (
+                "shared",
+                true,
+                "- This turn reads pages; the building turn after it makes the page.\n",
+            ),
+            (
+                "desktop-personal",
+                false,
+                "- This turn reads pages in the browser on this device; Octo builds in the chat.\n",
+            ),
+        ] {
+            let told = section(&routed(transport, hands_back, json!(true)));
+            assert!(
+                told.contains(&format!("{line}{}", browser_hand_back::BUILD_REQUEST_LINE)),
+                "{told}"
+            );
+            for stamp in [json!(false), json!("true"), JsonValue::Null] {
+                let section = section(&routed(transport, hands_back, stamp));
+                assert!(section.contains(line), "{section}");
+                assert!(!section.contains("request_build"), "{section}");
+            }
+        }
+        assert!(
+            browser_hand_back::BUILD_REQUEST_LINE.contains(
+                "only asks Octo to make or change something in this space (a page, a map, a table) and needs no website first, open no page"
+            )
+        );
     }
 
     #[test]
