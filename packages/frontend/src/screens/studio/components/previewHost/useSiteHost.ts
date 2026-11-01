@@ -50,7 +50,8 @@ export type SiteMessageEvent = Pick<MessageEvent, "data" | "origin" | "source">;
  * First draw: a page that draws itself after it loads lists "ready" in its
  * `layout-ack` and says `ready` once drawn. `drawing` is true from that
  * `layout-ack` until then (at most SITE_FIRST_DRAW_WAIT_MS), so the pane keeps
- * saying it is opening the site instead of showing an empty page. It waits
+ * saying it is opening the site, with the page out of sight under its line
+ * (`undrawn`), instead of an empty or half-drawn page. It waits
  * once each time the frame is loaded fresh (the press, Reload, a new
  * address), through the frame's load event: a `ready` said before that event
  * counts, the page's answer to the layout sent at that load is waited for (at
@@ -273,6 +274,12 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
      * answered since its load yet).
      */
     drawing,
+    /**
+     * The page said it draws its first view after it loads and has not said
+     * it has: what it shows meanwhile (its own placeholder rows, or nothing)
+     * stays under the pane's line, so the line is the one loading signal.
+     */
+    undrawn: drawsLater && !drawn,
     drawnOnce,
     follow,
     /** An ask waiting for the person's confirm in Studio's own strip (the intent said `confirm: true`). */

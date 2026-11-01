@@ -163,7 +163,11 @@ pub(super) fn changed_paths(files: &[CodexFileDescriptor]) -> Vec<String> {
 /// The previews in `state` (the CLI's state file) that this machine has open
 /// for `project_id`, with a tunnel client still running and a picture on
 /// their card, whose site folder holds a path in `changed` that changed
-/// after the site was last pictured.
+/// after the site was last pictured. A changed path is a site's when no other
+/// site of the space has a folder inside that site's that holds it: a site
+/// served from the workspace itself (a server started there that serves a
+/// folder of it) is not pictured again for a change in the folder of another
+/// open preview, though any other change in the workspace still counts for it.
 pub(super) fn stale_pictures(
     state: &JsonValue,
     project_id: &Uuid,
@@ -178,6 +182,13 @@ pub(super) fn stale_pictures(
         return Vec::new();
     };
     let project = project_id.to_string();
+    let site_dirs: Vec<&str> = previews
+        .iter()
+        .filter(|entry| {
+            entry.get("projectId").and_then(JsonValue::as_str) == Some(project.as_str())
+        })
+        .filter_map(|entry| entry.get("siteDir").and_then(JsonValue::as_str))
+        .collect();
     let mut stale: Vec<StalePicture> = Vec::new();
     for entry in previews {
         if entry.get("projectId").and_then(JsonValue::as_str) != Some(project.as_str()) {
@@ -226,7 +237,9 @@ pub(super) fn stale_pictures(
         let picture_at = entry.get("pictureAt").and_then(JsonValue::as_f64);
         let site_changed = changed
             .iter()
-            .filter(|changed| in_site(changed, site_dir))
+            .filter(|changed| {
+                in_site(changed, site_dir) && !in_site_inside(changed, site_dir, &site_dirs)
+            })
             .any(|changed| changed_after(workspace_dir, changed, picture_at));
         // Only a preview whose tunnel still runs can take a new picture.
         if site_changed && client_runs(pid) {
@@ -243,25 +256,44 @@ pub(super) fn stale_pictures(
     stale
 }
 
-/// Whether a changed workspace path is in a site's folder: the folder itself,
-/// a path under it, or a folder that holds it. Every path is when the folder
-/// is the whole workspace.
-fn in_site(changed: &str, site_dir: &str) -> bool {
+/// A site's folder as the workspace path it names: `.` for the workspace.
+fn site_folder(site_dir: &str) -> &str {
     let site = site_dir
         .trim()
         .trim_start_matches("./")
         .trim_end_matches('/');
-    if site.is_empty() || site == "." {
-        return true;
-    }
+    if site.is_empty() { "." } else { site }
+}
+
+/// Whether `inner` is the workspace path `outer` or a path under it. Every
+/// path is under the workspace itself (`.`).
+fn path_under(outer: &str, inner: &str) -> bool {
+    outer == "."
+        || inner == outer
+        || inner
+            .strip_prefix(outer)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Whether a changed workspace path is in a site's folder: the folder itself,
+/// a path under it, or a folder that holds it. Every path is when the folder
+/// is the whole workspace.
+fn in_site(changed: &str, site_dir: &str) -> bool {
+    let site = site_folder(site_dir);
     let changed = changed.trim_end_matches('/');
-    let under = |outer: &str, inner: &str| {
-        inner == outer
-            || inner
-                .strip_prefix(outer)
-                .is_some_and(|rest| rest.starts_with('/'))
-    };
-    under(site, changed) || under(changed, site)
+    path_under(site, changed) || (site != "." && path_under(changed, site))
+}
+
+/// Whether a changed path is in the folder of another site that is inside
+/// this site's folder (one of `site_dirs`, every site folder of the space):
+/// then it is that site's change, not this one's.
+fn in_site_inside(changed: &str, site_dir: &str, site_dirs: &[&str]) -> bool {
+    let site = site_folder(site_dir);
+    let changed = changed.trim_end_matches('/');
+    site_dirs
+        .iter()
+        .map(|other| site_folder(other))
+        .any(|other| other != site && path_under(site, other) && path_under(other, changed))
 }
 
 /// Whether a changed path changed after the site was last pictured: it was
@@ -853,6 +885,62 @@ mod tests {
             )
             .len(),
             1
+        );
+    }
+
+    // A local test: a comparison's preview, started from the workspace itself
+    // (its server serves a folder of it), took a new picture after a turn that
+    // made another site in its own folder and never touched the comparison.
+    #[test]
+    fn a_change_in_another_sites_folder_is_not_a_change_to_a_site_served_from_the_workspace() {
+        let dir = workspace();
+        std::fs::create_dir_all(dir.path().join("sites/lello")).unwrap();
+        std::fs::write(dir.path().join("sites/lello/index.html"), "x").unwrap();
+        let project = Uuid::new_v4();
+        let before = now_ms() - 60_000.0;
+        let root = entry(
+            &project,
+            json!({ "previewId": "preview-root", "localPort": 20549, "siteDir": ".", "pictureAt": before }),
+        );
+        let seville = entry(&project, json!({ "pictureAt": before }));
+        let lello = entry(
+            &project,
+            json!({ "previewId": "preview-lello", "localPort": 22658, "siteDir": "sites/lello/", "pictureAt": before }),
+        );
+        let state = json!({ "version": 1, "previews": [root, seville, lello] });
+        let ids = |changed: &[&str]| {
+            stale(state.clone(), &project, dir.path(), changed)
+                .into_iter()
+                .map(|picture| picture.preview_id)
+                .collect::<Vec<_>>()
+        };
+        // The turn that made the bookshop's page changed that site alone.
+        assert_eq!(ids(&["sites/lello/index.html"]), ["preview-lello"]);
+        assert_eq!(ids(&["sites/seville/data/places.json"]), ["preview-1"]);
+        // A change no other site's folder holds may be the workspace site's.
+        assert_eq!(ids(&["notes/todo.md"]), ["preview-root"]);
+        assert_eq!(ids(&["sites/lisbon/index.html"]), ["preview-root"]);
+        // A folder that holds a site is that site's change, and the workspace's.
+        assert_eq!(
+            ids(&["sites/"]),
+            ["preview-root", "preview-1", "preview-lello"]
+        );
+        // Another space's preview inside the folder takes nothing from it.
+        let other_space = json!({ "version": 1, "previews": [
+            entry(&project, json!({ "previewId": "preview-root", "localPort": 20549, "siteDir": ".", "pictureAt": before })),
+            entry(&Uuid::new_v4(), json!({ "pictureAt": before })),
+        ]});
+        assert_eq!(
+            stale(
+                other_space,
+                &project,
+                dir.path(),
+                &["sites/seville/index.html"]
+            )
+            .into_iter()
+            .map(|picture| picture.preview_id)
+            .collect::<Vec<_>>(),
+            ["preview-root"]
         );
     }
 

@@ -9,6 +9,7 @@ import { buildHomeFeed } from "./studio/homeFeed";
 import { getHomeNotificationTarget } from "./studio/homeNotifications";
 import { processNotificationClickDestination } from "../notifications/notificationClickDestination";
 import { useNotificationCenter } from "../notifications/useNotificationCenter";
+import { isDefaultConversationTitle } from "../conversations/conversationAutoTitle";
 import { UUID_PATTERN, parseNotificationClickUrl } from "../notifications/notificationContract";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -470,7 +471,17 @@ function StudioLayoutInner() {
     handleShowBuildLogs,
     handleHideBuildLogs
   } = useBuildLogs();
-  const notificationCenter = useNotificationCenter({ userId: currentUserId, accessToken: auth.session?.access_token ?? null, navigate });
+  // A reply's toast names its chat, as the chat list names it, when the chat is one this tab has.
+  const chatNamesRef = useRef(conversations);
+  chatNamesRef.current = conversations;
+  const notificationChatName = useCallback((conversationId: string) => {
+    const id = conversationId.trim().toLowerCase();
+    const title = chatNamesRef.current.find(conversation => conversation.controllerId?.trim().toLowerCase() === id)?.title.trim();
+    return title && !isDefaultConversationTitle(title) ? title : null;
+  }, []);
+  const notificationCenter = useNotificationCenter({
+    userId: currentUserId, accessToken: auth.session?.access_token ?? null, navigate, chatName: notificationChatName,
+  });
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const openDiagnostics = useCallback(() => setDiagnosticsOpen(true), []);
   useEffect(() => { setDiagnosticsOpen(false); }, [currentUserId]);

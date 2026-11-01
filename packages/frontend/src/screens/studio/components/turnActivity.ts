@@ -542,6 +542,25 @@ function groupWords(group: Group, previousHost: string | null): string {
 }
 
 /**
+ * One phrase for the same step done once on each of two sites, when its words
+ * name the site as what was done ("opened {host}": "opened phoronix.com and
+ * pcworld.com"); null for words that would read as one page on both ("read a
+ * page on {host}"), or for two different steps.
+ */
+function sameStepOnTwoSites(first: Group, second: Group): string | null {
+  const done = first.entry.done as ActivityDone;
+  const once = typeof done === "string" ? done : done.one;
+  if (
+    first.entry.key !== second.entry.key || !first.entry.host || !second.entry.host ||
+    groupCount(first) !== 1 || groupCount(second) !== 1 ||
+    !once.endsWith("{host}") || once.endsWith(" on {host}")
+  ) {
+    return null;
+  }
+  return once.replace("{host}", `${displayActivityHost(first.entry.host)} and ${displayActivityHost(second.entry.host)}`);
+}
+
+/**
  * The done line from the turn's labelled steps, or null when none is shown,
  * with the host of the first group it shows.
  *
@@ -650,7 +669,8 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
     (latest, group) => (latest === null || group.last > latest.last ? group : latest),
     null,
   );
-  const [most, next] = [...contentGroups].sort((a, b) => weight(b) - weight(a) || b.last - a.last);
+  const ranked = [...contentGroups].sort((a, b) => weight(b) - weight(a) || b.last - a.last);
+  const [most, next] = ranked;
   const [lead, other] = next === answered ? [next, most] : [most, next];
   const content = !lead
     ? []
@@ -659,15 +679,38 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
       : other.entry.host !== undefined && other.entry.host === lead.entry.host && other.first < lead.first
         ? [other, lead]
         : [lead, other];
+  // A site the turn did as much on as the second one the line names lost its
+  // place only to the later one: when it is the only one, and the first place
+  // is clear, the line names it too, beside that site, in the order they ran
+  // ("Opened phoronix.com and pcworld.com, opened 4 pages on frame.work").
+  // With more of them, none is picked over the others.
+  const tiedWithNext = next ? ranked.slice(2).filter((group) => weight(group) === weight(next)) : [];
+  const tie = tiedWithNext.length === 1 && weight(most) > weight(next) &&
+    next.entry.host !== undefined && tiedWithNext[0].entry.host !== undefined
+    ? tiedWithNext[0]
+    : null;
   const outcome = all
     .filter((group) => group.entry.role === "outcome")
     .sort((a, b) => b.last - a.last)
     .slice(0, 1);
-  const shown = [...outcome, ...content];
+  const shown = [...outcome, ...content.flatMap((group) => (
+    group === next && tie ? [group, tie].sort((a, b) => a.first - b.first) : [group]
+  ))];
   const namesResult = result === PREVIEW_OPENED ? shown.length === 0 : outcome.length === 0;
   const phrases: string[] = result && namesResult ? [result] : [];
   let previousHost: string | null = null;
-  for (const group of shown) {
+  for (let index = 0; index < shown.length; index += 1) {
+    const group = shown[index];
+    const pair = shown[index + 1];
+    const together = tie && pair && ((group === next && pair === tie) || (group === tie && pair === next))
+      ? sameStepOnTwoSites(group, pair)
+      : null;
+    if (together) {
+      phrases.push(together);
+      previousHost = null;
+      index += 1;
+      continue;
+    }
     phrases.push(groupWords(group, previousHost));
     previousHost = group.entry.host ?? null;
   }

@@ -132,7 +132,10 @@ title while the tab's history does not yet show the listed address. It reads the
 histories of the tabs whose address or title changed together, each for at most
 2 s, and a tab whose history does not answer in that time (often the busy one,
 still loading) has no title until a later list confirms it, rather than the title
-of the page it is leaving. It reads each
+of the page it is leaving. A tab whose page arrives between the list and the read
+of its history is listed with the title it is leaving while its history already
+shows the new address, so once a read confirms a title the tabs are listed again,
+and the title counts only when its tab still lists the same address and title. It reads each
 title back from the list's HTML escapes ("Laptops & PCs", not "Laptops &amp; PCs"). A tab an
 earlier run left open (`leftover: true`) is not one of them: it reads "Octo's
 earlier tab" in the tab picker. Take over
@@ -718,7 +721,13 @@ read, so that page would go into this chat's reply and Details):
   stage, and no still is kept from it. The view counts as open meanwhile,
   also when it opens during such a turn, and its picture connects again once
   a tab of the chat is in front (a view that has drawn no picture yet says
-  "Opening Instafy's browser…" while it loads, never "Reconnecting…").
+  "Opening Instafy's browser…" while it loads, never "Reconnecting…"). That
+  picture is the chat's first since the turn, never a reconnect, also in a
+  Studio whose browser connected before, when the view counts as open at once:
+  "Reconnecting…" shows only over a picture of the chat's page the view drew
+  and lost (or its still), and over the blank stage a first picture that takes
+  longer than a moment, or fails, says "Opening Instafy's browser…" until it
+  comes or the view gives up, unless the stage already says where Octo is.
   Behind the Chat tab, a screencast view whose chat's tab is in front keeps
   its picture (it asks for that one page), so it shows the page at once when
   it comes on screen. RFB and WebRTC connect only while the view is shown:

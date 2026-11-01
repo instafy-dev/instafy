@@ -742,7 +742,7 @@ describe("ConversationMessageRows", () => {
     expect(notice?.textContent).toContain("Open Machines");
     const inlineSpeakers = Array.from(container.querySelectorAll('[data-testid="chat-speaker-inline"]'));
     expect(inlineSpeakers).toHaveLength(2);
-    expect(inlineSpeakers[1]?.textContent).toContain("octo");
+    expect(inlineSpeakers[1]?.textContent).toContain("Octo");
     expect(inlineSpeakers[1]?.querySelector('[data-testid="chat-avatar-assistant"]')).not.toBeNull();
     expect(readSpeakerMarker(markers[1] ?? null)).toBeNull();
   });
@@ -988,7 +988,7 @@ describe("ConversationMessageRows", () => {
     });
 
     const speaker = container.querySelector('[data-testid="chat-speaker-inline"]');
-    expect(speaker?.textContent).toContain("octo");
+    expect(speaker?.textContent).toContain("Octo");
     // A reason that names the plumbing stays behind Details.
     expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(
       "Something went wrong, so this turn stopped.",
@@ -1068,7 +1068,7 @@ describe("ConversationMessageRows", () => {
     });
 
     const speaker = container.querySelector('[data-testid="chat-speaker-inline"]');
-    expect(speaker?.textContent).toContain("octo");
+    expect(speaker?.textContent).toContain("Octo");
     expect(speaker?.querySelector('[data-testid="chat-speaker-run-status"]')).toBeNull();
     expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(
       "This turn was stopped and didn't pick up again in time. Try again to continue.",

@@ -2321,6 +2321,9 @@ export function BrowserSessionModal({
       wholeScreenBehindChat
     ) {
       if (wholeScreenBehindChat) freezeCurrentBrowserFrame();
+      // A picture closed because the stage draws none of the chat's page
+      // (another chat's turn) is not held: the chat's next one is its first.
+      if (!stageDrawsChatPage) paintedFrameScopeRef.current = null;
       setResolvedViewerUrl(null);
       setBrowserInputWsUrl(null);
       setWebRtcConnection(null);
@@ -2774,9 +2777,17 @@ export function BrowserSessionModal({
     return () => window.clearTimeout(timer);
   }, [fail, projectId, reconnectingShown]);
 
-  // On screen only once the picture has been gone for the grace period.
-  const reconnectingNoteShown = useSustainedFlag(
-    !shouldCollapseDocked && viewLive && status === "connecting",
+  // On screen only once the picture has been gone for the grace period, and
+  // only over a picture of the chat's page this view drew (or its still): its
+  // first picture (after a reload, another chat's turn or a switch to another
+  // of its tabs) is never a reconnect, even when its first frame takes long
+  // or fails. Over the blank stage the view says then that it is opening, as
+  // a view does before its first picture, so it never stays blank and silent.
+  const pictureOnItsWay = !shouldCollapseDocked && viewLive && status === "connecting";
+  const holdsChatPicture = paintedFrameScopeRef.current === frameScope || Boolean(frozenFrameUrl && stageShowsPage);
+  const reconnectingNoteShown = useSustainedFlag(pictureOnItsWay && holdsChatPicture, RECONNECTING_GRACE_MS);
+  const firstPictureOpeningShown = useSustainedFlag(
+    pictureOnItsWay && stageDrawsChatPage && !holdsChatPicture,
     RECONNECTING_GRACE_MS,
   );
 
@@ -3838,6 +3849,11 @@ export function BrowserSessionModal({
             </>
           ) : null}
           {reconnectingNoteShown ? <BrowserSessionReconnecting /> : null}
+          {/* Where Octo is going, or that it is on a site, already says what the stage waits for. */}
+          {firstPictureOpeningShown && !agentArrivalNote && !agentWhereabouts ? (
+            <BrowserSessionRecovery reason={null} onRetry={retryConnection}
+              viewState={hostedBrowserViewState({ status: "connecting", failure: null, hasConnection: true, machineStartSlow, browserRestarting })} />
+          ) : null}
           {compactCardBody}
           {!shouldCollapseDocked && displayStatus !== "selecting" && !viewLive ? (
             <BrowserSessionRecovery viewState={viewState} reason={error}

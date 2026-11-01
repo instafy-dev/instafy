@@ -167,6 +167,30 @@ describe("SitePreviewPane", () => {
     expect(pill.textContent).toBe("Starting…");
   });
 
+  // Local test, Oct 31: after the map card's press the bar's pill read
+  // "Starting…" beside the pane's "Opening Seville in 3 days…", though nothing
+  // was started: the pill says "Starting…" for a site still being checked
+  // (its tunnel's probe not in yet), whose page or opening line is on screen.
+  // Review: hidden from sight, it still told screen readers "Starting…".
+  it("says nothing is starting while the site is being checked, to anyone: its page, or the line opening it, is the one signal", async () => {
+    mocks.getSitePreview.mockResolvedValue(record({ health: null }));
+    const pill = () => container.querySelector<HTMLElement>("[data-testid=site-preview-status]");
+    const starting = () => Array.from(container.querySelectorAll<HTMLElement>("[role=status]"))
+      .some((status) => `${status.getAttribute("aria-label") ?? ""} ${status.textContent ?? ""}`.includes("Starting"));
+    await render();
+    expect(pane().dataset.state).toBe("checking");
+    expect(frame()).not.toBeNull();
+    expect(container.querySelector("[data-testid=site-preview-progress]")?.textContent).toContain("Opening Docs site…");
+    expect(pill()).toBeNull();
+    expect(starting()).toBe(false);
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    await advance(SITE_LAYOUT_ANSWER_WAIT_MS);
+    // The page is on screen, and still nothing says it is starting.
+    expect(container.querySelector("[data-testid=site-preview-progress]")).toBeNull();
+    expect(pill()).toBeNull();
+    expect(starting()).toBe(false);
+  });
+
   // A local test: a restarted site's pane was blank for 16 to 26 s, and the
   // map's for 5 to 18 s, with nothing said. Local test, Oct 30: after a
   // press the pane said "Opening …", then "Loading…", then went blank: the
@@ -215,6 +239,44 @@ describe("SitePreviewPane", () => {
     await post({ source: "site-kit", v: 1, type: "layout-ack", payload: { supports: ["ready"] } }, origin, frame()!.contentWindow);
     expect(progress()).toContain("Loading…");
     await post({ source: "site-kit", v: 1, type: "ready" }, origin, frame()!.contentWindow);
+    expect(progress()).toBeNull();
+  });
+
+  // Review: a comparison's page shows its own placeholder rows and "Loading…"
+  // while it fetches its data, so the pane's line over it made two loading
+  // signals, the line on top of the page's own. Until a page that says it
+  // draws itself after it loads has drawn, it stays under the line, out of
+  // sight: the line is the one signal. A page that never said so shows under
+  // the line as it loads, as before.
+  it("keeps a page that draws itself after it loads out of sight under its line until it has drawn", async () => {
+    const progress = () => container.querySelector<HTMLElement>("[data-testid=site-preview-progress]");
+    const covers = () => progress()?.classList.contains("bg-white") ?? false;
+    const origin = new URL(FIRST).origin;
+    await render();
+    expect(progress()?.textContent).toContain("Opening Docs site…");
+    expect(covers()).toBe(false);
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    expect(covers()).toBe(false);
+    await post({ source: "site-kit", v: 1, type: "layout-ack", payload: { supports: ["view", "ready"] } }, origin, frame()!.contentWindow);
+    expect(progress()?.textContent).toContain("Opening Docs site…");
+    expect(covers()).toBe(true);
+    await post({ source: "site-kit", v: 1, type: "ready" }, origin, frame()!.contentWindow);
+    expect(progress()).toBeNull();
+    // Reload: the new page is out of sight under "Loading…" until it has drawn.
+    await click("[data-testid=site-preview-reload]");
+    expect(covers()).toBe(false);
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    await post({ source: "site-kit", v: 1, type: "layout-ack", payload: { supports: ["ready"] } }, origin, frame()!.contentWindow);
+    expect(progress()?.textContent).toContain("Loading…");
+    expect(covers()).toBe(true);
+    await post({ source: "site-kit", v: 1, type: "ready" }, origin, frame()!.contentWindow);
+    expect(progress()).toBeNull();
+    // One that never says it has drawn shows once the pane stops waiting.
+    await click("[data-testid=site-preview-reload]");
+    await act(async () => frame()!.dispatchEvent(new Event("load")));
+    await post({ source: "site-kit", v: 1, type: "layout-ack", payload: { supports: ["ready"] } }, origin, frame()!.contentWindow);
+    expect(covers()).toBe(true);
+    await advance(15_000);
     expect(progress()).toBeNull();
   });
 

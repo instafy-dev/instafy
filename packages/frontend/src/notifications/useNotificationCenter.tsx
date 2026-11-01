@@ -36,6 +36,23 @@ export function replyConversationId(item: ProductNotification): string | null {
   return item.eventName === "conversation.reply" ? notificationConversationId(item) : null;
 }
 
+/** The longest chat name a toast quotes; a longer one is cut with "…". */
+const TOAST_CHAT_NAME_MAX_CHARS = 60;
+
+/**
+ * What a toast in Studio says: a reply names its chat when Studio knows the
+ * chat's name, so the person knows which chat it is before they open it. A
+ * notification shown outside Studio keeps the registry text alone.
+ */
+export function notificationToastText(item: ProductNotification, chatName: string | null): string {
+  const name = chatName?.replace(/\s+/g, " ").trim() ?? "";
+  if (!replyConversationId(item) || !name) return item.body;
+  const shown = [...name].length > TOAST_CHAT_NAME_MAX_CHARS
+    ? `${[...name].slice(0, TOAST_CHAT_NAME_MAX_CHARS - 1).join("").trimEnd()}…`
+    : name;
+  return `There is a new reply in “${shown}”.`;
+}
+
 export interface HomeNotifications {
   page: NotificationPage;
   loading: boolean;
@@ -45,8 +62,18 @@ export interface HomeNotifications {
   markRead: (items: ProductNotification[]) => Promise<boolean>;
 }
 
-/** Account-owned data and delivery. Home owns the inbox UI; Settings owns preferences. */
-export function useNotificationCenter({ userId, accessToken, navigate }: { userId: string | null; accessToken: string | null; navigate: (url: string) => void }): HomeNotifications {
+/**
+ * Account-owned data and delivery. Home owns the inbox UI; Settings owns preferences. `chatName`: a chat's name by
+ * its controller id, when this tab knows it.
+ */
+export function useNotificationCenter({ userId, accessToken, navigate, chatName }: {
+  userId: string | null;
+  accessToken: string | null;
+  navigate: (url: string) => void;
+  chatName?: (conversationId: string) => string | null;
+}): HomeNotifications {
+  const chatNameRef = useRef(chatName);
+  chatNameRef.current = chatName;
   const identity = useRef({ userId, accessToken });
   if (identity.current.userId !== userId || identity.current.accessToken !== accessToken) identity.current = { userId, accessToken };
   const session = identity.current;
@@ -240,7 +267,9 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
         if (foreground) {
           const id = `notification:${userId}:${item.id}`;
           toastIds.current.add(id);
-          showStatus(item.body, "info", 10_000, { id, nonPreemptive: true, actionLabel: "View", onShow: () => {
+          const conversationId = replyConversationId(item);
+          const text = notificationToastText(item, conversationId ? chatNameRef.current?.(conversationId) ?? null : null);
+          showStatus(text, "info", 10_000, { id, nonPreemptive: true, actionLabel: "View", onShow: () => {
             if (current() && isAppInForeground()) {
               void controllerClient.notifications.updateState({ id: item.id, action: "seen", accessToken, expectedUserId: userId, isCurrent: current }).catch(() => {});
             }

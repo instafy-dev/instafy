@@ -5,6 +5,7 @@ import type { HomeNotifications } from "../../../notifications/useNotificationCe
 import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
 import { ChatLines, Check, Clock, Group, NavArrowRight, Plus, WarningTriangle } from "iconoir-react";
 import { OrgIdentity } from "../../../components/OrgIdentity";
+import { getOrgDisplayName } from "../../../org/orgNaming";
 import { HumanAvatar } from "../../../components/HumanAvatar";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { Button, IconButton } from "../../../components/Button";
@@ -549,8 +550,10 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
     (feed.teamFilter === HOME_TEAM_FILTER_ALL || feed.teamFilter === teamKeyForOrgId(currentProject.orgId))
       ? conversations.find(conversation => conversation.localId === activeConversationId && conversation.lifecycleStatus === "active")
       : null;
+  // The team as every other row names it: the personal team is "Personal".
   const resumeTeamName = currentProject?.orgId
-    ? organizations.find(team => team.id === currentProject.orgId)?.name ?? currentProject.orgName ?? "Team" : "Personal";
+    ? getOrgDisplayName(organizations.find(team => team.id === currentProject.orgId)?.name ?? currentProject.orgName ?? "Team")
+    : "Personal";
   // Each chat once: Unread, then Continue working, Recent chats, Recent activity.
   const resumeChatKey = resumeConversation ? homeConversationChatKey(resumeConversation) : null;
   const sections = useMemo(
