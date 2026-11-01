@@ -2322,6 +2322,16 @@ fn check_browser_turns_go_on_past_a_page(harness: &Harness) -> Result<()> {
                 !text.contains("a stale target, a changed page"),
                 "{label}#{index} reads a stale target or a changed page as final"
             );
+            // The turn's own reply rules say the same.
+            let input = input_text(request);
+            ensure!(
+                input.contains("If a browser tool fails or refuses a page, that ends that page, not the task: go on to the next source in this turn."),
+                "{label}#{index} never read that a failed page ends that page in its reply rules"
+            );
+            ensure!(
+                !input.contains("If a browser tool fails, say in plain words"),
+                "{label}#{index} reads a failed browser tool as the end of the turn"
+            );
         }
     }
     Ok(())

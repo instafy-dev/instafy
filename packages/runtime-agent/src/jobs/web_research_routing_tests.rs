@@ -1314,9 +1314,23 @@ fn a_failed_page_ends_that_page_and_never_the_research() {
         json!({}),
     );
     assert!(prompt.contains(BROWSER_CHOICE_CONTRACT));
-    assert!(prompt.contains(
-        "If a browser tool fails, say in plain words what did not work (never paste raw error codes"
-    ));
+    // A browser turn's reply rules say the same as its run's text: a failed or refused page ends that page,
+    // and what did not work is said only when nothing is left to try (a local test, Nov 1: research turns
+    // replied about the first page that failed or was refused).
+    for transport in ["shared", "desktop-personal"] {
+        let browser_turn = fresh_prompt(
+            tmp.path(),
+            "Compare the three latest robot vacuums under 600 euros and give me a comparison page.",
+            json!({ "browserTransport": transport }),
+        );
+        assert!(browser_turn.contains(
+            "If a browser tool fails or refuses a page, that ends that page, not the task: go on to the next source in this turn. When nothing is left to try, say in plain words what did not work (never paste raw error codes"
+        ), "{transport}");
+        assert!(
+            !browser_turn.contains("If a browser tool fails, say in plain words"),
+            "{transport}"
+        );
+    }
     assert!(BROWSER_CHOICE_CONTRACT.contains("Write `task` as the person's request: what to do."));
     for stop in ["what did not work and stop", "where to stop"] {
         assert!(!prompt.contains(stop), "{stop}");
