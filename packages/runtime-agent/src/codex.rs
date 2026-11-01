@@ -124,7 +124,7 @@ const MAX_COMMAND_OUTPUT_BUFFER_CHARS: usize = 8192;
 const BROWSER_MODE_DEVELOPER_INSTRUCTIONS: &str = r#"Browser/UI execution run:
 - Use project memory, pinned skills, and loaded learned blocks as the source of task behavior. This prompt only defines run-level invariants.
 - Use the dedicated browser tools configured for this turn when browser execution was requested. Every site and action approval the browser asks for still applies, and ask before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step unless the user's current message named it.
-- Keep the visible page open and focused. Report only concrete observed state. When a step fails, say in plain words what did not work (a failed result's plain reason); never paste raw error codes or error text such as `net::ERR_…` into your reply."#;
+- Keep the visible page open and focused. Report only concrete observed state. A failed or refused page ends that page, not the task: go on to the next source in this turn, as "Finding a page" says. Say in plain words what did not work when nothing is left to try (a failed result's plain reason); never paste raw error codes or error text such as `net::ERR_…` into your reply."#;
 /// The Shared Browser policy, around the one line that says how the run's
 /// approvals start (see `crate::shared_browser::run_approval_start`).
 macro_rules! shared_browser_developer_instructions {
@@ -146,8 +146,8 @@ macro_rules! shared_browser_developer_instructions {
             r#"- Snapshots, status, results and errors mask values that look like keys, tokens or codes as `[redacted secret]` or `REDACTED`. Never try to recover a masked value. When a snapshot has `secretScreen: true`, the page text is withheld until a new page loads: stop, do not click anything on that page to reveal or copy the value, and tell the user in words which control on that page shows it, using the control names the snapshot still lists.
 - An error ending in `[step_refused_secret]`, `[step_refused_sign_in]`, `[step_refused_upload]` or `[step_refused_consent]` is final in every approval mode: revealing or copying a credential, signing in, choosing files and accepting cookies are the user's steps. Do not retry or look for another control that does the same; tell the user which step is theirs, and for a sign-in use `request_human_input` on its fields. For `[step_refused_consent]`: accepting is the person's step; read on under the banner.
 - Downloads are blocked in this browser. Do not try to download or export files through it.
-- A denial, an approval that ran out of time, a stale target, a changed page, or a replayed approval is final for that attempted action. Do not retry it automatically; say in plain words which step did not go through and wait for a new user instruction. A step that ran out of its own time (`stepTimedOut: true`) is not one of these: it answered with the page as it is, so take a snapshot to see what it did and go on from there.
-- A page the network did not deliver fails with a plain reason, such as "Instafy's browser couldn't reach that site", and the browser's code only in `error.details`. Tell the person that reason in your own words; the code is for diagnosis, never for your reply.
+- A denial, an approval that ran out of time, or a replayed approval is final for that attempted action. Do not retry it automatically; say in plain words which step did not go through and wait for a new user instruction. A step that ran out of its own time (`stepTimedOut: true`) is not one of these: it answered with the page as it is, so take a snapshot to see what it did and go on from there.
+- A page the network did not deliver fails with a plain reason, such as "Instafy's browser couldn't reach that site", and the browser's code only in `error.details`. It ends that page, not the task: go on to the next source in this turn. When nothing is left to try, tell the person that reason in your own words; the code is for diagnosis, never for your reply.
 - Approval is never a model-visible tool. Do not search for, inspect, edit, or simulate runtime approval files."#
         )
     };
@@ -6592,7 +6592,7 @@ mod tests {
     #[test]
     fn browser_turns_give_a_failed_step_in_plain_words_never_a_raw_code() {
         assert!(
-            BROWSER_MODE_DEVELOPER_INSTRUCTIONS.contains("say in plain words what did not work")
+            BROWSER_MODE_DEVELOPER_INSTRUCTIONS.contains("Say in plain words what did not work")
         );
         assert!(BROWSER_MODE_DEVELOPER_INSTRUCTIONS.contains("never paste raw error codes"));
         for policy in [
@@ -7113,9 +7113,62 @@ mod tests {
             SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS,
         ] {
             assert!(policy.contains(
-                "- A denial, an approval that ran out of time, a stale target, a changed page, or a replayed approval is final for that attempted action. Do not retry it automatically; say in plain words which step did not go through and wait for a new user instruction. A step that ran out of its own time (`stepTimedOut: true`) is not one of these: it answered with the page as it is, so take a snapshot to see what it did and go on from there.\n"
+                "- A denial, an approval that ran out of time, or a replayed approval is final for that attempted action. Do not retry it automatically; say in plain words which step did not go through and wait for a new user instruction. A step that ran out of its own time (`stepTimedOut: true`) is not one of these: it answered with the page as it is, so take a snapshot to see what it did and go on from there.\n"
             ));
             assert!(!policy.contains("A denial, timeout,"));
+        }
+    }
+
+    /// A local test, Nov 1: a sign-in turn clicked "Sign in" with the snapshot its navigate had
+    /// returned while the page was still drawing, got "Shared Browser snapshot is stale; take a
+    /// fresh snapshot before acting", and ended asking the person to "tell me to continue": the
+    /// policy listed a stale target and a changed page among the outcomes that are final and wait
+    /// for the person. Only an approval's own outcome is final now. A stale target or a changed
+    /// page is looked at again, as the policy's snapshot line and the step's own error say; a
+    /// control that changed after the person's yes is asked about once more and ends the run the
+    /// second time, which the runtime counts itself (`CHANGED_AFTER_YES_LIMIT`).
+    #[test]
+    fn a_stale_target_or_a_changed_page_is_looked_at_again_not_final() {
+        for policy in [
+            SHARED_BROWSER_DEVELOPER_INSTRUCTIONS,
+            SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS,
+        ] {
+            let flat = policy.split_whitespace().collect::<Vec<_>>().join(" ");
+            for gone in ["a stale target, a changed page", "a stale target is final"] {
+                assert!(!flat.contains(gone), "{gone}");
+            }
+            assert!(flat.contains(
+                "A denial, an approval that ran out of time, or a replayed approval is final for that attempted action."
+            ));
+            assert!(flat.contains(
+                "If the page or indexed target set changes, take another snapshot instead of retrying a stale target."
+            ));
+        }
+    }
+
+    /// A local test, Nov 1: a tourism site that did not answer in time, a refused search engine and
+    /// a cookie click the policy refused each ended a research turn with no answer, while the
+    /// venue's own site, the maker's model pages and the operator's planner were one step away.
+    /// The browser run's text said "When a step fails, say in plain words what did not work" and
+    /// "Tell the person that reason in your own words", and only the browser skill said to go on.
+    /// A failed or refused page now ends that page, not the task: the turn goes on to the next
+    /// source in the same turn, and says what did not work only when nothing is left to try.
+    #[test]
+    fn a_failed_or_refused_page_ends_that_page_not_the_task() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let browser = flat(BROWSER_MODE_DEVELOPER_INSTRUCTIONS);
+        assert!(browser.contains(
+            "A failed or refused page ends that page, not the task: go on to the next source in this turn, as \"Finding a page\" says. Say in plain words what did not work when nothing is left to try"
+        ), "{browser}");
+        assert!(!browser.contains("When a step fails, say in plain words"));
+        for policy in [
+            SHARED_BROWSER_DEVELOPER_INSTRUCTIONS,
+            SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS,
+        ] {
+            let policy = flat(policy);
+            assert!(policy.contains(
+                "It ends that page, not the task: go on to the next source in this turn. When nothing is left to try, tell the person that reason in your own words"
+            ), "{policy}");
         }
     }
 

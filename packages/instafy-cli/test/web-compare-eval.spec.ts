@@ -429,7 +429,7 @@ describe("the shopping comparison eval (fixtures)", () => {
     for (const rule of [
       "## Finding a page",
       "A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.",
-      "Comparing: list the models a page you read names, and mark one only a search result names \"not checked\". Never names from memory, never placeholders such as \"candidate 1\".",
+      "Comparing: list the models a page you read names, its menu included, then open each one's own page; mark one only a search result names \"not checked\". Never names from memory, never placeholders such as \"candidate 1\".",
       // a stopped page ends that page, never the research: the next source is "Finding a page"'s
       "ends that page, not the task: \"Finding a page\" says what comes next. Never retry that page another way.",
     ]) {

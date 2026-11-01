@@ -75,7 +75,11 @@ export function createPersonalBrowserLinkOnlyGuard(data: unknown): PersonalBrows
 /** The guard over the bundled list. */
 export const PERSONAL_BROWSER_LINK_ONLY_GUARD = createPersonalBrowserLinkOnlyGuard(BUNDLED_LINK_ONLY_SITES);
 
-/** What the agent is told when a step meets a link-only site, or a missing list. */
+/**
+ * What the agent is told when a step meets a link-only site, or a missing list. A link-only site ends
+ * that address, not the task: a search engine or a listing the agent chose itself leads on to the
+ * source's own site, and only a site the person asked for is theirs to open.
+ */
 export function personalBrowserLinkOnlyMessage(refusal: PersonalBrowserLinkOnlyRefusal, action: string): string {
   if (refusal.code === "link_only_list_unavailable") {
     return `The link-only site list is unavailable in this Desktop build, so the agent reads and opens no web page. ${action}`;
@@ -84,5 +88,6 @@ export function personalBrowserLinkOnlyMessage(refusal: PersonalBrowserLinkOnlyR
     ? " This page says it is a copy of it."
     : refusal.via?.length ? ` This address is its copy on ${refusal.via.join(", then ")}.` : "";
   return `${refusal.site} is link-only: its terms bar AI agents or automated access, so the agent never reads, opens or uses it.${copy} ${action} ` +
-    "Give the person the plain link; they may open it themselves and use Send page to Octo.";
+    "Go on with the maker's, venue's or reviewer's own site; give the person this link only if they asked for this site: " +
+    "they may open it themselves and use Send page to Octo.";
 }

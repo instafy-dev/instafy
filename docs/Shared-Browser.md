@@ -810,10 +810,14 @@ error page such as a 504) sends the turn to the place's own site at once, in the
 same turn, and then to another official source; facts from a place's
 own page, and a route from the operator's journey planner with its stations
 chosen, not a listing or a kiosk page; "not checked" on anything not read this
-turn; and a cookie banner's refusal, so the banner does not cover the page. A
-sign-in, a bot check, a paywall or a refused read ends that page, never the task:
-nothing a turn carries tells it to stop there, so neither a card's task nor the
-reply rules end the research after a failed page. The research and comparison evals
+turn; a comparison's models, those a page's menu names included, each read on
+its own page; and a cookie banner's refusal, so the banner does not cover the
+page. A sign-in, a bot check, a paywall or a refused read ends that page, never
+the task: nothing a turn carries tells it to stop there, so neither a card's
+task nor the reply rules end the research after a failed page. A browser turn's
+own run text says the same: a failed or refused page ends that page, not the
+task, so the turn goes on to the next source in the same turn and says in plain
+words what did not work only when nothing is left to try. The research and comparison evals
 (`packages/instafy-bind/tests/web-research-eval.test.mjs`,
 `packages/instafy-cli/test/web-compare-eval.spec.ts`) grade these rules on
 fixture sites.
@@ -887,7 +891,11 @@ Browser has tabs of its own (see Personal-Browser.md).
   says how its content may be used. `open_tab`, `navigate` and a link, form or
   activation key that leads there are refused before any prompt, and a
   redirect one of Octo's steps causes is stopped by the step's request guard
-  before the request leaves the browser. A copy nested in another wrapper (a
+  before the request leaves the browser. Such a refusal ends that address, not
+  the task: it tells Octo to go on with the maker's, venue's or reviewer's own
+  site, and to give the person the plain link (they may open it and use **Send
+  page to Octo**) only when they asked for that site, so a search engine the
+  turn chose itself leads on to the next source. A copy nested in another wrapper (a
   translator's copy of an archive's copy) counts, and so does an answer that
   says it is a copy of a link-only site (an archive's Memento
   `Link: <…>; rel="original"`, which names the page even at a short address
@@ -1402,7 +1410,18 @@ the observed page. The selected CDP target is part of that fingerprint, so even
 two tabs with identical URLs and DOM cannot replay each other's snapshots. The
 controller recomputes that fingerprint before it judges or asks about a step and
 uses a concrete element handle, so reordered or relabeled DOM cannot silently
-retarget an action. Once the person has answered the step's prompt, the page
+retarget an action. A step whose snapshot no longer reads as the page (one
+still drawing after it loaded, say) fails without ending the run, and the
+policy says to take another snapshot: a stale target or a changed page is
+looked at again, and only an approval's own outcome is final. The controller
+says so on its stdout (`pageChanged`, for a step nobody was asked about whose
+snapshot, control or fields changed under it), and runtime-agent counts such
+steps until a step on a fresh snapshot's control, or one that moves to another
+page or tab, goes through (a look at the page or a scroll between them does
+not count). The second answers that the page keeps changing, which ends that
+page, not the run, so a page that never holds still (a live count, a ticker in
+a link) sends the turn on to the next source instead of a loop of snapshots.
+Once the person has answered the step's prompt, the page
 elsewhere may have changed by itself while they read it (a carousel's slide, a
 clock, a live count), so the step checks the control they were asked about
 rather than the whole page. It acts on that very element, still shown, with
@@ -1580,7 +1599,16 @@ For AI control, clicking the page or toolbar control icon opens a **Take over** 
 Canceling leaves control unchanged; confirming starts the existing handoff.
 **Let Octo continue** then appears in a row under the toolbar. Reduced-motion
 preferences use a static edge glow. Agent-requested handoff
-uses `request_human_input` with one to eight indices from a fresh snapshot. When
+uses `request_human_input` with one to eight indices from a fresh snapshot. It
+checks only the fields it highlights: each must still be at its index with the
+same label and kind, in a form that sends to the same place, on the same
+address. The controller records the editable
+fields of its latest snapshot of the page the person chose that way, as
+fingerprints, in the run's approval directory (`observed-fields.json`). So a
+sign-in page that draws more buttons under its form after it loads (a passkey)
+still pauses on its fields in the same turn, a field that changed fails the
+pause ("The page changed; take a fresh snapshot…"), and every other step still
+checks the whole page. A snapshot with no such record is checked whole. When
 it comes in while the chat is open, Studio switches the person whose turn it is
 (the run's `initiatingUserId`) to the Browser view, where the highlighted fields
 are (once per pause; history, a reload and other members' pauses switch

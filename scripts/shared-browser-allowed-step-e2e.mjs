@@ -215,7 +215,7 @@ export async function runSharedBrowserAllowedStepFixture() {
     // A run of its own: a new owner and run, with nothing approved yet.
     function freshRun() {
       assert.equal(children.size, 0, "A fresh run requires the previous command to have exited");
-      for (const name of ["request.json", "decision.json", "state.json", "withhold-next.json"]) {
+      for (const name of ["request.json", "decision.json", "state.json", "withhold-next.json", "observed-fields.json"]) {
         fs.rmSync(path.join(approvalDirectory, name), { force: true });
       }
       authority = {

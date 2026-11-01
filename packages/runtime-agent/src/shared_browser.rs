@@ -97,6 +97,10 @@ const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 // secret" step ran on, so the page it opens stays withheld; it is run-scoped
 // like the rest of this directory.
 //
+// `observed-fields.json` records the editable fields of Octo's latest snapshot
+// of the page the person chose, so a pause on fields checks only the fields it
+// highlights; it is run-scoped too.
+//
 // `tabs.json` lists the tabs Octo opened in the run (written by the
 // controller script) and `kept-tabs.json` the ones the person kept (written by
 // the origin). The guard reads both when the run ends, to close the rest.
@@ -109,11 +113,12 @@ const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 // tab record names the tab each run left open as its chat's page (see
 // `tab_kept_for_the_chat`), so every viewer of the chat finds that page, after
 // a reload or on another device too. Neither grants anything.
-const APPROVAL_FIXED_FILES: [&str; 8] = [
+const APPROVAL_FIXED_FILES: [&str; 9] = [
     "request.json",
     "decision.json",
     "state.json",
     "withhold-next.json",
+    "observed-fields.json",
     AGENT_TABS_FILE,
     KEPT_AGENT_TABS_FILE,
     LEFTOVER_AGENT_TABS_FILE,
@@ -175,6 +180,20 @@ const BROWSER_UNAVAILABLE_STREAK_LIMIT: u32 = 2;
 const CHANGED_AFTER_YES_LIMIT: u32 = 2;
 /// The terminal code a run ends on at [`CHANGED_AFTER_YES_LIMIT`].
 const CHANGED_AFTER_YES_CODE: &str = "approval_stale";
+/// Steps in a row that were not done because the page changed under them while
+/// nobody was asked (the controller's `pageChanged`): a snapshot the page no
+/// longer reads as, or a control or fields that are not there as they were.
+/// The first is looked at again, as the run's policy and the step's own error
+/// say. Two, so a page still drawing after it loaded gets one more snapshot,
+/// while a page that never holds still (a live count, a ticker in a link) ends
+/// that page within seconds instead of a loop of snapshots until the run's
+/// time runs out. It does not end the run: the turn goes on to the next
+/// source. A step on a control of a fresh snapshot, or one that moves to
+/// another page or tab, starts the count again.
+const PAGE_CHANGED_STREAK_LIMIT: u32 = 2;
+/// What a step answers at [`PAGE_CHANGED_STREAK_LIMIT`], in place of the
+/// controller's "take a fresh snapshot".
+const PAGE_KEEPS_CHANGING_MESSAGE: &str = "This page keeps changing while Octo reads it, so this step was not done, and another snapshot would not hold still either. That ends this page, not the task: go on to the next source in this turn. When nothing is left to try, tell the person in plain words what could not be done on this page.";
 /// How long a person has to answer the prompts of one Shared Browser tool
 /// call, as `assets/shared-browser-approval.js` reads it. The script's
 /// `DEFAULT_APPROVAL_WAIT_MS` and `MAX_APPROVAL_WAIT_MS`, and the origin's
@@ -2546,6 +2565,24 @@ struct SharedBrowserMcpServer {
     /// Steps in this run whose yes was not used because their control
     /// changed ([`CHANGED_AFTER_YES_LIMIT`]).
     changed_after_yes: Arc<AtomicU32>,
+    /// Steps in a row that the page changed under
+    /// ([`PAGE_CHANGED_STREAK_LIMIT`]).
+    page_changed_streak: Arc<AtomicU32>,
+}
+
+/// Whether a step that answered starts the count of steps the page changed
+/// under again: one on a control of a snapshot (the page read as that snapshot
+/// did), or one that moved to another page or tab. Looking at the page
+/// (status, a snapshot, the tab list) and scrolling prove neither.
+fn page_held_still_for(request: &SharedBrowserRequest) -> bool {
+    request
+        .body
+        .as_ref()
+        .is_some_and(|body| body.get("snapshotId").is_some())
+        || matches!(
+            request.path.as_str(),
+            "/v1/navigate" | "/v1/tabs/open" | "/v1/tabs/select" | "/v1/tabs/close"
+        )
 }
 
 impl SharedBrowserMcpServer {
@@ -2557,6 +2594,7 @@ impl SharedBrowserMcpServer {
             terminal_step: Arc::new(AsyncMutex::new(None)),
             browser_unavailable_streak: Arc::new(AtomicU32::new(0)),
             changed_after_yes: Arc::new(AtomicU32::new(0)),
+            page_changed_streak: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -2603,6 +2641,23 @@ impl SharedBrowserMcpServer {
             self.browser_unavailable_streak.store(0, Ordering::SeqCst);
             0
         };
+        // Steps the page changed under count in a row; a step on a fresh
+        // snapshot's control, or on another page, starts again.
+        let page_changed = outcome.as_ref().err().is_some_and(|error| {
+            error
+                .downcast_ref::<ControllerFailure>()
+                .is_some_and(|failure| failure.page_changed)
+        });
+        let page_changed_streak = if page_changed {
+            self.page_changed_streak
+                .fetch_add(1, Ordering::SeqCst)
+                .saturating_add(1)
+        } else {
+            if outcome.is_ok() && page_held_still_for(request) {
+                self.page_changed_streak.store(0, Ordering::SeqCst);
+            }
+            0
+        };
         match outcome {
             Ok(payload) => Ok(payload),
             Err(error) => {
@@ -2638,6 +2693,23 @@ impl SharedBrowserMcpServer {
                         *self.terminal_step.lock().await = failure.step;
                     }
                     return Err(latched);
+                }
+                // A page that keeps changing ends that page, not the run: the
+                // answer says so in place of "take a fresh snapshot", and
+                // keeps what the controller said of the step.
+                if page_changed_streak >= PAGE_CHANGED_STREAK_LIMIT
+                    && let Some(failure) = error.downcast_ref::<ControllerFailure>()
+                {
+                    return Err(SharedBrowserMcpExecutionFailure::Other(
+                        ControllerFailure {
+                            message: PAGE_KEEPS_CHANGING_MESSAGE.to_string(),
+                            step: failure.step,
+                            approval: failure.approval,
+                            changed_after_yes: false,
+                            page_changed: true,
+                        }
+                        .into(),
+                    ));
                 }
                 Err(SharedBrowserMcpExecutionFailure::Other(error))
             }
@@ -3439,12 +3511,14 @@ fn controller_failure(
             step,
             approval,
             changed_after_yes,
+            page_changed,
         } = failed_step(stdout).unwrap_or_default();
         ControllerFailure {
             message,
             step,
             approval,
             changed_after_yes,
+            page_changed,
         }
         .into()
     }
@@ -3452,14 +3526,16 @@ fn controller_failure(
 
 /// A controller command that failed, with the step's kind when the command
 /// said it (a search, or a form sent) before it asked the person, `once`
-/// when the person allowed the step at its prompt, and `changed_after_yes`
-/// when that yes was not used because the step's control changed.
+/// when the person allowed the step at its prompt, `changed_after_yes`
+/// when that yes was not used because the step's control changed, and
+/// `page_changed` when the page changed under a step nobody was asked about.
 #[derive(Debug)]
 struct ControllerFailure {
     message: String,
     step: Option<&'static str>,
     approval: Option<&'static str>,
     changed_after_yes: bool,
+    page_changed: bool,
 }
 
 impl ControllerFailure {
@@ -3492,15 +3568,17 @@ struct FailedStep {
     step: Option<&'static str>,
     approval: Option<&'static str>,
     changed_after_yes: bool,
+    page_changed: bool,
 }
 
 /// What a failed command printed of its step: exactly `{"ok":false,"activity":
 /// {...}}` on stdout, with `step` (one of the few kinds the controller names
 /// there), `approval` (`once`), or both, and `"changedAfterYes":true` beside
 /// `activity` when the person's yes was not used because the step's control
-/// changed (only with `approval`). Anything else names nothing. The
-/// controller writes nothing else to stdout before it fails, and never page
-/// text there.
+/// changed (only with `approval`). `"pageChanged":true` when the page changed
+/// under a step nobody was asked about, with or without `activity`, and never
+/// beside `changedAfterYes`. Anything else names nothing. The controller
+/// writes nothing else to stdout before it fails, and never page text there.
 fn failed_step(stdout: &[u8]) -> Option<FailedStep> {
     const KINDS: &[&str] = &["search", "submit"];
     const APPROVALS: &[&str] = &["once"];
@@ -3509,37 +3587,56 @@ fn failed_step(stdout: &[u8]) -> Option<FailedStep> {
     }
     let value = serde_json::from_slice::<JsonValue>(stdout).ok()?;
     let object = value.as_object()?;
-    let changed_after_yes = match object.get("changedAfterYes") {
-        None => false,
-        Some(JsonValue::Bool(true)) => true,
-        Some(_) => return None,
+    // A flag that is there is exactly `true`, or nothing is read.
+    let flag = |field: &str| match object.get(field) {
+        None => Some(false),
+        Some(JsonValue::Bool(true)) => Some(true),
+        Some(_) => None,
     };
-    if object.len() != 2 + usize::from(changed_after_yes)
+    let changed_after_yes = flag("changedAfterYes")?;
+    let page_changed = flag("pageChanged")?;
+    let activity = match object.get("activity") {
+        None => None,
+        Some(activity) => Some(activity.as_object()?),
+    };
+    if object.len()
+        != 1 + usize::from(activity.is_some())
+            + usize::from(changed_after_yes)
+            + usize::from(page_changed)
         || object.get("ok") != Some(&JsonValue::Bool(false))
+        || (activity.is_none() && !page_changed)
+        || (changed_after_yes && page_changed)
     {
         return None;
     }
-    let activity = object.get("activity")?.as_object()?;
-    if activity.is_empty()
-        || activity
-            .keys()
-            .any(|key| key != "step" && key != "approval")
-    {
-        return None;
-    }
-    // A field that is there names one of its known words, or nothing is read.
-    let known = |field: &str, words: &[&'static str]| match activity.get(field) {
-        None => Some(None),
-        Some(value) => words
-            .iter()
-            .copied()
-            .find(|word| value.as_str() == Some(*word))
-            .map(Some),
+    let (step, approval) = match activity {
+        None => (None, None),
+        Some(activity) => {
+            if activity.is_empty()
+                || activity
+                    .keys()
+                    .any(|key| key != "step" && key != "approval")
+            {
+                return None;
+            }
+            // A field that is there names one of its known words, or nothing
+            // is read.
+            let known = |field: &str, words: &[&'static str]| match activity.get(field) {
+                None => Some(None),
+                Some(value) => words
+                    .iter()
+                    .copied()
+                    .find(|word| value.as_str() == Some(*word))
+                    .map(Some),
+            };
+            (known("step", KINDS)?, known("approval", APPROVALS)?)
+        }
     };
     let failed = FailedStep {
-        step: known("step", KINDS)?,
-        approval: known("approval", APPROVALS)?,
+        step,
+        approval,
         changed_after_yes,
+        page_changed,
     };
     // Only a yes can go unused.
     (!changed_after_yes || failed.approval.is_some()).then_some(failed)
