@@ -34,13 +34,15 @@ own kind of page.
   under `:root:not([data-theme="light"])` inside `@media (prefers-color-scheme: dark)` and under
   `:root[data-theme="dark"]` (Studio's theme, which `instafy bind serve` puts on `<html>`). Never
   `color-scheme: light` alone; one look only when asked.
-- One primary button per page; no search, filter or sort nobody asked for. The lede: the verdict plus the biggest
-  unknown. Facts carry their trust: `checked 17 Oct on maker.com`, `€549 at Shop · seen 17 Oct`, `checked 4 min
-  ago`, `Estimate`, `Unknown`.
+- One primary button per page; no search, filter or sort nobody asked for, and no sort by a value no row has. The
+  lede: the verdict plus the biggest unknown, saying only what a page you read says: how many a page lists, or that
+  these are all of them or the latest, only when it says so. Facts carry their trust: `checked 17 Oct on maker.com`,
+  `€549 at Shop · seen 17 Oct`, `checked 4 min ago`, `Estimate`, `Unknown`.
 - Options side by side: each value names the page it was read on and the day; one nobody found reads `Unknown` and
-  why ("no price on maker.com's page"), never a blank or a dash. A filter from a stated limit ("under €600") counts
-  known values only: an item whose value is unknown is listed apart ("Price unknown"), never as within it, on the
-  page, in the lede and in the reply. The starters do this with `site.byFilter`; a page you write uses it too. A
+  why ("no price on maker.com's page"), never a blank or a dash. A value cites only a page that gives it: a count of
+  what you found cites only what it counts, so none found cites no page. A filter from a stated limit ("under €600")
+  counts known values only: an item whose value is unknown is listed apart ("Price unknown"), never as within it, on
+  the page, in the lede and in the reply. The starters do this with `site.byFilter`; a page you write uses it too. A
   candidate nothing could be read for is still a row, with `Unknown` in each cell: a page of options is never empty
   ("No options yet") while a page you read named what to compare.
 - Keep sort, filters and the open tab in the URL query and give rows ids, so links and Studio's Follow keep them.

@@ -113,7 +113,7 @@ fn a_page_asked_for_in_plain_words_points_the_building_turn_at_the_hub() {
 
     let hub =
         include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
-    let previous = include_str!("legacy/interactive-artifacts-v5.md");
+    let previous = include_str!("legacy/interactive-artifacts-v6.md");
     assert!(!previous.contains("small page"));
     let path = tmp.path().join(learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
     fs::write(&path, previous).unwrap();

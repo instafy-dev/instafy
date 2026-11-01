@@ -201,18 +201,16 @@
     if (typeof x.n === "number") return x.n;
     return numberIn(valueText(x));
   }
-  /** The number of a value the page shows, else null. A value counts only when its trust line draws it: a live value,
-   * an estimate, or a fact with its source. An unsourced fact (drawn "Not checked"), a check that could not read it,
-   * and a dash are unknown, so no filter or sort counts them. */
-  function known(x) {
-    if (!x) return null;
-    if (isRecord(x)) {
-      if (x.type === "claim" && (x.status === "uncertain" || x.status === "not_found" || x.status === "error")) return null;
-      return valueText(x) ? num(x) : null;
-    }
-    if (!valueText(x) || !(x.src || x.est)) return null;
-    return num(x);
+  /** Whether the page shows a value for x, in words or numbers: only when its trust line draws it, as a live value, an
+   * estimate, or a fact with its source. An unsourced fact (drawn "Not checked"), a check that could not read it, and
+   * a dash are unknown. */
+  function shown(x) {
+    if (!x) return false;
+    if (isRecord(x)) return !(x.type === "claim" && (x.status === "uncertain" || x.status === "not_found" || x.status === "error")) && !!valueText(x);
+    return !!valueText(x) && !!(x.src || x.est);
   }
+  /** The number of a value the page shows (shown), else null: no filter or sort counts anything else. */
+  function known(x) { return shown(x) ? num(x) : null; }
   /** Where a value stands against the page's one filter ({key, max?, min?}): "in", "out", or "unknown" when the page
    * has no number for it. Unknown is never "in": a row without a price is not "under $140". */
   function within(x, filter) {
@@ -976,18 +974,26 @@
       return data;
     }, function () { /* fail() already showed the notice */ drawnSoon(); });
   }
-  /** The first view is on the page (or the notice saying why not): told once it is painted. */
+  // A page out of sight (a hidden tab, a pane that is not shown) gets no frames until it is shown, so its next frame
+  // may never come; its first view is on the page all the same. The browser may hold such a page's timers too, for up
+  // to about a second.
+  var DRAWN_WAIT_MS = 100;
+  /** The first view is on the page (or the notice saying why not): told once, on the next frame or on a DRAWN_WAIT_MS
+   * timer, whichever comes first. */
   function drawnSoon() {
     var b = bind();
     if (!b || typeof b.drawn !== "function") return;
-    (window.requestAnimationFrame || setTimeout)(function () { b.drawn(); });
+    var told = false;
+    var tell = function () { if (!told) { told = true; b.drawn(); } };
+    if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(tell);
+    setTimeout(tell, DRAWN_WAIT_MS);
   }
 
   window.site = {
-    version: "1.6.0",
+    version: "1.6.1",
     h: h, append: append, icon: icon, link: link, slug: slug, rowAttrs: rowAttrs, safeUrl: safeUrl,
     date: date, dayDate: dayDate, ago: ago, money: money, num: num, valueText: valueText, host: host, seen: seenText,
-    cite: cite, known: known, within: within, byFilter: byFilter, old: isOld, expired: expired,
+    cite: cite, shown: shown, known: known, within: within, byFilter: byFilter, old: isOld, expired: expired,
     live: live, trust: trust, rowAction: rowAction, checkButton: checkButton, checkAll: checkAll, canCheck: canCheck,
     anyPending: anyPending, priceNotice: priceNotice, storesBlocked: storesBlocked, blocked: blockedRecord, tidy: tidyCaptions, remember: remember, recall: recall,
     state: state, setState: setState, onState: onState, render: render, schedule: schedule,
