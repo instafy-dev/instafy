@@ -694,7 +694,7 @@ fn a_route_comes_from_the_operators_journey_planner() {
     assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
-/// Live drive, Nov 1: a comparison's browser turn read the maker's home page, whose menu names four laptops and links
+/// A local test, Nov 1: a comparison's browser turn read the maker's home page, whose menu names four laptops and links
 /// their pages, tried a search engine (refused, link-only) and stopped with 4 of 15 cells: "Comparing" said only to
 /// list the models a page names. It now lists the ones the page's menu names too, then opens each model's own page,
 /// in "Finding a page" within the part a snapshot carries, without pushing the sign-in rules out of it. The part a

@@ -2296,7 +2296,7 @@ fn check(harness: &Harness) -> Result<()> {
 }
 
 /// (x) Chains B, H, G and F: what every request of a Shared Browser turn reads about a page that
-/// fails, is refused or changed under it. Live drive, Nov 1: a tourism site that did not answer in
+/// fails, is refused or changed under it. A local test, Nov 1: a tourism site that did not answer in
 /// time, a refused search engine and a sign-in page that was still drawing each ended a browser
 /// turn with no answer ("Tell me to continue"), while the next source, or one more snapshot, was a
 /// step away. A failed or refused page ends that page, not the task, and only an approval's own

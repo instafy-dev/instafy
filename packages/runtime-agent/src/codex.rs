@@ -7119,7 +7119,7 @@ mod tests {
         }
     }
 
-    /// Live drive, Nov 1: a sign-in turn clicked "Sign in" with the snapshot its navigate had
+    /// A local test, Nov 1: a sign-in turn clicked "Sign in" with the snapshot its navigate had
     /// returned while the page was still drawing, got "Shared Browser snapshot is stale; take a
     /// fresh snapshot before acting", and ended asking the person to "tell me to continue": the
     /// policy listed a stale target and a changed page among the outcomes that are final and wait
@@ -7146,7 +7146,7 @@ mod tests {
         }
     }
 
-    /// Live drive, Nov 1: a tourism site that did not answer in time, a refused search engine and
+    /// A local test, Nov 1: a tourism site that did not answer in time, a refused search engine and
     /// a cookie click the policy refused each ended a research turn with no answer, while the
     /// venue's own site, the maker's model pages and the operator's planner were one step away.
     /// The browser run's text said "When a step fails, say in plain words what did not work" and

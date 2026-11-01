@@ -5036,7 +5036,7 @@ fn a_sign_in_page_names_its_fields_and_says_to_pause_on_them() {
     assert!(in_tab.get("signIn").is_none(), "{in_tab}");
 }
 
-/// Live drive, Nov 1: the click that opened a sign-in page read it with its two
+/// A local test, Nov 1: the click that opened a sign-in page read it with its two
 /// fields, then the page drew more buttons under its form (other ways to sign
 /// in, a passkey). The pause on the two fields, 2 s later, failed with "The
 /// page changed; take a fresh snapshot before requesting human input": it
@@ -9221,7 +9221,7 @@ fn octo_never_opens_or_reads_a_link_only_site_on_the_page_the_person_chose() {
     );
 }
 
-/// Live drive, Nov 1: a comparison's browser turn read the maker's home page,
+/// A local test, Nov 1: a comparison's browser turn read the maker's home page,
 /// tried a search engine for reviews, and replied 3.7 s after the refusal,
 /// which said only "Give the person the plain link". A refused address ends
 /// that address, not the task: the refusal sends the turn on to the maker's,
