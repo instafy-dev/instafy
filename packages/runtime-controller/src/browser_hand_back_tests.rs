@@ -1520,7 +1520,10 @@ impl Chain {
     }
 
     /// The browser turn that carries on the routed card `routed` posted for
-    /// `words`, as Studio sends it.
+    /// `words`, as Studio sends it, with what its browser send's dispatch adds:
+    /// the browser, and the check that it asks the card's task, the person's
+    /// own words (`browserCardTurn.routed`; `a_routed_message_ends_with_its_card_and_its_browser_turn_is_the_cards`
+    /// shows dispatch stamps it so for such a send).
     async fn routed_browser_turn(&self, routed: &Uuid, words: &str) -> anyhow::Result<Uuid> {
         let browser = self
             .send(
@@ -1532,6 +1535,15 @@ impl Chain {
             .map_err(|error| controller_error("browser turn", error))?;
         let browser = self.job_of(&browser).await?;
         self.make_browser_turn(&browser).await?;
+        let stamp = json!({ "version": 1, "cardJobId": routed, "routed": true });
+        sql(
+            &self.pool,
+            "update agent_jobs
+                set payload = jsonb_set(payload, '{metadata,browserCardTurn}', $2::jsonb, true)
+              where id = $1",
+            &[&browser, &PgJson(&stamp)],
+        )
+        .await?;
         Ok(browser)
     }
 
