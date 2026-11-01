@@ -326,7 +326,7 @@ export function checkValues(dir) {
     if (!hasValue(fact) || fact.est) continue;
     const lacks = [!fact.src && '"src"', !httpsUrl(fact.url) && '"url" (the page)', !fact.date && !fact.asof && '"date" (the day)'].filter(Boolean);
     const list = lacks.length > 1 ? `${lacks.slice(0, -1).join(", ")} or ${lacks[lacks.length - 1]}` : lacks[0];
-    if (lacks.length) problems.push(`${where}: "${valueOf(fact)}" has no ${list}: add where you read it and when ("checked 27 Oct on maker.com"), or leave the value out.${fact.src ? "" : " Without a source the page shows it as not checked."}`);
+    if (lacks.length) problems.push(`${where}: "${valueOf(fact)}" has no ${list}: add the page that gives this value and the day you read it ("checked 27 Oct on maker.com"). When no page gives it (such as a count of what you found, with none found), leave out "v" and say why in "note".${fact.src ? "" : " Without a source the page shows it as not checked."}`);
   }
   for (const row of uncitedRows(data)) problems.push(row.problem);
 

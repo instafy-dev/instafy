@@ -1018,7 +1018,7 @@ fn the_research_skill_compares_items_and_the_page_lists_unknown_prices_apart() {
         "`instafy web search \"<name> price\" --json`, or `--chain reference-search` for shops' official sites; a link-only shop gets `instafy web link <site> query=<name>` (Guided mode).",
         "Still none: \"price unknown\", and the page for the person to open and send to Octo; never a remembered or guessed price.",
         "Sources asked for (\"two independent reviews\"): that many per item, each on that exact model, by a publisher other than the maker, the shops and each other (a sibling model's review does not count).",
-        "Short: \"<item>: 1 of 2 reviews found\", in the reply and on the page.",
+        "Short: \"<item>: 1 of 2 reviews found\", in the reply and on the page, citing only those reviews.",
         "A limit (\"under €600\"): an item with no price read this turn is listed as \"price unknown\", never as within it.",
     ] {
         assert!(research.contains(needle), "{needle}");
@@ -1062,6 +1062,78 @@ fn the_research_skill_compares_items_and_the_page_lists_unknown_prices_apart() {
         fs::write(&skill, previous).unwrap();
         learn::ensure_project_memory_scaffold(tmp.path());
         assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
+    }
+}
+
+/// A comparison's page cited a maker's home page as the source of "0 of 2 confirmed" reviews, said in its lede how
+/// many models that page names (its menu named one more) and sorted by a value no row had. A count of what was found
+/// cites only what it counts, so none found cites no page; a lede says only what a page read says; and no sort is by a
+/// value no row has. Unedited earlier copies of both skills are upgraded.
+#[test]
+fn a_page_of_options_cites_only_pages_that_give_a_value_and_its_lede_only_what_they_say() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hub_skill = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
+    ));
+    let previous_research = include_str!("legacy/web-research-v12.md");
+    let previous_hub = include_str!("legacy/interactive-artifacts-v5.md");
+    for (skill, previous, needle) in [
+        (
+            RESEARCH_SKILL,
+            previous_research,
+            "Short: \"<item>: 1 of 2 reviews found\", in the reply and on the page, citing only those reviews.",
+        ),
+        (
+            hub_skill,
+            previous_hub,
+            "A value cites only a page that gives it: a count of what you found cites only what it counts, so none found cites no page.",
+        ),
+        (
+            hub_skill,
+            previous_hub,
+            "The lede: the verdict plus the biggest unknown, saying only what a page you read says: how many a page lists, or that these are all of them or the latest, only when it says so.",
+        ),
+        (
+            hub_skill,
+            previous_hub,
+            "no search, filter or sort nobody asked for, and no sort by a value no row has.",
+        ),
+    ] {
+        assert!(flat(skill).contains(needle), "{needle}");
+        assert!(
+            !flat(previous).contains(needle),
+            "new in this version: {needle}"
+        );
+    }
+    assert!(
+        RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+        "{} bytes",
+        RESEARCH_SKILL.len()
+    );
+    assert!(hub_skill.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+
+    let tmp = scaffolded_space();
+    for (relative, previous, current) in [
+        (
+            learn::WEB_RESEARCH_RELATIVE_PATH,
+            previous_research,
+            RESEARCH_SKILL,
+        ),
+        (
+            learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
+            previous_hub,
+            hub_skill,
+        ),
+    ] {
+        let path = tmp.path().join(relative);
+        fs::write(&path, previous).unwrap();
+        learn::ensure_project_memory_scaffold(tmp.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), current, "{relative}");
+        let edited = format!("{previous}\nLocal page preference.\n");
+        fs::write(&path, &edited).unwrap();
+        learn::ensure_project_memory_scaffold(tmp.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), edited, "{relative}");
     }
 }
 
