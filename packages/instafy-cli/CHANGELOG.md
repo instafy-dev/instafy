@@ -1,5 +1,14 @@
 # @instafy/cli
 
+## 0.5.2
+
+### Patch Changes
+
+- 761ea7f: `instafy preview check` can keep the picture for an open preview's card in a file instead of sending it, for Instafy's runtime to send with its own credential after a turn's reply (`--picture-to <file>`, hidden from help). A check that sends its picture records when it took it before sending it, so an older picture still on its way to the card is not sent after it.
+- c2e9d6e: A preview card's picture shows the site in dark mode. A preview keeps one picture, which Studio shows in its light and dark themes alike, and a page that follows the person's light or dark mode showed as a bright picture in a dark Studio; a page with only a light look is still pictured light, as it shows. `instafy preview check` loads the desktop size, which the card's picture comes from, in dark mode and the phone size in light mode, so one check shows both looks; its report names each size's mode.
+- 4d534eb: `instafy bind check` reads a site's GeoJSON data files too, so a map's places (its layers in `data/<layer>.geojson`) count as shown. A map that showed every place the request named was reported as missing all of them, because the check read only HTML and `.json` files. What a map lists as not found yet (its config's `"missing"`) still does not count.
+- decda1b: `instafy web read` says what a stopped page leaves open. The address asked for and where it redirected are still never read another way, and the person still gets the plain link; the site's other pages (such as each product's own page, when a listing page is closed to bots) and other sources can still be read, each checked on its own. A stop of the whole site (a link-only site, a 429 or bot check, or a robots.txt that refuses every page, whether it cannot be read or its rules keep an agent it checks out of every path, as `Disallow: /` does) leaves only other sources, and says so. The note no longer ends "use a different source", which read as "leave this site".
+
 ## 0.5.1
 
 ### Patch Changes
