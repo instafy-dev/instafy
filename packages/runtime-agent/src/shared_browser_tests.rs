@@ -2895,14 +2895,24 @@ fn a_search_said_no_to_names_its_step_a_search() {
         );
     }
 
-    // Only that exact line names a step and the person's yes, and whether a
-    // change on the page left that yes unused; anything else on stdout names
+    // Only that exact line names a step and the person's yes, whether a
+    // change on the page left that yes unused, and whether the page changed
+    // under a step nobody was asked about; anything else on stdout names
     // nothing.
+    let changed = |step, approval| {
+        Some(FailedStep {
+            step,
+            approval,
+            changed_after_yes: false,
+            page_changed: true,
+        })
+    };
     let named = |step, approval| {
         Some(FailedStep {
             step,
             approval,
             changed_after_yes: false,
+            page_changed: false,
         })
     };
     let unused = |step, approval| {
@@ -2910,6 +2920,7 @@ fn a_search_said_no_to_names_its_step_a_search() {
             step,
             approval,
             changed_after_yes: true,
+            page_changed: false,
         })
     };
     for (stdout, expected) in [
@@ -2963,6 +2974,25 @@ fn a_search_said_no_to_names_its_step_a_search() {
             None,
         ),
         (r#"{"ok":false,"changedAfterYes":true}"#, None),
+        (r#"{"ok":false,"pageChanged":true}"#, changed(None, None)),
+        (
+            r#"{"ok":false,"activity":{"step":"search"},"pageChanged":true}"#,
+            changed(Some("search"), None),
+        ),
+        (
+            r#"{"ok":false,"activity":{"approval":"once"},"pageChanged":true}"#,
+            changed(None, Some("once")),
+        ),
+        // Never beside a yes left unused, only as `true`, and nothing else.
+        (
+            r#"{"ok":false,"activity":{"approval":"once"},"changedAfterYes":true,"pageChanged":true}"#,
+            None,
+        ),
+        (r#"{"ok":false,"pageChanged":false}"#, None),
+        (r#"{"ok":false,"pageChanged":"yes"}"#, None),
+        (r#"{"ok":false,"pageChanged":true,"why":"x"}"#, None),
+        (r#"{"ok":false,"activity":{},"pageChanged":true}"#, None),
+        (r#"{"ok":true,"pageChanged":true}"#, None),
         ("search", None),
         ("", None),
     ] {
@@ -2980,12 +3010,14 @@ fn a_failed_step_keeps_the_persons_yes_in_its_result() {
             step,
             approval,
             changed_after_yes,
+            page_changed,
         } = failed_step(stdout.as_bytes()).unwrap_or_default();
         ControllerFailure {
             message: "Shared Browser command exited with exit status: 1: The page changed after the person said yes".to_string(),
             step,
             approval,
             changed_after_yes,
+            page_changed,
         }
         .into()
     };
@@ -3004,6 +3036,7 @@ fn a_failed_step_keeps_the_persons_yes_in_its_result() {
         step: None,
         approval: Some("once"),
         changed_after_yes: false,
+        page_changed: false,
     }
     .into();
     let structured = failed_call_result(&network)
@@ -3033,6 +3066,7 @@ async fn the_call_that_ends_the_run_names_its_step_in_its_answer() {
                 step: Some("search"),
                 approval: None,
                 changed_after_yes: false,
+                page_changed: false,
             }
             .into())
         })
@@ -3080,18 +3114,21 @@ async fn a_stale_unanswered_or_refused_step_fails_only_its_own_call() {
         json!({ "index": 8, "snapshotId": SNAPSHOT_ID }),
     );
     let navigate = request("/v1/navigate", json!({ "url": "https://example.test/" }));
-    for (step, message) in [
+    for (step, message, page_changed) in [
         (
             &click,
             "Shared Browser snapshot is stale; take a fresh snapshot before acting",
+            true,
         ),
         (
             &navigate,
             "The site did not answer in time, so nothing was opened and the page is still blank.",
+            false,
         ),
         (
             &navigate,
             "Google search, Maps, Travel and Hotels is link-only: Octo never opens it, in any tab. Nothing was opened.",
+            false,
         ),
     ] {
         let failed = server
@@ -3101,12 +3138,14 @@ async fn a_stale_unanswered_or_refused_step_fails_only_its_own_call() {
                     step: None,
                     approval: None,
                     changed_after_yes: false,
+                    page_changed,
                 }
                 .into())
             })
             .await;
+        // Its own words: a stale snapshot is looked at again.
         assert!(
-            matches!(failed, Err(SharedBrowserMcpExecutionFailure::Other(_))),
+            matches!(&failed, Err(SharedBrowserMcpExecutionFailure::Other(error)) if format!("{error:#}") == message),
             "{message}"
         );
         let next = server
@@ -3140,6 +3179,7 @@ async fn a_second_yes_left_unused_by_a_changing_page_ends_the_run() {
                 step: Some("submit"),
                 approval,
                 changed_after_yes,
+                page_changed: false,
             }
             .into())
         }
@@ -3201,6 +3241,253 @@ async fn a_second_yes_left_unused_by_a_changing_page_ends_the_run() {
         ))
     ));
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+}
+
+/// A stale snapshot is looked at again, so a page that never holds still (a
+/// live count or a ticker in a link) would make every step on it stale, and
+/// the turn would take snapshot after snapshot until its time ran out. The
+/// page changing under a step is counted in a row: the first answer keeps the
+/// controller's "take a fresh snapshot", and the second says the page keeps
+/// changing, which ends that page, not the run. Looking at the page or
+/// scrolling between steps does not start the count again; a step on a
+/// control of a fresh snapshot, or on another page, does. What the controller
+/// said of the step stays in its answer.
+#[tokio::test]
+async fn a_page_that_keeps_changing_ends_that_page_not_the_run() {
+    let server = SharedBrowserMcpServer::new();
+    let request = |method: &str, path: &str, body: Option<JsonValue>| SharedBrowserRequest {
+        method: method.to_string(),
+        path: path.to_string(),
+        body,
+    };
+    let click = request(
+        "POST",
+        "/v1/click",
+        Some(json!({ "index": 2, "snapshotId": SNAPSHOT_ID })),
+    );
+    let look = request("GET", "/v1/snapshot", None);
+    let scroll = request("POST", "/v1/scroll", Some(json!({ "y": 400 })));
+    let navigate = request(
+        "POST",
+        "/v1/navigate",
+        Some(json!({ "url": "https://example.test/next" })),
+    );
+    let stale = |step: Option<&'static str>| {
+        move || async move {
+            Err(ControllerFailure {
+                message: "Shared Browser command exited with exit status: 1: Shared Browser command failed: Shared Browser snapshot is stale; take a fresh snapshot before acting".to_string(),
+                step,
+                approval: None,
+                changed_after_yes: false,
+                page_changed: true,
+            }
+            .into())
+        }
+    };
+    let answered = || async { Ok(json!({ "ok": true })) };
+    let words =
+        |result: &std::result::Result<JsonValue, SharedBrowserMcpExecutionFailure>| match result {
+            Err(SharedBrowserMcpExecutionFailure::Other(error)) => format!("{error:#}"),
+            other => panic!("not a step's own failure: {other:?}"),
+        };
+
+    // The first is looked at again.
+    let first = server.execute_with_failure_latch(&click, stale(None)).await;
+    assert!(
+        words(&first).contains("take a fresh snapshot"),
+        "{}",
+        words(&first)
+    );
+    // A snapshot and a scroll between steps prove nothing.
+    assert!(
+        server
+            .execute_with_failure_latch(&look, answered)
+            .await
+            .is_ok()
+    );
+    assert!(
+        server
+            .execute_with_failure_latch(&scroll, answered)
+            .await
+            .is_ok()
+    );
+    // The second in a row ends that page, not the run, and keeps the step's kind.
+    let second = server
+        .execute_with_failure_latch(&click, stale(Some("search")))
+        .await;
+    let second_words = words(&second);
+    assert!(
+        second_words.contains("This page keeps changing"),
+        "{second_words}"
+    );
+    assert!(
+        second_words
+            .contains("That ends this page, not the task: go on to the next source in this turn."),
+        "{second_words}"
+    );
+    assert!(
+        !second_words.contains("take a fresh snapshot"),
+        "{second_words}"
+    );
+    let Err(SharedBrowserMcpExecutionFailure::Other(error)) = &second else {
+        unreachable!()
+    };
+    assert_eq!(
+        failed_call_result(error)
+            .structured_content
+            .expect("structured")["activity"],
+        json!({"step": "search"})
+    );
+    assert_eq!(*server.terminal_consent_failure.lock().await, None);
+    // The next source opens, and the count starts again after it.
+    assert!(
+        server
+            .execute_with_failure_latch(&navigate, answered)
+            .await
+            .is_ok()
+    );
+    let after_navigate = server.execute_with_failure_latch(&click, stale(None)).await;
+    assert!(words(&after_navigate).contains("take a fresh snapshot"));
+    // So does a step on a fresh snapshot's control.
+    assert!(
+        server
+            .execute_with_failure_latch(&click, answered)
+            .await
+            .is_ok()
+    );
+    let after_click = server.execute_with_failure_latch(&click, stale(None)).await;
+    assert!(words(&after_click).contains("take a fresh snapshot"));
+    // A failure of another kind leaves the count where it was.
+    let refused = server
+        .execute_with_failure_latch(&navigate, || async {
+            Err(anyhow::anyhow!("The site did not answer in time"))
+        })
+        .await;
+    assert!(words(&refused).contains("did not answer in time"));
+    let again = server.execute_with_failure_latch(&click, stale(None)).await;
+    assert!(
+        words(&again).contains("This page keeps changing"),
+        "{}",
+        words(&again)
+    );
+}
+
+/// The controller says so on stdout when the page changed under a step nobody
+/// was asked about (`pageChanged`): a page that drew more controls after the
+/// snapshot a click names, and a field a pause would highlight that changed.
+/// Through runtime-agent, the second such step in a row ends that page with
+/// "This page keeps changing", and the next source opens in the same run.
+#[tokio::test]
+async fn the_controller_says_when_the_page_changed_under_a_step() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_authority("page-target", &["https://example.test"]);
+    let server = SharedBrowserMcpServer::new();
+    let through_the_latch = |mode, method, path, body| {
+        controller_command_through_the_latch(&fixture, &server, mode, method, path, body)
+    };
+    let snapshot_id =
+        |result: &std::result::Result<JsonValue, SharedBrowserMcpExecutionFailure>| {
+            result.as_ref().expect("a snapshot")["snapshotId"]
+                .as_str()
+                .expect("snapshot id")
+                .to_string()
+        };
+    let words =
+        |result: &std::result::Result<JsonValue, SharedBrowserMcpExecutionFailure>| match result {
+            Err(SharedBrowserMcpExecutionFailure::Other(error)) => format!("{error:#}"),
+            other => panic!("not a step's own failure: {other:?}"),
+        };
+
+    // The page reads one way, then another: it keeps drawing.
+    let (first_look, _) = through_the_latch("sign-in-page", "GET", "/v1/snapshot", None).await;
+    let (first, stdout) = through_the_latch(
+        "sign-in-page-drawn",
+        "POST",
+        "/v1/click",
+        Some(json!({ "index": 2, "snapshotId": snapshot_id(&first_look) })),
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<JsonValue>(&stdout).expect("one JSON line"),
+        json!({"ok": false, "pageChanged": true})
+    );
+    assert!(
+        words(&first).contains("take a fresh snapshot before acting"),
+        "{}",
+        words(&first)
+    );
+
+    // A pause on fields that changed since the snapshot it names says so too.
+    let (second_look, _) =
+        through_the_latch("sign-in-page-drawn", "GET", "/v1/snapshot", None).await;
+    let (second, stdout) = through_the_latch(
+        "sign-in-page-changed",
+        "POST",
+        "/v1/request-human-input",
+        Some(json!({ "indices": [0, 1], "snapshotId": snapshot_id(&second_look) })),
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<JsonValue>(&stdout).expect("one JSON line"),
+        json!({"ok": false, "pageChanged": true})
+    );
+    let second_words = words(&second);
+    assert!(
+        second_words.contains("This page keeps changing"),
+        "{second_words}"
+    );
+    assert!(!second_words.contains("_non_retryable"), "{second_words}");
+    assert!(!fixture.action_log().contains("human_input"));
+
+    // The run goes on: the next source opens.
+    let (next, _) = through_the_latch(
+        "safe",
+        "POST",
+        "/v1/navigate",
+        Some(json!({ "url": "https://example.test/next" })),
+    )
+    .await;
+    assert_eq!(
+        next.expect("the next source opens")["url"],
+        "https://example.test/next"
+    );
+}
+
+/// One controller command in `mode`, through runtime-agent's count of the
+/// run's failures, and what the controller printed on stdout.
+async fn controller_command_through_the_latch(
+    fixture: &EmbeddedControllerFixture,
+    server: &SharedBrowserMcpServer,
+    mode: &str,
+    method: &str,
+    path: &str,
+    body: Option<JsonValue>,
+) -> (
+    std::result::Result<JsonValue, SharedBrowserMcpExecutionFailure>,
+    String,
+) {
+    let text = body.as_ref().map(JsonValue::to_string);
+    let output = fixture.call(mode, method, path, text.as_deref());
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let request = SharedBrowserRequest {
+        method: method.to_string(),
+        path: path.to_string(),
+        body,
+    };
+    let result = server
+        .execute_with_failure_latch(&request, || async move {
+            if output.status.success() {
+                Ok(serde_json::from_slice::<JsonValue>(&output.stdout)?)
+            } else {
+                Err(controller_failure(
+                    output.status,
+                    &output.stderr,
+                    &output.stdout,
+                ))
+            }
+        })
+        .await;
+    (result, stdout)
 }
 
 #[test]
@@ -6370,6 +6657,11 @@ fn a_choice_is_bound_to_the_option_it_was_judged_on() {
     assert!(
         stderr.contains("The page changed before this step ran"),
         "{stderr}"
+    );
+    // runtime-agent counts it among the steps the page changed under.
+    assert_eq!(
+        serde_json::from_slice::<JsonValue>(&output.stdout).expect("one JSON line"),
+        json!({"ok": false, "pageChanged": true})
     );
     assert!(
         chosen_options(&fixture).is_empty(),
@@ -11032,6 +11324,7 @@ async fn mcp_wire_carries_each_kind_of_browser_result_whole() {
         step: Some("submit"),
         approval: Some("once"),
         changed_after_yes: false,
+        page_changed: false,
     }
     .into();
     assert_eq!(

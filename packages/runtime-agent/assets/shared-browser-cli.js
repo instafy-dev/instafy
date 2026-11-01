@@ -2361,6 +2361,7 @@ async function emitNavigationResult(page) {
 async function targetLocator(page, body) {
   const interactive = await collectInteractiveElements(page);
   if (body.snapshotId !== snapshotFingerprint(page.url(), interactive)) {
+    pageChangedUnderStep = true;
     throw new Error(
       "Shared Browser snapshot is stale; take a fresh snapshot before acting",
     );
@@ -2450,6 +2451,14 @@ async function controlPlace(locator) {
 // a chain of prompts.
 let changedAfterYes = false;
 
+// Set when a step was not done because the page changed under it while nobody
+// was asked: its snapshot no longer reads as the page, or the control or the
+// fields it was for are not there as they were. The failed command says so on
+// stdout, and runtime-agent counts such steps in a row, so a page that never
+// holds still (a live count, a ticker) ends that page instead of a loop of
+// snapshots.
+let pageChangedUnderStep = false;
+
 // The control a step is for is not on the page as it was when the step was
 // judged, so nothing was done. This does not end the run: Octo looks at the
 // page again and, if the step still fits, does it again, which asks the person
@@ -2457,6 +2466,8 @@ let changedAfterYes = false;
 function controlChanged() {
   if (stepAllowedAtPrompt) {
     changedAfterYes = true;
+  } else {
+    pageChangedUnderStep = true;
   }
   return new Error(
     stepAllowedAtPrompt
@@ -4156,6 +4167,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // Only the fields it highlights must be as Octo saw them: a sign-in page
     // that adds a button under its form after it loads still pauses on them.
     if (!humanInputFieldsAsObserved(page.url(), interactive, body)) {
+      pageChangedUnderStep = true;
       throw new Error("The page changed; take a fresh snapshot before requesting human input");
     }
     const selected = body.indices.map((index) => interactive[index]);
@@ -4740,14 +4752,21 @@ main().then(
     // "once" when the person said yes at its prompt: a step they allowed that
     // then did not happen still lists their yes. `changedAfterYes` when that
     // yes was not used because the control changed (controlChanged), which
-    // runtime-agent counts for the run.
+    // runtime-agent counts for the run, and `pageChanged` when the page changed
+    // under a step nobody was asked about, which it counts in a row.
     const activity = {
       ...(FAILED_STEP_KINDS.has(stepKind) ? { step: stepKind } : {}),
       ...(stepAllowedAtPrompt ? { approval: "once" } : {}),
     };
-    if (Object.keys(activity).length) {
+    const pageChanged = pageChangedUnderStep && !changedAfterYes;
+    if (Object.keys(activity).length || pageChanged) {
       await writeStdout(
-        `${JSON.stringify({ ok: false, activity, ...(changedAfterYes ? { changedAfterYes: true } : {}) })}\n`,
+        `${JSON.stringify({
+          ok: false,
+          ...(Object.keys(activity).length ? { activity } : {}),
+          ...(changedAfterYes ? { changedAfterYes: true } : {}),
+          ...(pageChanged ? { pageChanged: true } : {}),
+        })}\n`,
       ).catch(() => {});
     }
     const message = error && error.message ? error.message : String(error);

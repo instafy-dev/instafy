@@ -1413,7 +1413,15 @@ uses a concrete element handle, so reordered or relabeled DOM cannot silently
 retarget an action. A step whose snapshot no longer reads as the page (one
 still drawing after it loaded, say) fails without ending the run, and the
 policy says to take another snapshot: a stale target or a changed page is
-looked at again, and only an approval's own outcome is final. Once the person has answered the step's prompt, the page
+looked at again, and only an approval's own outcome is final. The controller
+says so on its stdout (`pageChanged`, for a step nobody was asked about whose
+snapshot, control or fields changed under it), and runtime-agent counts such
+steps until a step on a fresh snapshot's control, or one that moves to another
+page or tab, goes through (a look at the page or a scroll between them does
+not count). The second answers that the page keeps changing, which ends that
+page, not the run, so a page that never holds still (a live count, a ticker in
+a link) sends the turn on to the next source instead of a loop of snapshots.
+Once the person has answered the step's prompt, the page
 elsewhere may have changed by itself while they read it (a carousel's slide, a
 clock, a live count), so the step checks the control they were asked about
 rather than the whole page. It acts on that very element, still shown, with
