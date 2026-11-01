@@ -137,8 +137,9 @@ const AGENT_CONTEXT_CARD_LIMIT: usize = 4;
 const AGENT_CONTEXT_CARD_MAX_CHARS: usize = 1_200;
 const COLLABORATION_SKILL_PLANNING_MAX_CHARS: usize = 3_200;
 const COLLABORATION_SKILL_ROUTING_MAX_CHARS: usize = 1_400;
-/// How much of the browser skill's "Routing preflight" section the routing step reads.
-const BROWSER_SKILL_ROUTING_MAX_CHARS: usize = 1_300;
+/// How much of the browser skill's "Routing preflight" section the routing step reads: all of it,
+/// with room for a line more.
+const BROWSER_SKILL_ROUTING_MAX_CHARS: usize = 1_600;
 /// The longest message a routed card carries as its task, as a card's own task is bounded
 /// (`BrowserRequest::parse`).
 const ROUTED_BROWSER_TASK_MAX_UTF16_UNITS: usize = 8_000;

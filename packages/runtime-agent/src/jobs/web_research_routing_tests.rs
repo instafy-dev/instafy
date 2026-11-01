@@ -853,8 +853,8 @@ fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_b
         "the site runs in this space",
         "says not to use the browser",
         "attachments",
-        "or it carries on browser work this chat started.",
-        "when public pages answer it (facts, prices, opening hours, reviews), unless it carries on this chat's browser work:",
+        "or it carries on browser work this chat started, whether or not that found the answer.",
+        "Research whose answer is a reply (facts, opening hours, reviews) stays `direct` when the message does not name the browser, unless it carries on this chat's browser work:",
     ] {
         assert!(section.contains(words), "{words}");
     }
@@ -863,6 +863,71 @@ fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_b
     learn::ensure_project_memory_scaffold(tmp.path());
     let snapshot = format_browser_routing_preflight_snapshot(tmp.path()).expect("snapshot");
     assert!(snapshot.contains(section), "{snapshot}");
+    assert!(!snapshot.contains("(truncated)"), "{snapshot}");
+}
+
+/// Making something is a build, and research that ends in a page goes to the browser first. In a
+/// local test (Nov 1) a three-day city plan "on a map" went to the browser, whose turn cannot make
+/// a map: the routing section named a map only as something built after browsing. "Now find how
+/// to get there by metro" stayed with Octo because the chat's browser turn had not found the
+/// opening hours it was after, and a comparison page stayed with Octo, whose turn read no page and
+/// only posted a browser card. The section says that a page, a map or a table to make with no site
+/// to use first stays `direct`, that research ending in a page is `browser_then_build` from the
+/// first message while research answered in a reply stays `direct`, and that browser work carries
+/// on whether or not it found the answer. An unedited earlier copy is upgraded.
+#[test]
+fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() {
+    let start = BROWSER_SKILL
+        .find("\n## Routing preflight\n")
+        .expect("routing section")
+        + 1;
+    let section = &BROWSER_SKILL[start..];
+    let line = |route: &str| {
+        section
+            .lines()
+            .find(|line| line.starts_with(&format!("- `{route}`:")))
+            .unwrap_or_else(|| panic!("no {route} line"))
+    };
+    assert!(
+        line("browser").ends_with(
+            "or it carries on browser work this chat started, whether or not that found the answer."
+        ),
+        "{section}"
+    );
+    assert_eq!(
+        line("browser_then_build"),
+        "- `browser_then_build`: the same, and Octo then makes or changes something in this space \
+         (a page, a map, a table). So is research whose answer ends in a page (a comparison, \
+         prices, a route), from the first message. A request to make one with no site to use \
+         first (\"on a map\", \"as a page\") is `direct`."
+    );
+    let reply = section
+        .lines()
+        .find(|line| line.starts_with("- Research whose answer is a reply"))
+        .expect("the line for research answered in a reply");
+    assert!(
+        reply.contains("stays `direct` when the message does not name the browser"),
+        "{reply}"
+    );
+    // What it says in place of: a map named only as something built from what the browser found,
+    // and a public-pages rule that took in research ending in a page.
+    for earlier in [
+        "afterwards Octo builds or changes something in this space from what it found",
+        "stays `direct` when public pages answer it",
+    ] {
+        assert!(!section.contains(earlier), "{earlier}");
+    }
+
+    let previous = include_str!("legacy/browser-automation-v22.md");
+    assert!(previous.contains("afterwards Octo builds or changes something"));
+    let tmp = scaffolded_space();
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+    // The routing step reads all of it.
+    let snapshot = format_browser_routing_preflight_snapshot(tmp.path()).expect("snapshot");
+    assert!(snapshot.contains(section.trim_end()), "{snapshot}");
     assert!(!snapshot.contains("(truncated)"), "{snapshot}");
 }
 

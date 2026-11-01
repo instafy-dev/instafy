@@ -1697,19 +1697,41 @@ async fn run_follow_ups_from_the_chat(harness: &mut Harness) {
 }
 
 /// (ix) Chain N: a message typed in the chat right after a browser turn. The routing step reads
-/// the browser skill's line that keeps a message that carries on this chat's browser work in the
-/// browser, also when public pages could answer it. Each browser turn is told that it reads pages
-/// in Instafy's browser and Octo builds in the chat, never only that it is read-only. The page is
-/// one building turn, which reads every browser turn as page data and none outside it.
+/// the browser skill's lines that keep a message that carries on this chat's browser work in the
+/// browser, also when public pages could answer it and whether or not that work found its answer,
+/// that send research ending in a page to the browser from the first message, and that keep a
+/// request to make something with no site to use first out of it. Each browser turn is told that
+/// it reads pages in Instafy's browser and Octo builds in the chat, never only that it is
+/// read-only. The page is one building turn, which reads every browser turn as page data and none
+/// outside it.
 fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
     for label in ["N3", "N5"] {
         let turn = harness.turn(label);
         ensure!(turn.routed, "{label} was not sent straight to the browser");
-        let routing = first_sampling_request(turn).to_string();
-        ensure!(
-            routing.contains("unless it carries on this chat's browser work"),
-            "{label}'s routing call never read that a message carrying on the chat's browser work goes to the browser"
-        );
+        let routing = input_text(first_sampling_request(turn));
+        for (line, what) in [
+            (
+                "unless it carries on this chat's browser work",
+                "a message carrying on the chat's browser work goes to the browser",
+            ),
+            (
+                "or it carries on browser work this chat started, whether or not that found the answer.",
+                "browser work goes on whether or not it found its answer",
+            ),
+            (
+                "So is research whose answer ends in a page (a comparison, prices, a route), from the first message.",
+                "research ending in a page goes to the browser from the first message",
+            ),
+            (
+                "A request to make one with no site to use first (\"on a map\", \"as a page\") is `direct`.",
+                "a request to make something with no site to use first stays direct",
+            ),
+        ] {
+            ensure!(
+                routing.contains(line),
+                "{label}'s routing call never read that {what}"
+            );
+        }
     }
     for label in ["N2", "N4", "N6"] {
         let turn = harness.turn(label);

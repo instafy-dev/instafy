@@ -393,6 +393,10 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     include_str!("legacy/browser-automation-v20.md"),
     // From before a route came from the operator's journey planner, its stations chosen.
     include_str!("legacy/browser-automation-v21.md"),
+    // From before a request to make a page, a map or a table with no site to use first stayed
+    // out of the browser, research that ends in a page went to it from the first message, and
+    // browser work that did not find its answer still carried on there.
+    include_str!("legacy/browser-automation-v22.md"),
 ];
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),

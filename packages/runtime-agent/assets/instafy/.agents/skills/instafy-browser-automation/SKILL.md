@@ -350,7 +350,7 @@ Bad:
 
 A routing step before Octo's turn can send the person's message straight to Instafy's browser, as its own words. That browser turn sees only those words and this chat's earlier browser turns.
 
-- `browser`: the person names Instafy's browser ("in your browser"), the work happens on a website (open a site to use it, sign in, fill in or send a form, press its buttons, walk through its screens), or it carries on browser work this chat started.
-- `browser_then_build`: the same, and afterwards Octo builds or changes something in this space from what it found (a page, a map).
+- `browser`: the person names Instafy's browser ("in your browser"), the work happens on a website (open a site to use it, sign in, fill in or send a form, press its buttons, walk through its screens), or it carries on browser work this chat started, whether or not that found the answer.
+- `browser_then_build`: the same, and Octo then makes or changes something in this space (a page, a map, a table). So is research whose answer ends in a page (a comparison, prices, a route), from the first message. A request to make one with no site to use first ("on a map", "as a page") is `direct`.
 - Stay `direct`, even when the message names Instafy's browser, when the browser part needs what only this space or another chat holds (what a page, map or file here says, or "those" from a reply that was not the browser's): the building turn reads it and names it in a card. Also when the site runs in this space (a preview card), the person says not to use the browser, or it has attachments.
-- A message that does not name the browser stays `direct` when public pages answer it (facts, prices, opening hours, reviews), unless it carries on this chat's browser work: the building turn reads first and opens the browser itself if a page needs it.
+- Research whose answer is a reply (facts, opening hours, reviews) stays `direct` when the message does not name the browser, unless it carries on this chat's browser work: the building turn reads first and opens the browser itself if a page needs it.
