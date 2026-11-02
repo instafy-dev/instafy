@@ -312,6 +312,7 @@ async fn run_case(case: Case) -> Result<()> {
             Some(JobProgress {
                 sender,
                 status: Arc::new(AtomicBool::new(true)),
+                reply_draft: None,
             }),
             None,
             None,
@@ -452,6 +453,7 @@ async fn continued_write(
             Some(JobProgress {
                 sender,
                 status: Arc::new(AtomicBool::new(true)),
+                reply_draft: None,
             }),
             None,
             None,
@@ -484,6 +486,7 @@ async fn continued_write(
             Some(JobProgress {
                 sender,
                 status: Arc::new(AtomicBool::new(true)),
+                reply_draft: None,
             }),
             None,
             None,

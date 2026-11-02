@@ -950,6 +950,81 @@ async fn agent_lease_records_token_hash_per_attempt() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn job_proxy_renewal_preserves_in_flight_settlement_and_fences_attempts() -> anyhow::Result<()>
+{
+    with_team("renewed job token binding", |pool, team| async move {
+        let runtime_id = team.add_hosted_runtime(&pool).await?;
+        let state = build_test_state(pool.clone(), test_config("renewed-job-token-binding"));
+        let (job_id, initial) = lease_platform_job(&state, &team, &runtime_id).await?;
+        // A different configured lifetime guarantees a distinct signed grant
+        // without a wall-clock sleep. Neither token changes its job/attempt.
+        let mut config = state.config.clone();
+        config.proxy_token_ttl_seconds += 60;
+        let renewing = build_test_state(pool.clone(), config);
+        let renewed = post_as_runtime(
+            &renewing,
+            &team,
+            &runtime_id,
+            &format!("/agent/jobs/{job_id}/proxy-token"),
+            json!({"lease_attempt": 1}),
+        )
+        .await?;
+        let renewed = renewed["token"].as_str().expect("renewed token").to_owned();
+        assert_ne!(renewed, initial);
+        assert_eq!(
+            recorded_hashes(&pool, &job_id).await?,
+            Some(json!({"1": proxy_token_sha256(&initial)}))
+        );
+        for token in [&initial, &renewed] {
+            assert!(verify(&state, token, ProxyJobTokenMode::Live)
+                .await?
+                .is_ok());
+            assert!(verify(&state, token, ProxyJobTokenMode::Settle)
+                .await?
+                .is_ok());
+        }
+        let mut forged = claims_of(&renewed)?;
+        forged["job_id"] = json!(Uuid::new_v4().to_string());
+        assert_eq!(
+            verify(
+                &state,
+                &sign(&forged, JOB_TOKEN_SECRET),
+                ProxyJobTokenMode::Settle
+            )
+            .await?,
+            Err(ProxyJobTokenRejection::Unbound)
+        );
+        requeue(&pool, &job_id).await?;
+        let (_, next) = lease_one(&state, &team, &runtime_id).await?;
+        for token in [&initial, &renewed] {
+            assert_eq!(
+                verify(&state, token, ProxyJobTokenMode::Live).await?,
+                Err(ProxyJobTokenRejection::Unbound)
+            );
+            assert!(verify(&state, token, ProxyJobTokenMode::Settle)
+                .await?
+                .is_ok());
+        }
+        assert!(verify(&state, &next, ProxyJobTokenMode::Live)
+            .await?
+            .is_ok());
+        pool.get()
+            .await?
+            .execute(
+                "update agent_jobs set status = 'canceled' where id = $1",
+                &[&job_id],
+            )
+            .await?;
+        assert_eq!(
+            verify(&state, &next, ProxyJobTokenMode::Live).await?,
+            Err(ProxyJobTokenRejection::Unbound)
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn agent_lease_binds_only_platform_jobs() -> anyhow::Result<()> {
     with_team("job token binding scope", |pool, team| async move {
         let runtime_id = team.add_hosted_runtime(&pool).await?;

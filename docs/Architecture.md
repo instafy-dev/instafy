@@ -131,6 +131,29 @@ answers through `/projects/:id/provider-requests` (list, claim, complete).
   `status`, `cancelReason` and `targetDeviceId`, never its arguments or result; `events.resync`
   says the stream dropped events, so the device lists its requests again.
 
+## Progressive conversation replies
+
+The runtime sends provisional reply snapshots to `POST /agent/reply-draft`, which publishes
+`run.reply_draft` through the existing conversation-authorized `/events` stream. Drafts live only
+in memory; the normal durable reply or error remains authoritative. Reloading does not replay
+old drafts. Each snapshot carries its job lease attempt, retry segment and sequence so clients
+reject stale deliveries. Cancellation and terminal run events clear provisional text immediately.
+
+Only the top-level `summary` of a structured reply is exposed. Plain-text report/write turns
+and eligible lead replies can stream natural prose when the provider marks it `final_answer`.
+Providers that omit the phase still deliver their durable plain-text reply normally. Planning
+turns, worker/internal conversations, commentary, raw JSON fields and runtime sentinels are not
+shown. Ambient evaluation/declined turns withhold drafts until that run has durable visible
+assistant speech, preserving the participation and billing decision.
+
+The runtime coalesces snapshots at 200 ms and caps their display text at 128 KiB. These are
+presentation limits: they do not limit model execution or truncate the durable final reply.
+The controller rechecks the runtime scope/generation and exact active job lease attempt on every
+request, then checks lease expiry against the database clock after locking the job. It publishes
+while holding that lock to order drafts before completion or cancellation. Old controllers that
+do not have the route cause draft delivery to stop without interrupting the job. Draft traffic
+does not wake idle lease polls.
+
 ## Agent Job Trigger
 
 Each agent job records when the controller received what started it, on the database clock, and
@@ -385,6 +408,24 @@ Runtimes can be provisioned with different runtime-agent container images (for e
 
 ## AI Proxy
 All automation must route through the proxy. Do not call OpenAI/Anthropic directly.
+
+A job's proxy token is short-lived (30 minutes by default), but its lifetime does not end
+the job. Before its next model request approaches expiry, runtime-agent renews it through
+`POST /agent/jobs/:job_id/proxy-token`, authenticated with its current machine bearer and
+fenced to the original lease attempt. The controller rechecks the exact job, runtime
+generation and unexpired lease, derives the project/run/credential identity from storage,
+and does not extend the execution lease. Only a scoped proxy token reaches the model
+client; provider credentials and machine renewal authority stay outside its environment.
+Native Codex helpers share the job's in-memory auth source. Direct HTTP workers resolve
+that source for each request, and bounded isolated workers receive a fresh token before
+their existing ten-minute execution window. Cancellation, parent shutdown or a rejected
+renewal disables the source; an older controller without this endpoint fails renewal
+closed rather than falling back to static credentials.
+
+Apply `20261102110000_renewed_job_proxy_tokens.sql` and update controllers before runtimes.
+The additive table retains only hashes of renewed managed-job tokens, alongside the
+original lease token binding, so requests already in flight can still settle usage under
+their original token. Renewal never moves a token into a different job or lease attempt.
 
 Required envs:
 - `PROXY_BASE_URL`

@@ -52,6 +52,7 @@ This document explains how the Instafy runtime controller is structured and how 
 | POST | `/runtime/ensure` | Guarantee a runtime record exists (creates idle agents when missing). |
 | POST | `/agent/login` | Exchange shared key for agent token, lease/heartbeat URLs, and proxy envelope. |
 | POST | `/agent/lease` | Claim work with a signed runtime ID bound to an eligible registered runtime and its current generation, including when `STRICT_MODE=false`. |
+| POST | `/agent/jobs/:job_id/proxy-token` | Renew the proxy token of the runtime's active, unexpired job lease with `{lease_attempt}`. Machine authentication and runtime generation are required; identity comes from the stored job and renewal never extends its lease. |
 | POST | `/agent/secrets` | Resolve granted secrets only for the signed runtime's exact active, unexpired job lease and current runtime generation, including when `STRICT_MODE=false`. |
 | POST | `/credits` | Apply authenticated credit-ledger operations through the controller. |
 | POST | `/projects/:id/git/access_token` | Mint project Git tokens. `git.delete` is a 60-second, service-auth-only, single-scope cleanup capability. |

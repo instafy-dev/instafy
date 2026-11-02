@@ -172,6 +172,8 @@ impl Credentials {
 
         let response = client
             .post(refresh_token_endpoint())
+            // Credential renewal is a bounded control request, not a model stream.
+            .timeout(std::time::Duration::from_secs(120))
             .header("Content-Type", "application/json")
             .json(&refresh_request)
             .send()

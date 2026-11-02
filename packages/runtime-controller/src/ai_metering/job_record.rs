@@ -89,3 +89,23 @@ pub(crate) async fn bind_job_token(
         .map_err(|error| internal_error(format!("failed to bind job token: {error}")))?;
     Ok(())
 }
+
+/// A renewal must not overwrite the first grant: requests already in flight
+/// still settle under that token. The caller holds the exact active job row.
+pub(crate) async fn bind_renewed_job_token(
+    transaction: &tokio_postgres::Transaction<'_>,
+    job_id: &Uuid,
+    lease_attempt: i32,
+    token: &str,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    transaction
+        .execute(
+            "insert into ai_usage_job_proxy_tokens (job_id, lease_attempt, token_sha256)
+         select job_id, $2, $3 from ai_usage_jobs where job_id = $1
+         on conflict do nothing",
+            &[job_id, &lease_attempt, &proxy_token_sha256(token)],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to bind renewed job token: {error}")))?;
+    Ok(())
+}

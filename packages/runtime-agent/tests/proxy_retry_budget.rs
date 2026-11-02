@@ -1909,6 +1909,7 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
     let progress = (scenario == "retry_usage").then(|| JobProgress {
         sender,
         status: Arc::new(AtomicBool::new(true)),
+        reply_draft: None,
     });
     // These scenarios commit to the workspace, as a chat turn does: only then
     // does a turn expected to change files retry without one, and only then

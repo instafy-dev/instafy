@@ -1,3 +1,4 @@
+import { applyReplyDraftEvent, clearReplyDrafts, endReplyDraftRun, REPLY_DRAFT_EVENT_KIND } from "../../conversations/replyDrafts";
 import { useEffect, useRef, type Dispatch } from "react";
 import type { RunRecord, RuntimeState } from "../../types";
 import {
@@ -148,6 +149,7 @@ export function useRuntimeControllerSync({
     };
 
     const clearProjectDerivedRuntimeState = () => {
+      clearReplyDrafts();
       resetRuns();
       dispatch({ type: "setInternalConversationIds", conversationIds: [] });
       dispatch({ type: "setLocalWorkspace", workspace: null });
@@ -426,6 +428,7 @@ export function useRuntimeControllerSync({
         projectId,
         quietErrors: true,
         onRun: (run) => {
+          if (["success", "failed", "canceled", "merged"].includes(run.status)) endReplyDraftRun(run.id);
           rememberInternalConversation(run.conversationId, run.metadata);
           logRunEvent("controller:onRun", run);
           receivedRunEventRef.current = true;
@@ -437,6 +440,7 @@ export function useRuntimeControllerSync({
           upsertRun(run);
         },
         onRunPatch: (patch) => {
+          if (patch.status && ["success", "failed", "canceled", "merged"].includes(patch.status)) endReplyDraftRun(patch.id);
           rememberInternalConversation(patch.conversationId, patch.metadata);
           receivedRunEventRef.current = true;
           runEventSequence += 1;
@@ -676,6 +680,11 @@ export function useRuntimeControllerSync({
               markRunLeased(runId);
             }
           }
+          if (event.kind === REPLY_DRAFT_EVENT_KIND) {
+            if (cancelled || controllerSyncTerminated || event.project_id !== projectId) return;
+            applyReplyDraftEvent(event);
+            return;
+          }
           if (event.kind === "conversation.message_created" && event.data) {
             const message = parseConversationEvent(event);
             if (message) {
@@ -848,6 +857,7 @@ export function useRuntimeControllerSync({
     }
 
     return () => {
+      clearReplyDrafts();
       cancelled = true;
       runReconciliationGeneration += 1;
       if (trailingOriginHydration !== null) {

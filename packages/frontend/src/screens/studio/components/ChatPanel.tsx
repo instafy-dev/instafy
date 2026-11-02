@@ -1,3 +1,4 @@
+import { useReplyDraftMessages } from "../../../conversations/replyDrafts";
 import {
   FormEvent,
   KeyboardEvent,
@@ -3155,6 +3156,15 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     [activeConversationRuns, messages],
   );
   const activeConversationRun = activeConversationRuns[0] ?? null;
+  // A transport gap is not evidence that the controller stopped a healthy turn.
+  const activeReplyRunIds = useMemo(() => new Set(Object.values(runs ?? {})
+    .filter((run) => run.conversationId === activeConversationEntry?.controllerId &&
+      ["queued", "in_progress", "awaiting_approval"].includes(run.status))
+    .map((run) => run.id)), [runs, activeConversationEntry?.controllerId]);
+  const replyDrafts = useReplyDraftMessages(activeConversationEntry?.controllerId ?? null, messages, activeReplyRunIds);
+  const transcriptMessages = useMemo(() => replyDrafts.messages.length
+    ? [...displayedMessages, ...replyDrafts.messages] : displayedMessages,
+  [displayedMessages, replyDrafts.messages]);
   const showOutOfCreditsNotice = outOfCredits && activeConversationRuns.length === 0;
   // Keep the complete active-handle set for existing busy/queue overlap
   // behavior. Steer discovery applies the narrower silent-evaluation guard
@@ -5605,7 +5615,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     composerOverlayHeight,
     composerScrollPaddingBottom: chatScrollPaddingBottom,
     credentialGateStateForBubble: presentedCredentialGateStateForBubble,
-    displayedMessages,
+    displayedMessages: transcriptMessages,
     isAssistantTyping,
     lastScrollHeightRef,
     notificationsNudgeAnchorTimestamp,
@@ -6480,7 +6490,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   targetedMessageId={messageTargetActive ? requestedMessageId : null}
                   highlightedMessageId={highlightedMessageId}
                   key="conversation-message-rows"
-                  messages={displayedMessages}
+                  messages={transcriptMessages}
                   allConversationMessages={collapsedConversationMessages}
                   timedSyntheticRows={timedSyntheticRows}
                   currentUserId={currentUserId}
@@ -6563,7 +6573,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               typingStatusLabel={typingStatusLabel}
               typingStatusAriaLabel={typingStatusAriaLabel}
               suppressAssistantStatus={
-                showOutOfCreditsNotice || workspaceStartStall.showNotice || stoppedTurnNotice !== null ||
+                showOutOfCreditsNotice || workspaceStartStall.showNotice || stoppedTurnNotice !== null || replyDrafts.draftingRunActive ||
                 chatBrowserApprovalAsking
               }
               isThinkingLabelExpanded={isThinkingLabelExpanded}

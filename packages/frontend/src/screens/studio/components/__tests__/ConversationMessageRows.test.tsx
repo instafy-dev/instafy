@@ -2660,4 +2660,16 @@ describe("ConversationMessageRows", () => {
       expect(chat.text).not.toContain("Not opened");
     });
   });
+
+  it("renders a growing reply as provisional prose without stored-message actions", async () => {
+    await renderSpeakerBoundaryMessages([createMessage({
+      id: "reply-draft:job-1", role: "assistant", content: "The report is growing", timestamp: 1,
+      metadata: { source: "agent", replyDraft: true, jobId: "job-1", runId: "run-1" },
+    })]);
+    const draft = container.querySelector('[data-testid="chat-reply-draft"]');
+    expect(draft?.textContent).toContain("The report is growing");
+    expect(draft?.querySelector('[aria-busy="true"]')).not.toBeNull();
+    expect(draft?.querySelector("button")).toBeNull();
+  });
+
 });

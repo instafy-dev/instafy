@@ -54,6 +54,7 @@ pub(super) struct TurnFiles {
     /// A team lane's turn: it is told to wrap up before its hard limit.
     lane: bool,
     budget: TurnBudget,
+    deadline: Option<tokio::time::Instant>,
 }
 
 impl TurnFiles {
@@ -79,11 +80,7 @@ impl TurnFiles {
             dir,
             lane,
             continuable,
-            turn_budget(
-                crate::codex::resolve_codex_run_timeout(),
-                None,
-                chrono::Utc::now(),
-            ),
+            turn_budget(Some(Duration::from_secs(600)), None, chrono::Utc::now()),
         )
     }
 
@@ -94,6 +91,10 @@ impl TurnFiles {
             continue_note: continuable.then(|| dir.join("continue.md")),
             dir,
             lane,
+            deadline: budget.limit.map(|limit| {
+                let now = tokio::time::Instant::now();
+                now.checked_add(limit).unwrap_or(now)
+            }),
             budget,
         }
     }
@@ -108,18 +109,24 @@ impl TurnFiles {
     }
 
     /// This turn's hard limit.
-    pub(super) fn limit(&self) -> Duration {
-        self.budget.limit
+    pub(super) fn limit(&self) -> Option<Duration> {
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(tokio::time::Instant::now()))
+    }
+
+    pub(super) fn deadline(&self) -> Option<tokio::time::Instant> {
+        self.deadline
     }
 
     /// The wrap-up steer before this turn's hard limit: a lane's, and any turn its team's deadline
     /// cuts short (a lead's included). A person's own turn, or a lead's with time to spare, gets
     /// none.
     pub(super) fn wrap_up(&self) -> Option<TurnWrapUp> {
+        let limit = self.limit()?;
         if self.budget.team_bounded {
-            team_turn_wrap_up(self.budget.limit, self.continuable())
+            team_turn_wrap_up(limit, self.continuable())
         } else if self.lane {
-            turn_wrap_up(self.budget.limit, self.continuable())
+            turn_wrap_up(limit, self.continuable())
         } else {
             None
         }
@@ -249,17 +256,17 @@ pub(super) fn team_deadline(payload: &JsonValue) -> Option<chrono::DateTime<chro
 /// How long a turn may run, and whether a further turn fits after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct TurnBudget {
-    pub(super) limit: Duration,
+    pub(super) limit: Option<Duration>,
     /// The team's deadline, not the usual limit, set `limit`.
     pub(super) team_bounded: bool,
     pub(super) room_for_another: bool,
 }
 
-/// The budget of a turn that starts at `now`: the usual limit, or the time its team has left (at
+/// The budget of a turn that starts at `now`: an optional operator limit, or its team time (at
 /// least [`MIN_TEAM_TURN`]); another turn fits when at least that much, and [`CONTINUATION_GRACE`],
 /// is left after this one.
 pub(super) fn turn_budget(
-    usual: Duration,
+    usual: Option<Duration>,
     team_deadline: Option<chrono::DateTime<chrono::Utc>>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> TurnBudget {
@@ -271,10 +278,11 @@ pub(super) fn turn_budget(
         };
     };
     let left = (deadline - now).to_std().unwrap_or_default();
-    let limit = left.max(MIN_TEAM_TURN).min(usual);
+    let team_limit = left.max(MIN_TEAM_TURN);
+    let limit = usual.map_or(team_limit, |limit| team_limit.min(limit));
     TurnBudget {
-        limit,
-        team_bounded: limit < usual,
+        limit: Some(limit),
+        team_bounded: usual.is_none_or(|usual| limit < usual),
         room_for_another: left.saturating_sub(limit) >= MIN_TEAM_TURN + CONTINUATION_GRACE,
     }
 }
@@ -620,8 +628,18 @@ mod tests {
     }
 
     #[test]
+    fn no_implicit_wall_clock_but_an_explicit_team_deadline_still_bounds_work() {
+        let now = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        assert_eq!(turn_budget(None, None, now).limit, None);
+        let bounded = turn_budget(None, Some(now + chrono::Duration::seconds(1_800)), now);
+        assert_eq!(bounded.limit, Some(Duration::from_secs(1_800)));
+        assert!(bounded.team_bounded);
+        assert!(!bounded.room_for_another);
+    }
+
+    #[test]
     fn a_team_turn_ends_by_the_teams_deadline_and_only_leaves_a_note_when_another_fits() {
-        let usual = Duration::from_secs(600);
+        let usual = Some(Duration::from_secs(600));
         let now = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
         let after = |seconds: i64| Some(now + chrono::Duration::seconds(seconds));
         // no clock: the usual turn
@@ -658,7 +676,7 @@ mod tests {
         assert_eq!(
             turn_budget(usual, after(436), now),
             TurnBudget {
-                limit: Duration::from_secs(436),
+                limit: Some(Duration::from_secs(436)),
                 team_bounded: true,
                 room_for_another: false
             }
@@ -667,7 +685,7 @@ mod tests {
         assert_eq!(
             turn_budget(usual, after(-60), now),
             TurnBudget {
-                limit: MIN_TEAM_TURN,
+                limit: Some(MIN_TEAM_TURN),
                 team_bounded: true,
                 room_for_another: false
             }
@@ -697,14 +715,15 @@ mod tests {
         // deadline, with no note for a next turn
         let lane = TurnFiles::for_job(&job("worker", 300));
         assert!(
-            lane.limit() <= Duration::from_secs(300) && lane.limit() >= Duration::from_secs(295),
+            lane.limit().unwrap() <= Duration::from_secs(300)
+                && lane.limit().unwrap() >= Duration::from_secs(295),
             "{:?}",
             lane.limit()
         );
         assert!(!lane.continuable());
         let wrap = lane.wrap_up().expect("wrap-up");
         assert!(
-            wrap.after >= lane.limit() * 3 / 4 && wrap.after < lane.limit(),
+            wrap.after >= lane.limit().unwrap() * 3 / 4 && wrap.after < lane.limit().unwrap(),
             "{:?}",
             wrap.after
         );
@@ -712,19 +731,32 @@ mod tests {
         lane.remove();
         // a lead whose team's time is up still gets a short turn to report
         let lead = TurnFiles::for_job(&job("lead_continuation", -30));
-        assert_eq!(lead.limit(), MIN_TEAM_TURN.min(usual));
+        assert_eq!(
+            lead.budget.limit,
+            Some(usual.map_or(MIN_TEAM_TURN, |usual| MIN_TEAM_TURN.min(usual)))
+        );
         // its deadline cut it short, so it is told to wrap up too
         assert!(lead.wrap_up().is_some());
         lead.remove();
         // a lead with time to spare runs to its limit untold, as a person's own turn does
         let calm_lead = TurnFiles::for_job(&job("lead_continuation", 3_600));
-        assert_eq!(calm_lead.limit(), usual);
-        assert!(calm_lead.wrap_up().is_none());
+        if let Some(usual) = usual {
+            assert_eq!(calm_lead.budget.limit, Some(usual));
+            assert!(calm_lead.wrap_up().is_none());
+        } else {
+            assert!(calm_lead.limit().unwrap() <= Duration::from_secs(3_600));
+            assert!(calm_lead.wrap_up().is_some());
+        }
         calm_lead.remove();
         // a lane with time for more: the usual turn, and a note for the next one
         let early = TurnFiles::for_job(&job("worker", 3_600));
-        assert_eq!(early.limit(), usual);
-        assert!(early.continuable());
+        if let Some(usual) = usual {
+            assert_eq!(early.budget.limit, Some(usual));
+            assert!(early.continuable());
+        } else {
+            assert!(early.limit().unwrap() <= Duration::from_secs(3_600));
+            assert!(!early.continuable());
+        }
         early.remove();
     }
 
