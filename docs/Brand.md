@@ -292,21 +292,30 @@ uploaded picture, clipped to the tile, always wins, and people stay round.
   beside it pins both.
 - **Who wears which:** a row's face comes from the seed it carries
   (`metadata.agent.avatarSeed`), on every surface that draws the row and on
-  every reload. A saved agent's face is picked when it is made, and its owner
-  can change it in the bot editor (see
-  [Bot profiles](Settings-UI.md#bot-profiles)); an agent saved before the
-  hatchlings keeps its seed and wears that seed's hashed face. A chat draws
-  the viewer's own saved agents from their current profile (the transcript,
-  the typing row, branch rows, the roster and the plan card's legend), so a
-  new pick shows there at once. Another member's saved agent keeps the face
-  each of its rows was stamped with, so rows from before its owner picks a new
-  face keep the old one; only its profile card, which reads its public
-  profile, shows the new face at once. A helper whose rows carry no stamp
-  wears its handle's hashed face, which another helper can share; a helper the
-  controller stamps keeps that face for its whole job, retries and follow-ups
-  included, and AIs at work at the same time are stamped apart while eight or
-  fewer are. A face tells AIs apart within one chat: hatchling 3 in another
-  chat can be another AI.
+  every reload. Studio's bot editor picks a saved agent's face when it makes the
+  agent, and its owner can change it there (see
+  [Bot profiles](Settings-UI.md#bot-profiles)); a create through the API with a
+  handle can pick a picture or a hatchling too. Octo aside, an agent made
+  without a picked face keeps the seed the controller gave it: its id for the
+  agent made when an AI connection is added, or for one created through the API
+  without a seed or a handle, and its handle for one a person's context card
+  made. It wears that seed's hashed face, as an agent saved before the
+  hatchlings does. A chat draws the viewer's own saved agents from their current
+  profile (the transcript, the typing row, branch rows, the roster and the plan
+  card's legend), so a new pick shows there at once. Another member's saved
+  agent keeps the face each of its rows was stamped with, so rows from before
+  its owner picks a new face keep the old one; only its profile card, which
+  reads its public profile, shows the new face at once. A helper whose rows
+  carry no stamp wears its handle's hashed face, which another helper can share.
+  A helper the controller stamps keeps that face for its whole job and its
+  reruns (a rate-limit retry, a turn continuation, an answered question). Asked
+  again later, it gets that face back unless another AI at work wears it or the
+  chat's newest 200 jobs no longer show it. AIs without a profile at work at the
+  same time get different faces while one is free: a face that no AI at work
+  holds and no picture-less saved agent seen in the chat wears. After that,
+  faces repeat, so two can share a face with fewer than eight at work, and a
+  rerun keeps its face even if a returning AI has taken it since. A face tells
+  AIs apart within one chat: hatchling 3 in another chat can be another AI.
 
 ### Octo's tile
 

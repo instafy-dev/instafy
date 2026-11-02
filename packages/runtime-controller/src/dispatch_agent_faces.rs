@@ -1,9 +1,14 @@
 //! The face each AI without a profile wears in a chat (docs/Brand.md, "Octo's
 //! hatchlings"). Right after dispatch resolves its targets, under the
 //! conversation's dispatch fence, every target that is neither a saved agent
-//! nor Octo gets `hatchling:<n>` as its avatar seed. Its runs, jobs and every
-//! later message and Home row carry that seed in `metadata.agent.avatarSeed`,
-//! so no surface works a face out again.
+//! nor Octo gets `hatchling:<n>` as its avatar seed. Its runs and jobs carry
+//! that seed in `metadata.agent.avatarSeed`, and so do its runs' Home rows and
+//! the rows that copy a job's `agent` (its messages and questions and their
+//! Home rows, and a refused plan's or a swept job's notice, which has no Home
+//! row of its own); dispatch's runtime alert carries the seed of the AI it
+//! speaks as. Two rows written for an AI's turn build their metadata without
+//! it, its preview-ready card and a refused build's reason: Studio's chat draws
+//! them through their run, and Home shows them as the system's.
 //!
 //! [`allocate_faces`] decides. A face belongs to a persona: a handle in one
 //! root conversation, so a thread shares its parent's faces and an AI asked
@@ -37,9 +42,10 @@ use super::*;
 /// plans, count however old.
 const FACE_HISTORY_JOBS: i64 = 200;
 
-/// How long a plan's lead keeps its face once a job of its plan ends: the
-/// controller queues the lead's continuation after the last one ends, in the
-/// moments the completion's settlement takes, and the lead wears its face again.
+/// How long the AI that made a plan keeps its face once a job of its plan ends:
+/// the controller queues the plan's continuation for its lead after the last
+/// one ends, in the moments the completion's settlement takes, and a lead that
+/// made its plan wears its face again.
 const LEAD_HANDOVER_SECONDS: f64 = 120.0;
 
 /// Every AI the root conversation's subtree has run: its newest jobs, the jobs
@@ -349,9 +355,9 @@ fn worker_plan(metadata: &JsonValue) -> Option<&JsonMap<String, JsonValue>> {
     (plan.get("role").and_then(JsonValue::as_str).map(str::trim) == Some("worker")).then_some(plan)
 }
 
-/// Who a plan dispatch's own notices (a runtime alert) speak as: the plan's
-/// lead as its planning job stamped it, not the plan's first lane. `None` for
-/// any other dispatch.
+/// Who a plan helper dispatch's own notices (a runtime alert) speak as: the AI
+/// that made the plan, as its planning job stamped it, not the plan's first
+/// lane. `None` for any other dispatch.
 pub(super) async fn plan_lead_agent(
     transaction: &mut Transaction<'_>,
     context: &RequestContext,
@@ -399,10 +405,10 @@ async fn load_planning_agent(
         .map(|agent| agent.0))
 }
 
-/// The lead's planning job's `metadata.agent`, cut to what a notice carries
-/// (its saved agent's id included, so a client draws it from the profile),
-/// else the handle the plan names, seeded with itself as dispatch seeds an AI
-/// it gave no face.
+/// The planning job's `metadata.agent`, cut to what a notice carries (its saved
+/// agent's id included, so a client draws it from the profile), else the lead
+/// the plan names, seeded with its handle as dispatch seeds an AI it gave no
+/// face.
 fn plan_lead_identity(
     plan: &JsonMap<String, JsonValue>,
     planning_agent: Option<&JsonValue>,
@@ -632,7 +638,8 @@ mod tests {
             plan_lead_identity(plan, Some(&planning)),
             Some(json!({"handle": "ben", "displayName": "Ben", "avatarSeed": "hatchling:6"}))
         );
-        // A saved agent's lead keeps its id, so a client draws it as its profile does now.
+        // A saved agent that made the plan keeps its id, so a client draws it as its
+        // profile does now.
         let saved = json!({
             "handle": "pia",
             "id": "3f6c1f0e-8a1b-4c55-9d1e-2b7a6c9e4f10",

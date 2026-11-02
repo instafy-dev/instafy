@@ -224,10 +224,10 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
 
 /// A saved agent's face (docs/Brand.md, "Octo's hatchlings") is a picture or the
 /// hatchling its owner picked, exactly `hatchling:1` to `hatchling:8`; Octo keeps
-/// its own tile and takes no hatchling. An older Studio that removes a picture
-/// sends the agent's own id (`agent_id`, once there is an agent), which saves as
-/// before. Any other seed is refused, a value that only looks like a stamp
-/// included.
+/// its own tile and takes no hatchling. Studio sends the agent's own id
+/// (`agent_id`, once there is an agent) when Octo's picture is removed, and an
+/// older Studio sends it for any agent; it saves as before. Any other seed is
+/// refused, a value that only looks like a stamp included.
 fn validate_avatar_seed(
     seed: &str,
     agent_id: Option<&Uuid>,
@@ -1311,7 +1311,8 @@ mod tests {
             assert!(validate_avatar_seed(seed, None, false).is_err(), "{seed}");
         }
         assert!(validate_avatar_seed(&Uuid::new_v4().to_string(), Some(&id), false).is_err());
-        // Octo keeps its own tile, but may still take a picture, or its id from an older Studio.
+        // Octo keeps its own tile, but may still take a picture, or its id, which Studio
+        // sends when its picture is removed.
         for seed in ["hatchling:3", "\u{feff}hatchling:3", "reviewer"] {
             assert!(
                 validate_avatar_seed(seed, Some(&id), true).is_err(),

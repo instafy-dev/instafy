@@ -1825,7 +1825,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
         .first()
         .map(|(run_id, _)| *run_id)
         .unwrap_or_else(Uuid::new_v4);
-    // A plan's own notices speak as its lead, not as its first lane.
+    // A plan helper's own notices speak as the AI that made the plan, not as its first lane.
     let primary_agent_metadata = match agent_faces::plan_lead_agent(
         &mut transaction,
         context,

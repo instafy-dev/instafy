@@ -583,9 +583,9 @@ async fn resolve_required_agent(
 
 /// Where a job's card for an AI without a profile goes, a plan helper's own
 /// handle included: a job never creates a saved agent (docs/Brand.md, "Octo's
-/// hatchlings"), which would wear a helper's face in every chat. The card is
-/// its plan's lead's (outside a plan, its own AI's) when that is a saved agent
-/// of the job's person, else Octo's.
+/// hatchlings"), which would wear a helper's face in every chat. The card goes
+/// to the lead its plan names (outside a plan, its own AI) when that is a saved
+/// agent of the job's person, else to Octo.
 async fn lead_of_job(
     transaction: &Transaction<'_>,
     user_id: &Uuid,

@@ -386,7 +386,7 @@ async fn agent_profile_faces_are_a_picture_or_one_of_the_eight_hatchlings() -> a
         )
         .await?;
     assert_eq!(status, StatusCode::OK, "{updated}");
-    // Removing that picture in an older Studio sends Octo's id.
+    // Removing that picture in Studio sends Octo's id.
     let (status, updated) = case
         .request(
             Some(case.owner),
