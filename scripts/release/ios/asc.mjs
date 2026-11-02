@@ -26,6 +26,10 @@ const MAX_APPLE_CERTIFICATE_BYTES = 1024 * 1024;
 const MAX_APPLE_PROFILE_BYTES = 10 * 1024 * 1024;
 const MAX_APPLE_ERROR_BYTES = 64 * 1024;
 const MAX_APPLE_ERRORS = 20;
+// Apple's error codes are a fixed vocabulary (FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED),
+// so a code of this shape may name why a request failed. Titles and details are provider text.
+const APPLE_ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}(?:\.[A-Z][A-Z0-9_]{0,63}){0,4}$/u;
+const MAX_REPORTED_APPLE_ERROR_CODES = 3;
 const MAX_PAGES = 20;
 const MAX_ITEMS = 2_000;
 // App Store Connect documents HTTP 500 as a potentially temporary outage.
@@ -64,12 +68,13 @@ function fail(message) {
 }
 
 class AppStoreConnectHttpError extends Error {
-  constructor(requestLabel, status, attempts = 1, { transient = false, method = "GET" } = {}) {
+  constructor(requestLabel, status, attempts = 1, { transient = false, method = "GET", codes = [] } = {}) {
+    const named = codes.length > 0 ? ` (Apple error code ${codes.join(", ")})` : "";
     super(
       method === "GET"
         ? `[ios-asc] ${requestLabel} request failed with HTTP ${status}` +
-          (attempts > 1 ? ` after ${attempts} attempts` : "")
-        : `[ios-asc] ${requestLabel} ${method} request failed with HTTP ${status}` +
+          (attempts > 1 ? ` after ${attempts} attempts` : "") + named
+        : `[ios-asc] ${requestLabel} ${method} request failed with HTTP ${status}${named}` +
           (status >= 500 ? "; App Store Connect may or may not have applied it" : ""),
     );
     this.name = "AppStoreConnectHttpError";
@@ -434,6 +439,52 @@ async function validateAppleRelationshipNotFound(response, phase) {
   );
 }
 
+// Best effort: an error answer that is not small, well-formed JSON still
+// reports its HTTP status, just without Apple's codes.
+async function appleErrorCodes(response) {
+  try {
+    const mediaType = response.headers.get("content-type");
+    const declared = response.headers.get("content-length");
+    if (
+      typeof mediaType !== "string" ||
+      !/^application\/json(?:\s*;[^\r\n]*)?$/iu.test(mediaType) ||
+      (declared !== null && (!/^[0-9]+$/u.test(declared) || Number(declared) > MAX_APPLE_ERROR_BYTES)) ||
+      !response.body ||
+      typeof response.body.getReader !== "function"
+    ) {
+      await response.body?.cancel().catch(() => {});
+      return [];
+    }
+    const reader = response.body.getReader();
+    const chunks = [];
+    let length = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        length += value instanceof Uint8Array ? value.byteLength : Infinity;
+        if (length > MAX_APPLE_ERROR_BYTES) {
+          await reader.cancel().catch(() => {});
+          return [];
+        }
+        chunks.push(Buffer.from(value));
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    const payload = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, length)));
+    const codes = [];
+    for (const error of Array.isArray(payload?.errors) ? payload.errors.slice(0, MAX_APPLE_ERRORS) : []) {
+      const code = error?.code;
+      if (typeof code === "string" && APPLE_ERROR_CODE.test(code) && !codes.includes(code)) codes.push(code);
+      if (codes.length === MAX_REPORTED_APPLE_ERROR_CODES) break;
+    }
+    return codes;
+  } catch {
+    return [];
+  }
+}
+
 async function appleRequest(fetchImpl, token, value, {
   method = "GET",
   body,
@@ -504,10 +555,11 @@ async function appleRequest(fetchImpl, token, value, {
       return null;
     }
     if (!response.ok) {
-      await response.body?.cancel().catch(() => {});
+      const codes = await appleErrorCodes(response);
       throw new AppStoreConnectHttpError(requestLabel, response.status, attempts, {
         transient: idempotent && APPLE_TRANSIENT_READ_STATUSES.has(response.status),
         method,
+        codes,
       });
     }
     if (response.status === 204) return null;

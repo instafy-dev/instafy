@@ -601,6 +601,40 @@ test("the processing poll still ends at its deadline, naming the last read failu
   );
 });
 
+test("a failed request names Apple's error codes, never its titles or details", async () => {
+  const notTransient = { onTransientFailure: () => assert.fail("HTTP 403 is not transient") };
+  const agreement = flakyAppleFetch({}, { failures: 1, failure: () => json({ errors: [
+    { status: "403", code: "FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED", title: "provider-detail", detail: "provider-detail" },
+    { status: "403", code: "FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED", title: "provider-detail", detail: "provider-detail" },
+    { status: "403", code: "provider-detail", title: "provider-detail", detail: "provider-detail" },
+    { status: "403", code: "FORBIDDEN_ERROR", title: "provider-detail", detail: "provider-detail" },
+  ] }, 403) });
+  await rejectsWithMessage(
+    resolveAppleTargets(clockedTargets(agreement.fetchImpl, notTransient)),
+    /^\[ios-asc\] App Store Connect apps request failed with HTTP 403 \(Apple error code FORBIDDEN\.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED, FORBIDDEN_ERROR\)$/u,
+  );
+
+  const down = flakyAppleFetch({}, { failures: Infinity, failure: () => json({ errors: [{ code: "UNEXPECTED_ERROR" }] }, 503) });
+  await rejectsWithMessage(
+    resolveAppleTargets(clockedTargets(down.fetchImpl, { timeoutSeconds: 120, onTransientFailure: () => {} })),
+    /^\[ios-asc\] App Store Connect apps request failed with HTTP 503 after 3 attempts \(Apple error code UNEXPECTED_ERROR\)$/u,
+  );
+
+  // An answer that is not small, well-formed JSON keeps the status alone.
+  for (const failure of [
+    () => new Response(JSON.stringify({ errors: [{ code: "FORBIDDEN_ERROR" }] }), { status: 403, headers: { "content-type": "text/plain" } }),
+    () => json({ errors: [{ code: "FORBIDDEN_ERROR" }], padding: "x".repeat(70 * 1024) }, 403),
+    () => new Response("{\"errors\": [{\"code\": \"FORBIDDEN_ERROR\"", { status: 403, headers: { "content-type": "application/json" } }),
+    () => json({ errors: [{ code: "FORBIDDEN_ERROR".repeat(10) }, { code: { nested: "FORBIDDEN_ERROR" } }] }, 403),
+  ]) {
+    const plain = flakyAppleFetch({}, { failures: 1, failure });
+    await rejectsWithMessage(
+      resolveAppleTargets(clockedTargets(plain.fetchImpl, notTransient)),
+      /^\[ios-asc\] App Store Connect apps request failed with HTTP 403$/u,
+    );
+  }
+});
+
 function clockedTargets(fetchImpl, overrides = {}) {
   let clock = NOW.getTime();
   return {
