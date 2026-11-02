@@ -229,17 +229,17 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
 
       await renderTurn(betweenCommands);
       const waitingShape = turnStructure(container);
-      expect(activityLine()?.textContent).toBe("Thinking…" + "Details");
+      expect(activityLine()?.textContent).toBe("Thinking…");
 
       await renderTurn(commandRunning);
       expect(turnStructure(container)).toEqual(waitingShape);
       // The line holds its label a moment, so a quick step never flashes past.
-      expect(activityLine()?.textContent).toBe("Thinking…" + "Details");
+      expect(activityLine()?.textContent).toBe("Thinking…");
       await act(async () => {
         vi.advanceTimersByTime(ACTIVITY_LABEL_HOLD_MS);
       });
       expect(turnStructure(container)).toEqual(waitingShape);
-      expect(activityLine()?.textContent).toBe("Working…" + "Details");
+      expect(activityLine()?.textContent).toBe("Working…");
 
       await renderTurn(commandDone);
       expect(turnStructure(container)).toEqual(waitingShape);
@@ -271,11 +271,11 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
     expect(container.querySelector(".instafy-status-sweep")).toBeNull();
     expect(container.querySelector('[data-testid="turn-activity-announcement"]')).toBeNull();
     // The last running label holds its moment before the done line takes its place.
-    expect(activityLine()?.textContent).toBe("Thinking…" + "Details");
+    expect(activityLine()?.textContent).toBe("Thinking…");
     await act(async () => {
       vi.advanceTimersByTime(ACTIVITY_LABEL_HOLD_MS);
     });
-    expect(activityLine()?.textContent).toBe("Ran a command" + "Details");
+    expect(activityLine()?.textContent).toBe("Ran a command");
     expect(container.textContent).not.toContain("Analyzing output schema");
     expect(container.querySelector('[data-testid="message-content"]')?.textContent).toBe(
       "Here is what I found.",
@@ -291,7 +291,9 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
     });
     const running = earlierSteps();
     await renderTurn(running);
-    expect(activityLine()?.textContent).toBe("Thinking…" + "Details");
+    expect(activityLine()?.textContent).toBe("Thinking…");
+    // While it runs, the line opens the steps so far, and its arrow says so.
+    expect(activityLine()?.querySelector('[data-testid="turn-activity-line-arrow"]')).not.toBeNull();
 
     live.inFlight = false;
     const failure: ChatMessage = {
@@ -307,6 +309,11 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
     await renderTurn([...running, failure]);
     expect(activityLine()?.textContent).toBe("Thinking…");
     expect(container.querySelector('[data-testid="run-failure-body"]')).toBeNull();
+    // A failed turn's line opens nothing (its failure block has the one
+    // Details): plain words, with no arrow and no pointer.
+    expect(activityLine()?.tagName).toBe("DIV");
+    expect(activityLine()?.querySelector("svg")).toBeNull();
+    expect(activityLine()?.className).not.toContain("cursor-pointer");
 
     await act(async () => {
       vi.advanceTimersByTime(ACTIVITY_LABEL_HOLD_MS);
@@ -333,7 +340,7 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
     const running = [...earlierSteps(), card];
 
     await renderTurn(running);
-    expect(activityLine()?.textContent).toBe("Thinking…" + "Details");
+    expect(activityLine()?.textContent).toBe("Thinking…");
     await act(async () => {
       vi.advanceTimersByTime(ACTIVITY_LABEL_HOLD_MS);
     });
@@ -349,7 +356,7 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
     await renderTurn(answered);
 
     expect(container.querySelector(".instafy-status-sweep")).toBeNull();
-    expect(activityLine()?.textContent).toBe("Ran a command" + "Details");
+    expect(activityLine()?.textContent).toBe("Ran a command");
     expect(container.querySelector('[data-testid="message-content"]')?.textContent).toBe(
       "There are 12 files in this space.",
     );
@@ -531,7 +538,7 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
     await act(async () => {
       vi.advanceTimersByTime(ACTIVITY_LABEL_HOLD_MS);
     });
-    expect(activityLine()?.textContent).toBe("Working…" + "Details");
+    expect(activityLine()?.textContent).toBe("Working…");
     expect(container.textContent).not.toContain("Trying again");
     await act(async () => {
       activityLine()?.click();
@@ -615,7 +622,7 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
     await watch(3_100);
     await renderTurn([...pickedUp, command("next", "cat site/app.js", "in_progress", base + 6_400)]);
     await watch(2_000);
-    expect(shown).toEqual(["Working…" + "Details", "Thinking…" + "Details", "Working…" + "Details"]);
+    expect(shown).toEqual(["Working…", "Thinking…", "Working…"]);
     // Nor is it a note in Details.
     await act(async () => {
       activityLine()?.click();
@@ -633,7 +640,7 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
       agentUpdate("reasoning-long", "reasoning", `**${title}**\n\nDetails.`, Date.now(), { status: "in_progress" }),
     ]);
 
-    expect(activityLine()?.textContent).toBe("Thinking…" + "Details");
+    expect(activityLine()?.textContent).toBe("Thinking…");
     expect(container.textContent).not.toContain(title);
   });
 });

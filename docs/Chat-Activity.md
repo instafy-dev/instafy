@@ -3,7 +3,7 @@
 A turn in chat shows Octo's reply and one plain-language line that says what the turn did:
 
 ```
-Built the map, read 6 pages, looked up 14 places   Details ›
+Built the map, read 6 pages, looked up 14 places ›
 ```
 
 While the turn runs, the line says "Starting…" until the turn's first step, then names the current step ("Looking up
@@ -48,9 +48,21 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   history starts in the middle of a long turn. They are read from the step messages the turn's
   runtime wrote (never one a person recorded), and a turn too long to read whole stores none.
   Without them (an older controller), the line is worked out from the steps that loaded.
-- Once the turn has a step, the whole line is one button that opens Details (`aria-expanded`,
-  `aria-controls`); it reads "Details ›", then "Hide details", and opens and closes as often as it
-  is pressed. Opening Details never moves the line or changes the turn's chrome.
+- Once Details has something to show (a step, a note, a plan, a thread, or an earlier try of the
+  turn), the whole line is one button that opens it (`aria-expanded`, `aria-controls`), and it
+  adds no words of its own: a small arrow in the line's own muted colour follows its words, ›
+  while Details is closed and ⌄ while it is open. Over the line the pointer is a hand, and the
+  words darken with the arrow and underline, also while they sweep; a phone has no hover, so
+  there the arrow is the sign that the line opens. A screen reader hears the line and what
+  pressing it does ("Looked up 14 places, show details", then "…, hide details"), and the
+  running line's announcements say only the line. It opens and closes as often as it is
+  pressed, and opening Details never moves the line or changes the turn's chrome.
+- A line with nothing in Details yet is plain text, with no arrow and no pointer: a new turn's
+  `Starting…`, `Opening Instafy's browser…`, the `Trying again…` that stands in for a failed
+  turn while Instafy sends it again, and a failed turn's last running label while it holds,
+  since the failure block after it has the turn's one Details. The same words can open: a turn
+  Instafy sent again has its earlier try in Details from its first `Starting…`, and the
+  runtime's own `Trying again…` comes only after a step.
 - A turn reads its outcome once. A failed turn has no activity line and no "Run failed" beside
   its author: its failure block is its one line, and that block's Details ("Details ›", then
   "Hide details", with `aria-controls`) lists the error text and then the steps. The error text

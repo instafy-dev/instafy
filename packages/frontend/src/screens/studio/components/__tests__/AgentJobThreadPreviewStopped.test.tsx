@@ -223,7 +223,7 @@ describe("a run a person stopped", () => {
     live.activeConversation = { messages: [card, stopNotice()] };
     await act(async () => root.render(<Thread message={card} />));
     expect(container.querySelector('[data-testid="turn-activity-line"]')?.textContent).toBe(
-      "Stopped · ran 2 commands, edited a file" + "Details",
+      "Stopped · ran 2 commands, edited a file",
     );
     expect(container.textContent).not.toContain("Applied file changes");
     expect(container.textContent).not.toContain("secret-plan.ts");
@@ -259,7 +259,7 @@ describe("a run a person stopped", () => {
     live.activeConversation = { messages: [card, stopNotice()] };
     await act(async () => root.render(<Thread message={card} />));
     const line = container.querySelector<HTMLElement>('[data-testid="turn-activity-line"]');
-    expect(line?.textContent).toBe("Stopped · ran 3 commands" + "Details");
+    expect(line?.textContent).toBe("Stopped · ran 3 commands");
     await act(async () => line?.click());
     expect(container.querySelector('[data-testid="turn-activity-details"]')).not.toBeNull();
     expect(container.textContent).not.toContain(firstAnswer);
@@ -277,7 +277,7 @@ describe("a run a person stopped", () => {
     live.activeConversation = { messages: [card, stopNotice()] };
     await act(async () => root.render(<Thread message={card} />));
     expect(container.querySelector('[data-testid="turn-activity-line"]')?.textContent).toBe(
-      "Stopped · edited a file" + "Details",
+      "Stopped · edited a file",
     );
     expect(fileList?.files.map((file) => file.workspacePath)).toEqual(["sites/porto/app.js"]);
     expect(fileList?.unsavedReason).toBe("stopped_before_save");
@@ -296,7 +296,7 @@ describe("a run a person stopped", () => {
     live.activeConversation = { messages: [card, stopNotice()] };
     await act(async () => root.render(<Thread message={card} />));
     const line = container.querySelector('[data-testid="turn-activity-line"]');
-    expect(line?.textContent).toBe("Stopped · edited a file" + "Details");
+    expect(line?.textContent).toBe("Stopped · edited a file");
     await act(async () => (line as HTMLElement).click());
     expect(container.querySelectorAll('[data-testid="turn-activity-edit"]')).toHaveLength(1);
     expect(fileList?.files.map((file) => file.workspacePath)).toEqual(["sites/porto/app.js"]);

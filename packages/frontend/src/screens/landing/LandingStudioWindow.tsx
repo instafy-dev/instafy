@@ -663,8 +663,9 @@ const BROWSE_TEST_IDS: RunTestIds = {
  * One of Octo's runs, the agent job thread preview as the studio draws it
  * (AgentJobThreadPreviewLayout.tsx): one quiet activity line that says what
  * the run does while it runs ("Thinking…", then each step's own label) and
- * what it did once it ended, with Details beside it (TurnActivityLine.tsx),
- * then the summary and whatever the run left (sections), joined by the spine.
+ * what it did once it ended, with the arrow that opens Details after it
+ * (TurnActivityLine.tsx), then the summary and whatever the run left
+ * (sections), joined by the spine.
  */
 function OctoRun({
   steps,
@@ -751,12 +752,7 @@ function OctoRun({
                 >
                   {lineText}
                 </span>
-                {done ? (
-                  <span className={chrome.ACTIVITY_DETAILS}>
-                    Details
-                    <NavArrowRight aria-hidden="true" className="h-3 w-3" />
-                  </span>
-                ) : null}
+                {done ? <NavArrowRight aria-hidden="true" strokeWidth={2} className={chrome.ACTIVITY_ARROW} /> : null}
               </div>
             </div>
           </Reveal>
