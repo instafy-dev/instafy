@@ -117,8 +117,6 @@ export function endReplyDraftRun(runId: string): void {
   notify();
 }
 
-export const resetReplyDraftsForTests = clearReplyDrafts;
-
 function subscribe(listener: () => void) {
   listeners.add(listener);
   return () => {
@@ -213,23 +211,28 @@ export function useReplyDraftMessages(
   );
   // Bumped when a draft's grace period runs out, so the selection runs again.
   const [expiryTick, setExpiryTick] = useState(0);
-  const visible = useMemo(() => {
+  const { view, nextExpiry } = useMemo(() => {
     // The tick only asks for another selection. The time is read at each one, not at mount:
     // a transcript that changes long after a run ended (a jump to older history) must not
     // bring that run's draft back.
     void expiryTick;
-    return selectVisibleReplyDrafts(list, messages, activeRunIds, Date.now());
-  }, [activeRunIds, expiryTick, list, messages]);
-  // A draft shown only for the grace period needs one more look when it runs out.
-  const nextExpiry = useMemo(() => {
+    const visible = selectVisibleReplyDrafts(list, messages, activeRunIds, Date.now());
+    // A draft shown only for the grace period needs one more look when it runs out.
     let earliest: number | null = null;
     for (const draft of visible) {
       if (draft.runId !== null && activeRunIds.has(draft.runId)) continue;
       const expiry = draft.updatedAt + REPLY_DRAFT_RUN_ENDED_GRACE_MS;
       earliest = earliest === null ? expiry : Math.min(earliest, expiry);
     }
-    return earliest;
-  }, [activeRunIds, visible]);
+    return {
+      view: {
+        messages: visible.map(replyDraftChatMessage),
+        draftingRunActive: visible.length > 0 || list.some((draft) =>
+          draft.text.trim().length > 0 && draft.runId !== null && activeRunIds.has(draft.runId)),
+      },
+      nextExpiry: earliest,
+    };
+  }, [activeRunIds, expiryTick, list, messages]);
   useEffect(() => {
     if (nextExpiry === null) return;
     const timeoutId = window.setTimeout(
@@ -238,12 +241,5 @@ export function useReplyDraftMessages(
     );
     return () => window.clearTimeout(timeoutId);
   }, [nextExpiry]);
-  const draftMessages = useMemo(() => visible.map(replyDraftChatMessage), [visible]);
-  const draftingRunActive =
-    draftMessages.length > 0 ||
-    list.some((draft) => draft.text.trim().length > 0 && draft.runId !== null && activeRunIds.has(draft.runId));
-  return useMemo(
-    () => ({ messages: draftMessages, draftingRunActive }),
-    [draftMessages, draftingRunActive],
-  );
+  return view;
 }

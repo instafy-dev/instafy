@@ -282,16 +282,11 @@ impl SummaryReader {
                 ch if ch.is_whitespace() || ch == ',' => {}
                 _ => self.state = Done,
             },
-            Key => {
-                if let Some(decoded) = self.read_string_char(ch) {
-                    match decoded {
-                        StringChar::End => self.state = AfterKey,
-                        // Eight bytes are enough to reject any key longer than "summary".
-                        StringChar::Char(ch) if self.key.len() < 8 => self.key.push(ch),
-                        StringChar::Char(_) | StringChar::Pending => {}
-                    }
-                }
-            }
+            Key | Summary => match self.read_string_char(ch) {
+                StringChar::End => self.state = if self.state == Key { AfterKey } else { Done },
+                StringChar::Char(ch) => self.push_decoded(ch),
+                StringChar::Pending => {}
+            },
             AfterKey => match ch {
                 ':' => self.state = BeforeValue,
                 ch if ch.is_whitespace() => {}
@@ -309,22 +304,8 @@ impl SummaryReader {
                 }
                 _ => self.state = SkipScalar,
             },
-            Summary => {
-                if let Some(decoded) = self.read_string_char(ch) {
-                    match decoded {
-                        StringChar::End => self.state = Done,
-                        StringChar::Char(ch)
-                            if self.summary.len() + ch.len_utf8() <= MAX_DRAFT_BYTES =>
-                        {
-                            self.summary.push(ch)
-                        }
-                        StringChar::Char(_) => {}
-                        StringChar::Pending => {}
-                    }
-                }
-            }
             SkipString => {
-                if let Some(StringChar::End) = self.read_string_char(ch) {
+                if let StringChar::End = self.read_string_char(ch) {
                     self.state = AfterValue;
                 }
             }
@@ -340,7 +321,7 @@ impl SummaryReader {
                 _ => {}
             },
             SkipNestedString => {
-                if let Some(StringChar::End) = self.read_string_char(ch) {
+                if let StringChar::End = self.read_string_char(ch) {
                     self.state = SkipNested;
                 }
             }
@@ -358,24 +339,24 @@ impl SummaryReader {
         }
     }
 
-    /// One character of a JSON string's body. `None` while it is part of an
+    /// One character of a JSON string's body. `Pending` while it is part of an
     /// escape that has not produced a character yet.
-    fn read_string_char(&mut self, ch: char) -> Option<StringChar> {
+    fn read_string_char(&mut self, ch: char) -> StringChar {
         match self.escape {
             Escape::None => match ch {
                 '\\' => {
                     self.escape = Escape::Started;
-                    Some(StringChar::Pending)
+                    StringChar::Pending
                 }
-                '"' => Some(self.flush_surrogate_then(StringChar::End)),
-                ch => Some(self.flush_surrogate_then(StringChar::Char(ch))),
+                '"' => self.flush_surrogate_then(StringChar::End),
+                ch => self.flush_surrogate_then(StringChar::Char(ch)),
             },
             Escape::Started => {
                 self.escape = Escape::None;
                 let decoded = match ch {
                     'u' => {
                         self.escape = Escape::Unicode(0, 0);
-                        return Some(StringChar::Pending);
+                        return StringChar::Pending;
                     }
                     'n' => '\n',
                     't' => '\t',
@@ -385,22 +366,21 @@ impl SummaryReader {
                     // `"`, `\`, `/` and anything unexpected stand for themselves.
                     ch => ch,
                 };
-                Some(self.flush_surrogate_then(StringChar::Char(decoded)))
+                self.flush_surrogate_then(StringChar::Char(decoded))
             }
             Escape::Unicode(read, value) => {
                 let Some(digit) = ch.to_digit(16) else {
                     self.escape = Escape::None;
-                    return Some(
-                        self.flush_surrogate_then(StringChar::Char(char::REPLACEMENT_CHARACTER)),
-                    );
+                    return self
+                        .flush_surrogate_then(StringChar::Char(char::REPLACEMENT_CHARACTER));
                 };
                 let value = (value << 4) | digit as u16;
                 if read < 3 {
                     self.escape = Escape::Unicode(read + 1, value);
-                    return Some(StringChar::Pending);
+                    return StringChar::Pending;
                 }
                 self.escape = Escape::None;
-                Some(self.code_unit(value))
+                self.code_unit(value)
             }
         }
     }
@@ -443,6 +423,7 @@ impl SummaryReader {
             ReaderState::Summary if self.summary.len() + ch.len_utf8() <= MAX_DRAFT_BYTES => {
                 self.summary.push(ch)
             }
+            // Eight bytes are enough to reject any key longer than "summary".
             ReaderState::Key if self.key.len() < 8 => self.key.push(ch),
             _ => {}
         }
@@ -478,13 +459,42 @@ mod tests {
             "files": [],
         })
         .to_string();
-        let escaped = r#"{"summary":"aé😀\/\tb","files":[]}"#;
-        for piece in 1..8 {
-            assert_eq!(
-                read_in_pieces(&answer, piece),
-                "Line one\nSaid \"hi\" \\ done — ok 😀 /"
-            );
-            assert_eq!(read_in_pieces(escaped, piece), "aé😀/\tb");
+        for (case, text, expected) in [
+            (
+                "encoded summary",
+                answer.as_str(),
+                "Line one\nSaid \"hi\" \\ done — ok 😀 /",
+            ),
+            (
+                "escaped slash and tab",
+                r#"{"summary":"aé😀\/\tb","files":[]}"#,
+                "aé😀/\tb",
+            ),
+            (
+                "nested summaries and other keys",
+                r#"{"files":[{"summary":"nested \"]}","path":"a"}],"actions":{"summary":"no"},"confidence":3,"summary":"top"}"#,
+                "top",
+            ),
+            (
+                "prose",
+                "Plain prose that mentions {\"summary\": \"x\"}",
+                "",
+            ),
+            ("fenced JSON", "```json\n{\"summary\":\"fenced\"}```", ""),
+            (
+                "non-string summary",
+                r#"{"summary": null, "files": []}"#,
+                "",
+            ),
+            ("array", r#"["summary", "x"]"#, ""),
+        ] {
+            for piece in (1..8).chain(std::iter::once(text.chars().count())) {
+                assert_eq!(
+                    read_in_pieces(text, piece),
+                    expected,
+                    "{case}, piece={piece}"
+                );
+            }
         }
     }
 
@@ -504,14 +514,6 @@ mod tests {
     }
 
     #[test]
-    fn skips_other_keys_and_nested_summaries() {
-        let answer = r#"{"files":[{"summary":"nested \"]}","path":"a"}],"actions":{"summary":"no"},"confidence":3,"summary":"top"}"#;
-        for piece in 1..6 {
-            assert_eq!(read_in_pieces(answer, piece), "top");
-        }
-    }
-
-    #[test]
     fn oversized_unrelated_keys_do_not_grow_parser_memory_or_match_summary() {
         let mut reader = SummaryReader::default();
         reader.feed(&format!(
@@ -520,18 +522,6 @@ mod tests {
         ));
         assert_eq!(reader.summary(), "Visible");
         assert!(reader.key.len() <= 8);
-    }
-
-    #[test]
-    fn drafts_nothing_from_text_that_is_not_an_object_with_a_string_summary() {
-        for text in [
-            "Plain prose that mentions {\"summary\": \"x\"}",
-            "```json\n{\"summary\":\"fenced\"}```",
-            r#"{"summary": null, "files": []}"#,
-            r#"["summary", "x"]"#,
-        ] {
-            assert_eq!(read_in_pieces(text, 3), "", "{text}");
-        }
     }
 
     #[test]
