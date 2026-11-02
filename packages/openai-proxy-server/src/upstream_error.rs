@@ -48,6 +48,7 @@ pub(crate) enum UpstreamFailure {
     },
     CredentialRefresh,
     InvalidResponse,
+    ResponseTooLarge,
     Stream {
         code: Option<String>,
         message: String,
@@ -226,6 +227,9 @@ impl fmt::Display for UpstreamFailure {
             Self::Http { status, .. } => write!(f, "upstream returned {status}"),
             Self::CredentialRefresh => f.write_str("upstream credential refresh failed"),
             Self::InvalidResponse => f.write_str("invalid upstream response"),
+            Self::ResponseTooLarge => {
+                f.write_str("upstream response exceeded the proxy size limit")
+            }
             Self::Stream { code, message } => {
                 write!(f, "backend stream reported error: {message}")?;
                 if let Some(code) = code {
@@ -417,6 +421,12 @@ pub(crate) fn classify(error: &anyhow::Error) -> ErrorResponse {
                 "upstream_invalid_response",
                 "The upstream provider returned an invalid response.",
                 true,
+            ),
+            UpstreamFailure::ResponseTooLarge => ErrorResponse::new(
+                StatusCode::BAD_GATEWAY,
+                "upstream_response_too_large",
+                "The upstream response exceeded the proxy size limit.",
+                false,
             ),
             UpstreamFailure::Http {
                 status,

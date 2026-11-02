@@ -167,7 +167,12 @@ impl JobProcessor {
             job_id: job.id,
             conversation_id: job.conversation_id,
             proxy_base_url: proxy_base,
-            proxy_token: proxy.token.clone(),
+            // The bounded child gets only a fresh job capability. Its parent
+            // keeps the machine bearer and renewal authority.
+            proxy_token: match crate::job_proxy_auth::current() {
+                Some(auth) => auth.fresh_token().await?,
+                None => proxy.token.clone(),
+            },
             controller_base_url: self.config.controller_base_url.to_string(),
             // No general controller/MCP tools. Research accounting uses its own
             // narrow capability; publication authority stays here.

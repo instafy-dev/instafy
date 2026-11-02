@@ -46,6 +46,10 @@ use crate::workspace;
 
 #[path = "agent/planning_receipts.rs"]
 mod planning_receipts;
+#[path = "agent/proxy_token.rs"]
+mod proxy_token;
+#[path = "agent/reply_draft.rs"]
+mod reply_draft;
 #[path = "agent/stopped_turn.rs"]
 mod stopped_turn;
 
@@ -307,7 +311,9 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/agent/login", post(agent_login))
         .route("/agent/lease", post(agent_lease))
         .route("/agent/heartbeat", post(agent_heartbeat))
+        .route("/agent/jobs/:job_id/proxy-token", post(proxy_token::renew))
         .route("/agent/message", post(agent_message))
+        .route("/agent/reply-draft", post(reply_draft::agent_reply_draft))
         .route("/agent/complete", post(agent_complete))
         .route("/agent/stopped", post(stopped_turn::agent_stopped))
         .route(
@@ -6710,6 +6716,10 @@ fn extract_multi_agent_plan_details(value: &JsonValue) -> Option<&JsonValue> {
 mod deleted_space_fence_tests;
 
 #[cfg(test)]
+#[path = "agent_proxy_token_tests.rs"]
+mod proxy_token_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -9238,3 +9248,7 @@ fn default_lease_seconds() -> u32 {
 fn unauthorized(message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
     super::unauthorized(message)
 }
+
+#[cfg(test)]
+#[path = "agent/reply_draft_tests.rs"]
+mod reply_draft_tests;

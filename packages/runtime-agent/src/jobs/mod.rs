@@ -82,6 +82,7 @@ mod project_preferences_auth_tests;
 mod project_preferences_tests;
 #[cfg(test)]
 mod read_reference_tests;
+mod reply_draft;
 pub(crate) mod rolling_saves;
 mod runtime_pack_files;
 mod site_intent;
@@ -337,11 +338,13 @@ fn with_runtime_metadata_vec(messages: Vec<JobMessage>, runtime_id: &Uuid) -> Ve
 }
 
 pub type JobMessageSender = UnboundedSender<JobMessage>;
+pub use reply_draft::{ReplyDraft, ReplyDraftSender};
 
 #[derive(Clone)]
 pub struct JobProgress {
     pub sender: JobMessageSender,
     pub status: Arc<AtomicBool>,
+    pub reply_draft: Option<ReplyDraftSender>,
 }
 
 static CODEX_EXECUTION_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
@@ -3487,18 +3490,21 @@ impl TurnClockGuard {
     /// be continued, where to leave the note on what is left (`turn_continuation`).
     fn start(files: Option<&turn_continuation::TurnFiles>) -> Self {
         let started = chrono::Utc::now();
-        let limit = chrono::Duration::from_std(
-            files.map_or_else(crate::codex::resolve_codex_run_timeout, |files| {
+        let deadline = files
+            .map_or_else(crate::codex::resolve_codex_run_timeout, |files| {
                 files.limit()
-            }),
-        )
-        .unwrap_or_else(|_| chrono::Duration::seconds(600));
+            })
+            .and_then(|limit| chrono::Duration::from_std(limit).ok())
+            .and_then(|limit| started.checked_add_signed(limit));
         let format = |at: chrono::DateTime<chrono::Utc>| {
             at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         };
         let mut overrides = vec![
             EnvOverride::apply("INSTAFY_TURN_STARTED_AT", &format(started)),
-            EnvOverride::apply("INSTAFY_TURN_DEADLINE", &format(started + limit)),
+            match deadline {
+                Some(deadline) => EnvOverride::apply("INSTAFY_TURN_DEADLINE", &format(deadline)),
+                None => EnvOverride::remove("INSTAFY_TURN_DEADLINE"),
+            },
         ];
         match files {
             Some(files) => overrides.extend(files.env_overrides()),
@@ -5593,6 +5599,7 @@ impl JobProcessor {
             .isolated_workers
             .resolve(worker_config, Some(ReasoningEffort::High));
         Ok(DirectWorkerProxyConfig {
+            run_timeout: crate::codex::resolve_codex_run_timeout(),
             chat_completions_endpoint: format!("{base}/v1/chat/completions"),
             api_key: envelope.token.trim().to_string(),
             model: crate::job_model::normalize_model_id(model.as_deref().unwrap_or("")),
@@ -5622,8 +5629,14 @@ impl JobProcessor {
         self.verified_controller_claims(registration, job).await?;
 
         let proxy_envelope = job.proxy.as_ref().or(registration.proxy.as_ref());
-        let proxy_config =
+        let mut proxy_config =
             self.parallel_direct_worker_proxy_config(proxy_envelope, &worker_config)?;
+        proxy_config.run_timeout = turn_continuation::turn_budget(
+            crate::codex::resolve_codex_run_timeout(),
+            turn_continuation::team_deadline(&job.payload),
+            chrono::Utc::now(),
+        )
+        .limit;
         let project_id = self.project_id_for_job(job)?;
         let workspace_dir = self.prepare_workspace(&project_id)?;
         let prompt_text = job
@@ -6688,11 +6701,14 @@ impl JobProcessor {
         &self,
         job: &LeaseJob,
         task_usage: &TaskUsage,
+        turn_files: &turn_continuation::TurnFiles,
         cancel_signal: Option<JobCancelSignal>,
     ) -> CodexRunOptions {
         CodexRunOptions {
             usage_observer: Some(task_usage.call(UsagePhase::Routing)),
             job_id: Some(job.id),
+            run_timeout: turn_files.limit(),
+            run_deadline: turn_files.deadline(),
             disable_shell_tool: true,
             final_output_schema: CodexFinalOutputSchema::RoutingPreflight,
             suppress_contextual_instructions: true,
@@ -6731,19 +6747,20 @@ impl JobProcessor {
         let task_usage = TaskUsage::default();
         let turn_files = turn_continuation::TurnFiles::for_job(job);
         let turn_start = stopped_turn::TurnStart::default();
-        let result = self
-            .run_apply_job_observed(
-                registration,
-                job,
-                commit_to_workspace,
-                progress,
-                cancel_signal,
-                active_turn_input,
-                &task_usage,
-                &turn_files,
-                &turn_start,
-            )
-            .await;
+        // Keep the large execution state off the caller's async frame. Admission rejection
+        // above must be cheap even on the standard two-megabyte thread stack.
+        let result = Box::pin(self.run_apply_job_observed(
+            registration,
+            job,
+            commit_to_workspace,
+            progress,
+            cancel_signal,
+            active_turn_input,
+            &task_usage,
+            &turn_files,
+            &turn_start,
+        ))
+        .await;
         let result = turn_continuation::attach_turn_records(result, &turn_files);
         // A turn that lost its lease keeps what it already changed in its
         // folder: the changes go with the error, for the job loop's report.
@@ -7166,7 +7183,7 @@ impl JobProcessor {
                 agent_routing_primary_prompt(&preflight_prompt, &job.payload);
             tracing::info!(job_id = %job.id, context = %primary_context, "routing preflight history projection");
             let preflight_options =
-                self.routing_preflight_options(job, task_usage, cancel_signal.clone());
+                self.routing_preflight_options(job, task_usage, turn_files, cancel_signal.clone());
             let _codex_guard = CODEX_EXECUTION_LOCK.lock().await;
             match codex
                 .execute_with_options(&preflight_prompt, None, preflight_options)
@@ -7359,6 +7376,7 @@ impl JobProcessor {
         let final_output_schema = final_output_schema_for_job(job, granted_execution);
         let evidence_requirements = routing_evidence_requirements(job, runtime_expectations);
         let mut codex_run_options = CodexRunOptions {
+            proxy_auth: crate::job_proxy_auth::current(),
             usage_observer: Some(task_usage.call(UsagePhase::Main)),
             // The project's shared defaults, which any member may write, never reach a granted
             // turn.
@@ -7403,7 +7421,8 @@ impl JobProcessor {
             turn_wrap_up: turn_files.wrap_up(),
             turn_continue_note: turn_files.continue_note_path(),
             // A team's turn ends by the team's deadline (`turn_continuation`).
-            run_timeout: Some(turn_files.limit()),
+            run_timeout: turn_files.limit(),
+            run_deadline: turn_files.deadline(),
             granted,
         };
 
@@ -7561,11 +7580,12 @@ impl JobProcessor {
             && read_only_scoped_worker_preobserved
             && let Some(observation) = scoped_worker_path_observation.as_ref()
         {
-            let proxy_config = direct_worker_proxy_config(
+            let mut proxy_config = direct_worker_proxy_config(
                 proxy_envelope,
                 crate::job_model::resolve_for_installed_job("sequential direct lane").id,
                 codex_run_options.reasoning_effort.clone(),
             )?;
+            proxy_config.run_timeout = turn_files.limit();
             return execute_preobserved_scoped_worker_direct(
                 &prompt,
                 &prompt_context,
@@ -7585,11 +7605,12 @@ impl JobProcessor {
                     "This scoped task requires capabilities unavailable in the experimental isolated worker lane. Use the ordinary runtime configuration or split the task's inputs and capabilities."
                 );
             }
-            let proxy_config = direct_worker_proxy_config(
+            let mut proxy_config = direct_worker_proxy_config(
                 proxy_envelope,
                 crate::job_model::resolve_for_installed_job("sequential direct lane").id,
                 codex_run_options.reasoning_effort.clone(),
             )?;
+            proxy_config.run_timeout = turn_files.limit();
             let (execution, files) = execute_write_scoped_worker_direct(
                 &workspace_dir,
                 &prompt,
@@ -7659,6 +7680,25 @@ impl JobProcessor {
             active: bool,
         }
 
+        // Planning and worker output belongs to their internal protocol. A lead's
+        // natural summary is eligible, while its actions/plan JSON stays hidden.
+        let drafts_reply = !is_multi_agent_worker_job(job)
+            && !is_explicit_team_planning_job(job)
+            && matches!(
+                final_output_schema,
+                CodexFinalOutputSchema::Default | CodexFinalOutputSchema::SharedBrowser
+            );
+        let mut reply_draft = progress_sender
+            .as_ref()
+            .and_then(|progress| progress.reply_draft.clone())
+            .filter(|_| drafts_reply)
+            .map(|sender| {
+                reply_draft::ReplyDraftStream::start(
+                    sender,
+                    codex_run_options.allow_plain_text_final_fallback,
+                )
+            });
+
         let mut streaming_context = progress_sender.as_ref().map(|progress| StreamingContext {
             sender: progress.sender.clone(),
             status: progress.status.clone(),
@@ -7679,6 +7719,9 @@ impl JobProcessor {
         };
         let output_result = if streaming_context.is_some() {
             let mut event_handler = |event: &JsonValue| -> Result<()> {
+                if let Some(draft) = reply_draft.as_mut() {
+                    draft.observe(event);
+                }
                 if let Some(ctx) = streaming_context.as_mut() {
                     ctx.events.push(event.clone());
                     if ctx.active {
@@ -8442,7 +8485,27 @@ impl JobProcessor {
                 let mut retry_stream_events: Vec<JsonValue> = Vec::new();
                 let mut retry_streamed_count = 0usize;
                 let mut retry_stream_active = true;
+                let mut retry_draft = progress
+                    .reply_draft
+                    .clone()
+                    .filter(|_| {
+                        drafts_reply
+                            && matches!(
+                                retry_codex_run_options.final_output_schema,
+                                CodexFinalOutputSchema::Default
+                                    | CodexFinalOutputSchema::SharedBrowser
+                            )
+                    })
+                    .map(|sender| {
+                        reply_draft::ReplyDraftStream::start(
+                            sender,
+                            retry_codex_run_options.allow_plain_text_final_fallback,
+                        )
+                    });
                 let mut retry_event_handler = |event: &JsonValue| -> Result<()> {
+                    if let Some(draft) = retry_draft.as_mut() {
+                        draft.observe(event);
+                    }
                     retry_stream_events.push(event.clone());
                     if retry_stream_active {
                         let messages = with_runtime_metadata_vec(
@@ -8855,8 +8918,28 @@ impl JobProcessor {
                     &project_id,
                     &finalization_preferences,
                 )?;
+                let mut finalization_draft = progress_sender
+                    .as_ref()
+                    .and_then(|progress| progress.reply_draft.clone())
+                    .filter(|_| drafts_reply)
+                    .map(|sender| {
+                        reply_draft::ReplyDraftStream::start(
+                            sender,
+                            finalization_options.allow_plain_text_final_fallback,
+                        )
+                    });
+                let mut finalization_events = |event: &JsonValue| -> Result<()> {
+                    if let Some(draft) = finalization_draft.as_mut() {
+                        draft.observe(event);
+                    }
+                    Ok(())
+                };
                 let finalization_output = codex
-                    .execute_with_options(native_finalization_prompt, None, finalization_options)
+                    .execute_with_options(
+                        native_finalization_prompt,
+                        Some(&mut finalization_events),
+                        finalization_options,
+                    )
                     .await?;
                 drop(codex_guard);
 
@@ -15248,6 +15331,7 @@ struct DirectWorkerProxyConfig {
     api_key: String,
     model: String,
     reasoning_effort: ReasoningEffort,
+    run_timeout: Option<std::time::Duration>,
 }
 
 fn direct_worker_proxy_config(
@@ -15286,6 +15370,7 @@ fn direct_worker_proxy_config(
         .ok_or_else(|| anyhow!("OpenAI proxy base URL is missing for scoped worker lane"))?;
 
     Ok(DirectWorkerProxyConfig {
+        run_timeout: crate::codex::resolve_codex_run_timeout(),
         chat_completions_endpoint: format!("{base_url}/v1/chat/completions"),
         api_key,
         model,
@@ -15335,16 +15420,14 @@ async fn execute_preobserved_scoped_worker_direct(
         ]
     });
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .context("failed to build scoped worker proxy client")?;
+    let client = crate::model_http::client()?;
     let provider = "openai-proxy-chat";
     let response_json = post_scoped_worker_json_with_retry(
         &client,
         &proxy_config.chat_completions_endpoint,
         &proxy_config.api_key,
         &request,
+        proxy_config.run_timeout,
     )
     .await?;
     let response_text = extract_direct_worker_summary(&response_json)
@@ -15486,16 +15569,14 @@ async fn execute_write_scoped_worker_direct(
             }
         ]
     });
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .context("failed to build write-scoped worker proxy client")?;
+    let client = crate::model_http::client()?;
     let provider = "openai-proxy-chat";
     let response_json = post_scoped_worker_json_with_retry(
         &client,
         &proxy_config.chat_completions_endpoint,
         &proxy_config.api_key,
         &request,
+        proxy_config.run_timeout,
     )
     .await?;
     let response_text = extract_direct_worker_summary(&response_json)
@@ -15611,22 +15692,21 @@ async fn post_scoped_worker_json(
     api_key: &str,
     request: &JsonValue,
 ) -> Result<JsonValue> {
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(125),
-        client
-            .post(endpoint)
-            .bearer_auth(api_key)
-            .json(request)
-            .send(),
+    // Resolve on every call (including the single retry), never from the
+    // config's token snapshot once the job has a renewable source.
+    let renewed_token = match crate::job_proxy_auth::current() {
+        Some(auth) => Some(auth.token().await?),
+        None => None,
+    };
+    let api_key = renewed_token.as_deref().unwrap_or(api_key);
+    let (status, response_json) = crate::model_http::post_json(
+        client,
+        endpoint,
+        api_key,
+        request,
+        crate::model_http::read_timeout(),
     )
-    .await
-    .context("scoped worker proxy request timed out")?
-    .context("scoped worker proxy request failed")?;
-    let status = response.status();
-    let response_json = response
-        .json::<JsonValue>()
-        .await
-        .context("failed to parse scoped worker proxy response")?;
+    .await?;
     if !status.is_success() {
         return Err(anyhow!(
             "Scoped worker proxy request failed with status {}: {}",
@@ -15642,28 +15722,35 @@ async fn post_scoped_worker_json_with_retry(
     endpoint: &str,
     api_key: &str,
     request: &JsonValue,
+    run_timeout: Option<std::time::Duration>,
 ) -> Result<JsonValue> {
-    match post_scoped_worker_json(client, endpoint, api_key, request).await {
-        Ok(value) => Ok(value),
-        Err(first_error) => {
-            let first_error_text = format!("{first_error:#}");
-            if !scoped_worker_proxy_error_is_retryable(first_error_text.as_str()) {
-                return Err(first_error);
-            }
+    let attempts = async {
+        match post_scoped_worker_json(client, endpoint, api_key, request).await {
+            Ok(value) => Ok(value),
+            Err(first_error) => {
+                let first_error_text = format!("{first_error:#}");
+                if !scoped_worker_proxy_error_is_retryable(first_error_text.as_str()) {
+                    return Err(first_error);
+                }
 
-            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-            post_scoped_worker_json(client, endpoint, api_key, request)
-                .await
-                .with_context(|| {
-                    format!("retry after scoped worker proxy failure: {first_error_text}")
-                })
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+                post_scoped_worker_json(client, endpoint, api_key, request)
+                    .await
+                    .with_context(|| {
+                        format!("retry after scoped worker proxy failure: {first_error_text}")
+                    })
+            }
         }
-    }
+    };
+    crate::codex::optional_timeout(run_timeout, attempts)
+        .await
+        .context("Codex run timed out during scoped worker execution")?
 }
 
 fn scoped_worker_proxy_error_is_retryable(message: &str) -> bool {
     let normalized = message.to_ascii_lowercase();
     normalized.contains("timed out")
+        || normalized.contains("stalled")
         || normalized.contains("connection")
         || normalized.contains("request timed out")
 }
@@ -22320,12 +22407,14 @@ mod tests {
             }),
         );
         let usage = TaskUsage::default();
+        let turn_files =
+            turn_continuation::TurnFiles::in_dir(tmp.path().join("turn"), false, false);
         for (enabled, expected) in [
             (false, ScopedWorkerExecution::FileGeneration),
             (true, ScopedWorkerExecution::IsolatedTools),
         ] {
             processor.isolated_workers.enabled = enabled;
-            let options = processor.routing_preflight_options(&job, &usage, None);
+            let options = processor.routing_preflight_options(&job, &usage, &turn_files, None);
             assert_eq!(options.routing_scoped_worker_execution, Some(expected));
             assert_eq!(options.job_id, Some(job.id));
             assert!(options.disable_shell_tool);
@@ -22342,6 +22431,29 @@ mod tests {
                 job.payload["prompt_text"].as_str().unwrap()
             ));
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn routing_preflight_keeps_the_turns_remaining_budget_and_absolute_deadline() {
+        let tmp = tempdir().unwrap();
+        let processor = test_job_processor(tmp.path());
+        let job = test_lease_job(Some("feature"), json!({}));
+        let usage = TaskUsage::default();
+        let turn_files =
+            turn_continuation::TurnFiles::in_dir(tmp.path().join("turn"), false, false);
+        let deadline = turn_files.deadline().expect("explicit test budget");
+
+        tokio::time::advance(Duration::from_secs(240)).await;
+        let options = processor.routing_preflight_options(&job, &usage, &turn_files, None);
+        assert_eq!(options.run_timeout, Some(Duration::from_secs(360)));
+        assert_eq!(options.run_deadline, Some(deadline));
+
+        // Waiting for execution admission must not restart the captured remaining budget.
+        tokio::time::advance(Duration::from_secs(361)).await;
+        assert!(options.run_deadline.unwrap() < tokio::time::Instant::now());
+        let expired = processor.routing_preflight_options(&job, &usage, &turn_files, None);
+        assert_eq!(expired.run_timeout, Some(Duration::ZERO));
+        assert_eq!(expired.run_deadline, Some(deadline));
     }
 
     #[test]
@@ -30952,6 +31064,56 @@ mod tests {
         ));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn scoped_worker_budget_expiry_requests_a_time_limit_continuation() {
+        let received = Arc::new(tokio::sync::Notify::new());
+        let handler_received = received.clone();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::post(move || async move {
+                handler_received.notify_one();
+                std::future::pending::<axum::Json<JsonValue>>().await
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        // Keep paused time from advancing while loopback I/O reaches the handler.
+        let clock_guard = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        let request = tokio::spawn(async move {
+            let client = reqwest::Client::builder().no_proxy().build().unwrap();
+            post_scoped_worker_json_with_retry(
+                &client,
+                &endpoint,
+                "inert-test-token",
+                &json!({}),
+                Some(Duration::from_secs(30)),
+            )
+            .await
+        });
+        received.notified().await;
+        tokio::time::advance(Duration::from_secs(31)).await;
+        clock_guard.abort();
+        let error = request.await.unwrap().expect_err("explicit budget expires");
+        server.abort();
+
+        assert!(turn_continuation::is_turn_time_limit(&error));
+        let tmp = tempdir().unwrap();
+        let files = turn_continuation::TurnFiles::in_dir(tmp.path().join("turn"), true, true);
+        let error = turn_continuation::attach_turn_records(Err(error), &files).unwrap_err();
+        let artifacts = extract_job_failure_artifacts(&error).unwrap();
+        let continuation = artifacts
+            .iter()
+            .find(|artifact| artifact["kind"] == "agent/turn-continuation")
+            .expect("budget expiry preserves the controller continuation contract");
+        assert_eq!(continuation["requested"], true);
+        assert_eq!(continuation["endedBy"], "time_limit");
+    }
+
     #[test]
     fn missing_final_recovery_prompt_uses_compact_workspace_context() {
         let temp = tempdir().expect("temp dir");
@@ -32516,6 +32678,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unbounded_turn_clears_a_previous_jobs_shell_deadline() {
+        let _lock = JOB_PROCESS_ENV_LOCK.lock().await;
+        let _timeout = EnvOverride::remove("CODEX_RUN_TIMEOUT_SECONDS");
+        let _stale = EnvOverride::apply("INSTAFY_TURN_DEADLINE", "2020-01-01T00:00:00Z");
+        {
+            let _guard = TurnClockGuard::start(None);
+            assert!(env::var_os("INSTAFY_TURN_STARTED_AT").is_some());
+            assert!(env::var_os("INSTAFY_TURN_DEADLINE").is_none());
+        }
+        assert_eq!(
+            env::var("INSTAFY_TURN_DEADLINE").unwrap(),
+            "2020-01-01T00:00:00Z"
+        );
+    }
+
+    #[tokio::test]
     async fn a_turn_exports_its_start_and_the_hosts_deadline_to_the_shell() {
         let _lock = JOB_PROCESS_ENV_LOCK.lock().await;
         let _timeout = EnvOverride::apply("CODEX_RUN_TIMEOUT_SECONDS", "900");
@@ -33327,6 +33505,7 @@ mod tests {
             JobProgress {
                 sender,
                 status: Arc::new(AtomicBool::new(true)),
+                reply_draft: None,
             },
             receiver,
         )

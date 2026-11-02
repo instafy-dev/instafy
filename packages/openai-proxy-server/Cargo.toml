@@ -22,3 +22,4 @@ ring = "0.17"
 [dev-dependencies]
 serial_test = "2"
 native-tls = "0.2"
+tokio = { version = "1", features = ["test-util"] }

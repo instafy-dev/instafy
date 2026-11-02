@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::OnceLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
@@ -10,9 +10,14 @@ use uuid::Uuid;
 
 use crate::auth::{Credentials, response_indicates_chatgpt_token_expired};
 use crate::context_controls::ScopedResponseContext;
+use crate::model_transport::{ModelTransportConfig, ResponseBodyLimit};
 use crate::upstream_error::{self, ToolControlRejection, UpstreamFailure};
 use crate::usage::apply_chat_to_responses_usage;
 use crate::usage_diagnostics::{UsageAttempt, UsageDiagnostics};
+
+#[cfg(test)]
+#[path = "model_transport_tests.rs"]
+mod model_transport_tests;
 
 const APPLY_PATCH_GRAMMAR: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -60,6 +65,7 @@ pub(crate) type RequiredToolCallFallbackHook = Box<dyn FnOnce(&ToolControlReject
 
 pub struct CodexClient {
     http: reqwest::Client,
+    max_response_bytes: usize,
     credentials: Credentials,
     conversation_id: Option<String>,
     previous_response_id: Option<String>,
@@ -189,13 +195,12 @@ fn global_reasoning_effort() -> Option<&'static str> {
 
 impl CodexClient {
     pub fn new(credentials: Credentials) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
-            .build()
-            .context("failed to create HTTP client")?;
+        let transport = ModelTransportConfig::from_env()?;
+        let http = transport.http_client()?;
 
         Ok(Self {
             http,
+            max_response_bytes: transport.max_response_bytes,
             credentials,
             conversation_id: None,
             previous_response_id: None,
@@ -542,13 +547,16 @@ impl CodexClient {
                 rate_limits,
                 turn_state,
                 usage_attempt,
+                self.max_response_bytes,
             );
             events.read_until_output().await?;
             return Ok(CodexReply::Stream(events));
         }
 
         if self.credentials.is_chatgpt() {
-            let body = read_chatgpt_stream(response, usage_attempt.as_mut()).await?;
+            let body =
+                read_chatgpt_stream(response, usage_attempt.as_mut(), self.max_response_bytes)
+                    .await?;
             let mut completion =
                 parse_completion(body).context(UpstreamFailure::InvalidResponse)?;
             completion.rate_limits = rate_limits;
@@ -556,10 +564,9 @@ impl CodexClient {
             return Ok(CodexReply::Complete(completion));
         }
 
-        let body: Value = response
-            .json()
-            .await
-            .context("failed to decode JSON response")?;
+        let bytes = read_model_body(response, None, self.max_response_bytes).await?;
+        let body: Value =
+            serde_json::from_slice(&bytes).context(UpstreamFailure::InvalidResponse)?;
         if let Some(attempt) = usage_attempt.as_mut() {
             attempt.observe_json(&body);
         }
@@ -703,10 +710,7 @@ impl CodexClient {
                 attempt.failure("http_error");
             }
             let response_headers = response.headers().clone();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<empty>".to_string());
+            let body = read_model_error_body(response, self.max_response_bytes).await?;
             if response_indicates_chatgpt_token_expired(StatusCode::UNAUTHORIZED, &body)
                 && self
                     .credentials
@@ -735,10 +739,7 @@ impl CodexClient {
             }
             let status = response.status();
             let response_headers = response.headers().clone();
-            let text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<empty>".to_string());
+            let text = read_model_error_body(response, self.max_response_bytes).await?;
             return Err(UpstreamFailure::http_body(status, &response_headers, &text).into());
         }
 
@@ -1594,15 +1595,33 @@ fn view_image_tool_spec() -> Value {
 }
 
 async fn read_chatgpt_stream(
+    response: reqwest::Response,
+    usage_attempt: Option<&mut UsageAttempt>,
+    max_response_bytes: usize,
+) -> Result<Value> {
+    let bytes = read_model_body(response, usage_attempt, max_response_bytes).await?;
+    let text = String::from_utf8(bytes).context("streamed response was not valid UTF-8")?;
+
+    if std::env::var("CODEX_DEBUG_HTTP").as_deref() == Ok("1") {
+        eprintln!("<-- stream\n{}", text);
+    }
+
+    read_chatgpt_stream_text(&text)
+}
+
+async fn read_model_body(
     mut response: reqwest::Response,
     mut usage_attempt: Option<&mut UsageAttempt>,
-) -> Result<Value> {
+    max_response_bytes: usize,
+) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
+    let mut limit = ResponseBodyLimit::new(max_response_bytes);
     while let Some(chunk) = response
         .chunk()
         .await
         .context("failed to read streaming chunk from backend")?
     {
+        limit.receive(chunk.len())?;
         if let Some(attempt) = usage_attempt.as_deref_mut() {
             attempt.observe_sse_bytes(&chunk);
         }
@@ -1612,13 +1631,23 @@ async fn read_chatgpt_stream(
         attempt.finish_sse();
     }
 
-    let text = String::from_utf8(bytes).context("streamed response was not valid UTF-8")?;
+    Ok(bytes)
+}
 
-    if std::env::var("CODEX_DEBUG_HTTP").as_deref() == Ok("1") {
-        eprintln!("<-- stream\n{}", text);
+async fn read_model_error_body(response: reqwest::Response, max_bytes: usize) -> Result<String> {
+    match read_model_body(response, None, max_bytes).await {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(error)
+            if matches!(
+                error.downcast_ref(),
+                Some(UpstreamFailure::ResponseTooLarge)
+            ) =>
+        {
+            Err(error)
+        }
+        // Preserve an upstream rejection's status even if its error body was cut off.
+        Err(_) => Ok("<empty>".into()),
     }
-
-    read_chatgpt_stream_text(&text)
 }
 
 fn read_chatgpt_stream_text(text: &str) -> Result<Value> {
@@ -1909,6 +1938,7 @@ const MAX_STREAM_EVENT_BYTES: usize = 16 * 1024 * 1024;
 /// A streaming upstream response, read one event at a time.
 pub(crate) struct UpstreamEventStream {
     response: reqwest::Response,
+    body_limit: ResponseBodyLimit,
     /// A ChatGPT login's stream, whose client gets only the items [`chatgpt_relays_item`] keeps.
     pub(crate) chatgpt: bool,
     buffer: Vec<u8>,
@@ -1928,9 +1958,11 @@ impl UpstreamEventStream {
         rate_limits: Option<Value>,
         turn_state: Option<String>,
         usage_attempt: Option<UsageAttempt>,
+        max_response_bytes: usize,
     ) -> Self {
         Self {
             response,
+            body_limit: ResponseBodyLimit::new(max_response_bytes),
             chatgpt,
             buffer: Vec::new(),
             read_ahead: VecDeque::new(),
@@ -2000,6 +2032,7 @@ impl UpstreamEventStream {
                 .context("failed to read streaming chunk from backend")?
             {
                 Some(chunk) => {
+                    self.body_limit.receive(chunk.len())?;
                     self.buffer.extend_from_slice(&chunk);
                     if self.buffer.len() > MAX_STREAM_EVENT_BYTES {
                         bail!("upstream stream event exceeded {MAX_STREAM_EVENT_BYTES} bytes");
@@ -2430,6 +2463,7 @@ fn parse_codex_rate_limit_headers(headers: &reqwest::header::HeaderMap) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_transport::DEFAULT_MAX_RESPONSE_BYTES;
 
     #[tokio::test]
     async fn usage_diagnostics_observe_streams_before_read_ahead_and_preserve_dropped_attempts() {
@@ -2453,7 +2487,14 @@ mod tests {
         let (diagnostics, records) = crate::usage_diagnostics::recorder();
         let response = reqwest::get(&url).await.unwrap();
         let attempt = diagnostics.start("fixture-model", "responses", &json!({}));
-        let mut stream = UpstreamEventStream::new(response, true, None, None, Some(attempt));
+        let mut stream = UpstreamEventStream::new(
+            response,
+            true,
+            None,
+            None,
+            Some(attempt),
+            DEFAULT_MAX_RESPONSE_BYTES,
+        );
         // A terminal failure before output is observed even though the client
         // returns it as an error and never delivers a response to the runtime.
         assert!(stream.read_until_output().await.is_err());
@@ -2473,7 +2514,7 @@ mod tests {
         let response = reqwest::get(&url).await.unwrap();
         let mut attempt = diagnostics.start("fixture-model", "responses", &json!({}));
         assert!(
-            read_chatgpt_stream(response, Some(&mut attempt))
+            read_chatgpt_stream(response, Some(&mut attempt), DEFAULT_MAX_RESPONSE_BYTES)
                 .await
                 .is_err()
         );
@@ -2488,6 +2529,7 @@ mod tests {
             None,
             None,
             Some(attempt),
+            DEFAULT_MAX_RESPONSE_BYTES,
         ));
         let records = records.lock().unwrap();
         assert_eq!(records.last().unwrap()["outcome"], "interrupted");
@@ -2567,7 +2609,14 @@ mod tests {
         }
         let response = reqwest::get(format!("{base}/stream")).await.unwrap();
         let attempt = diagnostics.start("fixture-model", "responses", &json!({}));
-        let mut stream = UpstreamEventStream::new(response, false, None, None, Some(attempt));
+        let mut stream = UpstreamEventStream::new(
+            response,
+            false,
+            None,
+            None,
+            Some(attempt),
+            DEFAULT_MAX_RESPONSE_BYTES,
+        );
         stream.read_until_output().await.unwrap();
         assert!(stream.next_event().await.unwrap().is_some());
         assert!(stream.next_event().await.unwrap().is_none());

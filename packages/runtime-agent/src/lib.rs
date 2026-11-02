@@ -17,6 +17,7 @@ pub mod controller_tokens;
 pub mod isolated_tool_worker;
 pub mod job_cancel;
 pub mod job_model;
+pub mod job_proxy_auth;
 mod job_runtime_settings;
 pub mod jobs;
 pub mod local_browser;
@@ -25,6 +26,7 @@ pub mod mcp_process_groups;
 #[cfg(test)]
 mod mcp_test_wire;
 mod model_environment;
+mod model_http;
 pub mod origin;
 pub mod personal_browser;
 pub mod preview_restarts;

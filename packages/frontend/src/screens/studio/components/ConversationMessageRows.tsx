@@ -1,3 +1,4 @@
+import { isReplyDraftMessage } from "../../../conversations/replyDrafts";
 import { useEffect, useMemo, type JSX, type MouseEvent as ReactMouseEvent } from "react";
 import type { ChatMessage } from "../types";
 import { isCurrentUserChatMessage } from "./chatMessageDetailHelpers";
@@ -19,6 +20,7 @@ import { ChatSiteContext, conversationSite } from "./chatSiteContext";
 import type { ChatSpeakerMarker } from "./chatSpeakerMarker";
 import {
   AssistantMessageEntry,
+  NotchedMessageShell,
   BrowserRequestNoticeRow,
   extractChatAttachments,
   UserMessageBubble,
@@ -384,7 +386,8 @@ export function ConversationMessageRows({
         }
 
         const normalizedMessageType = (getMessageType(message) ?? "").trim().toLowerCase();
-        const messageAssistantAvatarMotion: AssistantAvatarMotion =
+        const isReplyDraft = isReplyDraftMessage(message);
+        const messageAssistantAvatarMotion: AssistantAvatarMotion = isReplyDraft ? "thinking" :
           activeAssistantAvatarMotion?.messageId === message.id
             ? activeAssistantAvatarMotion.motion
             : "idle";
@@ -459,6 +462,12 @@ export function ConversationMessageRows({
               onOpenImage={onOpenImage}
               mentionableAgentHandles={mentionableAgentHandles}
             />
+          ) : isReplyDraft ? (
+            <NotchedMessageShell align="left" messageId={message.id} testId="chat-reply-draft" showNotch={showNotch} className="pr-2">
+              <div className="min-w-0" aria-busy="true">
+                <MessageContent content={message.content} metadata={null} projectId={projectId} mentionableAgentHandles={mentionableAgentHandles} />
+              </div>
+            </NotchedMessageShell>
           ) : message.id === targetedMessageId ? (
             <div className="min-w-0 py-2" data-testid="chat-matched-message-content">
               <MessageContent content={message.content} metadata={message.metadata} projectId={projectId} mentionableAgentHandles={mentionableAgentHandles} />
@@ -581,7 +590,7 @@ export function ConversationMessageRows({
             narrowSpeakerIdentity={narrowSpeakerIdentity}
             speakerMarker={speakerMarker}
             onContextMenu={
-              message.role === "assistant" ? (event) => onMessageContextMenu(event, message.id) : undefined
+              message.role === "assistant" && !isReplyDraft ? (event) => onMessageContextMenu(event, message.id) : undefined
             }
             workflowSpineActive={Boolean(workflowSpineKey)}
             workflowSpineContinuesBefore={spineBridgeBefore}

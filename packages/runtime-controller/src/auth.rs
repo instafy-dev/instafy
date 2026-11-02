@@ -680,13 +680,13 @@ pub(crate) const MANAGED_AI_SETTLE_MAX_AGE_SECONDS: i64 = 86_400;
 pub(crate) enum ProxyJobTokenMode {
     /// A managed-key lease: `exp` holds, with the proxy's leeway, the job is
     /// still leased (`agent_jobs.status = 'leased'`) to the runtime the token
-    /// names, and the token is the one the lease minted for the job's current
+    /// names, and the token was minted or renewed for the job's current
     /// attempt. Cancel, finish and requeue leave `lease_attempts` alone, so
     /// the attempt check alone would keep a finished job's token live until
     /// it expires.
     Live,
     /// A usage settle: the token was issued within
-    /// [`MANAGED_AI_SETTLE_MAX_AGE_SECONDS`] and is the one the lease minted
+    /// [`MANAGED_AI_SETTLE_MAX_AGE_SECONDS`] and was minted or renewed
     /// for the attempt it names, whatever the job's status now. `exp` is not
     /// enforced, because a queued settle may land after it, and a finished
     /// job or a requeued job's old attempt must still bill.
@@ -794,7 +794,7 @@ fn decode_proxy_job_token(
 
 /// Verifies a job token the proxy presents for the platform lane. Beyond the
 /// signature, audience, issuer and age that [`ProxyJobTokenMode`] sets, the
-/// token must hash to what the job lease recorded in `ai_usage_jobs`: in
+/// token must hash to a recorded initial or renewed grant: in
 /// `Live` for the current attempt of a job still leased to the token's
 /// runtime, in `Settle` for the attempt the token names. So even a holder of
 /// the signing secret can use only tokens the controller minted for that job
@@ -826,6 +826,13 @@ pub(crate) async fn verify_proxy_job_token(
         .query_opt(
             "select t.token_sha256_by_attempt ->> $2 as own_sha256,
                     t.token_sha256_by_attempt ->> j.lease_attempts::text as current_sha256,
+                    j.lease_attempts as current_attempt,
+                    exists (
+                        select 1 from ai_usage_job_proxy_tokens renewed
+                        where renewed.job_id = t.job_id
+                          and renewed.lease_attempt::text = $2
+                          and renewed.token_sha256 = $4
+                    ) as renewed_token,
                     coalesce(
                         j.status = 'leased' and j.leased_by_runtime_id = $3,
                         false
@@ -837,19 +844,27 @@ pub(crate) async fn verify_proxy_job_token(
                 &verified.job_id,
                 &verified.lease_attempt.to_string(),
                 &verified.runtime_id,
+                &verified.token_sha256,
             ],
         )
         .await
         .map_err(|error| internal_error(format!("failed to load job token binding: {error}")))?;
-    let bound_sha256: Option<String> = row.and_then(|row| match mode {
-        ProxyJobTokenMode::Live if row.get::<_, bool>("leased_to_token_runtime") => {
-            row.get("current_sha256")
+    let bound = row.is_some_and(|row| {
+        if mode == ProxyJobTokenMode::Live
+            && (!row.get::<_, bool>("leased_to_token_runtime")
+                || row.get::<_, i32>("current_attempt") != verified.lease_attempt)
+        {
+            return false;
         }
-        ProxyJobTokenMode::Live => None,
-        ProxyJobTokenMode::Settle => row.get("own_sha256"),
+        let bound_sha256: Option<String> = row.get(match mode {
+            ProxyJobTokenMode::Live => "current_sha256",
+            ProxyJobTokenMode::Settle => "own_sha256",
+        });
+        row.get::<_, bool>("renewed_token")
+            || bound_sha256.is_some_and(|bound| {
+                bool::from(bound.as_bytes().ct_eq(verified.token_sha256.as_bytes()))
+            })
     });
-    let bound = bound_sha256
-        .is_some_and(|bound| bool::from(bound.as_bytes().ct_eq(verified.token_sha256.as_bytes())));
     if !bound {
         return Ok(Err(ProxyJobTokenRejection::Unbound));
     }

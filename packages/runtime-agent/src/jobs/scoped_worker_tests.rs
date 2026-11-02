@@ -142,6 +142,7 @@ async fn scoped_worker_compact_request_transmits_selected_effort_and_records_it(
         build_scoped_worker_path_observation(temp.path(), &read_only_worker(&["source.txt"]))
             .unwrap();
     let config = DirectWorkerProxyConfig {
+        run_timeout: None,
         chat_completions_endpoint: format!("http://{address}/v1/chat/completions"),
         api_key: "inert-scoped-test-token".into(),
         model: "saved-worker-model".into(),
@@ -182,6 +183,7 @@ async fn direct_workers_defer_questions_without_forcing_files_or_tool_calls() {
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let config = DirectWorkerProxyConfig {
+        run_timeout: None,
         chat_completions_endpoint: format!("http://{address}/v1/chat/completions"),
         api_key: "inert-scoped-test-token".into(),
         model: "test-model".into(),

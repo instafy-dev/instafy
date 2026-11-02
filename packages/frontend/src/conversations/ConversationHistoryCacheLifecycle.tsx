@@ -1,3 +1,4 @@
+import { clearReplyDrafts } from "./replyDrafts";
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "../providers/AuthProvider";
@@ -14,6 +15,7 @@ export function ConversationHistoryCacheLifecycle() {
   useEffect(() => {
     if (!loading) {
       if (previousUserId.current !== null && previousUserId.current !== userId) studioPerformance.clear();
+      if (previousUserId.current !== userId) clearReplyDrafts();
       previousUserId.current = userId;
       removeOtherAccountsConversationHistory(queryClient, userId);
     }

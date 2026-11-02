@@ -36,6 +36,9 @@ impl EnvGuard {
             "CODEX_DEBUG_HTTP",
             "PROXY_DEBUG_STREAM",
             "PROXY_STREAM_PASSTHROUGH",
+            "PROXY_MODEL_CONNECT_TIMEOUT_MS",
+            "PROXY_MODEL_READ_TIMEOUT_MS",
+            "PROXY_MODEL_MAX_RESPONSE_BYTES",
         ] {
             guard.set(key, "");
         }
@@ -508,6 +511,79 @@ async fn a_stream_that_breaks_off_after_output_ends_without_done() -> Result<()>
             .iter()
             .any(|event| event["type"] == "response.completed")
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn inactivity_before_output_keeps_the_typed_gateway_timeout() -> Result<()> {
+    let mut env = EnvGuard::isolated();
+    env.set("PROXY_MODEL_READ_TIMEOUT_MS", "250");
+    let fixture = fixture(&mut env, Lane::ChatGpt, vec![created()], Vec::new()).await?;
+    let response = stream_request(fixture.addr).await?;
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    let body: Value = response.json().await?;
+    assert_eq!(body["error"]["code"], "upstream_timeout");
+    assert_eq!(body["error"]["retryable"], true);
+    assert_eq!(fixture.upstream.calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn inactivity_after_output_ends_incomplete_without_a_proxy_retry() -> Result<()> {
+    let mut env = EnvGuard::isolated();
+    env.set("PROXY_MODEL_READ_TIMEOUT_MS", "250");
+    let (before, _) = answer_in_two_pieces();
+    let fixture = fixture(&mut env, Lane::ChatGpt, before, Vec::new()).await?;
+    let mut client = ClientStream::new(stream_request(fixture.addr).await?);
+    client.until("response.output_text.delta").await?;
+    let (events, done) = client.rest().await?;
+    assert!(!done);
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "response.completed")
+    );
+    assert_eq!(fixture.upstream.calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn aggregate_body_limit_is_an_explicit_upstream_error_before_output() -> Result<()> {
+    let mut env = EnvGuard::isolated();
+    env.set("PROXY_MODEL_MAX_RESPONSE_BYTES", "16");
+    let fixture = fixture(&mut env, Lane::ChatGpt, vec![created()], Vec::new()).await?;
+    let response = stream_request(fixture.addr).await?;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body: Value = response.json().await?;
+    assert_eq!(body["error"]["code"], "upstream_response_too_large");
+    assert_eq!(body["error"]["retryable"], false);
+    assert_eq!(fixture.upstream.calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn invalid_model_transport_settings_refuse_startup() -> Result<()> {
+    let mut env = EnvGuard::isolated();
+    env.set("PROXY_MODEL_READ_TIMEOUT_MS", "0");
+    let error = tokio::time::timeout(
+        Duration::from_secs(1),
+        run_proxy_with_shutdown(
+            "127.0.0.1:0".parse()?,
+            Some(Credentials::ApiKey {
+                key: "inert-fixture-key".into(),
+                endpoint: None,
+                default_model: None,
+            }),
+            std::future::pending::<()>(),
+        ),
+    )
+    .await?
+    .expect_err("invalid transport settings must stop startup");
+    assert!(error.to_string().contains("PROXY_MODEL_READ_TIMEOUT_MS"));
     Ok(())
 }
 

@@ -1136,6 +1136,30 @@ describe("runtime controller run event streaming", () => {
     unsubscribe();
   });
 
+  it("requests and forwards provisional reply snapshots without turning them into run rows", async () => {
+    const { subscribeToRunsFromController } = await import("../runtimeController/runs");
+    const onEvent = vi.fn();
+    const onRun = vi.fn();
+    const onRunPatch = vi.fn();
+    const unsubscribe = subscribeToRunsFromController({
+      projectId: "11111111-1111-4111-8111-111111111111", quietErrors: true,
+      onRun, onRunPatch, onEvent,
+    });
+    await vi.waitFor(() => expect(streamingRequests).toHaveLength(1));
+    const request = streamingRequests[0];
+    expect(new URL(request.url).searchParams.getAll("kinds[]")).toContain("run.reply_draft");
+    const event = {
+      kind: "run.reply_draft", project_id: "11111111-1111-4111-8111-111111111111",
+      conversation_id: "conversation-1", run_id: "run-1", job_id: "job-1",
+      data: { attempt: 1, segment: 1, seq: 1, text: "A growing reply" },
+    };
+    request.write(`data: ${JSON.stringify(event)}\n\n`);
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledWith(event));
+    expect(onRun).not.toHaveBeenCalled();
+    expect(onRunPatch).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
   it("requests and forwards the controller's resync hint", async () => {
     const { subscribeToRunsFromController } = await import(
       "../runtimeController/runs"

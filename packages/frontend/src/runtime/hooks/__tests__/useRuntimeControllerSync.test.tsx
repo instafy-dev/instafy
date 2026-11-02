@@ -64,6 +64,7 @@ vi.mock("../../utils/runtimeDebug", () => ({
 }));
 
 import { useRuntimeControllerSync } from "../useRuntimeControllerSync";
+import { conversationReplyDrafts } from "../../../conversations/replyDrafts";
 import {
   MEMBERS_CHANGED_EVENT,
   PROJECT_ACCESS_REFRESH_EVENT,
@@ -350,6 +351,34 @@ describe("useRuntimeControllerSync controller access results", () => {
     container.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean })
       .IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("scopes draft updates to the current project, clears them on switch, and ends them with the run", async () => {
+    const dependencies = createHookDependencies();
+    controllerMocks.fetchRuns.mockResolvedValue(fetchResult());
+    controllerMocks.subscribeToRuns.mockReturnValue(() => {});
+    await act(async () => root.render(<Harness projectId="project-current" dependencies={dependencies} />));
+    const subscription = controllerMocks.subscribeToRuns.mock.calls[0][0] as SubscribeControllerRunsParams;
+    const event: ControllerEventPayload = {
+      kind: "run.reply_draft", project_id: "project-current", conversation_id: "conversation-1",
+      run_id: "run-1", job_id: "job-1",
+      data: { attempt: 1, segment: 1, seq: 1, text: "Hello" },
+    };
+    await act(async () => subscription.onEvent?.({ ...event, project_id: "project-other" }));
+    expect(conversationReplyDrafts("conversation-1")).toHaveLength(0);
+    await act(async () => subscription.onEvent?.(event));
+    expect(conversationReplyDrafts("conversation-1")[0].text).toBe("Hello");
+    await act(async () => subscription.onRunPatch({ id: "run-1", status: "canceled" }));
+    expect(conversationReplyDrafts("conversation-1")).toHaveLength(0);
+    await act(async () => subscription.onEvent?.({ ...event, data: { ...event.data, seq: 2 } }));
+    expect(conversationReplyDrafts("conversation-1")).toHaveLength(0);
+    const next = { ...event, run_id: "run-2", job_id: "job-2" };
+    await act(async () => subscription.onEvent?.(next));
+    expect(conversationReplyDrafts("conversation-1")).toHaveLength(1);
+    await act(async () => root.render(<Harness projectId="project-other" dependencies={dependencies} />));
+    expect(conversationReplyDrafts("conversation-1")).toHaveLength(0);
+    await act(async () => subscription.onEvent?.(next));
+    expect(conversationReplyDrafts("conversation-1")).toHaveLength(0);
   });
 
   it.each([

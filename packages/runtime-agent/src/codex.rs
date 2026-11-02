@@ -97,7 +97,7 @@ use crate::shared_browser::{
 use crate::task_usage::{UsageAttempt, UsageCall, UsageCounts, UsageOutcome};
 
 use crate::job_model::DEFAULT_CODEX_MODEL;
-const DEFAULT_CODEX_RUN_TIMEOUT_SECONDS: u64 = 600;
+const INVALID_CODEX_RUN_TIMEOUT_FALLBACK_SECONDS: u64 = 600;
 /// What one Shared Browser call may still do after its last approval answer:
 /// navigation (30 s), settling (8.25 s) and the snapshot, with headroom. The
 /// helper's browser connection runs inside the approval budget.
@@ -908,6 +908,8 @@ pub struct CodexExecutionError {
 
 #[derive(Debug, Clone, Default)]
 pub struct CodexRunOptions {
+    /// Captured before entering a fresh task; native helpers share this auth source.
+    pub proxy_auth: Option<Arc<crate::job_proxy_auth::JobProxyAuth>>,
     /// Controller-admitted tool worker in a private workspace. Keep writes in that root,
     /// and do not create unaccounted native agents or project MCP processes.
     pub isolated_tool_worker: bool,
@@ -962,9 +964,11 @@ pub struct CodexRunOptions {
     /// left is not taken for this one's. A run that has one is not retried here when it times out:
     /// the controller continues it in a new turn instead.
     pub turn_continue_note: Option<PathBuf>,
-    /// The run's hard limit, when it is not the usual one (`resolve_codex_run_timeout`): a team's
-    /// turn ends by the team's deadline.
+    /// An explicit task limit. With none, only an operator-configured overall limit applies;
+    /// model inactivity, cancellation and lease loss remain independently bounded.
     pub run_timeout: Option<Duration>,
+    /// Absolute job/team deadline, retained across validation retries and finalization calls.
+    pub run_deadline: Option<tokio::time::Instant>,
     /// A granted turn: its one MCP server is its grants' broker (`provider_mcp`), and it has no
     /// workspace, shell, web search, apps or memory.
     pub granted: Option<crate::provider_mcp::GrantedTurn>,
@@ -1109,8 +1113,15 @@ impl CodexRunOptions {
     }
 
     /// The run's hard limit: its own (a team's turn ends by the team's deadline), else the usual.
-    fn hard_limit(&self) -> Duration {
-        self.run_timeout.unwrap_or_else(resolve_codex_run_timeout)
+    fn hard_limit(&self) -> Option<Duration> {
+        [
+            self.run_timeout,
+            resolve_codex_run_timeout(),
+            remaining_run_budget(self.run_deadline),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 }
 
@@ -1406,6 +1417,15 @@ impl CodexClient {
             "Codex thread cleanup is unconfirmed; runtime restart required"
         );
         let run_timeout = options.hard_limit();
+        let run_deadline = run_timeout
+            .map(|limit| {
+                tokio::time::Instant::now()
+                    .checked_add(limit)
+                    .context("Codex execution time budget exceeds the supported clock range")
+            })
+            .transpose()?;
+        let mut options = options;
+        options.proxy_auth = options.proxy_auth.or_else(crate::job_proxy_auth::current);
         // Capture before callback-free runs move to a fresh task. Neither the cached
         // CodexClient nor a restored rollout may retain a previous job's policy.
         let runtime_settings = crate::job_runtime_settings::current();
@@ -1453,7 +1473,7 @@ impl CodexClient {
                     let mut no_event_callback = None;
                     if let Some(cancel_signal) = shared_browser_cancel_signal {
                         Ok(Self::run_shared_browser_with_deadline(
-                            run_timeout,
+                            remaining_run_budget(run_deadline),
                             SHARED_BROWSER_EXECUTION_DRAIN_TIMEOUT,
                             cancel_signal,
                             client.execute_inner(
@@ -1467,8 +1487,8 @@ impl CodexClient {
                         )
                         .await)
                     } else {
-                        timeout(
-                            run_timeout,
+                        execution_timeout(
+                            run_deadline,
                             client.execute_inner(
                                 &prompt,
                                 &mut no_event_callback,
@@ -1485,7 +1505,7 @@ impl CodexClient {
             } else {
                 if let Some(cancel_signal) = shared_browser_cancel_signal {
                     Ok(Self::run_shared_browser_with_deadline(
-                        run_timeout,
+                        remaining_run_budget(run_deadline),
                         SHARED_BROWSER_EXECUTION_DRAIN_TIMEOUT,
                         cancel_signal,
                         self.execute_inner(
@@ -1499,8 +1519,8 @@ impl CodexClient {
                     )
                     .await)
                 } else {
-                    timeout(
-                        run_timeout,
+                    execution_timeout(
+                        run_deadline,
                         self.execute_inner(
                             prompt,
                             &mut on_event,
@@ -1580,12 +1600,17 @@ impl CodexClient {
                         error = %error_text,
                         "Codex run failed with a transient upstream error; retrying"
                     );
-                    tokio::time::sleep(delay).await;
+                    execution_timeout(run_deadline, tokio::time::sleep(delay))
+                        .await
+                        .context("Codex run timed out during retry backoff")?;
                 }
                 Err(_) => {
                     let should_retry = options.retries_a_timed_out_run(attempt, max_retries);
                     if !should_retry {
-                        return Err(anyhow!("Codex run timed out"));
+                        return Err(anyhow!(
+                            "Codex run timed out after its explicit {}-second execution budget",
+                            run_timeout.unwrap_or_default().as_secs()
+                        ));
                     }
 
                     let delay = codex_retry_delay(retry_base_delay, attempt);
@@ -1593,10 +1618,12 @@ impl CodexClient {
                         attempt = attempt + 1,
                         max_retries,
                         delay_ms = delay.as_millis(),
-                        timeout_secs = run_timeout.as_secs(),
+                        timeout_secs = run_timeout.map(|limit| limit.as_secs()),
                         "Codex run timed out; retrying"
                     );
-                    tokio::time::sleep(delay).await;
+                    execution_timeout(run_deadline, tokio::time::sleep(delay))
+                        .await
+                        .context("Codex run timed out during retry backoff")?;
                 }
             }
             attempt = attempt.saturating_add(1);
@@ -1604,7 +1631,7 @@ impl CodexClient {
     }
 
     async fn run_shared_browser_with_deadline<T>(
-        run_timeout: Duration,
+        run_timeout: Option<Duration>,
         cleanup_timeout: Duration,
         cancel_signal: JobCancelSignal,
         future: impl Future<Output = Result<T>>,
@@ -1612,7 +1639,7 @@ impl CodexClient {
         tokio::pin!(future);
         tokio::select! {
             output = &mut future => return output,
-            _ = tokio::time::sleep(run_timeout) => {
+            _ = deadline_elapsed(run_timeout) => {
                 // The deadline cancels the run itself: name it first, so a
                 // runtime exit that follows does not read as a person's Stop.
                 cancel_signal.note_shared_browser_shutdown_failure("run_deadline_before_shutdown");
@@ -2100,9 +2127,21 @@ impl CodexClient {
             )
         })?;
         ensure_no_codex_workload_identity()?;
+        if options.proxy_auth.is_some() {
+            crate::job_proxy_auth::bind_provider(&mut config.model_provider)?;
+            if let Some(provider) = config.model_providers.get_mut(&config.model_provider_id) {
+                crate::job_proxy_auth::bind_provider(provider)?;
+            }
+        }
         let auth_manager = AuthManager::shared_from_config(&config, true)
             .await
             .context("failed to initialize Codex auth manager")?;
+        if let Some(auth) = options.proxy_auth.as_ref() {
+            auth_manager
+                .set_external_auth(auth.clone())
+                .await
+                .map_err(|_| anyhow!("failed to initialize job-scoped proxy authentication"))?;
+        }
         let models_manager = build_models_manager(&config, auth_manager.clone());
         let model_info = models_manager
             .get_model_info(
@@ -3725,6 +3764,12 @@ fn apply_runtime_proxy_model_provider_overrides(config: &mut Config, bounded_ret
     // The local proxy currently exposes HTTP/SSE Responses endpoints, not the new
     // Responses websocket transport. Keep runtime automation on the proxy.
     config.model_provider.supports_websockets = false;
+    config.model_provider.stream_idle_timeout_ms.get_or_insert(
+        crate::model_http::read_timeout()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX),
+    );
     if bounded_retries {
         config.model_provider.request_max_retries = Some(0);
         config.model_provider.stream_max_retries = Some(PROXY_STREAM_MAX_RETRIES);
@@ -3732,6 +3777,12 @@ fn apply_runtime_proxy_model_provider_overrides(config: &mut Config, bounded_ret
     if let Some(provider) = config.model_providers.get_mut(&config.model_provider_id) {
         provider.base_url = Some(openai_base_url.clone());
         provider.supports_websockets = false;
+        provider.stream_idle_timeout_ms.get_or_insert(
+            crate::model_http::read_timeout()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
+        );
         if bounded_retries {
             provider.request_max_retries = Some(0);
             provider.stream_max_retries = Some(PROXY_STREAM_MAX_RETRIES);
@@ -4888,6 +4939,8 @@ pub(crate) struct CodexEventStreamAdapter {
     command_states: HashMap<String, CommandExecutionState>,
     patch_apply_paths: HashMap<String, Vec<String>>,
     agent_message_delta_buffers: HashMap<String, String>,
+    /// Delivery phase is known at ItemStarted, before the first text delta.
+    agent_message_phases: HashMap<String, &'static str>,
     last_agent_message_delta_id: Option<String>,
     completed_agent_message_seen: bool,
     turn_start_token_usage: TurnStartTokenUsage,
@@ -4919,6 +4972,7 @@ impl CodexEventStreamAdapter {
             command_states: HashMap::new(),
             patch_apply_paths: HashMap::new(),
             agent_message_delta_buffers: HashMap::new(),
+            agent_message_phases: HashMap::new(),
             last_agent_message_delta_id: None,
             completed_agent_message_seen: false,
             turn_start_token_usage,
@@ -4973,6 +5027,16 @@ impl CodexEventStreamAdapter {
                     value["item"]["phase"] = json!(phase);
                 }
                 vec![value]
+            }
+            EventMsg::ItemStarted(started) => {
+                if let TurnItem::AgentMessage(message) = &started.item {
+                    if let Some(phase) =
+                        agent_message_phase_label(message.phase.as_ref(), message.delivery.as_ref())
+                    {
+                        self.agent_message_phases.insert(message.id.clone(), phase);
+                    }
+                }
+                Vec::new()
             }
             EventMsg::AgentMessageContentDelta(delta) => {
                 self.collect_agent_message_delta(delta.item_id.clone(), &delta.delta)
@@ -5355,7 +5419,7 @@ impl CodexEventStreamAdapter {
             .or_default();
         text.push_str(delta);
         self.last_agent_message_delta_id = Some(id.clone());
-        vec![json!({
+        let mut value = json!({
             "type": "item.updated",
             "item": {
                 "id": id,
@@ -5363,7 +5427,11 @@ impl CodexEventStreamAdapter {
                 "text": text,
                 "status": "in_progress",
             }
-        })]
+        });
+        if let Some(phase) = self.agent_message_phases.get(&id) {
+            value["item"]["phase"] = json!(phase);
+        }
+        vec![value]
     }
 
     fn collect_completed_turn_item(&mut self, item: &TurnItem) -> Vec<JsonValue> {
@@ -5934,12 +6002,50 @@ fn bool_from_env(key: &str) -> Option<bool> {
     })
 }
 
-pub(crate) fn resolve_codex_run_timeout() -> Duration {
-    optional_env("CODEX_RUN_TIMEOUT_SECONDS")
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(DEFAULT_CODEX_RUN_TIMEOUT_SECONDS))
+/// An overall wall-clock budget is opt-in. Transport stalls, cancellation and lease loss still
+/// terminate work. Invalid operator input retains a finite fallback instead of disabling a cap.
+pub(crate) fn resolve_codex_run_timeout() -> Option<Duration> {
+    match optional_env("CODEX_RUN_TIMEOUT_SECONDS") {
+        None => None,
+        Some(value) => match value.parse::<u64>() {
+            Ok(0) => None,
+            Ok(seconds) => Some(Duration::from_secs(seconds)),
+            Err(_) => {
+                tracing::warn!("invalid CODEX_RUN_TIMEOUT_SECONDS; using 600-second safety limit");
+                Some(Duration::from_secs(
+                    INVALID_CODEX_RUN_TIMEOUT_FALLBACK_SECONDS,
+                ))
+            }
+        },
+    }
+}
+
+pub(crate) async fn optional_timeout<T>(
+    limit: Option<Duration>,
+    future: impl Future<Output = T>,
+) -> std::result::Result<T, tokio::time::error::Elapsed> {
+    match limit {
+        Some(limit) => timeout(limit, future).await,
+        None => Ok(future.await),
+    }
+}
+
+fn remaining_run_budget(deadline: Option<tokio::time::Instant>) -> Option<Duration> {
+    deadline.map(|deadline| deadline.saturating_duration_since(tokio::time::Instant::now()))
+}
+
+async fn execution_timeout<T>(
+    deadline: Option<tokio::time::Instant>,
+    future: impl Future<Output = T>,
+) -> std::result::Result<T, tokio::time::error::Elapsed> {
+    optional_timeout(remaining_run_budget(deadline), future).await
+}
+
+async fn deadline_elapsed(limit: Option<Duration>) {
+    match limit {
+        Some(limit) => tokio::time::sleep(limit).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// How many times a failed run is replayed from the start. An isolated tool worker, and a run
@@ -6939,7 +7045,7 @@ mod tests {
         let cleanup_for_run = cleanup_completed.clone();
 
         let output = CodexClient::run_shared_browser_with_deadline(
-            Duration::from_millis(10),
+            Some(Duration::from_millis(10)),
             Duration::from_millis(100),
             cancel_signal.clone(),
             async move {
@@ -6966,7 +7072,7 @@ mod tests {
     async fn shared_browser_deadline_is_named_as_why_the_tools_were_not_confirmed_gone() {
         let cancel_signal = JobCancelSignal::new();
         let result = CodexClient::run_shared_browser_with_deadline(
-            Duration::from_millis(10),
+            Some(Duration::from_millis(10)),
             Duration::from_millis(20),
             cancel_signal.clone(),
             std::future::pending::<Result<()>>(),
@@ -6982,7 +7088,7 @@ mod tests {
         let stopped = JobCancelSignal::new();
         stopped.cancel();
         let result = CodexClient::run_shared_browser_with_deadline(
-            Duration::from_secs(60),
+            Some(Duration::from_secs(60)),
             Duration::from_millis(20),
             stopped.clone(),
             std::future::pending::<Result<()>>(),
@@ -7002,7 +7108,7 @@ mod tests {
         let result = timeout(
             Duration::from_millis(100),
             CodexClient::run_shared_browser_with_deadline(
-                Duration::from_secs(60),
+                None,
                 Duration::from_millis(20),
                 cancel_signal.clone(),
                 async move {
@@ -7428,7 +7534,7 @@ mod tests {
 
         const NAVIGATION: Duration = Duration::from_secs(30);
         const SETTLE: Duration = Duration::from_millis(8_250);
-        let turn_cap = Duration::from_secs(DEFAULT_CODEX_RUN_TIMEOUT_SECONDS);
+        let turn_cap = Duration::from_secs(600); // Example explicit operator budget.
 
         let shared = shared_browser_mcp_server_config(
             McpServerTransportConfig::Stdio {
@@ -8918,6 +9024,89 @@ mod tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn cloned_options_keep_the_jobs_deadline_for_validation_and_finalization() {
+        let options = CodexRunOptions {
+            run_deadline: Some(tokio::time::Instant::now() + Duration::from_secs(30)),
+            ..Default::default()
+        };
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        let recovery = options.clone();
+        assert!(recovery.hard_limit().unwrap() <= Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_secs(11)).await;
+        assert_eq!(recovery.hard_limit(), Some(Duration::ZERO));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_attempts_and_backoff_share_one_execution_deadline() {
+        let deadline = Some(tokio::time::Instant::now() + Duration::from_secs(30));
+        execution_timeout(deadline, tokio::time::sleep(Duration::from_secs(20)))
+            .await
+            .unwrap();
+        execution_timeout(deadline, tokio::time::sleep(Duration::from_secs(5)))
+            .await
+            .unwrap();
+        assert!(
+            execution_timeout(deadline, tokio::time::sleep(Duration::from_secs(6)))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unbounded_execution_survives_the_old_ten_minute_wall() {
+        let result = optional_timeout(None, async {
+            tokio::time::sleep(Duration::from_secs(1_201)).await;
+            "completed"
+        })
+        .await;
+        assert_eq!(result.unwrap(), "completed");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_explicit_execution_budget_still_stops_work() {
+        let result = optional_timeout(Some(Duration::from_secs(30)), async {
+            tokio::time::sleep(Duration::from_secs(31)).await;
+        })
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn overall_execution_limit_is_explicit_and_invalid_values_fail_bounded() {
+        let _env_lock = env_lock();
+        let previous = std::env::var_os("CODEX_RUN_TIMEOUT_SECONDS");
+        unsafe {
+            std::env::remove_var("CODEX_RUN_TIMEOUT_SECONDS");
+        }
+        assert_eq!(resolve_codex_run_timeout(), None);
+        unsafe {
+            std::env::set_var("CODEX_RUN_TIMEOUT_SECONDS", "0");
+        }
+        assert_eq!(resolve_codex_run_timeout(), None);
+        unsafe {
+            std::env::set_var("CODEX_RUN_TIMEOUT_SECONDS", "900");
+        }
+        assert_eq!(resolve_codex_run_timeout(), Some(Duration::from_secs(900)));
+        let task = CodexRunOptions {
+            run_timeout: Some(Duration::from_secs(1_200)),
+            ..Default::default()
+        };
+        assert_eq!(task.hard_limit(), Some(Duration::from_secs(900)));
+        unsafe {
+            std::env::set_var("CODEX_RUN_TIMEOUT_SECONDS", "invalid");
+        }
+        assert_eq!(resolve_codex_run_timeout(), Some(Duration::from_secs(600)));
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var("CODEX_RUN_TIMEOUT_SECONDS", value);
+            },
+            None => unsafe {
+                std::env::remove_var("CODEX_RUN_TIMEOUT_SECONDS");
+            },
+        }
+    }
+
     #[test]
     fn a_run_with_its_own_limit_ends_by_it_and_others_by_the_usual_one() {
         let _env_lock = env_lock();
@@ -8927,7 +9116,7 @@ mod tests {
             run_timeout: Some(Duration::from_secs(436)),
             ..CodexRunOptions::default()
         };
-        assert_eq!(team_turn.hard_limit(), Duration::from_secs(436));
+        assert_eq!(team_turn.hard_limit(), Some(Duration::from_secs(436)));
     }
 
     #[test]
@@ -12119,4 +12308,48 @@ fn isolated_tool_worker_permissions(workspace: &Path) -> Result<PermissionProfil
         &FileSystemSandboxPolicy::restricted(entries),
         NetworkSandboxPolicy::Enabled,
     ))
+}
+
+#[cfg(test)]
+mod reply_draft_phase_tests {
+    use super::*;
+    use codex_protocol::items::AgentMessageItem;
+    use codex_protocol::protocol::{AgentMessageContentDeltaEvent, ItemStartedEvent};
+
+    #[test]
+    fn draft_deltas_carry_final_phase_and_async_delivery_stays_commentary() {
+        for (delivery, expected) in [
+            (None, "final_answer"),
+            (Some(AgentMessageDelivery::Async), "commentary"),
+        ] {
+            let mut adapter = CodexEventStreamAdapter::default();
+            adapter.collect(&Event {
+                id: "started".to_string(),
+                msg: EventMsg::ItemStarted(ItemStartedEvent {
+                    thread_id: ThreadId::new(),
+                    turn_id: "turn".to_string(),
+                    started_at_ms: 0,
+                    item: TurnItem::AgentMessage(AgentMessageItem {
+                        id: "reply".to_string(),
+                        content: Vec::new(),
+                        phase: Some(MessagePhase::FinalAnswer),
+                        memory_citation: None,
+                        delivery,
+                        questions: None,
+                    }),
+                }),
+            });
+            let events = adapter.collect(&Event {
+                id: "delta".to_string(),
+                msg: EventMsg::AgentMessageContentDelta(AgentMessageContentDeltaEvent {
+                    thread_id: "thread".to_string(),
+                    turn_id: "turn".to_string(),
+                    item_id: "reply".to_string(),
+                    delta: "Hello".to_string(),
+                }),
+            });
+            assert_eq!(events[0]["item"]["phase"], expected);
+            assert_eq!(events[0]["item"]["text"], "Hello");
+        }
+    }
 }

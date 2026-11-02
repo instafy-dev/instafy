@@ -21,6 +21,12 @@ use crate::resources::ResourceSampler;
 use runtime_contracts::ProxyEnvelopePayload;
 use runtime_contracts::multi_agent::AgentRuntimeSettings;
 
+#[path = "controller/job_proxy.rs"]
+mod job_proxy;
+pub use job_proxy::JobProxyTokenError;
+#[cfg(test)]
+pub(crate) use job_proxy::tests::proxy_test_client;
+
 const REQUIRED_AGENT_SCOPES: &[&str] = &[
     "agent.lease",
     "agent.heartbeat",
@@ -1228,6 +1234,28 @@ impl ControllerClient {
 
         self.post_agent(url, &self.bearer_for_agent(registration), payload)
             .await
+    }
+
+    /// Best-effort display only. False means this route/job no longer takes drafts.
+    pub async fn post_reply_draft(
+        &self,
+        registration: &Registration,
+        job_id: Uuid,
+        lease_attempt: i32,
+        seq: u64,
+        draft: &crate::jobs::ReplyDraft,
+    ) -> Result<bool> {
+        let response = self.http.post(self.base_url.join("/agent/reply-draft")?)
+            .bearer_auth(self.bearer_for_agent(registration))
+            .timeout(Duration::from_secs(3))
+            .json(&json!({ "job_id": job_id, "lease_attempt": lease_attempt, "segment": draft.segment, "seq": seq, "text": draft.text }))
+            .send().await?;
+        let status = response.status();
+        if status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS {
+            return Ok(false);
+        }
+        response.error_for_status()?;
+        Ok(true)
     }
 
     pub async fn fetch_job_secrets(

@@ -23,6 +23,9 @@ use crate::origin::LocalOriginSync;
 /// cancelled before a stop.
 const INTERRUPTED_TURN_WINDOW: Duration = Duration::from_secs(60);
 
+#[path = "reply_draft_dispatch.rs"]
+mod reply_draft_dispatch;
+
 /// The turns this process runs, as a stop sees them: a turn still running is
 /// unfinished, and so is one that lost its lease, within
 /// [`INTERRUPTED_TURN_WINDOW`] or for as long as the runtime has started no
@@ -212,15 +215,30 @@ impl AgentExecutor {
         lease_lost_signal: Option<JobCancelSignal>,
         active_turn_input: Option<ActiveTurnInputReceiver>,
     ) -> Result<JobExecution> {
+        let lease_lost_signal = Some(lease_lost_signal.unwrap_or_default());
+        let (proxy_auth, _proxy_auth_guard) = crate::job_proxy_auth::for_job(
+            client.clone(),
+            registration,
+            job,
+            lease_lost_signal.clone(),
+        )?;
         let (progress_tx, progress_status, progress_task) = spawn_progress_dispatch(
             client.clone(),
             registration,
             job.id,
             lease_lost_signal.clone(),
         );
+        let (reply_draft, reply_draft_task) = reply_draft_dispatch::spawn(
+            client.clone(),
+            registration,
+            job.id,
+            job.lease_attempts,
+            lease_lost_signal.clone(),
+        );
         let progress_handle = JobProgress {
             sender: progress_tx.clone(),
             status: progress_status,
+            reply_draft: Some(reply_draft),
         };
 
         // The folder's unfinished work reaches canonical every two minutes
@@ -229,17 +247,20 @@ impl AgentExecutor {
         let ticker = saves
             .as_ref()
             .map(rolling_saves::RollingSaves::start_ticker);
-        let mut result = self
-            .processor
-            .run_apply_job(
+        let mut result = crate::job_proxy_auth::scope(
+            proxy_auth,
+            self.processor.run_apply_job(
                 registration,
                 job,
                 true,
                 Some(progress_handle),
                 lease_lost_signal.clone(),
                 active_turn_input,
-            )
-            .await;
+            ),
+        )
+        .await;
+        // No in-flight draft may overtake the durable completion.
+        drop(reply_draft_task);
         if let Some(saves) = saves.as_ref() {
             rolling_saves::finish_job(saves, ticker, &mut result).await;
         }
@@ -266,6 +287,13 @@ impl AgentExecutor {
         job: &LeaseJob,
         lease_lost_signal: Option<JobCancelSignal>,
     ) -> Result<JobExecution> {
+        let lease_lost_signal = Some(lease_lost_signal.unwrap_or_default());
+        let (proxy_auth, _proxy_auth_guard) = crate::job_proxy_auth::for_job(
+            client.clone(),
+            registration,
+            job,
+            lease_lost_signal.clone(),
+        )?;
         // The subprocess receives only this job's scoped secrets. Never install
         // them into the parent environment shared by sibling workers.
         let secrets = client.fetch_job_secrets(registration, job.id, true).await?;
@@ -275,19 +303,21 @@ impl AgentExecutor {
         let progress_handle = JobProgress {
             sender: progress_tx.clone(),
             status: progress_status,
+            reply_draft: None,
         };
         // Private copies are published only after scope/conflict validation.
         // A rolling whole-checkout save must not collect a sibling's edits.
-        let result = self
-            .processor
-            .run_parallel_scoped_worker_job(
+        let result = crate::job_proxy_auth::scope(
+            proxy_auth,
+            self.processor.run_parallel_scoped_worker_job(
                 registration,
                 job,
                 Some(progress_handle),
                 lease_lost_signal,
                 worker_config,
-            )
-            .await;
+            ),
+        )
+        .await;
         finish_progress_dispatch(progress_tx, progress_task, job.id).await;
         result
     }

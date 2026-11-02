@@ -111,6 +111,9 @@ returns a surfaced upstream error instead of silently pretending the backend is 
 | `PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS` | Which upstream endpoints get the platform lane's `service_tier: "default"`: `openai` (only hosts under `openai.com`), `all` (any endpoint that takes a tier) or `none`; any other value stops the proxy at startup. See [Service tier](#service-tier) | `openai` |
 | `CODEX_PROXY_CHATGPT_ENDPOINT` | Upstream ChatGPT Codex Responses endpoint | `https://chatgpt.com/backend-api/codex/responses` |
 | `PROXY_STREAM_PASSTHROUGH` | `0`, `false`, `no` or `off` makes a streaming `/v1/responses` request wait for the whole upstream response again; see [Streaming](#streaming) | On |
+| `PROXY_MODEL_CONNECT_TIMEOUT_MS` | Maximum time to establish an upstream model connection, in milliseconds | `30000` (30 seconds) |
+| `PROXY_MODEL_READ_TIMEOUT_MS` | Maximum upstream model read inactivity, in milliseconds; successful reads reset it | `600000` (10 minutes) |
+| `PROXY_MODEL_MAX_RESPONSE_BYTES` | Maximum body bytes received for one upstream model response, including SSE framing and comments | `67108864` (64 MiB) |
 
 `CODEX_OPENAI_ENDPOINT` can also point at an OpenAI-compatible Chat Completions endpoint (e.g. `.../chat/completions`). When it does, the proxy will call that upstream endpoint and adapt the result into an OpenAI Responses-shaped payload for downstream callers.
 
@@ -545,6 +548,32 @@ model's text while it is written instead of all of it when the model is done. An
 answers a stream request with one JSON body is read whole, as before. Other upstreams, requests
 that do not stream, and `/v1/chat/completions` keep reading the whole response first.
 `PROXY_STREAM_PASSTHROUGH=0` turns streaming off.
+
+Model requests have no proxy-imposed total HTTP deadline. Connection setup is bounded to
+30 seconds and a stalled upstream read to 10 minutes by default; received traffic resets the
+read timer, so a healthy stream can run longer, including quiet reasoning beyond two minutes.
+`PROXY_MODEL_CONNECT_TIMEOUT_MS` and `PROXY_MODEL_READ_TIMEOUT_MS` change those limits. Both
+take positive integer milliseconds; unset or empty uses the default, and an invalid setting
+stops the proxy at startup (or fails standalone client creation). These settings also cover
+buffered model responses. Speech, transcription and credential renewal keep their separate
+total deadlines.
+
+The runtime's overall turn budget and cancellation still bound work across requests and
+retries. Cancelling a streamed request drops its upstream reader; the proxy does not start
+a detached reader or retry it. Inactivity before output returns the existing HTTP 504
+`upstream_timeout`. After output it ends the stream without a terminal event or `[DONE]`,
+as for any broken stream; it never reports the partial response as complete.
+
+To bound memory when traffic continues indefinitely, one model response may contain at most
+64 MiB of body bytes by default, across all chunks. `PROXY_MODEL_MAX_RESPONSE_BYTES` changes
+that positive integer limit and is validated the same way. It covers streamed and buffered
+Responses, Chat Completions and Gemini bodies. It is a proxy transport limit, not an output
+token limit sent to the model. Before output, exceeding it returns HTTP 502
+`upstream_response_too_large` with `retryable: false`; after output, the stream ends incomplete.
+The proxy never retries it, although a client that treats every 5xx as transient may still
+spend its bounded retry budget. The existing 16 MiB
+per-event limit remains. Without a terminal usage observation, an interrupted attempt's
+usage remains unknown rather than being reported as zero.
 
 A passed-on stream keeps what the client finally gets as before:
 

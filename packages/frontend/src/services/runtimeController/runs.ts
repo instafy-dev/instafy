@@ -72,6 +72,7 @@ const PREVIEW_THUMBNAIL_EVENT_KINDS = ["preview.thumbnail_updated"] as const;
 // The stream dropped events (it fell behind, or could not check access for
 // them); the payload is just a reason, and the listener re-reads everything.
 const STREAM_EVENT_KINDS = ["events.resync"] as const;
+const REPLY_DRAFT_EVENT_KINDS = ["run.reply_draft"] as const;
 const FORWARD_EVENT_KINDS = [
   ...RUNTIME_TELEMETRY_EVENT_KINDS,
   ...TELEMETRY_EVENT_KINDS,
@@ -88,6 +89,7 @@ const FORWARD_EVENT_KINDS = [
   ...PREVIEW_FOLLOW_EVENT_KINDS,
   ...PREVIEW_THUMBNAIL_EVENT_KINDS,
   ...STREAM_EVENT_KINDS,
+  ...REPLY_DRAFT_EVENT_KINDS,
 ] as const;
 
 export interface ControllerEventPayload {

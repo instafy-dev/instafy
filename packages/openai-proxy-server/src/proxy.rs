@@ -33,6 +33,7 @@ use crate::context_controls::{AffinityCodec, ResponseContext, TURN_STATE_HEADER}
 use crate::controller_integration::ControllerIntegration;
 use crate::credential_lease::LeasedCredentials;
 use crate::incomplete_response;
+use crate::model_transport::ModelTransportConfig;
 use crate::proxy_auth::ProxyClaims;
 use crate::stream_passthrough;
 use crate::upstream_error::{self, ToolControlRejection, UpstreamFailure};
@@ -1131,6 +1132,8 @@ where
     let require_credential_claim = boolean_env("PROXY_REQUIRE_CREDENTIAL_CLAIM")?;
     let service_tier_endpoints =
         ServiceTierEndpoints::parse(std::env::var(ServiceTierEndpoints::ENV).ok().as_deref())?;
+    // Fail at startup rather than accepting requests with unusable transport settings.
+    ModelTransportConfig::from_env()?;
     let controller = ControllerIntegration::from_env()?;
     if (require_controller_auth || require_credential_claim) && controller.is_none() {
         anyhow::bail!(

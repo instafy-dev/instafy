@@ -614,7 +614,7 @@ impl EventHub {
     /// broadcast. The bus still carries them: other nodes apply the same check
     /// to their own streams in `publish_local`.
     fn send_local(&self, event: ControllerEvent) {
-        if event.kind.starts_with("run.") {
+        if event.kind.starts_with("run.") && event.kind != REPLY_DRAFT_EVENT {
             if let Some(waker) = event.project_id.and_then(|project_id| {
                 lock_unpoisoned(&self.lease_wakers)
                     .get(&project_id)
@@ -633,6 +633,8 @@ impl EventHub {
         let _ = self.sender.send(event);
     }
 }
+
+pub(crate) const REPLY_DRAFT_EVENT: &str = "run.reply_draft";
 
 /// The kinds `publish_project_signal` fans out per project.
 const PROJECT_SIGNAL_KINDS: [&str; 2] = [
@@ -1007,6 +1009,15 @@ mod tests {
             publish_controller_event(
                 &hub,
                 "conversation.updated",
+                Some(project_id),
+                None,
+                None,
+                None,
+                JsonValue::Null,
+            );
+            publish_controller_event(
+                &hub,
+                REPLY_DRAFT_EVENT,
                 Some(project_id),
                 None,
                 None,
