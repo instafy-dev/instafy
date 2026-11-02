@@ -127,6 +127,7 @@ import {
 } from "../../../location/requestCurrentLocation";
 import { setPendingAgentProfileTarget } from "./agentProfileDeepLink";
 import { ChatBubbleRow } from "./ChatBubbleRow";
+import { AssistantSpeakerIdentityLabel } from "./AssistantSpeakerIdentityPill";
 import { browserTurnArrival } from "./browserTurnArrival";
 import { ChatColumn } from "./ChatColumn";
 import { ChatLoadingPill } from "./ChatLoadingPill";
@@ -420,6 +421,7 @@ import {
   writeBrowserTransportPreference,
 } from "./browserTransportPreference";
 import { ChatTranscriptViewport } from "./ChatTranscriptViewport";
+import { resolveChatTranscriptIdentityLayout } from "./chatTranscriptIdentityLayout";
 import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
 import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
@@ -549,6 +551,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const currentUserId = user?.id ?? null;
   const runtimeMenu = useRuntimeMenuOptions();
   const rootRef = useRef<HTMLDivElement>(null);
+  const [chatScrollbarWidth, setChatScrollbarWidth] = useState(0);
   const {
     runtime: runtimeContext,
     currentRuntime,
@@ -3149,6 +3152,37 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     candidates.sort((left, right) => resolveRunSortTimestamp(right) - resolveRunSortTimestamp(left));
     return candidates;
   }, [activeConversationEntry?.controllerId, activeConversationEntry?.pendingRunIds, messages, runs]);
+  const chatTranscriptIdentityLayout = useMemo(() => resolveChatTranscriptIdentityLayout({
+    currentUserId,
+    chatClientSessionId,
+    humanPeerContext: conversationHumanPeerContext,
+    agentHandles,
+    // A recent page or a targeted search result cannot tell us who authored
+    // the older conversation. Never fetch extra history for cosmetic layout.
+    historyComplete: Boolean(activeConversationEntry) &&
+      activeConversationEntry?.visibility != null &&
+      hasResolvedRecentHistory && !hasMoreRecentHistory &&
+      !isRecentHistoryLoading && !recentHistoryError &&
+      !messageTargetActive && !jobThread,
+    messages: recentMessages,
+    runAgentIdentityByRunId,
+    runMetadata: activeConversationRuns.map(run => run.metadata),
+  }), [
+    activeConversationEntry,
+    activeConversationRuns,
+    agentHandles,
+    chatClientSessionId,
+    conversationHumanPeerContext,
+    currentUserId,
+    hasMoreRecentHistory,
+    hasResolvedRecentHistory,
+    isRecentHistoryLoading,
+    jobThread,
+    messageTargetActive,
+    recentHistoryError,
+    recentMessages,
+    runAgentIdentityByRunId,
+  ]);
   // A browser turn of this chat on its way: the Browser view says where Octo
   // is going over the blank tab it starts on.
   const browserArrival = useMemo(
@@ -6076,14 +6110,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           <ViewerAgentsContext.Provider value={availableAgentById}>
           <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
           <div ref={rootRef} className="flex h-full min-h-0 flex-col overflow-hidden">
-            <div
-              className="flex-1 min-h-0 overflow-x-hidden overflow-y-auto px-3 pb-4 pt-2 sm:px-4 sm:pb-2"
-              data-testid="chat-message-scroll"
-              aria-label={conversationLabel}
-              role="log"
+            <ChatTranscriptViewport
+              ariaLabel={conversationLabel}
               onScroll={handleScroll}
               onContextMenu={handleConversationContextMenu}
-              ref={scrollContainerRef}
+              scrollContainerRef={scrollContainerRef}
+              onScrollbarWidthChange={setChatScrollbarWidth}
         >
           <div ref={handleScrollContentRef}>
             <ChatColumn className="space-y-2.5">
@@ -6264,6 +6296,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     align={isLeftAligned ? "left" : "right"}
                     avatar={avatar}
                     speakerIdentity={humanSpeakerIdentity}
+                    narrowSpeakerIdentity={message.role === "assistant" && !suppressOuterAssistantAvatar ? (
+                      <AssistantSpeakerIdentityLabel
+                        handle={messageAgentIdentity?.handle ?? getDefaultAssistantHandle()}
+                        agentIdentity={messageAgentIdentity}
+                        metadata={messageMetadata}
+                        timestamp={message.timestamp}
+                      />
+                    ) : null}
                     onContextMenu={
                       message.role === "assistant"
                         ? (event) => handleMessageContextMenu(event, message.id)
@@ -6277,7 +6317,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               <RunTraceRerunNotice jobId={normalizedJobThread.jobId} sources={jobThreadRerunSources} onOpen={openJobThreadRerun} />
             </ChatColumn>
           </div>
-        </div>
+        </ChatTranscriptViewport>
         <div className="flex items-center justify-between gap-3 border-t border-slate-200 bg-slate-50/75 px-3 py-2.5 text-xs text-slate-500 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel-soft)] dark:text-slate-400 sm:px-4">
           <div className="min-w-0">
             <div className="font-medium text-slate-700 dark:text-slate-200">Read-only run trace</div>
@@ -6349,6 +6389,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
       <ChatTranscriptViewport
         ariaLabel={conversationLabel}
+        identityLayout={chatTranscriptIdentityLayout}
+        onScrollbarWidthChange={setChatScrollbarWidth}
         onScroll={handleScroll}
         onContextMenu={handleConversationContextMenu}
         scrollContainerRef={scrollContainerRef}
@@ -6358,7 +6400,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       // transcript to say it again. The roster rides above it where a chat
       // shows one.
       !conversationWorkspace || jobThread ? (
-      <div className="px-3 pt-2 sm:px-4" data-testid="chat-conversation-roster-row">
+      <div className="chat-reading-inset pt-2" data-testid="chat-conversation-roster-row">
         {/* Constrain to the shared 56rem chat column so the roster's right
             edge lands on the message column, not the panel edge. */}
         <ChatColumn className="pointer-events-none flex items-center justify-end gap-2 [&>:last-child]:pointer-events-auto">
@@ -6486,6 +6528,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
               rows.push(
                 <ConversationMessageRows
+                  identityLayout={chatTranscriptIdentityLayout}
                   scrollSnapshotKey={scrollSnapshotKey}
                   targetedMessageId={messageTargetActive ? requestedMessageId : null}
                   highlightedMessageId={highlightedMessageId}
@@ -6559,6 +6602,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               renderAssistantAvatar={renderAssistantAvatar}
             />
             <ChatTypingRows
+              identityLayout={chatTranscriptIdentityLayout}
               peerTypingLabel={peerTypingLabel}
               isAssistantTyping={isAssistantTyping}
               isAssistantTypingCoveredByJobThreadPreview={isAssistantTypingCoveredByJobThreadPreview}
@@ -6782,6 +6826,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       <ChatMessageMenuOverlay
         messageMenu={messageMenu}
         selectedMessageTokenUsage={selectedMessageTokenUsage}
+        selectedMessageTimestamp={selectedMessage?.timestamp ?? null}
         onClose={closeMessageMenu}
         onShowActionsView={() =>
           setMessageMenu((current) => (current ? { ...current, view: "actions" } : null))
@@ -6816,6 +6861,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       <CredentialsConnectModal {...gettingStartedConnectModalProps} />
 
       <ChatComposerSurface
+        scrollbarInset={chatVisible ? chatScrollbarWidth : 0}
         composerRunStopController={runStop}
         replyContext={<WorkerQuestionReplyStrip reply={workerQuestionReply} />}
         viewNavigation={hasComposerViewNavigation ? conversationWorkspace ? <ConversationWorkspaceViews placement="composer" /> : <ConversationSurfaceTabs

@@ -1,0 +1,48 @@
+/* Opt-in native scrollbar preset for pointer-driven Studio reading surfaces.
+   Chromium/Electron use a 12px lane with a 6px thumb. Other engines use their
+   native thin scrollbar. Layout must measure the occupied gutter rather than
+   assume either width; touch and forced-color environments keep native styling. */
+@media (hover: hover) and (pointer: fine) and (forced-colors: none) {
+  .studio-scrollbar {
+    --studio-scrollbar-thumb: var(--color-slate-500);
+    --studio-scrollbar-thumb-hover: var(--color-slate-600);
+    scrollbar-width: thin;
+    scrollbar-color: var(--studio-scrollbar-thumb) transparent;
+  }
+
+  .dark .studio-scrollbar {
+    --studio-scrollbar-thumb: var(--color-slate-600);
+    --studio-scrollbar-thumb-hover: var(--color-slate-500);
+  }
+
+  @supports selector(::-webkit-scrollbar) {
+    .studio-scrollbar {
+      /* Non-auto standard properties override the Chromium pseudo-elements. */
+      scrollbar-width: auto;
+      scrollbar-color: auto;
+    }
+
+    .studio-scrollbar::-webkit-scrollbar {
+      width: 12px;
+      height: 12px;
+    }
+
+    .studio-scrollbar::-webkit-scrollbar-track,
+    .studio-scrollbar::-webkit-scrollbar-corner {
+      background: transparent;
+    }
+
+    .studio-scrollbar::-webkit-scrollbar-thumb {
+      min-height: 40px;
+      border: 3px solid transparent;
+      border-radius: 9999px;
+      background: var(--studio-scrollbar-thumb);
+      background-clip: padding-box;
+    }
+
+    .studio-scrollbar::-webkit-scrollbar-thumb:hover,
+    .studio-scrollbar::-webkit-scrollbar-thumb:active {
+      background-color: var(--studio-scrollbar-thumb-hover);
+    }
+  }
+}
