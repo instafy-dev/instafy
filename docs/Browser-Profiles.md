@@ -101,9 +101,9 @@ cloud machine as the browser, which stops anything still running on it." A draft
 browser in use only holds the card: it is looked at again once that clears. A failed start,
 or a continuation the controller did not take, leaves the button and says why, and leaves
 no notice. A continuation the controller put in the conversation's send queue, behind a
-run that took the lane first, counts as sent: the notice stays and the card reads
-**Browser opened**. A press, or an opened card, reads **Browser opened** from then on, also
-after a reload, so displaying an old message never runs it again. **Try again** on a failed
+run that took the lane first, counts as sent: the notice stays and the card leaves the
+chat. A pressed or opened card stays out of the chat from then on, also after a reload, so
+displaying an old message never runs it again. **Try again** on a failed
 browser run sends the card's task again through the browser, with the card it continues,
 never the notice text. A browser Studio opened by itself grants nothing a press does not.
 On the space's own machine, Instafy's browser starts every run in routine browsing, pressed

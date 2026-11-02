@@ -60,7 +60,10 @@ export type BrowserRequestHost = {
   personalTurnsAllowed?: boolean;
   /** Cards Studio considered starting by itself, by {@link browserRequestKey}. */
   cardStates?: ReadonlyMap<string, BrowserRequestCardState>;
-  /** Cards a continuation was already sent for, by {@link browserRequestKey}. */
+  /**
+   * Cards a continuation was already sent for, by {@link browserRequestKey}:
+   * they have left the chat.
+   */
   continuedKeys?: ReadonlySet<string>;
   /**
    * Cards for a message Octo sent straight to the browser whose continuation
@@ -70,7 +73,7 @@ export type BrowserRequestHost = {
   routedWaitingKeys?: ReadonlySet<string>;
   /**
    * The conversation's newest card, by {@link browserRequestKey}. An older
-   * card no longer offers its button: the newer one carries the task on.
+   * card leaves the chat: the newer one carries the task on.
    */
   newestCardKey?: string | null;
 };

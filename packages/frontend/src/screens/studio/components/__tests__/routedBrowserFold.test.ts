@@ -1,7 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
+import {
+  forgetPromptsSentFromThisPageForTests,
+  recordSendFailedForPromptSentFromThisPage,
+  rememberPromptSentFromThisPage,
+} from "../../../../conversations/sentPromptRegistry";
 import type { ChatMessage } from "../../types";
-import { BROWSER_BUILD_REQUEST_NOTE_KEY, BROWSER_HAND_BACK_CLAIM_KEY, BROWSER_HAND_BACK_RECORD_KEY } from "../browserHandBack";
+import {
+  BROWSER_BUILD_REQUEST_NOTE_KEY,
+  BROWSER_HAND_BACK_CLAIM_KEY,
+  BROWSER_HAND_BACK_RECORD_KEY,
+  isBrowserNoticePrompt,
+} from "../browserHandBack";
 import { shouldDisplayChatMessage, synthesizeAgentJobThreadMessages } from "../chatMessagePresentation";
 import { resolveRoutedBrowserFold } from "../routedBrowserFold";
 
@@ -109,11 +119,12 @@ describe("a routed card that is still opening", () => {
     expect(resolveRoutedBrowserFold([ask, routedCard(), continuation(false)]).waitingCardKeys.size).toBe(0);
     const failed = [ask, routedCard(), continuation(), failedBeforeItRan];
     expect(resolveRoutedBrowserFold(failed).waitingCardKeys.size).toBe(0);
-    // The card stays, with the failure under it.
-    expect(shown(failed)).toEqual(["ask", "card", "failure"]);
+    // Nothing is opening it any more, so it leaves as any opened card does:
+    // the person's message and the failure (with its Try again) remain.
+    expect(shown(failed)).toEqual(["ask", "failure"]);
     const stopped = [ask, routedCard(), continuation(), stoppedBeforeItShowedAnything];
     expect(resolveRoutedBrowserFold(stopped).waitingCardKeys.size).toBe(0);
-    expect(shown(stopped)).toContain("card");
+    expect(shown(stopped)).toEqual(["ask", "stopped"]);
   });
 });
 
@@ -130,14 +141,16 @@ describe("a message sent straight to the browser", () => {
     expect(shown([ask, routedCard(), continuation()])).toEqual(["ask", "card"]);
   });
 
-  it("leaves a card the person pressed, or one the routing step did not send, as it was", () => {
-    expect(resolveRoutedBrowserFold([ask, routedCard(), continuation(false), step, reply]).hiddenPromptIds.size).toBe(0);
-    expect(shown([ask, routedCard(), continuation(false), step, reply])).toContain("card");
-    expect(shown([ask, routedCard(), continuation(false), step, reply])).toContain("continuation");
+  // The fold keeps their continuation: its one line ("Opened Instafy's
+  // browser for …") is the record, and the card leaves as any opened card
+  // does.
+  it("keeps the continuation of a card the person pressed, or of one the routing step did not send", () => {
+    const pressed = [ask, routedCard(), continuation(false), step, reply];
+    expect(resolveRoutedBrowserFold(pressed).hiddenPromptIds.size).toBe(0);
+    expect(shown(pressed)).toEqual(["ask", "continuation", `agent-job-thread:${BROWSER_JOB}`]);
     const ordinary = [ask, routedCard(false), continuation(), step, reply];
     expect(resolveRoutedBrowserFold(ordinary).hiddenPromptIds.size).toBe(0);
-    expect(shown(ordinary)).toContain("card");
-    expect(shown(ordinary)).toContain("continuation");
+    expect(shown(ordinary)).toEqual(["ask", "continuation", `agent-job-thread:${BROWSER_JOB}`]);
   });
 });
 
@@ -247,5 +260,138 @@ describe("a message the browser turn handed to the building turn", () => {
     const messages = [ask, routedCard(), continuation(), step, reply, handBack(true), buildingStep, buildingReply];
     expect(resolveRoutedBrowserFold(messages).hiddenPromptIds.has("hand-back")).toBe(false);
     expect(listed(messages)).toContain("hand-back");
+  });
+});
+
+// A turn that builds something asked for the browser at its end (a local
+// test, Nov 2: a Seville map's turn): its card sits in that turn, and Studio
+// opened it by itself. The chat kept a full card that only said "Opened",
+// with "Octo opened Instafy's browser" right under the turn.
+const TASK = "Find a first-visit three-day Seville itinerary on https://www.visitasevilla.es and verify the key places.";
+const MAP_JOB = "77777777-7777-4777-8777-777777777777";
+const MAP_RUN = "88888888-8888-4888-8888-888888888888";
+const LOOKUP_JOB = "99999999-9999-4999-8999-999999999999";
+const LOOKUP_RUN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const LATER_JOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+const plan = message({ id: "plan", role: "user", authorId: "user-1", content: "Plan 3 days in Seville.", timestamp: 10,
+  metadata: { runId: MAP_RUN } });
+function mapStep(jobId = MAP_JOB, id = "map-step", timestamp = 11): ChatMessage {
+  return message({ id, content: "uw add-point", timestamp, messageType: "command_execution",
+    metadata: { jobId, runId: MAP_RUN, source: "agent", kind: "update", outcome: "in_progress",
+      messageType: "command_execution", details: { status: "completed" } } });
+}
+function mapCard(jobId = MAP_JOB, id = "map-card", timestamp = 12): ChatMessage {
+  return message({ id, content: "Continue this task in Instafy's browser.", timestamp, messageType: "action_request",
+    metadata: { messageType: "action_request", jobId, runId: MAP_RUN, source: "agent", kind: "update",
+      details: { testId: "browser-request-card", browserRequest: { task: TASK, location: "auto", continueBuilding: true } } } });
+}
+function mapReply(jobId = MAP_JOB, id = "map-reply", timestamp = 13): ChatMessage {
+  return message({ id, content: "I made the Seville map and asked for a check of the sights.", timestamp,
+    metadata: { jobId, runId: MAP_RUN, source: "agent", outcome: "succeeded" } });
+}
+const mapTurn = [plan, mapStep(), mapCard(), mapReply()];
+/** The continuation, as Studio sends it (by itself or on a press), or as a reload reads it back. */
+function lookup(by: "studio" | "press" | "reload"): ChatMessage {
+  const prompt = {
+    browserRequestOf: `job:${MAP_JOB}`,
+    browserTransport: "shared",
+    browserHandsBack: true,
+    clientMessageId: "lookup-client-id",
+    ...(by === "press" ? { browserCardSites: ["www.visitasevilla.es"] } : { browserAutoStarted: true }),
+  };
+  return message({
+    id: "lookup",
+    role: "user",
+    authorId: "user-1",
+    content: `${by === "press" ? "Opened" : "Octo opened"} Instafy's browser for www.visitasevilla.es`,
+    timestamp: 14,
+    metadata: by === "reload" ? { runId: LOOKUP_RUN, prompt_metadata: prompt } : { runId: LOOKUP_RUN, ...prompt },
+  });
+}
+const lookupStep = message({ id: "lookup-step", content: "Opened visitasevilla.es", timestamp: 15, messageType: "mcp_tool_call",
+  metadata: { jobId: LOOKUP_JOB, runId: LOOKUP_RUN, source: "agent", kind: "update", outcome: "in_progress",
+    messageType: "mcp_tool_call", details: { tool: "navigate", status: "completed" } } });
+const lookupReply = message({ id: "lookup-reply", content: "The official site lists the Cathedral and the Alcázar.", timestamp: 16,
+  metadata: { jobId: LOOKUP_JOB, runId: LOOKUP_RUN, source: "agent", outcome: "succeeded" } });
+
+/** What a turn's thread holds, as the chat lists it. */
+function turnOf(messages: ChatMessage[], jobId: string): string[] | null {
+  const thread = synthesizeAgentJobThreadMessages(messages, messages.filter(shouldDisplayChatMessage))
+    .find((entry) => entry.id === `agent-job-thread:${jobId}`);
+  if (!thread) return null;
+  return ((thread.metadata as { threadMessages?: ChatMessage[] }).threadMessages ?? []).map((entry) => entry.id);
+}
+
+describe("a browser card a building turn posted", () => {
+  afterEach(() => forgetPromptsSentFromThisPageForTests());
+
+  it("stays in its turn while it needs the person's press, and leaves once the press opened the browser", () => {
+    expect(turnOf(mapTurn, MAP_JOB)).toEqual(["map-step", "map-card", "map-reply"]);
+    expect(resolveRoutedBrowserFold(mapTurn).settledCardIds.size).toBe(0);
+    const pressed = [...mapTurn, lookup("press"), lookupStep, lookupReply];
+    expect(listed(pressed)).toEqual(["plan", `agent-job-thread:${MAP_JOB}`, "lookup", `agent-job-thread:${LOOKUP_JOB}`]);
+    expect(turnOf(pressed, MAP_JOB)).toEqual(["map-step", "map-reply"]);
+    expect([...resolveRoutedBrowserFold(pressed).settledCardIds]).toEqual(["map-card"]);
+  });
+
+  it("leaves the chat once Studio opened the browser for it: the one line and the browser turn are the record", () => {
+    // As soon as the continuation is in the chat, before the browser turn shows anything.
+    const opened = [...mapTurn, lookup("studio")];
+    expect(listed(opened)).toEqual(["plan", `agent-job-thread:${MAP_JOB}`, "lookup"]);
+    expect(turnOf(opened, MAP_JOB)).toEqual(["map-step", "map-reply"]);
+    // The continuation reads as its one line, "Octo opened Instafy's browser for …".
+    expect(isBrowserNoticePrompt(lookup("studio"))).toBe(true);
+    const answered = [...opened, lookupStep, lookupReply];
+    expect(listed(answered)).toEqual(["plan", `agent-job-thread:${MAP_JOB}`, "lookup", `agent-job-thread:${LOOKUP_JOB}`]);
+    expect(turnOf(answered, MAP_JOB)).toEqual(["map-step", "map-reply"]);
+  });
+
+  it("stays gone after a reload, read back from the stored continuation", () => {
+    const reloaded = [...mapTurn, lookup("reload"), lookupStep, lookupReply];
+    expect(turnOf(reloaded, MAP_JOB)).toEqual(["map-step", "map-reply"]);
+    expect(listed(reloaded)).toContain("lookup");
+  });
+
+  // Its browser turn ended before it showed anything. The card offered no
+  // button any more (it had opened), and the failure's own Try again sends
+  // the card's task again: the one line and that turn's failure or Stopped
+  // line say all there is.
+  it("stays gone when its browser turn failed or was stopped before it showed anything", () => {
+    const failure = message({ id: "lookup-failure", content: "The browser could not start.", timestamp: 15, messageType: "error",
+      metadata: { runId: LOOKUP_RUN, source: "agent", outcome: "failed", messageType: "error" } });
+    const stopped = message({ id: "lookup-stopped", content: "Stopped (1 run canceled.)", timestamp: 15,
+      metadata: { runId: LOOKUP_RUN, source: "controller", kind: "run_cancellation",
+        details: { runIds: [LOOKUP_RUN], jobIds: [LOOKUP_JOB], outcome: "canceled", runStatus: "canceled" } } });
+    for (const ended of [failure, stopped]) {
+      const messages = [...mapTurn, lookup("studio"), ended];
+      expect(turnOf(messages, MAP_JOB)).toEqual(["map-step", "map-reply"]);
+      expect(shown(messages)).toEqual(["plan", `agent-job-thread:${MAP_JOB}`, "lookup", ended.id]);
+    }
+  });
+
+  // Local drive, Oct 28: two live cards stacked up in one chat.
+  it("leaves the chat once a newer card followed it, and the newer one stays while it needs the person", () => {
+    const later = [...mapTurn, mapStep(LATER_JOB, "later-step", 20), mapCard(LATER_JOB, "later-card", 21),
+      mapReply(LATER_JOB, "later-reply", 22)];
+    expect(turnOf(later, MAP_JOB)).toEqual(["map-step", "map-reply"]);
+    expect(turnOf(later, LATER_JOB)).toEqual(["later-step", "later-card", "later-reply"]);
+  });
+
+  // The controller never took the continuation: it continues no card, and
+  // the card comes back with its button (and why) for the person.
+  it("comes back when the controller never took its continuation", () => {
+    const sent = lookup("press");
+    rememberPromptSentFromThisPage(sent);
+    expect(turnOf([...mapTurn, sent], MAP_JOB)).toEqual(["map-step", "map-reply"]);
+    recordSendFailedForPromptSentFromThisPage(sent);
+    expect(turnOf([...mapTurn, sent], MAP_JOB)).toEqual(["map-step", "map-card", "map-reply"]);
+  });
+
+  // A card in a turn with no step of its own is a message of its own.
+  it("leaves no message behind for a turn whose only answer was the card", () => {
+    const cardOnly = [plan, mapCard(), lookup("studio")];
+    expect(listed([plan, mapCard()])).toEqual(["plan", "map-card"]);
+    expect(listed(cardOnly)).toEqual(["plan", "lookup"]);
   });
 });
