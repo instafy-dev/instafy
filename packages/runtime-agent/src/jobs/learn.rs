@@ -2893,15 +2893,15 @@ mod tests {
 
     /// A page check that loaded nothing (exit 4, no browser here, or 70, the check itself failed)
     /// stays in the reply as what it means for the page. The skill said "nothing was checked; say
-    /// so", while `AGENTS.md` says a reply never describes the turn's own checks: it says nobody
-    /// has looked at the page yet. The copy from before is upgraded.
+    /// so", while `AGENTS.md` says a reply never describes the turn's own checks: the reply says
+    /// nobody has looked at the page yet. The copy from before is upgraded.
     #[test]
     fn frontend_previews_says_a_check_that_loaded_nothing_in_the_pages_words() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
         let skill = flat(FRONTEND_PREVIEWS_TEMPLATE);
         assert!(
             skill.contains(
-                "Exit 4 (no browser here) or 70 (the check itself failed) means nobody has looked at the page yet; say that in the reply."
+                "Exit 4 (no browser here) or 70 (the check itself failed) means nothing was checked, so the reply says nobody has looked at the page yet."
             ),
             "{skill}"
         );
