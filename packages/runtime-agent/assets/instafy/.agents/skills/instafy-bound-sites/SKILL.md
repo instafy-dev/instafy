@@ -68,8 +68,8 @@ Not for: a one-off answer in chat, or a static page with nothing to check (use `
    place too (a city or postcode field): in Studio's preview card location is not available yet, and the page says
    so. Render strings with `textContent`; only open `https:` links, and take store links from your seed data unless
    the offer is `seller.trust: "curated"`.
-7. **Serve it and show it in Studio in one command**, from the site's folder:
-   `instafy preview open --title '<short title>' --serve-cmd "instafy bind serve . --port {port} --preview" --start --json`
+7. **Serve it and show it in Studio in one command**, inside the site's folder:
+   `(cd <dir> && instafy preview open --title '<short title>' --serve-cmd "instafy bind serve . --port {port} --preview" --start --json)`
    (single quotes: in double quotes the shell expands `$150` to `50`). It picks the port, keeps the binder serving
    after your turn, posts the card and takes its picture. `--preview` means no viewer token: only space members reach the page,
    through the card, and the binder refuses every other host. Never post localhost, preview or tunnel URLs.

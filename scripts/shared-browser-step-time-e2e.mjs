@@ -107,7 +107,7 @@ const BUSY_MESSAGE = "The page is still busy, so it could not be read yet. Take 
 // What a load answers whose site sent nothing back before the step stopped
 // waiting for it, from a blank tab and from a page that had loaded: nothing was
 // opened, and Octo goes to the next source in the same turn.
-const NEXT_SOURCE = "Open the place's own site now (the venue's or the operator's), or another official source if this was it.";
+const NEXT_SOURCE = "Don't open this address again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
 const UNANSWERED_MESSAGE = `The site did not answer in time, so nothing was opened and the page is still blank. ${NEXT_SOURCE}`;
 const UNANSWERED_LOADED_MESSAGE = `The site did not answer in time, so nothing was opened and the tab still shows the page it showed before. ${NEXT_SOURCE}`;
 // How long a step whose site did not answer may take past its time: stopping

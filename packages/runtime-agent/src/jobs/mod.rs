@@ -9832,6 +9832,11 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
         // they name nor the contexts and learned blocks their text matches are
         // loaded for it: what the prompt loads follows its instructions alone.
         let request_for_selection = skills::request_outside_carried_skill_files(trimmed_prompt);
+        // A hand-back's own words are always the controller's one line: the
+        // skills it loads and is told of follow the request it carries on.
+        let request_for_skills =
+            browser_hand_back::request_for_skill_selection(job.payload.get("metadata"))
+                .unwrap_or(request_for_selection);
         let has_scoped_worker_observation = scoped_worker_path_observation.is_some();
         if !lead_continuation_checkpoint && !has_scoped_worker_observation {
             if let Some(section) =
@@ -9899,7 +9904,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             if skill_hints_apply
                 && let Some(hints) = format_skill_hints(
                     workspace_dir,
-                    request_for_selection,
+                    request_for_skills,
                     DIRECT_WRITE_SKILL_HINTS_LEAD,
                 )
             {
@@ -9921,7 +9926,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
         } else if include_workspace_memory && !stateful_thread_restored {
             if let Some(snapshot) = format_project_memory_snapshot_with_preferences(
                 workspace_dir,
-                request_for_selection,
+                request_for_skills,
                 preferences,
                 pinned_skill_for_turn(job),
             ) {
@@ -9943,11 +9948,8 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             // The restored thread carries the instructions of the turn it began
             // on, not the skills that match this request; name those.
             if skill_hints_apply
-                && let Some(hints) = format_skill_hints(
-                    workspace_dir,
-                    request_for_selection,
-                    RESTORED_SKILL_HINTS_LEAD,
-                )
+                && let Some(hints) =
+                    format_skill_hints(workspace_dir, request_for_skills, RESTORED_SKILL_HINTS_LEAD)
             {
                 append_prompt_section(
                     &mut prompt,

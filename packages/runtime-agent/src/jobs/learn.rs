@@ -165,9 +165,10 @@ const FRONTEND_PREVIEWS_TEMPLATE: &str = include_str!(concat!(
 // v11 the one from before the card showed a picture and a summary of the site,
 // v12 the one that had the reply report exit codes and a stopped site's process,
 // v13 the one from before `instafy preview open --start` picked the site's port, which
-// sent the person to the card and stopped a site with `kill`, and v14 the one that had
+// sent the person to the card and stopped a site with `kill`, v14 the one that had
 // a reply say a check loaded nothing ("nothing was checked; say so"), not that nobody
-// has looked at the page yet. A
+// has looked at the page yet, and v15 the one that did not say a card's line comes from
+// what its page shows. A
 // workspace still holding an unedited earlier bundled copy of this skill,
 // browser automation or skill import compat is upgraded; an edited one is kept.
 const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
@@ -185,6 +186,7 @@ const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
     include_str!("legacy/frontend-previews-v12.md"),
     include_str!("legacy/frontend-previews-v13.md"),
     include_str!("legacy/frontend-previews-v14.md"),
+    include_str!("legacy/frontend-previews-v15.md"),
 ];
 /// What a previewed site asks Studio for (the person's location, Present and
 /// Follow), read only when a site needs it.
@@ -296,6 +298,8 @@ const LEGACY_BOUND_SITES_TEMPLATES: &[&str] = &[
     include_str!("legacy/bound-sites-v2.md"),
     // From before one `instafy preview open --start` picked the port, served the site and showed it.
     include_str!("legacy/bound-sites-v3.md"),
+    // From before the card's command went into the site's folder (it said "from the site's folder").
+    include_str!("legacy/bound-sites-v4.md"),
 ];
 const LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES: &[&str] = &[
     // From before each value cited its page and day, and a value never was a dash.
@@ -334,6 +338,8 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     include_str!("legacy/interactive-artifacts-v5.md"),
     // From before a request for a small page, or for something as a page or on a page, matched this skill.
     include_str!("legacy/interactive-artifacts-v6.md"),
+    // From before the card's command went into the site's folder (it said "from the site's folder").
+    include_str!("legacy/interactive-artifacts-v7.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),
@@ -417,6 +423,12 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // own notes and what a browser script keeps in mind moved to
     // `references/learning-and-local-browsers.md`, so a browser turn carries the whole skill.
     include_str!("legacy/browser-automation-v24.md"),
+    // From before a failed tool call was never repeated the same way (it was retried once, and a
+    // failed first step was reported or repaired once), a list was set by the field `choose`
+    // takes, a route was planned for the day and time the person travels, a page's links were
+    // printed with its text, and a message that carries on the chat's browser work went to the
+    // browser also when it needs what a page here says, if all it needs is what that work found.
+    include_str!("legacy/browser-automation-v25.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,
@@ -466,6 +478,9 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     include_str!("legacy/web-research-v11.md"),
     // From before a count of the reviews found cited only those reviews.
     include_str!("legacy/web-research-v12.md"),
+    // From before it said that a browser turn's readers are its browser tools and the `instafy`
+    // commands are for building turns.
+    include_str!("legacy/web-research-v13.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -2483,10 +2498,11 @@ mod tests {
             skill.contains("share the `public link` line of its `logFile`, whole: it carries the")
         );
         assert!(skill.contains("Never share the bare tunnel URL."));
-        // One command serves the site on a port the CLI picks and shows its card: no
-        // detached serve, no port named by the skill, no sentence pointing at a card.
+        // One command, inside the site's folder, serves the site on a port the CLI picks and
+        // shows its card: no detached serve, no port named by the skill, no sentence pointing
+        // at a card.
         assert!(skill.contains(
-            "`instafy preview open --title '<short title>' --serve-cmd \"instafy bind serve . --port {port} --preview\" --start --json`"
+            "`(cd <dir> && instafy preview open --title '<short title>' --serve-cmd \"instafy bind serve . --port {port} --preview\" --start --json)`"
         ));
         for gone in ["--detach", "4173", "free port", "from the card"] {
             assert!(!skill.contains(gone), "{gone}");
@@ -2510,6 +2526,37 @@ mod tests {
             BOUND_SITES_CHEATSHEET_TEMPLATE
                 .contains("\"status\": \"uncertain\", \"basis\": \"live\"")
         );
+    }
+
+    /// `instafy preview open` takes the folder it runs in for the card's site: where opening the
+    /// card starts it again, and the folder whose changes take a new picture for the card. Told
+    /// to run it "from the site's folder", a turn ran it from the space's folder with the site's
+    /// path in the serve command, so the card's site was the whole space and another chat's build
+    /// took a new picture of it. The command goes into the site's folder itself, and serves `.`.
+    /// An unedited earlier copy is upgraded; an edited one is kept.
+    #[test]
+    fn bound_sites_starts_its_card_inside_the_sites_own_folder() {
+        assert!(
+            BOUND_SITES_TEMPLATE.contains(
+                "**Serve it and show it in Studio in one command**, inside the site's folder:\n   `(cd <dir> && instafy preview open"
+            ),
+            "{BOUND_SITES_TEMPLATE}"
+        );
+        assert!(!BOUND_SITES_TEMPLATE.contains("from the site's folder"));
+        assert!(BOUND_SITES_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+        let previous = include_str!("legacy/bound-sites-v4.md");
+        assert!(previous.contains("in one command**, from the site's folder:\n"));
+        assert!(LEGACY_BOUND_SITES_TEMPLATES.contains(&previous));
+        let workspace = tempdir().expect("workspace tempdir");
+        ensure_project_memory_scaffold(workspace.path());
+        let path = workspace.path().join(BOUND_SITES_RELATIVE_PATH);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), BOUND_SITES_TEMPLATE);
+        let edited = format!("{previous}\nOur sites live in pages/.\n");
+        fs::write(&path, &edited).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), edited);
     }
 
     #[test]
@@ -2933,6 +2980,43 @@ mod tests {
         assert!(FRONTEND_PREVIEWS_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
         let previous = include_str!("legacy/frontend-previews-v14.md");
         assert!(previous.contains("means nothing was checked; say so."));
+        assert!(LEGACY_FRONTEND_PREVIEWS_TEMPLATES.contains(&previous));
+        let workspace = tempdir().expect("workspace tempdir");
+        ensure_project_memory_scaffold(workspace.path());
+        let path = workspace.path().join(FRONTEND_PREVIEWS_RELATIVE_PATH);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            FRONTEND_PREVIEWS_TEMPLATE
+        );
+    }
+
+    /// With no `--summary`, a card's line under its title is the page's own
+    /// `<meta name="description">`. A turn wrote that description in the same edit as the page,
+    /// from what the person asked for: the card said the page had the hours and a verified
+    /// route, while its page said the hours were not checked and no route was confirmed. The
+    /// description is written after the page, from what the page shows. Each new picture of the
+    /// card takes its line from the page's description again, so a later change that alters what
+    /// the page shows writes it again. The copy from before is upgraded.
+    #[test]
+    fn frontend_previews_has_a_cards_line_say_only_what_its_page_shows() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let skill = flat(FRONTEND_PREVIEWS_TEMPLATE);
+        assert!(
+            skill.contains(
+                "Without it the card shows the page's own `<meta name=\"description\">`: write it after the page, from what the page shows, and again when a change alters what it shows (\"Not checked\" stays not checked)."
+            ),
+            "{skill}"
+        );
+        assert!(FRONTEND_PREVIEWS_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+        let previous = include_str!("legacy/frontend-previews-v15.md");
+        assert!(
+            previous.contains(
+                "Without it the card shows the page's own `<meta name=\"description\">`.\n"
+            )
+        );
+        assert!(!previous.contains("from what the page shows"));
         assert!(LEGACY_FRONTEND_PREVIEWS_TEMPLATES.contains(&previous));
         let workspace = tempdir().expect("workspace tempdir");
         ensure_project_memory_scaffold(workspace.path());
