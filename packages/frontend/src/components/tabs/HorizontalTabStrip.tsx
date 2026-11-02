@@ -55,6 +55,9 @@ export function HorizontalTabStrip({
   enableWheelHorizontal = true,
   testId,
 }: HorizontalTabStripProps) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const leftControlRef = useRef<HTMLDivElement | null>(null);
+  const rightControlRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const revealedActiveItemRef = useRef<HTMLElement | null>(null);
   const [hasOverflow, setHasOverflow] = useState(false);
@@ -70,7 +73,13 @@ export function HorizontalTabStrip({
       return;
     }
     const maxScrollLeft = Math.max(0, node.scrollWidth - node.clientWidth);
-    const overflow = maxScrollLeft > 1;
+    // Controls consume space themselves. Decide whether content needs them
+    // using the space available without those controls; otherwise arrows can
+    // keep their own overflow alive after a pane grows or text gets smaller.
+    const gap = rootRef.current ? parseFloat(getComputedStyle(rootRef.current).columnGap) || 0 : 0;
+    const controlsWidth = [leftControlRef.current, rightControlRef.current]
+      .reduce((total, control) => total + (control ? control.getBoundingClientRect().width + gap : 0), 0);
+    const overflow = maxScrollLeft > controlsWidth + 1;
     setHasOverflow(overflow);
     if (!overflow) {
       setCanScrollLeft(false);
@@ -238,6 +247,7 @@ export function HorizontalTabStrip({
 
   return (
     <div
+      ref={rootRef}
       className={[
         "relative flex min-w-0 flex-1 self-stretch items-end gap-1",
         className,
@@ -246,7 +256,7 @@ export function HorizontalTabStrip({
         .join(" ")}
       data-testid={testId}
     >
-      {leftControl}
+      {leftControl ? <div ref={leftControlRef} className="flex shrink-0 items-end">{leftControl}</div> : null}
       <div className="relative min-w-0 flex-1">
         <div
           ref={viewportRef}
@@ -274,7 +284,7 @@ export function HorizontalTabStrip({
           {overflowActions}
         </div>
       ) : null}
-      {rightControl}
+      {rightControl ? <div ref={rightControlRef} className="flex shrink-0 items-end">{rightControl}</div> : null}
     </div>
   );
 }
