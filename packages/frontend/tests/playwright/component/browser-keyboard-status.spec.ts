@@ -158,6 +158,43 @@ for (const width of [320, 390, 768, 1280]) {
 }
 
 for (const theme of ["light", "dark"] as const) {
+  for (const width of [320, 390]) {
+    test.describe(`${theme} short Personal recovery at ${width}px`, () => {
+      test.use({ viewport: { width, height: 420 }, hasTouch: true });
+
+      for (const scale of [1, 1.5, 2]) {
+        test(`keeps the entire Retry target visible after scrolling at ${scale * 100}% text`, async ({ page }) => {
+          const errors = await mount(page, "personal-error", theme);
+          // Root-font scaling stresses rem-based controls and spacing as well
+          // as text. This is not an Android OS-font or physical-keyboard test.
+          await page.evaluate(value => { document.documentElement.style.fontSize = `${16 * value}px`; }, scale);
+          const viewport = page.getByTestId("personal-browser-viewport");
+          const card = page.getByTestId("personal-browser-state-card");
+          const retry = page.getByRole("button", { name: "Retry Personal Browser", exact: true });
+          await expect(card.getByRole("alert")).toContainText(/\S/);
+          await retry.scrollIntoViewIfNeeded();
+          // A click on the visible center alone can pass with most of the
+          // button clipped. Require the complete control inside both clips.
+          await inside(retry, card);
+          await inside(card, viewport);
+          await touchTarget(retry);
+          await noHorizontalOverflow(page);
+          await retry.focus();
+          await page.keyboard.press("Enter");
+          await expect.poll(() => page.evaluate(() => window.__browserKeyboardStatusReview.retryCount)).toBe(1);
+          await expect(retry).toHaveAttribute("aria-disabled", "true");
+          await expect(retry).toBeFocused();
+          await inside(retry, card);
+          await page.evaluate(() => window.__browserKeyboardStatusReview.finishRetry());
+          await expect(retry).toBeEnabled();
+          await expect(retry).toBeFocused();
+          await inside(retry, card);
+          expect(errors).toEqual([]);
+        });
+      }
+    });
+  }
+
   test.describe(`${theme} touch tablet keyboard`, () => {
     test.use({ viewport: { width: 768, height: 844 }, hasTouch: true });
     test("keeps native text at 16px and controls reachable with a coarse pointer", async ({ page }) => {

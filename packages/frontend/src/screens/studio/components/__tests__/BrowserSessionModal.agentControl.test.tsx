@@ -14,7 +14,7 @@
 
 import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   fetchStatus: vi.fn(),
@@ -147,6 +147,11 @@ function Host({ agentHolds }: { agentHolds: boolean }) {
 describe("Shared Browser while Octo holds an RFB-only browser", () => {
   let root: Root;
   let container: HTMLDivElement;
+  beforeAll(async () => {
+    // Resolve the mocked lazy module once. Settling imports at every clock
+    // tick adds real timer waits to an otherwise entirely simulated clock.
+    await import("@novnc/novnc/lib/rfb");
+  });
   beforeEach(() => {
     vi.useFakeTimers();
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -170,7 +175,7 @@ describe("Shared Browser while Octo holds an RFB-only browser", () => {
   /** Steps the clock in small acts, so each step's effects run before the next timers. */
   async function advance(ms: number) {
     for (let elapsed = 0; elapsed < ms; elapsed += 10) {
-      await act(async () => { await vi.advanceTimersByTimeAsync(Math.min(10, ms - elapsed)); await vi.dynamicImportSettled(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(Math.min(10, ms - elapsed)); });
     }
   }
   const reconnecting = () => document.querySelector('[data-testid="browser-session-reconnecting"]') !== null;

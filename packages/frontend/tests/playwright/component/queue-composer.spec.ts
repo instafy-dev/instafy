@@ -393,6 +393,59 @@ for (const width of [320, 390]) for (const theme of ["light", "dark"]) for (cons
   });
 }
 
+for (const fontSize of [24, 32]) for (const theme of ["light", "dark"]) {
+  test(`short composer keeps enlarged fields and view controls reachable with ${fontSize}px root text in ${theme}`, async ({ page }) => {
+    const draft = "Keep this draft when the keyboard opens";
+    const { errors } = await openFixture(page, { width: 320, theme, stash: true, attachments: 4, draft });
+    await page.evaluate(size => { document.documentElement.style.fontSize = `${size}px`; }, fontSize);
+    const input = editor(page);
+    const retainedInput = (await input.elementHandle())!;
+    await input.focus();
+    await page.setViewportSize({ width: 320, height: 320 });
+    const form = page.locator("form");
+    await expect(input).toBeFocused();
+    await expect.poll(async () => {
+      const field = (await input.boundingBox())!;
+      return field.y >= 0 && field.y + field.height <= 320;
+    }).toBe(true);
+    // At 150% the whole writing row fits. At 200% coarse targets make that
+    // row taller than this viewport; preserve the field and scroll to Send.
+    if (fontSize === 24) await expect(page.getByTestId("chat-send-button")).toBeInViewport({ ratio: 1 });
+    const bounds = (await form.boundingBox())!;
+    expect(bounds.y).toBeGreaterThanOrEqual(0);
+    expect(bounds.y + bounds.height).toBeLessThanOrEqual(320);
+    expect(await form.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
+
+    // The editor stays focused, but a person can still scroll away from it to
+    // change views. Revealing focus on every scroll would trap this toolbar.
+    await form.hover({ position: { x: 8, y: bounds.height / 2 } });
+    await page.mouse.wheel(0, -1200);
+    await expect.poll(() => form.evaluate(node => node.scrollTop)).toBe(0);
+    for (const name of ["Browser", "Chat"]) {
+      const tab = page.getByRole("tab", { name, exact: true });
+      await expect(tab).toBeInViewport({ ratio: 1 });
+      await tab.click();
+      await expect(tab).toHaveAttribute("aria-selected", "true");
+      await expect(input).toHaveText(draft);
+      await expect(page.getByTestId("chat-image-upload-remove")).toHaveCount(4);
+    }
+    await trigger(page).focus();
+    await trigger(page).press("Enter");
+    await expect(page.getByRole("dialog", { name: "Queued messages", exact: true })).toBeInViewport();
+    await expect(page.getByTestId("chat-send-queue-reorder").first()).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog", { name: "Queued messages", exact: true })).toHaveCount(0);
+    const send = page.getByTestId("chat-send-button");
+    await send.focus();
+    await expect(send).toBeInViewport({ ratio: 1 });
+    await page.setViewportSize({ width: 320, height: 900 });
+    await expect.poll(() => form.evaluate(node => node.scrollTop)).toBe(0);
+    expect(await retainedInput.evaluate(node => node.isConnected)).toBe(true);
+    await expect(input).toHaveText(draft);
+    expect(errors).toEqual([]);
+  });
+}
+
 for (const fontSize of [16, 32]) for (const theme of ["light", "dark"]) {
   test(`attachment tray follows a short visual viewport without clipping targets with ${fontSize}px root text in ${theme}`, async ({ page }) => {
     const draft = "Keep this draft while the keyboard opens";
@@ -608,7 +661,7 @@ test("read-only queue keeps the bubble list visible while disabling mutations", 
   expect(errors).toEqual([]);
 });
 
-for (const theme of ["light", "dark"]) for (const fontSize of [16, 20]) {
+for (const theme of ["light", "dark"]) for (const fontSize of [16, 20, 24, 32]) {
   test(`joined toolbar fits stashed drafts and queue controls at 320px in ${theme} with ${fontSize}px text`, async ({ page }) => {
     const { errors } = await openFixture(page, { width: 320, stash: true, theme });
     // Exercise wider system-font metrics / increased text size without shrinking
@@ -622,7 +675,12 @@ for (const theme of ["light", "dark"]) for (const fontSize of [16, 20]) {
     expect(toolbarBounds.x + toolbarBounds.width).toBeLessThanOrEqual(320);
     const viewport = toolbar.getByTestId("conversation-resource-tabs").locator(".overflow-x-auto");
     const tabs = ["Chat", "Browser"].map(name => toolbar.getByRole("tab", { name, exact: true }));
-    for (const tab of tabs) await expect(tab).toBeVisible();
+    for (const tab of tabs) {
+      await expect(tab).toBeVisible();
+      // Full labels remain visible, including at 200% root/rem sizing; a
+      // horizontally clipped tab still satisfies Playwright's visibility.
+      expect(await tab.locator(".truncate").evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+    }
     await expect.poll(async () => {
       const viewBounds = (await viewport.boundingBox())!;
       return (await Promise.all(tabs.map(async tab => {
@@ -642,6 +700,11 @@ for (const theme of ["light", "dark"]) for (const fontSize of [16, 20]) {
     const browser = toolbar.getByRole("tab", { name: "Browser", exact: true });
     await browser.focus();
     await browser.press("Enter");
+    await expect(browser).toHaveAttribute("aria-selected", "true");
+    await browser.press("Home");
+    await expect(tabs[0]).toBeFocused();
+    await tabs[0].press("ArrowRight");
+    await expect(browser).toBeFocused();
     await expect(browser).toHaveAttribute("aria-selected", "true");
     await trigger(page).click();
     await expect(page.getByRole("dialog", { name: "Queued messages" })).toBeVisible();

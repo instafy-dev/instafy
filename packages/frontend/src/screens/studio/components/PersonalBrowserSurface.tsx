@@ -790,12 +790,14 @@ export function PersonalBrowserSurface({
       >
         {visible && previewUrl ? <img alt="" aria-hidden src={previewUrl} className="pointer-events-none absolute inset-0 h-full w-full object-fill" data-testid="personal-browser-overlay-preview" /> : null}
         {!ready ? (
-          <div className="absolute inset-0 flex min-h-0 items-center justify-center p-4 sm:p-6">
+          <div className="absolute inset-0 flex min-h-0 items-center justify-center p-2">
             <Surface tone="default" radius="2xl" shadow="none"
               className="max-h-full min-w-0 w-full max-w-md space-y-3 overflow-y-auto p-4"
               data-testid="personal-browser-state-card">
               {browserStatus.state === "starting" ? (
-                <LoadingStatus className="min-w-0 [overflow-wrap:anywhere]">{browserStatus.detail}</LoadingStatus>
+                // The retry button already shows progress. Announce recovery
+                // without inserting a row that scrolls its focused action away.
+                <LoadingStatus className={model.recovering && model.status?.state === "error" ? "sr-only" : "min-w-0 [overflow-wrap:anywhere]"}>{browserStatus.detail}</LoadingStatus>
               ) : !model.status?.error ? (
                 <Text variant="bodyStrong" tone="primary" className="[overflow-wrap:anywhere]">{browserStatus.detail}</Text>
               ) : null}
@@ -805,13 +807,14 @@ export function PersonalBrowserSurface({
               {model.status?.state === "error" ? (
                 <Button
                   preset="inline"
+                  aria-label="Retry Personal Browser"
                   icon={<Refresh className="h-3.5 w-3.5" aria-hidden="true" />}
                   isPending={model.recovering}
                   isDisabled={!model.available && !model.recovering}
                   onPress={model.retryOpen}
                   variant="secondary"
                 >
-                  Retry Personal Browser
+                  Retry
                 </Button>
               ) : null}
             </Surface>

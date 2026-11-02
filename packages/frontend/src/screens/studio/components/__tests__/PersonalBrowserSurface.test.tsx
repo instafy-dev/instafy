@@ -978,7 +978,9 @@ describe("PersonalBrowserSurface", () => {
     expect(retry.getAttribute("aria-disabled")).toBe("true");
     expect(retry.hasAttribute("data-pending")).toBe(true);
     expect(document.activeElement).toBe(retry);
-    expect(retry.textContent).toContain("Retry Personal Browser");
+    expect(retry.textContent).toContain("Retry");
+    expect(retry.textContent).not.toContain("Personal Browser");
+    expect(retry.getAttribute("aria-label")).toBe("Retry Personal Browser");
     await act(async () => retry.click());
     expect(model.retryOpen).toHaveBeenCalledTimes(1);
 
@@ -986,6 +988,15 @@ describe("PersonalBrowserSurface", () => {
     const unavailable = await renderStatus();
     expect(unavailable.querySelector<HTMLButtonElement>('button')?.disabled).toBe(true);
     expect(unavailable.querySelector('[role="status"]')).toBeNull();
+
+    // A stale error can remain while the native host reports opening. With no
+    // Retry button/spinner present, opening still needs visible progress.
+    model.recovering = true;
+    model.status = { ...model.status!, state: "opening" };
+    const reopening = await renderStatus();
+    expect(reopening.querySelector('button')).toBeNull();
+    expect(reopening.querySelector('[role="status"]')?.classList.contains("sr-only")).toBe(false);
+    expect(reopening.querySelector('[role="status"]')?.textContent).toContain("Reopening Personal Browser");
   });
 
   it("offers recovery actions and keeps Pause reachable while native control is still enabled", async () => {
@@ -1009,7 +1020,7 @@ describe("PersonalBrowserSurface", () => {
       );
     });
     const browserRetry = Array.from(document.querySelectorAll("button")).find(
-      (button) => button.textContent?.includes("Retry Personal Browser"),
+      (button) => button.getAttribute("aria-label") === "Retry Personal Browser",
     );
     expect(browserRetry).toBeTruthy();
     const errorCard = document.querySelector('[data-testid="personal-browser-state-card"]')!;

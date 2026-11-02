@@ -41,6 +41,26 @@ async function mountComposerViews(page: Page) {
   await page.evaluate(() => document.fonts.ready);
 }
 
+test("view scroll arrows release their space again when the tabs fit", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  await mountComposerViews(page);
+  const strip = page.getByTestId("conversation-subtabs");
+  const fittingWidth = Math.ceil((await strip.boundingBox())!.width) + 2;
+  const resizePane = (width: number) => page.evaluate(width => (window as unknown as {
+    configureComposer: (options: { width: number; paths: string[] }) => void;
+  }).configureComposer({ width, paths: [] }), width);
+  for (let iteration = 0; iteration < 2; iteration++) {
+    await resizePane(100);
+    await expect(page.getByRole("button", { name: /Scroll views/ })).toHaveCount(2);
+    await resizePane(fittingWidth);
+    // Without discounting the controls' own space, their narrowed viewport
+    // reports overflow forever even though the actual tabs now fit the pane.
+    await expect(page.getByRole("button", { name: /Scroll views/ })).toHaveCount(0);
+    const viewport = page.getByTestId("conversation-resource-tabs").locator(".overflow-x-auto");
+    expect(await viewport.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+  }
+});
+
 for (const touch of [false, true]) {
   test(`composer views stay compact and scroll within their pane with a ${touch ? "touch" : "mouse"} pointer`, async ({ page }) => {
     const errors: string[] = [];
