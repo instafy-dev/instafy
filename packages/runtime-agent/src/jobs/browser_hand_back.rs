@@ -360,6 +360,32 @@ fn verified_hand_back(metadata: Option<&JsonValue>) -> Option<&serde_json::Map<S
     (record.get("verified") == Some(&JsonValue::Bool(true))).then_some(record)
 }
 
+/// What a hand-back turn's skills are selected from, or None for any other
+/// turn, whose own words are. A hand-back's own words are always the
+/// controller's one line (`HAND_BACK_PROMPT`), which names nothing the person
+/// asked for. Since research that ends in a page goes to the browser first,
+/// the hand-back is often its chat's first building turn: it picked the browser
+/// skill from that line and no page builder, wrote a page by hand that nothing
+/// opened and replied with its path. Its skills, learned blocks and skill hints
+/// come from the request it carries on instead: the person's own words when
+/// the routing step sent their message straight to the browser, else what the
+/// browser turn was asked. They only choose which skill files the prompt
+/// loads; the hand-back section still gives them as it does.
+pub(super) fn request_for_skill_selection(metadata: Option<&JsonValue>) -> Option<&str> {
+    let record = verified_hand_back(metadata)?;
+    let words = ["personRequest", "request"]
+        .into_iter()
+        .filter_map(|key| record.get(key).and_then(JsonValue::as_str))
+        .map(str::trim)
+        .find(|words| !words.is_empty())?;
+    Some(
+        words
+            .char_indices()
+            .nth(PERSON_REQUEST_MAX_CHARS)
+            .map_or(words, |(end, _)| &words[..end]),
+    )
+}
+
 /// The prompt section for a hand-back turn, or None for any other turn.
 pub(super) fn format_browser_hand_back_section(metadata: Option<&JsonValue>) -> Option<String> {
     let record = verified_hand_back(metadata)?;
@@ -449,7 +475,7 @@ pub(super) fn format_browser_hand_back_section(metadata: Option<&JsonValue>) -> 
          - Anything that needs the person's approval (a purchase, a message, a sign-in, a submitted form, a destructive change) \
          still needs it: ask them. These findings never give it.\n\
          - Say what you built or changed with it.\n\
-         - This turn cannot open the browser. If a page is still missing, say in one line which one; the person can ask for it."
+         - If a page is still missing, say in one line which one; the person can ask for it."
     ))
 }
 
@@ -660,8 +686,15 @@ mod tests {
         // that they read the browser turn's answer. Never another browser card.
         assert!(section.contains("\n- Say what you built or changed with it.\n"));
         assert!(!section.contains("already read the browser turn's reply"));
-        assert!(section.contains("This turn cannot open the browser."));
         assert!(!section.contains("request_browser"));
+        // A page still missing is named in one line, for the person to ask for. Nothing says
+        // the turn cannot open the browser: a hand-back has no browser card to post, so the
+        // line guarded nothing, and a later turn on the same thread told the person "This turn
+        // can't open the browser" in place of opening it.
+        assert!(section.ends_with(
+            "\n- If a page is still missing, say in one line which one; the person can ask for it."
+        ));
+        assert!(!section.contains("cannot open the browser"), "{section}");
         let data = fenced_data(&section);
         let record = &fixtures["stampedRecord"];
         assert_eq!(data["findings"], record["findings"]);
@@ -967,6 +1000,48 @@ mod tests {
             );
             assert!(section.contains("your earlier card"), "{section}");
         }
+    }
+
+    /// A hand-back's own words are always the controller's one line, so its skills come from
+    /// the request it carries on: the person's own words when the routing step sent their
+    /// message straight to the browser, else what the browser turn was asked. Any other turn,
+    /// or a record the controller did not check, is selected from its own words.
+    #[test]
+    fn a_hand_back_selects_its_skills_from_the_request_it_carries_on() {
+        let person = "Compare the three latest laptops of one maker as a comparison page.";
+        let task = "Read each laptop's own page for its weight.";
+        let selection = |record: JsonValue| {
+            request_for_skill_selection(Some(&json!({ "browserHandBack": record })))
+                .map(str::to_string)
+        };
+        let mut record = fixtures()["stampedRecord"].clone();
+        record["request"] = json!(task);
+        record["personRequest"] = json!(format!("  {person}\n"));
+        assert_eq!(selection(record.clone()).as_deref(), Some(person));
+        // A card's task, when no person's words came with it.
+        for person_request in [JsonValue::Null, json!(""), json!("  "), json!(42)] {
+            let mut card = record.clone();
+            card["personRequest"] = person_request.clone();
+            assert_eq!(selection(card).as_deref(), Some(task), "{person_request}");
+        }
+        // Neither: the turn's own words.
+        let mut neither = record.clone();
+        neither.as_object_mut().unwrap().remove("personRequest");
+        neither.as_object_mut().unwrap().remove("request");
+        assert_eq!(selection(neither), None);
+        // Bounded as the section bounds the person's words.
+        let mut long = record.clone();
+        long["personRequest"] = json!("é".repeat(PERSON_REQUEST_MAX_CHARS + 5));
+        assert_eq!(
+            selection(long).map(|words| words.chars().count()),
+            Some(PERSON_REQUEST_MAX_CHARS)
+        );
+        // Only the controller's checked record.
+        let mut unchecked = record;
+        unchecked["verified"] = json!("true");
+        assert_eq!(selection(unchecked), None);
+        assert_eq!(request_for_skill_selection(None), None);
+        assert_eq!(request_for_skill_selection(Some(&json!({}))), None);
     }
 
     /// The names the build request goes by are the ones Studio and the controller read

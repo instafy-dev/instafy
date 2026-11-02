@@ -7,9 +7,16 @@
 //! findings"), and it wrote a page by hand that nobody could open. This pins what the runtime
 //! decides: no routing request, the lane a routed build runs in (it edits the workspace, ends in
 //! plain words and offers no team plan, goal or card), the findings and the browser turn's own
-//! words in its prompt, the shell, and the chat's thread. The provider stands in for the model:
-//! it runs the compare starter and opens a preview whatever it is asked, so those steps show
-//! only that the lane can take them.
+//! words in its prompt, the shell, and the chat's thread.
+//!
+//! Research that ends in a page goes to the browser first, so a hand-back is often its chat's
+//! first building turn, on a new thread. Its own words are always the controller's one line, and
+//! its skills were picked from them: the browser skill and no page builder. It wrote the page by
+//! hand, posted no card and replied with the page's path. Its skills come from the person's
+//! request it carries on, so the page skill and its card step reach it. The provider stands in
+//! for the model: it takes the page skill's card step (the compare starter, then a preview from
+//! the site's folder) when its thread has read that skill, and otherwise writes the page by hand
+//! and names its file, as the model did.
 
 use super::*;
 use std::sync::Mutex as StdMutex;
@@ -32,6 +39,15 @@ const BUILT: &str =
     "Built the comparison page from the maker's pages and opened it. Reviews: not checked.";
 /// The browser turn's own words, which the person did not read: it posted only that it finished.
 const BROWSER_WORDS: &str = "I read the maker's pages for three laptops. Their reviews are not checked: the Laptop 13 page links to two, which I did not open.";
+/// What a person asked in a message the routing step sent straight to the browser.
+const PERSON_REQUEST: &str = "Compare the three latest laptops from maker.example: processor, battery, weight and price, with two independent reviews each, as a comparison page.";
+/// The page skill, which the hand-back reads in its snapshot when its request asks for a page.
+const PAGE_SKILL: &str =
+    include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
+/// What a model without the page skill did: a page written by hand, which nothing opens.
+const BY_HAND: &str = "mkdir -p sites/laptops && printf '<!doctype html><title>Three laptops</title>\\n' > sites/laptops/index.html";
+const BUILT_BY_HAND: &str =
+    "Built a responsive comparison page at `sites/laptops/index.html` with the maker's figures.";
 /// What the lane of a routed build says (runtime-agent `jobs/mod.rs`).
 const WRITE_LANE: &str = "\nDirect workspace-change response contract:\n";
 const NO_ACTIONS: &str = "- Do not emit `multi_agent_plan`, goals, integrations, browser/location actions, or broad coordination metadata.";
@@ -59,7 +75,34 @@ fn a_hand_back_takes_no_routing_step_and_builds_in_the_write_lane_via_proxy() ->
             "browser-hand-back",
         );
     }
+    run_on_a_large_stack(Case::OnTheCardsThread)
+}
 
+#[test]
+fn a_hand_back_that_starts_the_chats_building_thread_builds_the_page_asked_for_via_proxy()
+-> Result<()> {
+    if std::env::var(CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(
+            CHILD,
+            "browser_hand_back::a_hand_back_that_starts_the_chats_building_thread_builds_the_page_asked_for_via_proxy",
+            "browser-hand-back-first-building-turn",
+        );
+    }
+    run_on_a_large_stack(Case::FirstBuildingTurn)
+}
+
+/// Which hand-back a fixture runs.
+#[derive(Clone, Copy)]
+enum Case {
+    /// A building turn posts a card that continues building, and the hand-back resumes its
+    /// thread.
+    OnTheCardsThread,
+    /// The routing step sent the person's message straight to the browser, so the hand-back
+    /// is the chat's first building turn.
+    FirstBuildingTurn,
+}
+
+fn run_on_a_large_stack(case: Case) -> Result<()> {
     const STACK: usize = 32 * 1024 * 1024;
     std::thread::Builder::new()
         .name("browser-hand-back-proxy".to_string())
@@ -70,7 +113,7 @@ fn a_hand_back_takes_no_routing_step_and_builds_in_the_write_lane_via_proxy() ->
                 .worker_threads(2)
                 .thread_stack_size(STACK)
                 .build()?
-                .block_on(run_case())
+                .block_on(run_case(case))
         })?
         .join()
         .map_err(|_| anyhow::anyhow!("browser hand-back fixture panicked"))?
@@ -147,6 +190,35 @@ fn command_outputs(request: &Value) -> Vec<String> {
         .collect()
 }
 
+/// Every text a request sends: its thread's earlier turns, then this one.
+fn input_text(request: &Value) -> String {
+    request["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .filter_map(|part| part["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A `## ` section of a skill, its heading included, up to the next one.
+fn skill_section<'a>(skill: &'a str, heading: &str) -> &'a str {
+    let start = skill
+        .find(&format!("\n{heading}\n"))
+        .unwrap_or_else(|| panic!("{heading} in the page skill"))
+        + 1;
+    let end = skill[start + heading.len()..]
+        .find("\n## ")
+        .map_or(skill.len(), |at| start + heading.len() + at);
+    skill[start..end].trim_end()
+}
+
+/// The page skill's card step: serve the site from its own folder and post its card.
+fn card_step() -> &'static str {
+    skill_section(PAGE_SKILL, "## 3. Serve it and show it")
+}
+
 fn tool_names(request: &Value) -> Vec<String> {
     request["tools"]
         .as_array()
@@ -192,12 +264,17 @@ async fn provider_request(
             json!([{"type":"request_browser","task":CARD_TASK,"continueBuilding":true}]),
         ));
     }
-    match command_outputs(&body).len() {
-        0 => response(command("starter", STARTER)),
-        1 => response(command("preview", PREVIEW)),
+    // The hand-back takes the page skill's card step when its thread has read the skill, and
+    // otherwise writes the page by hand and names its file.
+    let read_the_page_skill = input_text(&body).contains(card_step());
+    match (read_the_page_skill, command_outputs(&body).len()) {
+        (true, 0) => response(command("starter", STARTER)),
+        (true, 1) => response(command("preview", PREVIEW)),
         // The lane ends in plain words.
-        2 => response(message(BUILT)),
-        steps => panic!("unexpected request after {steps} steps of the hand-back"),
+        (true, 2) => response(message(BUILT)),
+        (false, 0) => response(command("by-hand", BY_HAND)),
+        (false, 1) => response(message(BUILT_BY_HAND)),
+        (_, steps) => panic!("unexpected request after {steps} steps of the hand-back"),
     }
 }
 
@@ -285,7 +362,7 @@ fn job_on_thread(
     }
 }
 
-async fn run_case() -> Result<()> {
+async fn run_case(case: Case) -> Result<()> {
     let _env = env_guard().await;
     let workspace_root = TempDir::new()?;
     let runtime_home = TempDir::new()?;
@@ -405,29 +482,76 @@ async fn run_case() -> Result<()> {
         runtime_access_token: None,
         parent_dispositions_runtime_on_shutdown: false,
     }));
-    let registration = registration_for_live(Uuid::new_v4());
+    let space = Space {
+        processor: &processor,
+        registration: registration_for_live(Uuid::new_v4()),
+        provider: &state,
+        workspace: &workspace,
+        project_id,
+    };
+    match case {
+        Case::OnTheCardsThread => on_the_cards_thread(&space).await?,
+        Case::FirstBuildingTurn => as_the_chats_first_building_turn(&space).await?,
+    }
+
+    drop(settings);
+    drop(proxy_guard);
+    drop(stub_guard);
+    proxy_task.await??;
+    stub_task.await??;
+    Ok(())
+}
+
+/// What a case's turns run in.
+struct Space<'a> {
+    processor: &'a JobProcessor,
+    registration: Registration,
+    provider: &'a Provider,
+    workspace: &'a Path,
+    project_id: Uuid,
+}
+
+impl Space<'_> {
+    async fn run(&self, what: &str, job: LeaseJob) -> Result<runtime_agent::jobs::JobExecution> {
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            self.processor
+                .run_apply_job(&self.registration, &job, true, None, None, None),
+        )
+        .await
+        .with_context(|| format!("{what} timed out"))?
+        .with_context(|| format!("{what} failed"))
+    }
+
+    /// The requests of the hand-back turn: every one carries its prompt last.
+    fn hand_back_requests(&self) -> Vec<Value> {
+        self.provider
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| last_user_text(request).contains(HAND_BACK_PROMPT))
+            .cloned()
+            .collect()
+    }
+}
+
+async fn on_the_cards_thread(space: &Space<'_>) -> Result<()> {
+    let project_id = space.project_id;
     let conversation_id = Uuid::new_v4();
 
     // The building turn: it posts the card that continues building.
-    let card = tokio::time::timeout(
-        Duration::from_secs(60),
-        processor.run_apply_job(
-            &registration,
-            &job(
+    let card = space
+        .run(
+            "the card's turn",
+            job(
                 project_id,
                 conversation_id,
                 REQUEST,
                 json!({"execution_mode":"apply","agentRoutingPreflight":{}}),
             ),
-            true,
-            None,
-            None,
-            None,
-        ),
-    )
-    .await
-    .context("the card's turn timed out")?
-    .context("the card's turn failed")?;
+        )
+        .await?;
     // It posts the card and no reply of its own: the card says where the browser goes, and
     // the browser turn says what it found.
     assert_eq!(card.summary, "");
@@ -451,28 +575,20 @@ async fn run_case() -> Result<()> {
 
     // The hand-back, as dispatch stamps it: Studio's words and the checked record, on the chat's
     // own thread.
-    let built = tokio::time::timeout(
-        Duration::from_secs(60),
-        processor.run_apply_job(
-            &registration,
-            &job_on_thread(
+    let built = space
+        .run(
+            "the hand-back",
+            job_on_thread(
                 project_id,
                 conversation_id,
                 HAND_BACK_PROMPT,
                 json!({"execution_mode":"apply","browserHandBack":hand_back_record()}),
                 Some(thread.clone()),
             ),
-            true,
-            None,
-            None,
-            None,
-        ),
-    )
-    .await
-    .context("the hand-back timed out")?
-    .context("the hand-back failed")?;
+        )
+        .await?;
 
-    let requests = state.requests.lock().unwrap().clone();
+    let requests = space.provider.requests.lock().unwrap().clone();
     let routing = requests
         .iter()
         .filter(|request| last_user_text(request).contains(ROUTING_OPENING))
@@ -521,7 +637,7 @@ async fn run_case() -> Result<()> {
     assert_eq!(restored["defaultThreadId"], thread["defaultThreadId"]);
 
     // The lane took the starter and the preview the provider asked for.
-    assert!(workspace.join("sites/laptops/index.html").is_file());
+    assert!(space.workspace.join("sites/laptops/index.html").is_file());
     let outputs = command_outputs(hand_back[2]);
     assert!(
         outputs[0].contains("starter") && outputs[0].contains("compare"),
@@ -546,11 +662,100 @@ async fn run_case() -> Result<()> {
         .map(|call| call["phase"].as_str().unwrap_or_default().to_string())
         .collect::<Vec<_>>();
     assert_eq!(phases, ["main"], "no routing call");
+    Ok(())
+}
 
-    drop(settings);
-    drop(proxy_guard);
-    drop(stub_guard);
-    proxy_task.await??;
-    stub_task.await??;
+/// The routing step sent the person's message straight to the browser, so the chat has no
+/// building thread: the hand-back starts it, and nothing in its thread read a skill before. It
+/// reads the page skill, with its card step and its reply rule, because the person asked for a
+/// page; it builds with the starter, posts the card and names no file. Nothing tells it that it
+/// cannot open the browser.
+async fn as_the_chats_first_building_turn(space: &Space<'_>) -> Result<()> {
+    let mut record = hand_back_record();
+    // A routed card's task is the person's own words, and the controller gives the build the
+    // message's words as the person's request.
+    record["request"] = json!(PERSON_REQUEST);
+    record["personRequest"] = json!(PERSON_REQUEST);
+    let built = space
+        .run(
+            "the hand-back",
+            job(
+                space.project_id,
+                Uuid::new_v4(),
+                HAND_BACK_PROMPT,
+                json!({"execution_mode":"apply","browserHandBack":record}),
+            ),
+        )
+        .await?;
+
+    let hand_back = space.hand_back_requests();
+    // A new thread: its first request carries no earlier turn of the chat, and no skill was
+    // selected in it before this turn's own.
+    let first = hand_back.first().context("the hand-back's first request")?;
+    assert!(
+        first["input"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .all(|item| item["role"] != "assistant" && item["type"] != "function_call"),
+        "{first}"
+    );
+    assert_eq!(
+        input_text(first)
+            .matches("## Persistent context tree (selected)")
+            .count(),
+        1,
+        "{first}"
+    );
+
+    // Its skills follow the person's request: the page skill is in its selected tree and its
+    // snapshot, with the card step and the reply rule.
+    let prompt = last_user_text(first);
+    let tree = prompt
+        .split_once("## Persistent context tree (selected)\n")
+        .and_then(|(_, rest)| rest.split("\n## ").next())
+        .context("the selected tree")?;
+    assert!(tree.contains("instafy-interactive-artifacts"), "{tree}");
+    assert!(prompt.contains(card_step()), "{prompt}");
+    assert!(
+        prompt.contains(skill_section(PAGE_SKILL, "## 4. Reply")),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(&format!(
+            "The person's request, which went straight to Instafy's browser:\n{PERSON_REQUEST}\n"
+        )),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("cannot open the browser"), "{prompt}");
+    assert!(prompt.contains(WRITE_LANE), "{prompt}");
+    assert!(prompt.contains(NO_ACTIONS), "{prompt}");
+
+    // Its reply names no file: the card shows the page. It built with the starter and posted
+    // the card from the site's folder.
+    for path in ["sites/", "index.html", ".html"] {
+        assert!(!built.summary.contains(path), "{path}: {}", built.summary);
+    }
+    assert_eq!(built.summary, BUILT);
+    assert_eq!(
+        hand_back.len(),
+        3,
+        "the starter, the preview, and the reply"
+    );
+    let outputs = command_outputs(&hand_back[2]);
+    assert!(
+        outputs[0].contains("starter") && outputs[0].contains("compare"),
+        "{outputs:?}"
+    );
+    assert!(outputs[1].contains("live"), "{outputs:?}");
+    assert!(space.workspace.join("sites/laptops/index.html").is_file());
+    assert!(
+        built
+            .provider_conversation_state
+            .as_ref()
+            .is_some_and(|thread| thread["defaultThreadId"].is_string()),
+        "{:?}",
+        built.provider_conversation_state
+    );
     Ok(())
 }

@@ -165,9 +165,10 @@ const FRONTEND_PREVIEWS_TEMPLATE: &str = include_str!(concat!(
 // v11 the one from before the card showed a picture and a summary of the site,
 // v12 the one that had the reply report exit codes and a stopped site's process,
 // v13 the one from before `instafy preview open --start` picked the site's port, which
-// sent the person to the card and stopped a site with `kill`, and v14 the one that had
+// sent the person to the card and stopped a site with `kill`, v14 the one that had
 // a reply say a check loaded nothing ("nothing was checked; say so"), not that nobody
-// has looked at the page yet. A
+// has looked at the page yet, and v15 the one that did not say a card's line comes from
+// what its page shows. A
 // workspace still holding an unedited earlier bundled copy of this skill,
 // browser automation or skill import compat is upgraded; an edited one is kept.
 const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
@@ -185,6 +186,7 @@ const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
     include_str!("legacy/frontend-previews-v12.md"),
     include_str!("legacy/frontend-previews-v13.md"),
     include_str!("legacy/frontend-previews-v14.md"),
+    include_str!("legacy/frontend-previews-v15.md"),
 ];
 /// What a previewed site asks Studio for (the person's location, Present and
 /// Follow), read only when a site needs it.
@@ -2933,6 +2935,42 @@ mod tests {
         assert!(FRONTEND_PREVIEWS_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
         let previous = include_str!("legacy/frontend-previews-v14.md");
         assert!(previous.contains("means nothing was checked; say so."));
+        assert!(LEGACY_FRONTEND_PREVIEWS_TEMPLATES.contains(&previous));
+        let workspace = tempdir().expect("workspace tempdir");
+        ensure_project_memory_scaffold(workspace.path());
+        let path = workspace.path().join(FRONTEND_PREVIEWS_RELATIVE_PATH);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            FRONTEND_PREVIEWS_TEMPLATE
+        );
+    }
+
+    /// With no `--summary`, a card's line under its title is the page's own
+    /// `<meta name="description">`. A turn wrote that description in the same edit as the page,
+    /// from what the person asked for: the card said the page had the hours and a verified
+    /// route, while its page said the hours were not checked and no route was confirmed. The
+    /// description is written after the page, from what the page shows. The copy from before is
+    /// upgraded.
+    #[test]
+    fn frontend_previews_has_a_cards_line_say_only_what_its_page_shows() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let skill = flat(FRONTEND_PREVIEWS_TEMPLATE);
+        assert!(
+            skill.contains(
+                "Without it the card shows the page's own `<meta name=\"description\">`: write it after the page, from what the page shows (\"Not checked\" stays not checked)."
+            ),
+            "{skill}"
+        );
+        assert!(FRONTEND_PREVIEWS_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+        let previous = include_str!("legacy/frontend-previews-v15.md");
+        assert!(
+            previous.contains(
+                "Without it the card shows the page's own `<meta name=\"description\">`.\n"
+            )
+        );
+        assert!(!previous.contains("from what the page shows"));
         assert!(LEGACY_FRONTEND_PREVIEWS_TEMPLATES.contains(&previous));
         let workspace = tempdir().expect("workspace tempdir");
         ensure_project_memory_scaffold(workspace.path());
