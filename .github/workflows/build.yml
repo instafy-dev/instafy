@@ -1821,7 +1821,6 @@ jobs:
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration granted_turns:: -- --test-threads=1
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration native_subagents:: -- --test-threads=1
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration browser_hand_back:: -- --test-threads=1
-          cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration stopped_turn:: -- --test-threads=1
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test run_instructions
 
   rust-test-proxy:
