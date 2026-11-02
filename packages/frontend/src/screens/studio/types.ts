@@ -81,10 +81,11 @@ export interface ChatMessageCommitRange {
 // Why the run that produced a message's file changes left them out of the
 // space's saved history, from the runtime's origin/apply artifact:
 // "save_failed" when the save ran and failed, "auto_save_off" when saving
-// was off so no save ran. Absent when the save worked (a partial save is
-// reported per file instead), was never attempted, or the files went into a
-// Desktop folder on the user's own disk.
-export type ChatMessageUnsavedReason = "save_failed" | "auto_save_off";
+// was off so no save ran; and "stopped_before_save" when the person stopped
+// the turn before its save, from the stopped turn's report. Absent when the
+// save worked (a partial save is reported per file instead), was never
+// attempted, or the files went into a Desktop folder on the user's own disk.
+export type ChatMessageUnsavedReason = "save_failed" | "auto_save_off" | "stopped_before_save";
 
 export interface ChatMessage {
   id: string;

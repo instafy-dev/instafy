@@ -46,6 +46,8 @@ use crate::workspace;
 
 #[path = "agent/planning_receipts.rs"]
 mod planning_receipts;
+#[path = "agent/stopped_turn.rs"]
+mod stopped_turn;
 
 const AGENT_CONVERSATION_HISTORY_LIMIT: i64 = 80;
 /// How many of a conversation's latest skill setup openers a job carries. A
@@ -307,6 +309,7 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/agent/heartbeat", post(agent_heartbeat))
         .route("/agent/message", post(agent_message))
         .route("/agent/complete", post(agent_complete))
+        .route("/agent/stopped", post(stopped_turn::agent_stopped))
         .route(
             "/agent/plan-groups/:group_id/status",
             get(agent_plan_group_status),
