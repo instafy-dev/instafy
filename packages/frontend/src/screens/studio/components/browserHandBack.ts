@@ -27,6 +27,16 @@ export const BROWSER_HAND_BACK_CLAIM_KEY = "continuesFromBrowserJob";
 export const BROWSER_HAND_BACK_RECORD_KEY = "browserHandBack";
 /** What the hand-back turn is asked; the findings come from the controller. */
 export const BROWSER_HAND_BACK_PROMPT = "Continue building with what the browser turn found.";
+/**
+ * The runtime's Details note on a browser turn that carried on a card the
+ * routing step posted for the person's own message, opened no page, and asked
+ * Octo to make what the message asks: a browser turn cannot make it. The
+ * controller hands the message itself to the building turn as soon as that
+ * turn ends (runtime-controller `browser_hand_back::hand_back_build_request`),
+ * so Studio sends no hand-back for it (it reads no page); the chat shows the
+ * person's message and then the building turn (routedBrowserFold.ts).
+ */
+export const BROWSER_BUILD_REQUEST_NOTE_KEY = "browserBuildRequest";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

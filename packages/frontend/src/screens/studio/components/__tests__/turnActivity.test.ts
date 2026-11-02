@@ -1007,6 +1007,15 @@ describe("Details notes", () => {
     const listedFindings = { ...findings, metadata: { ...findings.metadata, details: { kind: "agent_message", browserFindings: { pages: 2, pagesRead: 2 } } } };
     const list = note('[{"url":"https://a.example/","stopped":"login"}]');
     expect(listed([request, listedFindings, list])).toEqual([]);
+    // A browser turn that handed the person's message to the building turn:
+    // the building turn answers, and its note is no step of the person's.
+    const buildRequest = note("This needs no website: Octo makes it in the chat.", "status");
+    const handedOver = {
+      ...buildRequest,
+      metadata: { ...buildRequest.metadata, details: { kind: "agent_message", browserBuildRequest: { version: 1 } } },
+    };
+    expect(listed([buildRequest])).toEqual(["This needs no website: Octo makes it in the chat."]);
+    expect(listed([handedOver])).toEqual([]);
     // Words that mention braces are still words.
     expect(listed([note("Kept the {n} placeholder out of the title.")])).toEqual(["Kept the {n} placeholder out of the title."]);
   });

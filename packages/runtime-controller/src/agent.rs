@@ -3922,6 +3922,21 @@ pub(crate) async fn agent_complete(
     // The settlement takes its own connections.
     drop(connection);
 
+    // A message the routing step sent straight to the browser, whose browser
+    // turn asked Octo to make it, goes to the building turn now, in its
+    // person's name and ahead of any send they queued meanwhile
+    // (crate::browser_hand_back::hand_back_build_request).
+    if let (Some(conversation_id), "success") = (run_conversation_id, run_status) {
+        crate::browser_hand_back::hand_back_build_request(
+            &state,
+            &project_id,
+            &conversation_id,
+            &job_uuid,
+            &job_payload,
+        )
+        .await;
+    }
+
     // The conversation's next queued send goes now, behind the reply: its
     // dispatch reserves its own credits, so it does not wait for this turn's
     // billing, and a send typed meanwhile cannot overtake it. A plan
