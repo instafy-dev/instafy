@@ -90,6 +90,7 @@ mod skill_routing;
 #[cfg(test)]
 mod skill_routing_eval_tests;
 mod skills;
+pub(crate) mod stopped_turn;
 mod turn_baseline;
 mod turn_continuation;
 pub(crate) mod user_input_request;
@@ -6729,6 +6730,7 @@ impl JobProcessor {
         }
         let task_usage = TaskUsage::default();
         let turn_files = turn_continuation::TurnFiles::for_job(job);
+        let turn_start = stopped_turn::TurnStart::default();
         let result = self
             .run_apply_job_observed(
                 registration,
@@ -6739,9 +6741,13 @@ impl JobProcessor {
                 active_turn_input,
                 &task_usage,
                 &turn_files,
+                &turn_start,
             )
             .await;
         let result = turn_continuation::attach_turn_records(result, &turn_files);
+        // A turn that lost its lease keeps what it already changed in its
+        // folder: the changes go with the error, for the job loop's report.
+        let result = turn_start.attach_to_lost_lease(result).await;
         // The job ends here, unless it lost its lease and a later lease may
         // resume it, or its turn ran out of time and a new job continues it:
         // only then is the record of how its turn began kept.
@@ -6766,6 +6772,7 @@ impl JobProcessor {
         active_turn_input: Option<ActiveTurnInputReceiver>,
         task_usage: &TaskUsage,
         turn_files: &turn_continuation::TurnFiles,
+        turn_start: &stopped_turn::TurnStart,
     ) -> Result<JobExecution> {
         let proxy_envelope = job.proxy.as_ref().or(registration.proxy.as_ref());
 
@@ -7632,6 +7639,14 @@ impl JobProcessor {
                     status,
                 )
             });
+        // Should the turn be stopped, what it changed counts from here.
+        if records_workspace_change_receipts
+            && let Some(status) = earlier_attempt_status
+                .as_ref()
+                .or(git_status_before.as_ref())
+        {
+            turn_start.record(&workspace_dir, status);
+        }
         let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
         let shared_browser_action_log_before =
             explicit_shared_browser_execution.then(crate::shared_browser::action_log_len);
@@ -19108,56 +19123,7 @@ fn build_codex_artifacts(output: &CodexRunOutput, outcome: &CodexOutcome) -> Vec
         .files
         .iter()
         .chain(outcome.read_files.iter())
-        .map(|file| {
-            let mut map = JsonMap::new();
-            map.insert("path".to_string(), JsonValue::String(file.path.clone()));
-            map.insert(
-                "workspacePath".to_string(),
-                JsonValue::String(file.workspace_path.clone()),
-            );
-            if let Some(label) = file.label.as_ref() {
-                map.insert("label".to_string(), JsonValue::String(label.clone()));
-            }
-            if let Some(description) = file.description.as_ref() {
-                map.insert(
-                    "description".to_string(),
-                    JsonValue::String(description.clone()),
-                );
-            }
-            if let Some(mime_type) = file.mime_type.as_ref() {
-                map.insert("mimeType".to_string(), JsonValue::String(mime_type.clone()));
-            }
-            if let Some(change) = file.change.as_ref() {
-                map.insert("change".to_string(), change.to_json());
-                let change_type = match &change.kind {
-                    FileChangeKind::Created => "created",
-                    FileChangeKind::Deleted => "deleted",
-                    FileChangeKind::Changed => "changed",
-                    FileChangeKind::Read => "read",
-                    FileChangeKind::Other(value) => value.as_str(),
-                };
-                map.insert(
-                    "changeType".to_string(),
-                    JsonValue::String(change_type.to_string()),
-                );
-                if !change.lines.is_empty() {
-                    let line_values: Vec<JsonValue> = change
-                        .lines
-                        .iter()
-                        .map(|range| {
-                            let mut range_map = JsonMap::new();
-                            range_map
-                                .insert("from".to_string(), JsonValue::from(range.from as u64));
-                            range_map.insert("to".to_string(), JsonValue::from(range.to as u64));
-                            JsonValue::Object(range_map)
-                        })
-                        .collect();
-                    map.insert("changeLines".to_string(), JsonValue::Array(line_values));
-                }
-            }
-            map.insert("source".to_string(), JsonValue::String("workspace".into()));
-            JsonValue::Object(map)
-        })
+        .map(apply_files_entry)
         .collect();
 
     let mut artifact_map = JsonMap::new();
@@ -19177,6 +19143,58 @@ fn build_codex_artifacts(output: &CodexRunOutput, outcome: &CodexOutcome) -> Vec
     artifacts.push(JsonValue::Object(artifact_map));
 
     artifacts
+}
+
+/// One file of a turn's `apply/files` artifact, as Studio's file list and
+/// Undo read it.
+fn apply_files_entry(file: &CodexFileDescriptor) -> JsonValue {
+    let mut map = JsonMap::new();
+    map.insert("path".to_string(), JsonValue::String(file.path.clone()));
+    map.insert(
+        "workspacePath".to_string(),
+        JsonValue::String(file.workspace_path.clone()),
+    );
+    if let Some(label) = file.label.as_ref() {
+        map.insert("label".to_string(), JsonValue::String(label.clone()));
+    }
+    if let Some(description) = file.description.as_ref() {
+        map.insert(
+            "description".to_string(),
+            JsonValue::String(description.clone()),
+        );
+    }
+    if let Some(mime_type) = file.mime_type.as_ref() {
+        map.insert("mimeType".to_string(), JsonValue::String(mime_type.clone()));
+    }
+    if let Some(change) = file.change.as_ref() {
+        map.insert("change".to_string(), change.to_json());
+        let change_type = match &change.kind {
+            FileChangeKind::Created => "created",
+            FileChangeKind::Deleted => "deleted",
+            FileChangeKind::Changed => "changed",
+            FileChangeKind::Read => "read",
+            FileChangeKind::Other(value) => value.as_str(),
+        };
+        map.insert(
+            "changeType".to_string(),
+            JsonValue::String(change_type.to_string()),
+        );
+        if !change.lines.is_empty() {
+            let line_values: Vec<JsonValue> = change
+                .lines
+                .iter()
+                .map(|range| {
+                    let mut range_map = JsonMap::new();
+                    range_map.insert("from".to_string(), JsonValue::from(range.from as u64));
+                    range_map.insert("to".to_string(), JsonValue::from(range.to as u64));
+                    JsonValue::Object(range_map)
+                })
+                .collect();
+            map.insert("changeLines".to_string(), JsonValue::Array(line_values));
+        }
+    }
+    map.insert("source".to_string(), JsonValue::String("workspace".into()));
+    JsonValue::Object(map)
 }
 
 fn build_codex_run_log_artifact(

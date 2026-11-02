@@ -1168,6 +1168,32 @@ impl ControllerClient {
             .await
     }
 
+    /// The one end report of a job whose turn was stopped: the step that
+    /// names what the turn changed before it learned of the stop, and the
+    /// files themselves, as a finished turn's reply lists them. The controller
+    /// records them on the stopped turn, and nothing else; it turns down a job
+    /// it did not cancel.
+    pub async fn report_stopped_turn(
+        &self,
+        registration: &Registration,
+        job_id: Uuid,
+        content: &str,
+        message_type: &str,
+        metadata: &JsonValue,
+        artifacts: &[JsonValue],
+    ) -> Result<()> {
+        let url = self.base_url.join("/agent/stopped")?;
+        let payload = json!({
+            "job_id": job_id,
+            "content": truncate_agent_payload_text(content, MAX_AGENT_MESSAGE_CONTENT_CHARS),
+            "message_type": message_type,
+            "metadata": compact_agent_payload_json(metadata, 0),
+            "artifacts": compact_completion_artifacts(artifacts),
+        });
+        self.post_agent(url, &self.bearer_for_agent(registration), payload)
+            .await
+    }
+
     fn absolute_url(&self, path: &str) -> Result<Url> {
         if let Ok(url) = Url::parse(path) {
             return Ok(url);

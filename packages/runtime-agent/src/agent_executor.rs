@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::controller::{ControllerClient, LeaseJob, Registration};
 use crate::job_cancel::JobCancelSignal;
 use crate::jobs::rolling_saves;
+use crate::jobs::stopped_turn::StoppedTurnChanges;
 use crate::jobs::{JobExecution, JobMessage, JobProcessor, JobProgress};
 use crate::origin::LocalOriginSync;
 
@@ -211,8 +212,12 @@ impl AgentExecutor {
         lease_lost_signal: Option<JobCancelSignal>,
         active_turn_input: Option<ActiveTurnInputReceiver>,
     ) -> Result<JobExecution> {
-        let (progress_tx, progress_status, progress_task) =
-            spawn_progress_dispatch(client, registration, job.id, lease_lost_signal.clone());
+        let (progress_tx, progress_status, progress_task) = spawn_progress_dispatch(
+            client.clone(),
+            registration,
+            job.id,
+            lease_lost_signal.clone(),
+        );
         let progress_handle = JobProgress {
             sender: progress_tx.clone(),
             status: progress_status,
@@ -240,6 +245,17 @@ impl AgentExecutor {
         }
 
         finish_progress_dispatch(progress_tx, progress_task, job.id).await;
+        // A turn that lost its lease sends no completion. What it already
+        // changed goes in its one end report, once every step it streamed
+        // has reached the controller, which leaves out of the report what
+        // those steps already show.
+        if let Err(error) = &result
+            && let Some(changes) = StoppedTurnChanges::of_lost_lease(error)
+        {
+            self.processor
+                .report_stopped_turn(&client, registration, job, changes)
+                .await;
+        }
         result
     }
 

@@ -56,6 +56,9 @@ mod native_subagents;
 #[path = "proxy_integration/proxy_stream.rs"]
 mod proxy_stream;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "proxy_integration/stopped_turn.rs"]
+mod stopped_turn;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "proxy_integration/turn_wrap_up.rs"]
 mod turn_wrap_up;
 

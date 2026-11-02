@@ -303,7 +303,15 @@ as present) fails the confirmation. A
 passed heartbeat deadline is diagnostic, not proof that execution stopped, so
 expired, unreadable, or malformed marker state remains agent-owned and
 fail-closed. A heartbeat write failure, lease loss, external cancellation, or
-run deadline enters the same bounded cleanup supervisor. Codex gets a fixed
+run deadline enters the same bounded cleanup supervisor. Once the run is
+cancelled (a Stop its runtime learned of, or its deadline), the guard rewrites
+the marker at once with a deadline that has passed: the origin still keeps
+people out of the browser, and the browser tools refuse every later step of
+the run before it acts (`approval_authority_revoked`), so a step Codex sends
+while it shuts down does nothing. The runtime learns of a Stop from the job's
+next heartbeat, sent each second, or from a report the controller refuses: a
+step sent in that second still acts, as any step sent before the press does.
+Codex gets a fixed
 eight-second confirmed-shutdown window inside a ten-second outer drain cap; if
 it stalls, panics, loses an MCP startup race, or cannot prove child-process
 exit, the guard leaves authority in place and recycles the runtime. Heartbeat
