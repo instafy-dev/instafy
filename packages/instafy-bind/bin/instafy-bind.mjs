@@ -17,6 +17,7 @@ import { envNameRefusal } from "../src/executors/script.mjs";
 import { DEFAULT_AGENT_BUDGET_PER_HOUR } from "../src/budget.mjs";
 import { handlerHash, readTried, tryIntent } from "../src/try.mjs";
 import { checkReport } from "../src/check.mjs";
+import { cardCommand, inSpace, previewShows, shellWord } from "../src/preview-host.mjs";
 
 const HELP = `instafy-bind: a website plus a generic backend that turns clicks into typed intents.
 
@@ -57,14 +58,16 @@ serve      Serve the site (or every subfolder with a bound.json) with the binder
 init       Write a starter bound.json, index.html and handlers/hello.mjs. --starter <name>: a themed page instead,
            with theme.css and site.js (compare 2-8 options; ranked a top-N; timeline days or steps in time;
            checklist ticks; blank anything else). You design the content in data.json and app.js. Existing
-           files are kept; --force overwrites them.
+           files are kept; --force overwrites them. In a space, its next step ends with the command that serves
+           the page and posts its card in Studio.
 check      Does the site show every item the request named (each product, stop or entry)? Reads the text of its
            HTML pages and every value in its data files (data.json, data/**/*.json), and lists the items it does
            not show. On a page of options (the compare and ranked starters' data.json) it also lists values that
            only say nothing ("—", "n/a"), values without the page and day they were read, and a filter that
            would count a row whose value is unknown; and it notes the rows a filter lists apart. Exit 1 when an
            item is missing or a value needs fixing, 2 when there is nothing to check. Items: --expect, plus an
-           "expect" array in data.json. Run it before telling anyone the page is done.
+           "expect" array in data.json. Run it before telling anyone the page is done. In a space, while no
+           preview shows the site, a pass ends with the command that serves it and posts its card.
 command    Push a command (select, highlight, toast, reload) to every open viewer. Uses the
            admin token in .bind/admin-token.
 confirm    Approve (or --no: decline) jobs waiting for confirmation.
@@ -344,6 +347,19 @@ async function serve(dir, flags) {
   process.on("SIGTERM", stop);
 }
 
+/** The command that serves the site in `dir` and posts its card, while no preview shows it: in a space's workspace, for
+ *  a folder `serve` shows as one site (not a folder of sites, nor a folder with no page). Otherwise null. */
+function cardStep(dir) {
+  if (!inSpace(dir)) return null;
+  let sites = [];
+  try {
+    sites = discoverSites(dir, { plain: true });
+  } catch {
+    return null;
+  }
+  return sites.length === 1 && sites[0].prefix === "" && !previewShows(dir) ? cardCommand(dir) : null;
+}
+
 /** The `instafy preview open` command that shows one site of this binder in Studio's preview card. */
 function previewCommand(port, site) {
   // Printed for a shell: keep the title inside double quotes without anything the shell would expand.
@@ -551,7 +567,14 @@ async function main() {
       }
       for (const file of result.written) process.stdout.write(`wrote ${path.join(rest[0], file)}\n`);
       for (const file of result.skipped) process.stdout.write(`kept  ${path.join(rest[0], file)} (exists; --force overwrites)\n`);
-      if (flags.starter) process.stdout.write(`next: put the real content in ${path.join(rest[0], flags.starter === "blank" ? "app.js" : "data.json")}, then instafy-bind serve ${rest[0]}\n`);
+      // In a space the page ends with its card, posted by the command that also serves it; anywhere else the binder
+      // runs on its own, and serving the site is the next step.
+      const card = inSpace(rest[0]) ? cardCommand(rest[0]) : null;
+      const content = flags.starter ? path.join(rest[0], flags.starter === "blank" ? "app.js" : "data.json") : null;
+      if (card && !content) process.stdout.write(`next: post its card: ${card}\n`);
+      else if (card && flags.starter === "blank") process.stdout.write(`next: put the real content in ${content}, then post its card: ${card}\n`);
+      else if (card) process.stdout.write(`next: put the real content in ${content}, check it (\`instafy bind check ${shellWord(rest[0])} --expect "<item>,<item>"\`), then post its card: ${card}\n`);
+      else if (content) process.stdout.write(`next: put the real content in ${content}, then instafy-bind serve ${rest[0]}\n`);
       else process.stdout.write(`next: instafy-bind serve ${rest[0]}   (add --dry-run to see agent prompts without an Instafy login)\n`);
       return;
     }
@@ -566,7 +589,7 @@ async function main() {
       if (!rest[0]) fail('usage: instafy-bind check <dir> --expect "<item>,<item>" [--json]', 64);
       let report;
       try {
-        report = checkReport(rest[0], flags.expect ?? [], { json: Boolean(flags.json) });
+        report = checkReport(rest[0], flags.expect ?? [], { json: Boolean(flags.json), card: cardStep(rest[0]) });
       } catch (error) {
         fail(error.message, 64);
       }

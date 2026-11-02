@@ -25,6 +25,15 @@
 //   `frame-ancestors 'self' <studio origin>` and the bind client trusts no other parent. The label is a bearer that
 //   also leaks in Origin headers, so without this any page that framed the preview URL could act as its host. A
 //   preview without a recorded Studio origin is still shown, but its page takes no host messages at all.
+//
+// The card. A page someone asked for ends with its card: run in the site's folder, `instafy preview open --start`
+// serves the site with `serve --preview`, keeps it serving after the turn and posts the card. So in a space `init`
+// names that command as its next step and a check that passes ends with it, until a preview shows the site. The
+// command serves a site only from inside the space's workspace (the CLI's resolveWorkspaceRoot: WORKSPACE_PROJECT_DIR,
+// else WORKSPACE_DIR/<space>); anywhere else the binder runs on its own and names no card. Whether a preview shows a
+// folder is read from the same state file: `instafy preview open` records with each preview the folder its site is
+// served from (`siteDir`, relative to the space's workspace), which the runtime also reads to take a card's picture
+// again after a turn changes that folder.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -111,4 +120,64 @@ export function previewTunnelReader(file = defaultPreviewStateFile()) {
     }
     return previews;
   };
+}
+
+const OPEN_CARD = "instafy preview open --title '<short title>' --serve-cmd 'instafy bind serve . --port {port} --preview' --start --json";
+
+const clean = (value) => (typeof value === "string" && value.trim() ? value.trim() : null);
+
+/** The folder's real path, or the path itself when it cannot be resolved. */
+function realOr(dir) {
+  try {
+    return fs.realpathSync(path.resolve(String(dir)));
+  } catch {
+    return path.resolve(String(dir));
+  }
+}
+
+/** A word the shell reads as it is: the text, or the text in single quotes. */
+export function shellWord(text) {
+  const word = String(text);
+  return /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`;
+}
+
+/** The card's command for the site in `dir`, said from where `init` or `check` ran: in a subshell, so a command chained
+ *  after it still runs here. The turn writes the title. */
+export function cardCommand(dir) {
+  const where = String(dir ?? ".");
+  return path.resolve(where) === path.resolve(".") ? OPEN_CARD : `(cd ${shellWord(where)} && ${OPEN_CARD})`;
+}
+
+/** Whether `dir` is in the space's workspace, where the card's command serves a site from. */
+export function inSpace(dir, env = process.env) {
+  const root = clean(env.WORKSPACE_PROJECT_DIR) ?? clean(env.WORKSPACE_DIR);
+  if (root === null) return false;
+  const rel = path.relative(realOr(root), realOr(dir));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+
+/** The workspace a preview's folder is relative to, as the CLI resolves it for that preview's space. */
+function workspaceOf(env, space) {
+  const project = clean(env.WORKSPACE_PROJECT_DIR);
+  if (project) return project;
+  const base = clean(env.WORKSPACE_DIR);
+  return base && typeof space === "string" && /^[\w-]+$/.test(space) ? path.join(base, space) : null;
+}
+
+/** Whether a preview the CLI opened on this machine shows the site in `dir`: one it recorded with that folder as the
+ *  folder its site is served from. */
+export function previewShows(dir, { env = process.env, file = defaultPreviewStateFile() } = {}) {
+  let previews;
+  try {
+    previews = JSON.parse(fs.readFileSync(file, "utf8"))?.previews;
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(previews)) return false;
+  const folder = realOr(dir);
+  return previews.some((entry) => {
+    if (!entry || typeof entry !== "object" || typeof entry.siteDir !== "string") return false;
+    const root = workspaceOf(env, entry.projectId);
+    return root !== null && realOr(path.resolve(root, entry.siteDir)) === folder;
+  });
 }
