@@ -1302,11 +1302,13 @@ pub fn browser_step_activity(step: &JsonValue) -> Option<JsonValue> {
 }
 
 /// A status message the runtime writes itself (never one the model wrote): saving the turn's
-/// changes and retrying a request.
+/// changes and sending the turn's request again. Codex sending a dropped stream again by itself
+/// (`codex_stream_retry`) has none: nothing says when the resent stream is back, so its words
+/// would stay on the line through the model's next pause.
 pub fn runtime_status_activity(kind: &str) -> Option<JsonValue> {
     let label = match kind {
         "workspace_commit" => &SAVING,
-        "codex_retry" | "codex_stream_retry" => &RETRYING,
+        "codex_retry" => &RETRYING,
         _ => return None,
     };
     activity_json(vec![Found::builtin(label, Some(1))])
@@ -1889,9 +1891,12 @@ mod tests {
             json!("Saving your changes")
         );
         assert_eq!(
-            runtime_status_activity("codex_stream_retry").unwrap()["live"],
+            runtime_status_activity("codex_retry").unwrap()["live"],
             json!("Trying again")
         );
+        // Codex sending a dropped stream again by itself: nothing says when it is back, so it
+        // has no words for the line.
+        assert_eq!(runtime_status_activity("codex_stream_retry"), None);
         assert_eq!(runtime_status_activity("agent_message"), None);
         let evidence_retry = evidence_retry_activity().unwrap();
         assert_eq!(evidence_retry["live"], json!("Working"));

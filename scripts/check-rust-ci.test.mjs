@@ -190,19 +190,19 @@ test('only self-hosted Rust children install the fixed missing native packages w
   for(const item of aggregates)assert.doesNotMatch(job(item.key),/apt-get|Install scoped Rust native prerequisites/u);
 });
 
-test('the full reviewed seven check and seventeen test command lines (not lanes) and working directories are hash-bound', () => {
+test('the full reviewed seven check and eighteen test command lines (not lanes) and working directories are hash-bound', () => {
   // Exact normalized command order + working-directory from build.yml at f20002b,
   // plus the reviewed runtime-agent proxy_retry_budget, provider_mcp and read-reference selectors,
   // the proxy_retry_budget runs for the own-AI default and gpt-5.5, and the runtime
   // provider core and service unit tests in the provider check, plus the inert
   // native_compaction selector for the real proxy's ChatGPT and API-key paths and
-  // the inert native_images, granted_turns, native_subagents, browser_hand_back and stopped_turn selectors and
+  // the inert native_images, granted_turns, native_subagents, browser_hand_back, stopped_turn and evidence_retry selectors and
   // the inert run_instructions target,
   // plus the complete tunnel-broker suite in its own lane.
   // Commands are literal steps, not a matrix/shell fragment that can drop a crate.
   for (const [list, stepName, hash, expectedCount] of [
     [checks, 'Check public Rust package', '7ab805f6d9f99e7d6cae9fd5ab924ebb4cc3612d07690f954330bbc0f6381608', 7],
-    [suites, 'Run database-free Rust test suite', '302292233be18d178f33f90e9e7cc45839ea133cb577080e5ce61094d4730ebd', 17],
+    [suites, 'Run database-free Rust test suite', 'f025f96897413764ebef1e3bdb17bdd0c556e232de84d3f5857ff35b4b1ef10a', 18],
   ]) {
     const inventory = list.flatMap(item => {
       const part = step(item.key, stepName);
@@ -221,7 +221,7 @@ test('the full reviewed seven check and seventeen test command lines (not lanes)
     assert.equal(inventory.length, expectedCount);
     assert.equal(createHash('sha256').update(JSON.stringify(inventory)).digest('hex'), hash);
   }
-  assert.equal(children.reduce((sum, item) => sum + (job(item.key).match(/^          cargo (?:check|test) /gmu) ?? []).length, 0), 22);
+  assert.equal(children.reduce((sum, item) => sum + (job(item.key).match(/^          cargo (?:check|test) /gmu) ?? []).length, 0), 23);
   // The whole tunnel-broker workspace (broker and its types crate), locked like its check lane.
   assert.match(step('rust-test-broker', 'Run database-free Rust test suite'),
     /run: \|\n          cargo test --locked --manifest-path packages\/tunnel-broker\/Cargo.toml\n/u);
@@ -234,6 +234,7 @@ test('the full reviewed seven check and seventeen test command lines (not lanes)
   assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration native_subagents:: -- --test-threads=1\n/u);
   assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration browser_hand_back:: -- --test-threads=1\n/u);
   assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration stopped_turn:: -- --test-threads=1\n/u);
+  assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration evidence_retry:: -- --test-threads=1\n/u);
   assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test run_instructions\n/u);
 });
 
@@ -280,6 +281,7 @@ test('actual runtime-agent Bash defaults only unset flags on self-hosted Linux a
     ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'native_subagents::', '--', '--test-threads=1'],
     ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'browser_hand_back::', '--', '--test-threads=1'],
     ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'stopped_turn::', '--', '--test-threads=1'],
+    ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'evidence_retry::', '--', '--test-threads=1'],
     ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'run_instructions'],
   ];
   const fixture = `cargo() { printf 'CALL\\0%s\\0%s\\0%s\\0' "\${RUSTFLAGS+x}" "\${RUSTFLAGS-}" "\${INSTAFY_TEST_CODEX_MODEL-}"; printf '%s\\0' "$@"; return "\${CARGO_FIXTURE_STATUS:-0}"; }\n`;
@@ -375,11 +377,11 @@ test('the restore-only mitigation preserves every other byte of the reviewed Bui
   // proxy_retry_budget, provider_mcp and read-reference selectors, the code-mode host build, the
   // per-model proxy_retry_budget runs, the runtime provider core and service unit
   // tests, CLI git wrapper suite, local author pseudonym key test and inert native
-  // compaction, granted turn, native subagent, browser hand-back and stopped turn selectors and run_instructions target, CLI preview check, bound-sites binder, web read (with its offline fixtures), preview picture and web search and link suites, and the tunnel
+  // compaction, granted turn, native subagent, browser hand-back, stopped turn and evidence retry selectors and run_instructions target, CLI preview check, bound-sites binder, web read (with its offline fixtures), preview picture and web search and link suites, and the tunnel
   // broker test lane with its Rust tests aggregate entry: retains all functional commands, aggregate
   // guards, routing, permissions and other jobs.
   assert.equal(createHash('sha256').update(normalized).digest('hex'),
-    'd58a4471499a632b97920f10d00839ece57e10f02f1f9806b7790865bd91e920');
+    '1894e10395d162ff5472c47a6034457ea8e4e498aede99c2453567c2a2b62b09');
 });
 
 test('actual inline runner qualification rejects wrong native identity, ambient private env and missing compilers', () => {

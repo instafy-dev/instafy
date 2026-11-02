@@ -10191,12 +10191,15 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 - Imported or nested repositories are ordinary directories unless the user explicitly asks to preserve nested Git metadata.\n\
                 - Keep the final summary short: what changed and important caveats.\n",
             );
-            // The replies guide the reply line names. Codex leaves the space's `AGENTS.md` out of
-            // a turn on a restored thread ("The previously provided AGENTS.md instructions no
-            // longer apply") and out of a required change's first attempt
-            // (`broad_contextual_instruction_suppression_reason`), so those turns are given its
-            // "Replies", as a browser turn on a restored thread is.
-            if (stateful_thread_restored || direct_workspace_file_change)
+            // The replies guide the reply line names. A turn that loads no memory snapshot (a
+            // required change, a lookup of another chat, a turn on a restored thread) also runs
+            // without the space's `AGENTS.md` (`broad_contextual_instruction_suppression_reason`;
+            // a restored thread is told "The previously provided AGENTS.md instructions no
+            // longer apply"), so it is given its "Replies", as a browser turn on a restored
+            // thread is.
+            if (stateful_thread_restored
+                || direct_workspace_file_change
+                || cross_chat_context_lookup)
                 && let Some(section) = pinned_replies_section(workspace_dir)
             {
                 append_prompt_section(
@@ -19930,9 +19933,11 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                 }
             }
             "stream.retry" => {
-                // Codex is retrying, and the turn may still recover. The Studio shows a
-                // "Retrying:" status as calm progress and keeps the cause as its detail; a
-                // failure that outlasts the retries still arrives as an error.
+                // Codex is sending a dropped stream again, and the turn may still recover. The
+                // status keeps the cause for the run's record but gives the turn's line no
+                // words: Codex sends nothing when the resent stream is back, so they would stay
+                // through the model's next pause. A failure that outlasts the retries still
+                // arrives as an error.
                 if let Some(reason) = map
                     .get("message")
                     .and_then(JsonValue::as_str)
@@ -19946,20 +19951,14 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                     if pushed_at_last_retry.is_some_and(|count| count != pushed.get()) {
                         retry_episode += 1;
                     }
-                    let mut metadata = json!({
-                        "kind": "codex_stream_retry",
-                        "event": event.clone(),
-                    });
-                    if let Some(activity) =
-                        activity_labels::runtime_status_activity("codex_stream_retry")
-                    {
-                        metadata["activity"] = activity;
-                    }
                     push_message(
                         format!("stream_retry::{retry_episode}::{reason}"),
                         format!("Retrying: {reason}"),
                         Some("status"),
-                        metadata,
+                        json!({
+                            "kind": "codex_stream_retry",
+                            "event": event.clone(),
+                        }),
                     );
                     pushed_at_last_retry = Some(pushed.get());
                 }
@@ -22456,8 +22455,9 @@ mod tests {
     /// command/status evidence if observed", and a hand-back replied "Built a
     /// responsive comparison page at `sites/framework-comparison/index.html`";
     /// a page turn said "The page is open in Studio" when only its card was
-    /// posted. A turn Codex gives no `AGENTS.md` (one on a restored thread, a
-    /// required change's first attempt) is given that section with the lane.
+    /// posted. A turn that is given no `AGENTS.md` (one on a restored thread, a
+    /// required change's first attempt, one that looks up another chat) is
+    /// given that section with the lane.
     #[test]
     fn a_file_changing_turn_replies_as_agents_md_says() {
         let tmp = tempdir().expect("temp dir");
@@ -22470,11 +22470,20 @@ mod tests {
         assert!(agents_doc[start..].contains(replies_rule));
         let restored_state =
             json!({"defaultThreadId":"existing-thread", "historyReplayRequired":false});
-        for (required, restored) in [(true, false), (false, true), (true, true), (false, false)] {
+        // (a required change, a restored thread, a lookup of another chat). A lookup's thread
+        // is never kept, so it always starts one.
+        for (required, restored, lookup) in [
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+            (false, false, false),
+            (false, false, true),
+            (true, false, true),
+        ] {
             let mut job = test_lease_job(Some("feature"), json!({ "metadata": {} }));
             job.project_id = Some(project_id);
             let mut preflight =
-                test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, false, false);
+                test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, lookup, false);
             preflight.workspace_file_change_requirement = if required {
                 WorkspaceFileChangeRequirement::Required
             } else {
@@ -22493,6 +22502,21 @@ mod tests {
                 ),
                 RuntimeFinalOutputMode::PlainTextWrite
             );
+            assert_eq!(job_requests_cross_chat_context_lookup(&job), lookup);
+            let provider_state = restored.then_some(&restored_state);
+            // Whether Codex leaves the space's `AGENTS.md` out of the turn.
+            let without_agents_md = broad_contextual_instruction_suppression_reason(
+                &job,
+                "Put the hours on a small page I can share.",
+                false,
+                provider_state,
+                ThreadLane::Building,
+                direct_write_broad_context_suppression_eligible(
+                    runtime_job_expectations(&job.payload),
+                    false,
+                ),
+            )
+            .is_some();
             let (prompt, _, metrics) = processor
                 .build_prompt_with_text(
                     &project_id,
@@ -22500,13 +22524,13 @@ mod tests {
                     tmp.path(),
                     "Put the hours on a small page I can share.",
                     true,
-                    restored.then_some(&restored_state),
+                    provider_state,
                     &[],
                     None,
                     None,
                 )
                 .expect("prompt should build");
-            let case = format!("required={required} restored={restored}");
+            let case = format!("required={required} restored={restored} lookup={lookup}");
             assert!(
                 prompt.contains("\nDirect workspace-change response contract:\n"),
                 "{case}"
@@ -22521,25 +22545,23 @@ mod tests {
             assert!(!prompt.contains("plain-text summary"), "{case}");
             assert!(!prompt.contains("command/status evidence"), "{case}");
             // Every such turn holds the section the line names: a conditional change on a new
-            // thread in its memory snapshot, the others given it with the lane.
+            // thread in its memory snapshot, the others given it with the lane, exactly when
+            // Codex leaves the file out.
             assert!(prompt.contains(replies_rule), "{case}");
             let pinned =
                 prompt.contains("From `AGENTS.md` (this thread may predate it):\n## Replies\n");
-            assert_eq!(pinned, required || restored, "{case}");
+            assert_eq!(pinned, without_agents_md, "{case}");
+            assert_eq!(pinned, required || restored || lookup, "{case}");
             assert_eq!(
                 metrics["promptSections"]["pinnedRepliesSection"]["chars"]
                     .as_u64()
                     .is_some_and(|chars| chars > 0),
-                required || restored,
+                pinned,
                 "{case}"
             );
             // Given with the lane, it is that section alone (a new thread's snapshot holds the
             // whole file).
-            assert_eq!(
-                prompt.contains("## Responsiveness"),
-                !(required || restored),
-                "{case}"
-            );
+            assert_eq!(prompt.contains("## Responsiveness"), !pinned, "{case}");
         }
         // The retry of a file-changing turn ends the same way.
         let retry =
@@ -35390,6 +35412,16 @@ mod tests {
                 .and_then(|metadata| metadata.get("kind"))
                 .and_then(JsonValue::as_str),
             Some("codex_stream_retry")
+        );
+        // It gives the turn's line no words. Codex sends nothing when the resent stream is back,
+        // so "Trying again…" stayed on the line through the model's next pause: 2 s over a 502
+        // the turn had already got past. The line keeps the turn's step instead.
+        assert_eq!(
+            retry
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("activity")),
+            None
         );
         assert!(
             messages

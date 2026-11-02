@@ -568,6 +568,63 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
     ).toEqual([retryAnswer]);
   });
 
+  // A local test: the proxy answered a request with a 502, Codex sent it
+  // again 192 ms later, the resent request answered 1.4 s after that and the
+  // turn's next step came 1.6 s later still. The line said "Trying again…"
+  // for 2 s over a turn that had picked up again. Nothing says when a resent
+  // stream is back, so the runtime gives Codex's own retry no words: the line
+  // keeps its step, then says Thinking… as after any pause.
+  it("says nothing of a dropped stream Codex picked up again by itself", async () => {
+    vi.useFakeTimers();
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    const shown: string[] = [];
+    const watch = async (ms: number) => {
+      for (let elapsed = 0; elapsed < ms; elapsed += 100) {
+        await act(async () => {
+          vi.advanceTimersByTime(100);
+        });
+        const text = activityLine()?.textContent ?? "";
+        if (shown.at(-1) !== text) {
+          shown.push(text);
+        }
+      }
+    };
+    const command = (id: string, script: string, status: string, timestamp: number) =>
+      agentUpdate(id, "command_execution", script, timestamp, {
+        status,
+        command: script,
+        ...(status === "completed" ? { exitCode: 0 } : {}),
+      });
+    await renderTurn([...earlierSteps(), command("read", "cat site/index.html", "in_progress", base + 3_000)]);
+    await watch(ACTIVITY_LABEL_HOLD_MS);
+    // As the runtime writes it: a status of its own, with no words for the line.
+    const streamRetry = agentUpdate(
+      "stream-retry",
+      "status",
+      "Retrying: unexpected status 502 Bad Gateway: The upstream request failed.",
+      base + 3_300,
+      {
+        kind: "codex_stream_retry",
+        event: { type: "stream.retry", message: "unexpected status 502 Bad Gateway: The upstream request failed." },
+      },
+    );
+    const pickedUp = [...earlierSteps(), command("read", "cat site/index.html", "completed", base + 3_100), streamRetry];
+    await renderTurn(pickedUp);
+    await watch(3_100);
+    await renderTurn([...pickedUp, command("next", "cat site/app.js", "in_progress", base + 6_400)]);
+    await watch(2_000);
+    expect(shown).toEqual(["Working…" + "Details", "Thinking…" + "Details", "Working…" + "Details"]);
+    // Nor is it a note in Details.
+    await act(async () => {
+      activityLine()?.click();
+    });
+    expect(container.querySelector('[data-testid="turn-activity-details"]')).not.toBeNull();
+    expect(container.textContent).not.toContain("Retrying");
+    expect(container.textContent).not.toContain("502");
+  });
+
   it("never turns a long reasoning title into the running line", async () => {
     const title =
       "Comparing the output schema of the export endpoint with the fields the importer expects";

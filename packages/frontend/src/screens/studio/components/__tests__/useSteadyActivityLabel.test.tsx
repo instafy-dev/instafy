@@ -4,7 +4,6 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ACTIVITY_LABEL_HOLD_MS,
-  RETRY_LABEL_DELAY_MS,
   THINKING_LABEL_DELAY_MS,
   useSteadyActivityLabel,
 } from "../useSteadyActivityLabel";
@@ -126,29 +125,6 @@ describe("useSteadyActivityLabel", () => {
       "Saving your changes…",
       "Opening the preview…",
     ]);
-  });
-
-  // A local test: a 502 from the proxy was picked up again in 192 ms,
-  // and the line said "Trying again…" for 2 s over it.
-  it("says nothing of a retry over within a second", async () => {
-    await render("Setting up the site…");
-    await wait(ACTIVITY_LABEL_HOLD_MS);
-    await render("Trying again…");
-    await wait(RETRY_LABEL_DELAY_MS - STEP_MS);
-    expect(line()).toBe("Setting up the site…");
-    await render("Editing files…");
-    await wait(5_000);
-    expect(shownLog.map((entry) => entry.text)).toEqual(["Setting up the site…", "Editing files…"]);
-  });
-
-  it("says Trying again once a retry has gone on for a second", async () => {
-    await render("Reading pages…");
-    await wait(ACTIVITY_LABEL_HOLD_MS);
-    await render("Trying again…");
-    await wait(RETRY_LABEL_DELAY_MS - 1);
-    expect(line()).toBe("Reading pages…");
-    await wait(1);
-    expect(line()).toBe("Trying again…");
   });
 
   it("says Thinking only after a pause with no step", async () => {
