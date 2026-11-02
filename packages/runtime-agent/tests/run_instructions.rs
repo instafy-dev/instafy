@@ -2619,6 +2619,8 @@ fn check(harness: &Harness) -> Result<()> {
     check_messages_the_browser_could_not_make(harness)?;
     // (xii) What a browser turn is told it can do.
     check_browser_turns_are_told_only_what_they_can_use(harness)?;
+    // (xiii) The tools a browser turn is given, by the names its run text gives them.
+    check_browser_turns_are_given_their_tools_by_name(harness)?;
     println!("every turn read its own run instructions");
     Ok(())
 }
@@ -2775,6 +2777,94 @@ fn check_browser_turns_go_on_past_a_page(harness: &Harness) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+/// Whether a request's tool list offers `name` in the namespace `namespace` (or as one tool named
+/// `<namespace>__<name>`), in `tools` or in code mode's `additional_tools`, and not deferred.
+fn offers_tool(request: &Value, namespace: &str, name: &str) -> bool {
+    let full = format!("{namespace}__{name}");
+    let lists = std::iter::once(&request["tools"]).chain(
+        request["input"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry["type"] == "additional_tools")
+            .map(|entry| &entry["tools"]),
+    );
+    lists
+        .flat_map(|tools| tools.as_array().into_iter().flatten())
+        .any(|tool| {
+            (tool["name"] == full.as_str() && tool["defer_loading"] != json!(true))
+                || (tool["name"] == namespace
+                    && tool["tools"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|nested| {
+                            nested["name"] == name && nested["defer_loading"] != json!(true)
+                        }))
+        })
+        || request.to_string().contains(&format!("### `{full}`"))
+}
+
+/// (xiii) Every Shared and Personal Browser turn: its browser's tools are in each of its
+/// requests, never deferred behind a tool search that a fresh browser turn's first step spent
+/// finding them on (a local test, Nov 2: four fresh browser turns of four), and its run text names
+/// them as the turn calls them: every tool the Shared Browser's run text lists is a tool its
+/// requests offer under that name, and the Personal Browser's `snapshot` too.
+fn check_browser_turns_are_given_their_tools_by_name(harness: &Harness) -> Result<()> {
+    let mut checked = 0;
+    for turn in thread_turns(harness) {
+        let server = match turn.lane {
+            Lane::Shared(_) => "instafy_shared_browser",
+            Lane::Personal => "instafy_personal_browser",
+            _ => continue,
+        };
+        let namespace = format!("mcp__{server}");
+        for (index, request) in sampling_requests(turn) {
+            let text = instructions_text(request);
+            let named = format!(
+                "MCP server, named `{namespace}__<name>` (a code cell calls `tools.{namespace}__snapshot({{}})`): "
+            );
+            let Some(listed) = text
+                .lines()
+                .find_map(|line| line.split_once(&named).map(|(_, tools)| tools))
+            else {
+                bail!(
+                    "{}#{index} is not told its tools as it calls them",
+                    turn.label
+                );
+            };
+            let tools: Vec<&str> = listed
+                .split('`')
+                .skip(1)
+                .step_by(2)
+                .take_while(|name| !name.contains(' '))
+                .collect();
+            ensure!(
+                tools.contains(&"snapshot") && tools.contains(&"navigate"),
+                "{}#{index}: {tools:?}",
+                turn.label
+            );
+            // The stub Personal Browser serves `snapshot` alone; the Shared Browser's own server
+            // serves every tool its run text lists.
+            let offered = if matches!(turn.lane, Lane::Shared(_)) {
+                tools.clone()
+            } else {
+                vec!["snapshot"]
+            };
+            for tool in offered {
+                ensure!(
+                    offers_tool(request, &namespace, tool),
+                    "{}#{index} does not offer {namespace}__{tool} in its tool list",
+                    turn.label
+                );
+            }
+            checked += 1;
+        }
+    }
+    ensure!(checked > 0, "no browser turn made a request");
     Ok(())
 }
 

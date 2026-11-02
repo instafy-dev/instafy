@@ -622,6 +622,37 @@ async fn personal_browser_mcp(
     Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response()
 }
 
+/// The Personal Browser's tools as a turn calls them, and its `snapshot` tool.
+const PERSONAL_BROWSER_NAMESPACE: &str = "mcp__instafy_personal_browser";
+const PERSONAL_BROWSER_SNAPSHOT_TOOL: &str = "mcp__instafy_personal_browser__snapshot";
+
+/// Whether a request's tool list offers `name` in the namespace `namespace`, or as one tool
+/// named `<namespace>__<name>`, in `tools` or in code mode's `additional_tools`.
+fn offers_namespaced_tool(request: &Value, namespace: &str, name: &str) -> bool {
+    let full = format!("{namespace}__{name}");
+    let lists = std::iter::once(&request["tools"]).chain(
+        request["input"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry["type"] == "additional_tools")
+            .map(|entry| &entry["tools"]),
+    );
+    lists
+        .flat_map(|tools| tools.as_array().into_iter().flatten())
+        .any(|tool| {
+            tool["name"] == full.as_str()
+                || (tool["name"] == namespace
+                    && tool["tools"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|nested| {
+                            nested["name"] == name && nested["defer_loading"] != json!(true)
+                        }))
+        })
+}
+
 /// Every tool name a request offers: top-level tools, code mode's `additional_tools`, and the
 /// nested tools a code mode `exec` description declares (as "### `name`" sections).
 fn offered_tool_names(request: &Value) -> Vec<String> {
@@ -1097,8 +1128,24 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
                 );
             }
         }
-        // Upstream defers MCP tools behind tool search (or code mode's `ALL_TOOLS`), so the
-        // request need not name `snapshot`; the turn must still have connected and listed it.
+        // The browser's own tool is in the turn's first request, by the name the run text gives
+        // it: declared in a code-mode turn's `exec` tool, or in the turn's tool list. Deferred
+        // behind tool search (or code mode's `ALL_TOOLS`), every fresh browser turn's first step
+        // looked it up.
+        let first = &requests[0];
+        let declared = format!("### `{PERSONAL_BROWSER_SNAPSHOT_TOOL}`");
+        assert!(
+            first.to_string().contains(&declared)
+                || offers_namespaced_tool(first, PERSONAL_BROWSER_NAMESPACE, "snapshot"),
+            "{scenario}: the first request does not offer {PERSONAL_BROWSER_SNAPSHOT_TOOL}: {:?}",
+            offered_tool_names(first)
+        );
+        assert!(
+            first.to_string().contains(&format!(
+                "a code cell calls `tools.{PERSONAL_BROWSER_SNAPSHOT_TOOL}({{}})`"
+            )),
+            "{scenario}: the run text does not name the tool as the turn calls it"
+        );
         let mcp_methods = state.mcp_methods.lock().unwrap();
         for method in ["initialize", "tools/list"] {
             assert!(

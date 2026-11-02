@@ -2943,7 +2943,9 @@ fn schema(value: JsonValue) -> Arc<JsonObject> {
     Arc::new(value.as_object().cloned().unwrap_or_default())
 }
 
-fn shared_browser_mcp_tools() -> Vec<Tool> {
+/// The tools the Shared Browser's MCP server lists, with the fields each one takes, as the turn's
+/// run text names them (`crate::codex`).
+pub(crate) fn shared_browser_mcp_tools() -> Vec<Tool> {
     let tab_id = json!({
         "type": "string",
         "minLength": 1,

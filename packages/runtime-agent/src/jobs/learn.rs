@@ -417,6 +417,11 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // own notes and what a browser script keeps in mind moved to
     // `references/learning-and-local-browsers.md`, so a browser turn carries the whole skill.
     include_str!("legacy/browser-automation-v24.md"),
+    // From before a failed tool call was never repeated the same way (it was retried once), a
+    // route was planned for the day and time the person travels, a page's links were printed
+    // with its text, and a message that carries on the chat's browser work went to the browser
+    // also when it needs what a page here says.
+    include_str!("legacy/browser-automation-v25.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,
@@ -466,6 +471,9 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     include_str!("legacy/web-research-v11.md"),
     // From before a count of the reviews found cited only those reviews.
     include_str!("legacy/web-research-v12.md"),
+    // From before it said that a browser turn's readers are its browser tools and the `instafy`
+    // commands are for building turns.
+    include_str!("legacy/web-research-v13.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

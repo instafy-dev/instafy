@@ -87,8 +87,8 @@ secrets), or `{"url", "stopped"}` (`login`, `captcha`, `paywall`, `blocked`,
 For every reader, browser or not:
 
 - Open an address the person, a skill or a search result gave, a link on a page
-  you read, or the home page of the official site the task is about. Never a
-  search engine or a guessed path.
+  you read (print a page's links with its text), or the home page of the
+  official site the task is about. Never a search engine or a guessed path.
 - A page that says it is missing ("not found", "are you lost?"): use that
   site's own search box or menu.
 - A page that fails (busy, blank, or an error page such as 504): open the
@@ -97,6 +97,8 @@ For every reader, browser or not:
 - A sight, stop, opening hours, price or route comes from its own page (the
   venue's, operator's or shop's; a route from the operator's journey planner,
   its stations chosen), not a listing or a kiosk page: those only lead to it.
+  Plan a route for the day and time the person travels (a daytime hour when
+  they gave none); say which day and time it is for.
 - Anything not read on a page this turn (from memory or a search result) says
   "not checked" next to it.
 - Comparing: list the models a page you read names, its menu included, then
@@ -132,7 +134,7 @@ the request, or end the turn and ask.
 - Prefer concrete action over narration. If the target and first cue are already known, keep pre-action commentary to one short line at most.
 - Use the browser capability actually exposed for this turn. Never fall through from an unavailable transport to a different one.
 - For Personal or Shared Browser, default to one browser-capable runtime per conversation.
-- Start with the exposed browser tool itself, not install checks (`node -v`, `npx playwright --version`, `npm i`), env or repo searches (`env | rg PLAYWRIGHT`, `command -v playwright`) or runtime introspection (`instafy runtime status`, `instafy --help`); report the tool's concrete error if provisioning failed.
+- Start with the exposed browser tool itself, not install checks (`node -v`, `npm i`), env or repo searches (`env | rg PLAYWRIGHT`) or runtime introspection (`instafy runtime status`); report the tool's concrete error if provisioning failed.
 - For requests like “open this page”, “read the title”, “click this button”, or “continue the current browser session”, the first executable step must target the page directly.
 - Do not reopen `INSTAFY.md`, `AGENTS.md`, or `.agents/skills/**` via shell before the first page action. Project memory and loaded learned blocks are already in context for this run.
 - If a learned block was loaded for this run, trust it first. Only reopen memory files after a concrete browser action failed and the missing cue is still unclear.
@@ -230,9 +232,9 @@ The high-level `instafy_shared_browser` MCP server is the only normal Shared
 Browser automation path. It attaches to provisioned headed Chromium, selects the
 focused page, bounds snapshot output, and emits cursor/ticker events. Do not
 replace it with shell commands, inline Node, Playwright, CDP, direct action-log
-writes, or a new browser process. If the tool returns an error, retry it at most
-once, then say in plain words what did not work: a failed page ends that page,
-not the task ("Finding a page" says what comes next).
+writes, or a new browser process. If the tool returns an error, don't repeat it
+the same way: a failed page ends that page, not the task ("Finding a page" says
+what comes next).
 
 ## Good outputs
 
@@ -242,9 +244,9 @@ not the task ("Finding a page" says what comes next).
 
 ## Routing preflight
 
-A routing step before Octo's turn can send the person's message straight to Instafy's browser, as its own words. That browser turn sees only those words and this chat's earlier browser turns.
+A routing step before Octo's turn can send the person's message straight to Instafy's browser. That browser turn sees only those words and this chat's earlier browser turns.
 
 - `browser`: the person names Instafy's browser ("in your browser"), the work happens on a website (open a site to use it, sign in, fill in or send a form, press its buttons, walk through its screens), or it carries on browser work this chat started, whether or not that found the answer.
 - `browser_then_build`: the same, and Octo then makes or changes something in this space (a page, a map, a table). So is research whose answer ends in a page (a comparison, prices, a route), from the first message. A request to make one with no site to use first ("on a map", "put this on a page") is `direct`.
-- Stay `direct`, even when the message names Instafy's browser, when the browser part needs what only this space or another chat holds (what a page, map or file here says, or "those" from a reply that was not the browser's): the building turn reads it and names it in a card. Also when the site runs in this space (a preview card), the person says not to use the browser, or it has attachments.
+- Stay `direct`, even when the message names Instafy's browser, when the browser part needs what only this space or another chat holds (what a page, map or file here says, or "those" from a reply that was not the browser's): the building turn reads it and names it in a card, unless the message carries on this chat's browser work: filling in, checking again or going on with that work is `browser_then_build`. Also when the site runs in this space (a preview card), the person says not to use the browser, or it has attachments.
 - Research whose answer is a reply (facts, a price, opening hours, reviews) stays `direct` when the message does not name the browser, unless it carries on this chat's browser work: the building turn reads first and opens the browser itself if a page needs it.
