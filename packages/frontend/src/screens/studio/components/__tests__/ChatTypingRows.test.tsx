@@ -16,7 +16,11 @@ import {
   resolveTranscriptTailKey,
   resolveTypingIndicatorState,
 } from "../typingIndicatorState";
-import { expectAiTile, expectCanonicalOctoCoin } from "../../../../components/__tests__/octoCoinExpectations";
+import {
+  expectAiTile,
+  expectCanonicalOctoCoin,
+  expectHatchling,
+} from "../../../../components/__tests__/octoCoinExpectations";
 import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
 
 // The face is Octo's tile (OctoCoin, docs/Brand.md): white with the shared
@@ -436,7 +440,110 @@ describe("ChatTypingRows", () => {
       expectAiTile(face.firstElementChild);
     }
     expectOctoCoinFace(faces[0]!.firstElementChild);
-    expect(faces[1]?.firstElementChild?.textContent).toBe("R");
+    // The reviewer wears its hatchling, still while Octo thinks beside it.
+    expect(expectHatchling(faces[1]?.firstElementChild)).toBe("3");
+    expect(faces[1]?.querySelector("[data-octo-motion]")).toBeNull();
+  });
+
+  it("draws each face once: two lanes of one persona fold into the count, apart by key", async () => {
+    // Two plans' reviewers wear one face; a third lane is Octo.
+    const reviewer = { handle: "reviewer", avatarSeed: "hatchling:3", displayName: "@reviewer", isThinking: true };
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await act(async () => {
+        root.render(
+          <ChatTypingRows
+            peerTypingLabel={null}
+            isAssistantTyping
+            isAssistantTypingCoveredByJobThreadPreview={false}
+            typingAgents={[
+              { ...reviewer, key: "handle:reviewer|hatchling:3|plan-a" },
+              { ...reviewer, key: "handle:reviewer|hatchling:3|plan-b" },
+              { key: "agent:octo-id", handle: "octo", id: "octo-id", avatarSeed: "octo", displayName: "Octo", isThinking: false },
+            ]}
+            hasMultipleTypingAgents
+            typingAgentHandle="reviewer"
+            typingAgentAvatarSeed="hatchling:3"
+            typingIndicatorState={{ phase: "thinking", label: null }}
+            typingStatusLabel="3 working"
+            typingStatusAriaLabel="@reviewer, @reviewer, Octo are working"
+            isThinkingLabelExpanded={false}
+            onToggleThinkingLabel={() => undefined}
+            latestDisplayedMessageId="message-1"
+            renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+          />,
+        );
+      });
+      const faces = Array.from(container.querySelectorAll('[data-testid="assistant-typing-stack-face"]'));
+      expect(faces).toHaveLength(2);
+      expect(expectHatchling(faces[0]?.firstElementChild)).toBe("3");
+      expectOctoCoinFace(faces[1]!.firstElementChild);
+      // The label still counts every lane.
+      expect(container.querySelector("[data-sweep-text]")?.textContent).toBe("3 working");
+      expect(consoleError.mock.calls.flat().join(" ")).not.toContain("same key");
+
+      // Two plans' reviewers wearing two faces are both drawn, each by its lane.
+      await act(async () => {
+        root.render(
+          <ChatTypingRows
+            peerTypingLabel={null}
+            isAssistantTyping
+            isAssistantTypingCoveredByJobThreadPreview={false}
+            typingAgents={[
+              { ...reviewer, key: "handle:reviewer|hatchling:3|plan-a" },
+              { ...reviewer, avatarSeed: "hatchling:5", key: "handle:reviewer|hatchling:5|plan-b" },
+            ]}
+            hasMultipleTypingAgents
+            typingAgentHandle="reviewer"
+            typingAgentAvatarSeed="hatchling:3"
+            typingIndicatorState={{ phase: "thinking", label: null }}
+            typingStatusLabel="2 working"
+            typingStatusAriaLabel="@reviewer, @reviewer are working"
+            isThinkingLabelExpanded={false}
+            onToggleThinkingLabel={() => undefined}
+            latestDisplayedMessageId="message-1"
+            renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+          />,
+        );
+      });
+      const twoFaces = Array.from(container.querySelectorAll('[data-testid="assistant-typing-stack-face"]'));
+      expect(twoFaces.map((slot) => expectHatchling(slot.firstElementChild))).toEqual(["3", "5"]);
+      expect(consoleError.mock.calls.flat().join(" ")).not.toContain("same key");
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("gives the single typing face its run's agent id, for its card and its speaker marker", async () => {
+    const renderAssistantAvatar = vi.fn(() => <span data-testid="assistant-avatar" />);
+    await act(async () => {
+      root.render(
+        <ChatTypingRows
+          peerTypingLabel={null}
+          isAssistantTyping
+          isAssistantTypingCoveredByJobThreadPreview={false}
+          typingAgents={[]}
+          hasMultipleTypingAgents={false}
+          typingAgentHandle="pia"
+          typingAgentAvatarSeed="hatchling:4"
+          typingAgentId="agent-pia"
+          typingIndicatorState={{ phase: "thinking", label: null }}
+          typingStatusLabel="Thinking…"
+          typingStatusAriaLabel="Pia is thinking"
+          isThinkingLabelExpanded={false}
+          onToggleThinkingLabel={() => undefined}
+          latestDisplayedMessageId="message-1"
+          renderAssistantAvatar={renderAssistantAvatar}
+        />,
+      );
+    });
+    expect(renderAssistantAvatar).toHaveBeenLastCalledWith(
+      null,
+      { handle: "pia", avatarSeed: "hatchling:4", id: "agent-pia" },
+      expect.anything(),
+    );
+    const marker = container.querySelector<HTMLElement>('[data-testid="chat-speaker-marker"]');
+    expect(marker?.dataset).toMatchObject({ agentHandle: "pia", agentAvatarSeed: "hatchling:4", agentId: "agent-pia" });
   });
 
   it("animates only the Octo run that is actually in progress in a multi-agent row", async () => {

@@ -1,13 +1,17 @@
 import type { ConversationState } from "../../../conversations/ConversationsProvider";
+import {
+  aiFaceIdentityFromMetadata,
+  aiFaceKey,
+  withSavedAgentFace,
+  type AiFaceIdentity,
+  type SavedAgentFace,
+} from "../../../utils/aiFace";
 import type { ChatMessage } from "../types";
 import { getMessageType } from "./chatMessageMetadata";
 import { isGenericProgressLabel } from "./threadPreviewHelpers";
 
-export type AgentThreadBranchParticipant = {
-  handle: string;
-  avatarSeed?: string | null;
-  avatarUrl?: string | null;
-};
+/** One AI in a thread, as its face resolves it (utils/aiFace.ts); the handle is normalized. */
+export type AgentThreadBranchParticipant = AiFaceIdentity & { handle: string };
 
 export type AgentThreadBranchRow = {
   threadLocalId: string;
@@ -130,37 +134,83 @@ export function shouldHideStandaloneConversationThreadPreview({
   return false;
 }
 
-function addParticipant(
-  participants: Map<string, AgentThreadBranchParticipant>,
-  handle: unknown,
-  options: { avatarSeed?: string | null; avatarUrl?: string | null } = {},
-) {
-  const normalized = normalizeHandle(handle);
-  if (!normalized || participants.has(normalized)) {
-    return;
+/**
+ * The agent an AI wrote a message as. Only an assistant row speaks for an
+ * AI: a person's own message can carry a client-supplied agent, and a
+ * runtime alert a person raised is theirs (chatAssistantIdentity.ts).
+ */
+function stampedAgent(message: ChatMessage): AgentThreadBranchParticipant | null {
+  if (message.role !== "assistant") {
+    return null;
   }
-  participants.set(normalized, {
-    handle: normalized,
-    avatarSeed: options.avatarSeed ?? normalized,
-    avatarUrl: options.avatarUrl ?? null,
-  });
+  const messageType = (getMessageType(message) ?? "").trim().toLowerCase();
+  if (messageType === "runtime_alert" && message.authorId?.trim()) {
+    return null;
+  }
+  const identity = aiFaceIdentityFromMetadata(message.metadata);
+  const handle = normalizeHandle(identity?.handle);
+  return identity && handle ? { ...identity, handle } : null;
 }
 
-function collectConversationParticipants(conversation: ConversationState): AgentThreadBranchParticipant[] {
-  const participants = new Map<string, AgentThreadBranchParticipant>();
-  addParticipant(participants, conversation.ownerAgent?.handle);
+/** The id of the viewer's own saved agent with this (normalized) handle, if any. */
+function savedAgentIdWithHandle(savedAgents: ReadonlyMap<string, SavedAgentFace>, handle: string): string | null {
+  for (const [agentId, agent] of savedAgents) {
+    if (normalizeHandle(agent.handle) === handle) {
+      return agentId;
+    }
+  }
+  return null;
+}
 
+function collectConversationParticipants(
+  conversation: ConversationState,
+  savedAgents: ReadonlyMap<string, SavedAgentFace>,
+): AgentThreadBranchParticipant[] {
   // Faces come only from the agent stamped on a message, never from @words in
   // its text: a person's mention is written @handle too, and so is a package
   // such as @types/node, and the stack draws every participant as an AI tile.
-  conversation.messages.forEach((message) => {
-    const metadata = isRecord(message.metadata) ? message.metadata : null;
-    const agent = metadata && isRecord(metadata.agent) ? metadata.agent : null;
-    addParticipant(participants, agent?.handle, {
-      avatarSeed: typeof agent?.avatarSeed === "string" ? agent.avatarSeed : null,
-      avatarUrl: typeof agent?.avatarUrl === "string" ? agent.avatarUrl : null,
-    });
-  });
+  const stamps = conversation.messages.flatMap((message) => stampedAgent(message) ?? []);
+  // One entry per AI, each drawn as the viewer's own saved agent's current
+  // profile where it is one.
+  const participants = new Map<string, AgentThreadBranchParticipant>();
+  const addParticipant = (key: string, participant: AgentThreadBranchParticipant) => {
+    if (!participants.has(key)) {
+      participants.set(key, { ...withSavedAgentFace(participant, savedAgents), handle: participant.handle });
+    }
+  };
+
+  // The owner goes first. The Studio names a thread's owner by its handle
+  // alone ({ id: null, handle }), so the owner's id is the one its first row
+  // with that handle carries. A row is the owner's when it carries the
+  // owner's id or, carrying none, the owner's handle; the owner wears its
+  // first such stamp. Until it has one it is known only by name: the viewer's
+  // own saved agent with that handle, else the hollow face (docs/Brand.md,
+  // "Octo's hatchlings"), unless it is Octo.
+  const ownerHandle = normalizeHandle(conversation.ownerAgent?.handle);
+  const ownerId =
+    conversation.ownerAgent?.id?.trim() ||
+    stamps.find((stamp) => stamp.handle === ownerHandle && stamp.agentId?.trim())?.agentId?.trim() ||
+    null;
+  const isOwnerStamp = (stamp: AgentThreadBranchParticipant) => {
+    const stampId = stamp.agentId?.trim();
+    return Boolean(ownerHandle) && (stampId ? stampId === ownerId : stamp.handle === ownerHandle);
+  };
+  if (ownerHandle) {
+    const ownerStamp = stamps.find(isOwnerStamp);
+    const savedOwnerId = ownerStamp || ownerId ? null : savedAgentIdWithHandle(savedAgents, ownerHandle);
+    addParticipant("owner", ownerStamp
+      ? { ...ownerStamp, agentId: ownerId ?? ownerStamp.agentId }
+      : savedOwnerId
+        ? { handle: ownerHandle, agentId: savedOwnerId }
+        : { handle: ownerHandle, agentId: ownerId, textOnly: true });
+  }
+  // Everyone else by agent id, else by handle and seed, so two helpers that
+  // share a handle but wear different faces stay two.
+  for (const stamp of stamps) {
+    if (!isOwnerStamp(stamp)) {
+      addParticipant(aiFaceKey(stamp), stamp);
+    }
+  }
 
   return Array.from(participants.values());
 }
@@ -168,9 +218,12 @@ function collectConversationParticipants(conversation: ConversationState): Agent
 export function buildAgentThreadBranchRows({
   message,
   conversations,
+  savedAgents = new Map(),
 }: {
   message: ChatMessage;
   conversations: ConversationState[];
+  /** The viewer's own saved agents by id (ViewerAgentsContext). */
+  savedAgents?: ReadonlyMap<string, SavedAgentFace>;
 }): AgentThreadBranchRow[] {
   const sources = [message, ...extractThreadMessages(message)];
   const references = sources.flatMap((source) => extractThreadReferencesFromText(source.content ?? ""));
@@ -189,7 +242,7 @@ export function buildAgentThreadBranchRows({
       title,
       hiddenActivityCount: countConversationActivity(thread.messages),
       isRunning: (thread.pendingRunIds?.length ?? 0) > 0 || (thread.awaitingLeaseRunIds?.length ?? 0) > 0,
-      participants: collectConversationParticipants(thread),
+      participants: collectConversationParticipants(thread, savedAgents),
     });
   });
 

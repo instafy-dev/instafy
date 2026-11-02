@@ -6,7 +6,7 @@
 // Crew colours are inline styles at the call sites (landingCrew.ts), never
 // classes, and so are the label colours that read on them.
 
-import { AI_TILE_CLASS, AI_TILE_SHAPE_CLASS } from "../../components/OctoCoin";
+import { AI_TILE_SHAPE_CLASS } from "../../components/OctoCoin";
 import {
   DARK_ACTIVE_BG_CLASS,
   DARK_CANVAS_CLASS,
@@ -211,19 +211,15 @@ export const TRANSCRIPT_SCROLL = "transition-transform duration-0 ease-out group
 // replaced by the raised-control border tier, and the small shadow. Humans fill
 // with their crew colour inline, label colour included.
 export const AVATAR_SHELL = `flex shrink-0 items-center justify-center overflow-hidden rounded-full shadow-avatar-coin dark:border dark:shadow-sm ${DARK_RAISED_CONTROL_BORDER_CLASS}`;
-// An agent other than Octo: the AI tile Octo wears (AI_TILE_CLASS, docs/Brand.md
-// "One rule for faces"), crew fill and initial inline. In light the shared
-// coin shadow follows the tile; in dark its only edge is the tile's own
-// hairline, as Octo's and the studio's ChatMessageAvatar tiles are, so it takes
-// none of the people's dark border or small shadow.
-export const AVATAR_SHELL_AGENT = `flex shrink-0 items-center justify-center overflow-hidden ${AI_TILE_CLASS} shadow-avatar-coin`;
 export const AVATAR_2XS = "h-6 w-6 text-xxs";
 // The roster's coins (the approved hero's 28px, 11.5px initials; 24px on phones).
 export const AVATAR_ROSTER = "h-6 w-6 text-xxs md:h-7 md:w-7 md:text-[11.5px]";
 export const AVATAR_SM = "h-8 w-8 text-xs";
 export const AVATAR_HUMAN = "font-semibold";
-// Octo's coin is not copied here: the landing renders the studio's own
-// OctoCoin (src/components/OctoCoin.tsx), sized by AVATAR_ROSTER / AVATAR_SM.
+// No AI tile is copied here: the landing renders the studio's own OctoCoin
+// for Octo and AiFace for the scenario agent (src/components/), sized by
+// AVATAR_ROSTER / AVATAR_SM. In dark their only edge is the tile's hairline,
+// so they take none of the people's dark border or small shadow.
 
 // AssistantSpeakerIdentityLabel (AssistantSpeakerIdentityPill.tsx) and HumanSpeakerIdentityLabel (chatHumanIdentity.tsx).
 export const SPEAKER_LABEL = "inline-flex max-w-full items-center gap-2 text-xs text-slate-500 dark:text-slate-400";

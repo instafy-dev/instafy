@@ -296,6 +296,7 @@ export function MachinesPanel() {
                         agent={{
                           handle: agent.handle,
                           avatarSeed: agent.avatarSeed,
+                          id: agent.id,
                         }}
                         size="2xs"
                       />

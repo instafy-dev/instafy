@@ -18,6 +18,7 @@ import {
   Undo,
   Xmark,
 } from "iconoir-react";
+import { AiFace } from "../../components/AiFace";
 import { ChatsIcon, HomeIcon } from "../../components/AppIcons";
 import { ControlChevron } from "../../components/ControlChevron";
 import { OctoCoin } from "../../components/OctoCoin";
@@ -47,11 +48,11 @@ import {
   type TurnStep,
 } from "./landingTurnScript";
 
-// Crew colours, one per participant in roster order, as inline styles
-// (Tailwind never sees them). Octo has no crew colour: it stays ink.
+// Crew colours, one per person in roster order, as inline styles (Tailwind
+// never sees them). No AI has a crew colour: Octo stays ink, and the
+// scenario agent wears its hatchling.
 const ADA = LANDING_CREW.ada;
 const KIM = LANDING_CREW.kim;
-const AGENT = LANDING_CREW.agent;
 
 const FORMA_TEAM = { key: "forma", name: "Forma", avatarUrl: null };
 
@@ -87,27 +88,16 @@ function Reveal({
 type AvatarSize = "2xs" | "sm" | "roster";
 const AVATAR_SIZE: Record<AvatarSize, string> = { "2xs": chrome.AVATAR_2XS, sm: chrome.AVATAR_SM, roster: chrome.AVATAR_ROSTER };
 
-// ChatMessageAvatar.tsx:102-166 for a human: the crew colour stands in for the
+// ChatMessageAvatar.tsx:85-91 for a person: the crew colour stands in for the
 // app's muted ID-hashed palette so Ada and Kim keep one colour across the whole
-// page, with the label colour that reads on that fill. People are round; an
-// agent other than Octo wears Octo's AI tile (docs/Brand.md, "One rule for
-// faces"): its crew fill and its initial, never Octo's mark in a crew colour.
-function CrewAvatar({
-  initial,
-  crew,
-  size,
-  agent = false,
-}: {
-  initial: string;
-  crew: CrewColor;
-  size: AvatarSize;
-  agent?: boolean;
-}) {
+// page, with the label colour that reads on that fill. People are round
+// (docs/Brand.md, "One rule for faces"); a crew colour is only ever a person's.
+function CrewAvatar({ initial, crew, size }: { initial: string; crew: CrewColor; size: AvatarSize }) {
   return (
     <span
       aria-hidden="true"
       data-crew-fill={crew.fill}
-      className={`${agent ? chrome.AVATAR_SHELL_AGENT : chrome.AVATAR_SHELL} ${AVATAR_SIZE[size]} ${chrome.AVATAR_HUMAN}`}
+      className={`${chrome.AVATAR_SHELL} ${AVATAR_SIZE[size]} ${chrome.AVATAR_HUMAN}`}
       style={{ backgroundColor: crew.fill, color: crew.on }}
     >
       {initial}
@@ -405,7 +395,9 @@ export function MiniPhoneBar({ title }: { title: ReactNode }) {
 // slides in at step4. Each coin names its participant in data-roster-coin so
 // the hero can find Octo's coin and the others without reaching into classes.
 // The separator ring takes each face's shape: round for people, the AI tile
-// for Octo and the agent.
+// for Octo and the agent. The agent's face is the studio's own AiFace, not a
+// copy of its tile: the scenario's fixed hatchling (presenceSeed), one ink on
+// Octo's tile.
 export function RosterStack({ scenario, agentVisible }: { scenario: SessionScenario; agentVisible: boolean }) {
   return (
     <div aria-hidden="true" data-testid="landing-roster" className={chrome.ROSTER}>
@@ -426,7 +418,7 @@ export function RosterStack({ scenario, agentVisible }: { scenario: SessionScena
         data-agent-name={scenario.presenceAgent}
         className={`${chrome.ROSTER_RING_AGENT} ${chrome.REVEAL_BASE} ${agentVisible ? chrome.REVEAL_SLIDE_SHOWN : chrome.REVEAL_SLIDE_HIDDEN}`}
       >
-        <CrewAvatar initial={scenario.presenceAgent.charAt(0)} crew={AGENT} size="roster" agent />
+        <AiFace identity={{ handle: scenario.presenceHandle, avatarSeed: scenario.presenceSeed }} className={AVATAR_SIZE.roster} />
       </span>
     </div>
   );

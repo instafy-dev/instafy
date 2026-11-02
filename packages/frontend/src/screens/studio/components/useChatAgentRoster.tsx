@@ -317,7 +317,16 @@ export function useChatAgentRoster({
       const resolvedAgentIdentity = resolveObservedAgentIdentity(messageAgentIdentity, metadataAgentIdentity, runAgentIdentity);
       const agentHandle =
         resolvedAgentIdentity?.handle ?? primaryAgentHandleForPopover ?? getDefaultAssistantHandle();
-      const cardProps = resolveAgentProfileCardProps(agentHandle, resolvedAgentIdentity);
+      // A row that names no AI (a system row) speaks for the conversation's
+      // primary agent, which the viewer added: the viewer's own saved agent
+      // with that handle (resolveViewerAgentProfile), so it wears the face the
+      // roster and the typing row give it.
+      const primaryAgent = resolvedAgentIdentity ? null : agentByHandle.get(agentHandle) ?? null;
+      const cardProps = resolveAgentProfileCardProps(
+        agentHandle,
+        resolvedAgentIdentity ??
+          (primaryAgent ? { handle: agentHandle, avatarSeed: primaryAgent.avatarSeed, id: primaryAgent.id } : null),
+      );
 
       return (
         <AssistantAvatarPopover
@@ -329,6 +338,7 @@ export function useChatAgentRoster({
       );
     },
     [
+      agentByHandle,
       primaryAgentHandleForPopover,
       resolveAgentProfileCardProps,
       runAgentIdentityByRunId,

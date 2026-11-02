@@ -31,6 +31,7 @@ import { useStatus } from "../../../status/useStatus";
 import {
   normalizeCustomAgentAvatarSrc,
 } from "../../../utils/agentAvatar";
+import { defaultAgentFace, hatchlingSeed, resolveAiFace, type Hatchling } from "../../../utils/aiFace";
 import { normalizeCustomAgentHandle } from "../../../assistants/localBuiltInAssistantCatalog";
 import { formatCredentialKind, resolveCredentialLabel } from "../../../utils/credentialFormatting";
 import {
@@ -251,6 +252,12 @@ function resolveAgentAvatarUrlDraftFromSeed(seed: string | null | undefined): st
   return normalizeCustomAgentAvatarSrc(seed) ?? "";
 }
 
+/** The hatchling a saved agent wears now; null when its face is a picture (or Octo). */
+function savedAgentHatchling(agent: ControllerAgentProfile): Hatchling | null {
+  const face = resolveAiFace({ handle: agent.handle, avatarSeed: agent.avatarSeed, agentId: agent.id });
+  return face.kind === "hatchling" ? face.n : null;
+}
+
 function resolveCredentialTestStatusLabel(status: CredentialTestFeedbackStatus): string {
   if (status === "ok") {
     return "Verified";
@@ -319,6 +326,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
   const [agentNameDraft, setAgentNameDraft] = useState("");
   const [agentAvatarUrlDraft, setAgentAvatarUrlDraft] = useState("");
   const [agentAvatarFileDraft, setAgentAvatarFileDraft] = useState<File | null>(null);
+  const [agentFaceDraft, setAgentFaceDraft] = useState<Hatchling | null>(null);
   const [agentBioDraft, setAgentBioDraft] = useState("");
   const [agentDescriptionDraft, setAgentDescriptionDraft] = useState("");
   const [agentCredentialDraft, setAgentCredentialDraft] = useState<string | null>(null);
@@ -354,6 +362,13 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     }
     return { octoAgent: octo, botAgents: bots };
   }, [agents]);
+  // A new bot's face, and the one a bot gets back when its picture is
+  // removed: the hatchling the owner's picture-less bots wear least, counting
+  // down from 8 (docs/Brand.md, "Octo's hatchlings").
+  const defaultBotFace = useMemo(
+    () => defaultAgentFace(botAgents.flatMap((agent) => savedAgentHatchling(agent) ?? [])),
+    [botAgents],
+  );
 
   const credentialsById = useMemo(() => {
     const lookup = new Map<string, ControllerCredentialListItem>();
@@ -680,6 +695,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     setAgentHandleDraft("");
     setAgentNameDraft("");
     setAgentAvatarUrlDraft("");
+    setAgentFaceDraft(null);
     setAgentDescriptionDraft("");
     setAgentBioDraft("");
     setAgentCredentialDraft(null);
@@ -755,6 +771,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     setAgentHandleDraft("");
     setAgentNameDraft("");
     setAgentAvatarUrlDraft("");
+    setAgentFaceDraft(defaultBotFace);
     setAgentDescriptionDraft("");
     setAgentBioDraft("");
     setAgentCredentialDraft(credentialId);
@@ -762,7 +779,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     setAgentModelDraft(credential ? modelOptionsForProvider(provider)[0]?.id ?? null : null);
     setAgentCredentialDirty(false);
     setAgentModelDirty(false);
-  }, [credentialsById]);
+  }, [credentialsById, defaultBotFace]);
 
   const handleAgentCredentialChange = useCallback(
     (credentialId: string) => {
@@ -799,6 +816,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     setAgentHandleDraft(`@${agent.handle}`);
     setAgentNameDraft(agent.displayName ?? "");
     setAgentAvatarUrlDraft(resolveAgentAvatarUrlDraftFromSeed(agent.avatarSeed));
+    // A bot with a picture would get the default face back if it lost it.
+    setAgentFaceDraft(savedAgentHatchling(agent) ?? defaultBotFace);
     setAgentDescriptionDraft(agent.description ?? "");
     setAgentBioDraft(agent.bio ?? "");
     const resolvedCredentialId = agent.credentialId ?? defaultCredentialId ?? null;
@@ -815,7 +834,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
       }
       return options.some((option) => option.id === current) ? current : fallback;
     });
-  }, [credentialsById, defaultCredentialId]);
+  }, [credentialsById, defaultBotFace, defaultCredentialId]);
 
   const openOctoProfileModal = useCallback((agent: ControllerAgentProfile) => {
     setAgentCredentialDirty(false);
@@ -826,6 +845,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     setAgentHandleDraft("@octo");
     setAgentNameDraft(agent.displayName ?? "Octo");
     setAgentAvatarUrlDraft(resolveAgentAvatarUrlDraftFromSeed(agent.avatarSeed));
+    // Octo keeps its own tile: a picture or nothing, never a hatchling.
+    setAgentFaceDraft(null);
     setAgentDescriptionDraft(agent.description ?? "");
     setAgentBioDraft(agent.bio ?? "");
     const resolvedCredentialId = agent.credentialId ?? defaultCredentialId ?? null;
@@ -923,12 +944,13 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
       try {
         const picture = await resolvePicture();
         if (!mounted.current) return;
+        const avatarSeed = picture ?? (agentFaceDraft ? hatchlingSeed(agentFaceDraft) : undefined);
         const result = await createMyAgent({
           credentialId: credentialId || null,
           ...(!credentialId ? { provider: agentProviderDraft } : {}),
           handle: handleForRequest,
           displayName: trimmedName.length > 0 ? trimmedName : undefined,
-          avatarSeed: picture ?? undefined,
+          avatarSeed,
           description: trimmedDescription.length > 0 ? trimmedDescription : undefined,
           bio: trimmedBio || undefined,
           model: agentModelDraft,
@@ -938,7 +960,18 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
           showStatus(result.error ?? "Unable to create bot.", "error", 4500);
           return;
         }
-        showStatus(`Agent created: @${result.agent.handle}`, "success", 3000);
+        // A bot created without a handle is named after its connection and
+        // seeded with its own id; the controller ignores avatarSeed there.
+        // Save the picture or face the editor showed onto it.
+        const faceResult = avatarSeed && result.agent.avatarSeed !== avatarSeed
+          ? await updateMyAgent(result.agent.id, { avatarSeed })
+          : null;
+        if (!mounted.current) return;
+        if (faceResult && !faceResult.success) {
+          showStatus(`Agent created: @${result.agent.handle}, but its picture or face did not save.`, "error", 4500);
+        } else {
+          showStatus(`Agent created: @${result.agent.handle}`, "success", 3000);
+        }
         closeAgentProfileModal();
         await loadCredentials({ silent: true });
         notifyAiConfigChanged("agent_created");
@@ -980,7 +1013,17 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     try {
       const picture = await resolvePicture();
       if (!mounted.current) return;
-      const nextAvatarSeed = picture ?? (rawAvatarUrl.length === 0 && existingCustomAvatarUrl ? agentId : undefined);
+      // A bot without a picture wears the hatchling picked in the editor. It
+      // is saved only when it differs from the face the bot wears now (none,
+      // while the bot's face is a picture), so an existing bot keeps its seed
+      // until then. Octo keeps its own tile: removing its picture resets its
+      // seed to its id, as before.
+      const existingFace = existingAgent ? savedAgentHatchling(existingAgent) : null;
+      const nextFaceSeed = agentProfileModal.mode === "edit" && agentFaceDraft && agentFaceDraft !== existingFace
+        ? hatchlingSeed(agentFaceDraft)
+        : undefined;
+      const removedPicture = rawAvatarUrl.length === 0 && Boolean(existingCustomAvatarUrl);
+      const nextAvatarSeed = picture ?? nextFaceSeed ?? (removedPicture ? agentId : undefined);
       const result = await updateMyAgent(agentId, {
         handle: handleForRequest,
         displayName: trimmedName.length > 0 ? trimmedName : null,
@@ -1013,6 +1056,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     agentActionPendingId,
     agentAvatarUrlDraft,
     agentAvatarFileDraft,
+    agentFaceDraft,
     user,
     agentCredentialDraft,
     agentCredentialDirty,
@@ -1067,9 +1111,11 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
   );
 
   const editingAgent = agents.find(agent => agent.id === agentProfileModal?.agentId);
+  const editingAgentFace = editingAgent ? savedAgentHatchling(editingAgent) : null;
   const agentProfileDirty = agentProfileModal?.mode === "create" || Boolean(agentAvatarFileDraft) ||
     agentNameDraft.trim() !== (editingAgent?.displayName ?? (agentProfileModal?.mode === "octo" ? "Octo" : "")) ||
     agentAvatarUrlDraft.trim() !== resolveAgentAvatarUrlDraftFromSeed(editingAgent?.avatarSeed ?? "") ||
+    (agentProfileModal?.mode === "edit" && editingAgentFace !== null && agentFaceDraft !== editingAgentFace) ||
     agentBioDraft.trim() !== (editingAgent?.bio ?? "") ||
     agentDescriptionDraft.trim() !== (editingAgent?.description ?? "") ||
     (agentProfileModal?.mode === "edit" && normalizeAgentHandle(agentHandleDraft) !== editingAgent?.handle) ||
@@ -1077,7 +1123,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
 
   const agentEditorDirty = agentProfileModal?.mode === "create"
     ? Boolean(agentNameDraft || agentHandleDraft || agentAvatarUrlDraft || agentAvatarFileDraft ||
-        agentBioDraft || agentDescriptionDraft || agentCredentialDirty || agentModelDirty)
+        agentBioDraft || agentDescriptionDraft || agentCredentialDirty || agentModelDirty) ||
+      agentFaceDraft !== defaultBotFace
     : agentProfileDirty;
   const dismissAgentProfileModal = useStudioEditorDismissal({
     isOpen: Boolean(agentProfileModal),
@@ -1245,6 +1292,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
         avatarImageUrl={agentAvatarUrlDraft}
         avatarFile={agentAvatarFileDraft}
         avatarSeed={editingAgent && normalizeCustomAgentAvatarSrc(editingAgent.avatarSeed) ? editingAgent.id : editingAgent?.avatarSeed}
+        face={agentFaceDraft}
+        onFaceChange={setAgentFaceDraft}
         onAvatarFileChange={(file) => { setAgentAvatarFileDraft(file); uploadedAgentPicture.current = null; }}
         dirty={agentProfileDirty}
         onAvatarImageUrlChange={setAgentAvatarUrlDraft}

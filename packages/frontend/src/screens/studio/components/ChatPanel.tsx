@@ -159,6 +159,7 @@ import {
 } from "./ChatPanelOverlays";
 import { ConversationMessageRows } from "./ConversationMessageRows";
 import { MultiAgentRunsContext } from "./MultiAgentPlanEntry";
+import { ViewerAgentsContext } from "./viewerAgents";
 import { RunTraceRerunNotice } from "./PlanRerunNotice";
 import { useConversationPreviewThreads } from "./useConversationPreviewThreads";
 import { buildHumanLabelByUserId } from "./chatHumanLabels";
@@ -224,6 +225,7 @@ import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { AgentProfileCardContent } from "./AssistantAvatarPopover";
 import {
   OPEN_AGENT_PROFILE_EVENT,
+  resolveOpenedAgentIdentity,
   type OpenAgentProfileDetail,
 } from "./agentProfileOpen";
 import { emitAiConfigChanged } from "./aiConfigEvents";
@@ -241,6 +243,8 @@ import {
   extractAgentIdentityFromMetadata,
   extractRunIdFromMetadata,
   resolvePreviousAssistantHandle,
+  resolveTypingAgentLanes,
+  resolveViewerAgentProfile,
   shouldShowAssistantAvatarForMessage,
   shouldShowAssistantIdentityForMessage,
 } from "./chatAssistantIdentity";
@@ -281,6 +285,7 @@ import {
   resolveGettingStartedConversationContext,
 } from "./gettingStartedConversationContext";
 import {
+  resolveConversationRosterAgents,
   resolveConversationRosterHumans,
   type ConversationRosterAgent,
 } from "./conversationRosterMembers";
@@ -1708,6 +1713,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showStatus,
     stickyMentionedAgentByConversationRef,
   });
+  // Handles belong to an owner, so a row's agent is the viewer's own only by
+  // its exact id; the chat draws those from their current profile.
+  const availableAgentById = useMemo(
+    () => new Map(availableAgents.map((agent) => [agent.id, agent])),
+    [availableAgents],
+  );
   const resolvePromptAgentTargets = useCallback(
     (
       prompt: string,
@@ -1785,6 +1796,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   } | null>(null);
   const agentProfileModal = agentProfileTarget && agentProfileTarget.projectId === activeProjectId &&
     agentProfileTarget.userId === currentUserId ? agentProfileTarget.identity : null;
+  const agentProfileCardIdentity = useMemo(
+    () => agentProfileModal ? resolveOpenedAgentIdentity(agentProfileModal, agentByHandle) : null,
+    [agentByHandle, agentProfileModal],
+  );
   useEffect(() => {
     setAgentProfileTarget(null);
     const handler = (event: Event) => {
@@ -2932,29 +2947,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     ],
   );
   // AI participants active in this conversation (default assistant when
-  // enabled plus any added agents), each carrying its own avatar seed so the
-  // roster faces match the transcript.
-  const conversationRosterAgents = useMemo<ConversationRosterAgent[]>(() => {
-    const seen = new Set<string>();
-    const rosterAgents: ConversationRosterAgent[] = [];
-    for (const rawHandle of agentHandles) {
-      const handle = rawHandle.trim().toLowerCase();
-      if (!handle || seen.has(handle)) {
-        continue;
-      }
-      seen.add(handle);
-      const profile = agentByHandle.get(handle) ?? null;
-      const avatarSeed =
-        typeof profile?.avatarSeed === "string" && profile.avatarSeed.trim().length > 0
-          ? profile.avatarSeed.trim()
-          : handle;
-      const displayName =
-        getBuiltInAssistantDisplayName(handle) ??
-        (profile?.displayName?.trim() ? profile.displayName.trim() : `@${handle}`);
-      rosterAgents.push({ handle, displayName, avatarSeed, agentId: profile?.id ?? null });
-    }
-    return rosterAgents;
-  }, [agentByHandle, agentHandles]);
+  // enabled plus any added agents).
+  const conversationRosterAgents = useMemo<ConversationRosterAgent[]>(
+    () => resolveConversationRosterAgents({ agentHandles, agentByHandle }),
+    [agentByHandle, agentHandles],
+  );
 
   const peerTypingLabel = useMemo(() => {
     const peerIds = Object.keys(peerTypingActivity);
@@ -3299,10 +3296,17 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, [activeConversationRun?.metadata, messages, runAgentIdentityByRunId]);
   const typingAgentHandle =
     typingAgentIdentity?.handle ?? primaryAgentHandleForPopover ?? getDefaultAssistantHandle();
-  const typingAgentProfile = agentByHandle.get(typingAgentHandle) ?? null;
+  // The run's own agent, as stamped: the viewer's saved agent only by its id.
+  const typingAgentProfile = resolveViewerAgentProfile(
+    typingAgentIdentity,
+    typingAgentHandle,
+    availableAgentById,
+    agentByHandle,
+  );
+  const typingAgentId = typingAgentIdentity?.id;
   const typingAgentAvatarSeed =
     typeof typingAgentProfile?.avatarSeed === "string" && typingAgentProfile.avatarSeed.trim().length > 0
-      ? typingAgentProfile.avatarSeed.trim()
+      ? typingAgentProfile.avatarSeed
       : typingAgentIdentity?.avatarSeed ?? typingAgentHandle;
   const typingAgentDisplayName =
     getBuiltInAssistantDisplayName(typingAgentHandle) ??
@@ -3396,49 +3400,28 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     agentName: chatBrowserApprovalAgentName,
   });
   const recordBrowserApprovalSettled = turnBrowserApproval.value.recordSettled;
+  const typingLanes = useMemo(
+    () => resolveTypingAgentLanes(activeConversationRuns, availableAgentById),
+    [activeConversationRuns, availableAgentById],
+  );
   const typingAgents = useMemo<AssistantTypingAgent[]>(() => {
-    const order: string[] = [];
-    const thinkingHandles = new Set<string>();
-    for (const run of activeConversationRuns) {
-      const metadata = run.metadata && isRecord(run.metadata) ? run.metadata : null;
-      const identity = extractAgentIdentityFromMetadata(metadata);
-      if (identity?.handle) {
-        order.push(identity.handle);
-        if (run.status === "in_progress") {
-          thinkingHandles.add(identity.handle);
-        }
-      }
+    if (typingLanes.agents.length > 0) {
+      return typingLanes.agents;
     }
-    if (order.length === 0) {
-      order.push(typingAgentHandle);
-    }
-    const uniqueHandles: string[] = [];
-    const seen = new Set<string>();
-    for (const handle of order) {
-      const normalized = handle.trim().toLowerCase();
-      if (!normalized || seen.has(normalized)) {
-        continue;
-      }
-      seen.add(normalized);
-      uniqueHandles.push(normalized);
-    }
-    return uniqueHandles.map((handle) => {
-      const profile = agentByHandle.get(handle) ?? null;
-      const avatarSeed =
-        typeof profile?.avatarSeed === "string" && profile.avatarSeed.trim().length > 0
-          ? profile.avatarSeed.trim()
-          : handle;
-      const displayName =
-        getBuiltInAssistantDisplayName(handle) ??
-        (profile?.displayName?.trim() ? profile.displayName.trim() : `@${handle}`);
-      return { handle, avatarSeed, displayName, isThinking: thinkingHandles.has(handle) };
-    });
-  }, [activeConversationRuns, agentByHandle, typingAgentHandle]);
+    return [{
+      key: typingAgentHandle,
+      handle: typingAgentHandle,
+      avatarSeed: typingAgentAvatarSeed,
+      ...(typingAgentId ? { id: typingAgentId } : {}),
+      displayName: typingAgentDisplayName,
+      isThinking: false,
+    }];
+  }, [typingAgentAvatarSeed, typingAgentDisplayName, typingAgentHandle, typingAgentId, typingLanes]);
   const hasMultipleTypingAgents = typingAgents.length > 1;
-  const multiTypingStatus = useMemo(() => resolveMultiAgentTypingStatus(activeConversationRuns.map(run => {
-    const handle = extractAgentIdentityFromMetadata(run.metadata)?.handle;
-    return { status: run.status, displayName: typingAgents.find(agent => agent.handle === handle)?.displayName ?? "Agent" };
-  })), [activeConversationRuns, typingAgents]);
+  const multiTypingStatus = useMemo(() => resolveMultiAgentTypingStatus(activeConversationRuns.map(run => ({
+    status: run.status,
+    displayName: typingLanes.agentByRunId.get(run.id)?.displayName ?? "Agent",
+  }))), [activeConversationRuns, typingLanes]);
   const workspaceStarting =
     waitingForPreferredRuntime ||
     hostedRuntimeEnsuring ||
@@ -5281,7 +5264,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   } = useChatSendQueuePresentation({
     activeConversationControllerId: activeConversationEntry?.controllerId ?? null,
     activeConversationRun,
-    agentByHandle,
     chatSendQueue: combinedChatSendQueue,
     currentRuntime,
     hostedRuntimeEnsuring,
@@ -6072,6 +6054,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
         return (
           <MultiAgentRunsContext.Provider value={multiAgentRunContext}>
+          <ViewerAgentsContext.Provider value={availableAgentById}>
           <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
           <div ref={rootRef} className="flex h-full min-h-0 flex-col overflow-hidden">
             <div
@@ -6292,6 +6275,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         </div>
       </div>
       </ChatScrollSnapshotBoundary>
+      </ViewerAgentsContext.Provider>
       </MultiAgentRunsContext.Provider>
     );
   }
@@ -6563,6 +6547,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               hasMultipleTypingAgents={hasMultipleTypingAgents}
               typingAgentHandle={typingAgentHandle}
               typingAgentAvatarSeed={typingAgentAvatarSeed}
+              typingAgentId={typingAgentId}
               typingIndicatorState={hasMultipleTypingAgents
                 ? { phase: workspaceStarting ? "waiting" : multiTypingStatus.phase, label: null }
                 : typingIndicatorState}
@@ -6746,6 +6731,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   return (
     <MultiAgentRunsContext.Provider value={multiAgentRunContext}>
+    <ViewerAgentsContext.Provider value={availableAgentById}>
     <WorkerQuestionReplyContext.Provider value={normalizedJobThread ? null : workerQuestionReply.host}>
     <ChatRunStopNoticeProvider value={runStopNoticeContext}>
     <RunFailureRetryProvider value={runFailureRetryContextValue}>
@@ -7083,11 +7069,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           dialogAriaLabel={`Agent profile: @${agentProfileModal.handle}`}
         >
           <AgentProfileCardContent
-            {...resolveAgentProfileCardProps(agentProfileModal.handle, {
-              handle: agentProfileModal.handle,
-              id: agentProfileModal.agentId,
-              avatarSeed: agentProfileModal.avatarSeed || agentProfileModal.handle,
-            })}
+            {...resolveAgentProfileCardProps(agentProfileModal.handle, agentProfileCardIdentity)}
+            agentTextOnly={!agentProfileCardIdentity}
             onRequestClose={() => setAgentProfileTarget(null)}
           />
         </StudioDialogModal>
@@ -7102,6 +7085,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     </RunFailureRetryProvider>
     </ChatRunStopNoticeProvider>
     </WorkerQuestionReplyContext.Provider>
+    </ViewerAgentsContext.Provider>
     </MultiAgentRunsContext.Provider>
       );
   }

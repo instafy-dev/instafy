@@ -821,6 +821,7 @@ export function ParticipantsDrawer({
                                 handle: agent.handle,
                                 displayName: agent.displayName,
                                 avatarSeed: agent.avatarSeed,
+                                textOnly: agent.textOnly,
                               }}
                               size="sm"
                             />
@@ -830,6 +831,7 @@ export function ParticipantsDrawer({
                             projectId={projectId}
                             agentHandle={agent.handle}
                             agentId={agent.agentId}
+                            agentTextOnly={agent.textOnly}
                             canEditProfile={agent.canEditProfile === true}
                             agentAvatarSeed={agent.avatarSeed}
                             displayName={agent.displayName}

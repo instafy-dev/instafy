@@ -35,6 +35,8 @@ export interface HomeFeedActor {
   handle: string | null;
   avatarSeed: string | null;
   displayName?: string | null;
+  /** An AI named by its handle alone, with no row of its own: the hollow face. */
+  textOnly?: boolean;
 }
 
 export interface HomeFeedEvent {
@@ -215,22 +217,24 @@ export function dayLabelFor(at: number | null, now: number): { key: string; labe
   };
 }
 
-/** The agent behind a local conversation's latest assistant message, if any. */
+/**
+ * The agent behind a local conversation's latest assistant message, if any,
+ * else the thread's owner. The owner is named by its handle alone, so it is
+ * known only by name and wears the hollow face, as the thread's branch row
+ * draws it (docs/Brand.md, "Octo's hatchlings").
+ */
 export function resolveConversationActor(conversation: ConversationState): HomeFeedActor | null {
   const lastAssistant = [...conversation.messages].reverse().find((message) => message.role === "assistant");
   const metadata = lastAssistant?.metadata as { agent?: { handle?: unknown; avatarSeed?: unknown } } | null | undefined;
+  const stampedHandle = typeof metadata?.agent?.handle === "string" ? metadata.agent.handle : null;
   const rawHandle =
-    typeof metadata?.agent?.handle === "string"
-      ? metadata.agent.handle
-      : typeof conversation.ownerAgent?.handle === "string"
-        ? conversation.ownerAgent.handle
-        : null;
+    stampedHandle ?? (typeof conversation.ownerAgent?.handle === "string" ? conversation.ownerAgent.handle : null);
   const handle = rawHandle?.trim().replace(/^@/, "").toLowerCase() || null;
   const avatarSeed = typeof metadata?.agent?.avatarSeed === "string" ? metadata.agent.avatarSeed : null;
   if (!handle && !lastAssistant) {
     return null;
   }
-  return { kind: handle ? "agent" : "assistant", handle, avatarSeed };
+  return { kind: handle ? "agent" : "assistant", handle, avatarSeed, ...(handle && stampedHandle === null ? { textOnly: true } : {}) };
 }
 
 function conversationTimestamp(conversation: ConversationState): number {

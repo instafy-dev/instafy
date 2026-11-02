@@ -13,6 +13,7 @@ import {
   expectAiTile,
   expectAvatarCoinLightEdge,
   expectCanonicalOctoCoin,
+  expectHatchling,
 } from "../../../../components/__tests__/octoCoinExpectations";
 import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
 import { getSitePreview } from "../../../../services/runtimeController/previews";
@@ -1974,6 +1975,41 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(bubble?.querySelector('[data-testid="mock-file-change-list"]')).not.toBeNull();
   });
 
+  it("gives a plan card's clip room for its chips' outside focus ring and their touch targets", async () => {
+    // The chips' ring is 2px with a 2px offset, outside the chip. A clip
+    // flush with the row cut it on the row's left edge and last line, so the
+    // card's wrapper pads its clip by 4px and takes the 4px back on the left,
+    // top and bottom (-ml-1, -my-1). Not on the right: the bubble clips x
+    // flush with its right edge (no padding there), so a chip as wide as the
+    // row, or one ending at its right end, lost its ring's right side when
+    // the wrapper reached out there too. On touch the clip also keeps 10px
+    // under the last line for Workstreams' and Cancel group's 44px targets.
+    const card = createMessage({
+      id: "team-plan",
+      messageType: "multi_agent_plan",
+      content: "I'm splitting this into workstreams.",
+      metadata: {
+        messageType: "multi_agent_plan",
+        details: {
+          mode: "read_only",
+          agents: [{ handle: "front", label: "Frontend", writeScope: { mode: "read_only" } }],
+          lead: { leadHandle: "octo", continuationPrompt: "Review sibling outputs." },
+        },
+      },
+    });
+    await act(async () => {
+      root.render(<AgentJobThreadPreviewLayout {...createProps({ cards: [card] })} />);
+    });
+
+    const wrapper = container.querySelector('[data-testid="multi-agent-inline-status"]')?.parentElement;
+    expect(classTokens(wrapper)).toEqual(
+      expect.arrayContaining(["overflow-hidden", "p-1", "-ml-1", "-my-1", "max-w-[calc(100%+0.25rem)]", "pointer-coarse:pb-2.5"]),
+    );
+    for (const outward of ["max-w-full", "-m-1", "-mx-1", "-mr-1"]) {
+      expect(classTokens(wrapper)).not.toContain(outward);
+    }
+  });
+
   it("hides stale or completed reasoning-only run chrome with no useful summary", async () => {
     await act(async () => {
       root.render(
@@ -2080,9 +2116,10 @@ describe("AgentJobThreadPreviewLayout", () => {
     for (const slot of [octoSlot, benSlot, piaSlot]) expect(slot?.getAttribute("role")).toBe("img");
     expect(benSlot?.getAttribute("title")).toBe("@ben");
     expectCanonicalOctoCoin(octoSlot?.querySelector(":scope > [data-octo-coin]"));
-    expect(benSlot?.textContent).toBe("B");
+    // @ben wears its hatchling (ben is 3), never an initial.
+    expect(expectHatchling(benSlot?.firstElementChild)).toBe("3");
     // One rule for faces: every face in the stack is an AI tile (Octo's, Ben's
-    // gradient and Pia's picture clipped to it) filling its 20px slot with no
+    // hatchling and Pia's picture clipped to it) filling its 20px slot with no
     // inset, carrying the shared coin shadow outside a clean separator: a ring
     // on the face that draws above the face's shadow and follows its corners.
     // No slot is positioned, so tree order decides the overlap.
@@ -2114,6 +2151,38 @@ describe("AgentJobThreadPreviewLayout", () => {
       openButton?.click();
     });
     expect(openBranchThread).toHaveBeenCalledWith("child-thread-local");
+  });
+
+  it("never draws one face twice in a branch row: a repeat folds into +N with everyone past three", async () => {
+    const participants = [
+      { handle: "octo", avatarSeed: "octo" },
+      // ben and reviewer both hash to 3: two helpers, one face.
+      { handle: "ben", avatarSeed: "ben" },
+      { handle: "reviewer", avatarSeed: "reviewer" },
+      { handle: "scout", avatarSeed: "hatchling:6" },
+      { handle: "medic", avatarSeed: "hatchling:1" },
+    ];
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createProps({
+            branchThreads: [{ threadLocalId: "child", title: "Team", hiddenActivityCount: 0, isRunning: false, participants }],
+            onOpenBranchThread: vi.fn(),
+            activity: activityWithUpdates([]),
+            detailsOpen: true,
+          })}
+        />,
+      );
+    });
+    // Everyone is named; three distinct faces are drawn and the rest counted.
+    const stack = container.querySelector('[aria-label="Participants: @octo, @ben, @reviewer, @scout, @medic"]');
+    expect(Array.from(stack?.querySelectorAll(':scope > [role="img"]') ?? [], (slot) => slot.getAttribute("aria-label"))).toEqual([
+      "@octo, AI",
+      "@ben, AI",
+      "@scout, AI",
+    ]);
+    expect(stack?.lastElementChild?.textContent).toBe("+2");
+    expect(stack?.lastElementChild?.getAttribute("aria-hidden")).toBe("true");
   });
 
   it.each([

@@ -9,6 +9,7 @@ import {
   classTokens,
   expectAiTile,
   expectCanonicalOctoCoin,
+  expectHatchling,
   expectPersonCircle,
 } from "../../../../components/__tests__/octoCoinExpectations";
 import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
@@ -17,6 +18,21 @@ import {
   publishChatParticipants,
   type ChatParticipantsSnapshot,
 } from "../chatParticipantsStore";
+
+// An agent's profile card, which a face in the drawer opens, reads these.
+vi.mock("../../../../providers/AuthProvider", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../../providers/AuthProvider")>()),
+  useAuth: () => ({ user: null, session: null }),
+}));
+vi.mock("../../../../conversations/ConversationsProvider", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../../conversations/ConversationsProvider")>()),
+  useConversations: () => ({ conversations: [] }),
+}));
+vi.mock("../../../../runtime/useRuntime", () => ({ useRuntime: () => ({ runs: {} }) }));
+vi.mock("../../../../workspace/WorkspaceTabsProvider", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../../workspace/WorkspaceTabsProvider")>()),
+  useWorkspaceTabs: () => ({ openConversationTab: vi.fn(), openPanelTab: vi.fn(), requestUrlPush: vi.fn() }),
+}));
 
 function snapshot(overrides: Partial<ChatParticipantsSnapshot> = {}): ChatParticipantsSnapshot {
   return {
@@ -166,7 +182,7 @@ describe("ParticipantsDrawer", () => {
     expect(drawer?.textContent).not.toContain(DEFAULT_PROJECT_AI_MODEL);
   });
 
-  it("shows built-in Octo as its coin, not a gradient initial", async () => {
+  it("shows built-in Octo as its coin and every other agent as its hatchling", async () => {
     // The drawer used to draw every agent as a gradient initial, so Octo was an
     // "O" here while every other surface showed its coin (docs/Brand.md).
     await act(async () => {
@@ -184,7 +200,26 @@ describe("ParticipantsDrawer", () => {
       '[data-testid="participants-agent-profile-pixel"] > [aria-hidden="true"]',
     );
     expect(pixelFace?.querySelector(".octo-mark")).toBeNull();
-    expect(pixelFace?.textContent).toBe("P");
+    // docs/Brand.md, "Octo's hatchlings": pixel's seed hashes to 8, and no
+    // initial.
+    expect(expectHatchling(pixelFace)).toBe("8");
+  });
+
+  it("draws an agent the viewer knows only by its handle with the hollow face, as the roster and the picker do", async () => {
+    const base = snapshot();
+    await act(async () => {
+      publishChatParticipants({ ...base, agents: [{ ...base.agents[1]!, handle: "kimbot", avatarSeed: "kimbot", textOnly: true }] });
+    });
+    await render();
+    const trigger = container.querySelector<HTMLElement>('[data-testid="participants-agent-profile-kimbot"]');
+    expect(expectHatchling(trigger?.querySelector(':scope > [aria-hidden="true"]'))).toBe("unknown");
+    // So does the profile card it opens, not with the handle's numbered face.
+    await act(async () => {
+      trigger?.click();
+    });
+    const card = document.body.querySelector('[role="dialog"]');
+    expect(card?.textContent).toContain("@kimbot");
+    expect(expectHatchling(card?.querySelector('svg[data-ai-face="hatchling"]')?.parentElement)).toBe("unknown");
   });
 
   it("keeps people round, draws every AI as a tile and names the AI as AI", async () => {
