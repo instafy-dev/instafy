@@ -587,9 +587,9 @@ describe("what a routed card covers", () => {
       metadata: { ...continuation.metadata, prompt_metadata: { browserRequestOf: CARD_KEY, browserTransport: "shared" } },
     };
     expect(resolveJobThreadTypingCoverage(card, [browserRun("queued")], [ask, card, pressed])).toBe("none");
-    // Its browser turn was stopped before it showed anything: the card is a
-    // card again and stands for that turn no more, also while the stopped
-    // run's record catches up; the next turn's typing row says it is starting.
+    // Its browser turn was stopped before it showed anything: the card stands
+    // for that turn no more, also while the stopped run's record catches up,
+    // and the next turn's typing row says it is starting.
     const stopped = stored({
       id: "stopped",
       role: "assistant",
