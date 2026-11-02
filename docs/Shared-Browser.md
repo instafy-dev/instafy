@@ -853,8 +853,9 @@ error page such as a 504) sends the turn to the place's own site at once, in the
 same turn, and then to another official source; facts from a place's
 own page, and a route from the operator's journey planner with its stations
 chosen, for the day and time the person travels (a daytime hour when they gave
-none) and saying which, not a listing or a kiosk page; "not checked" on
-anything not read this turn; a comparison's models, those a page's menu names
+none) and saying which, not a listing or a kiosk page; "not checked", or
+nothing, for anything not read this turn (how far, how to get there, what is
+best included); a comparison's models, those a page's menu names
 included, each read on
 its own page; and a cookie banner's refusal, so the banner does not cover the
 page. A sign-in, a bot check, a paywall or a refused read ends that page, never
@@ -1201,7 +1202,11 @@ answer ends in a page (a comparison, prices, a route) is `browser_then_build`
 from the first message too, while research answered in a reply (facts, a
 price, opening hours, reviews) stays with Octo, whose turn reads public pages
 itself. A request to make something with no site to use first ("on a map",
-"put this on a page") stays with Octo: a browser turn cannot make it. A message that names the browser still stays with Octo
+"put this on a page") stays with Octo: a browser turn cannot make it. A
+message that carries on the chat's browser work goes on there, whether or not
+that work found its answer, and a bare "keep going" carries on what the chat
+left open (what its replies or a page here mark not checked), never a change
+the person stopped or undid. A message that names the browser still stays with Octo
 when the browser turn could not do it alone: it sees only the person's words
 and the chat's earlier browser turns, so a message that needs what this space
 or another chat holds, a site that runs in this space, or a message that says
@@ -2399,12 +2404,18 @@ unless the policy is `"covered"`.
   posts them as one note of the turn
   (`details.browserFindings: {pages, pagesRead}`), where the controller reads
   them back after the reply for the record. Studio's Details leaves that note
-  out. Unless a finding says a page stopped it, the person reads "Finished
-  in the browser." in place of the browser turn's own words: the building turn
-  says what it made a moment later, and the browser turn's account of what it
-  could not build ("this turn is read-only") is no answer. Those words go into
-  the note ahead of the findings, so the record still gives the building turn
-  what the browser turn did not read. The fixtures in
+  out. Unless a finding says a page stopped it, the browser turn posts no
+  words of its own, only its line and Details: the building turn says what it
+  made a moment later, and the browser turn's account of what it could not
+  build ("this turn is read-only") is no answer. Those words go into the note
+  ahead of the findings, and a turn that posted none has that note as its
+  reply in the record, so the record still gives the building turn what the
+  browser turn did not read. The browser turn is told that the building turn
+  cannot open the browser, so it reads what the request needs before it ends:
+  each item's own page and, for reviews, the review pages a page it read links
+  to, else a reviewer's own site. The building turn cites a page only for a
+  fact listed under it; a place or claim the reply names with no page under it
+  is read on its own page or left out. The fixtures in
   `packages/runtime-controller/src/browser_hand_back_fixtures.json` pin the
   three halves together.
   One browser turn hands back without a building card or a page read: one that

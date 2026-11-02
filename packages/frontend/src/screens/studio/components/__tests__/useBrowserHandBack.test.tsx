@@ -27,6 +27,7 @@ import {
   readBrowserHandBackOf,
   type BrowserHandBackInput,
 } from "../browserHandBack";
+import { shouldDisplayChatMessage } from "../chatMessagePresentation";
 import { useBrowserHandBack } from "../useBrowserHandBack";
 import { BROWSER_HUMAN_INPUT_CONTINUE_PROMPT } from "../useBrowserHumanInput";
 
@@ -143,6 +144,17 @@ describe("browser hand-back: when Studio sends one", () => {
   });
 
   it("hands back a finished browser turn that continued this page's card", () => {
+    expect(browserHandBackCandidate(input)).toBe(BROWSER_JOB);
+  });
+
+  // A browser turn whose findings go back to a build posts no words of its
+  // own (runtime-agent `move_findings_into_details`): its reply is blank, and
+  // the chat shows none ("Finished in the browser." stood there before). The
+  // hand-back reads the findings note, never the reply's words.
+  it("hands back a browser turn that posted no words, whose blank reply the chat leaves out", () => {
+    const blank = reply(BROWSER_JOB, "", now - 1_000, { source: "agent", outcome: "succeeded" });
+    input.messages = [...input.messages.slice(0, -1), blank];
+    expect(shouldDisplayChatMessage(blank)).toBe(false);
     expect(browserHandBackCandidate(input)).toBe(BROWSER_JOB);
   });
 

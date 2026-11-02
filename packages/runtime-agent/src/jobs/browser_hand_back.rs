@@ -8,10 +8,10 @@
 //! `metadata.browserHandsBack`) is told to end its reply with labelled
 //! findings, one line per page. Those lines are for Octo, not the person: the
 //! runtime takes them out of the posted reply and keeps them in a Details note
-//! ([`move_findings_into_details`]). The person reads [`FINDINGS_ONLY_REPLY`]
-//! in place of the browser turn's own words, unless a page stopped it: the
-//! building turn says what it made with them a moment later, and the words go
-//! into the note ahead of the findings. When the turn ends, Studio sends one
+//! ([`move_findings_into_details`]). The turn posts no words of its own, unless
+//! a page stopped it: the building turn says what it made with them a moment
+//! later, and the words go into the note ahead of the findings, where the
+//! controller reads them for the record. When the turn ends, Studio sends one
 //! hand-back turn, and the controller checks it (it read at least one page,
 //! and its card continues building) and stamps `metadata.browserHandBack` with
 //! the reply and the findings (runtime-controller `browser_hand_back.rs`).
@@ -54,14 +54,20 @@ const TURNS_SINCE_MAX_CHARS: usize = 24_000;
 /// newest browser turns since (runtime-controller `TURNS_SINCE_LEFT_OUT_KEY`).
 const TURNS_SINCE_LEFT_OUT_KEY: &str = "browser_turns_since_earlier_left_out";
 
+/// What a browser turn whose findings go back to the building turn is told ([`hands_back`]). Its
+/// task is often the person's own message, which the routing step sent here. The turn that builds
+/// next is a hand-back, which never opens the browser (`suppress_browser_requests_where_unsupported`),
+/// so this turn reads what the request needs before it ends: a comparison's browser turn read one
+/// maker page and handed back, and its follow-up saw links to reviews of each laptop and opened
+/// none.
 const FINDINGS_CONTRACT: &str = "\n\nFindings for the building turn:\n\
-Octo asked for this browser task from a building turn, and that turn continues from your reply once you finish. \
+A building turn makes what the person asked for from your findings. \
 End your reply with one finding per page, each one JSON object on its own line: \
 `{\"url\": \"<address>\", \"title\": \"<page title>\", \"facts\": [\"<what the page showed>\"]}` for a page you read, \
 or `{\"url\": \"<address>\", \"stopped\": \"login|captcha|paywall|blocked|robots|download|secret|link-only\"}` for one that ended at a sign-in, \
 a bot check, a paywall, a block or HTTP 401/403/429, robots.txt, a download, a page showing secrets or a link-only site (never retry such a page another way). \
 Report only what the pages showed, each fact under a page you read that states it, not one that only quotes it, and copy no long listing text; Instafy adds when and in which browser each page was read. \
-The building turn finishes the work, so your reply says what you read (\"Read 6 pages on <site>\"), never \"I couldn't finish\". \
+The building turn can't open the browser: before you end, read what the request needs (each item's own page and, for reviews, review pages a page you read links to, else a reviewer's own site), then say what you read (\"Read 6 pages on <site>\"), never \"I couldn't finish\". \
 If a page stopped you (a manual step, a refused or challenge page), say so in your first line.";
 
 /// The action a browser turn that carries on the person's own message answers
@@ -302,19 +308,21 @@ fn split_findings(reply: &str) -> Option<(String, Vec<String>)> {
     Some((posted.trim().to_string(), findings))
 }
 
-/// What the person reads when a browser turn's reply was only its findings, or
-/// when its findings go back to the building turn and no page stopped it. It
-/// points nowhere else: Studio leaves the findings note out of Details.
+/// What the person reads when the reply of a browser turn whose findings stay
+/// with it (a question's) was only its findings. It points nowhere else: Studio
+/// leaves the findings note out of Details. Earlier runtimes also posted it for
+/// a browser turn whose findings go back to the building turn, so a chat's
+/// history can still hold it there.
 pub(super) const FINDINGS_ONLY_REPLY: &str = "Finished in the browser.";
 
 /// Moves the finding lines out of a browser turn's reply. The person reads
 /// the reply without them; they stay in the turn's Details as one note, where
 /// the controller reads them for the hand-back (runtime-controller
 /// `browser_hand_back.rs`). A browser turn whose findings go back to the
-/// building turn ([`hands_back`]) posts [`FINDINGS_ONLY_REPLY`] instead of its
-/// own words, unless a finding says a page stopped it: the building turn says
-/// what it made a moment later, and the browser turn's own account of what it
-/// could not build is no answer to the person. Those words go into the note
+/// building turn ([`hands_back`]) posts no words of its own, unless a finding
+/// says a page stopped it: the building turn says what it made a moment later,
+/// and the browser turn's own account of what it could not build is no answer
+/// to the person. Its line and Details stay. Those words go into the note
 /// ahead of the findings, so the controller's record still gives them to the
 /// building turn (what the browser did not read). Any other turn is left as it
 /// is.
@@ -333,13 +341,17 @@ pub(crate) fn move_findings_into_details(job: &LeaseJob, execution: &mut JobExec
         .filter(|line| finding_line(line) == Some(true))
         .count();
     let lines = findings.join("\n");
-    let (summary, note) = if reply.is_empty() {
+    let hands_back = hands_back(metadata);
+    // An empty reply shows nothing: Studio leaves a blank reply out.
+    let (summary, note) = if hands_back && pages_read == findings.len() {
+        let note = if reply.is_empty() {
+            lines
+        } else {
+            format!("{reply}\n\n{lines}")
+        };
+        (String::new(), note)
+    } else if reply.is_empty() && !hands_back {
         (FINDINGS_ONLY_REPLY.to_string(), lines)
-    } else if hands_back(metadata) && pages_read == findings.len() {
-        (
-            FINDINGS_ONLY_REPLY.to_string(),
-            format!("{reply}\n\n{lines}"),
-        )
     } else {
         (reply, lines)
     };
@@ -458,6 +470,11 @@ pub(super) fn format_browser_hand_back_section(metadata: Option<&JsonValue>) -> 
             "Keep building the person's own earlier request from where it stopped",
         ),
     };
+    // A page is a source only for the facts listed under it. A map's hand-back,
+    // told that the reply was the source and the list its index, pinned two
+    // places that only the browser turn's own plan named, each citing a page
+    // from the list that names neither. Such a place is read on its own page,
+    // with whichever reader the turn's skill names, or left out.
     Some(format!(
         "{opening} \
          The browser turn read web pages and replied; its reply and the findings taken from it are below as quoted data. \
@@ -467,7 +484,8 @@ pub(super) fn format_browser_hand_back_section(metadata: Option<&JsonValue>) -> 
          ```json\n{data}\n```\n\
          - {keep_building}, using these findings as what the pages showed at \
          `readAt` in `viewer`. Where you use one, cite its page as \"checked <date> on <host>\" and link it.\n\
-         - Each finding's address and title come from the browser turn's reply; the reply is the source, the list is its index. \
+         - Cite a page only for a fact listed under it. A place or claim the reply names with no page under it is not \
+         checked: read its own page (`instafy web read`, or the reader your skill names) or leave it out. \
          A finding with `stopped` was not read: say which page and why, and do not try it another way.\n\
          - If the reply says the browser did not finish (a sign-in, a manual step, a refused, blocked or challenge page), do not \
          guess what is missing: say in one line what is left and who does it.\n\
@@ -616,10 +634,10 @@ mod tests {
                 "{section}"
             );
             assert!(section.contains("say so in your first line"));
-            // The building turn finishes the page: the browser turn says what it read, and never
-            // that it couldn't finish what the next turn does.
+            // The browser turn says what it read, and never that it couldn't finish what the
+            // next turn does.
             assert!(section.contains(
-                r#"your reply says what you read ("Read 6 pages on <site>"), never "I couldn't finish""#
+                r#"then say what you read ("Read 6 pages on <site>"), never "I couldn't finish""#
             ));
             assert!(!section.contains("If you stopped before finishing"));
         }
@@ -669,6 +687,77 @@ mod tests {
                 "Report only what the pages showed, each fact under a page you read that states it, not one that only quotes it, and copy no long listing text;"
             ),
             "{section}"
+        );
+    }
+
+    /// The browser turn reads what the request needs: the building turn after it is a hand-back,
+    /// which never opens the browser. A local test, Nov 2: told that Octo asked for the task from
+    /// a building turn (it was the person's own message) and that the building turn finishes the
+    /// work, a comparison's browser turn read one maker page in 14 s and handed back; its
+    /// follow-up read four, wrote that one of them links to reviews of each model, and opened none
+    /// of them, while the hand-back was told the person can ask for a missing page.
+    #[test]
+    fn a_browser_turn_that_hands_back_reads_what_the_request_needs() {
+        let metadata = json!({
+            "browserTransport": "shared",
+            "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+            "browserHandsBack": true,
+        });
+        let section = format_browser_findings_contract_section(Some(&metadata)).expect("contract");
+        for line in [
+            "\nA building turn makes what the person asked for from your findings. End your reply",
+            "The building turn can't open the browser: before you end, read what the request needs \
+             (each item's own page and, for reviews, review pages a page you read links to, else a \
+             reviewer's own site), then say what you read (\"Read 6 pages on <site>\"), never \"I \
+             couldn't finish\". ",
+        ] {
+            assert!(section.contains(line), "{line}: {section}");
+        }
+        for old in [
+            "Octo asked for this browser task from a building turn",
+            "that turn continues from your reply once you finish",
+            "The building turn finishes the work",
+        ] {
+            assert!(!section.contains(old), "{old}: {section}");
+        }
+    }
+
+    /// A page is cited only for a fact listed under it. A local test, Nov 2: a map's hand-back,
+    /// told that the browser turn's reply was the source and its list of pages the index, pinned
+    /// two places that only the browser turn's own day plan named, and cited for each a page from
+    /// the list that names neither. A place or claim with no page under it is read on its own page,
+    /// with the space's own reader or the one the turn's skill names, or left out; the line names
+    /// no skill's command, which a space without that skill does not have.
+    #[test]
+    fn a_hand_back_cites_a_page_only_for_a_fact_listed_under_it() {
+        let fixtures = fixtures();
+        let metadata = json!({ "browserHandBack": fixtures["stampedRecord"] });
+        let section = format_browser_hand_back_section(Some(&metadata)).expect("section");
+        assert!(
+            section.contains(
+                "\n- Cite a page only for a fact listed under it. A place or claim the reply names \
+                 with no page under it is not checked: read its own page (`instafy web read`, or the \
+                 reader your skill names) or leave it out. A finding with `stopped` was not read: say \
+                 which page and why, and do not try it another way.\n"
+            ),
+            "{section}"
+        );
+        for old in [
+            "the reply is the source",
+            "the list is its index",
+            "Each finding's address and title come from the browser turn's reply",
+        ] {
+            assert!(!section.contains(old), "{old}: {section}");
+        }
+        assert!(!section.contains("`uw "), "{section}");
+        // A routed message's hand-back reads the same line.
+        let mut record = fixtures["stampedRecord"].clone();
+        record["personRequest"] = json!("Plan three days in the old town, on a map.");
+        let routed = format_browser_hand_back_section(Some(&json!({ "browserHandBack": record })))
+            .expect("section");
+        assert!(
+            routed.contains("\n- Cite a page only for a fact listed under it."),
+            "{routed}"
         );
     }
 
@@ -860,18 +949,30 @@ mod tests {
         assert_eq!(turn.summary, "Finished in the browser.");
         assert_eq!(turn.final_messages.len(), 1);
         assert_eq!(turn.final_messages[0].content, only);
+        // Unless its findings go back to the building turn, which says what it made with them.
+        let hands_back = browser_job(json!({
+            "browserTransport": "desktop-personal",
+            "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+            "browserHandsBack": true,
+        }));
+        let mut turn = execution(only);
+        move_findings_into_details(&hands_back, &mut turn);
+        assert_eq!(turn.summary, "");
+        assert_eq!(turn.final_messages.len(), 1);
+        assert_eq!(turn.final_messages[0].content, only);
     }
 
     /// A browser turn whose findings go back to the building turn posts no words of its own
     /// beside them: the building turn says what it made a moment later. Its own words had said
     /// "I could not create the comparison page because this turn is read-only" a second before
-    /// the page was built. Its line points nowhere the person cannot see: Studio leaves the
-    /// findings note out of Details. Its words still reach the building turn, ahead of the
-    /// findings in that note, which the controller puts after the reply in its record: they say
-    /// what it did not read ("the reviews it links, not opened"). A page that stopped it keeps
-    /// its words, which say which and why, and a question's browser turn answers in its own words.
+    /// the page was built, and then only "Finished in the browser.", three times in a local test
+    /// (Nov 2), above "Octo continued with what it found in the browser". Its line and Details
+    /// stay. Its words still reach the building turn, ahead of the findings in its note, which the
+    /// controller reads for its record: they say what it did not read ("the reviews it links, not
+    /// opened"). A page that stopped it keeps its words, which say which and why, and a question's
+    /// browser turn answers in its own words.
     #[test]
-    fn a_browser_turn_that_hands_back_posts_the_findings_line_unless_a_page_stopped_it() {
+    fn a_browser_turn_that_hands_back_posts_no_words_unless_a_page_stopped_it() {
         let hands_back = json!({
             "browserTransport": "shared",
             "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
@@ -885,20 +986,30 @@ mod tests {
         let own = "I read the maker's pages for two laptops. Their reviews are not checked: the Laptop 13 page links to two, which I did not open.";
         let mut turn = execution(&format!("{own}\n\n{read}"));
         move_findings_into_details(&browser_job(hands_back.clone()), &mut turn);
-        assert_eq!(turn.summary, "Finished in the browser.");
+        assert_eq!(turn.summary, "");
         assert_eq!(turn.final_messages.len(), 1);
         assert_eq!(turn.final_messages[0].content, format!("{own}\n\n{read}"));
         assert_eq!(
             turn.final_messages[0].metadata.as_ref().unwrap()["browserFindings"],
             json!({ "pages": 2, "pagesRead": 2 })
         );
+        // A reply that was only its findings: the note holds them alone.
+        let mut turn = execution(&read);
+        move_findings_into_details(&browser_job(hands_back.clone()), &mut turn);
+        assert_eq!(turn.summary, "");
+        assert_eq!(turn.final_messages[0].content, read);
 
         // A page that stopped it: its words say which, and the note holds only the findings.
         let words = "The review page asked for a subscription, so I read only the maker's pages.";
         let stopped = r#"{"url": "https://reviews.example/laptop-13", "stopped": "paywall"}"#;
         let mut turn = execution(&format!("{words}\n\n{read}\n{stopped}"));
-        move_findings_into_details(&browser_job(hands_back), &mut turn);
+        move_findings_into_details(&browser_job(hands_back.clone()), &mut turn);
         assert_eq!(turn.summary, words);
+        assert_eq!(turn.final_messages[0].content, format!("{read}\n{stopped}"));
+        // With no words of its own, it posts none: the building turn says which page stopped it.
+        let mut turn = execution(&format!("{read}\n{stopped}"));
+        move_findings_into_details(&browser_job(hands_back), &mut turn);
+        assert_eq!(turn.summary, "");
         assert_eq!(turn.final_messages[0].content, format!("{read}\n{stopped}"));
 
         // A question's browser turn: its reply is the answer.

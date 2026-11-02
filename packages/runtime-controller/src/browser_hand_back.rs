@@ -42,7 +42,10 @@
 //! the reply's lines, `readAt` and `viewer` from the job itself. The runtime
 //! moves those lines out of the reply the person reads into a Details note of
 //! the browser turn (runtime-agent `move_findings_into_details`); the record's
-//! reply puts them back after it. The runtime
+//! reply puts them back after it. A browser turn whose findings go back to
+//! the building turn posts no words of its own: its note holds them, ahead of
+//! its findings, and the record's reply is that note ([`browser_turn_reply`]).
+//! The runtime
 //! shows it to the building turn as quoted page data, never as the person's
 //! words and never as their consent (runtime-agent `jobs/browser_hand_back.rs`).
 //! A hand-back is never queued or recorded without a dispatch: it resumes an
@@ -798,26 +801,22 @@ pub(crate) async fn require_hand_back(
         return Ok(record);
     }
 
-    // The turn's final answer is its completion summary; a turn that streamed
-    // its answer instead has it as its last streamed message.
-    let summary = browser_job
-        .get::<_, Option<String>>("summary")
-        .filter(|summary| !summary.trim().is_empty());
-    let reply = match (summary, run_id) {
-        (Some(summary), _) => Some(summary),
-        (None, Some(run_id)) => last_streamed_reply(transaction, conversation_id, &run_id).await?,
-        (None, None) => None,
-    }
-    .filter(|reply| !reply.trim().is_empty())
-    .ok_or_else(|| {
-        hand_back_refused(
+    let reply = browser_turn_reply(
+        transaction,
+        conversation_id,
+        &browser_job_id,
+        run_id,
+        browser_job.get::<_, Option<String>>("summary"),
+    )
+    .await?;
+    if reply.trim().is_empty() {
+        return Err(hand_back_refused(
             StatusCode::CONFLICT,
             "browser_hand_back_empty",
             "That browser turn returned nothing to hand back.",
-        )
-    })?;
+        ));
+    }
 
-    let finding_lines = finding_lines_note(transaction, conversation_id, &browser_job_id).await?;
     // A card the routing step posted for the person's own message: the
     // building thread never saw that message (its job ran no model turn), so
     // the record gives the build its words, from the message's own job, as the
@@ -834,7 +833,7 @@ pub(crate) async fn require_hand_back(
         completed_at,
         request,
         person_request,
-        &reply_with_finding_lines(&reply, finding_lines.as_deref()),
+        &reply,
     );
     // A browser turn that read no page leaves the building turn nothing to
     // continue with; its own reply already says what stopped it.
@@ -1213,6 +1212,39 @@ pub(crate) async fn job_posted_routed_browser_card(
         .map_err(|error| internal_error(format!("failed to read the routed card: {error}")))
 }
 
+/// A browser turn's reply as the building turn reads it, with the finding
+/// lines its runtime moved into its Details note put back after it
+/// ([`reply_with_finding_lines`]). The reply is the turn's completion summary,
+/// or, for a turn that streamed its answer instead, its last streamed message.
+/// A browser turn whose findings go back to the building turn posts no words
+/// of its own (runtime-agent `move_findings_into_details`): with a note and no
+/// summary, the note holds its words ahead of its findings and is the whole
+/// reply, never a message the turn streamed on its way. Empty when the turn
+/// left neither.
+async fn browser_turn_reply(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: &Uuid,
+    browser_job_id: &Uuid,
+    run_id: Option<Uuid>,
+    summary: Option<String>,
+) -> Result<String, (StatusCode, Json<ApiError>)> {
+    let finding_lines = finding_lines_note(transaction, conversation_id, browser_job_id)
+        .await?
+        .filter(|lines| !lines.trim().is_empty());
+    let reply = match (
+        summary.filter(|summary| !summary.trim().is_empty()),
+        finding_lines.is_some(),
+        run_id,
+    ) {
+        (Some(summary), _, _) => summary,
+        (None, true, _) | (None, false, None) => String::new(),
+        (None, false, Some(run_id)) => last_streamed_reply(transaction, conversation_id, &run_id)
+            .await?
+            .unwrap_or_default(),
+    };
+    Ok(reply_with_finding_lines(&reply, finding_lines.as_deref()))
+}
+
 /// The finding lines the runtime moved out of the browser turn's reply into
 /// its Details note, if any.
 async fn finding_lines_note(
@@ -1548,21 +1580,15 @@ pub(crate) async fn browser_turns_since(
         };
         let completed_at: DateTime<Utc> = row.get("completed_at");
         let read_at = completed_at.to_rfc3339_opts(SecondsFormat::Secs, true);
-        let reply = match (
-            row.get::<_, Option<String>>("summary")
-                .filter(|summary| !summary.trim().is_empty()),
+        let reply = browser_turn_reply(
+            transaction,
+            conversation_id,
+            &browser_job_id,
             run_id,
-        ) {
-            (Some(summary), _) => summary,
-            (None, Some(run_id)) => last_streamed_reply(transaction, conversation_id, &run_id)
-                .await?
-                .unwrap_or_default(),
-            (None, None) => String::new(),
-        };
-        let finding_lines =
-            finding_lines_note(transaction, conversation_id, &browser_job_id).await?;
-        let (reply, truncated) =
-            bounded_reply(&reply_with_finding_lines(&reply, finding_lines.as_deref()));
+            row.get::<_, Option<String>>("summary"),
+        )
+        .await?;
+        let (reply, truncated) = bounded_reply(&reply);
         let request = browser_payload
             .get("prompt_text")
             .and_then(JsonValue::as_str)
