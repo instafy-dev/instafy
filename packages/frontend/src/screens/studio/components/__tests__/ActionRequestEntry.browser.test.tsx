@@ -54,14 +54,14 @@ describe("a request_browser card", () => {
     return {
       destination: text("browser-request-destination"),
       unavailable: text("browser-request-unavailable"),
-      opening: text("browser-request-opening"),
       openingNote: text("browser-request-opening-note"),
-      opened: text("browser-request-opened"),
-      notOpened: text("browser-request-not-opened"),
       reason: text("browser-request-reason"),
       button: container.querySelector<HTMLButtonElement>('[data-testid="browser-request-continue"]'),
-      routedLine: text("routed-browser-opening"),
+      // The turn's one line while Studio opens the browser for the card.
+      line: text("browser-request-opening"),
       card: container.querySelector('[data-testid="browser-request-card"]'),
+      // Whatever the chat shows for it: nothing once it has left the chat.
+      shown: container.innerHTML,
     };
   }
 
@@ -118,82 +118,87 @@ describe("a request_browser card", () => {
     expect(card.button?.disabled).toBe(false);
   });
 
-  // Octo opens Instafy's browser by itself (owner decision, Oct 19); the card
-  // says so in place of its button, or keeps the button with the reason.
+  // Octo opens Instafy's browser by itself (owner decision, Oct 19). A card
+  // shows only while it needs the person; while Studio opens it, it reads as
+  // the turn's one line.
   const task = { task: "Open https://dashboard.stripe.com/apikeys and stop on the list.", location: "auto" };
 
-  it("reads Opening while Studio opens the browser by itself, with the cost of switching the machine", async () => {
+  it("reads as the turn's one line while Studio opens the browser by itself, with the cost of switching the machine", async () => {
     const card = await render(task, { ...web, cardStates: new Map([["job:job-1", {
       kind: "opening", note: "This space's machine restarts with the browser. This takes about two minutes and one billing interval.",
     }]]) });
-    expect(card.opening).toBe("Opening Instafy's browser for dashboard.stripe.com");
+    expect(card.line).toContain("Opening Instafy's browser…");
     expect(card.openingNote).toContain("about two minutes and one billing interval");
+    // No box: no card, no button, no site.
+    expect(card.card).toBeNull();
     expect(card.button).toBeNull();
     expect(card.destination).toBeNull();
   });
 
-  it("reads a plain Opened, without its button, once continued, also after a reload", async () => {
+  // Local test, Nov 2: once Studio opened the browser for a map turn's card,
+  // the card stayed as a full card saying only "Opened", above the reply,
+  // with "Octo opened Instafy's browser" right under it. The continuation's
+  // one line and the browser turn's own line are the record.
+  it("leaves the chat once Instafy's browser opened for it, by Studio or by a press, also after a reload", async () => {
     for (const host of [
+      // Studio opened it by itself, or the person pressed it, here.
       { ...web, cardStates: new Map([["job:job-1", { kind: "opened" } as const]]) },
+      { ...web, cardStates: new Map([["job:job-1", { kind: "opening", note: null } as const]]), continuedKeys: new Set(["job:job-1"]) },
+      // After a reload, or on another device: its continuation is in the chat.
       { ...web, continuedKeys: new Set(["job:job-1"]) },
-      // Also once a newer card followed it.
+      { ...web, continuedKeys: new Set(["job:job-1"]), newestCardKey: "job:job-1" },
       { ...web, continuedKeys: new Set(["job:job-1"]), newestCardKey: "job:job-2" },
     ]) {
       const card = await render(task, host);
-      // The browser opened; whether the site loaded is for the browser to show.
-      expect(card.opened).toBe("Opened");
-      expect(card.button).toBeNull();
-      expect(card.destination).toBeNull();
+      expect(card.shown).toBe("");
     }
   });
 
   // Local drive, Oct 28: two live cards stacked up in one chat, and the older
   // one's button stayed pressable for the rest of it.
-  it("offers no button once a newer card followed it, and the newest keeps its own", async () => {
+  it("leaves the chat once a newer card followed it, and the newest keeps its button", async () => {
     let card = await render(task, { ...web, newestCardKey: "job:job-2" });
-    expect(card.button).toBeNull();
-    expect(card.destination).toBeNull();
-    expect(card.opened).toBeNull();
-    // It never opened, and it no longer promises to: a plain "Not opened".
-    expect(card.notOpened).toBe("Not opened");
-    expect(container.textContent).not.toContain("Studio opens the browser");
-    card = await render(task, { ...web, newestCardKey: "job:job-1" });
-    expect(card.button?.disabled).toBe(false);
-    expect(card.destination).toBe("For dashboard.stripe.com");
-    expect(card.notOpened).toBeNull();
-    // No reason or warning on a card that offers nothing to press.
+    expect(card.shown).toBe("");
+    // Whatever it said before: a reason, or that no browser opens here.
     card = await render(task, { ...web, sharedUnavailable: true, newestCardKey: "job:job-2", cardStates: new Map([[
       "job:job-1", { kind: "button", reason: "This starts a second cloud machine for this space." } as const,
     ]]) });
-    expect(card.button).toBeNull();
-    expect(card.reason).toBeNull();
-    expect(card.unavailable).toBeNull();
+    expect(card.shown).toBe("");
+    card = await render(task, { ...web, newestCardKey: "job:job-1" });
+    expect(card.button?.disabled).toBe(false);
+    expect(card.destination).toBe("For dashboard.stripe.com");
   });
 
   // Local drive, Oct 29: every card said "Studio opens the browser and
   // continues this task there.", whether it opened by itself or waited for a
-  // press. The card says what it is for; Opening and Opened say the rest.
-  it("never says what Studio does, as a button, while opening or once opened, an older card included", async () => {
-    for (const host of [
-      web,
-      { ...web, cardStates: new Map([["job:job-1", { kind: "opening", note: null } as const]]) },
-      { ...web, continuedKeys: new Set(["job:job-1"]) },
-    ]) {
+  // press. The card says what it is for; the line says the rest.
+  it("never says what Studio does, as a button or while opening", async () => {
+    for (const host of [web, { ...web, cardStates: new Map([["job:job-1", { kind: "opening", note: null } as const]]) }]) {
       await render(task, host);
-      expect(container.textContent).toContain("Continue in Instafy's browser");
       expect(container.textContent).not.toContain("Studio opens the browser");
     }
-    const opening = await render(task, { ...web, cardStates: new Map([["job:job-1", { kind: "opening", note: null } as const]]) });
-    expect(opening.opening).toBe("Opening Instafy's browser for dashboard.stripe.com");
+    await render(task, web);
+    expect(container.textContent).toContain("Continue in Instafy's browser");
   });
 
-  it("keeps the button with the reason Studio did not open it by itself", async () => {
-    const card = await render(task, { ...web, cardStates: new Map([["job:job-1", {
-      kind: "button", reason: "This starts a second cloud machine for this space.",
-    } as const]]) });
+  // Studio could not open it by itself: the card stays, with its button, the
+  // site it is for and why, until the person's press opened the browser.
+  it("keeps the button with the reason Studio did not open it by itself, until the press opened the browser", async () => {
+    const reason = { kind: "button", reason: "This starts a second cloud machine for this space." } as const;
+    let card = await render(task, { ...web, cardStates: new Map([["job:job-1", reason]]) });
     expect(card.reason).toBe("This starts a second cloud machine for this space.");
     expect(card.destination).toBe("For dashboard.stripe.com");
     expect(card.button?.disabled).toBe(false);
+    // Opening failed: the button comes back with why.
+    card = await render(task, { ...web, cardStates: new Map([["job:job-1", {
+      kind: "button", reason: "Instafy's browser could not open. See the browser for details, then try again.",
+    } as const]]) });
+    expect(card.reason).toBe("Instafy's browser could not open. See the browser for details, then try again.");
+    expect(card.button?.disabled).toBe(false);
+    // The press went out.
+    card = await render(task, { ...web, cardStates: new Map([["job:job-1", { kind: "opened" } as const]]),
+      continuedKeys: new Set(["job:job-1"]) });
+    expect(card.shown).toBe("");
   });
 
   it("says the browser on this device needs the person's own AI", async () => {
@@ -225,10 +230,9 @@ describe("a request_browser card", () => {
         { ...web, continuedKeys: new Set(["job:job-1"]), routedWaitingKeys: new Set(["job:job-1"]) },
       ]) {
         const card = await render(routed, host);
-        expect(card.routedLine).toBe("Opening Instafy's browser…");
+        expect(card.line).toBe("Opening Instafy's browser…");
         expect(card.card).toBeNull();
         expect(card.button).toBeNull();
-        expect(card.opened).toBeNull();
       }
       const slow = await render(routed, { ...web, cardStates: new Map([["job:job-1", {
         kind: "opening", note: "This space's machine restarts with the browser. This takes about two minutes and one billing interval.",
@@ -238,16 +242,15 @@ describe("a request_browser card", () => {
 
     // Pressed by the person (here or on another device), or carried on by a
     // browser turn that failed or was stopped before it showed anything: no
-    // browser is opening, so the card never says one is.
-    it("shows today's Opened card once nothing is opening it any more", async () => {
+    // browser is opening, so it never says one is, and it leaves the chat as
+    // any card does.
+    it("leaves the chat as any card does once nothing is opening it any more", async () => {
       for (const host of [
         { ...web, continuedKeys: new Set(["job:job-1"]) },
         { ...web, cardStates: new Map([["job:job-1", { kind: "opened" } as const]]), continuedKeys: new Set(["job:job-1"]) },
       ]) {
         const card = await render(routed, host);
-        expect(card.routedLine).toBeNull();
-        expect(card.card).not.toBeNull();
-        expect(card.opened).toBe("Opened");
+        expect(card.shown).toBe("");
       }
     });
 
@@ -255,19 +258,24 @@ describe("a request_browser card", () => {
       const held = await render(routed, { ...web, cardStates: new Map([["job:job-1", {
         kind: "button", reason: "Someone else is using Instafy's browser right now.",
       }]]) });
-      expect(held.routedLine).toBeNull();
+      expect(held.line).toBeNull();
       expect(held.card).not.toBeNull();
       expect(held.reason).toBe("Someone else is using Instafy's browser right now.");
       expect(held.button?.disabled).toBe(false);
       const unavailable = await render(routed, { ...web, sharedUnavailable: true });
-      expect(unavailable.routedLine).toBeNull();
+      expect(unavailable.line).toBeNull();
       expect(unavailable.unavailable).toBe("Instafy's browser is not available in this workspace.");
     });
 
-    it("leaves a card the routing step did not send as it was", async () => {
-      const card = await render({ task: routed.task, location: "auto" }, { ...web, cardStates: new Map([["job:job-1", { kind: "opening", note: null } as const]]) });
-      expect(card.routedLine).toBeNull();
-      expect(card.opening).toBe("Opening Instafy's browser for forms.example");
+    // Only a routed card waits for its browser turn to show something: any
+    // other card's continuation leaves its own one line in the chat.
+    it("keeps the line until the browser turn shows something only for a card the routing step sent", async () => {
+      const waiting = { ...web, continuedKeys: new Set(["job:job-1"]), routedWaitingKeys: new Set(["job:job-1"]) };
+      expect((await render(routed, waiting)).line).toBe("Opening Instafy's browser…");
+      expect((await render({ task: routed.task, location: "auto" }, waiting)).shown).toBe("");
+      const opening = await render({ task: routed.task, location: "auto" }, { ...web, cardStates: new Map([["job:job-1", { kind: "opening", note: null } as const]]) });
+      expect(opening.line).toBe("Opening Instafy's browser…");
+      expect(opening.card).toBeNull();
     });
   });
 });

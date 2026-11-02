@@ -69,6 +69,7 @@ import {
   normalizeConversationGoalProgressSummaryForDisplay,
 } from "../../../conversations/conversationGoals";
 import { isRunActivelyProgressing } from "../../../conversations/runLiveness";
+import { usePromptSendFailureVersion } from "../../../conversations/sentPromptRegistry";
 import { useRuntimeMenuOptions, type RuntimeMenuOption } from "../../../runtime/useRuntimeMenu";
 import {
   shouldPinChatMessagesToBottom,
@@ -2985,8 +2986,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const collapsedConversationMessages = useMemo(() => collapseLifecycleMessages(messages), [messages]);
   const previewThreads = useConversationPreviewThreads(conversations, activeConversation?.controllerId ?? null);
+  // What reads whether a prompt went out is worked out again when a send
+  // fails, not only when a message arrives: a failure may add none (its error
+  // repeats the chat's last one), and a browser card whose continuation did
+  // not go out comes back with its button (routedBrowserFold.ts).
+  const promptSendFailures = usePromptSendFailureVersion();
 
   const groupedMessages = useMemo(() => {
+    void promptSendFailures;
     const collapsedVisible = collapsedConversationMessages.filter((message) => shouldDisplayChatMessage(message));
     const jobThreads = synthesizeAgentJobThreadMessages(collapsedConversationMessages, collapsedVisible);
 
@@ -3022,7 +3029,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     });
 
     return [...jobThreads, ...threadMessages];
-  }, [activeConversation?.controllerId, collapsedConversationMessages, previewThreads, messages]);
+  }, [activeConversation?.controllerId, collapsedConversationMessages, previewThreads, messages, promptSendFailures]);
   const displayedMessages = useMemo(() => revealCanonicalMessageTarget(
     groupedMessages, messages, messageTargetActive ? requestedMessageId : null,
   ), [groupedMessages, messages, messageTargetActive, requestedMessageId]);
@@ -4655,15 +4662,16 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     pageId: browserHandoffPage?.id ?? null,
   }), [runs, activeProjectId, activeConversationEntry?.controllerId, resolvedBrowserRuntimeId, browserHandoffPage?.id]);
   // The sites of the cards the person pressed in this chat: their OK for
-  // each one in the chat's later browser turns.
+  // each one in the chat's later browser turns. Only a press that went out
+  // counts.
   const activeConversationMessageList = activeConversation?.messages;
-  const pressedCardSites = useMemo(
-    () => pressedBrowserCardSites(
+  const pressedCardSites = useMemo(() => {
+    void promptSendFailures;
+    return pressedBrowserCardSites(
       Array.isArray(activeConversationMessageList) ? activeConversationMessageList : [],
       currentUserId,
-    ),
-    [activeConversationMessageList, currentUserId],
-  );
+    );
+  }, [activeConversationMessageList, currentUserId, promptSendFailures]);
   const browserHandoff = useChatBrowserHandoff({
     userId: currentUserId,
     projectId: activeProjectId ?? null,
@@ -4993,17 +5001,18 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   useEffect(() => {
     setBrowserCardOpening(browserCardOpeningNow);
   }, [browserCardOpeningNow]);
-  // A continuation whose dispatch failed continues no card; the failure also
-  // sets that card's state, which recomputes this.
-  const browserRequestContinued = useMemo(
-    () => browserRequestContinuedKeys(messages),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [messages, browserRequestState.cardStates],
-  );
+  // A continuation whose dispatch failed continues no card.
+  const browserRequestContinued = useMemo(() => {
+    void promptSendFailures;
+    return browserRequestContinuedKeys(messages);
+  }, [messages, promptSendFailures]);
   const newestBrowserRequest = useMemo(() => newestBrowserRequestKey(messages), [messages]);
   // Cards for a message Octo sent straight to the browser that Studio opened
   // by itself and that are still opening (routedBrowserFold.ts).
-  const routedBrowserWaiting = useMemo(() => routedBrowserWaitingKeys(messages), [messages]);
+  const routedBrowserWaiting = useMemo(() => {
+    void promptSendFailures;
+    return routedBrowserWaitingKeys(messages);
+  }, [messages, promptSendFailures]);
   const browserRequestHost = useMemo<BrowserRequestHost>(() => ({
     transport: browserTransport,
     personalAvailable: personalBrowser.available,

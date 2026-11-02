@@ -1,3 +1,11 @@
+// A browser card stays in the chat only while it needs the person. Once
+// Instafy's browser opened for it, by Studio itself or by the person's press,
+// the card leaves the chat, also after a reload: the continuation's one line
+// ("Octo opened Instafy's browser for …") and the browser turn's own line are
+// the record. A card a newer card followed leaves too: the newer one carries
+// the task on. A card that stays a button (Studio could not open it by
+// itself, or opening failed) shows with its site and its reason.
+//
 // A message Octo sent straight to Instafy's browser reads as one turn: the
 // person's message, then the browser turn's own line and reply. Its job ran
 // no model turn and posted only a routed card (`browserRequest.routed`),
@@ -5,17 +13,17 @@
 // on as the browser turn's task. The chat leaves that continuation out (it
 // repeats the person's message), and the card shows only the turn's one line,
 // "Opening Instafy's browser…", until the browser turn shows something; then
-// the card goes too. A routed card that stays a button (Studio could not
-// open it by itself) or that the person pressed is never folded: it shows as
-// any card does, with its reason, and reads Opened once pressed. So does one
-// whose browser turn failed or was stopped before it showed anything: nothing
-// is opening any more. A message that asked Octo to make something, which its
-// browser turn handed back without opening a page (the runtime's build request
-// note), reads as the building turn alone: the card goes as soon as that note
-// arrives, and once the hand-back the controller sends for it is in the chat,
-// the browser turn and the hand-back's notice go too. Until then, or when that
-// hand-back was refused, the browser turn shows what it has (the controller
-// leaves a refusal's reason as its reply).
+// the card goes too. A routed card the person pressed leaves as any card does,
+// and its continuation's one line stays. So does one whose browser turn failed
+// or was stopped before it showed anything: nothing is opening any more, and
+// the person's message and that turn's own failure or Stopped line remain. A
+// message that asked Octo to make something, which its browser turn handed
+// back without opening a page (the runtime's build request note), reads as
+// the building turn alone: the card goes as soon as that note arrives, and
+// once the hand-back the controller sends for it is in the chat, the browser
+// turn and the hand-back's notice go too. Until then, or when that hand-back
+// was refused, the browser turn shows what it has (the controller leaves a
+// refusal's reason as its reply).
 
 import { hasFailedRunMetadata } from "../../../conversations/runFailurePresentation";
 import type { ChatMessage } from "../types";
@@ -23,6 +31,7 @@ import { BROWSER_BUILD_REQUEST_NOTE_KEY, readBrowserHandBackOf } from "./browser
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { getControllerConversationNoticeKind } from "./controllerConversationNotice";
 import {
+  browserRequestContinuedKeys,
   browserRequestFromMessage,
   browserRequestKey,
   isAutoStartedContinuation,
@@ -65,6 +74,14 @@ export type RoutedBrowserFold = {
    * browser turn and the hand-back's notice show nothing either.
    */
   handedBackBuildRequestJobIds: ReadonlySet<string>;
+  /**
+   * Browser cards of any turn, by message id, that have left the chat:
+   * Instafy's browser opened for them (a continuation names them), or a newer
+   * card followed. A routed card still opening by itself
+   * ({@link waitingCardKeys}) is not among them: its line shows until its
+   * browser turn shows something.
+   */
+  settledCardIds: ReadonlySet<string>;
 };
 
 /**
@@ -81,18 +98,47 @@ function endsARunWithoutItsJob(message: ChatMessage): boolean {
 }
 
 /**
+ * The browser cards that have left the chat ({@link RoutedBrowserFold.settledCardIds}):
+ * every card a continuation names, and every card but the newest. The
+ * continuations are read as the card reads them (browserRequestContinuedKeys),
+ * so one whose dispatch failed continues no card, and that card keeps its
+ * button.
+ */
+function settledBrowserCardIds(
+  messages: readonly ChatMessage[],
+  cards: readonly ChatMessage[],
+  waitingCardKeys: ReadonlySet<string>,
+): Set<string> {
+  const settled = new Set<string>();
+  const newest = cards.at(-1);
+  if (!newest) return settled;
+  const newestKey = browserRequestKey(newest);
+  const continued = browserRequestContinuedKeys(messages);
+  for (const card of cards) {
+    const key = browserRequestKey(card);
+    if (waitingCardKeys.has(key)) continue;
+    if (continued.has(key) || key !== newestKey) settled.add(card.id);
+  }
+  return settled;
+}
+
+/**
  * Links each routed card Studio opened by itself to the browser turn that
  * carries it on: the continuation names the card (`browserRequestOf`), and
- * its stored row names the run that turn's job reports under.
+ * its stored row names the run that turn's job reports under. Also lists the
+ * cards of any turn that have left the chat.
  */
 export function resolveRoutedBrowserFold(messages: readonly ChatMessage[]): RoutedBrowserFold {
+  const cards: ChatMessage[] = [];
   const routedCards = new Map<string, ChatMessage>();
   const jobByRunId = new Map<string, string>();
   const runsEndedWithoutAJob = new Set<string>();
   const jobsThatRequestedABuild = new Set<string>();
   for (const message of messages) {
     if (message.role !== "assistant") continue;
-    if (browserRequestFromMessage(message)?.routed) routedCards.set(browserRequestKey(message), message);
+    const request = browserRequestFromMessage(message);
+    if (request) cards.push(message);
+    if (request?.routed) routedCards.set(browserRequestKey(message), message);
     const jobId = stringField(message, ["jobId", "job_id"]);
     const runId = stringField(message, ["runId", "run_id"]);
     if (jobId && runId && !jobByRunId.has(runId)) jobByRunId.set(runId, jobId);
@@ -107,7 +153,14 @@ export function resolveRoutedBrowserFold(messages: readonly ChatMessage[]): Rout
   const buildRequestJobIds = new Set<string>();
   const handedBackBuildRequestJobIds = new Set<string>();
   if (routedCards.size === 0) {
-    return { hiddenPromptIds, cardIdByBrowserJobId, waitingCardKeys, buildRequestJobIds, handedBackBuildRequestJobIds };
+    return {
+      hiddenPromptIds,
+      cardIdByBrowserJobId,
+      waitingCardKeys,
+      buildRequestJobIds,
+      handedBackBuildRequestJobIds,
+      settledCardIds: settledBrowserCardIds(messages, cards, waitingCardKeys),
+    };
   }
   for (const message of messages) {
     const key = readBrowserRequestOf(message);
@@ -131,7 +184,14 @@ export function resolveRoutedBrowserFold(messages: readonly ChatMessage[]): Rout
       handedBackBuildRequestJobIds.add(handedBack);
     }
   }
-  return { hiddenPromptIds, cardIdByBrowserJobId, waitingCardKeys, buildRequestJobIds, handedBackBuildRequestJobIds };
+  return {
+    hiddenPromptIds,
+    cardIdByBrowserJobId,
+    waitingCardKeys,
+    buildRequestJobIds,
+    handedBackBuildRequestJobIds,
+    settledCardIds: settledBrowserCardIds(messages, cards, waitingCardKeys),
+  };
 }
 
 /** Routed cards still opening by themselves ({@link RoutedBrowserFold.waitingCardKeys}). */

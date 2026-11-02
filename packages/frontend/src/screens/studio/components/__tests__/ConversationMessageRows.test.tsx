@@ -12,6 +12,14 @@ import { collapseLifecycleMessages, shouldDisplayChatMessage, synthesizeAgentJob
 import {
   CHAT_SPEAKER_MARKER_SELECTOR,
 } from "../chatSpeakerMarker";
+import {
+  BrowserRequestHostContext,
+  browserRequestContinuedKeys,
+  newestBrowserRequestKey,
+  type BrowserRequestCardState,
+  type BrowserRequestHost,
+} from "../browserRequest";
+import { routedBrowserWaitingKeys } from "../routedBrowserFold";
 
 const workspaceTabsMocks = vi.hoisted(() => ({
   openConversationTab: vi.fn(),
@@ -2508,5 +2516,148 @@ describe("ConversationMessageRows", () => {
     expect(container.textContent).not.toContain("Run failed");
     expect(container.querySelector('[data-testid="run-failure-retry"]')).toBeNull();
     expect(container.querySelector('[data-testid="run-failure-details-toggle"]')).toBeNull();
+  });
+
+  // A local test, Nov 2: a map turn ended asking for Instafy's browser, and
+  // Studio opened it by itself. Under the map's card the chat kept a full card
+  // titled "Continue in Instafy's browser" that only said "Opened", and
+  // "Octo opened Instafy's browser" under the turn said it again.
+  describe("a browser card a building turn posted", () => {
+    const TASK = "Find a first-visit Seville itinerary on https://www.visitasevilla.es and verify the key places.";
+    const MAP_JOB = "77777777-7777-4777-8777-777777777777";
+    const MAP_RUN = "88888888-8888-4888-8888-888888888888";
+    const LOOKUP_JOB = "99999999-9999-4999-8999-999999999999";
+    const LOOKUP_RUN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const LATER_JOB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const CARD_KEY = `job:${MAP_JOB}`;
+
+    const ask = createMessage({ id: "ask", role: "user", authorId: "user-1", content: "Plan 3 days in Seville.",
+      timestamp: 1, metadata: { runId: MAP_RUN } });
+    const step = (jobId: string, id: string, timestamp: number) => createMessage({ id, content: "uw add-point",
+      timestamp, messageType: "command_execution", metadata: { jobId, runId: MAP_RUN, source: "agent", kind: "update",
+        outcome: "in_progress", messageType: "command_execution", details: { status: "completed" } } });
+    // The card the runtime sends for request_browser (browser_request.rs).
+    const card = (jobId: string, id: string, timestamp: number) => createMessage({ id,
+      content: "Continue this task in Instafy's browser.", timestamp, messageType: "action_request",
+      metadata: { messageType: "action_request", jobId, runId: MAP_RUN, source: "agent", kind: "update",
+        details: { testId: "browser-request-card", title: "Continue in Instafy's browser",
+          browserRequest: { task: TASK, location: "auto", continueBuilding: true },
+          actions: [{ id: "continue-browser", label: "Open browser and continue", variant: "primary",
+            event: "instafy:request-browser", busyLabel: "Opening browser…", testId: "browser-request-continue" }] } } });
+    const reply = (jobId: string, id: string, timestamp: number) => createMessage({ id,
+      content: "I made the Seville map and asked for a check of the sights.", timestamp,
+      metadata: { jobId, runId: MAP_RUN, source: "agent", outcome: "succeeded" } });
+    const mapTurn = [ask, step(MAP_JOB, "map-step", 2), card(MAP_JOB, "map-card", 3), reply(MAP_JOB, "map-reply", 4)];
+    const lookup = (by: "studio" | "press" | "reload") => {
+      const prompt = { browserRequestOf: CARD_KEY, browserTransport: "shared", browserHandsBack: true,
+        ...(by === "press" ? { browserCardSites: ["www.visitasevilla.es"] } : { browserAutoStarted: true }) };
+      return createMessage({ id: "lookup", role: "user", authorId: "user-1", timestamp: 5,
+        content: `${by === "press" ? "Opened" : "Octo opened"} Instafy's browser for www.visitasevilla.es`,
+        metadata: by === "reload" ? { runId: LOOKUP_RUN, prompt_metadata: prompt } : { runId: LOOKUP_RUN, ...prompt } });
+    };
+    const lookupReply = createMessage({ id: "lookup-reply", content: "The official site lists the Cathedral and the Alcázar.",
+      timestamp: 7, metadata: { jobId: LOOKUP_JOB, runId: LOOKUP_RUN, source: "agent", outcome: "succeeded" } });
+    const lookupTurn = [createMessage({ id: "lookup-step", content: "Opened visitasevilla.es", timestamp: 6,
+      messageType: "mcp_tool_call", metadata: { jobId: LOOKUP_JOB, runId: LOOKUP_RUN, source: "agent", kind: "update",
+        outcome: "in_progress", messageType: "mcp_tool_call", details: { tool: "navigate", status: "completed" } } }), lookupReply];
+
+    /** The chat as ChatPanel draws it: its rows, and the card's host. */
+    async function renderChat(messages: ChatMessage[], cardStates: ReadonlyMap<string, BrowserRequestCardState> = new Map()) {
+      const all = collapseLifecycleMessages(messages);
+      const host: BrowserRequestHost = {
+        transport: "shared",
+        personalAvailable: false,
+        sharedUnavailable: false,
+        cardStates,
+        continuedKeys: browserRequestContinuedKeys(messages),
+        routedWaitingKeys: routedBrowserWaitingKeys(messages),
+        newestCardKey: newestBrowserRequestKey(messages),
+      };
+      await act(async () => {
+        root.render(
+          <BrowserRequestHostContext.Provider value={host}>
+            <ConversationMessageRows
+              messages={synthesizeAgentJobThreadMessages(all, all.filter(shouldDisplayChatMessage))}
+              allConversationMessages={all}
+              currentUserId="user-1"
+              chatClientSessionId="session-1"
+              projectId="project-1"
+              runtimeId={null}
+              conversationLocalId="conversation-local"
+              conversationControllerId="conversation-controller"
+              firstPlanMessageId={null}
+              humanLabelByUserId={new Map()}
+              runAgentIdentityByRunId={new Map()}
+              runAgentHandleByRunId={new Map()}
+              renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+              assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
+              onRequestActions={vi.fn()}
+              onRequestActionsAtPoint={vi.fn()}
+              onCancelTerminalCommand={null}
+              onMessageContextMenu={vi.fn()}
+            />
+          </BrowserRequestHostContext.Provider>,
+        );
+      });
+      const cards = [...container.querySelectorAll('[data-testid="browser-request-card"]')];
+      return {
+        cards: cards.length,
+        button: container.querySelector<HTMLButtonElement>('[data-testid="browser-request-continue"]'),
+        site: container.querySelector('[data-testid="browser-request-destination"]')?.textContent ?? null,
+        reason: container.querySelector('[data-testid="browser-request-reason"]')?.textContent ?? null,
+        line: container.querySelector('[data-testid="browser-request-opening"]')?.textContent ?? null,
+        notices: [...container.querySelectorAll('[data-testid="chat-browser-request-notice"]')].map((row) => row.textContent?.trim()),
+        text: container.textContent ?? "",
+      };
+    }
+
+    it("shows the card, with its button, site and reason, only until the person's press opened the browser", async () => {
+      let chat = await renderChat(mapTurn, new Map([[CARD_KEY, { kind: "button", reason: "Someone else is using Instafy's browser right now." }]]));
+      expect(chat.cards).toBe(1);
+      expect(chat.button?.disabled).toBe(false);
+      expect(chat.site).toBe("For www.visitasevilla.es");
+      expect(chat.reason).toBe("Someone else is using Instafy's browser right now.");
+      expect(chat.notices).toEqual([]);
+      // The press went out: its one line is the record, and then the browser turn.
+      chat = await renderChat([...mapTurn, lookup("press"), ...lookupTurn], new Map([[CARD_KEY, { kind: "opened" }]]));
+      expect(chat.cards).toBe(0);
+      expect(chat.button).toBeNull();
+      expect(chat.notices).toEqual(["Opened Instafy's browser for www.visitasevilla.es"]);
+      expect(chat.text).toContain(lookupReply.content);
+    });
+
+    it("reads as one line, with no card, while Studio opens the browser by itself", async () => {
+      const chat = await renderChat(mapTurn, new Map([[CARD_KEY, { kind: "opening", note: null }]]));
+      expect(chat.cards).toBe(0);
+      expect(chat.button).toBeNull();
+      expect(chat.line).toBe("Opening Instafy's browser…");
+    });
+
+    it("leaves the chat once Studio opened the browser for it: one line, then the browser turn", async () => {
+      for (const messages of [[...mapTurn, lookup("studio")], [...mapTurn, lookup("studio"), ...lookupTurn]]) {
+        const chat = await renderChat(messages, new Map([[CARD_KEY, { kind: "opened" }]]));
+        expect(chat.cards).toBe(0);
+        expect(chat.line).toBeNull();
+        expect(chat.notices).toEqual(["Octo opened Instafy's browser for www.visitasevilla.es"]);
+        expect(chat.text).not.toContain("Continue in Instafy's browser");
+      }
+      expect((await renderChat([...mapTurn, lookup("studio"), ...lookupTurn])).text).toContain(lookupReply.content);
+    });
+
+    it("stays gone after a reload, and is never offered again", async () => {
+      const chat = await renderChat([...mapTurn, lookup("reload"), ...lookupTurn]);
+      expect(chat.cards).toBe(0);
+      expect(chat.button).toBeNull();
+      expect(chat.notices).toEqual(["Octo opened Instafy's browser for www.visitasevilla.es"]);
+    });
+
+    it("leaves the chat once a newer card followed it", async () => {
+      const chat = await renderChat([...mapTurn, step(LATER_JOB, "later-step", 8), card(LATER_JOB, "later-card", 9),
+        reply(LATER_JOB, "later-reply", 10)]);
+      expect(chat.cards).toBe(1);
+      expect(container.querySelector('[data-testid="browser-request-card"]')?.closest("[data-chat-message-ids]")
+        ?.getAttribute("data-chat-message-ids")).toContain("later-reply");
+      expect(chat.text).not.toContain("Not opened");
+    });
   });
 });

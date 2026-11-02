@@ -414,9 +414,14 @@ export function synthesizeAgentJobThreadMessages(
 
   // A turn sent again folds into the turn that replaced it.
   const retryFold = resolveAutomaticRetryFold(collapsedAll);
-  // A message sent straight to the browser folds into its browser turn.
+  // A message sent straight to the browser folds into its browser turn, and
+  // a browser card leaves the chat once the browser opened for it.
   const routedFold = resolveRoutedBrowserFold(collapsedAll);
-  const hiddenIds = new Set([...retryFold.hiddenPromptIds, ...routedFold.hiddenPromptIds]);
+  const hiddenIds = new Set([
+    ...retryFold.hiddenPromptIds,
+    ...routedFold.hiddenPromptIds,
+    ...routedFold.settledCardIds,
+  ]);
   for (const [browserJobId, cardId] of routedFold.cardIdByBrowserJobId) {
     // The card says the browser is opening until its browser turn shows
     // something, or hands the message to the building turn.
@@ -512,6 +517,8 @@ export function synthesizeAgentJobThreadMessages(
     // The owning chat carries this question directly, even before any worker
     // role metadata arrives. Do not duplicate it inside a synthesized trace.
     if (isWorkerInputQuestion(message)) return;
+    // A browser card that left the chat leaves its turn too.
+    if (routedFold.settledCardIds.has(message.id)) return;
     const jobId = extractAgentJobId(message);
     if (!jobId) {
       return;

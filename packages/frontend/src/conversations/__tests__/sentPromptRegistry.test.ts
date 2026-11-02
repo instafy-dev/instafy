@@ -1,13 +1,15 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   claimAutoRetryForPromptSentFromThisPage,
   didSendFailForPromptSentFromThisPage,
   findPromptSentFromThisPageForRun,
   forgetPromptsSentFromThisPageForTests,
+  readPromptSendFailureVersion,
   readRetrySentFromThisPage,
   recordRunsStartedByPromptSentFromThisPage,
   recordSendFailedForPromptSentFromThisPage,
   rememberPromptSentFromThisPage,
+  subscribeToPromptSendFailures,
   wasRunStartedByPromptSentFromThisPage,
 } from "../sentPromptRegistry";
 
@@ -144,6 +146,45 @@ describe("sentPromptRegistry", () => {
   it("ignores a failed send of a prompt this page did not send", () => {
     recordSendFailedForPromptSentFromThisPage(DISPATCHED);
     expect(didSendFailForPromptSentFromThisPage(STORED_COPY)).toBe(false);
+  });
+
+  // A send the controller did not take may add no message to the chat (its
+  // error repeats the chat's last one), so what the chat works out from
+  // whether a prompt went out (a browser card keeps its button when its
+  // continuation did not) is told when that changes, not when messages do.
+  it("tells what reads it whenever a prompt's send is found to have failed, or to have gone out after all", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeToPromptSendFailures(listener);
+    const before = readPromptSendFailureVersion();
+    // Not this page's prompt: nothing changed.
+    recordSendFailedForPromptSentFromThisPage(DISPATCHED);
+    expect(listener).not.toHaveBeenCalled();
+    expect(readPromptSendFailureVersion()).toBe(before);
+
+    rememberPromptSentFromThisPage(LOCAL_COPY);
+    recordSendFailedForPromptSentFromThisPage(DISPATCHED);
+    expect(listener).toHaveBeenCalledTimes(1);
+    const failed = readPromptSendFailureVersion();
+    expect(failed).not.toBe(before);
+    // The same failure again changes nothing.
+    recordSendFailedForPromptSentFromThisPage(DISPATCHED);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(readPromptSendFailureVersion()).toBe(failed);
+    // Another of its dispatches started a run: it went out after all.
+    recordRunsStartedByPromptSentFromThisPage(DISPATCHED, ["run-1"]);
+    expect(didSendFailForPromptSentFromThisPage(STORED_COPY)).toBe(false);
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(readPromptSendFailureVersion()).not.toBe(failed);
+    // More runs of a prompt that went out change nothing.
+    recordRunsStartedByPromptSentFromThisPage(DISPATCHED, ["job-1"]);
+    expect(listener).toHaveBeenCalledTimes(2);
+
+    unsubscribe();
+    const other = { id: "user-2", metadata: { clientMessageId: "client-2" } };
+    rememberPromptSentFromThisPage(other);
+    recordSendFailedForPromptSentFromThisPage({ metadata: other.metadata });
+    expect(didSendFailForPromptSentFromThisPage(other)).toBe(true);
+    expect(listener).toHaveBeenCalledTimes(2);
   });
 
   it("keeps a bounded number of prompts, dropping the oldest", () => {
