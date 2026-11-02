@@ -78,6 +78,20 @@ export function shownBrowserPageTitle(title: string | null | undefined): string 
 }
 
 /**
+ * Whether a page has answered. Instafy's browser says whether a tab is still
+ * on its way to its page (`loading`): a page that has arrived may still have
+ * no title to show, such as an svg shown on its own. A browser that does not
+ * say goes by the title: until the page arrives, its tab lists the new
+ * address with no title, or with the blank tab's "about:blank". A page with
+ * no title of its own is named by its address, so it answers too.
+ */
+export function browserPageAnswered(page: Pick<BrowserSessionPage, "title" | "loading">): boolean {
+  if (page.loading !== undefined) return !page.loading;
+  const title = page.title?.trim() ?? "";
+  return title.length > 0 && !browserSessionPageIsPlaceholder({ url: title });
+}
+
+/**
  * The page's own title, shortened for one line. Page titles are page data:
  * they are only ever shown as text, never followed.
  */

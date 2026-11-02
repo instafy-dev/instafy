@@ -11,7 +11,10 @@
 //! - `pageKey`, the first 16 hex characters of the SHA-256 of the address without its fragment,
 //!   so distinct pages can be counted without the address itself;
 //! - `approval`: `once`, `routine` or `free` from the controller, or `denied` / `expired` from
-//!   the step's terminal consent code.
+//!   the step's terminal consent code;
+//! - `refused`: which of the person's own steps the browser refused to take, one of
+//!   [`REFUSED_STEPS`], so Details names it for what it was ("Tried accepting cookies on
+//!   metrodoporto.pt"), not as any click.
 //!
 //! Nothing else of the result is read: never page text, a title or anything the model wrote.
 //! A step that started before its page is known takes the host from the address Octo asked
@@ -29,6 +32,11 @@ const STEPS: &[&str] = &[
 ];
 /// The ways the controller says a step was allowed.
 const CONTROLLER_APPROVALS: &[&str] = &["once", "routine", "free"];
+/// The person's own steps the browser refuses to take, as the controller names a refused step:
+/// the browser action policy's categories for accepting a consent banner, signing in, choosing a
+/// file, showing a credential and typing into a field for a password, code or payment.
+pub(crate) const REFUSED_STEPS: &[&str] =
+    &["consent", "sign_in", "upload", "reveal_secret", "sensitive"];
 /// The longest address the controller's activity may carry.
 const MAX_URL_CHARS: usize = 4_096;
 
@@ -166,6 +174,18 @@ pub(crate) fn browser_step_facts(
         });
     if let Some(approval) = approval {
         facts.insert("approval".into(), JsonValue::from(approval));
+    }
+    let refused = reported
+        .and_then(|activity| activity.get("refused"))
+        .and_then(JsonValue::as_str)
+        .and_then(|refused| {
+            REFUSED_STEPS
+                .iter()
+                .copied()
+                .find(|known| *known == refused)
+        });
+    if let Some(refused) = refused {
+        facts.insert("refused".into(), JsonValue::from(refused));
     }
     Some(JsonValue::Object(facts))
 }
@@ -358,6 +378,36 @@ mod tests {
             facts,
             json!({"step": "click", "host": "visitlisboa.com", "approval": "once"})
         );
+    }
+
+    /// A step the browser refused because it is the person's (Metro do Porto's "Aceitar todos os
+    /// cookies") keeps which one it was from the failed call's own result, so Details can name
+    /// it; any other word names nothing.
+    #[test]
+    fn a_refused_step_keeps_which_of_the_persons_steps_it_was() {
+        let refused = |word: &str| {
+            browser_step_facts(
+                "click",
+                Some(&json!({"index": 2, "snapshotId": "0".repeat(64)})),
+                Some(&json!({"activity": {"refused": word}})),
+                None,
+                &mut Some("metrodoporto.pt".into()),
+            )
+            .unwrap()
+        };
+        for word in REFUSED_STEPS {
+            assert_eq!(
+                refused(word),
+                json!({"step": "click", "host": "metrodoporto.pt", "refused": word})
+            );
+        }
+        for word in ["Aceitar todos os cookies", "cookies", "", "CONSENT"] {
+            assert_eq!(
+                refused(word),
+                json!({"step": "click", "host": "metrodoporto.pt"}),
+                "{word}"
+            );
+        }
     }
 
     #[test]

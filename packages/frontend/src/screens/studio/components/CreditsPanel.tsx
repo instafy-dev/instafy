@@ -21,6 +21,7 @@ import {
   LIVE_CONNECTIONS_PLURAL,
 } from "../../../credits/usageLabels";
 import { CREDITS_UPDATED_EVENT, useCredits } from "../../../credits/useCredits";
+import { isPersonalOrgName } from "../../../org/orgNaming";
 import { useProjects } from "../../../projects/useProjects";
 import { useStatus } from "../../../status/useStatus";
 import { CreditActivityChart, type CreditActivityRange } from "./CreditActivityChart";
@@ -84,7 +85,10 @@ export function CreditsPanel() {
     ledgerError,
     refresh: refreshCredits,
   } = useCredits();
-  const { activeProjectId } = useProjects();
+  const { activeProjectId, projectList } = useProjects();
+  // A space of the person's own: no team shares its balance, so the panel
+  // never says "team" or "shared" there (the same rule as "Personal settings").
+  const personal = isPersonalOrgName(projectList.find((project) => project.id === activeProjectId)?.orgName);
   const { showStatus } = useStatus();
   const location = useLocation();
   const navigate = useNavigate();
@@ -753,7 +757,7 @@ export function CreditsPanel() {
 
   return (
     <SettingsShell
-      title="Team credits"
+      title={personal ? "Credits" : "Team credits"}
       subtitle={sectionLabel}
       navLabel="Sections"
       categories={categories}
@@ -770,8 +774,8 @@ export function CreditsPanel() {
         <div className="space-y-2">
           <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
             <div className="min-w-0">
-              <Text variant="bodyStrong" tone="secondary">
-                Shared team balance
+              <Text variant="bodyStrong" tone="secondary" data-testid="credits-balance-label">
+                {personal ? "Balance" : "Shared team balance"}
               </Text>
               {!creditsLoaded && !creditsError ? (
                 <LoadingStatus
@@ -866,7 +870,7 @@ export function CreditsPanel() {
           <Text as="p" variant="body" tone="secondary">
             We couldn't charge your card for {currentPlanLabel ?? "your plan"}. Stripe retries
             automatically — update your payment method to keep your plan. If payment keeps
-            failing, your team drops back to the free Starter tier.
+            failing, {personal ? "you go" : "your team drops"} back to the free Starter tier.
           </Text>
           <Button
             onPress={handleManageSubscription}
@@ -902,7 +906,7 @@ export function CreditsPanel() {
               Usage rates
             </Heading>
             <Text variant="body" tone="secondary">
-              AI prompts, live access, and hosted runtimes all burn from the same team balance.
+              AI prompts, live access, and hosted runtimes all burn from the same {personal ? "" : "team "}balance.
             </Text>
           </div>
           {policyLoading ? (
@@ -914,6 +918,7 @@ export function CreditsPanel() {
           ) : policy?.usage ? (
             <div className="space-y-2">
               <CreditsUsageRates
+                personal={personal}
                 usageRateRows={usageRateRows}
                 managedAiUsage={managedAiUsage}
                 unitLabel={unitLabel}
@@ -962,8 +967,9 @@ export function CreditsPanel() {
               Plans
             </Heading>
             <Text variant="body" tone="secondary">
-              Your shared balance tops back up daily (UTC) to the selected plan limit. Limits shown below are defaults;
-              team-specific overrides may apply.
+              {personal
+                ? "Your balance tops back up daily (UTC) to the selected plan limit. Limits shown below are defaults; overrides may apply."
+                : "Your shared balance tops back up daily (UTC) to the selected plan limit. Limits shown below are defaults; team-specific overrides may apply."}
             </Text>
             <Text variant="caption" tone="muted" data-testid="billing-hosted-runtime-definition">
               "Hosted runtimes" are cloud machines (2 CPU · 4 GB · Node, Python, browsers) that run
@@ -1095,9 +1101,11 @@ export function CreditsPanel() {
               <Heading level={3} variant="subtitle">
                 Recent balance activity
               </Heading>
-              <Text variant="caption" tone="muted">
-                AI, runtime, and live access spend all land in this shared ledger.
-              </Text>
+              {personal ? null : (
+                <Text variant="caption" tone="muted">
+                  AI, runtime, and live access spend all land in this shared ledger.
+                </Text>
+              )}
             </div>
             <div className="flex items-center gap-2">
               {activityView === "graph" ? (

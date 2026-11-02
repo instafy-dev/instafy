@@ -157,11 +157,16 @@ type HostProps = {
   earlierRunIds?: string[];
   teammates?: boolean;
   onContinue?: (message: string) => Promise<boolean>;
+  /** The page's listed title: its host unless given; null while it has none. */
+  pageTitle?: string | null;
+  /** Whether the browser says the page is still on its way. */
+  pageLoading?: boolean;
 };
 
 /** Studio's part: tabs are read only while the view is opening or live. */
 function Host({ agentHolds, viewOnly = false, conversationId = "chat-a", pageUrl = "https://www.visitlisboa.com/",
-  agentPageIds, hidden = false, compact = false, pausedRunId, earlierRunIds = [], teammates = false, onContinue }: HostProps) {
+  agentPageIds, hidden = false, compact = false, pausedRunId, earlierRunIds = [], teammates = false, onContinue,
+  pageTitle, pageLoading }: HostProps) {
   const [kind, setKind] = useState<HostedBrowserViewKind | null>(null);
   const pagesActive = hostedBrowserPagesActive(kind);
   const [ready, setReady] = useState(false);
@@ -175,7 +180,8 @@ function Host({ agentHolds, viewOnly = false, conversationId = "chat-a", pageUrl
   }, [pagesActive]);
   const host = new URL(pageUrl).host;
   const pages: BrowserSessionPage[] = ready
-    ? [{ id: "PAGE1", label: host, title: host, lastReferencedAt: 0, host, url: pageUrl, isActive: true }]
+    ? [{ id: "PAGE1", label: host, title: pageTitle === undefined ? host : pageTitle, lastReferencedAt: 0, host,
+      url: pageUrl, isActive: true, ...(pageLoading === undefined ? {} : { loading: pageLoading }) }]
     : [];
   return <BrowserSessionModal isOpen onOpenChange={noop} projectId={projectId} currentUserId="user-1"
     browserSessionId="browser-session-1" preferRuntimeId={null} resumeRuntimeId={runtimeId}
@@ -318,6 +324,38 @@ describe("Shared Browser view while Octo drives", () => {
     expect(whereabouts()).toBe("Octo is on visitlisboa.com");
   });
 
+  // A local test: while a slow site never answered, the row of pages said
+  // "Opening visitporto.travel…" and the stage, with no picture to show,
+  // "Octo is on visitporto.travel": two statuses for one tab.
+  it("says Octo is opening a site on the stage too, until its page has arrived", async () => {
+    const visitPorto = "https://www.visitporto.travel/";
+    const row = () => document.querySelector('[data-testid="browser-reading-row"]')?.textContent ?? null;
+    await octoTakesControl({ pageUrl: visitPorto, pageTitle: null, agentPageIds: ["PAGE1"] });
+    // Another chat drops the still: the stage says where Octo is.
+    await act(async () => root.render(
+      <Host agentHolds conversationId="chat-b" pageUrl={visitPorto} pageTitle={null} agentPageIds={["PAGE1"]} />,
+    ));
+    await advance(50);
+    expect(still()).toBeNull();
+    expect(whereabouts()).toBe("Octo is opening visitporto.travel…");
+    expect(row()).toContain("Opening visitporto.travel…");
+    // The page arrives.
+    await act(async () => root.render(
+      <Host agentHolds conversationId="chat-b" pageUrl={visitPorto} pageTitle="Visit Porto" agentPageIds={["PAGE1"]} />,
+    ));
+    await advance(50);
+    expect(whereabouts()).toBe("Octo is on visitporto.travel");
+    expect(row()).toContain("Octo is reading");
+    // A page with no title to show, which the browser says has arrived.
+    await act(async () => root.render(
+      <Host agentHolds conversationId="chat-b" pageUrl={visitPorto} pageTitle={null} pageLoading={false}
+        agentPageIds={["PAGE1"]} />,
+    ));
+    await advance(50);
+    expect(whereabouts()).toBe("Octo is on visitporto.travel");
+    expect(row()).toContain("Octo is reading");
+  });
+
   it("drops the still when the page goes to another address", async () => {
     await octoTakesControl({ pageUrl: "https://www.roborock.com/", agentPageIds: ["PAGE1"] });
     expect(still()).not.toBeNull();
@@ -331,6 +369,34 @@ describe("Shared Browser view while Octo drives", () => {
     await octoTakesControl({ agentPageIds: ["PAGE1"] });
     expect(document.querySelector('[data-testid="browser-reading-takeover"]')).not.toBeNull();
     expect(takeOverButtons()).toBe(1);
+  });
+
+  // A local test: while the view asked the person about a step, the row of
+  // pages above the prompt said "Octo is reading httpbin.org ·
+  // httpbin.org/forms/post". Octo reads nothing while it waits for them.
+  it("says Waiting for you in the row of pages while the view's prompt asks, and what Octo reads once answered", async () => {
+    const prompt = { runtimeId, request: {
+      version: 1, approvalId: "22222222-2222-4222-8222-222222222222", kind: "origin",
+      ownerId: "33333333-3333-4333-8333-333333333333", runId: "44444444-4444-4444-8444-444444444444",
+      initiatorUserId: "user-1", browserPageId: "PAGE1", operation: "approve-origin", sourceOrigin: null,
+      destinationOrigin: "https://httpbin.org", destinationFingerprint: "a".repeat(64), snapshotId: null,
+      targetFingerprint: null, payloadFingerprint: null, requestedAtMs: Date.now(), expiresAtMs: Date.now() + 120_000,
+      requestFingerprint: "e".repeat(64),
+      display: { label: "Open https://httpbin.org/forms/post", destinationOrigin: "https://httpbin.org" },
+    } };
+    const readingLabel = () => document.querySelector('[data-testid="browser-reading-row"] span[id]')?.textContent ?? null;
+    const sheet = () => document.querySelector('[data-testid="shared-browser-approval-prompt"]');
+    mocks.fetchPendingApproval.mockResolvedValue(prompt);
+    await octoTakesControl({ agentPageIds: ["PAGE1"] });
+    await advance(2_000);
+    expect(sheet()?.textContent).toContain("Octo wants to open httpbin.org/forms/post.");
+    expect(readingLabel()).toBe("Waiting for you");
+    expect(document.querySelector('[data-testid="browser-reading-row"]')?.textContent).not.toContain("reading");
+    // Answered elsewhere: the prompt goes, and the row says what Octo does.
+    mocks.fetchPendingApproval.mockResolvedValue(null);
+    await advance(2_000);
+    expect(sheet()).toBeNull();
+    expect(readingLabel()).toBe("Octo is reading 1 page");
   });
 
   it("never captions an earlier turn's step when the view opens during Octo's turn", async () => {

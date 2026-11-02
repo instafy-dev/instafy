@@ -67,6 +67,7 @@ function toBrowserSessionPage(
     host: page.host,
     label: page.label,
     title: page.title,
+    ...(page.loading !== undefined ? { loading: page.loading } : {}),
     lastReferencedAt: total - index,
     isActive: page.id === activePageId,
     canGoBack: page.canGoBack,

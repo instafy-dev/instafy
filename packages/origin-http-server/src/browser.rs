@@ -59,6 +59,10 @@ struct BrowserPageResponse {
     host: String,
     label: String,
     title: Option<String>,
+    /// The tab is still on its way to `url` (see [`browser_page_loading`]):
+    /// Studio says Octo is opening the site there, not reading it. Always
+    /// listed, so Studio can tell it from a list that does not say.
+    loading: bool,
     is_active: bool,
     can_go_back: bool,
     can_go_forward: bool,
@@ -858,6 +862,21 @@ fn browser_target_is_placeholder(target: &BrowserCdpTargetDescriptor) -> bool {
     is_blank_page_address(&target.url)
 }
 
+/// Whether a tab is still on its way to the address it lists: its listed
+/// title is the page it is leaving (`still_loading`, see
+/// [`pages_still_loading`]), or the blank tab's ("about:blank", or none),
+/// which DevTools keeps until the first page arrives. A page that has arrived
+/// lists a title of its own: its `<title>`, its address when it has none, or
+/// a bare media type when it is an image or svg shown on its own. That last
+/// one names nothing, so the page has no `title`, but it is not loading.
+fn browser_page_loading(
+    target: &BrowserCdpTargetDescriptor,
+    still_loading: &HashSet<String>,
+) -> bool {
+    !browser_target_is_placeholder(target)
+        && (still_loading.contains(&target.id) || is_blank_page_address(&target.title))
+}
+
 fn filter_browser_page_targets(
     mut targets: Vec<BrowserCdpTargetDescriptor>,
     include_placeholder: bool,
@@ -1317,6 +1336,7 @@ async fn handle_browser_pages(
             } else {
                 normalize_browser_page_title(&target.title)
             };
+            let loading = browser_page_loading(&target, &still_loading);
             let host = normalize_browser_page_host(&target.url);
             let has_history_state = history_target_id.as_deref() == Some(target.id.as_str());
             BrowserPageResponse {
@@ -1325,6 +1345,7 @@ async fn handle_browser_pages(
                 host: host.clone(),
                 label: derive_browser_page_label(title.as_deref(), &host, &target.url),
                 title,
+                loading,
                 is_active: active_page_id.as_deref() == Some(target.id.as_str()),
                 can_go_back: has_history_state && history_state.can_go_back,
                 can_go_forward: has_history_state && history_state.can_go_forward,
@@ -2587,6 +2608,7 @@ mod tests {
             host: "example.com".to_string(),
             label: "Example".to_string(),
             title: Some("Example".to_string()),
+            loading: false,
             is_active: true,
             can_go_back: true,
             can_go_forward: false,
@@ -2606,6 +2628,8 @@ mod tests {
             Some(false)
         );
         assert!(value.get("can_go_back").is_none());
+        // Whether the tab is still on its way is listed when it is not, too.
+        assert_eq!(value.get("loading"), Some(&serde_json::json!(false)));
         // A page that is not one of Octo's tabs carries no badge fields.
         assert!(value.get("openedBy").is_none());
         assert!(value.get("kept").is_none());
@@ -2622,6 +2646,7 @@ mod tests {
             host: "www.trams.example".to_string(),
             label: "Planner".to_string(),
             title: None,
+            loading: false,
             is_active: true,
             can_go_back: false,
             can_go_forward: false,
@@ -2644,6 +2669,7 @@ mod tests {
             host: "example.com".to_string(),
             label: "Example".to_string(),
             title: None,
+            loading: false,
             is_active: false,
             can_go_back: false,
             can_go_forward: false,
@@ -2666,6 +2692,7 @@ mod tests {
             host: "example.com".to_string(),
             label: "Example".to_string(),
             title: None,
+            loading: false,
             is_active: false,
             can_go_back: false,
             can_go_forward: false,
@@ -2788,6 +2815,57 @@ mod tests {
                 "{title}"
             );
         }
+    }
+
+    // A local test: Studio's reading row said "Opening visitlisboa.com…" for
+    // as long as Octo read an svg shown on its own. Its tab lists the bare
+    // media type as its title, so the page list gives it no title, as it
+    // gives none to a tab still on its way. Only the second is loading.
+    #[test]
+    fn a_page_is_loading_only_while_its_title_is_the_one_it_is_leaving() {
+        let target = |url: &str, title: &str| BrowserCdpTargetDescriptor {
+            id: "page".to_string(),
+            target_type: "page".to_string(),
+            title: title.to_string(),
+            url: url.to_string(),
+            websocket_debugger_url: None,
+        };
+        let none = HashSet::new();
+        let leaving = HashSet::from(["page".to_string()]);
+        // On its way from the blank tab: the blank tab's title, or none.
+        for title in ["about:blank", "", " "] {
+            assert!(
+                browser_page_loading(&target("https://www.visitporto.travel/", title), &none),
+                "{title:?}"
+            );
+        }
+        // On its way from another page, whose title it still lists.
+        assert!(browser_page_loading(
+            &target("https://www.metrodoporto.pt/", "Livraria Lello & Co"),
+            &leaving
+        ));
+        // Arrived: a title of its own, its address, or a bare media type,
+        // which names nothing and so is no title to show.
+        for title in [
+            "Visit Lisboa",
+            "www.visitlisboa.com/logo.svg",
+            "image/svg+xml",
+        ] {
+            assert!(
+                !browser_page_loading(
+                    &target("https://www.visitlisboa.com/logo.svg", title),
+                    &none
+                ),
+                "{title}"
+            );
+        }
+        assert_eq!(normalize_browser_page_title("image/svg+xml"), None);
+        // A blank tab is on its way nowhere.
+        assert!(!browser_page_loading(
+            &target("about:blank", "about:blank"),
+            &none
+        ));
+        assert!(!browser_page_loading(&target("about:blank", ""), &leaving));
     }
 
     // A local test: a tab's title read "Modular Laptops &amp; PCs". DevTools'

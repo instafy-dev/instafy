@@ -676,7 +676,8 @@ screenshot cannot be read, the report says the blank check is incomplete; on a p
 `desktop.png` (1280×800, the page in dark mode) and `phone.png` (390×844, in light mode) to `--out <dir>` (default: a
 new folder under the temp folder for each run, readable only by you; the report names the files and each size's
 mode), so one check shows both looks. `--phone` loads only the phone size, `--desktop` only the desktop size, which
-the card's picture comes from.
+the card's picture comes from. With no errors, its last line says the page loaded on the sizes it loaded, and that how
+it looks (layout, legibility, overlap) isn't checked until someone opens the screenshots.
 `--framed` loads the site inside a frame on another origin instead, and then also reports a site that refuses to be
 framed (`X-Frame-Options` or CSP `frame-ancestors`).
 
@@ -693,7 +694,7 @@ the runtime image) nothing off the site's origin loads (`offSite: "blocked"`).
 
 | Exit | Meaning |
 |---|---|
-| 0 | No problems found |
+| 0 | The page loaded with no errors (how it looks is not checked) |
 | 1 | Problems found (listed) |
 | 2 | Nothing answers on the port within `--timeout` (the message says whether a server took the connection) |
 | 3 | The port is not allowed |
