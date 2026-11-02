@@ -375,6 +375,15 @@ describe("describeUnsavedChanges", () => {
       expect(text).not.toMatch(/runtime|turned off|next turn|unsaved work/i);
     }
   });
+
+  it("says a stopped turn's changes were never saved, without promising a later save", () => {
+    expect(describeUnsavedChanges("stopped_before_save", { unsavedWorkInHistory: false })).toBe(
+      "Stopped before these changes were saved. They're kept as unsaved work.",
+    );
+    expect(describeUnsavedChanges("stopped_before_save", { unsavedWorkInHistory: true })).toBe(
+      "Stopped before these changes were saved. They're kept under History, in Unsaved work.",
+    );
+  });
 });
 
 describe("describeRevertConfirm", () => {

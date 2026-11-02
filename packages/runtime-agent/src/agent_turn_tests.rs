@@ -12,6 +12,9 @@ struct StandIn {
     heartbeats: Arc<AtomicUsize>,
     completions: Arc<AtomicUsize>,
     handoff_rejected: Arc<AtomicBool>,
+    /// The job was stopped: its completion is refused, as the controller
+    /// refuses a cancelled job's.
+    stopped: Arc<AtomicBool>,
     requests: Arc<Mutex<Vec<serde_json::Value>>>,
     runtime_settings: Arc<Mutex<AgentRuntimeSettings>>,
     secrets_fetches: Arc<AtomicUsize>,
@@ -37,12 +40,29 @@ async fn secrets(State(stand_in): State<StandIn>) -> Json<serde_json::Value> {
 async fn complete(
     State(stand_in): State<StandIn>,
     Json(body): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
+) -> (AxumStatusCode, Json<serde_json::Value>) {
     stand_in
         .requests
         .lock()
         .push(json!({"endpoint":"complete", "body":body}));
+    if stand_in.stopped.load(Ordering::SeqCst) {
+        return (
+            AxumStatusCode::NOT_FOUND,
+            Json(json!({"message":"agent job not found or already completed"})),
+        );
+    }
     stand_in.completions.fetch_add(1, Ordering::SeqCst);
+    (AxumStatusCode::OK, Json(json!({ "ok": true })))
+}
+
+async fn stopped_report(
+    State(stand_in): State<StandIn>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    stand_in
+        .requests
+        .lock()
+        .push(json!({"endpoint":"stopped", "body":body}));
     Json(json!({ "ok": true }))
 }
 
@@ -88,6 +108,7 @@ impl Harness {
             .route("/agent/heartbeat", post(heartbeat))
             .route("/agent/secrets", post(secrets))
             .route("/agent/complete", post(complete))
+            .route("/agent/stopped", post(stopped_report))
             .route(
                 "/agent/jobs/:job_id/user-input-requests",
                 post(user_input_request),
@@ -291,8 +312,8 @@ async fn the_job_loop_records_whether_a_turn_was_interrupted() {
             .await
         }
     });
-    // The first heartbeat runs at once; the periodic one (every 5 s) cancels
-    // the job.
+    // The first heartbeat runs at once; the periodic one (every second)
+    // cancels the job.
     let deadline = Instant::now() + Duration::from_secs(20);
     while harness.stand_in.heartbeats.load(Ordering::SeqCst) < 2 {
         assert!(Instant::now() < deadline, "no periodic heartbeat");
@@ -337,6 +358,7 @@ async fn worker_question_registers_before_completion_and_keeps_controller_identi
         &harness.registration,
         &job,
         question_execution(),
+        &JobProcessor::new(harness.config.clone()),
     )
     .await;
     let requests = harness.stand_in.requests.lock();
@@ -368,6 +390,7 @@ async fn rejected_worker_question_fails_once_without_reporting_completion() {
         &harness.registration,
         &job,
         question_execution(),
+        &JobProcessor::new(harness.config.clone()),
     )
     .await;
     let requests = harness.stand_in.requests.lock();
@@ -393,10 +416,131 @@ async fn untracked_job_cannot_publish_a_worker_question() {
         &harness.registration,
         &harness.job(),
         question_execution(),
+        &JobProcessor::new(harness.config.clone()),
     )
     .await;
     let requests = harness.stand_in.requests.lock();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0]["endpoint"], "complete");
     assert_eq!(requests[0]["body"]["outcome"], "failed");
+}
+
+/// A finished building turn's execution: it changed a page, read another,
+/// saved, and used the model.
+fn saved_edit_execution() -> JobExecution {
+    JobExecution {
+        summary: "I put the hours on the page.".into(),
+        suggested_replies: Vec::new(),
+        provider: "codex-embedded".into(),
+        artifacts: vec![
+            json!({"kind":"apply/files", "files":[
+                {"path":"sites/porto/app.js", "workspacePath":"sites/porto/app.js",
+                 "change":{"type":"changed"}, "changeType":"changed", "source":"workspace"},
+                {"path":"sites/porto/README.md", "workspacePath":"sites/porto/README.md",
+                 "change":{"type":"read"}, "changeType":"read", "source":"workspace"},
+            ], "metadata":{"provider":"codex-embedded"}}),
+            json!({"kind":"origin/apply", "metadata":{
+                "gitSyncStatus":"synced", "gitRev":"abc1234", "gitBaseRev":"def5678",
+                "paths":["sites/porto/app.js"],
+            }}),
+            json!({"kind":"ai/task-usage", "usage":{"inputTokens":42, "outputTokens":12}}),
+        ],
+        credit_snapshot: None,
+        provider_conversation_state: None,
+        messages: Vec::new(),
+        messages_streamed: true,
+        final_messages: Vec::new(),
+    }
+}
+
+/// A Stop that reached the job after its model was done, while it saved its
+/// changes: the controller refuses the completion, and what the turn changed
+/// goes in the stopped turn's one end report instead, with its save and
+/// without its usage. Not when the completion is taken.
+#[tokio::test]
+async fn a_stop_while_the_turn_saves_reports_what_it_changed_once() {
+    let harness = Harness::start().await;
+    harness.stand_in.stopped.store(true, Ordering::SeqCst);
+    let job = harness.job();
+    let processor = JobProcessor::new(harness.config.clone());
+    RuntimeAgent::complete_job(
+        &harness.client,
+        &harness.registration,
+        &job,
+        saved_edit_execution(),
+        &processor,
+    )
+    .await;
+    let requests = harness.stand_in.requests.lock().clone();
+    let reports: Vec<_> = requests
+        .iter()
+        .filter(|request| request["endpoint"] == "stopped")
+        .collect();
+    assert_eq!(reports.len(), 1, "{requests:?}");
+    let report = &reports[0]["body"];
+    assert_eq!(report["job_id"], json!(job.id.to_string()));
+    assert_eq!(report["message_type"], "file_change");
+    let page = harness
+        .config
+        .project_workspace_dir(&harness.config.project_id)
+        .join("sites/porto/app.js")
+        .display()
+        .to_string();
+    assert_eq!(report["metadata"]["paths"], json!([page]));
+    let artifacts = report["artifacts"].as_array().unwrap();
+    let kinds: Vec<&str> = artifacts
+        .iter()
+        .map(|artifact| artifact["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["apply/files", "origin/apply"]);
+    assert_eq!(
+        artifacts[0]["files"],
+        json!([{"path":"sites/porto/app.js", "workspacePath":"sites/porto/app.js",
+                "change":{"type":"changed"}, "changeType":"changed", "source":"workspace"}])
+    );
+    assert!(artifacts[0]["metadata"].get("stoppedBeforeSave").is_none());
+    assert_eq!(artifacts[1]["metadata"]["gitRev"], "abc1234");
+    drop(requests);
+
+    // A completion the controller takes sends no report.
+    let harness = Harness::start().await;
+    RuntimeAgent::complete_job(
+        &harness.client,
+        &harness.registration,
+        &harness.job(),
+        saved_edit_execution(),
+        &JobProcessor::new(harness.config.clone()),
+    )
+    .await;
+    assert_eq!(harness.stand_in.completions.load(Ordering::SeqCst), 1);
+    assert!(
+        !harness
+            .stand_in
+            .requests
+            .lock()
+            .iter()
+            .any(|request| request["endpoint"] == "stopped")
+    );
+
+    // Nor does a stopped turn that changed no file.
+    let harness = Harness::start().await;
+    harness.stand_in.stopped.store(true, Ordering::SeqCst);
+    let mut execution = saved_edit_execution();
+    execution.artifacts.truncate(0);
+    RuntimeAgent::complete_job(
+        &harness.client,
+        &harness.registration,
+        &harness.job(),
+        execution,
+        &JobProcessor::new(harness.config.clone()),
+    )
+    .await;
+    assert!(
+        !harness
+            .stand_in
+            .requests
+            .lock()
+            .iter()
+            .any(|request| request["endpoint"] == "stopped")
+    );
 }

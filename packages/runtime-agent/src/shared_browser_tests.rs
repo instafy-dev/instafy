@@ -11618,3 +11618,81 @@ async fn mcp_wire_carries_each_kind_of_browser_result_whole() {
         })
     );
 }
+
+/// A Stop reaches a browser turn as its job's cancel, at its next heartbeat,
+/// and Codex then shuts down, which takes a moment: a step it sends meanwhile
+/// is refused before it acts. The run's marker goes past its deadline at once,
+/// which the browser tools refuse, and stays, so nobody else can use the
+/// browser until the run's tools are gone.
+#[tokio::test]
+async fn a_stopped_turns_next_browser_step_is_refused_before_it_acts() {
+    let fixture = EmbeddedControllerFixture::new();
+    let cancel_signal = JobCancelSignal::new();
+    let guard = SharedBrowserAgentControlGuard::acquire_with_path(
+        fixture.authority_path.clone(),
+        fixture.approval_dir.clone(),
+        ApprovalStart::Routine,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        "page-target",
+        "Octo",
+        cancel_signal.clone(),
+        Duration::from_secs(60),
+    )
+    .expect("acquire run");
+    let navigate = |url: &str| {
+        fixture
+            .command_for(
+                "safe",
+                "page-target",
+                "POST",
+                "/v1/navigate",
+                Some(&json!({ "url": url }).to_string()),
+            )
+            .output()
+            .expect("run embedded Shared Browser controller")
+    };
+    let marker_deadline = || {
+        let marker: JsonValue = serde_json::from_slice(
+            &std::fs::read(&fixture.authority_path).expect("the run's marker"),
+        )
+        .expect("marker JSON");
+        marker["expiresAtMs"].as_u64().expect("marker deadline")
+    };
+
+    let before = navigate("https://example.test/before-stop");
+    assert!(
+        before.status.success(),
+        "a step before the Stop runs: {}",
+        String::from_utf8_lossy(&before.stderr)
+    );
+
+    cancel_signal.cancel();
+    // The guard's own task ends the run's authority; give it a moment.
+    let stopped_at = std::time::Instant::now();
+    while marker_deadline() > unix_time_millis() && stopped_at.elapsed() < Duration::from_secs(1) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let after = navigate("https://example.test/after-stop");
+    assert!(!after.status.success(), "a step after the Stop is refused");
+    let stderr = String::from_utf8_lossy(&after.stderr);
+    assert!(stderr.contains("approval_authority_revoked"), "{stderr}");
+    let actions = fixture.action_log();
+    assert!(
+        actions.contains("https://example.test/before-stop"),
+        "{actions}"
+    );
+    assert!(
+        !actions.contains("https://example.test/after-stop"),
+        "nothing of the refused step reached the page: {actions}"
+    );
+    assert!(
+        fixture.authority_path.is_file(),
+        "the marker stays until the run's tools are gone"
+    );
+
+    cancel_signal.confirm_shared_browser_shutdown();
+    drop(guard);
+    assert!(!fixture.authority_path.exists());
+}

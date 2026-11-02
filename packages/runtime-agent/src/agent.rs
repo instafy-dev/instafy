@@ -28,6 +28,7 @@ use crate::controller::{
     SpaceDeleted,
 };
 use crate::job_cancel::JobCancelSignal;
+use crate::jobs::stopped_turn::StoppedTurnChanges;
 use crate::jobs::{JobExecution, JobFailureWithArtifacts, JobProcessor};
 use crate::origin::{OriginLaunchOverrides, OriginService};
 use crate::personal_browser::validate_personal_browser_job_capability;
@@ -113,16 +114,11 @@ impl ShutdownSignal {
     }
 }
 
-/// How often a running job heartbeats, in seconds, so that a cancel, which it learns of only from
-/// its heartbeat, stops it within about that long: every second for a job that holds device
-/// grants, and every `heartbeat_seconds / 6`, 5 to 15 s, for any other.
-fn heartbeat_interval_seconds(heartbeat_seconds: u32, job: &LeaseJob) -> u64 {
-    if job.grants.is_empty() {
-        u64::from((heartbeat_seconds / 6).clamp(5, 15))
-    } else {
-        1
-    }
-}
+/// How often a running job heartbeats: every second, whatever the job. A job learns of a Stop (the
+/// controller cancelled it) only from its next heartbeat or from a report the controller refuses,
+/// so this is about how long a stopped turn can go on before it knows. Each heartbeat is one
+/// request to the controller and one short transaction there (`agent_heartbeat`).
+const JOB_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
 struct HeartbeatTask {
     stop_signal: ShutdownSignal,
@@ -134,18 +130,15 @@ impl HeartbeatTask {
         client: Arc<ControllerClient>,
         registration: Registration,
         job_id: Uuid,
-        interval_seconds: u64,
         lease_lost_signal: Option<JobCancelSignal>,
     ) -> Self {
         let stop_signal = ShutdownSignal::new();
         let stop_listener = stop_signal.clone();
         let lease_lost_signal = lease_lost_signal.clone();
         let handle = tokio::spawn(async move {
-            // `interval_seconds` comes from `heartbeat_interval_seconds`. Keep heartbeats frequent
-            // enough to detect lease loss promptly and keep the controller-side runtime
-            // `last_seen_at` fresh (important for stale-runtime sweeps).
-            let interval_duration = Duration::from_secs(interval_seconds.max(1));
-            let mut ticker = interval(interval_duration);
+            // Frequent enough to learn of a Stop within about a second, and to keep the
+            // controller-side runtime `last_seen_at` fresh (stale-runtime sweeps read it).
+            let mut ticker = interval(JOB_HEARTBEAT_INTERVAL);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
             let mut skip_first = true;
@@ -1366,7 +1359,6 @@ impl RuntimeAgent {
                 client.clone(),
                 registration.clone(),
                 job.id,
-                heartbeat_interval_seconds(heartbeat_seconds, &job),
                 Some(lease_lost_signal.clone()),
             ));
 
@@ -1493,6 +1485,7 @@ impl RuntimeAgent {
                             messages_streamed: false,
                             final_messages: Vec::new(),
                         },
+                        &executor.processor(),
                     )
                     .await;
                 } else {
@@ -1524,10 +1517,21 @@ impl RuntimeAgent {
                     end = TurnEnd::after_run(&execution_result);
                     match execution_result {
                         Ok(execution) => {
-                            Self::complete_job(&client, registration, &job, execution).await;
+                            Self::complete_job(
+                                &client,
+                                registration,
+                                &job,
+                                execution,
+                                &executor.processor(),
+                            )
+                            .await;
                         }
                         Err(error) => {
                             if end == TurnEnd::LeaseLost {
+                                // No completion for a turn that lost its lease. A
+                                // Stop cancelled it, or a stop of this runtime put
+                                // it back in the queue; the executor reported what
+                                // it already changed, recorded only for the former.
                                 info!(job_id = %job.id, "job cancelled; skipping completion");
                                 turn.end(end);
                                 executor.processor().cleanup_after_lease_lost(&job).await;
@@ -1660,6 +1664,7 @@ impl RuntimeAgent {
         registration: &Registration,
         job: &LeaseJob,
         mut execution: JobExecution,
+        processor: &JobProcessor,
     ) {
         // A browser turn's finding lines are for Octo: the reply goes out
         // without them, and a Details note keeps them.
@@ -1748,9 +1753,34 @@ impl RuntimeAgent {
             }
             Err(error) => {
                 warn!(?error, job_id = %job.id, "failed to report job completion");
+                // A Stop that reached the job after its model was done (while
+                // its changes were saved, say) cancelled it: the controller
+                // refuses its completion. What the turn changed goes in the
+                // stopped turn's one end report instead, which the controller
+                // takes only for a job it cancelled.
+                if completion_refused(&error)
+                    && let Some(changes) =
+                        processor
+                            .workspace_dir_for_job(job)
+                            .and_then(|workspace_dir| {
+                                StoppedTurnChanges::of_finished_turn(workspace_dir, &execution)
+                            })
+                {
+                    processor
+                        .report_stopped_turn(client, registration, job, &changes)
+                        .await;
+                }
             }
         }
     }
+}
+
+/// Whether the controller turned a completion down (a 4xx answer: the job is
+/// no longer this runtime's to complete), as opposed to not answering.
+fn completion_refused(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains("status=4"))
 }
 
 fn should_self_disposition_runtime_on_shutdown(parent_dispositions_runtime: bool) -> bool {

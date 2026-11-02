@@ -4,8 +4,9 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mapControllerMessageToChat } from "../../../../conversations/conversationMessageUtils";
 import type { ChatMessage } from "../../types";
-import { AgentJobThreadPreviewLayout } from "../AgentJobThreadPreviewLayout";
+import { AgentJobThreadPreviewLayout, type ChatFileChangeListProps } from "../AgentJobThreadPreviewLayout";
 import { useAgentJobThreadPreviewState } from "../useAgentJobThreadPreviewState";
 
 const JOB_ID = "0d4c9c1e-49af-4b1d-9a63-5b8f6f4f2f10";
@@ -105,6 +106,9 @@ function stopNotice(): ChatMessage {
   };
 }
 
+/** What the turn's file list was given, the last time it rendered. */
+let fileList: ChatFileChangeListProps | null = null;
+
 function Thread({ message }: { message: ChatMessage }) {
   const state = useAgentJobThreadPreviewState({ message, projectId: "project-1" });
   if (!state) return null;
@@ -114,9 +118,66 @@ function Thread({ message }: { message: ChatMessage }) {
       branchThreads={[]}
       onOpenBranchThread={() => {}}
       MessageContent={({ content }: { content: string }) => <span>{content}</span>}
-      ChatFileChangeList={() => null}
+      ChatFileChangeList={(props: ChatFileChangeListProps) => {
+        fileList = props;
+        return null;
+      }}
     />
   );
+}
+
+const EDIT_LABEL = {
+  v: 1,
+  key: "builtin/edit",
+  role: "content",
+  live: "Editing files",
+  done: { one: "edited a file", other: "edited {n} files", some: "edited files" },
+};
+
+/**
+ * A file-change step as the controller stores it (`build_agent_update_metadata`,
+ * its label lifted out of its details) and Studio maps it: one the runtime
+ * streamed while the turn ran, or the stopped turn's end report, which carries
+ * the turn's files and keeps the step that names them out of progress.
+ */
+function editStep(
+  id: string,
+  itemId: string,
+  paths: string[],
+  ageMs: number,
+  report?: { artifacts: unknown[] },
+): ChatMessage {
+  return mapControllerMessageToChat({
+    id,
+    conversationId: "conversation-1",
+    projectId: "project-1",
+    sessionId: null,
+    promptId: null,
+    runId: RUN_ID,
+    role: "assistant",
+    content: `Applied file changes: ${paths.join(", ")}`,
+    createdAt: new Date(Date.now() - ageMs).toISOString(),
+    metadata: {
+      source: "agent",
+      kind: "update",
+      outcome: report ? "canceled" : "in_progress",
+      jobId: JOB_ID,
+      messageType: "file_change",
+      details: { kind: "codex_file_change", itemId, eventType: "item.completed", status: "completed", paths },
+      activity: { ...EDIT_LABEL, count: paths.length },
+      ...(report ? { artifacts: report.artifacts } : {}),
+    },
+  });
+}
+
+const PAGE = "/workspace/project-1/sites/porto/app.js";
+
+function filesArtifact(stoppedBeforeSave: boolean) {
+  return {
+    kind: "apply/files",
+    files: [{ path: "sites/porto/app.js", workspacePath: "sites/porto/app.js", changeType: "changed", source: "workspace" }],
+    metadata: { provider: "codex-embedded", ...(stoppedBeforeSave ? { stoppedBeforeSave: true } : {}) },
+  };
 }
 
 describe("a run a person stopped", () => {
@@ -131,6 +192,7 @@ describe("a run a person stopped", () => {
     root = createRoot(container);
     live.activeConversation = null;
     live.runs = {};
+    fileList = null;
     // A phone-width row uses the compact rail, where a stuck thread prints its status.
     clientWidth = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(390);
   });
@@ -165,6 +227,61 @@ describe("a run a person stopped", () => {
     );
     expect(container.textContent).not.toContain("Applied file changes");
     expect(container.textContent).not.toContain("secret-plan.ts");
+  });
+
+  // Live test, Nov 2: a Stop let an edit the model sent after the press land.
+  // Its own step was refused, so the stopped turn's end report is the only
+  // record of it: its line names the edit, and its files show with Review
+  // changes and Undo, Not saved, since the turn never saved them.
+  it("names an edit only its end report records, with its files, not saved", async () => {
+    const report = editStep("00000000-0000-4000-8000-000000000004", "stopped-turn-files", [PAGE], 30_000, {
+      artifacts: [filesArtifact(true)],
+    });
+    const card = threadCard([report]);
+    live.activeConversation = { messages: [card, stopNotice()] };
+    await act(async () => root.render(<Thread message={card} />));
+    expect(container.querySelector('[data-testid="turn-activity-line"]')?.textContent).toBe(
+      "Stopped · edited a file" + "Details",
+    );
+    expect(fileList?.files.map((file) => file.workspacePath)).toEqual(["sites/porto/app.js"]);
+    expect(fileList?.unsavedReason).toBe("stopped_before_save");
+    expect(fileList?.messageId).toBe(report.id);
+  });
+
+  // The usual Stop: the edit's own step was recorded before the press. The
+  // report restates that step with the turn's files, so the line still counts
+  // one file and Details keeps one row for the edit.
+  it("counts an edit its own step already showed once, and shows its files", async () => {
+    const streamed = editStep("00000000-0000-4000-8000-000000000003", "call_edit", [PAGE], 90_000);
+    const report = editStep("00000000-0000-4000-8000-000000000004", "call_edit", [PAGE], 30_000, {
+      artifacts: [filesArtifact(true)],
+    });
+    const card = threadCard([streamed, report]);
+    live.activeConversation = { messages: [card, stopNotice()] };
+    await act(async () => root.render(<Thread message={card} />));
+    const line = container.querySelector('[data-testid="turn-activity-line"]');
+    expect(line?.textContent).toBe("Stopped · edited a file" + "Details");
+    await act(async () => (line as HTMLElement).click());
+    expect(container.querySelectorAll('[data-testid="turn-activity-edit"]')).toHaveLength(1);
+    expect(fileList?.files.map((file) => file.workspacePath)).toEqual(["sites/porto/app.js"]);
+    expect(fileList?.messageId).toBe(report.id);
+  });
+
+  // A Stop that came while the turn saved: the report carries the turn's own
+  // save, so its files read as that save left them, with its versions.
+  it("shows the save a turn stopped while saving made", async () => {
+    const streamed = editStep("00000000-0000-4000-8000-000000000003", "call_edit", [PAGE], 90_000);
+    const report = editStep("00000000-0000-4000-8000-000000000004", "call_edit", [PAGE], 30_000, {
+      artifacts: [
+        filesArtifact(false),
+        { kind: "origin/apply", metadata: { gitSyncStatus: "synced", gitRev: "abc1234", gitBaseRev: "def5678" } },
+      ],
+    });
+    const card = threadCard([streamed, report]);
+    live.activeConversation = { messages: [card, stopNotice()] };
+    await act(async () => root.render(<Thread message={card} />));
+    expect(fileList?.unsavedReason).toBeNull();
+    expect(fileList?.commitRange).toMatchObject({ base: "def5678", head: "abc1234" });
   });
 
   it("reads Stopped, not Status unavailable, when its run record says it was canceled", async () => {

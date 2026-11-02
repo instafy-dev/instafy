@@ -30,7 +30,7 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 | A message sent straight to Instafy's browser | `Opening Instafy's browser…` while Studio opens it, then the browser turn's own line: one turn under the person's message, with no card and no notice (`routedBrowserFold.ts`). A card Studio cannot open by itself shows as any card does, and reads Opened once the person presses it or once its browser turn fails or is stopped before it shows anything |
 | Done, no step but notes, a plan or a thread in Details | a neutral count, so Details opens: `Wrote 2 notes`, `Made a plan, wrote a note`, `Started a thread` (`detailsOnlySummary`; never the notes' own words; reasoning titles alone give no line, and a status the runtime wrote itself, such as a retry, is no note) |
 | Done, nothing of its own after a retry | `Took two tries` (`Took three tries`, …), so Details opens on the first try |
-| Stopped by the person | `Stopped · looked up 9 places`, or `Stopped` |
+| Stopped by the person | `Stopped · looked up 9 places`, or `Stopped`. A turn learns of a Stop within about a second (its next heartbeat), and a step it sent before then has run: an edit it made is kept, and its line names it once, `Stopped · read a page, edited a file`, with the files under it (Review changes, Undo; Not saved when the turn never saved them) and a new picture on the card of a site it changed ([A stopped turn's changes](#a-stopped-turns-changes)) |
 | No news for 45 seconds while not in flight | `Status unavailable` |
 
 - While the turn runs, the line changes only to a label that has lasted: each one it shows stays at
@@ -145,6 +145,40 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   least 44 px tall.
 - A message without a valid `activity` (an older runtime, history, a label that breaks a rule)
   counts as an unlabelled step, so mixed versions read the same.
+
+## A stopped turn's changes
+
+A Stop cancels the turn's job on the controller at once. The turn learns of it from its next
+heartbeat (every running job sends one each second) or from a report the controller refuses, and
+then shuts down. A step the model sent in between has run: an edit is in the space's folder, and
+the job's own save at its end keeps it. The executor that ran the turn then sends the job's one
+end report (`POST /agent/stopped`): the paths whose `git status` changed during the turn, as one
+`file_change` step and the `apply/files` artifact a finished turn's reply carries
+(`jobs/stopped_turn.rs`). A Stop can also reach a job after its model is done, while its changes
+are saved: the controller then refuses the job's completion, and the job loop sends the same
+report of the files the finished turn's reply lists, with that turn's own save (`origin/apply`).
+
+The controller takes the report only from the runtime that held the job, with that runtime's
+current token, once, and within two minutes of the Stop; a marker among the job's artifacts says
+it was taken, whatever an earlier attempt of the job left there. It records the step in the
+turn's thread and nothing else: the job and its run stay cancelled, and the turn's charge stays
+what the Stop left (its reserve). The report carries no usage: an artifact other than the files
+and the save is refused.
+
+An edit is counted once. The report's step names each file by its place in the turn's folder, as
+the turn's own edit steps name it. When the chat already shows a file, because the edit's own step
+was recorded before the press, the controller leaves it out of the step; when the chat shows every
+file the report names, the report restates the turn's newest edit step (its own item, so Details
+keeps one row for it) with the files attached. So the line reads `Stopped · read a page, edited a
+file`, Details lists each edit once, and the files show under the line with Review changes and
+Undo. A turn that lost its lease never saved its changes: its files say Not saved ("Stopped before
+these changes were saved"), and a later turn saves only what it changes itself. A turn stopped
+while it saved shows what that save left, with its version.
+
+The step stays in the history later turns read, so a turn that goes on, or undoes it, knows what
+the stopped turn left. A preview whose site the turn changed is pictured again. A job a stop of
+its machine put back in the queue is not cancelled: the controller turns its report down, and the
+job's next lease takes the work up.
 
 ## Where labels come from
 
