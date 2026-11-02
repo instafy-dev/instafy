@@ -249,7 +249,7 @@ test("every rule the eval grades is a rule the skills state", () => {
   // "Finding a page" is the browser skill's, and the research skill points to it.
   const browser = flat(BROWSER_SKILL);
   const finding = {
-    no_guessed_paths: ["Open an address the person, a skill or a search result gave, a link on a page you read, or the home page of the official site the task is about.", "Never a search engine or a guessed path."],
+    no_guessed_paths: ["Open an address the person, a skill or a search result gave, a link on a page you read (print a page's links with its text), or the home page of the official site the task is about.", "Never a search engine or a guessed path."],
     missing_page_searched: ["A page that says it is missing (\"not found\", \"are you lost?\"): use that site's own search box or menu."],
     no_search_engine: ["Never a search engine or a guessed path."],
     facts_from_own_page: ["comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner, its stations chosen), not a listing or a kiosk page: those only lead to it."],
