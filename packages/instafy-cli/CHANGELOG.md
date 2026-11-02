@@ -1,5 +1,13 @@
 # @instafy/cli
 
+## 0.5.3
+
+### Patch Changes
+
+- 06a3a83: A bound site's page that draws its first view after it loads now tells the Studio preview when it has drawn, so the preview keeps saying it is opening the site, with the page out of sight, until the page shows its content, instead of showing the page's placeholder rows while it fetches its data. The bind client has `instafyBind.drawsLater()` and `instafyBind.drawn()`: the layout's acknowledgement lists `ready`, and `ready` is sent once, after the first view is drawn. The starters' `site.start()` (`site.js` 1.6.0) calls both: when it starts, and once its first view, or the notice saying the data did not load, is on the page.
+- 6a8d3cc: `instafy preview check` ends a check with no errors by saying what it checked: "Loaded on both sizes with no errors; how it looks isn't checked until someone opens the screenshots." (or the one size it loaded with `--phone` or `--desktop`), in place of "No problems found. Open the screenshots…", which an agent read as the page displaying correctly without opening them.
+- 551d0ae: A starter page tells the Studio preview it has drawn on its next frame, or on a 100 ms timer when no frame comes first. A page out of sight (a hidden tab or pane) gets no frames, so its preview kept saying it was opening the site for the full 15 s; it now says it has drawn within about a second at most, as the browser may hold an unseen page's timers that long (`site.js` 1.6.1). The compare starter leaves out a sort whose column no row has a value for (a price a store can still check stays): a phone no longer shows "Unknown" on the right of every row, and "Sort by" offers only the sorts left. Rows whose `data.json` asks for a sort are still ordered by the first one left, and a `sort` that is not a list orders nothing instead of stopping the page. Its notes on `data.json` say that a value cites only a page that gives it, so a count of what was found cites only what it counts, and that the lede says only what a page you read says. `instafy bind check` asks for the page that gives a value, or, when no page gives it, a note saying why.
+
 ## 0.5.2
 
 ### Patch Changes
