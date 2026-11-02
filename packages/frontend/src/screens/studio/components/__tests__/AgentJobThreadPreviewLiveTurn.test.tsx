@@ -492,6 +492,139 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
     );
   });
 
+  // A local test: "keep going" ran `instafy preview list` and answered;
+  // the runtime asked again for the look it wanted, the line said "Trying
+  // again…" for 5 s, and the first answer stayed in Details as a step.
+  it("reads Working… while it asks again for evidence, and lists only the answer that stands", async () => {
+    vi.useFakeTimers();
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    const answerDraft = (id: string, text: string, timestamp: number) =>
+      agentUpdate(id, "status", text, timestamp, {
+        kind: "agent_message",
+        event: { type: "item.completed", item: { id: `msg-${id}`, type: "agent_message", text, phase: "final_answer" } },
+      });
+    const firstAnswer = "The page is still open. If you want, I can check the hours again.";
+    const evidenceRetry: ChatMessage = {
+      ...agentUpdate("retry", "status", "Retrying: accepted execution evidence is still missing.", base + 4_000, {
+        kind: "codex_retry",
+        reason: "missing_command_observation",
+        attempt: 2,
+      }),
+    };
+    evidenceRetry.metadata = {
+      ...evidenceRetry.metadata,
+      activity: { v: 1, key: "runtime/evidence-retry", role: "quiet", live: "Working", count: 1, also: [] },
+    };
+    const firstAttempt = [
+      ...earlierSteps(),
+      agentUpdate("preview-list", "command_execution", "instafy preview list", base + 3_000, {
+        status: "completed",
+        command: "instafy preview list",
+        exitCode: 0,
+      }),
+      answerDraft("first-answer", firstAnswer, base + 3_500),
+      evidenceRetry,
+    ];
+    await renderTurn(firstAttempt);
+    await act(async () => {
+      vi.advanceTimersByTime(ACTIVITY_LABEL_HOLD_MS);
+    });
+    expect(activityLine()?.textContent).toBe("Working…" + "Details");
+    expect(container.textContent).not.toContain("Trying again");
+    await act(async () => {
+      activityLine()?.click();
+    });
+    const rows = () =>
+      Array.from(container.querySelectorAll('[data-testid="agent-thread-inline-update-row"]')).map(
+        (row) => row.textContent,
+      );
+    expect(rows()).toEqual([
+      expect.stringContaining("Reading the request"),
+      expect.stringContaining("Analyzing output schema"),
+    ]);
+    expect(container.textContent).not.toContain(firstAnswer);
+
+    live.inFlight = false;
+    const retryAnswer = "The page now gives the opening hours from the shop's own site.";
+    await renderTurn([
+      ...firstAttempt,
+      agentUpdate("web-read", "command_execution", "instafy web read https://shop.example", base + 5_000, {
+        status: "completed",
+        command: "instafy web read https://shop.example",
+        exitCode: 0,
+      }),
+      answerDraft("retry-answer", retryAnswer, base + 6_000),
+      reply("reply", retryAnswer, base + 6_500),
+    ]);
+    expect(rows()).toEqual([
+      expect.stringContaining("Reading the request"),
+      expect.stringContaining("Analyzing output schema"),
+    ]);
+    expect(container.textContent).not.toContain(firstAnswer);
+    expect(
+      Array.from(container.querySelectorAll('[data-testid="message-content"]')).map((node) => node.textContent),
+    ).toEqual([retryAnswer]);
+  });
+
+  // A local test: the proxy answered a request with a 502, Codex sent it
+  // again 192 ms later, the resent request answered 1.4 s after that and the
+  // turn's next step came 1.6 s later still. The line said "Trying again…"
+  // for 2 s over a turn that had picked up again. Nothing says when a resent
+  // stream is back, so the runtime gives Codex's own retry no words: the line
+  // keeps its step, then says Thinking… as after any pause.
+  it("says nothing of a dropped stream Codex picked up again by itself", async () => {
+    vi.useFakeTimers();
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    const shown: string[] = [];
+    const watch = async (ms: number) => {
+      for (let elapsed = 0; elapsed < ms; elapsed += 100) {
+        await act(async () => {
+          vi.advanceTimersByTime(100);
+        });
+        const text = activityLine()?.textContent ?? "";
+        if (shown.at(-1) !== text) {
+          shown.push(text);
+        }
+      }
+    };
+    const command = (id: string, script: string, status: string, timestamp: number) =>
+      agentUpdate(id, "command_execution", script, timestamp, {
+        status,
+        command: script,
+        ...(status === "completed" ? { exitCode: 0 } : {}),
+      });
+    await renderTurn([...earlierSteps(), command("read", "cat site/index.html", "in_progress", base + 3_000)]);
+    await watch(ACTIVITY_LABEL_HOLD_MS);
+    // As the runtime writes it: a status of its own, with no words for the line.
+    const streamRetry = agentUpdate(
+      "stream-retry",
+      "status",
+      "Retrying: unexpected status 502 Bad Gateway: The upstream request failed.",
+      base + 3_300,
+      {
+        kind: "codex_stream_retry",
+        event: { type: "stream.retry", message: "unexpected status 502 Bad Gateway: The upstream request failed." },
+      },
+    );
+    const pickedUp = [...earlierSteps(), command("read", "cat site/index.html", "completed", base + 3_100), streamRetry];
+    await renderTurn(pickedUp);
+    await watch(3_100);
+    await renderTurn([...pickedUp, command("next", "cat site/app.js", "in_progress", base + 6_400)]);
+    await watch(2_000);
+    expect(shown).toEqual(["Working…" + "Details", "Thinking…" + "Details", "Working…" + "Details"]);
+    // Nor is it a note in Details.
+    await act(async () => {
+      activityLine()?.click();
+    });
+    expect(container.querySelector('[data-testid="turn-activity-details"]')).not.toBeNull();
+    expect(container.textContent).not.toContain("Retrying");
+    expect(container.textContent).not.toContain("502");
+  });
+
   it("never turns a long reasoning title into the running line", async () => {
     const title =
       "Comparing the output schema of the export endpoint with the fields the importer expects";

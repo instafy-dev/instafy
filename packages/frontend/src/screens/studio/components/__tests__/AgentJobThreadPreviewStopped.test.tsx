@@ -229,6 +229,42 @@ describe("a run a person stopped", () => {
     expect(container.textContent).not.toContain("secret-plan.ts");
   });
 
+  // A local test: "keep going" answered, the runtime asked again for a
+  // look it wanted, and the person stopped the retry. The answer the retry
+  // replaced stayed in Details as a step of its own.
+  it("lists no answer a retry replaced, though the retry never answered", async () => {
+    const firstAnswer = "The page is still open. If you want, I can check the hours again.";
+    const status = (id: string, content: string, ageMs: number, details: Record<string, unknown>): ChatMessage => ({
+      id,
+      role: "assistant",
+      authorId: null,
+      content,
+      timestamp: Date.now() - ageMs,
+      files: null,
+      messageType: "status",
+      metadata: { jobId: JOB_ID, source: "agent", kind: "update", outcome: "in_progress", messageType: "status", details },
+    });
+    const card = threadCard([
+      status("00000000-0000-4000-8000-000000000004", firstAnswer, 100_000, {
+        kind: "agent_message",
+        event: { type: "item.completed", item: { id: "msg-1", type: "agent_message", text: firstAnswer, phase: "final_answer" } },
+      }),
+      status("00000000-0000-4000-8000-000000000005", "Retrying: accepted execution evidence is still missing.", 99_000, {
+        kind: "codex_retry",
+        reason: "missing_command_observation",
+        attempt: 2,
+      }),
+      commandUpdate("00000000-0000-4000-8000-000000000006", "instafy web read https://shop.example", 90_000),
+    ]);
+    live.activeConversation = { messages: [card, stopNotice()] };
+    await act(async () => root.render(<Thread message={card} />));
+    const line = container.querySelector<HTMLElement>('[data-testid="turn-activity-line"]');
+    expect(line?.textContent).toBe("Stopped · ran 3 commands" + "Details");
+    await act(async () => line?.click());
+    expect(container.querySelector('[data-testid="turn-activity-details"]')).not.toBeNull();
+    expect(container.textContent).not.toContain(firstAnswer);
+  });
+
   // Live test, Nov 2: a Stop let an edit the model sent after the press land.
   // Its own step was refused, so the stopped turn's end report is the only
   // record of it: its line names the edit, and its files show with Review

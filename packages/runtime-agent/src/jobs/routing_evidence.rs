@@ -1048,6 +1048,9 @@ fn readonly_observation(argv: &[&str]) -> bool {
             ["agents", "status", id] | ["agents", "status", id, "--json"] => {
                 uuid::Uuid::parse_str(id).is_ok()
             }
+            // The space's open previews, as the controller lists them: what runs now. It
+            // changes nothing, and with no option it asks the space's own controller.
+            ["preview", "list"] | ["preview", "list", "--json"] => true,
             _ => false,
         };
     }
@@ -1690,6 +1693,54 @@ mod tests {
             assert_eq!(
                 routing_evidence_progress(None, &argv_message(argv, "completed", 0)),
                 RoutingEvidenceProgress::default()
+            );
+        }
+    }
+
+    /// "keep going" was asked for a look at the current state, and its answer rested on
+    /// `instafy preview list`, which lists the space's open previews and changes nothing. The
+    /// receipt was refused as an unknown Instafy command, so the turn was run again for a look
+    /// it had taken, and the line said "Trying again…" over it.
+    #[test]
+    fn the_space_preview_list_is_an_observation() {
+        for script in ["instafy preview list", "instafy preview list --json"] {
+            let (progress, receipts) = routing_evidence_with_receipts(
+                None,
+                &argv_message(json!(["/bin/bash", "-lc", script]), "completed", 0),
+            );
+            assert_eq!(
+                progress,
+                RoutingEvidenceProgress {
+                    context_retrieval: false,
+                    command_observation: true
+                },
+                "{script}"
+            );
+            assert_eq!(
+                serde_json::to_value(receipts).unwrap()["successfulObservations"],
+                1,
+                "{script}"
+            );
+        }
+        // Another server, a step that closes a preview or opens one, a failed list and a usage
+        // request are not a look at this space's previews.
+        for (script, exit_code) in [
+            ("instafy preview list --server-url http://127.0.0.1:9", 0),
+            (
+                "instafy preview close 0dd25975-0e04-4ecf-b148-108c4db4f66c",
+                0,
+            ),
+            ("instafy preview open --port 4173", 0),
+            ("instafy preview list", 1),
+            ("instafy preview list --help", 0),
+        ] {
+            assert_eq!(
+                routing_evidence_progress(
+                    None,
+                    &argv_message(json!(["/bin/bash", "-lc", script]), "completed", exit_code)
+                ),
+                RoutingEvidenceProgress::default(),
+                "{script}"
             );
         }
     }

@@ -8174,7 +8174,7 @@ impl JobProcessor {
                             "kind": "codex_retry",
                             "reason": retry_reason,
                             "attempt": 2,
-                            "activity": activity_labels::runtime_status_activity("codex_retry"),
+                            "activity": retry_status_activity(retry_reason),
                         })),
                     });
                 }
@@ -10178,7 +10178,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 - Complete required context retrieval, observations and tests before deciding on changes. These requirements never waive write-scope or read-only restrictions.\n\
                 - Keep changes minimal and workspace-relative. Apply exact supplied paths and contents as-is. Do not add an extra `bash -lc` wrapper.\n\
                 - If commit/sync/status was requested, use repo/Instafy tools when callable and complete still-required changes.\n\
-                - Finish with one short plain-text summary of changes or a justified no-change result. Do not wrap it in JSON or paste full file contents; changed files are detected from disk.\n\
+                - Finish with a short reply about what changed, as AGENTS.md's Replies says. Do not wrap it in JSON or paste full file contents; changed files are detected from disk.\n\
                 - Do not emit `multi_agent_plan`, goals, integrations, browser/location actions, or broad coordination metadata.\n",
             );
             append_prompt_section(
@@ -10189,8 +10189,26 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 - Use workspace-relative paths only. Never write outside the active workspace.\n\
                 - Do not create submodules or gitlinks unless the user explicitly asked for one.\n\
                 - Imported or nested repositories are ordinary directories unless the user explicitly asks to preserve nested Git metadata.\n\
-                - Keep the final summary short: what changed, important caveats, and any exact command/status evidence if observed.\n",
+                - Keep the final summary short: what changed and important caveats.\n",
             );
+            // The replies guide the reply line names. A turn that loads no memory snapshot (a
+            // required change, a lookup of another chat, a turn on a restored thread) also runs
+            // without the space's `AGENTS.md` (`broad_contextual_instruction_suppression_reason`;
+            // a restored thread is told "The previously provided AGENTS.md instructions no
+            // longer apply"), so it is given its "Replies", as a browser turn on a restored
+            // thread is.
+            if (stateful_thread_restored
+                || direct_workspace_file_change
+                || cross_chat_context_lookup)
+                && let Some(section) = pinned_replies_section(workspace_dir)
+            {
+                append_prompt_section(
+                    &mut prompt,
+                    &mut prompt_section_metrics,
+                    "pinnedRepliesSection",
+                    &section,
+                );
+            }
         } else if stateful_thread_restored && !multi_agent_planning_turn {
             append_prompt_section(
                 &mut prompt,
@@ -13720,6 +13738,21 @@ fn is_retryable_codex_upstream_summary(summary: &str) -> bool {
         || normalized.contains("timeout")
 }
 
+/// The words on the line while the runtime sends the turn's request again, by the retry's
+/// reason. A retry for evidence the answer lacked (a command or lookup the routing step asked
+/// for, `routing_recovery::Plan::reason`) failed nothing the person saw: the turn is still at
+/// work, and its line says "Working…". Any other says "Trying again…". Studio leaves the answer a
+/// retry replaces out of Details either way.
+fn retry_status_activity(retry_reason: &str) -> Option<JsonValue> {
+    match retry_reason {
+        "missing_command_execution"
+        | "missing_command_observation"
+        | "missing_context_retrieval"
+        | "missing_context_and_observation" => activity_labels::evidence_retry_activity(),
+        _ => activity_labels::runtime_status_activity("codex_retry"),
+    }
+}
+
 fn codex_fallback_retry_reason(kind: CodexFallbackSummaryKind) -> &'static str {
     match kind {
         CodexFallbackSummaryKind::MissingFinalAssistantMessage => "missing_final_assistant_message",
@@ -13834,7 +13867,7 @@ fn codex_plain_write_task_retry_prompt(prompt: &str) -> String {
         - The prior attempt did not provide a complete final response or verified requested file changes. Inspect the current state before repeating an edit.\n\
         - Complete any still-missing required lookup/observation and requested file changes under the original permissions and write-scope guardrails. Do not repeat work already completed.\n\
         - Apply still-required changes with the available tools. For conditional changes, a completed inspection with no warranted edits is a valid result; do not manufacture a patch or repeat an already completed edit. If evidence or permission is unavailable, report the concrete blocker instead of inventing a result.\n\
-        - Finish with one short plain-text summary. Do not wrap the final answer in JSON or serialize file contents; the runtime detects actual changes from disk.\n"
+        - Finish with a short reply about what changed, as AGENTS.md's Replies says. Do not wrap the final answer in JSON or serialize file contents; the runtime detects actual changes from disk.\n"
     )
 }
 
@@ -19900,9 +19933,11 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                 }
             }
             "stream.retry" => {
-                // Codex is retrying, and the turn may still recover. The Studio shows a
-                // "Retrying:" status as calm progress and keeps the cause as its detail; a
-                // failure that outlasts the retries still arrives as an error.
+                // Codex is sending a dropped stream again, and the turn may still recover. The
+                // status keeps the cause for the run's record but gives the turn's line no
+                // words: Codex sends nothing when the resent stream is back, so they would stay
+                // through the model's next pause. A failure that outlasts the retries still
+                // arrives as an error.
                 if let Some(reason) = map
                     .get("message")
                     .and_then(JsonValue::as_str)
@@ -19916,20 +19951,14 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                     if pushed_at_last_retry.is_some_and(|count| count != pushed.get()) {
                         retry_episode += 1;
                     }
-                    let mut metadata = json!({
-                        "kind": "codex_stream_retry",
-                        "event": event.clone(),
-                    });
-                    if let Some(activity) =
-                        activity_labels::runtime_status_activity("codex_stream_retry")
-                    {
-                        metadata["activity"] = activity;
-                    }
                     push_message(
                         format!("stream_retry::{retry_episode}::{reason}"),
                         format!("Retrying: {reason}"),
                         Some("status"),
-                        metadata,
+                        json!({
+                            "kind": "codex_stream_retry",
+                            "event": event.clone(),
+                        }),
                     );
                     pushed_at_last_retry = Some(pushed.get());
                 }
@@ -22415,6 +22444,175 @@ mod tests {
         ));
         let unchecked = job(json!({"reply": "Read the maker's pages."}));
         assert!(should_run_agent_routing_preflight(&unchecked, prompt));
+    }
+
+    /// How a file-changing turn is told to end.
+    const WRITE_LANE_REPLY_LINE: &str =
+        "- Finish with a short reply about what changed, as AGENTS.md's Replies says. Do not wrap";
+
+    /// A file-changing turn's reply follows `AGENTS.md`'s "Replies". The lane
+    /// asked for "one short plain-text summary of changes" with "any exact
+    /// command/status evidence if observed", and a hand-back replied "Built a
+    /// responsive comparison page at `sites/framework-comparison/index.html`";
+    /// a page turn said "The page is open in Studio" when only its card was
+    /// posted. A turn that is given no `AGENTS.md` (one on a restored thread, a
+    /// required change's first attempt, one that looks up another chat) is
+    /// given that section with the lane.
+    #[test]
+    fn a_file_changing_turn_replies_as_agents_md_says() {
+        let tmp = tempdir().expect("temp dir");
+        learn::ensure_project_memory_scaffold(tmp.path());
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let agents_doc = fs::read_to_string(tmp.path().join(learn::AGENTS_DOC_FILENAME)).unwrap();
+        let start = agents_doc.find("## Replies").expect("section");
+        let replies_rule = "Name a site, page or file by what it is";
+        assert!(agents_doc[start..].contains(replies_rule));
+        let restored_state =
+            json!({"defaultThreadId":"existing-thread", "historyReplayRequired":false});
+        // (a required change, a restored thread, a lookup of another chat). A lookup's thread
+        // is never kept, so it always starts one.
+        for (required, restored, lookup) in [
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+            (false, false, false),
+            (false, false, true),
+            (true, false, true),
+        ] {
+            let mut job = test_lease_job(Some("feature"), json!({ "metadata": {} }));
+            job.project_id = Some(project_id);
+            let mut preflight =
+                test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, lookup, false);
+            preflight.workspace_file_change_requirement = if required {
+                WorkspaceFileChangeRequirement::Required
+            } else {
+                WorkspaceFileChangeRequirement::Conditional
+            };
+            let job = job_with_agent_routing_preflight(&job, &preflight);
+            assert_eq!(
+                runtime_job_expectations(&job.payload).workspace_file_changes,
+                required
+            );
+            assert_eq!(
+                final_output_mode_for_runtime_job(
+                    &job,
+                    false,
+                    runtime_job_expectations(&job.payload)
+                ),
+                RuntimeFinalOutputMode::PlainTextWrite
+            );
+            assert_eq!(job_requests_cross_chat_context_lookup(&job), lookup);
+            let provider_state = restored.then_some(&restored_state);
+            // Whether Codex leaves the space's `AGENTS.md` out of the turn.
+            let without_agents_md = broad_contextual_instruction_suppression_reason(
+                &job,
+                "Put the hours on a small page I can share.",
+                false,
+                provider_state,
+                ThreadLane::Building,
+                direct_write_broad_context_suppression_eligible(
+                    runtime_job_expectations(&job.payload),
+                    false,
+                ),
+            )
+            .is_some();
+            let (prompt, _, metrics) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "Put the hours on a small page I can share.",
+                    true,
+                    provider_state,
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("prompt should build");
+            let case = format!("required={required} restored={restored} lookup={lookup}");
+            assert!(
+                prompt.contains("\nDirect workspace-change response contract:\n"),
+                "{case}"
+            );
+            assert!(prompt.contains(WRITE_LANE_REPLY_LINE), "{case}");
+            assert!(
+                prompt.contains(
+                    "- Keep the final summary short: what changed and important caveats.\n"
+                ),
+                "{case}"
+            );
+            assert!(!prompt.contains("plain-text summary"), "{case}");
+            assert!(!prompt.contains("command/status evidence"), "{case}");
+            // Every such turn holds the section the line names: a conditional change on a new
+            // thread in its memory snapshot, the others given it with the lane, exactly when
+            // Codex leaves the file out.
+            assert!(prompt.contains(replies_rule), "{case}");
+            let pinned =
+                prompt.contains("From `AGENTS.md` (this thread may predate it):\n## Replies\n");
+            assert_eq!(pinned, without_agents_md, "{case}");
+            assert_eq!(pinned, required || restored || lookup, "{case}");
+            assert_eq!(
+                metrics["promptSections"]["pinnedRepliesSection"]["chars"]
+                    .as_u64()
+                    .is_some_and(|chars| chars > 0),
+                pinned,
+                "{case}"
+            );
+            // Given with the lane, it is that section alone (a new thread's snapshot holds the
+            // whole file).
+            assert_eq!(prompt.contains("## Responsiveness"), !pinned, "{case}");
+        }
+        // The retry of a file-changing turn ends the same way.
+        let retry =
+            codex_plain_write_task_retry_prompt("Put the hours on a small page I can share.");
+        assert!(retry.contains(
+            "- Finish with a short reply about what changed, as AGENTS.md's Replies says."
+        ));
+        assert!(!retry.contains("plain-text summary"));
+    }
+
+    /// "keep going" answered after a look the routing step did not count, and
+    /// the runtime asked again for it: the line said "Trying again…" for 5 s
+    /// over a retry nothing on screen had failed. A retry for evidence the
+    /// answer lacked reads "Working…"; any other still reads "Trying again…".
+    #[test]
+    fn a_retry_for_missing_evidence_reads_as_work() {
+        use routing_evidence::{RoutingEvidenceProgress, RoutingEvidenceRequirements};
+        let live = |reason: &str| {
+            retry_status_activity(reason).expect("labelled")["live"]
+                .as_str()
+                .expect("live")
+                .to_string()
+        };
+        let mut evidence_reasons = vec!["missing_command_execution"];
+        for (context_retrieval, command_observation) in [(true, true), (true, false), (false, true)]
+        {
+            let plan = routing_recovery::plan(
+                RoutingEvidenceRequirements {
+                    context_retrieval,
+                    command_observation,
+                },
+                RoutingEvidenceProgress::default(),
+                routing_recovery::Gate::default(),
+            )
+            .expect("a plan for missing evidence");
+            evidence_reasons.push(plan.reason());
+        }
+        for reason in evidence_reasons {
+            assert_eq!(live(reason), "Working", "{reason}");
+        }
+        for reason in [
+            "missing_personal_browser_execution",
+            "missing_shared_browser_execution",
+            "missing_generic_mcp_tool_execution",
+            codex_fallback_retry_reason(CodexFallbackSummaryKind::MissingFinalAssistantMessage),
+            "missing_files",
+            "no_file_changes",
+            "transient_upstream_error",
+        ] {
+            assert_eq!(live(reason), "Trying again", "{reason}");
+        }
     }
 
     /// A hand-back's decided route is a build in this chat, so without a
@@ -25092,7 +25290,7 @@ mod tests {
         // Must agree with the PLAIN_WRITE_RUNTIME_* instructions: plain-text final,
         // changes applied via tools, files derived from the git delta — no JSON demand.
         assert!(prompt.contains("apply them directly with `apply_patch`"));
-        assert!(prompt.contains("Finish with one short plain-text summary"));
+        assert!(prompt.contains(WRITE_LANE_REPLY_LINE));
         assert!(!prompt.contains("Return exactly one JSON object"));
         assert!(!prompt.contains("contentBase64"));
         assert!(prompt.contains("Latest user request:\nCreate notes/hello.txt"));
@@ -30958,7 +31156,7 @@ mod tests {
                 if mode == "owned" {
                     assert_eq!(output_mode, RuntimeFinalOutputMode::PlainTextWrite);
                     assert!(prompt.contains("Direct workspace-change response contract"));
-                    assert!(prompt.contains("Finish with one short plain-text summary"));
+                    assert!(prompt.contains(WRITE_LANE_REPLY_LINE));
                     assert!(prompt.contains("Owned paths: notes/approved.txt"));
                     assert!(!prompt.contains("Do not edit files"));
                     assert!(!prompt.contains("Return exactly one JSON object"));
@@ -31044,7 +31242,7 @@ mod tests {
                         None,
                     )
                     .unwrap();
-                assert!(prompt.contains("Finish with one short plain-text summary"));
+                assert!(prompt.contains(WRITE_LANE_REPLY_LINE));
                 assert!(prompt.contains("Explain a justified no-change result"));
                 assert!(
                     prompt.contains("a no-change explanation does not satisfy a required edit")
@@ -35214,6 +35412,16 @@ mod tests {
                 .and_then(|metadata| metadata.get("kind"))
                 .and_then(JsonValue::as_str),
             Some("codex_stream_retry")
+        );
+        // It gives the turn's line no words. Codex sends nothing when the resent stream is back,
+        // so "Trying again…" stayed on the line through the model's next pause: 2 s over a 502
+        // the turn had already got past. The line keeps the turn's step instead.
+        assert_eq!(
+            retry
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("activity")),
+            None
         );
         assert!(
             messages

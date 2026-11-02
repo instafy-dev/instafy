@@ -446,10 +446,14 @@ function plural(count: number, one: string, many: string): string {
 /**
  * "ran 5 commands, used 2 tools": what an unlabelled turn did, by kind. A look
  * around the workspace is not counted: a turn that only did that and answered
- * (or posted a card) has no line, as a plain answer has none.
+ * (or posted a card) has no line, as a plain answer has none. A step that
+ * failed (a command that exited with an error) did nothing it would have done,
+ * so it is not counted either; when no other step is left, the line says what
+ * was tried: "Tried running a command".
  */
 function neutralCounts(allSteps: TurnStep[]): string | null {
-  const steps = allSteps.filter((step) => !step.plumbing);
+  const counted = allSteps.filter((step) => !step.plumbing);
+  const steps = counted.filter((step) => step.state !== "failed");
   const commands = steps.filter((step) => step.kind === "command").length;
   const tools = steps.filter((step) => step.kind === "tool" || step.kind === "search").length;
   const files = new Set<string>();
@@ -470,7 +474,14 @@ function neutralCounts(allSteps: TurnStep[]): string | null {
     tools > 0 ? plural(tools, "used a tool", "used {n} tools") : null,
     edited > 0 ? plural(edited, "edited a file", "edited {n} files") : null,
   ].filter((part): part is string => part !== null);
-  return parts.length > 0 ? parts.join(", ") : null;
+  if (parts.length > 0) {
+    return parts.join(", ");
+  }
+  // A step the person said no to, or left, is named by its answer instead.
+  const tried = counted.find(
+    (step) => step.state === "failed" && step.activity?.approval !== "denied" && step.activity?.approval !== "expired",
+  );
+  return tried ? triedWords(NEUTRAL_LABELS[tried.kind].live) : null;
 }
 
 type Group = {

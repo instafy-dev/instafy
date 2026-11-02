@@ -437,7 +437,10 @@ can still be credited as an observation; its error text stays in the output beca
 stage may not discard stderr. Stderr may go to `/dev/null` only on an unpiped command or a
 pipeline's last stage; any other redirect is rejected. Commands that only print literal text
 (`echo`, `printf`, `yes`) never count, piped or not. Short read flags such as `grep -h` and
-`ls -h` are reads, while `--help` and `--version` are not.
+`ls -h` are reads, while `--help` and `--version` are not. Of Instafy's own commands, a
+known-safe `instafy git` read, and `instafy agents status <id>` and `instafy preview list`
+(the space's open previews) with or without `--json`, are observations; its conversation and
+context lookups are context retrieval, and any other `instafy` command is neither.
 Unsupported shell shapes may remain unrecognized even if a read actually occurred. Legacy
 single-command interpreter receipts remain generic execution evidence, not proof of correct
 program semantics or answers. This classification does not grant execution permission.
