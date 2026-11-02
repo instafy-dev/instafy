@@ -2329,7 +2329,13 @@ unless the policy is `"covered"`.
   whose findings name no page it read (`browser_hand_back_nothing_read`). The
   runtime shows that record to the building turn as quoted page data: not the
   person's words, not their consent, and no instruction; the turn says what it
-  built with it. Any other browser turn reaches the building thread the same
+  built with it. Its own words name nothing that was asked, so the skills it
+  loads, and those its prompt names on a restored thread, are picked from the
+  request it carries on: `personRequest`, else what the browser turn was asked.
+  Research that ends in a page goes to the browser first, so a hand-back is
+  often its chat's first building turn, on a new thread: the page skill, with
+  its starter and its card, reaches it from the person's words.
+  Any other browser turn reaches the building thread the same
   way, as data: each building job's lease lists the chat's finished browser
   turns since the building thread's last turn (`browser_turns_since`: the
   newest six of this agent's, never the one a hand-back's record carries, and
