@@ -45,9 +45,9 @@
 //! reply puts them back after it. A browser turn whose findings go back to
 //! the building turn posts no words of its own: its note holds them, ahead of
 //! its findings, and the record's reply is that note ([`browser_turn_reply`]).
-//! The runtime
-//! shows it to the building turn as quoted page data, never as the person's
-//! words and never as their consent (runtime-agent `jobs/browser_hand_back.rs`).
+//! The runtime shows the record to the building turn as quoted page data,
+//! never as the person's words and never as their consent (runtime-agent
+//! `jobs/browser_hand_back.rs`).
 //! A hand-back is never queued or recorded without a dispatch: it resumes an
 //! idle lane or is refused.
 //!
