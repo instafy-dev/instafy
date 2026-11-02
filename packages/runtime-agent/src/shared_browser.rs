@@ -2705,6 +2705,7 @@ impl SharedBrowserMcpServer {
                             message: PAGE_KEEPS_CHANGING_MESSAGE.to_string(),
                             step: failure.step,
                             approval: failure.approval,
+                            refused: failure.refused,
                             changed_after_yes: false,
                             page_changed: true,
                         }
@@ -2770,6 +2771,12 @@ impl ServerHandler for SharedBrowserMcpServer {
 /// the browser never answered its step, so that step does not stand in for the
 /// browser work of the turn (runtime-agent's retry of a turn with none still
 /// runs).
+///
+/// A model that calls the tools one at a time (not from code) reads only a
+/// result's structured content when it has one, so structured content that
+/// carries these facts also carries the failure's own words (`error.reason`),
+/// as a page the network did not deliver does: a refused step still tells it
+/// what to do, and its `[step_refused_…]` code.
 fn failed_call_result(error: &anyhow::Error) -> CallToolResult {
     let mut result = failed_tool_result(&format!("{error:#}"));
     let activity = error
@@ -2784,7 +2791,17 @@ fn failed_call_result(error: &anyhow::Error) -> CallToolResult {
             Some(JsonValue::Object(structured)) => {
                 structured.insert(field.to_string(), value);
             }
-            _ => result.structured_content = Some(json!({ field: value })),
+            _ => {
+                let reason = result
+                    .content
+                    .iter()
+                    .find_map(|content| content.as_text().map(|text| text.text.clone()))
+                    .unwrap_or_default();
+                result.structured_content = Some(json!({
+                    "error": { "reason": reason },
+                    field: value,
+                }));
+            }
         }
     }
     result
@@ -3510,6 +3527,7 @@ fn controller_failure(
         let FailedStep {
             step,
             approval,
+            refused,
             changed_after_yes,
             page_changed,
         } = failed_step(stdout).unwrap_or_default();
@@ -3517,6 +3535,7 @@ fn controller_failure(
             message,
             step,
             approval,
+            refused,
             changed_after_yes,
             page_changed,
         }
@@ -3526,14 +3545,18 @@ fn controller_failure(
 
 /// A controller command that failed, with the step's kind when the command
 /// said it (a search, or a form sent) before it asked the person, `once`
-/// when the person allowed the step at its prompt, `changed_after_yes`
-/// when that yes was not used because the step's control changed, and
-/// `page_changed` when the page changed under a step nobody was asked about.
+/// when the person allowed the step at its prompt, which of the person's own
+/// steps the browser refused to take (`refused`, one of
+/// [`REFUSED_STEPS`](crate::shared_browser_activity::REFUSED_STEPS)),
+/// `changed_after_yes` when that yes was not used because the step's control
+/// changed, and `page_changed` when the page changed under a step nobody was
+/// asked about.
 #[derive(Debug)]
 struct ControllerFailure {
     message: String,
     step: Option<&'static str>,
     approval: Option<&'static str>,
+    refused: Option<&'static str>,
     changed_after_yes: bool,
     page_changed: bool,
 }
@@ -3541,7 +3564,8 @@ struct ControllerFailure {
 impl ControllerFailure {
     /// What the failed call's result says of its step (`activity`), for the
     /// turn's line and Details: a step the person allowed that then did not
-    /// happen still lists their yes.
+    /// happen still lists their yes, and a step the browser refused because
+    /// it is the person's is named for what it was.
     fn activity(&self) -> Option<JsonValue> {
         let mut activity = serde_json::Map::new();
         if let Some(step) = self.step {
@@ -3549,6 +3573,9 @@ impl ControllerFailure {
         }
         if let Some(approval) = self.approval {
             activity.insert("approval".to_string(), JsonValue::from(approval));
+        }
+        if let Some(refused) = self.refused {
+            activity.insert("refused".to_string(), JsonValue::from(refused));
         }
         (!activity.is_empty()).then_some(JsonValue::Object(activity))
     }
@@ -3567,18 +3594,21 @@ impl std::error::Error for ControllerFailure {}
 struct FailedStep {
     step: Option<&'static str>,
     approval: Option<&'static str>,
+    refused: Option<&'static str>,
     changed_after_yes: bool,
     page_changed: bool,
 }
 
 /// What a failed command printed of its step: exactly `{"ok":false,"activity":
 /// {...}}` on stdout, with `step` (one of the few kinds the controller names
-/// there), `approval` (`once`), or both, and `"changedAfterYes":true` beside
-/// `activity` when the person's yes was not used because the step's control
-/// changed (only with `approval`). `"pageChanged":true` when the page changed
-/// under a step nobody was asked about, with or without `activity`, and never
-/// beside `changedAfterYes`. Anything else names nothing. The controller
-/// writes nothing else to stdout before it fails, and never page text there.
+/// there), `approval` (`once`), `refused` (which of the person's own steps the
+/// browser refused, one of [`REFUSED_STEPS`](crate::shared_browser_activity::REFUSED_STEPS)),
+/// or several, and `"changedAfterYes":true` beside `activity` when the
+/// person's yes was not used because the step's control changed (only with
+/// `approval`). `"pageChanged":true` when the page changed under a step
+/// nobody was asked about, with or without `activity`, and never beside
+/// `changedAfterYes`. Anything else names nothing. The controller writes
+/// nothing else to stdout before it fails, and never page text there.
 fn failed_step(stdout: &[u8]) -> Option<FailedStep> {
     const KINDS: &[&str] = &["search", "submit"];
     const APPROVALS: &[&str] = &["once"];
@@ -3609,13 +3639,13 @@ fn failed_step(stdout: &[u8]) -> Option<FailedStep> {
     {
         return None;
     }
-    let (step, approval) = match activity {
-        None => (None, None),
+    let (step, approval, refused) = match activity {
+        None => (None, None, None),
         Some(activity) => {
             if activity.is_empty()
                 || activity
                     .keys()
-                    .any(|key| key != "step" && key != "approval")
+                    .any(|key| !matches!(key.as_str(), "step" | "approval" | "refused"))
             {
                 return None;
             }
@@ -3629,12 +3659,17 @@ fn failed_step(stdout: &[u8]) -> Option<FailedStep> {
                     .find(|word| value.as_str() == Some(*word))
                     .map(Some),
             };
-            (known("step", KINDS)?, known("approval", APPROVALS)?)
+            (
+                known("step", KINDS)?,
+                known("approval", APPROVALS)?,
+                known("refused", crate::shared_browser_activity::REFUSED_STEPS)?,
+            )
         }
     };
     let failed = FailedStep {
         step,
         approval,
+        refused,
         changed_after_yes,
         page_changed,
     };

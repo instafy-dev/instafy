@@ -92,6 +92,26 @@ describe("mapRuntimeBrowserSessionPagesPayload", () => {
     ]);
   });
 
+  // An svg shown on its own has no title the list shows, as a tab still on
+  // its way has none: the list says which one is still loading.
+  it("keeps whether a tab is still on its way to its page, when the browser says so", () => {
+    const pages = mapRuntimeBrowserSessionPagesPayload({
+      pages: [
+        { id: "tab-1", url: "https://www.visitporto.travel/", host: "www.visitporto.travel", label: "visitporto.travel", title: null, loading: true },
+        { id: "tab-2", url: "https://www.visitlisboa.com/logo.svg", host: "www.visitlisboa.com", label: "visitlisboa.com", title: null, loading: false },
+        // A browser that does not say, or says something else, says nothing.
+        { id: "tab-3", url: "https://docs.example/", host: "docs.example", label: "Docs", title: "Docs" },
+        { id: "tab-4", url: "https://docs.example/", host: "docs.example", label: "Docs", title: null, loading: "yes" },
+      ],
+    });
+    expect(pages.map((page) => [page.id, page.loading ?? null])).toEqual([
+      ["tab-1", true],
+      ["tab-2", false],
+      ["tab-3", null],
+      ["tab-4", null],
+    ]);
+  });
+
   it("keeps which of Octo's tabs an earlier run left open", () => {
     const pages = mapRuntimeBrowserSessionPagesPayload({
       pages: [

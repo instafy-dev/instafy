@@ -1925,8 +1925,12 @@ final class AppUITests: XCTestCase {
       XCTFail("Expected mobile navigation to open Credits.")
       return
     }
+    // A space of the person's own titles the panel "Credits"; a team's space "Team credits".
     XCTAssertNotNil(
-      waitForAnyElement(staticTextCandidates(app, label: "Team credits"), timeout: 8),
+      waitForAnyElement(
+        staticTextCandidates(app, label: "Team credits") + staticTextCandidates(app, label: "Credits"),
+        timeout: 8,
+      ),
       "Expected the Credits panel heading.",
     )
     guard let creditsUnits = waitForAnyElement(buttonCandidates(app, label: "credits"), timeout: 5),

@@ -4,6 +4,7 @@ import { InlineNotice } from "../../../components/InlineNotice";
 import type { BrowserSessionPage } from "./browserSessionPages";
 import {
   BROWSER_AGENT_DEFAULT_NAME,
+  browserPageAnswered,
   browserReadingHost,
   browserReadingTitle,
   shownBrowserPageTitle,
@@ -31,16 +32,28 @@ export function BrowserAgentTabBadge({ agentName = BROWSER_AGENT_DEFAULT_NAME, l
   );
 }
 
+/** "visitporto.travel", "a.example and b.example", "a.example, b.example and c.example". */
+function sitesInWords(pages: readonly BrowserSessionPage[]): string {
+  const hosts = [...new Set(pages.map(browserReadingHost))];
+  return hosts.length > 1 ? `${hosts.slice(0, -1).join(", ")} and ${hosts[hosts.length - 1]}` : hosts.join("");
+}
+
 /**
  * One compact row while the agent holds the browser: the pages it is reading
  * (host and title, as text) and one Take over button. Take over is the same
  * action as the browser's own Take over: it revokes the agent's control of
  * every tab, not just the one on screen. The row names pages, never a tab's
  * number: "Octo's tab 1" is the label its prompts use, not the person's.
+ *
+ * It says only what is so. Until one of the pages answers, the agent is not
+ * reading anything yet: "Opening visitporto.travel…". While a prompt waits
+ * for the person viewing (`waitingForYou`), the agent reads nothing either:
+ * "Waiting for you", beside the pages the prompt is about.
  */
 export function BrowserReadingRow({
   pages,
   agentName = BROWSER_AGENT_DEFAULT_NAME,
+  waitingForYou = false,
   canTakeOver,
   takingOver = false,
   error = null,
@@ -48,6 +61,8 @@ export function BrowserReadingRow({
 }: {
   pages: readonly BrowserSessionPage[];
   agentName?: string;
+  /** A prompt of the agent's waits for this viewer's answer. */
+  waitingForYou?: boolean;
   canTakeOver: boolean;
   takingOver?: boolean;
   error?: string | null;
@@ -56,36 +71,48 @@ export function BrowserReadingRow({
   const labelId = useId();
   if (pages.length === 0) return null;
   const count = pages.length === 1 ? "1 page" : `${pages.length} pages`;
+  const opening = !waitingForYou && !pages.some(browserPageAnswered);
+  const openingLine = opening ? `Opening ${sitesInWords(pages)}…` : null;
   return (
     <div
       className="flex min-w-0 shrink-0 flex-wrap items-center gap-2 border-b border-slate-200 px-3 py-1 text-xs dark:border-slate-800"
       data-browser-session-safe-zone="true"
       data-testid="browser-reading-row"
     >
-      <span id={labelId} className="flex-none font-medium text-slate-600 dark:text-slate-300">
-        {agentName} is reading<span className="sr-only"> {count}</span>
-      </span>
-      <ul
-        aria-labelledby={labelId}
-        className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-      >
-        {pages.map((page) => {
-          const host = browserReadingHost(page);
-          const title = browserReadingTitle(page);
-          const fullTitle = shownBrowserPageTitle(page.title);
-          return (
-            <li
-              key={page.id}
-              className="inline-flex min-w-0 max-w-[11rem] flex-none items-center sm:max-w-[16rem] gap-1 rounded-full border border-violet-500/25 bg-violet-500/5 px-2 py-0.5 text-slate-700 dark:text-slate-200"
-              data-testid="browser-reading-page"
-              title={fullTitle ? `${fullTitle}\n${page.url}` : page.url}
-            >
-              <span className="flex-none font-medium">{host}</span>
-              {title ? <span className="truncate text-slate-500 dark:text-slate-400">· {title}</span> : null}
-            </li>
-          );
-        })}
-      </ul>
+      {openingLine ? (
+        // The site is the line: no list repeats it.
+        <span className="min-w-0 flex-1 truncate font-medium text-slate-600 dark:text-slate-300" title={openingLine}
+          data-testid="browser-reading-opening">
+          {openingLine}
+        </span>
+      ) : (
+        <>
+          <span id={labelId} className="flex-none font-medium text-slate-600 dark:text-slate-300">
+            {waitingForYou ? "Waiting for you" : <>{agentName} is reading<span className="sr-only"> {count}</span></>}
+          </span>
+          <ul
+            aria-labelledby={labelId}
+            className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          >
+            {pages.map((page) => {
+              const host = browserReadingHost(page);
+              const title = browserReadingTitle(page);
+              const fullTitle = shownBrowserPageTitle(page.title);
+              return (
+                <li
+                  key={page.id}
+                  className="inline-flex min-w-0 max-w-[11rem] flex-none items-center sm:max-w-[16rem] gap-1 rounded-full border border-violet-500/25 bg-violet-500/5 px-2 py-0.5 text-slate-700 dark:text-slate-200"
+                  data-testid="browser-reading-page"
+                  title={fullTitle ? `${fullTitle}\n${page.url}` : page.url}
+                >
+                  <span className="flex-none font-medium">{host}</span>
+                  {title ? <span className="truncate text-slate-500 dark:text-slate-400">· {title}</span> : null}
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      )}
       {canTakeOver ? (
         <Button
           type="button"

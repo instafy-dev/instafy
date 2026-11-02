@@ -1194,10 +1194,22 @@ export function formatSiteCheck(report: SiteCheckReport): string {
   else if (report.thumbnail) lines.push(`The preview card's picture was not updated (${report.thumbnailReason ?? report.thumbnail}).`);
   lines.push(
     report.ok
-      ? "No problems found. Open the screenshots and check layout, legibility and overlap on both sizes."
+      ? loadedWithoutErrors(report.viewports)
       : "Fix every error above, reload the site, and run the check again. Open the screenshots either way.",
   );
   return lines.join("\n");
+}
+
+/**
+ * The last line of a check that found nothing wrong: what was checked, and that how the page looks was not. A turn
+ * read "No problems found. Open the screenshots…" as the page displaying correctly, and replied so without opening
+ * them.
+ */
+function loadedWithoutErrors(viewports: readonly Pick<ViewportReport, "name">[]): string {
+  const [only] = viewports;
+  return viewports.length === 1 && only
+    ? `Loaded on the ${only.name} size with no errors; how it looks isn't checked until someone opens the screenshot.`
+    : "Loaded on both sizes with no errors; how it looks isn't checked until someone opens the screenshots.";
 }
 
 export type PreviewCheckCliOptions = {

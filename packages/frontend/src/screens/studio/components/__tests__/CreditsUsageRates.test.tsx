@@ -44,4 +44,23 @@ describe("CreditsUsageRates", () => {
     expect(legacy).toContain("GPT-5.5");
     expect(legacy).not.toContain("· GPT-5.5");
   });
+
+  // A local test, in a space of the person's own: the prompt rates said the
+  // reserve is reconciled "on the shared ledger". Nobody shares that balance.
+  it("says the ledger is shared only in a team's space", () => {
+    const rates = (personal?: boolean) => renderToStaticMarkup(
+      <CreditsUsageRates
+        usageRateRows={[]}
+        managedAiUsage={managedAiUsage}
+        unitLabel="credits"
+        displayCurrency="USD"
+        personal={personal}
+      />,
+    ).replace(/\s+/g, " ");
+
+    expect(rates(true)).toContain("reconciled against the final token-based cost on the ledger.");
+    expect(rates(true)).not.toMatch(/shared|team/i);
+    expect(rates(false)).toContain("reconciled against the final token-based cost on the shared ledger.");
+    expect(rates()).toContain("on the shared ledger.");
+  });
 });

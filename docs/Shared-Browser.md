@@ -124,7 +124,16 @@ bound to (`browserPageId`) and every tab the page list reports with
 kept, and an absent value is the person's tab. A compact **Octo is reading**
 row under the toolbar lists those tabs as host and title text (page titles are
 shown as text only, never followed; never a tab's number such as "Octo's tab 1",
-the label Octo's own prompts use) with one **Take over** button. A tab still
+the label Octo's own prompts use) with one **Take over** button. It says only what
+is so: until one of those tabs has arrived at its page, it reads **Opening visitporto.travel…**
+with no list (and the stage, when it has no picture to show, **Octo is opening
+visitporto.travel…**), and while a prompt in the view waits for the person viewing, it reads
+**Waiting for you** beside the pages. `GET /browser/pages` says whether each tab is
+still on its way (`loading`): its listed title is the page it is leaving, the blank
+tab's, or none. A page that has arrived may still have no title to show (an svg shown
+on its own lists a bare media type), so Studio goes by `loading`, and by the title
+only for a browser that does not say it (one with no title of its own is named by its
+address, so it has arrived). A tab still
 loading another address is named by the site it opens, with no title until that
 page arrives: DevTools' tab list gives the new address with the title of the page
 the tab is leaving (a blank tab's "about:blank"), so `GET /browser/pages` drops a
@@ -1345,7 +1354,12 @@ only that the page didn't load, so no reason claims the site was unreachable
 when it answered. The browser policy and the
 `instafy-browser-automation` skill tell Octo to give the person that reason in
 plain words and never to paste a raw error code into a reply. Any other failed
-call keeps the controller's masked error text.
+call keeps the controller's masked error text. A failed call whose result also
+carries facts for the turn's Details (`activity`, `browserUnavailable`) gives
+that text in `structuredContent.error.reason` too: a model that calls the tools
+one at a time, not from code, reads only a result's structured content when it
+has one, so a refused step still tells it what to do, with its
+`[step_refused_…]` code.
 If the client temporarily loses its network, it retains the exact visible
 request, shows reconnecting state, and retries the bounded poll/decision path;
 the origin's one-use fingerprint and replay checks remain authoritative.
