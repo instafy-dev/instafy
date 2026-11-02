@@ -95,7 +95,7 @@ describe("WaitingBrowserPrompts", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function render(props: Partial<Props> & { runs: RunRecord[] }) {
+  async function render(props: Omit<Partial<Props>, "runs"> & { runs: RunRecord[] }) {
     await act(async () => {
       root.render(
         <WaitingBrowserPrompts
