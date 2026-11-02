@@ -840,6 +840,11 @@ const LEGACY_SAVE_DID_NOT_RUN_MESSAGE =
 
 // The message-level note when the turn's save failed or did not run.
 export function describeUnsavedChanges(reason: ChatMessageUnsavedReason, placement: UnsavedWorkPlacement): string {
+  if (reason === "stopped_before_save") {
+    // A later turn saves only what it changes itself, so nothing promises
+    // these a save.
+    return `Stopped before these changes were saved. They're ${keptAs(placement)}.`;
+  }
   if (reason === "auto_save_off") {
     // No later turn is promised to save these, and nothing says they were
     // kept as unsaved work.
