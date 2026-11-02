@@ -661,6 +661,67 @@ describe("a step its turn ended before", () => {
   });
 });
 
+// A local test: "Which day is the Alcázar on?" ran a cell whose `jq` was
+// not installed (exit 127), then a `python` that answered, and the line read
+// "Ran 2 commands". The runtime kept the failure (the stored step reads
+// `failed`, exit 127); only the line's neutral count forgot it.
+describe("an unlabelled step that failed", () => {
+  const jq = () =>
+    command(null, { status: "failed", exitCode: 127, command: "bash -lc 'jq -r .plan.days map.config.json'" });
+  const python = () => command(null, { command: "bash -lc 'python -c \"print(1)\"'" });
+
+  it("never counts, and Details says what it tried", () => {
+    const turn = summarize([jq(), python()]);
+    expect(turn.summary).toBe("Ran a command");
+    const failed = turn.details[0];
+    expect(failed.kind === "step" && [failed.step.state, failed.step.label]).toEqual([
+      "failed",
+      "Tried running a command",
+    ]);
+    // Its exit code alone says it failed.
+    expect(summarize([command(null, { status: "completed", exitCode: 127 }), python()]).summary).toBe("Ran a command");
+    // Other kinds of step too.
+    expect(
+      summarize([step("mcp_tool_call", null, { status: "failed" }), step("file_change", null, { paths: ["a.md"] })])
+        .summary,
+    ).toBe("Edited a file");
+  });
+
+  it("reads the same from the steps stored with the reply", () => {
+    const reply: ChatMessage = {
+      id: "reply",
+      role: "assistant",
+      content: "The Alcázar is planned for Tuesday, November 3.",
+      timestamp: 99,
+      metadata: {
+        source: "agent",
+        jobId: JOB,
+        outcome: "succeeded",
+        turnSteps: {
+          v: 1,
+          activities: [],
+          steps: [
+            { type: "command_execution", status: "failed", exitCode: 127 },
+            { type: "command_execution", status: "completed", exitCode: 0 },
+          ],
+        },
+      },
+    };
+    expect(summarize(readTurnStepsRecord(reply, JOB)!).summary).toBe("Ran a command");
+  });
+
+  it("is what the line names when nothing else worked", () => {
+    expect(summarize([jq()]).summary).toBe("Tried running a command");
+    expect(summarize([jq()], "cancelled").summary).toBe("Stopped · tried running a command");
+    expect(summarize([step("file_change", null, { status: "failed", paths: ["a.md"] })]).summary).toBe(
+      "Tried editing files",
+    );
+    // A look that failed is still only a look.
+    const LOOK = { v: 1, key: "builtin/plumbing", role: "quiet", live: "Running a command", done: "ran a command", count: 1, also: [] };
+    expect(summarize([command(LOOK, { status: "failed", exitCode: 1, command: "bash -lc 'cat missing.txt'" })]).summary).toBeNull();
+  });
+});
+
 // A turn whose only commands looked around the workspace (`pwd`, `rg --files`),
 // as the runtime marks them. A local test: two turns that only posted a browser
 // card read "Ran a command".
@@ -1139,13 +1200,13 @@ describe("answered browser prompts", () => {
     const site = browserStep(BROWSER_READ, { host: "carris.pt", pageKey: PAGE_B, step: "snapshot", approval: "once" });
     expect(summarize([opened, site]).summary).toBe("Opened carris.pt, read a page · you allowed the site");
     const google = browserStep({ key: "browser/use", role: "content", live: "Using the browser", done: "used the browser" }, { step: "navigate", approval: "denied" }, "failed");
-    expect(summarize([google]).summary).toBe("Used a tool · you said no to opening a page");
+    expect(summarize([google]).summary).toBe("You said no to opening a page");
   });
 
   it("never say a step the person said no to, or left, was done", () => {
     // Octo asked to open google.com and the person said no: nothing was opened.
     const google = browserStep(BROWSER_OPEN, { host: "google.com", step: "navigate", approval: "denied" }, "failed");
-    expect(summarize([google]).summary).toBe("Used a tool · you said no to opening google.com");
+    expect(summarize([google]).summary).toBe("You said no to opening google.com");
     const opened = browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_A, step: "navigate" });
     expect(summarize([opened, google]).summary).toBe("Opened carris.pt · you said no to opening google.com");
     const unanswered = browserStep(BROWSER_SEARCH, { host: "visitlisboa.com", step: "search", approval: "expired" }, "failed");

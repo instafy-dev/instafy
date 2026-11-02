@@ -100,6 +100,26 @@ function isAnswerDraft(message: ChatMessage): boolean {
   return details?.kind === "agent_message" && item?.phase === "final_answer";
 }
 
+/**
+ * The status the runtime writes when it sends the turn's request to the model
+ * again (`codex_retry`, kept under `details` by the controller): the answer
+ * before it is replaced. A stream picked up again (`codex_stream_retry`)
+ * replaces nothing.
+ */
+function isRequestRetry(message: ChatMessage): boolean {
+  if (messageType(message) !== "status" || !isRecord(message.metadata)) {
+    return false;
+  }
+  const details = isRecord(message.metadata.details) ? message.metadata.details : null;
+  return details?.kind === "codex_retry" || message.metadata.kind === "codex_retry";
+}
+
+/** The answer drafts a retry of the turn's request replaced: each one before its last retry. */
+function answersReplacedByRetry(threadMessages: readonly ChatMessage[]): ChatMessage[] {
+  const lastRetry = threadMessages.findLastIndex(isRequestRetry);
+  return threadMessages.slice(0, Math.max(lastRetry, 0)).filter(isAnswerDraft);
+}
+
 /** A reply the turn ended with: not a failure, a stop or a status. */
 function isSucceededReply(message: ChatMessage): boolean {
   const outcome = isRecord(message.metadata) ? message.metadata.outcome : null;
@@ -506,6 +526,12 @@ export function useAgentJobThreadPreviewState({
           excludedIds.add(candidate.id);
         }
       }
+    }
+    // An answer the runtime asked the model for again was replaced as soon as
+    // the retry began, so it is no note either, also in a turn stopped before
+    // the retry answered.
+    for (const replaced of answersReplacedByRetry(threadMessages)) {
+      excludedIds.add(replaced.id);
     }
     return listIntermediateUpdates(threadMessages, excludedIds);
   }, [finalSummaryMessage, latestFileMessage?.id, terminalProxyErrorMessage, threadMessages]);

@@ -276,6 +276,14 @@ const RETRYING: BuiltinLabel = BuiltinLabel {
     live: "Trying again",
     done: None,
 };
+// A retry for evidence an answer lacked (a command the routing step asked the turn to run). The
+// person has no reason to see it: to them the turn is still at work, and its line says so.
+const EVIDENCE_RETRY: BuiltinLabel = BuiltinLabel {
+    key: "runtime/evidence-retry",
+    role: ActivityRole::Quiet,
+    live: "Working",
+    done: None,
+};
 // A command made only of looks around the workspace: where it is, what is there, what a file
 // says, how a command is used. Studio never counts it on the line, so a turn that only looked
 // and answered (or posted a card) has no line. Its words are an unlabelled command's, so its
@@ -1304,6 +1312,13 @@ pub fn runtime_status_activity(kind: &str) -> Option<JsonValue> {
     activity_json(vec![Found::builtin(label, Some(1))])
 }
 
+/// The runtime's retry of a request for evidence its answer lacked (`codex_retry`, its reason a
+/// missing command or lookup): "Working", not "Trying again", since nothing failed that the
+/// person could see.
+pub fn evidence_retry_activity() -> Option<JsonValue> {
+    activity_json(vec![Found::builtin(&EVIDENCE_RETRY, Some(1))])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1848,6 +1863,7 @@ mod tests {
             &TOOL,
             &SAVING,
             &RETRYING,
+            &EVIDENCE_RETRY,
         ] {
             assert!(
                 activity_json(vec![Found::builtin(label, Some(1))]).is_some(),
@@ -1877,6 +1893,10 @@ mod tests {
             json!("Trying again")
         );
         assert_eq!(runtime_status_activity("agent_message"), None);
+        let evidence_retry = evidence_retry_activity().unwrap();
+        assert_eq!(evidence_retry["live"], json!("Working"));
+        assert_eq!(evidence_retry["role"], json!("quiet"));
+        assert_eq!(evidence_retry["key"], json!("runtime/evidence-retry"));
     }
 
     // Browser steps name their site from the browser's own state; pages are told apart by

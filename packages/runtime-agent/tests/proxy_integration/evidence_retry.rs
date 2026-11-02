@@ -282,14 +282,24 @@ async fn run_case(case: Case) -> Result<()> {
     .context("evidence-retry job failed")?;
 
     let mut retry_reasons = Vec::new();
+    let mut retry_lines = Vec::new();
     while let Ok(message) = messages.try_recv() {
         if let Some(metadata) = message.metadata
             && metadata.get("kind").and_then(Value::as_str) == Some("codex_retry")
         {
             retry_reasons.push(metadata["reason"].clone());
+            retry_lines.push((
+                metadata["activity"]["key"].clone(),
+                metadata["activity"]["live"].clone(),
+            ));
         }
     }
     assert_eq!(retry_reasons, vec![json!("missing_command_observation")]);
+    // Nothing failed that the person saw: the line reads "Working…", not "Trying again…".
+    assert_eq!(
+        retry_lines,
+        vec![(json!("runtime/evidence-retry"), json!("Working"))]
+    );
     let requests = state.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 3, "command, first answer, retry answer");
     // The command really ran: its output went back to the model.

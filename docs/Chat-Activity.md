@@ -22,11 +22,11 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 | From the send until the turn's first step | `Starting…`, however long that takes: the workspace starting, the turn waiting behind another, the model reasoning before its first step, the runtime retrying its request, and a turn Instafy resent by itself all read the same |
 | Running a labelled step | its running label, for example `Looking up places…` (the newest running step wins; in a chain, its first command that is not quiet) |
 | Running an unlabelled command or tool | `Working…`; a file edit says `Editing files…` |
-| A runtime status is the newest thing | `Saving your changes…`, `Trying again…`, until anything newer arrives. A step still running from before the turn's save never names the line again; after a retry, it does |
+| A runtime status is the newest thing | `Saving your changes…`, `Trying again…`, until anything newer arrives. `Trying again…` shows only once a retry has gone on for a second: most are over sooner (a dropped stream picked up again at once). A retry for evidence the answer lacked (a look the routing step asked for) reads `Working…`, since nothing failed that the person saw. A step still running from before the turn's save never names the line again; after a retry, it does |
 | The model is working with no step running, after the turn's first step | `Thinking…` (never its reasoning titles or notes), once there has been no step for 3 seconds; until then the line keeps the step before it |
 | A request in the turn waits on the person viewing | `Waiting for you`, only for the person who can answer: a Shared Browser prompt of the turn's run ([Browser prompts](#browser-prompts)) |
 | Done | what it made leads (the latest outcome), then the two "what it did" groups that did most (pages, places, files; the later one when they tie): `Built the map, read 6 pages, looked up 14 places`. A research turn that read six pages on frame.work and reviews on three other sites names the sites it read most, `Opened 6 pages on frame.work, opened 2 pages on phoronix.com`, not the last site it happened to open. When one other site did as much as the second site named, and the first place is clear, the line names both, in the order they ran: `Opened phoronix.com and pcworld.com, opened 4 pages on frame.work` (words that would read as one page on both stay apart: `Read a page on phoronix.com, read a page on pcworld.com, …`); with more sites tied, the later one keeps the place. When the step that answered (the last group) is one of the two, it leads; otherwise the bigger leads. On one site the two read in the order they ran, so the tram follow-up reads `Opened carris.pt, read a page`, not `Opened metrolisboa.pt, opened carris.pt`; on another site the page that answered leads: `Read a page on carris.pt, opened 2 pages on metrolisboa.pt`. Only a step that ended counts: one still running when the turn ended found nothing yet, whatever its label's `when` says. The steps are read in the order they last changed (a step that started before another and ended after it is the later one), as the chat's thread holds them and as the controller stores them with the reply, so the line reads the same when the reply lands. Then, after ` · `, what the person answered to the turn's browser prompts. A turn that opened or stopped a preview names the later of the two, and a site stopped and opened again reads `Opened a preview`. The preview card already says a preview opened, so `Opened a preview` shows only when no other step of the turn finished; no card says a site stopped, so a turn that made nothing else leads with it: `Stopped the preview, edited a file`. A step that failed never counts; when nothing else is left to say, the line says what was tried: `Tried searching the web`. A look at the page a browser turn started on, before its first step that took the tab elsewhere, never leads: the tram follow-up reads `Opened metrolisboa.pt`, not `Read a page on visitlisboa.com, opened metrolisboa.pt`; only a turn that did nothing else names it |
-| Done, nothing labelled | a neutral count: `Ran 5 commands`, `Ran 3 commands, used 2 tools`, `Edited 4 files`; a look around the workspace (`pwd`, `ls`, `cat`, `rg --files`) is not counted, so a turn that only looked and answered, or only posted a card, has no line |
+| Done, nothing labelled | a neutral count: `Ran 5 commands`, `Ran 3 commands, used 2 tools`, `Edited 4 files`; a look around the workspace (`pwd`, `ls`, `cat`, `rg --files`) is not counted, so a turn that only looked and answered, or only posted a card, has no line. A step that failed is not counted either (a command that exited with an error, as its own exit code says): a turn whose `jq` was missing and whose `python` answered reads `Ran a command`. When every step failed, the line says what was tried, `Tried running a command`, unless the person said no to it (its answer names it) |
 | A message sent straight to Instafy's browser | `Opening Instafy's browser…` while Studio opens it, then the browser turn's own line: one turn under the person's message, with no card and no notice (`routedBrowserFold.ts`). A card Studio cannot open by itself shows as any card does, and reads Opened once the person presses it or once its browser turn fails or is stopped before it shows anything |
 | Done, no step but notes, a plan or a thread in Details | a neutral count, so Details opens: `Wrote 2 notes`, `Made a plan, wrote a note`, `Started a thread` (`detailsOnlySummary`; never the notes' own words; reasoning titles alone give no line, and a status the runtime wrote itself, such as a retry, is no note) |
 | Done, nothing of its own after a retry | `Took two tries` (`Took three tries`, …), so Details opens on the first try |
@@ -110,6 +110,9 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   answer, which streams as a note while the turn runs, leaves Details once the turn's reply is in,
   also when the reply no longer reads the same: the runtime may change it after the answer (an
   integration card's retry phrase, a line about what wasn't saved), and the reply is what stands.
+  An answer the runtime asked the model for again (a retry for a step's evidence, a change it
+  did not make, a page it did not open) leaves Details as soon as the retry begins, also in a
+  turn stopped before the retry answered.
   A browser
   row shows its site, or "Looked at the tabs" for a look at the tab list, never the tool's name.
   A row's label comes from its first command that is
@@ -169,7 +172,8 @@ from trusted data only, in this order:
    (`pnpm test`, `npm run test`, `cargo test`, `pytest`, `vitest`), builds (`pnpm build`,
    `npm run build`, `cargo build`) and `git clone`. Web searches, file edits, browser tool calls
    ("used the browser") and other tool calls ("used a tool") have fixed labels too, as do the
-   runtime's own statuses: saving the turn's changes and retrying a request. A Shared Browser
+   runtime's own statuses: saving the turn's changes, retrying a request, and asking again for
+   evidence an answer lacked ("Working"). A Shared Browser
    step names its site (see [Browser steps](#browser-steps)).
 4. **A look around the workspace** is marked as one (`builtin/plumbing`, quiet, in an unlabelled
    command's words): a command made only of `pwd`, `ls`, `cat`, `head`, `tail`, `wc`, `rg`,
@@ -287,8 +291,7 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   Opening, reading and searching carry `when: "success"`: a step the person said no to, left
   unanswered, or that failed (a link-only site, an error) opened, read and searched nothing, so
   the done line never counts it (Studio counts no failed step at all). "Opened google.com · you said no to opening google.com" cannot
-  happen; a turn whose only step was refused reads "Used a tool · you said no to opening
-  google.com".
+  happen; a turn whose only step was refused reads "You said no to opening google.com".
 
 - **Studio** groups browser steps by key and host. Pages opened and read count by distinct
   `pageKey`, so reading a page twice is "read a page"; searches count each time. After a group on

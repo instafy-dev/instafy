@@ -492,6 +492,82 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
     );
   });
 
+  // A local test: "keep going" ran `instafy preview list` and answered;
+  // the runtime asked again for the look it wanted, the line said "Trying
+  // again…" for 5 s, and the first answer stayed in Details as a step.
+  it("reads Working… while it asks again for evidence, and lists only the answer that stands", async () => {
+    vi.useFakeTimers();
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    const answerDraft = (id: string, text: string, timestamp: number) =>
+      agentUpdate(id, "status", text, timestamp, {
+        kind: "agent_message",
+        event: { type: "item.completed", item: { id: `msg-${id}`, type: "agent_message", text, phase: "final_answer" } },
+      });
+    const firstAnswer = "The page is still open. If you want, I can check the hours again.";
+    const evidenceRetry: ChatMessage = {
+      ...agentUpdate("retry", "status", "Retrying: accepted execution evidence is still missing.", base + 4_000, {
+        kind: "codex_retry",
+        reason: "missing_command_observation",
+        attempt: 2,
+      }),
+    };
+    evidenceRetry.metadata = {
+      ...evidenceRetry.metadata,
+      activity: { v: 1, key: "runtime/evidence-retry", role: "quiet", live: "Working", count: 1, also: [] },
+    };
+    const firstAttempt = [
+      ...earlierSteps(),
+      agentUpdate("preview-list", "command_execution", "instafy preview list", base + 3_000, {
+        status: "completed",
+        command: "instafy preview list",
+        exitCode: 0,
+      }),
+      answerDraft("first-answer", firstAnswer, base + 3_500),
+      evidenceRetry,
+    ];
+    await renderTurn(firstAttempt);
+    await act(async () => {
+      vi.advanceTimersByTime(ACTIVITY_LABEL_HOLD_MS);
+    });
+    expect(activityLine()?.textContent).toBe("Working…" + "Details");
+    expect(container.textContent).not.toContain("Trying again");
+    await act(async () => {
+      activityLine()?.click();
+    });
+    const rows = () =>
+      Array.from(container.querySelectorAll('[data-testid="agent-thread-inline-update-row"]')).map(
+        (row) => row.textContent,
+      );
+    expect(rows()).toEqual([
+      expect.stringContaining("Reading the request"),
+      expect.stringContaining("Analyzing output schema"),
+    ]);
+    expect(container.textContent).not.toContain(firstAnswer);
+
+    live.inFlight = false;
+    const retryAnswer = "The page now gives the opening hours from the shop's own site.";
+    await renderTurn([
+      ...firstAttempt,
+      agentUpdate("web-read", "command_execution", "instafy web read https://shop.example", base + 5_000, {
+        status: "completed",
+        command: "instafy web read https://shop.example",
+        exitCode: 0,
+      }),
+      answerDraft("retry-answer", retryAnswer, base + 6_000),
+      reply("reply", retryAnswer, base + 6_500),
+    ]);
+    expect(rows()).toEqual([
+      expect.stringContaining("Reading the request"),
+      expect.stringContaining("Analyzing output schema"),
+    ]);
+    expect(container.textContent).not.toContain(firstAnswer);
+    expect(
+      Array.from(container.querySelectorAll('[data-testid="message-content"]')).map((node) => node.textContent),
+    ).toEqual([retryAnswer]);
+  });
+
   it("never turns a long reasoning title into the running line", async () => {
     const title =
       "Comparing the output schema of the export endpoint with the fields the importer expects";
