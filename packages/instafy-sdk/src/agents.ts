@@ -38,6 +38,7 @@ export interface CreateMyAgentInput {
   displayName?: string | null;
   description?: string | null;
   bio?: string | null;
+  /** A picture (an `http(s)` URL, a `/` path or a `data:image/` URI) or exactly `hatchling:1` to `hatchling:8`; anything else is rejected with a 400. Null or blank means the agent's id, and a create without `handle` ignores it. */
   avatarSeed?: string | null;
   provider?: string;
   model?: string | null;
@@ -50,6 +51,7 @@ export interface UpdateMyAgentInput {
   description?: string | null;
   /** Omit to preserve the saved bio; send null to clear it. */
   bio?: string | null;
+  /** As on create (Octo takes only a picture), or the agent's own id or its unchanged seed; anything else is rejected with a 400. Omit it, or send null or a blank string, to keep the saved seed. */
   avatarSeed?: string | null;
   credentialId?: string | null;
   model?: string | null;
