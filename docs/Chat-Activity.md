@@ -3,7 +3,7 @@
 A turn in chat shows Octo's reply and one plain-language line that says what the turn did:
 
 ```
-Built the map, read 6 pages, looked up 14 places   Details ›
+Built the map, read 6 pages, looked up 14 places ›
 ```
 
 While the turn runs, the line says "Starting…" until the turn's first step, then names the current step ("Looking up
@@ -27,7 +27,8 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 | A request in the turn waits on the person viewing | `Waiting for you`, only for the person who can answer: a Shared Browser prompt of the turn's run ([Browser prompts](#browser-prompts)) |
 | Done | what it made leads (the latest outcome), then the two "what it did" groups that did most (pages, places, files; the later one when they tie): `Built the map, read 6 pages, looked up 14 places`. A research turn that read six pages on frame.work and reviews on three other sites names the sites it read most, `Opened 6 pages on frame.work, opened 2 pages on phoronix.com`, not the last site it happened to open. When one other site did as much as the second site named, and the first place is clear, the line names both, in the order they ran: `Opened phoronix.com and pcworld.com, opened 4 pages on frame.work` (words that would read as one page on both stay apart: `Read a page on phoronix.com, read a page on pcworld.com, …`); with more sites tied, the later one keeps the place. When the step that answered (the last group) is one of the two, it leads; otherwise the bigger leads. On one site the two read in the order they ran, so the tram follow-up reads `Opened carris.pt, read a page`, not `Opened metrolisboa.pt, opened carris.pt`; on another site the page that answered leads: `Read a page on carris.pt, opened 2 pages on metrolisboa.pt`. Only a step that ended counts: one still running when the turn ended found nothing yet, whatever its label's `when` says. The steps are read in the order they last changed (a step that started before another and ended after it is the later one), as the chat's thread holds them and as the controller stores them with the reply, so the line reads the same when the reply lands. Then, after ` · `, what the person answered to the turn's browser prompts. A turn that opened or stopped a preview names the later of the two, and a site stopped and opened again reads `Opened a preview`. The preview card already says a preview opened, so `Opened a preview` shows only when no other step of the turn finished; no card says a site stopped, so a turn that made nothing else leads with it: `Stopped the preview, edited a file`. A step that failed never counts; when nothing else is left to say, the line says what was tried: `Tried searching the web`. A look at the page a browser turn started on, before its first step that took the tab elsewhere, never leads: the tram follow-up reads `Opened metrolisboa.pt`, not `Read a page on visitlisboa.com, opened metrolisboa.pt`; only a turn that did nothing else names it |
 | Done, nothing labelled | a neutral count: `Ran 5 commands`, `Ran 3 commands, used 2 tools`, `Edited 4 files`; a look around the workspace (`pwd`, `ls`, `cat`, `rg --files`) is not counted, so a turn that only looked and answered, or only posted a card, has no line. A step that failed is not counted either (a command that exited with an error, as its own exit code says): a turn whose `jq` was missing and whose `python` answered reads `Ran a command`. When every step failed, the line says what was tried, `Tried running a command`, unless the person said no to it (its answer names it) |
-| A message sent straight to Instafy's browser | `Opening Instafy's browser…` while Studio opens it, then the browser turn's own line: one turn and one Octo row under the person's message, with no card, no notice and no `Starting…` under that line (`routedBrowserFold.ts`, `typingIndicatorState.ts`). A card Studio cannot open by itself shows as any card does, and reads Opened once the person presses it or once its browser turn fails or is stopped before it shows anything |
+| A message sent straight to Instafy's browser | `Opening Instafy's browser…` while Studio opens it, then the browser turn's own line: one turn and one Octo row under the person's message, with no card, no notice and no `Starting…` under that line (`routedBrowserFold.ts`, `typingIndicatorState.ts`). A card Studio cannot open by itself shows as any card does, with its button, and leaves as any card does once the person presses it; once its browser turn fails or is stopped before it shows anything, the person's message and that turn's own failure or Stopped line remain |
+| A turn asked for Instafy's browser (`request_browser`) | the card, with its button, the site it is for and the reason, only while it needs the person. While Studio opens it by itself, `Opening Instafy's browser…` in its place, with no box. Once the browser opened for it, by Studio or by the person's press, the card leaves the chat, also after a reload: the continuation's one line ("Octo opened Instafy's browser for …", or "Opened Instafy's browser for …" after a press) and the browser turn's own line are the record. A card a newer card followed leaves too |
 | Done, no step but notes, a plan or a thread in Details | a neutral count, so Details opens: `Wrote 2 notes`, `Made a plan, wrote a note`, `Started a thread` (`detailsOnlySummary`; never the notes' own words; reasoning titles alone give no line, and a status the runtime wrote itself, such as a retry, is no note) |
 | Done, nothing of its own after a retry | `Took two tries` (`Took three tries`, …), so Details opens on the first try |
 | Stopped by the person | `Stopped · looked up 9 places`, or `Stopped`. A turn learns of a Stop within about a second (its next heartbeat), and a step it sent before then has run: an edit it made is kept, and its line names it once, `Stopped · read a page, edited a file`, with the files under it (Review changes, Undo; Not saved when the turn never saved them) and a new picture on the card of a site it changed ([A stopped turn's changes](#a-stopped-turns-changes)) |
@@ -48,9 +49,21 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   history starts in the middle of a long turn. They are read from the step messages the turn's
   runtime wrote (never one a person recorded), and a turn too long to read whole stores none.
   Without them (an older controller), the line is worked out from the steps that loaded.
-- Once the turn has a step, the whole line is one button that opens Details (`aria-expanded`,
-  `aria-controls`); it reads "Details ›", then "Hide details", and opens and closes as often as it
-  is pressed. Opening Details never moves the line or changes the turn's chrome.
+- Once Details has something to show (a step, a note, a plan, a thread, or an earlier try of the
+  turn), the whole line is one button that opens it (`aria-expanded`, `aria-controls`), and it
+  adds no words of its own: a small arrow in the line's own muted colour follows its words, ›
+  while Details is closed and ⌄ while it is open. Over the line the pointer is a hand, and the
+  words darken with the arrow and underline, also while they sweep; a phone has no hover, so
+  there the arrow is the sign that the line opens. A screen reader hears the line and what
+  pressing it does ("Looked up 14 places, show details", then "…, hide details"), and the
+  running line's announcements say only the line. It opens and closes as often as it is
+  pressed, and opening Details never moves the line or changes the turn's chrome.
+- A line with nothing in Details yet is plain text, with no arrow and no pointer: a new turn's
+  `Starting…`, `Opening Instafy's browser…`, the `Trying again…` that stands in for a failed
+  turn while Instafy sends it again, and a failed turn's last running label while it holds,
+  since the failure block after it has the turn's one Details. The same words can open: a turn
+  Instafy sent again has its earlier try in Details from its first `Starting…`, and the
+  runtime's own `Trying again…` comes only after a step.
 - A turn reads its outcome once. A failed turn has no activity line and no "Run failed" beside
   its author: its failure block is its one line, and that block's Details ("Details ›", then
   "Hide details", with `aria-controls`) lists the error text and then the steps. The error text

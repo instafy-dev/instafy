@@ -5,8 +5,6 @@ import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
 import { StudioListBox, StudioListBoxItem } from "../../../components/aria/StudioListBox";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
-import { Badge } from "../../../components/Badge";
-import { Spinner } from "../../../components/Spinner";
 import { useStatus } from "../../../status/useStatus";
 import {
   BrowserRequestHostContext,
@@ -249,24 +247,25 @@ export function ActionRequestEntry({
   );
   const browserUnavailable =
     browserRequest && browserHost ? browserRequestUnavailableReason(browserRequest, browserHost) : null;
-  // Studio opens the browser for a card by itself where it can: the card then
-  // reads Opening and then Opened in place of its button. Where it cannot,
-  // the button stays, with the reason when there is one. A continued card
-  // reads Opened after a reload too, so an old card is not pressed again. A
-  // card a newer card followed offers no button either: the newer one
-  // carries the task on, so two live cards never stack up.
+  // A browser card shows only while it needs the person: its button, with
+  // the site and the reason Studio did not open it by itself. While Studio
+  // opens it by itself it reads as the turn's one line. Once Instafy's
+  // browser opened for it, by Studio or by the person's press, it leaves the
+  // chat, also after a reload, so it is never offered again: the
+  // continuation's one line and the browser turn's own line are the record
+  // (routedBrowserFold.ts takes it out of the transcript). A card a newer card
+  // followed leaves too: the newer one carries the task on.
   const browserKey = browserRequest ? browserRequestKey(message) : null;
   const browserCardState = browserKey ? browserHost?.cardStates?.get(browserKey) ?? null : null;
+  const browserOpened = Boolean(browserKey &&
+    (browserHost?.continuedKeys?.has(browserKey) || browserCardState?.kind === "opened"));
+  // A message Octo sent straight to the browser keeps its line until that
+  // browser turn shows something (routedBrowserFold.ts).
+  const browserOpening = Boolean(browserKey && (browserRequest?.routed
+    ? browserCardState?.kind === "opening" || browserHost?.routedWaitingKeys?.has(browserKey)
+    : browserCardState?.kind === "opening" && !browserOpened));
   const browserSuperseded = Boolean(browserKey && browserHost?.newestCardKey && browserHost.newestCardKey !== browserKey);
-  const browserPhase = browserKey && (browserHost?.continuedKeys?.has(browserKey) || browserCardState?.kind === "opened")
-    ? "opened"
-    : browserCardState?.kind === "opening"
-      ? "opening"
-      : browserSuperseded ? "superseded" : "button";
-  const browserReason = browserPhase === "button" && browserCardState?.kind === "button" && !browserUnavailable
-    ? browserCardState.reason
-    : null;
-  const browserUnavailableNote = browserPhase === "button" ? browserUnavailable : null;
+  const browserReason = browserCardState?.kind === "button" && !browserUnavailable ? browserCardState.reason : null;
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
   const [inputValue, setInputValue] = useState("");
   const [selectOpen, setSelectOpen] = useState(false);
@@ -341,18 +340,9 @@ export function ActionRequestEntry({
     [busyActionId, inputValue, message.id, showStatus]
   );
 
-  // A message Octo sent straight to the browser: while Studio opens its card
-  // by itself, and until that browser turn shows something, the turn's one
-  // line says so; then the browser turn's own line follows
-  // (routedBrowserFold.ts). A card that stays a button, one the person
-  // pressed, or one whose browser turn failed or was stopped before it showed
-  // anything shows as any card does: nothing is opening it.
-  const routedOpening = Boolean(browserRequest?.routed && browserKey && (
-    browserCardState?.kind === "opening" || browserHost?.routedWaitingKeys?.has(browserKey)
-  ));
-  if (routedOpening) {
+  if (browserOpening) {
     return (
-      <div className="space-y-1" data-testid="routed-browser-opening">
+      <div className="space-y-1" data-testid="browser-request-opening">
         <TurnActivityLine
           text="Opening Instafy's browser…"
           live
@@ -362,13 +352,16 @@ export function ActionRequestEntry({
           detailsId=""
           onToggleDetails={() => {}}
         />
-        {browserPhase === "opening" && browserCardState?.kind === "opening" && browserCardState.note ? (
+        {browserCardState?.kind === "opening" && browserCardState.note ? (
           <Text as="div" variant="caption" tone="muted" data-testid="browser-request-opening-note">
             {browserCardState.note}
           </Text>
         ) : null}
       </div>
     );
+  }
+  if (browserOpened || browserSuperseded) {
+    return null;
   }
 
   if (!parsed) {
@@ -391,10 +384,7 @@ export function ActionRequestEntry({
     );
   }
 
-  const visibleActions = browserPhase === "button"
-    ? parsed.actions
-    : parsed.actions.filter((action) => action.eventName !== "instafy:request-browser");
-  const actions: ChatActionCardAction[] = visibleActions.map((action) => ({
+  const actions: ChatActionCardAction[] = parsed.actions.map((action) => ({
     id: action.id,
     label: action.label,
     variant: action.variant,
@@ -418,38 +408,15 @@ export function ActionRequestEntry({
       overline={parsed.overline}
       title={fallbackTitle}
       // A browser card says what it is for, never what pressing it does:
-      // Studio opens it by itself where it can, and it reads Opening and
-      // Opened. Older cards carry a line about that; it is not shown.
+      // Studio opens it by itself where it can. Older cards carry a line
+      // about that; it is not shown.
       description={browserRequest ? null : parsed.description}
       children={
-        parsed.input || parsed.context || (browserPhase === "button" && browserDestinations.length > 0) ||
-          browserUnavailableNote || browserPhase !== "button" || browserReason ? (
+        parsed.input || parsed.context || browserDestinations.length > 0 || browserUnavailable || browserReason ? (
           <div className="space-y-2">
-            {browserPhase === "opening" ? (
-              <Text as="div" variant="caption" tone="muted" className="flex items-center gap-2 break-all" data-testid="browser-request-opening">
-                <Spinner aria-hidden="true" tone="slate" size="sm" />
-                <span>
-                  Opening Instafy&apos;s browser{browserDestinations.length > 0 ? (
-                    <> for <span className="font-mono text-slate-700 dark:text-slate-200">{browserDestinations[0]}</span></>
-                  ) : null}
-                </span>
-              </Text>
-            ) : browserPhase === "opened" ? (
-              <div className="flex items-center gap-2" data-testid="browser-request-opened">
-                <Badge tone="success">Opened</Badge>
-              </div>
-            ) : browserPhase === "superseded" ? (
-              <div className="flex items-center gap-2" data-testid="browser-request-not-opened">
-                <Badge tone="neutral">Not opened</Badge>
-              </div>
-            ) : browserPhase === "button" && browserDestinations.length > 0 ? (
+            {browserDestinations.length > 0 ? (
               <Text as="div" variant="caption" tone="muted" className="break-all" data-testid="browser-request-destination">
                 For <span className="font-mono text-slate-700 dark:text-slate-200">{browserDestinations.join(", ")}</span>
-              </Text>
-            ) : null}
-            {browserPhase === "opening" && browserCardState?.kind === "opening" && browserCardState.note ? (
-              <Text as="div" variant="caption" tone="muted" data-testid="browser-request-opening-note">
-                {browserCardState.note}
               </Text>
             ) : null}
             {browserReason ? (
@@ -457,9 +424,9 @@ export function ActionRequestEntry({
                 {browserReason}
               </Text>
             ) : null}
-            {browserUnavailableNote ? (
+            {browserUnavailable ? (
               <Text as="div" variant="caption" tone="muted" data-testid="browser-request-unavailable">
-                {browserUnavailableNote}
+                {browserUnavailable}
               </Text>
             ) : null}
             {parsed.context ? (

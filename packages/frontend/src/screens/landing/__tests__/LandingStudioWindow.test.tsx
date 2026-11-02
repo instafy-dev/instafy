@@ -157,9 +157,12 @@ describe("landing studio window turn column", () => {
       expect(container.textContent).not.toContain("Kim is typing…");
       expect(all('[data-octo-motion="thinking"]')).toHaveLength(0);
       expect(all("[data-beat-visible]").every((node) => node.getAttribute("data-beat-visible") === "true")).toBe(true);
-      // The finished line says what the run did, with Details beside it.
-      expect(container.querySelector('[data-testid="landing-run-line"]')?.textContent).toBe(scenario.activity);
-      expect(container.querySelector('[data-testid="landing-run-line"]')?.parentElement?.textContent).toContain("Details");
+      // The finished line says what the run did, with only an arrow after it,
+      // as the studio's line opens Details with no words of its own.
+      const runLine = container.querySelector('[data-testid="landing-run-line"]');
+      expect(runLine?.textContent).toBe(scenario.activity);
+      expect(runLine?.parentElement?.textContent).toBe(scenario.activity);
+      expect(runLine?.nextElementSibling?.tagName.toLowerCase()).toBe("svg");
     }
   });
 

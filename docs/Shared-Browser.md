@@ -1218,8 +1218,8 @@ browser…" until the browser turn shows something, and neither the card nor
 the continuation (which repeats the person's message) is shown. A routed card
 Studio cannot open by itself shows as any card does, with its reason; once the
 person presses it, or once its browser turn fails or is stopped before it
-shows anything, it reads Opened as any card does, since nothing is opening it
-any more. The card's
+shows anything, it leaves the chat as any opened card does, since nothing is
+opening it any more. The card's
 browser turn, its hand-back and every check on them are a card's, except that
 its browser turn is the person's own turn for billing (its task is their
 words; [Credits and billing](Credits-Billing.md)), and its hand-back gives the
@@ -2306,13 +2306,18 @@ unless the policy is `"covered"`.
   skill setup, whose reply carries its walk, and on a turn that decides whether
   to answer at all. A reply that does show beside a card never says a page
   opened before a browser tool saw it, or what the browser will submit, send or
-  buy. It reads
-  **Opening Instafy's browser…** while it opens and a plain **Opened** once it
-  was continued, also after a reload. A card a newer card followed offers no
-  button and reads **Not opened**: the newer card carries the task on, so two
-  live cards never stack up. The one-line record of a continuation names Octo only when
+  buy. A card shows only while it needs the person. While Studio opens it by
+  itself, the turn's one line **Opening Instafy's browser…** takes its place,
+  with no box. Once it was continued, by Studio or by the person's press, it
+  leaves the chat, also after a reload, so it is never offered again: the
+  continuation's one line and the browser turn's own line are the record. A
+  card a newer card followed leaves too: the newer card carries the task on,
+  so two live cards never stack up. The one-line record of a continuation names Octo only when
   Studio opened the browser by itself ("Octo opened Instafy's browser for
   …"); after the person's own press it reads "Opened Instafy's browser for …".
+  A browser turn that fails or is stopped before it shows anything leaves that
+  line and its own failure (with **Try again**, which sends the card's task
+  again) or Stopped line.
   Either way the browser turn is the card's, and costs nothing unless it did
   something in the browser beyond looking at the page it was given
   ([Credits and Billing](Credits-Billing.md#turns-instafy-starts-by-itself)).

@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from "react";
 import type { ChatMessage } from "../screens/studio/types";
 import { readRunFailureRetryOf } from "./runFailurePresentation";
 
@@ -41,6 +42,47 @@ type PromptRef = { id?: string | null; metadata?: unknown };
 const MAX_KEYS = 600;
 
 const sentPromptsByKey = new Map<string, SentPrompt>();
+
+// A send the controller did not take may add no message to the chat (its
+// error is not added again when it repeats the chat's last one), so what the
+// chat works out from whether a prompt went out, such as a browser card that
+// keeps its button when its continuation did not, is told when that changes.
+const sendFailureListeners = new Set<() => void>();
+let sendFailureVersion = 0;
+
+/** Called whenever a prompt this page sent is found not to have gone out, or to have gone out after all. */
+export function subscribeToPromptSendFailures(listener: () => void): () => void {
+  sendFailureListeners.add(listener);
+  return () => {
+    sendFailureListeners.delete(listener);
+  };
+}
+
+/** Changes whenever {@link didSendFailForPromptSentFromThisPage} changes for a prompt. */
+export function readPromptSendFailureVersion(): number {
+  return sendFailureVersion;
+}
+
+/**
+ * {@link readPromptSendFailureVersion}, kept current: a memo that reads
+ * whether a prompt went out lists it beside the messages it reads.
+ */
+export function usePromptSendFailureVersion(): number {
+  return useSyncExternalStore(subscribeToPromptSendFailures, readPromptSendFailureVersion, readPromptSendFailureVersion);
+}
+
+/** Runs a change to a prompt's entry, and tells the listeners when it changed whether its send failed. */
+function changeEntry(entry: SentPrompt, change: () => void): void {
+  const failed = didSendFail(entry);
+  change();
+  if (didSendFail(entry) === failed) {
+    return;
+  }
+  sendFailureVersion += 1;
+  for (const listener of Array.from(sendFailureListeners)) {
+    listener();
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -131,9 +173,11 @@ export function recordRunsStartedByPromptSentFromThisPage(
   if (!entry) {
     return;
   }
-  for (const id of normalizedIds(runIds)) {
-    entry.runIds.add(id);
-  }
+  changeEntry(entry, () => {
+    for (const id of normalizedIds(runIds)) {
+      entry.runIds.add(id);
+    }
+  });
 }
 
 /**
@@ -176,7 +220,9 @@ export function findPromptSentFromThisPageForRun(runId: string): { metadata: unk
 export function recordSendFailedForPromptSentFromThisPage(message: PromptRef): void {
   const entry = findEntry(message);
   if (entry) {
-    entry.sendFailed = true;
+    changeEntry(entry, () => {
+      entry.sendFailed = true;
+    });
   }
 }
 
