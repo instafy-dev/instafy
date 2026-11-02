@@ -481,7 +481,11 @@ about. A control whose name says more than the text it shows is named by that
 text first ("Agree and close" (also called "Agree and close: Agree to our data
 processing and close")), each name cut on its own. A step that sends a form
 lists the fields it sends, by the names the page gives them and never their
-values ("Sends: Customer name, Telephone, E-mail address"). The sentence
+values ("Sends: Customer name, Telephone, E-mail address"): every one of them
+while the prompt's label holds them (its 240 bytes, after the step's category,
+the tab's name and the control's), whole, since the prompt wraps. Only a form
+whose names are longer than that ends with how many more it sends ("and 3
+more"). The sentence
 names the other site a step is bound to, as the chat's prompt row does: a
 step that sends a form there says it goes there ("It goes to
 pay.example."), and any other says it may ("It may go to carris.pt."): a
@@ -1289,7 +1293,19 @@ same site again, nor "Open the place's own site now", which a turn read as the
 site that had just failed and opened again, nor the page the tab still shows,
 which was read as that step's page, nor the click's
 own timeout. Its line reads as the step it tried ("Tried opening <site>" for a
-navigation). Whether the site answered is judged by the load's own request,
+navigation). The address the load asked for (and the one a redirect led it to,
+when it was one) is then not opened again in that chat's browser turns for 10
+minutes: `navigate` and `open_tab` refuse it at once, before any prompt or
+load, so nothing is sent to its site, with "This address did not answer in
+Instafy's browser in the last 10 minutes, so it was not opened again." and the
+same hint. A turn had opened such an address again in the chat's next turn,
+and once more after the hint, 20 seconds each. Only these two steps are
+refused: a link or form on a page, and the person's own navigation, never. The
+run's approval directory keeps these addresses as fingerprints
+(`unanswered.json`, the SHA-256 of each address without its fragment, at most
+32, with when), and runtime-agent carries them, in memory, into the chat's
+next runs on the same browser and into no other chat's: a runtime that starts
+again carries none. Whether the site answered is judged by the load's own request,
 never by the tab's address, which a page's script may change while the load
 waits. A site that answered as the step stopped waiting has its page, which is
 read as it is, and a load the browser does not confirm stopped fails as a busy
@@ -1520,7 +1536,11 @@ steps until a step on a fresh snapshot's control, or one that moves to another
 page or tab, goes through (a look at the page or a scroll between them does
 not count). The second answers that the page keeps changing, which ends that
 page, not the run, so a page that never holds still (a live count, a ticker in
-a link) sends the turn on to the next source instead of a loop of snapshots.
+a link) sends the turn on instead of a loop of snapshots: to the site's own
+page for the task, from a link on the page (its menu: a planner, a search
+page), else to the next source. A home page's planner form that kept changing
+had sent a turn back to a site that had not answered, while the planner's own
+page, linked from that home page, held still.
 Once the person has answered the step's prompt, the page
 elsewhere may have changed by itself while they read it (a carousel's slide, a
 clock, a live count), so the step checks the control they were asked about

@@ -24,7 +24,8 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // stops waiting for it and fails as one that opened nothing and names where to
 // go next, never as a blank page to navigate again nor as the page the tab
 // still shows; the next step reaches the browser at once, and the site's late
-// answer never loads. A form sent to such a site has reached it, so its load
+// answer never loads. That address is then refused at once by navigate and
+// open_tab, and the site is not asked again. A form sent to such a site has reached it, so its load
 // runs on and the step never says nothing was opened. An address the site
 // answers 404 or 410 for fails as soon as that answer comes, saying it has no
 // page, without waiting for the not-found page to load; a page that only reads
@@ -113,6 +114,9 @@ const BUSY_MESSAGE = "The page is still busy, so it could not be read yet. Take 
 const NEXT_SOURCE = "Don't open this address again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
 const UNANSWERED_MESSAGE = `The site did not answer in time, so nothing was opened and the page is still blank. ${NEXT_SOURCE}`;
 const UNANSWERED_LOADED_MESSAGE = `The site did not answer in time, so nothing was opened and the tab still shows the page it showed before. ${NEXT_SOURCE}`;
+// What navigate and open_tab answer for that address while the chat's browser
+// turns refuse it (10 minutes): nothing is asked or loaded.
+const REFUSED_AGAIN_MESSAGE = `This address did not answer in Instafy's browser in the last 10 minutes, so it was not opened again. ${NEXT_SOURCE}`;
 // How long a step whose site did not answer may take past its time: stopping
 // the load and ending its guards, never a read of the page while it waits.
 const UNANSWERED_ANSWER_MS = 5_000;
@@ -497,6 +501,32 @@ export async function runSharedBrowserStepTimeFixture() {
     assert.equal(late.payload.url, "about:blank");
     assert.equal(late.payload.visibleText, "");
 
+    // 1c'. The same address again, as navigate or open_tab opens it (with a
+    // fragment, which never reaches the site): refused at once, before
+    // anything asks or loads, so the site is not asked again, with the hint
+    // the step that found it gave. A turn had opened such an address again in
+    // its next turn, and once more after that hint, 20 seconds each.
+    requests.length = 0;
+    const tabsBeforeAgain = context.pages().length;
+    const promptsBeforeAgain = prompts.length;
+    const refusedAgain = [];
+    for (const [requestPath, body] of [
+      ["/v1/navigate", { url: `${origin}/slow` }],
+      ["/v1/tabs/open", { url: `${origin}/slow#hours` }],
+    ]) {
+      const again = await runTool("POST", requestPath, body);
+      assert.equal(again.code, 1, `The step is refused: ${again.stdout}`);
+      assert.equal(again.stdout, "", "A refused step answers with no page");
+      assert.ok(again.stderr.includes(REFUSED_AGAIN_MESSAGE), again.stderr);
+      assert.doesNotMatch(again.stderr, /did not answer in time/u);
+      assert.ok(again.wallMs < 5_000, `It was refused at once (${Math.round(again.wallMs)} ms)`);
+      refusedAgain.push(again);
+    }
+    assert.deepEqual(requests, [], "The site was not asked again");
+    assert.equal(unanswered.length, 0, "Nothing waits on the site");
+    assert.equal(context.pages().length, tabsBeforeAgain, "No tab was opened");
+    assert.equal(prompts.length, promptsBeforeAgain, "Nothing asked");
+
     // 1d. The same from a page that had loaded, one that keeps changing its own
     // address as many do: when the time is up the tab still shows that page,
     // and the load waits behind it as it did behind the blank page. The step
@@ -509,8 +539,9 @@ export async function runSharedBrowserStepTimeFixture() {
     await ok("POST", "/v1/navigate", { url: `${origin}/places/live` });
     requests.length = 0;
     const actionsBefore = actions().length;
-    const fromPage = await runTool("POST", "/v1/navigate", { url: `${origin}/slow` });
-    assert.deepEqual(requests, ["GET /slow"], "The site was asked once");
+    // Another address of the same site, which the refusal above leaves alone.
+    const fromPage = await runTool("POST", "/v1/navigate", { url: `${origin}/slow?from=page` });
+    assert.deepEqual(requests, ["GET /slow?from=page"], "The site was asked once");
     assert.equal(fromPage.code, 1, `The step fails: ${fromPage.stdout}`);
     assert.equal(fromPage.stdout, "", "A failed navigation answers with no page");
     assert.ok(fromPage.stderr.includes(UNANSWERED_LOADED_MESSAGE), fromPage.stderr);
@@ -695,6 +726,7 @@ export async function runSharedBrowserStepTimeFixture() {
         "a page with a few hundred controls is described in one call to the page each time a step reads it: once for a read, at most three times for a choice (its check, the list, its result)",
         "a loaded page that shows no text and no controls reads as still busy, not as an empty page, and its line says no page was read",
         "a navigation from a blank tab to a site that does not answer in time is stopped once the step's time is up and fails as one that opened nothing, naming where to go next, never as a blank page to navigate again; the next step reaches the browser at once, and the site's late answer never loads",
+        "that address again, by navigate or open_tab, is refused at once with the same hint: the site is not asked again, nothing asks, and no tab opens",
         "a navigation from a page that had loaded, and keeps changing its own address, to a site that does not answer in time is stopped and fails the same way, never naming the page the tab still shows; the next step reaches the browser at once and finds that page, and the site's late answer never lands",
         "a link clicked on a page that had loaded, to a site that does not answer, is stopped once the click stops waiting for it and fails the same way, never as the page the tab still shows nor as the click's own timeout; the next step reaches the browser at once, and the site's late answer never lands",
         "a form sent to a site that does not answer is not stopped and never reads as nothing opened: the step answers once its time is up and says to check what it did, and the form's late answer lands",
@@ -703,7 +735,7 @@ export async function runSharedBrowserStepTimeFixture() {
         "a hand-off whose fields the page is too busy to highlight in time answers with the page as it is and leaves no hand-off behind",
         "a search whose results page keeps the page busy answers once the step's time is up, with the page's address and a note that it is still busy, never waiting out the page; its line says no page was read",
       ],
-      timings: { slowAnswerMs: Math.round(slow.wallMs), manyControlsReadMs: Math.round(planner.wallMs), manyControlsChoiceMs: Math.round(chose.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), unansweredLoadMs: Math.round(loading.wallMs), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs), noPageMs },
+      timings: { slowAnswerMs: Math.round(slow.wallMs), manyControlsReadMs: Math.round(planner.wallMs), manyControlsChoiceMs: Math.round(chose.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), unansweredLoadMs: Math.round(loading.wallMs), refusedAgainMs: refusedAgain.map((again) => Math.round(again.wallMs)), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs), noPageMs },
       limitations: ["No model, Studio UI, origin or runtime shutdown guard; those are unit-tested."],
     };
     fs.writeFileSync(resultFile, `${JSON.stringify(result, null, 2)}\n`);

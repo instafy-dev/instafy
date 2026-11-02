@@ -3064,15 +3064,17 @@ fn format_terminal_failure_message(
 /// page, not on its own earlier work. Records this job's chat for the page.
 fn shared_browser_page_left_by_other_chat(job: &LeaseJob, page_id: Option<&str>) -> bool {
     page_id.is_some_and(|page_id| {
-        crate::shared_browser::page_left_by_another_conversation(
-            page_id,
-            job.conversation_id.or_else(|| {
-                job.payload
-                    .get("conversation_id")
-                    .and_then(JsonValue::as_str)
-                    .and_then(|value| Uuid::parse_str(value.trim()).ok())
-            }),
-        )
+        crate::shared_browser::page_left_by_another_conversation(page_id, shared_browser_chat(job))
+    })
+}
+
+/// The chat a browser job belongs to.
+fn shared_browser_chat(job: &LeaseJob) -> Option<Uuid> {
+    job.conversation_id.or_else(|| {
+        job.payload
+            .get("conversation_id")
+            .and_then(JsonValue::as_str)
+            .and_then(|value| Uuid::parse_str(value.trim()).ok())
     })
 }
 
@@ -6920,6 +6922,7 @@ impl JobProcessor {
                         .as_ref()
                         .expect("Shared Browser execution must have a cancellation signal")
                         .clone(),
+                    shared_browser_chat(job),
                 )?,
             )
         } else {

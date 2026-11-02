@@ -79,8 +79,6 @@ function cut(label: string, max = MAX_LABEL_CHARS): string {
   return characters.length <= max ? characters.join("") : `${characters.slice(0, max - 1).join("")}…`;
 }
 
-/** The list of fields a prompt says a form step sends is cut to this many characters. */
-const MAX_SENDS_CHARS = 120;
 // How the runtime writes a control's two names and what a form step sends:
 // `Submit order · Sends: Customer name, Telephone` and
 // `Agree and close (also called "Agree and close: Agree to our data processing and close")`.
@@ -143,7 +141,9 @@ export function browserApprovalSentence(agent: string, request: BrowserApprovalW
   const { label, note } = splitBrowserApprovalLabel(request.display.label);
   const words = controlWords(label);
   const sentence = stepSentence(agent, request, label, words);
-  const sends = words.sends ? ` Sends: ${cut(words.sends, MAX_SENDS_CHARS).replace(/[.\s]+$/u, "")}.` : "";
+  // Every field the runtime names, whole: it fits them in its label's bound,
+  // and the prompt wraps. A cut here would hide some of what the form sends.
+  const sends = words.sends ? ` Sends: ${words.sends.replace(/[.\s]+$/u, "")}.` : "";
   return `${sentence}${sends}${note ? ` ${note}` : ""}`;
 }
 

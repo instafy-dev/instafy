@@ -1761,10 +1761,10 @@ function quotedControlLabel(description) {
   return other ? `"${bounded(shown)}" (also called "${bounded(other)}")` : `"${bounded(shown)}"`;
 }
 
-// A prompt's label, with its category and tab, fits the approval's 240
-// bytes, so each name and the list of sent fields are cut on their own.
+// A prompt's label, with its category and tab, fits the approval's label
+// bound (240 bytes): each of the control's names is cut on its own, and the
+// fields a form step sends take the rest of it.
 const PROMPT_NAME_BYTES = 44;
-const PROMPT_FIELDS_BYTES = 80;
 
 // `value` cut to `maxBytes` of UTF-8 between characters, ending in "…" when cut.
 function boundedBytes(value, maxBytes) {
@@ -1781,14 +1781,17 @@ function boundedBytes(value, maxBytes) {
   return `${kept.trimEnd()}\u2026`;
 }
 
-// The sent fields as a prompt lists them: as many whole names as fit, then
-// "and 2 more".
-function sentFieldsText(names) {
+// The sent fields as a prompt lists them in `maxBytes`: every name when they
+// all fit (the prompt wraps), else as many whole names as fit, then "and 2
+// more".
+function sentFieldsText(names, maxBytes) {
+  const all = names.join(", ");
+  if (all && Buffer.byteLength(all) <= maxBytes) return all;
   const listed = [];
   for (const [index, name] of names.entries()) {
     const rest = names.length - index - 1;
     const text = [...listed, name].join(", ") + (rest > 0 ? ` and ${rest} more` : "");
-    if (Buffer.byteLength(text) > PROMPT_FIELDS_BYTES) break;
+    if (Buffer.byteLength(text) > maxBytes) break;
     listed.push(name);
   }
   const more = names.length - listed.length;
@@ -1798,15 +1801,25 @@ function sentFieldsText(names) {
 
 // The control's name in a prompt, the text it shows first and each name cut
 // on its own, and for a step that sends a form the fields it sends, never
-// their values: `Submit order · Sends: Customer name, Telephone`.
-function promptLabel(description, fallback, sentFields = []) {
+// their values: `Submit order · Sends: Customer name, Telephone`. The fields
+// take what the label's bound leaves after the step's category
+// (`categoryTitle`), the tab's name in one of Octo's own tabs, and the
+// control's name, so a seven-field form lists all seven.
+function promptLabel(description, fallback, sentFields = [], categoryTitle = "") {
   const { shown, other } = controlNames(description);
   const name = !shown
     ? fallback
     : other
       ? `${boundedBytes(shown, PROMPT_NAME_BYTES)} (also called "${boundedBytes(other, PROMPT_NAME_BYTES)}")`
       : boundedBytes(shown, 2 * PROMPT_NAME_BYTES);
-  return sentFields.length > 0 ? `${name} \u00b7 Sends: ${sentFieldsText(sentFields)}` : name;
+  if (sentFields.length === 0) return name;
+  const lead = `${name} \u00b7 Sends: `;
+  const around = [categoryTitle, inAgentTab() ? tabName(activePageId) : ""]
+    .filter(Boolean)
+    .map((part) => `${part}: `)
+    .join("");
+  const room = approvalProtocol.maxLabelBytes - Buffer.byteLength(around) - Buffer.byteLength(lead);
+  return `${lead}${sentFieldsText(sentFields, room)}`;
 }
 
 // A list's own name, masked, for a choice: its label ("Start") or its title,
@@ -3616,6 +3629,7 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
     // A new tab has no site yet, so only a full address opens it.
     const url = validateNavigationUrl(body.url, null);
     assertMayOpen(url);
+    refuseUnansweredAddress(url);
     const step = classifyStep("navigate", null, { url });
     if (step.verdict === "ask" || CONSEQUENTIAL_ACTION_PATTERN.test(url)) {
       throw new Error(
@@ -3657,6 +3671,7 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
         assertStepOnTime();
         emitAction({ type: "navigate", label: `Open a tab: ${url}`, url });
         loading = true;
+        openingAddress = url;
         await openAddress(opened, url);
         await settleAfterAction(opened);
         documents.assertNoneBlocked();
@@ -3739,13 +3754,26 @@ async function within(ms, promise, fallback = null) {
 // Stops the load a step started in its tab (guardStepDocuments) whose site has
 // not answered, whatever started it: navigate, open_tab, a link, a form or a
 // key. Null when no such load waits; otherwise whether the browser said it
-// stopped, and whether the site's answer came as it stopped (that page is
-// then the step's).
+// stopped, whether the site's answer came as it stopped (that page is then the
+// step's), and the addresses it asked for (loadAddresses).
 async function stopUnansweredLoad(guards) {
   const load = guards.map((guard) => guard.unansweredLoad()).find(Boolean) ?? null;
   if (!load) return null;
   const stopped = await within(GUARD_RELEASE_MS, stopLoading(load.page).catch(() => false), false);
-  return { page: load.page, stopped, answered: load.answered };
+  return { page: load.page, stopped, answered: load.answered, addresses: loadAddresses(load.request) };
+}
+
+// The addresses a load asked for: the first, which a step or the page asked
+// the tab to open, and the one its last redirect led to, which is the one that
+// did not answer.
+function loadAddresses(request) {
+  try {
+    let first = request;
+    while (first.redirectedFrom()) first = first.redirectedFrom();
+    return [...new Set([first.url(), request.url()])];
+  } catch (_) {
+    return [];
+  }
 }
 
 // The answer of a step whose time ran out: the page as it is now, read like a
@@ -3795,11 +3823,15 @@ async function pageAsItIs(browser) {
     readSomething ? "This is the page as it is now: check" : "Check"
   } what the step did before you act again.`;
   if (unanswered) {
-    throw new Error(load.stopped ? unansweredLoadMessage(load.page) : `${BUSY_PAGE_MESSAGE} ${note}`);
+    throw load.stopped
+      ? didNotAnswer(unansweredLoadMessage(load.page), load.addresses)
+      : new Error(`${BUSY_PAGE_MESSAGE} ${note}`);
   }
   if (view.blank === true) {
     const stoppedBlankLoad = await within(GUARD_RELEASE_MS, stopLoading(resolvedPage).catch(() => false), false);
-    throw new Error(stoppedBlankLoad ? UNANSWERED_PAGE_MESSAGE : `${BUSY_PAGE_MESSAGE} ${note}`);
+    throw stoppedBlankLoad
+      ? didNotAnswer(UNANSWERED_PAGE_MESSAGE, openingAddress ? [openingAddress] : [])
+      : new Error(`${BUSY_PAGE_MESSAGE} ${note}`);
   }
   emitAction({ type: "nav_result", label: view.title || view.url, url: view.url });
   return withActivity(
@@ -3818,6 +3850,13 @@ const BUSY_PAGE_MESSAGE = "The page is still busy, so it could not be read yet. 
 const UNANSWERED_NEXT_SOURCE = "Don't open this address again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
 const UNANSWERED_PAGE_MESSAGE = `The site did not answer in time, so nothing was opened and the page is still blank. ${UNANSWERED_NEXT_SOURCE}`;
 const UNANSWERED_LOADED_PAGE_MESSAGE = `The site did not answer in time, so nothing was opened and the tab still shows the page it showed before. ${UNANSWERED_NEXT_SOURCE}`;
+// What navigate and open_tab answer for an address that did not answer in the
+// chat's browser turns in the last 10 minutes (refuseUnansweredAddress): a turn
+// opened such an address again in its next turn, and once more after the hint.
+const UNANSWERED_AGAIN_MESSAGE = `This address did not answer in Instafy's browser in the last 10 minutes, so it was not opened again. ${UNANSWERED_NEXT_SOURCE}`;
+// The address navigate or open_tab is loading, for a tab still blank when the
+// step's time is up whose load the step's guard did not see.
+let openingAddress = null;
 
 function unansweredLoadMessage(page) {
   return isBlankPage(page) ? UNANSWERED_PAGE_MESSAGE : UNANSWERED_LOADED_PAGE_MESSAGE;
@@ -3831,7 +3870,28 @@ function unansweredLoadMessage(page) {
 async function unansweredLoadFailure(error, guard) {
   if (error?.name !== "TimeoutError") return error;
   const load = await stopUnansweredLoad([guard]);
-  return load?.stopped && !load.answered ? new Error(unansweredLoadMessage(load.page)) : error;
+  return load?.stopped && !load.answered
+    ? didNotAnswer(unansweredLoadMessage(load.page), load.addresses)
+    : error;
+}
+
+// The failure of a step whose load's site did not answer. The addresses the
+// load asked for are kept for the chat's browser turns, so navigate and
+// open_tab refuse them at once for a while (refuseUnansweredAddress).
+function didNotAnswer(message, addresses) {
+  approvalProtocol.rememberUnanswered(addresses);
+  return new Error(message);
+}
+
+// An address that did not answer in the chat's browser turns in the last 10
+// minutes is not opened again: navigate and open_tab refuse it at once, before
+// anything asks or loads, so nothing is sent to its site, with the same hint
+// as the step that found it. Only these two steps: the person's own
+// navigation, and the page's own links and forms, are never refused.
+function refuseUnansweredAddress(url) {
+  if (approvalProtocol.didNotAnswerRecently(url)) {
+    throw new Error(UNANSWERED_AGAIN_MESSAGE);
+  }
 }
 
 // Stops what the page is still loading, as the browser's stop button does; true
@@ -4294,6 +4354,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const step = classifyStep("navigate", null, { url });
     const readingStep = step.verdict !== "ask" && !CONSEQUENTIAL_ACTION_PATTERN.test(url);
     assertMayOpen(url);
+    refuseUnansweredAddress(url);
     refuseUnlessReadingStep(readingStep);
     // A plain address (a reading step) needs only its site's approval in this
     // tab: the site prompt names the exact address, and a site already
@@ -4325,6 +4386,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     }
     assertStepOnTime();
     emitAction({ type: "navigate", label: `Go to ${url}`, url });
+    openingAddress = revalidatedUrl;
     await openAddress(page, revalidatedUrl);
     await settleAfterAction(page);
     page = await resolveExpectedPage(browser);
@@ -4376,6 +4438,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
           target.description,
           "Activate this control",
           await sentFieldNames(target, clickSubmission),
+          approvalCategoryTitle(step),
         ),
         categoryTitle: approvalCategoryTitle(step),
         sourceOrigin,
@@ -4483,6 +4546,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
           target.description,
           "Submit this form",
           readingStep ? [] : await sentFieldNames(target, typeSubmission, body.text),
+          approvalCategoryTitle(step),
         )
         : promptLabel(target.description, "Type into this field"),
       categoryTitle: approvalCategoryTitle(step),
@@ -4700,6 +4764,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
           target.description,
           "Activate this control",
           readingStep ? [] : await sentFieldNames(target, pressSubmission),
+          approvalCategoryTitle(step),
         )
         : `Press ${pressKey} on ${promptLabel(target.description, "this field")}`,
       categoryTitle: approvalCategoryTitle(step),
