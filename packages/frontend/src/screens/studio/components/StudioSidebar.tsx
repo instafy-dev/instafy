@@ -263,8 +263,8 @@ export function StudioSidebar({
     () => moreItems?.filter((item): item is StudioNavItem => Boolean(item)) ?? [],
     [moreItems],
   );
-  // External context already contains the space selector. Only compact
-  // desktop navigation needs a second row for New chat below its toggle.
+  // External context already contains the space selector. Reserve a row for
+  // the footer toggle, plus a separate New chat row in compact navigation.
   const desktopHeaderRows = externalHeader ? showLabels ? 1 : 2 : pathHeader ? 1 : showLabels ? 2 : 3;
   const mobileHeaderRows = showLabels ? pathControls ? 1 : 2 : 4;
   const fixedEntryCount = (desktopRail ? desktopHeaderRows : mobileHeaderRows) + items.length;
@@ -1083,22 +1083,22 @@ export function StudioSidebar({
     runDestination(() => category ? onOpenOrgSettings?.(orgKey, category) : onOpenOrgSettings?.(orgKey));
   };
   const openSelectedTeamSettings = () => openTeamSettings(activeOrgKey);
-  const canStartHeaderChat = externalHeader && showChatActions && selectedTeamHasActiveSpace &&
+  const desktopChatActions = desktopRail && externalHeader;
+  const canStartSidebarChat = externalHeader && showChatActions && selectedTeamHasActiveSpace &&
     Boolean(onStartNewConversation) && activePanel !== "home" && !hideContext &&
     navigationPage !== "home";
-  const runHeaderChatAction = (action: () => void) => {
-    if (!canStartHeaderChat || !onStartNewConversation) return;
+  const runSidebarChatAction = (action: () => void) => {
+    if (!canStartSidebarChat || !onStartNewConversation) return;
     resetWorkspaceSwitcher();
     closeMoreMenu();
     runDestination(action);
   };
-  const headerNewChat = canStartHeaderChat ? <StudioNewChatButton
+  const newChatAction = canStartSidebarChat ? <StudioNewChatButton
     testId="sidebar-new-chat" size="sm" radius="lg"
-    label={mobileSheet || desktopRail && !showLabels ? undefined : "New chat"}
+    label={desktopChatActions || mobileSheet ? undefined : "New chat"}
     isDisabled={mobileDrillInOpen}
-    runAction={runHeaderChatAction}
-    className={mobileSheet ? "!h-12 !w-11 !min-h-12 !min-w-11 shrink-0" : desktopRail && !showLabels
-      ? "!h-11 !w-11 !min-h-11 !min-w-11 shrink-0"
+    runAction={runSidebarChatAction}
+    className={desktopChatActions ? "shrink-0" : mobileSheet ? "!h-12 !w-11 !min-h-12 !min-w-11 shrink-0"
       : "!h-11 !w-auto !min-h-11 min-w-0 flex-1 justify-start gap-2 px-3"}
   /> : null;
   // A selected-team/account/page change discards any open menu, including
@@ -1253,7 +1253,7 @@ export function StudioSidebar({
   return (
     <>
       {navigationHeaderPortalTarget ? createPortal(renderNavigationHeader ? renderNavigationHeader({ team: teamMenu, space: spaceControl, teamName: activeOrgName, accentColor: activeOrgAccentColor, onBrowseTeams: () => { onNavigationHeaderAction?.(); openWorkspaceSwitcher(); } }) : navigationPath, navigationHeaderPortalTarget) : null}
-      {mobileSheet && navigationActionsPortalTarget ? createPortal(headerNewChat, navigationActionsPortalTarget) : null}
+      {mobileSheet && navigationActionsPortalTarget ? createPortal(newChatAction, navigationActionsPortalTarget) : null}
       {desktopRail ? <StudioOrganizationRail
         userId={userId} organizations={orgDeckTeams} selectedOrgKey={activeOrgKey}
         pendingOrgKey={mergedProjectsError ? null : pendingOrgSwitchKey}
@@ -1308,7 +1308,7 @@ export function StudioSidebar({
             style={{ top: `${DESKTOP_TITLE_BAR_HEIGHT_PX}px` }}
           />
         ) : null}
-        {desktopRail ? <div
+        {desktopRail && !desktopChatActions ? <div
           className={`${externalHeader ? "h-12 min-h-12 border-b border-transparent" : "min-h-11"} shrink-0 ${pathHeader ? "gap-x-0 flex items-center border-b border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]" : "gap-x-1 flex items-center"} ${showLabels ? pathHeader ? "pr-px" : "pr-[7px]" : ""}`}
           data-testid="sidebar-team-header">
           <div className={`flex w-[calc(4rem-1px)] shrink-0 items-center justify-center ${pathHeader ? "h-11" : ""}`}>
@@ -1321,10 +1321,8 @@ export function StudioSidebar({
               {showLabels ? <SidebarCollapse className={externalHeader ? "h-[18px] w-[18px]" : "h-4 w-4"} /> : <SidebarExpand className={externalHeader ? "h-[18px] w-[18px]" : "h-4 w-4"} />}
             </IconButton>
           </div>
-          {externalHeader && showLabels ? headerNewChat : null}
           {!externalHeader && showLabels ? pathHeader ? navigationPath : teamMenu : null}
         </div> : null}
-        {desktopRail && !showLabels && headerNewChat ? <div className="flex shrink-0 justify-center">{headerNewChat}</div> : null}
         {!desktopRail && !mobileSheet ? <div
           className={`shrink-0 gap-x-1 px-1 py-1 ${pathHeader ? "flex items-center border-b border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]" : "flex items-center gap-y-1"} ${showLabels ? "min-h-14" : "flex-col"} ${externalHeader && !navigationToggleExternal ? "flex-row-reverse" : ""}`}
           inert={mobileDrillInOpen || undefined} aria-hidden={mobileDrillInOpen || undefined}
@@ -1343,7 +1341,7 @@ export function StudioSidebar({
             <span>Home</span>
             <AttentionBadge count={homeAttentionCount} testId="sidebar-home-badge" aria-hidden />
           </Button> : null}
-          {externalHeader ? headerNewChat ?? <span className="min-w-0 flex-1" aria-hidden="true" /> : <>
+          {externalHeader ? newChatAction ?? <span className="min-w-0 flex-1" aria-hidden="true" /> : <>
           <IconButton variant="ghost" size="sm" radius="lg"
             onPress={() => {
               resetWorkspaceSwitcher();
@@ -1378,6 +1376,7 @@ export function StudioSidebar({
             {spaceControl}
           </li> : null}
           {selectedTeamHasActiveSpace ? <>
+          {desktopChatActions && newChatAction && !items.some(item => item.id === "chat") ? <li className={`flex ${showLabels ? "justify-end pr-2" : "justify-center"}`} data-testid="sidebar-new-chat-row">{newChatAction}</li> : null}
           {items.map((item) => {
           const opensChatExplorer = item.id === "chat" && Boolean(onOpenConversationHistory);
           const togglesChatPane = desktopRail && opensChatExplorer;
@@ -1388,21 +1387,23 @@ export function StudioSidebar({
           const isPinned = pinnedPanel === item.id;
           const badgeCount = item.badge?.count ?? 0;
           const badgeText = badgeCount > 9 ? "9+" : badgeCount.toString();
+          const rowNewChat = desktopChatActions && item.id === "chat" ? newChatAction : null;
 
           return (
             <Fragment key={item.id}>
-              <li>
+              <li className={rowNewChat && showLabels ? "flex items-center gap-2 pr-2" : undefined} data-testid={item.id === "chat" ? "sidebar-chat-row" : undefined}>
                 <Button
                   onPress={() => runDestination(() => opensChatExplorer ? onOpenConversationHistory?.() : onSelect(item.id))}
                   variant="ghost"
                   size="sm"
                   radius="lg"
-                  fullWidth
+                  fullWidth={!rowNewChat || !showLabels}
                   data-testid={opensChatExplorer ? "sidebar-nav-history" : `sidebar-nav-${item.id}`}
                   className={[
                     "group/item relative py-1.5 transition focus-visible:ring-offset-0",
                     sidebarRowLayoutClass,
                     getSidebarRowToneClass(isActive),
+                    rowNewChat && showLabels ? "min-w-0 flex-1" : "",
                   ].join(" ")}
                   aria-current={!togglesChatPane && isActive ? "page" : undefined}
                   aria-expanded={togglesChatPane ? isConversationHistoryActive : undefined}
@@ -1445,12 +1446,14 @@ export function StudioSidebar({
                     ) : null}
                   </span>
                   {showLabels ? (
-                    <span className="flex flex-1 items-center justify-between gap-2 text-sm font-medium text-slate-700 dark:text-slate-200">
-                      <span>{label}</span>
+                    <span className={`${rowNewChat ? "min-w-0 " : ""}flex flex-1 items-center justify-between gap-2 text-sm font-medium text-slate-700 dark:text-slate-200`}>
+                      <span className={rowNewChat ? "truncate" : undefined}>{label}</span>
                     </span>
                   ) : null}
                 </Button>
+                {showLabels ? rowNewChat : null}
               </li>
+              {rowNewChat && !showLabels ? <li className="flex justify-center" data-testid="sidebar-new-chat-row">{rowNewChat}</li> : null}
             </Fragment>
           );
         })}
@@ -1499,6 +1502,18 @@ export function StudioSidebar({
             </Button> : null}
           </li>}
       </ul>}
+
+      {desktopChatActions ? <div className="shrink-0 pl-3 pr-2 pt-2" data-testid="sidebar-navigation-footer">
+        <Button variant="ghost" size="sm" radius="lg"
+          aria-label={showLabels ? "Collapse sidebar" : "Expand sidebar"}
+          title={showLabels ? "Collapse sidebar" : "Expand sidebar"}
+          aria-expanded={showLabels}
+          data-testid="sidebar-drawer-toggle" onPress={onToggleSidebar}
+          isDisabled={!onToggleSidebar} className="max-w-full justify-start gap-4">
+          {showLabels ? <SidebarCollapse className="h-5 w-5 shrink-0" aria-hidden="true" /> : <SidebarExpand className="h-5 w-5 shrink-0" aria-hidden="true" />}
+          {showLabels ? <span className="truncate">Collapse sidebar</span> : null}
+        </Button>
+      </div> : null}
 
       {!desktopRail && !(mobileSheet && mobileSheetContent) ? <div className="shrink-0" data-testid="sidebar-account-navigation"
         inert={mobileDrillInOpen || undefined} aria-hidden={mobileDrillInOpen || undefined}>
