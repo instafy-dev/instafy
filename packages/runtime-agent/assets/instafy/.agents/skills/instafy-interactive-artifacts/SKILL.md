@@ -58,10 +58,10 @@ own kind of page.
 
 ## 3. Serve it and show it
 
-1. One command, from the site's folder, starts it so it outlives your turn and posts its card:
-   `instafy preview open --title '<short title>' --serve-cmd "<serve command>" --start --json`, with `{port}` where
-   the serve command takes its port. The serve command is the builder skill's; a bound or plain site's is
-   `instafy bind serve . --port {port} --preview`. It picks the port: never choose one.
+1. One command, run inside the site's folder, starts it so it outlives your turn and posts its card:
+   `(cd sites/<slug> && instafy preview open --title '<short title>' --serve-cmd "<serve command>" --start --json)`,
+   with `{port}` where the serve command takes its port. The serve command is the builder skill's; a bound or plain
+   site's is `instafy bind serve . --port {port} --preview`. It picks the port: never choose one.
 2. `instafy preview check --port <port>` (the JSON's) loads it as Studio does: fix every error it lists and look at
    the phone screenshot.
 3. Never post preview, tunnel or localhost URLs. A public link only when the user asks for one:
