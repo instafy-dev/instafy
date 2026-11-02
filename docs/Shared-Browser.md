@@ -1373,10 +1373,15 @@ plain words and never to paste a raw error code into a reply. A `navigate` or
 `open_tab` whose site answers 404 or 410 for the page it loads (the tab's own
 document, after any redirects) fails as soon as that answer comes, without
 waiting for the not-found page to load: "This address has no page. Open a link
-from a page you read, or that site's own search." Its line reads as the step it
-tried ("Tried opening <site>"), and a tab `open_tab` opened for it closes again.
-Any other answer, a page whose text says it was not found included, is the
-step's page. Any other failed
+from a page you read, or that site's own search." The same answer with no page
+at all, whose load Chromium fails itself
+(`net::ERR_HTTP_RESPONSE_CODE_FAILURE`), fails the same way. The not-found
+page stops loading, and settles as any page a step loads does, while the
+step's guards still hold, so a refresh or a script on it that would send the
+tab on (to a link-only site too) is stopped before it leaves the browser. Its
+line reads as the step it tried ("Tried opening <site>"), and a tab `open_tab`
+opened for it closes again. Any other answer, a page whose text says it was not
+found included, is the step's page. Any other failed
 call keeps the controller's masked error text. A failed call whose result also
 carries facts for the turn's Details (`activity`, `browserUnavailable`) gives
 that text in `structuredContent.error.reason` too: a model that calls the tools

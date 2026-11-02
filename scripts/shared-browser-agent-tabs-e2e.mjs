@@ -69,6 +69,10 @@ async function listenSite(name, routes) {
       response.writeHead(302, { location: route.redirect, "cache-control": "no-store" }).end();
       return;
     }
+    if (route.empty) {
+      response.writeHead(route.status, { "content-length": "0", "cache-control": "no-store" }).end();
+      return;
+    }
     response.writeHead(route.status ?? 200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
     response.end(page(route.title, route.body, route.script, route.frame));
   });
@@ -112,9 +116,18 @@ export async function runSharedBrowserAgentTabsFixture() {
       "/timetable": { title: "Timetable", body: "<p>Trains leave every 20 minutes.</p><form method=\"post\" action=\"/order\"><button>Place order</button></form>" },
       "/hours": { title: "Opening hours", body: "<p>Open daily 9 to 17.</p>" },
       "/prices": { title: "Prices", body: "<p>Entry 12 EUR.</p>" },
-      // A guessed address and a page that is gone: the site's own not-found pages.
+      // A guessed address and a page that is gone: the site's own not-found
+      // pages, and answers with no page at all, whose loads Chromium fails
+      // itself.
       "/reviews/guessed": { status: 404, title: "Page not found", body: "<p>Oops! That page can't be found.</p>" },
       "/reviews/gone": { status: 410, title: "Page gone", body: "<p>This review was removed.</p>" },
+      "/reviews/empty-guessed": { status: 404, empty: true },
+      "/reviews/empty-gone": { status: 410, empty: true },
+      // Not-found pages that send their tab on to the link-only site by
+      // themselves: at once, from a script, and from a script a moment later.
+      "/reviews/moved-on": { status: 404, title: "Page not found", body: `<meta http-equiv="refresh" content="0;url=${linkOnlyReview}"><p>Taking you to our partner.</p>` },
+      "/reviews/sent-on": { status: 404, title: "Page not found", body: "<p>Taking you to our partner.</p>", script: `location.href = ${JSON.stringify(linkOnlyReview)};` },
+      "/reviews/sent-on-soon": { status: 404, title: "Page not found", body: "<p>Taking you to our partner.</p>", script: `setTimeout(() => { location.href = ${JSON.stringify(linkOnlyReview)}; }, 50);` },
       "/to-link-only": { redirect: "https://www.booking.com/hotel/fixture.html" },
       "/to-review": { redirect: linkOnlyReview },
       "/new-window": { title: "Reviews", body: "<p><a href=\"/to-review\" target=\"_blank\">Read the review</a></p>" },
@@ -412,12 +425,13 @@ export async function runSharedBrowserAgentTabsFixture() {
     assert.equal(runPage.url(), `${research.origin}/`, "The person's page was not touched by Octo's tabs");
 
     // 11b. A tab opened at an address the site answers 404 or 410 for (a
-    // guessed review address, a page that is gone) fails as a step Octo
-    // tried, saying the address has no page and where to look instead, never
-    // as the browser going away; the tab it opened closes again, so no
-    // not-found page is left among Octo's tabs, and the run's page is in
-    // front. A tab at a page the site has opens as before.
-    for (const address of ["/reviews/guessed", "/reviews/gone"]) {
+    // guessed review address, a page that is gone, with a not-found page or
+    // with none) fails as a step Octo tried, saying the address has no page
+    // and where to look instead, never as the browser going away; the tab it
+    // opened closes again, so no not-found page is left among Octo's tabs,
+    // and the run's page is in front. A tab at a page the site has opens as
+    // before.
+    for (const address of ["/reviews/guessed", "/reviews/gone", "/reviews/empty-guessed", "/reviews/empty-gone"]) {
       await refused(
         /This address has no page\. Open a link from a page you read, or that site's own search\./u,
         "POST", "/v1/tabs/open", { url: `${sources.origin}${address}` }, ["allow_origin"],
@@ -427,6 +441,20 @@ export async function runSharedBrowserAgentTabsFixture() {
       assert.deepEqual(tabsRecord().tabs, [], "No tab of Octo's is left");
       assert.equal(tabsRecord().currentTabId, null);
       assert.equal(await hasFocus(runPage), true, "The run's page is in front");
+    }
+    // A not-found page that sends its tab on to the link-only site by itself,
+    // at once or a moment later, never gets it there: the step stops the
+    // not-found page's load and settles while its guard still holds, so what
+    // the page sends is stopped before it leaves the browser, and the step
+    // fails. Its line says either why it stopped.
+    const sentOn = /This address has no page\. Open a link from a page you read, or that site's own search\.|led to Nike, which is link-only/u;
+    for (const address of ["/reviews/moved-on", "/reviews/sent-on", "/reviews/sent-on-soon"]) {
+      const linkOnlyAsked = linkOnly.requests.length;
+      await refused(sentOn, "POST", "/v1/tabs/open", { url: `${sources.origin}${address}` }, ["allow_origin"]);
+      await delay(1_000);
+      assert.deepEqual(linkOnly.requests.slice(linkOnlyAsked), [], `${address}: the link-only site was never asked`);
+      assert.ok(!browserPages().some((entry) => entry.url().includes("nike")), `${address}: no tab shows the link-only site`);
+      for (const tab of tabsRecord().tabs) await ok("POST", "/v1/tabs/close", { tabId: tab.tabId });
     }
     const found = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/prices` }, ["allow_origin"]);
     assert.match(found.visibleText, /Entry 12 EUR/u);
@@ -441,6 +469,14 @@ export async function runSharedBrowserAgentTabsFixture() {
     assert.equal(prompts.length, promptsBeforeRunPage, "Refused before any prompt");
     await refused(/led to Booking\.com, which is link-only/, "POST", "/v1/navigate", { url: `${sources.origin}/to-link-only` }, ["allow_origin"]);
     assert.ok(!browserPages().some((entry) => entry.url().includes("booking")), "The run's page never showed the link-only site");
+    // Nor through a not-found page that sends it on by itself.
+    for (const address of ["/reviews/moved-on", "/reviews/sent-on", "/reviews/sent-on-soon"]) {
+      const linkOnlyAsked = linkOnly.requests.length;
+      await refused(sentOn, "POST", "/v1/navigate", { url: `${sources.origin}${address}` }, ["allow_origin"]);
+      await delay(1_000);
+      assert.deepEqual(linkOnly.requests.slice(linkOnlyAsked), [], `${address}: the link-only site was never asked`);
+      assert.ok(!runPage.url().includes("nike"), `${address}: the run's page never went to the link-only site`);
+    }
     await ok("POST", "/v1/navigate", { url: `${sources.origin}/later` }, []);
     for (let attempt = 0; attempt < 100 && runPage.url() !== linkOnlyReview; attempt += 1) await delay(50);
     assert.equal(runPage.url(), linkOnlyReview, "The run's page moved on by itself");
@@ -546,7 +582,8 @@ export async function runSharedBrowserAgentTabsFixture() {
         "each tab keeps its number and label; numbers are never reused",
         "windows a page in Octo's tab opens by itself are closed before the next step",
         "closing Octo's tab, and its last tab, brings the run's page to the front",
-        "a tab at an address the site answers 404 or 410 for fails saying the address has no page, and the tab closes again",
+        "a tab at an address the site answers 404 or 410 for, with a not-found page or none, fails saying the address has no page, and the tab closes again",
+        "a not-found page that sends its tab or the run's page on to a link-only site by itself, at once or a moment later, never gets it there",
         "turn-end close through the DevTools HTTP endpoint",
         "the person's page: link-only refused before any prompt, through a redirect, and once the page is on one",
         "a page that frames a link-only site loads and Octo's step succeeds, reading nothing of the frame",

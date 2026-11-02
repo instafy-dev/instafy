@@ -261,6 +261,12 @@ export async function runSharedBrowserStepTimeFixture() {
         unfinished.push(response);
         return;
       }
+      // Answers with no page at all, whose loads Chromium fails itself.
+      const empty = { "/reviews/empty-not-found": 404, "/reviews/empty-gone": 410 }[url.pathname];
+      if (empty) {
+        response.writeHead(empty, { "content-length": "0", "cache-control": "no-store" }).end();
+        return;
+      }
       const noPage = { "/reviews/not-found": [404, "Page not found"], "/reviews/gone": [410, "Page gone"] }[url.pathname];
       if (noPage) {
         response.writeHead(noPage[0], { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
@@ -590,11 +596,13 @@ export async function runSharedBrowserStepTimeFixture() {
     // reads as a step it tried, never as a page it opened or read. It does
     // not wait for the not-found page to load: one whose rest comes later
     // than a step took a guessed address past the step's time, and the step
-    // answered with that page as one it had read. A page that only reads as
-    // not found, under any other answer, is still the step's page.
+    // answered with that page as one it had read. An answer with no page at
+    // all, whose load Chromium fails itself, fails the same way. A page that
+    // only reads as not found, under any other answer, is still the step's
+    // page.
     await ok("POST", "/v1/navigate", { url: `${origin}/places/tower` });
     const noPageMs = {};
-    for (const address of ["/reviews/slow-not-found", "/reviews/not-found", "/reviews/gone"]) {
+    for (const address of ["/reviews/slow-not-found", "/reviews/not-found", "/reviews/gone", "/reviews/empty-not-found", "/reviews/empty-gone"]) {
       requests.length = 0;
       const actionsBeforeNoPage = actions().length;
       const noPage = await runTool("POST", "/v1/navigate", { url: `${origin}${address}` });
@@ -690,7 +698,7 @@ export async function runSharedBrowserStepTimeFixture() {
         "a navigation from a page that had loaded, and keeps changing its own address, to a site that does not answer in time is stopped and fails the same way, never naming the page the tab still shows; the next step reaches the browser at once and finds that page, and the site's late answer never lands",
         "a link clicked on a page that had loaded, to a site that does not answer, is stopped once the click stops waiting for it and fails the same way, never as the page the tab still shows nor as the click's own timeout; the next step reaches the browser at once, and the site's late answer never lands",
         "a form sent to a site that does not answer is not stopped and never reads as nothing opened: the step answers once its time is up and says to check what it did, and the form's late answer lands",
-        "a navigation the site answers 404 or 410 for fails as soon as that answer comes, saying the address has no page, even when the rest of its not-found page comes later than a step; a page that only reads as not found, and a 200, are the step's page",
+        "a navigation the site answers 404 or 410 for fails as soon as that answer comes, saying the address has no page, even when the rest of its not-found page comes later than a step or there is no page at all; a page that only reads as not found, and a 200, are the step's page",
         "a click that opens a window and keeps the page busy fails once the step's time is up, as it would in its time: the window is closed and never loads anything, then or later",
         "a hand-off whose fields the page is too busy to highlight in time answers with the page as it is and leaves no hand-off behind",
         "a search whose results page keeps the page busy answers once the step's time is up, with the page's address and a note that it is still busy, never waiting out the page; its line says no page was read",

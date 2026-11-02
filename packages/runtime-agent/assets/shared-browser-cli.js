@@ -3100,8 +3100,38 @@ class NoPageError extends Error {
 // "Tried opening <site>"), without waiting for the not-found page to load.
 async function openAddress(page, url) {
   const deadline = Date.now() + 30_000;
-  const response = await page.goto(url, { waitUntil: "commit", timeout: 30_000 });
+  // The site's answer for the tab's own document, after any redirects, as it
+  // comes: Chromium fails the load of a 404 or 410 with an empty body itself
+  // (net::ERR_HTTP_RESPONSE_CODE_FAILURE), so page.goto never returns it.
+  let status = null;
+  const answered = (response) => {
+    try {
+      const request = response.request();
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) status = response.status();
+    } catch (_) {
+      // An answer that belongs to no frame is not the tab's document.
+    }
+  };
+  page.on("response", answered);
+  let response;
+  try {
+    response = await page.goto(url, { waitUntil: "commit", timeout: 30_000 });
+  } catch (error) {
+    if (NO_PAGE_STATUSES.has(status) && /\bERR_HTTP_RESPONSE_CODE_FAILURE\b/u.test(String(error?.message || ""))) {
+      throw new NoPageError();
+    }
+    throw error;
+  } finally {
+    page.off("response", answered);
+  }
   if (response && NO_PAGE_STATUSES.has(response.status())) {
+    // The not-found page stops loading while the step's guards still hold, and
+    // they hold as long after that as after any page a step loads
+    // (settleAfterAction): what it would load next (a refresh, or a script
+    // that sends the tab on, to a link-only site too) is stopped before it
+    // leaves the browser, as it was while the step waited for the page.
+    await within(GUARD_RELEASE_MS, stopLoading(page).catch(() => false), false);
+    await page.waitForTimeout(250).catch(() => {});
     throw new NoPageError();
   }
   await page.waitForLoadState("domcontentloaded", { timeout: Math.max(deadline - Date.now(), 1) });

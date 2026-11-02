@@ -249,9 +249,9 @@ describe("reading a page", () => {
     routes["news.example.org/museum"] = { body: page(lines.map((line) => `<p>${line}</p>`).join("")) };
     const result = await one("http://news.example.org/museum", { find: 'tickets "opens at"' });
     expect(result.find).toEqual({ terms: ["tickets", "opens at"], passages: 2, matchedLines: 2 });
-    expect(result.text).toMatch(/opens at 10:00/);
-    expect(result.text).toMatch(/12 EUR/);
-    expect(result.text).not.toMatch(/Main Street|Parking|Welcome|Archive note/);
+    // Each passage keeps the two lines above its match (where its heading sits) and the one below.
+    expect(result.text).toContain("Welcome\nNews of the week\nThe museum opens at 10:00.\nGift shop\n…\nParking is limited\nGarden\nTickets cost 12 EUR.\nContact");
+    expect(result.text).not.toMatch(/Main Street|Cafe|Archive note/);
     expect(formatWebRead(await read("http://news.example.org/museum", { find: 'tickets "opens at"' }))).toMatch(/--find: 2 passage\(s\) for tickets, opens at\n/);
     const none = await one("http://news.example.org/museum", { find: "lockers" });
     expect(none.find).toEqual({ terms: ["lockers"], passages: 0, matchedLines: 0 });
@@ -278,19 +278,96 @@ describe("reading a page", () => {
     expect(whole.length).toBeLessThan(4_400);
     routes["news.example.org/bookshop"] = { body: page(lines.map((line) => `<p>${line}</p>`).join(""), "Old Town Bookshop") };
     const result = await one("http://news.example.org/bookshop", { find: "opening hours visit" });
-    expect(result.find).toEqual({ terms: ["opening", "hours", "visit"], passages: 2, matchedLines: 3, whole: true });
-    // All of it, past the default --max-chars, with the hours under the name they belong to.
+    // The passages come first, each with the two lines above its match, so the hours keep the name they are under.
+    expect(result.find).toEqual({ terms: ["opening", "hours", "visit"], passages: 2, matchedLines: 3, whole: true, text: expect.any(String) });
+    expect(result.find!.text).toMatch(/^<untrusted_page_content url="http:\/\/news\.example\.org\/bookshop" read_at="[^"]+" viewer="server fetch">\n/);
+    expect(result.find!.text).toContain("Old Town Bookshop\nPlan your visit\nShelf 1:");
+    expect(result.find!.text).toContain(
+      "Old Town Bookshop\nopen daily, 09:00 - 19:30\nA visit to the Reading Room is included in the bookshop's ticket.\nReading Room hours follow the bookshop's.\nShelf 25:",
+    );
+    expect(result.find!.text).not.toContain("Shelf 48:");
+    // Then all of the page, past the default --max-chars.
     expect(result.textChars).toBe(whole.length);
     expect(result.truncated).toBe(false);
     expect(result.text).toContain("Old Town Bookshop\nopen daily, 09:00 - 19:30\n");
     expect(result.text).toContain("Shelf 48:");
     const text = formatWebRead(await read("http://news.example.org/bookshop", { find: "opening hours visit" }));
-    expect(text).toContain(`--find: 2 passage(s) for opening, hours, visit, in the whole page below (a page of up to ${LIMITS.maxChars} characters comes back whole)\n`);
+    expect(text).toContain(
+      `--find: 2 passage(s) for opening, hours, visit, first, then the whole page (a page of up to ${LIMITS.maxChars} characters comes back whole)\n<untrusted_page_content url="http://news.example.org/bookshop"`,
+    );
+    expect(text.indexOf("open daily, 09:00 - 19:30")).toBeLessThan(text.indexOf("title: Old Town Bookshop"));
     // A page with no line that names a term comes back whole too, never as "this page does not say it".
     const none = await one("http://news.example.org/bookshop", { find: "lockers" });
     expect(none.find).toEqual({ terms: ["lockers"], passages: 0, matchedLines: 0, whole: true });
     expect(none.textChars).toBe(whole.length);
-    expect(formatWebRead(await read("http://news.example.org/bookshop", { find: "lockers" }))).not.toMatch(/does not say it/);
+    const noneText = formatWebRead(await read("http://news.example.org/bookshop", { find: "lockers" }));
+    expect(noneText).toContain(`--find: 0 passage(s) for lockers; the whole page is below (a page of up to ${LIMITS.maxChars} characters comes back whole)\n`);
+    expect(noneText).not.toMatch(/does not say it/);
+  });
+
+  it("puts a short page's --find passages ahead of its text and links, so a read whose middle is cut still shows them", async () => {
+    // A museum's homepage of about 3,500 characters, with its menu of links and its own JSON-LD, gives its hours in
+    // the footer. A turn may keep only the start and the end of a long output: the whole page, its links and its
+    // structured data then crowd the footer's hours out of the start, so the passages come before all of them.
+    const rooms = Array.from({ length: 28 }, (_, n) => `Room ${n + 1}: paintings, prints and drawings from the city's own collection, shown in turn.`);
+    const menu = Array.from({ length: 30 }, (_, n) => `<li><a href="/collection/${n + 1}">Collection highlight ${n + 1}</a></li>`).join("");
+    const museum = {
+      "@context": "https://schema.org",
+      "@type": "Museum",
+      name: "City Museum",
+      description: "A museum of the city's art and history, with rooms for paintings, prints, drawings and maps.",
+      address: { "@type": "PostalAddress", streetAddress: "Main Street 1", addressLocality: "Old Town", postalCode: "12345" },
+      sameAs: Array.from({ length: 6 }, (_, n) => `https://social${n + 1}.example.com/citymuseum`),
+    };
+    routes["news.example.org/museum"] = {
+      body: page(
+        `<h1>City Museum</h1><ul>${menu}</ul>${rooms.map((line) => `<p>${line}</p>`).join("")}` +
+          `<script type="application/ld+json">${JSON.stringify(museum)}</script>` +
+          "<footer><p>City Museum</p><p>Main Street 1, Old Town</p><h2>Opening hours</h2><p>Tuesday to Sunday, 10:00 - 18:00</p><p>Closed on Mondays</p></footer>",
+        "City Museum",
+      ),
+    };
+    const out: string[] = [];
+    const io = { out: (line: string) => out.push(line), err: (line: string) => out.push(line) };
+    expect(await runWebReadCli(["http://news.example.org/museum"], { json: true, find: "opening hours" }, io, deps())).toBe(WEB_READ_EXIT_OK);
+    const json = Buffer.from(out.join("\n"), "utf8");
+    const result = (JSON.parse(out.join("\n")) as { pages: PageResult[] }).pages[0]!;
+    expect(result.find).toMatchObject({ terms: ["opening", "hours"], passages: 1, matchedLines: 1, whole: true });
+    expect(result.links).toHaveLength(30);
+    expect(result.structured?.length).toBeGreaterThan(0);
+    // The whole page is there too, after the passages: it alone puts the footer past the output's first 4,000 bytes.
+    expect(result.textChars).toBeGreaterThan(3_000);
+    const pageText = json.lastIndexOf('"text": "<untrusted_page_content');
+    expect(json.indexOf('"find": {')).toBeLessThan(pageText);
+    // The hours and the lines above them come within the output's first 3,000 bytes, ahead of the page, its links and
+    // its structured data.
+    const hours = json.indexOf("Main Street 1, Old Town\\nOpening hours\\nTuesday to Sunday, 10:00 - 18:00");
+    expect(hours).toBeGreaterThan(json.indexOf('"find": {'));
+    expect(hours).toBeLessThan(pageText);
+    expect(hours).toBeLessThan(3_000);
+  });
+
+  it("never calls a page whole, nor says it lacks the terms, when the page was too large to read whole", async () => {
+    // A page whose HTML is cut at the reader's body ceiling: what comes after the cut was never read.
+    const script = `<script>var data = "${"x".repeat(LIMITS.maxBodyBytes + 100_000)}";</script>`;
+    const rooms = Array.from({ length: 6 }, (_, n) => `<p>Room ${n + 1}: paintings, prints and drawings from the city's own collection.</p>`).join("");
+    routes["news.example.org/big"] = { body: page(`<p>The museum opens at 10:00.</p>${rooms}${script}<p>Tickets cost 12 EUR.</p>`, "Big page") };
+    for (const fromCache of [false, true]) {
+      const result = await one("http://news.example.org/big", { find: "tickets opens" });
+      expect(result.status).toBe("read");
+      expect(result.fromCache).toBe(fromCache);
+      expect(result.truncated).toBe(true);
+      expect(result.find).toMatchObject({ terms: ["tickets", "opens"], passages: 1, matchedLines: 1 });
+      expect(result.find).not.toHaveProperty("whole");
+      expect(result.text).toContain("The museum opens at 10:00.");
+      expect(result.text).not.toContain("12 EUR");
+      const text = formatWebRead(await read("http://news.example.org/big", { find: "tickets opens" }));
+      expect(text).toContain("--find: 1 passage(s) for tickets, opens; only the start of this page was read (it is too large to read whole)\n");
+      expect(text).not.toMatch(/whole page|does not say it/);
+      const none = formatWebRead(await read("http://news.example.org/big", { find: "lockers" }));
+      expect(none).toContain("--find: 0 passage(s) for lockers; only the start of this page was read (it is too large to read whole)\n");
+      expect(none).not.toMatch(/whole page|does not say it/);
+    }
   });
 
   it("bounds the text to --max-chars (default 4000)", async () => {
@@ -1321,9 +1398,13 @@ describe("page parsing", () => {
 
   it("splits --find terms and keeps phrases", () => {
     expect(findTerms('opening hours, "public holiday" x')).toEqual(["opening", "hours", "public holiday"]);
-    expect(findPassages(["a", "opening at 9", "b", "c", "d", "closing at 5"], ["opening", "closing"], 1000).passages).toEqual([
-      "a\nopening at 9\nb",
-      "d\nclosing at 5",
+    // Each match with the two lines above it and the one below; windows that touch are one passage.
+    expect(findPassages(["h", "a", "opening at 9", "b", "c", "d", "e", "closing at 5", "f"], ["opening", "closing"], 1000)).toEqual({
+      passages: ["h\na\nopening at 9\nb", "d\ne\nclosing at 5\nf"],
+      matchedLines: 2,
+    });
+    expect(findPassages(["a", "opening at 9", "b", "c", "closing at 5"], ["opening", "closing"], 1000).passages).toEqual([
+      "a\nopening at 9\nb\nc\nclosing at 5",
     ]);
   });
 });

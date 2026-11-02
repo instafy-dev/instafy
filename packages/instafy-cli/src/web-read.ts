@@ -200,8 +200,11 @@ export type PageResult = {
   text?: string;
   textChars?: number;
   truncated?: boolean;
-  /** `whole`: the page is within LIMITS.maxChars, so `text` is all of it and `passages` counts the places that match */
-  find?: { terms: string[]; passages: number; matchedLines: number; whole?: boolean };
+  /**
+   * --find on a page of up to LIMITS.maxChars: `text` here holds the passages (wrapped like the page's `text`, and
+   * ahead of it), and `whole` says the page's `text` is all of the page (not when its HTML was cut at maxBodyBytes)
+   */
+  find?: { terms: string[]; passages: number; matchedLines: number; whole?: true; text?: string };
   links?: Array<{ index: number; text: string; href: string; linkOnly?: true; noReuse?: true }>;
   /** the page is on a site whose terms bar reusing its content (not reading it); `tell` says how it may be used */
   noReuse?: { site: string; reason: string; via?: string[] };
@@ -293,6 +296,8 @@ type CachedPage = {
   redirects: string[];
   /** the addresses the page said it is a copy of (Memento rel=original), redacted */
   originals?: string[];
+  /** the page's HTML was cut at LIMITS.maxBodyBytes, so `lines` are only its start */
+  bodyTruncated?: true;
   lines: string[];
   links: PageLink[];
   structured: StructuredItem[];
@@ -986,12 +991,13 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     contentHash: `sha256:${sha256(response.body)}`,
     redirects,
     ...(response.originals.length ? { originals: response.originals.map((original) => redaction.redactUrl(original).text) } : {}),
+    ...(response.truncated ? { bodyTruncated: true as const } : {}),
     lines: redacted.digest.lines.slice(0, 20_000),
     links: redacted.digest.links,
     structured: redacted.digest.structured,
   };
   if (!response.noStore) ctx.cache.put("pages", requested, record, ctx.now());
-  return present(page, record, false, options, ctx.guard, response.truncated);
+  return present(page, record, false, options, ctx.guard);
 }
 
 /** The model-facing view of a read page: bounded text (or a long page's --find passages) wrapped as untrusted, plus links and data. */
@@ -1001,22 +1007,27 @@ function present(
   fromCache: boolean,
   options: { maxChars: number; links: number; terms: string[] },
   guard: LinkOnlyGuard,
-  bodyTruncated = false,
 ): PageResult {
   const provenance: Provenance = { ...page.provenance, finalUrl: record.finalUrl, title: record.title, readAt: record.readAt };
+  const wrap = (text: string) => wrapUntrusted(text, record.finalUrl, record.readAt, page.provenance.viewer);
   const full = record.lines.join("\n");
   let body = full;
-  let truncated = bodyTruncated;
+  let truncated = record.bodyTruncated === true;
   let find: PageResult["find"];
   if (options.terms.length) {
-    // Only a page longer than the reader's ceiling is cut to the passages that mention a term. A shorter page comes
-    // back whole, with the counts: a line that names no term (a place's hours under its name) keeps the lines around it.
     const found = findPassages(record.lines, options.terms, options.maxChars);
-    const whole = full.length <= LIMITS.maxChars;
-    if (!whole) body = found.passages.join("\n…\n");
-    find = whole
-      ? { terms: options.terms, passages: found.places, matchedLines: found.matchedLines, whole }
-      : { terms: options.terms, passages: found.passages.length, matchedLines: found.matchedLines };
+    const passages = found.passages.join("\n…\n");
+    find = { terms: options.terms, passages: found.passages.length, matchedLines: found.matchedLines };
+    if (full.length > LIMITS.maxChars) {
+      // A page longer than the reader's ceiling is cut to the passages that mention a term.
+      body = passages;
+    } else {
+      // A shorter page comes back whole, so a line that names no term (a place's hours under its name) keeps the
+      // lines around it. Its passages come first, ahead of the page, its links and its data: a turn that keeps only
+      // the start and the end of a long output still sees them. A page whose HTML was cut is only its start.
+      if (!truncated) find.whole = true;
+      if (found.passages.length) find.text = wrap(passages);
+    }
   } else if (full.length > options.maxChars) {
     truncated = true;
     body = `${full.slice(0, options.maxChars)}…`;
@@ -1050,10 +1061,10 @@ function present(
     redirects: record.redirects,
     contentHash: record.contentHash,
     fromCache,
-    text: wrapUntrusted(body, record.finalUrl, record.readAt, page.provenance.viewer),
+    ...(find ? { find } : {}),
+    text: wrap(body),
     textChars: body.length,
     truncated,
-    ...(find ? { find } : {}),
     links,
     structured,
     ...(structuredDropped ? { structuredDropped } : {}),
@@ -1273,10 +1284,15 @@ export function formatWebRead(report: WebReadReport): string {
       out.push(`  read ${page.provenance.readAt} by ${page.provenance.viewer}${page.fromCache ? " (cached)" : ""}, HTTP ${page.httpStatus}`);
       if (page.noReuse) out.push(`  no-reuse: ${page.noReuse.site} (${page.noReuse.reason})`);
       if (page.find) {
-        const shown = page.find.whole
-          ? `, in the whole page below (a page of up to ${LIMITS.maxChars} characters comes back whole)`
-          : page.find.passages ? "" : ": this page does not say it";
-        out.push(`  --find: ${page.find.passages} passage(s) for ${page.find.terms.join(", ")}${shown}`);
+        const { passages, whole } = page.find;
+        const shown = whole
+          ? `${passages ? ", first, then the whole page" : "; the whole page is below"} (a page of up to ${LIMITS.maxChars} characters comes back whole)`
+          : page.truncated
+            ? "; only the start of this page was read (it is too large to read whole)"
+            : passages ? "" : ": this page does not say it";
+        out.push(`  --find: ${passages} passage(s) for ${page.find.terms.join(", ")}${shown}`);
+        // A short page's passages, ahead of its links and its text (both below).
+        if (page.find.text) out.push(page.find.text);
       }
       // The title and link texts are written by the site too, so they go inside the untrusted wrapper with the text.
       const pageWritten = [`title: ${page.provenance.title || "(none)"}`];
@@ -1356,9 +1372,9 @@ export function registerWebCommand(program: Command): Command {
     .argument("<url...>", "http(s) URLs to read")
     .option(
       "--find <terms>",
-      `Count the passages that mention these words ("quoted phrases" kept whole); a page longer than ${LIMITS.maxChars} characters comes back as those passages only, a shorter one whole`,
+      `The passages that mention these words ("quoted phrases" kept whole): a page longer than ${LIMITS.maxChars} characters comes back as those passages only, a shorter one with them first and then whole`,
     )
-    .option("--max-chars <n>", `Most characters of text per page, or of a long page's --find passages (default ${LIMITS.defaultChars}, at most ${LIMITS.maxChars})`)
+    .option("--max-chars <n>", `Most characters of text per page, or of its --find passages (default ${LIMITS.defaultChars}, at most ${LIMITS.maxChars})`)
     .option("--links <n>", `Most links per page (default ${LIMITS.defaultLinks}, at most ${LIMITS.maxLinks})`)
     .option("--fresh", "Read again even if this workspace's cache has the page (never re-reads a stopped URL)")
     .option("--json", "Output JSON")
