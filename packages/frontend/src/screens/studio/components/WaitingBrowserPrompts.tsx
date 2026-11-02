@@ -136,13 +136,20 @@ export function WaitingBrowserPrompts({
     [asking, targets],
   );
 
+  // Said only when it changes: the tabs that show it belong to the whole layout.
   const waitingKey = [...new Set(waiting.map(({ target }) => target.conversationId))].sort().join("\n");
   const onWaitingChangeRef = useRef(onWaitingChange);
   onWaitingChangeRef.current = onWaitingChange;
+  const saidKey = useRef("");
   useEffect(() => {
+    if (saidKey.current === waitingKey) return;
+    saidKey.current = waitingKey;
     onWaitingChangeRef.current(new Set(waitingKey ? waitingKey.split("\n") : []));
   }, [waitingKey]);
-  useEffect(() => () => onWaitingChangeRef.current(new Set()), []);
+  useEffect(() => () => {
+    if (saidKey.current) onWaitingChangeRef.current(new Set());
+    saidKey.current = "";
+  }, []);
 
   const chatsRef = useRef(chats);
   chatsRef.current = chats;

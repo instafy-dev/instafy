@@ -166,7 +166,8 @@ describe("WaitingBrowserPrompts", () => {
     expect(mocks.requestAccessToken).not.toHaveBeenCalled();
     expect(mocks.fetchPendingApproval).not.toHaveBeenCalled();
     expect(mocks.showStatus).not.toHaveBeenCalled();
-    expect(waitingChats()).toEqual([]);
+    // Nothing waits, so the tabs are not told anything.
+    expect(onWaitingChange).not.toHaveBeenCalled();
 
     // Nor for a prompt the origin hands back that is not the person's own run's.
     await render({ runs: [browserRun(runA, chatA)] });
