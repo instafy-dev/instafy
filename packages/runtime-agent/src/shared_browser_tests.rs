@@ -4883,7 +4883,11 @@ fn a_call_that_could_not_reach_the_browser_is_marked_in_its_result() {
         b"",
     ));
     assert_eq!(unreachable.is_error, Some(true));
-    let text = unreachable.content[0].as_text().expect("text content").text.clone();
+    let text = unreachable.content[0]
+        .as_text()
+        .expect("text content")
+        .text
+        .clone();
     assert_eq!(
         unreachable.structured_content,
         Some(json!({ "browserUnavailable": true, "error": { "reason": text } }))

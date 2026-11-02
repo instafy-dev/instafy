@@ -2213,7 +2213,9 @@ mod tests {
             .and_then(|rest| rest.split("## ").next())
             .expect("Replies section");
         assert!(
-            replies.contains("\"I couldn't reach the shop's site, so I read its www. address instead\""),
+            replies.contains(
+                "\"I couldn't reach the shop's site, so I read its www. address instead\""
+            ),
             "{replies}"
         );
         assert_eq!(replies.matches("didn't load").count(), 1, "{replies}");
@@ -2913,7 +2915,10 @@ mod tests {
         let path = workspace.path().join(FRONTEND_PREVIEWS_RELATIVE_PATH);
         fs::write(&path, previous).unwrap();
         ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), FRONTEND_PREVIEWS_TEMPLATE);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            FRONTEND_PREVIEWS_TEMPLATE
+        );
     }
 
     /// The bundled browser skill names the Personal Browser's tab tools; v7 is

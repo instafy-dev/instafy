@@ -2846,7 +2846,11 @@ mod tests {
         ));
         // Arrived: a title of its own, its address, or a bare media type,
         // which names nothing and so is no title to show.
-        for title in ["Visit Lisboa", "www.visitlisboa.com/logo.svg", "image/svg+xml"] {
+        for title in [
+            "Visit Lisboa",
+            "www.visitlisboa.com/logo.svg",
+            "image/svg+xml",
+        ] {
             assert!(
                 !browser_page_loading(
                     &target("https://www.visitlisboa.com/logo.svg", title),
@@ -2857,7 +2861,10 @@ mod tests {
         }
         assert_eq!(normalize_browser_page_title("image/svg+xml"), None);
         // A blank tab is on its way nowhere.
-        assert!(!browser_page_loading(&target("about:blank", "about:blank"), &none));
+        assert!(!browser_page_loading(
+            &target("about:blank", "about:blank"),
+            &none
+        ));
         assert!(!browser_page_loading(&target("about:blank", ""), &leaving));
     }
 
