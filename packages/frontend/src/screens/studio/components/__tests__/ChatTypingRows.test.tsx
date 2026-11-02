@@ -315,6 +315,44 @@ describe("ChatTypingRows", () => {
     expect(shown()).toBe("Starting…");
   });
 
+  it("keeps the runtime-busy notice when the row above covers the typing row", async () => {
+    // A routed card reads "Opening Instafy's browser…" for its browser turn
+    // and covers the typing row's "Starting…"; a turn that waits for a free
+    // machine still asks the person to act, so its notice stays.
+    const notice =
+      'Your cloud runtime is busy in "Space B". Stop it there or let it go idle, and this message sends once a runtime is free. It waits up to 30 minutes.';
+    const row = (text: string, wraps: boolean) => (
+      <ChatTypingRows
+        peerTypingLabel={null}
+        isAssistantTyping
+        isAssistantTypingCoveredByJobThreadPreview
+        typingAgents={[]}
+        hasMultipleTypingAgents={false}
+        typingAgentHandle="octo"
+        typingAgentAvatarSeed="octo"
+        typingIndicatorState={{ phase: "waiting", label: null }}
+        typingStatusLabel={text}
+        typingStatusAriaLabel={text}
+        typingStatusWraps={wraps}
+        isThinkingLabelExpanded={false}
+        onToggleThinkingLabel={() => undefined}
+        latestDisplayedMessageId="routed-card"
+        renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+      />
+    );
+    const shown = () =>
+      container.querySelector('[data-testid="assistant-typing-indicator"]:not([aria-hidden="true"]) [data-sweep-text]')
+        ?.textContent ?? null;
+    await act(async () => {
+      root.render(row(notice, true));
+    });
+    expect(shown()).toBe(notice);
+    await act(async () => {
+      root.render(row("Starting…", false));
+    });
+    expect(shown()).toBeNull();
+  });
+
   it("keeps every typing label on one truncated line except the runtime-busy notice", async () => {
     // A multi-agent count or a fallback could wrap at phone width and flip
     // between one and two lines as runs changed; only the clickable reasoning

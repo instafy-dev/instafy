@@ -157,8 +157,14 @@ export function ChatTypingRows({
     options?: AssistantAvatarRenderOptions,
   ) => JSX.Element;
 }) {
+  // A row that shows a turn's own state covers this one, except the
+  // runtime-busy notice: it asks the person to act, which no line above it
+  // says (a routed card reads "Opening Instafy's browser…" over a turn that
+  // waits for a machine).
   const showAssistantStatus =
-    isAssistantTyping && !isAssistantTypingCoveredByJobThreadPreview && !suppressAssistantStatus;
+    isAssistantTyping &&
+    (!isAssistantTypingCoveredByJobThreadPreview || typingStatusWraps) &&
+    !suppressAssistantStatus;
   const usesCanonicalOcto = usesCanonicalOctoAvatar({
     handle: typingAgentHandle,
     avatarSeed: typingAgentAvatarSeed,
