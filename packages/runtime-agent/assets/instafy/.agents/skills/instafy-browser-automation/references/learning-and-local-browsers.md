@@ -1,8 +1,9 @@
 # Browser automation: learned blocks and the other browsers
 
 The parts of `instafy-browser-automation` a turn reads only when it needs them: how to write a
-learned block for a site, the owner-local `observe` tool, and the Personal Browser's own notes.
-A Personal or Shared Browser turn's run text says how its browser works.
+learned block for a site and the cues a run reports for one, the owner-local `observe` tool, the
+Personal Browser's own notes, and what a script that drives a browser keeps in mind. A Personal
+or Shared Browser turn's run text says how its browser works.
 
 ## Learning boundary
 
@@ -99,3 +100,28 @@ Good:
 Bad:
 - “Attach to `http://127.0.0.1:9223`, open `http://host.docker.internal:56768/`, then run these exact commands...”
 - “Use this exact browser CLI / debugger command...”
+
+## Worked cues
+
+- When a task involves more than one actionable browser cue (for example route + field + submit + result link + extraction label), print those exact successful cues in the command's structured JSON evidence under a compact `workedCues` object or array. Use only cues that actually worked:
+  - route or relative path
+  - consent button text
+  - field label / name / id
+  - chosen query / option value / option text
+  - exact submit button text / aria label / stable selector
+  - exact result-link text / stable selector
+  - exact page label used for the final extraction
+- Do not include failed guesses, alternative controls that were not used, or generic summaries like `visible search control` or `matching result`.
+- When the prompt asks for an output key like `ARTICLE_TOKEN` but the page uses a human label like `Article token:`, extract from the actual page label and then map it into the requested final reply line. Do not assume the page literally contains the requested output key.
+- When a successful cue is an exact visible control or link text, report only that exact cue. Do not append nearby helper text, sibling labels, or surrounding UI copy such as `Search result` once the worked cue is already known to be `Beta`.
+- When a task is likely to recur, store the reusable cue pattern in a learned block instead of encoding tool/runtime syntax into memory.
+
+## A script that drives a browser
+
+- If one field is missing but you are already on the correct page, prefer a broader in-process fallback before launching a new command:
+  - read the nearest parent text,
+  - read the surrounding section text,
+  - read `body.innerText()` and extract the needed value from the actual visible label.
+- Preserve the shared browser safely during cleanup:
+  - never call `browser.close()` unless the user explicitly asked to close the session
+  - guard `browser.disconnect()` because some attached browser objects do not expose it

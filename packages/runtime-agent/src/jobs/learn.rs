@@ -413,13 +413,14 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // out of the browser, research that ends in a page went to it from the first message, and
     // browser work that did not find its answer still carried on there.
     include_str!("legacy/browser-automation-v23.md"),
-    // From before how to write a learned block, the owner-local tool and the Personal Browser's
-    // own notes moved to `references/learning-and-local-browsers.md`, so a browser turn carries
-    // the whole skill.
+    // From before how to write a learned block, the owner-local tool, the Personal Browser's
+    // own notes and what a browser script keeps in mind moved to
+    // `references/learning-and-local-browsers.md`, so a browser turn carries the whole skill.
     include_str!("legacy/browser-automation-v24.md"),
 ];
-/// What a turn reads of the browser skill only when it needs it, with a command: how to write a
-/// learned block for a site, the owner-local `observe` tool and the Personal Browser's own notes.
+/// What a turn with a shell reads of the browser skill only when it needs it: how to write a
+/// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,
+/// the Personal Browser's own notes, and what a script that drives a browser keeps in mind.
 const BROWSER_AUTOMATION_REFERENCE_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-browser-automation/references/learning-and-local-browsers.md"

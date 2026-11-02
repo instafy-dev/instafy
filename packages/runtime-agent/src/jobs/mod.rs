@@ -1630,6 +1630,16 @@ fn select_recursive_context_nodes(
     contexts: &[ContextNode],
     prompt_text: &str,
 ) -> Vec<SelectedContextNode> {
+    select_recursive_context_nodes_admitting(contexts, prompt_text, &|_| true)
+}
+
+/// [`select_recursive_context_nodes`], where a context `admit` refuses is never selected as a
+/// child, so it takes no parent's place from one it admits.
+fn select_recursive_context_nodes_admitting(
+    contexts: &[ContextNode],
+    prompt_text: &str,
+    admit: &dyn Fn(&ContextNode) -> bool,
+) -> Vec<SelectedContextNode> {
     let normalized_prompt = prompt_text.trim().to_ascii_lowercase();
     let prompt_terms = PromptRoutingTerms::new(prompt_text);
     let prompt_exact_cues = extract_exact_routing_cues(prompt_text);
@@ -1715,6 +1725,14 @@ fn select_recursive_context_nodes(
             .get(parent_id.as_str())
             .cloned()
             .unwrap_or_default();
+        let child_ids: Vec<String> = child_ids
+            .into_iter()
+            .filter(|child_id| {
+                contexts_by_id
+                    .get(child_id.as_str())
+                    .is_none_or(|context| admit(context))
+            })
+            .collect();
         let selected_children = select_scored_child_contexts(
             parent_id.as_str(),
             &child_ids,
@@ -1983,32 +2001,78 @@ fn format_project_memory_snapshot(
 }
 
 /// A skill a turn carries whatever its words, whole, and the section of it a turn on a
-/// restored thread is given again. The turn it is pinned to cannot open a file, so it reads
-/// the skill only in its prompt.
+/// restored thread is given again. The turn it is pinned to has no shell: it cannot open a
+/// file, so it reads the skill only in its prompt, and of the other skills it is told only of
+/// those it can use with no shell ([`usable_with_no_shell`]).
 struct PinnedSkill {
     /// The skill's folder under `.agents/skills`.
     id: &'static str,
     relative_path: &'static str,
     /// The heading of the section a restored thread is given.
     section: &'static str,
-    /// The only other skills the turn loads, when its words route them: those it can use with
-    /// no shell. Every other skill (one that builds, runs commands or plans a team, and the
-    /// space's own skills about running the workspace) is left out of its prompt.
-    reads_with: &'static [&'static str],
 }
 
-/// The browser skill, which says how to find a page. With it, a browser turn reads which
-/// sources to trust and how to cite them, and when to ask for the person's location.
+/// The browser skill, which says how to find a page.
 const BROWSER_TURN_SKILL: PinnedSkill = PinnedSkill {
     id: "instafy-browser-automation",
     relative_path: learn::BROWSER_AUTOMATION_RELATIVE_PATH,
     section: "## Finding a page",
-    reads_with: &["instafy-web-research", "instafy-location-sharing"],
 };
 
 /// How much of its pinned skill a turn carries: the browser skill whole. A turn that routes a
-/// skill by its words carries `PROJECT_MEMORY_MAX_FILE_BYTES` of it.
+/// skill by its words carries `PROJECT_MEMORY_MAX_FILE_BYTES` of it, and that much of the
+/// pinned skill counts against the snapshot's budget, so the skills its words route keep the
+/// room they have beside it.
 const PINNED_SKILL_MAX_BYTES: usize = 2 * PROJECT_MEMORY_MAX_FILE_BYTES;
+
+/// The runtime's own skills a turn with no shell cannot use: each builds something, runs
+/// commands (`instafy …`, `git`) or plans a team. Group participation is for a turn that
+/// decides whether to answer a group chat at all, which pins it itself
+/// (`ensure_ambient_participation_context`).
+const SHELL_TURN_SKILLS: &[&str] = &[
+    "instafy-automations",
+    "instafy-bound-sites",
+    "instafy-conversation-history",
+    "instafy-diagnostics",
+    "instafy-frontend-previews",
+    "instafy-git-canonical-conflicts",
+    "instafy-git-canonical-sync",
+    "instafy-group-participation",
+    "instafy-interactive-artifacts",
+    "instafy-learning-policy",
+    "instafy-research-team",
+    "instafy-skill-import-compat",
+    "instafy-space-review",
+];
+
+/// Whether a turn with no shell (a Personal or Shared Browser turn) can use a skill. It cannot
+/// use the space's memory, routing and team skills (`context_kind` `root`, `meta` or
+/// `learned_index`), a skill that runs code of its own (a `scripts/` folder, where the skills
+/// layout keeps the code a skill runs, or a skill pack whose manifest names commands, as the
+/// map pack's does), or one of [`SHELL_TURN_SKILLS`]. It can use every other skill, one the
+/// space added or imported included.
+fn usable_with_no_shell(context: &ContextNode) -> bool {
+    let memory_kind = context
+        .metadata
+        .context_kind
+        .as_deref()
+        .is_some_and(|kind| {
+            ["root", "meta", "learned_index"]
+                .iter()
+                .any(|memory| kind.eq_ignore_ascii_case(memory))
+        });
+    if memory_kind || SHELL_TURN_SKILLS.contains(&context.id.as_str()) {
+        return false;
+    }
+    let scripts = context
+        .path
+        .parent()
+        .is_some_and(|folder| folder.join("scripts").is_dir());
+    let pack_commands = crate::skill_packs::installed_packs()
+        .iter()
+        .any(|pack| pack.name == context.id && (pack.cli.is_some() || !pack.bin.is_empty()));
+    !scripts && !pack_commands
+}
 
 /// The section of a skill only the routing step reads ([`format_browser_routing_preflight_snapshot`]):
 /// a turn that carries the skill whole leaves it out.
@@ -2152,7 +2216,8 @@ fn format_project_memory_snapshot_with_preferences(
         }
     };
     // A turn's pinned skill is carried whole, up to `PINNED_SKILL_MAX_BYTES`, but for the
-    // section only the routing step reads: the turn cannot open the file for the rest.
+    // section only the routing step reads: the turn cannot open the file for the rest. It takes
+    // as much of the budget as a skill its words route would, so those keep their room.
     let append_pinned_skill =
         |label: &str, path: &Path, remaining: &mut usize, out: &mut String| {
             if *remaining == 0 || !path.exists() {
@@ -2164,7 +2229,7 @@ fn format_project_memory_snapshot_with_preferences(
                 return;
             };
             let text = without_markdown_h2_section(&text, ROUTING_PREFLIGHT_SECTION);
-            let mut end = text.len().min(PINNED_SKILL_MAX_BYTES.min(*remaining));
+            let mut end = text.len().min(PINNED_SKILL_MAX_BYTES);
             while !text.is_char_boundary(end) {
                 end -= 1;
             }
@@ -2176,7 +2241,7 @@ fn format_project_memory_snapshot_with_preferences(
             if cut || end < text.len() {
                 out.push_str("[truncated]\n");
             }
-            *remaining = remaining.saturating_sub(end);
+            *remaining = remaining.saturating_sub(end.min(PROJECT_MEMORY_MAX_FILE_BYTES));
         };
 
     append_file("AGENTS.md", &agents_doc_path, &mut remaining, &mut out);
@@ -2204,9 +2269,14 @@ fn format_project_memory_snapshot_with_preferences(
 
     if remaining > 0 && skills_dir.is_dir() {
         let contexts = build_top_level_context_nodes(workspace_dir);
+        // A turn with a pinned skill has no shell: it is told only of the skills it can use.
+        let told_of = |context: &ContextNode| match pinned {
+            Some(pinned) => context.id == pinned.id || usable_with_no_shell(context),
+            None => true,
+        };
         if !contexts.is_empty() {
             out.push_str("\n## Persistent contexts index (.agents/skills)\n");
-            for context in &contexts {
+            for context in contexts.iter().filter(|context| told_of(context)) {
                 if remaining == 0 {
                     break;
                 }
@@ -2230,7 +2300,19 @@ fn format_project_memory_snapshot_with_preferences(
                 }
             }
 
-            let mut selected_contexts = select_recursive_context_nodes(&contexts, prompt_text);
+            // A skill such a turn cannot use takes no routing place: the space's memory and
+            // routing skills are still walked (they are always included), and its pinned skill
+            // loads whatever its words, so it takes none either.
+            let mut selected_contexts =
+                select_recursive_context_nodes_admitting(&contexts, prompt_text, &|context| {
+                    match pinned {
+                        Some(pinned) => {
+                            context.metadata.always_include
+                                || (context.id != pinned.id && usable_with_no_shell(context))
+                        }
+                        None => true,
+                    }
+                });
             // A pinned skill the words did not route is loaded too, under its parent.
             if let Some(pinned) = pinned_skill
                 && !selected_contexts.iter().any(|context| context.id == pinned)
@@ -2262,11 +2344,17 @@ fn format_project_memory_snapshot_with_preferences(
             } else {
                 Vec::new()
             };
-            // A turn with a pinned skill loads, besides it, only the skills it reads with; the
+            // A turn with a pinned skill loads, besides it, only the skills it can use; the
             // learned blocks its words route still come.
-            if let Some(pinned) = pinned {
+            if pinned.is_some() {
+                let by_id: HashMap<&str, &ContextNode> = contexts
+                    .iter()
+                    .map(|context| (context.id.as_str(), context))
+                    .collect();
                 selected_contexts.retain(|context| {
-                    context.id == pinned.id || pinned.reads_with.contains(&context.id.as_str())
+                    by_id
+                        .get(context.id.as_str())
+                        .is_some_and(|context| told_of(context))
                 });
                 let kept: HashSet<String> = selected_contexts
                     .iter()
@@ -10480,7 +10568,9 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             );
         }
 
-        if let Some(section) = format_client_context_section(job.payload.get("metadata")) {
+        if let Some(section) =
+            format_client_context_section(job.payload.get("metadata"), !browser_turn)
+        {
             append_prompt_section(
                 &mut prompt,
                 &mut prompt_section_metrics,
@@ -17929,7 +18019,9 @@ fn extract_client_timezone(metadata: Option<&JsonValue>) -> Option<String> {
         .map(str::to_string)
 }
 
-fn format_client_context_section(metadata: Option<&JsonValue>) -> Option<String> {
+/// The person's time zone, language and local time. `commands`: the turn can run the `instafy`
+/// commands that take `--timezone`, and is told to pass it; a browser turn cannot.
+fn format_client_context_section(metadata: Option<&JsonValue>, commands: bool) -> Option<String> {
     let client = client_metadata(metadata)?;
 
     let timezone = client
@@ -17968,9 +18060,12 @@ fn format_client_context_section(metadata: Option<&JsonValue>) -> Option<String>
     formatted.push_str(
         "- A timestamp's UTC offset or locale does not identify the user's IANA timezone. If the client timezone is unknown, use an explicit user choice or a reliable established preference; otherwise ask when a timezone is needed. Do not infer it from the runtime clock or assume UTC.\n",
     );
-    formatted.push_str(
-        "- For `instafy recommendations remind`, `instafy automations create`, or a schedule update that needs a timezone, always pass `--timezone` explicitly using the resolved timezone. Preserve an explicit user choice over client context.\n\n",
-    );
+    if commands {
+        formatted.push_str(
+            "- For `instafy recommendations remind`, `instafy automations create`, or a schedule update that needs a timezone, always pass `--timezone` explicitly using the resolved timezone. Preserve an explicit user choice over client context.\n",
+        );
+    }
+    formatted.push('\n');
     Some(formatted)
 }
 
@@ -32154,7 +32249,7 @@ mod tests {
         });
 
         let section =
-            format_client_context_section(Some(&metadata)).expect("client context section");
+            format_client_context_section(Some(&metadata), true).expect("client context section");
 
         assert!(
             section.contains("Client context:"),
@@ -32193,7 +32288,7 @@ mod tests {
                 },
                 "prompt_metadata": {"client": {"timezone": "Europe/Vienna"}}
             });
-            let section = format_client_context_section(Some(&metadata)).unwrap();
+            let section = format_client_context_section(Some(&metadata), true).unwrap();
             assert!(section.contains("Local timezone: unknown"));
             assert!(section.contains("Local date/time: 2026-10-05T21:15:00+02:00"));
             assert!(!section.contains("Local timezone: Europe/Vienna"));
@@ -32275,15 +32370,18 @@ mod tests {
 
     #[test]
     fn client_context_distinguishes_missing_metadata_unknown_timezone_and_real_utc() {
-        assert!(format_client_context_section(None).is_none());
-        assert!(format_client_context_section(Some(&json!({"other": true}))).is_none());
-        let unknown = format_client_context_section(Some(&json!({
-            "client": {"timezone": null}
-        })))
+        assert!(format_client_context_section(None, true).is_none());
+        assert!(format_client_context_section(Some(&json!({"other": true})), true).is_none());
+        let unknown = format_client_context_section(
+            Some(&json!({
+                "client": {"timezone": null}
+            })),
+            true,
+        )
         .unwrap();
         assert!(unknown.contains("Local timezone: unknown"));
         let utc = json!({"prompt_metadata": {"client": {"timezone": "UTC"}}});
-        let known = format_client_context_section(Some(&utc)).unwrap();
+        let known = format_client_context_section(Some(&utc), true).unwrap();
         assert!(known.contains("Local timezone: UTC\n"));
         assert_eq!(extract_client_timezone(Some(&utc)).as_deref(), Some("UTC"));
     }
