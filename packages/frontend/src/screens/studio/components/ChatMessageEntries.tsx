@@ -61,9 +61,10 @@ import { extractThreadRunStatus } from "./threadPreviewHelpers";
 import { useAgentJobThreadPreviewState } from "./useAgentJobThreadPreviewState";
 import { useAuthorizedImage, useNearViewport } from "./useAuthorizedImage";
 import { sanitizeChatMessageCopyEvent } from "./chatSelectionCopy";
+import "./ChatIdentityLayout.css";
 
 const { getRawUrl: getWorkspaceFileRawUrl } = controllerClient.workspace.files;
-const CHAT_LEFT_SPINE_OFFSET_CLASS = "left-[-26px]";
+const CHAT_LEFT_SPINE_OFFSET_CLASS = "chat-message-gutter-spine left-[-26px]";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -123,7 +124,7 @@ export function NotchedMessageShell({
       data-chat-message-id={messageId}
       data-message-type={messageType}
       data-chat-message-copy-root="true"
-      className={`group relative inline-flex ${widthClassName} min-w-0 flex-col items-start ${paddingClassName} text-sm text-slate-700 dark:text-slate-200 ${className ?? ""}`.trim()}
+      className={`chat-message-shell group relative inline-flex ${widthClassName} min-w-0 flex-col items-start ${paddingClassName} text-sm text-slate-700 dark:text-slate-200 ${className ?? ""}`.trim()}
       onCopy={handleChatMessageCopy}
       onPointerDownCapture={onPointerDownCapture}
       onPointerDown={onPointerDown}
@@ -1209,7 +1210,7 @@ export function AssistantMessageEntry({
             size="icon"
             radius="full"
             onPress={handleOpenActions}
-            className="absolute left-full top-1 ml-1 hidden h-6 w-6 p-0 text-slate-500 opacity-0 pointer-events-none transition-opacity sm:inline-flex hover:text-slate-700 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 [@media(hover:none)]:hidden hover:!bg-transparent data-[hovered]:!bg-transparent data-[pressed]:!bg-transparent dark:text-slate-400 dark:hover:text-slate-200 dark:hover:!bg-transparent dark:data-[hovered]:!bg-transparent dark:data-[pressed]:!bg-transparent"
+            className="chat-message-actions-trigger absolute left-full top-1 ml-1 h-6 w-6 p-0 text-slate-500 transition-opacity hover:text-slate-700 hover:!bg-transparent data-[hovered]:!bg-transparent data-[pressed]:!bg-transparent dark:text-slate-400 dark:hover:text-slate-200 dark:hover:!bg-transparent dark:data-[hovered]:!bg-transparent dark:data-[pressed]:!bg-transparent"
             aria-label="Message actions"
             data-testid="chat-message-actions"
           >
@@ -1223,7 +1224,7 @@ export function AssistantMessageEntry({
   return (
     <div
       data-chat-message-id={message.id}
-      className="group relative inline-flex max-w-full"
+      className="chat-message-shell group relative inline-flex max-w-full"
       onPointerDown={handleBubblePointerDown}
       onPointerMove={handleBubblePointerMove}
       onPointerUp={handleBubblePointerUp}
@@ -1240,7 +1241,7 @@ export function AssistantMessageEntry({
         failureMessage={runFailurePresentation ? message : null}
         data-testid="chat-bubble-assistant"
         data-message-type={messageType ?? undefined}
-        className={`${CHAT_BUBBLE_MAX_WIDTH.alert} px-4 py-3 text-sm`}
+        className={`relative ${CHAT_BUBBLE_MAX_WIDTH.alert} px-4 py-3 text-sm`}
       >
         {runFailurePresentation ? (
           <RunFailureMessageBody message={message} presentation={runFailurePresentation} />
@@ -1257,21 +1258,21 @@ export function AssistantMessageEntry({
             <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} unsavedReason={message.unsavedReason ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
           </div>
         ) : null}
+        {onRequestActions ? (
+          <Button
+            ref={actionAnchorRef}
+            variant="ghost"
+            size="icon"
+            radius="full"
+            onPress={handleOpenActions}
+            className="chat-message-actions-trigger absolute left-full top-1 ml-1 h-6 w-6 p-0 text-slate-500 transition-opacity hover:text-slate-700 hover:!bg-transparent data-[hovered]:!bg-transparent data-[pressed]:!bg-transparent dark:text-slate-400 dark:hover:text-slate-200 dark:hover:!bg-transparent dark:data-[hovered]:!bg-transparent dark:data-[pressed]:!bg-transparent"
+            aria-label="Message actions"
+            data-testid="chat-message-actions"
+          >
+            <MoreHoriz className="h-4 w-4" aria-hidden="true" />
+          </Button>
+        ) : null}
       </ErrorBubbleSurface>
-      {onRequestActions ? (
-        <Button
-          ref={actionAnchorRef}
-          variant="ghost"
-          size="icon"
-          radius="full"
-          onPress={handleOpenActions}
-          className="absolute left-full top-1 ml-1 hidden h-6 w-6 p-0 text-slate-500 opacity-0 pointer-events-none transition-opacity sm:inline-flex hover:text-slate-700 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 [@media(hover:none)]:hidden hover:!bg-transparent data-[hovered]:!bg-transparent data-[pressed]:!bg-transparent dark:text-slate-400 dark:hover:text-slate-200 dark:hover:!bg-transparent dark:data-[hovered]:!bg-transparent dark:data-[pressed]:!bg-transparent"
-          aria-label="Message actions"
-          data-testid="chat-message-actions"
-        >
-          <MoreHoriz className="h-4 w-4" aria-hidden="true" />
-        </Button>
-      ) : null}
     </div>
   );
 }

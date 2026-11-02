@@ -22,6 +22,7 @@ import {
   expectHatchling,
 } from "../../../../components/__tests__/octoCoinExpectations";
 import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
+import { OPEN_AGENT_PROFILE_EVENT, type OpenAgentProfileDetail } from "../agentProfileOpen";
 
 // The face is Octo's tile (OctoCoin, docs/Brand.md): white with the shared
 // avatar coin shadow in light, reversed in dark, one ink. jsdom cannot resolve dark: variants, so the tile
@@ -48,8 +49,90 @@ describe("ChatTypingRows", () => {
       root.unmount();
     });
     vi.useRealTimers();
+    vi.unstubAllGlobals();
     container.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  const soloStatusProps = {
+    identityLayout: "solo" as const,
+    peerTypingLabel: null,
+    isAssistantTyping: true,
+    isAssistantTypingCoveredByJobThreadPreview: false,
+    typingAgents: [],
+    hasMultipleTypingAgents: false,
+    typingAgentHandle: "octo",
+    typingAgentAvatarSeed: "octo",
+    typingIndicatorState: { phase: "thinking" as const, label: null },
+    typingStatusLabel: "Thinking…",
+    typingStatusAriaLabel: "Octo is thinking",
+    isThinkingLabelExpanded: false,
+    onToggleThinkingLabel: () => undefined,
+    latestDisplayedMessageId: "question",
+    renderAssistantAvatar: () => <span data-testid="assistant-avatar" />,
+  };
+
+  it.each([
+    { label: "Thinking…", phase: "thinking" as const, wraps: false, motion: "thinking" },
+    { label: "Checking the opening hours…", phase: "thinking" as const, wraps: false, motion: "thinking" },
+    { label: 'Your cloud runtime is busy in "Space B". Stop it there or wait until it is free.', phase: "waiting" as const, wraps: true, motion: "idle" },
+  ])("keeps solo status '$label' beside one small face without a heading or gutter", async ({ label, phase, wraps, motion }) => {
+    await act(async () => {
+      root.render(<ChatTypingRows {...soloStatusProps} typingIndicatorState={{ phase, label: null }} typingStatusLabel={label} typingStatusWraps={wraps} />);
+    });
+    const indicator = container.querySelector('[data-testid="assistant-typing-indicator"]');
+    const face = indicator?.querySelector('[data-testid="assistant-thinking-octo-compact"]');
+    expect(face).toBeInstanceOf(HTMLElement);
+    expect(face?.querySelector(".octo-mark")?.getAttribute("data-octo-motion")).toBe(motion);
+    expect(container.querySelector(".chat-message-avatar-gutter")).toBeNull();
+    expect(container.querySelector('[data-testid="chat-speaker-inline"]')).toBeNull();
+    const text = indicator?.querySelector("[data-sweep-text]");
+    expect(text?.textContent).toBe(label);
+    expect(text?.classList.contains("truncate")).toBe(!wraps);
+  });
+
+  it("keeps the solo thinking face still when reduced motion is requested", async () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+      addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    }));
+    await act(async () => {
+      root.render(<ChatTypingRows {...soloStatusProps} />);
+    });
+    const face = container.querySelector('[data-testid="assistant-thinking-octo-compact"]');
+    expect(face?.querySelector("svg")?.getAttribute("data-octo-animated")).toBe("false");
+    expect(face?.querySelectorAll("animate, animateTransform")).toHaveLength(0);
+  });
+
+  it("retains exact profile targets for same-handle participants in a compact heading", async () => {
+    const details: OpenAgentProfileDetail[] = [];
+    const onProfile = (event: Event) => details.push((event as CustomEvent<OpenAgentProfileDetail>).detail);
+    window.addEventListener(OPEN_AGENT_PROFILE_EVENT, onProfile);
+    try {
+      await act(async () => {
+        root.render(<ChatTypingRows {...soloStatusProps} identityLayout="participants" hasMultipleTypingAgents typingAgents={[
+          { handle: "reviewer", displayName: "Reviewer", avatarSeed: "hatchling:2", id: "agent-a", isThinking: true },
+          { handle: "reviewer", displayName: "Reviewer", avatarSeed: "hatchling:4", id: "agent-b", isThinking: false },
+        ]} />);
+      });
+      const profiles = container.querySelectorAll<HTMLButtonElement>('.chat-typing-speaker-header [data-testid="chat-speaker-agent-profile"]');
+      expect(profiles).toHaveLength(2);
+      await act(async () => { profiles[0].click(); profiles[1].click(); });
+      expect(details).toEqual([
+        { handle: "reviewer", avatarSeed: "hatchling:2", agentId: "agent-a" },
+        { handle: "reviewer", avatarSeed: "hatchling:4", agentId: "agent-b" },
+      ]);
+    } finally {
+      window.removeEventListener(OPEN_AGENT_PROFILE_EVENT, onProfile);
+    }
+  });
+
+  it("keeps a custom participant's heading beside its status", async () => {
+    await act(async () => {
+      root.render(<ChatTypingRows {...soloStatusProps} identityLayout="participants" typingAgentHandle="reviewer" typingAgentAvatarSeed="hatchling:2" typingAgentId="agent-a" />);
+    });
+    expect(container.querySelector('.chat-typing-speaker-header [data-testid="chat-speaker-name"]')?.textContent).toBe("reviewer");
+    expect(container.querySelector('[data-testid="assistant-thinking-octo-compact"]')).toBeNull();
   });
 
   it("does not duplicate assistant status text with activity dots", async () => {
@@ -315,7 +398,7 @@ describe("ChatTypingRows", () => {
     expect(shown()).toBe("Starting…");
   });
 
-  it("leaves nothing under the newest row once that row covers it, not even its spacer", async () => {
+  it.each(["solo", "participants"] as const)("leaves nothing under the newest row once it covers the %s status, not even its spacer", async (identityLayout) => {
     // A routed card is the newest row while another AI's turn starts: the
     // typing row says "Starting…" for that turn under the card. Then Studio
     // sends the card's task on, and the card reads "Opening Instafy's
@@ -325,6 +408,7 @@ describe("ChatTypingRows", () => {
     vi.useFakeTimers();
     const row = (covered: boolean, label: string, wraps = false) => (
       <ChatTypingRows
+        identityLayout={identityLayout}
         peerTypingLabel={null}
         isAssistantTyping
         isAssistantTypingCoveredByJobThreadPreview={covered}
@@ -343,7 +427,7 @@ describe("ChatTypingRows", () => {
       />
     );
     const rowShown = () => ({
-      faces: container.querySelectorAll('[data-testid="assistant-avatar"]').length,
+      faces: container.querySelectorAll('[data-testid="assistant-avatar"], [data-testid="assistant-thinking-octo-compact"]').length,
       speakers: container.querySelectorAll('[data-testid="chat-speaker-marker"]').length,
       typingRow: container.querySelector('[data-testid="assistant-typing-indicator"]') !== null,
     });
@@ -723,11 +807,13 @@ describe("ChatTypingRows", () => {
       (element?.getAttribute("class") ?? "").split(/\s+/).filter((token) => !/^[hw]-\d+$/.test(token));
     expect(withoutSize(compactMark.parentElement)).toEqual(withoutSize(gutterMark.parentElement));
     expect(compactMark.getAttribute("class")).toBe(gutterMark.getAttribute("class"));
-    expect(compact?.closest(".sm\\:hidden")).not.toBeNull();
+    expect(compact?.closest(".chat-speaker-inline-avatar--narrow")).not.toBeNull();
     expect(compactMark.getAttribute("data-octo-motion")).toBe("thinking");
     expect(compactMark.getAttribute("data-octo-scroll-reactive")).toBe("true");
-    // The gutter keeps the only chat-avatar-assistant selector on the row.
-    expect(container.querySelectorAll('[data-testid="chat-avatar-assistant"]')).toHaveLength(1);
+    // The gutter and transcript's compact profile header carry the same
+    // face; their visibility is mutually exclusive at the pane breakpoint.
+    expect(container.querySelectorAll('.chat-message-avatar-gutter [data-testid="chat-avatar-assistant"]')).toHaveLength(1);
+    expect(container.querySelector('.chat-typing-speaker-header [data-testid="chat-speaker-name"]')?.textContent).toBe("Octo");
   });
 
   it("gives the thinking Octo of a multi-agent row the same coin", async () => {
@@ -788,12 +874,13 @@ describe("ChatTypingRows", () => {
     expect(container.textContent).not.toContain("Starting…");
   });
 
-  it("drops the status row at once when the reply landed while it was up", async () => {
+  it.each(["solo", "participants"] as const)("drops the %s status row at once when the reply landed while it was up", async (identityLayout) => {
     // Seen on production: octo's reply appeared with its avatar above it,
     // and a second octo avatar sat under the finished answer for seconds,
     // because the spacer meant for a reply still on its way outlived one
     // that had already arrived.
     const props = {
+      identityLayout,
       peerTypingLabel: null,
       isAssistantTypingCoveredByJobThreadPreview: false,
       typingAgents: [],

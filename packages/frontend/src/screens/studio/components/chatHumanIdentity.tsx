@@ -3,6 +3,7 @@ import { extractChatClientIdentity } from "./chatMessageDetailHelpers";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import { formatSpeakerTimestamp } from "./chatSpeakerTimestamp";
 import { HumanProfilePopover } from "../../../profile/HumanProfilePopover";
+import "./ChatIdentityLayout.css";
 
 export type HumanChatIdentity = {
   avatarSeed: string | null;
@@ -39,7 +40,7 @@ export function HumanSpeakerIdentityLabel({
   timestamp?: number | null;
   projectId?: string | null;
   /**
-   * "narrow" hides the label's own avatar at sm+ where the message row's
+   * "narrow" hides the label's own avatar in a wide transcript where the row's
    * avatar gutter shows the face instead, so name and body share one left
    * alignment line (#177).
    */
@@ -52,7 +53,7 @@ export function HumanSpeakerIdentityLabel({
       data-testid="chat-human-speaker-label"
     >
       <HumanProfilePopover projectId={projectId} userId={avatarSeed} displayName={label} className="inline-flex min-w-0 items-center gap-2 rounded-lg text-left">
-        <span className={`flex-none ${avatarVisibility === "narrow" ? "sm:hidden" : ""}`.trim()}>
+        <span className={`chat-speaker-inline-avatar flex-none ${avatarVisibility === "narrow" ? "chat-speaker-inline-avatar--narrow" : ""}`.trim()}>
           <ChatMessageAvatar
             kind="human"
             seed={avatarSeed}

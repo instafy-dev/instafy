@@ -1299,6 +1299,19 @@ describe("ChatComposerSurface", () => {
     expect(form?.className).toContain(CHAT_COMPOSER_COLUMN_CLASS_NAME);
   });
 
+  it("reserves the transcript scrollbar space without remounting the editor", async () => {
+    const props = createProps({ scrollbarInset: 15 });
+    await act(async () => root.render(<ChatComposerSurface {...props} />));
+    const form = container.querySelector("form")!;
+    const editor = container.querySelector('[data-testid="chat-input"]');
+    expect(editor).not.toBeNull();
+    expect(form.parentElement?.style.paddingInlineEnd).toBe("15px");
+    await act(async () => root.render(<ChatComposerSurface {...props} scrollbarInset={0} />));
+    expect(Number.parseFloat(form.parentElement!.style.paddingInlineEnd)).toBe(0);
+    expect(container.querySelector("form")).toBe(form);
+    expect(container.querySelector('[data-testid="chat-input"]')).toBe(editor);
+  });
+
   it("insets the active goal card from scroll edges", async () => {
     await act(async () => {
       root.render(

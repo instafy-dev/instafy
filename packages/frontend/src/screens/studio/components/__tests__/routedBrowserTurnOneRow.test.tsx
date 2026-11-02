@@ -320,15 +320,19 @@ function chatPanel(step: Step) {
 }
 
 /**
- * Whether a face shows at a width, from its classes and its ancestors': on a
- * phone the avatar gutter collapses (`hidden sm:block`) and a row's inline
- * face (`sm:hidden`) shows instead; on a wider screen it is the other way.
+ * Standalone rows retain a viewport fallback: phone hides the gutter and
+ * shows inline faces; desktop does the reverse. The transcript-only typing
+ * heading stays hidden here. Pane-aware visibility is covered in the browser.
  */
 function shows(element: Element, width: "phone" | "desktop"): boolean {
   for (let node: Element | null = element; node; node = node.parentElement) {
     const classes = Array.from(node.classList);
-    if (width === "phone" && classes.includes("hidden")) return false;
+    if (classes.includes("chat-typing-speaker-header")) return false;
+    if (width === "phone" && (classes.includes("hidden") ||
+      classes.includes("chat-message-avatar-gutter--responsive"))) return false;
     if (width === "desktop" && (classes.includes("sm:hidden") ||
+      classes.includes("chat-narrow-speaker-identity") ||
+      classes.includes("chat-speaker-inline-avatar--narrow") ||
       (classes.includes("hidden") && !classes.some((name) => /^sm:(block|flex|inline|inline-flex|grid)$/.test(name))))) {
       return false;
     }

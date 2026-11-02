@@ -157,10 +157,11 @@ describe("ConversationMessageRows", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function renderSpeakerBoundaryMessages(messages: ChatMessage[], target?: string, highlight: string | undefined = target) {
+  async function renderSpeakerBoundaryMessages(messages: ChatMessage[], target?: string, highlight: string | undefined = target, identityLayout: "solo" | "participants" = "participants") {
     await act(async () => {
       root.render(
         <ConversationMessageRows
+          identityLayout={identityLayout}
           messages={messages}
           targetedMessageId={target}
           highlightedMessageId={highlight}
@@ -185,6 +186,68 @@ describe("ConversationMessageRows", () => {
     });
   }
 
+  it("omits repeated solo reply headings while preserving speaker semantics and message actions", async () => {
+    const message = createMessage({ content: "The route is ready.", timestamp: Date.UTC(2026, 10, 2, 10), metadata: { agent: { handle: "octo" } } });
+    await renderSpeakerBoundaryMessages([message], undefined, undefined, "solo");
+    expect(container.querySelector('[data-testid="chat-speaker-inline"]')).toBeNull();
+    expect(container.querySelector('.chat-message-row time')).toBeNull();
+    expect(container.querySelector('[role="article"][aria-label="Octo"]')?.textContent).toContain("The route is ready.");
+    expect(container.querySelector('[aria-label="Message actions"]')).not.toBeNull();
+    await renderSpeakerBoundaryMessages([message], undefined, undefined, "participants");
+    expect(container.querySelector('[data-testid="chat-speaker-name"]')?.textContent).toBe("Octo");
+    expect(container.querySelector('.chat-message-row time')).not.toBeNull();
+  });
+
+  it("places day and hour-gap landmarks outside message content and cached rows", async () => {
+    const stamp = (day: number, hour: number, minute: number) => new Date(2026, 10, day, hour, minute).getTime();
+    const messages = [
+      createMessage({ id: "yesterday", content: "The garden closes at six.", timestamp: stamp(1, 18, 10) }),
+      createMessage({ id: "yesterday-reply", role: "user", authorId: "user-1", content: "Thanks.", timestamp: stamp(1, 18, 11) }),
+      createMessage({ id: "today", role: "user", authorId: "user-1", content: "Let's continue.", timestamp: stamp(2, 9, 0) }),
+      createMessage({ id: "today-reply", content: "The route is ready.", timestamp: stamp(2, 9, 1) }),
+      createMessage({ id: "later", content: "Here are the updated hours.", timestamp: stamp(2, 10, 1) }),
+    ];
+    await renderSpeakerBoundaryMessages(messages, undefined, undefined, "solo");
+    const dividers = Array.from(container.querySelectorAll('[data-testid="chat-time-divider"]'));
+    expect(dividers.map(divider => divider.getAttribute("data-before-message-id"))).toEqual(["yesterday", "today", "later"]);
+    for (const divider of dividers) {
+      expect(divider.nextElementSibling?.getAttribute("data-chat-scroll-message-id")).toBe(divider.getAttribute("data-before-message-id"));
+      expect(divider.closest('[data-chat-scroll-message-id], [data-chat-message-copy-root]')).toBeNull();
+      expect(divider.querySelector("time")?.getAttribute("datetime")).toBe(new Date(messages.find(message => message.id === divider.getAttribute("data-before-message-id"))!.timestamp).toISOString());
+    }
+    expect(container.querySelectorAll('.chat-message-row time')).toHaveLength(0);
+    expect(container.querySelectorAll('[data-chat-scroll-message-id]')).toHaveLength(messages.length);
+  });
+
+  it("moves the initial landmark when earlier same-session messages load without remounting the existing row", async () => {
+    const timestamp = new Date(2026, 10, 2, 10).getTime();
+    const current = createMessage({ id: "current", content: "A current reply.", timestamp });
+    await renderSpeakerBoundaryMessages([current]);
+    const row = container.querySelector('[data-chat-scroll-message-id="current"]');
+    await renderSpeakerBoundaryMessages([createMessage({ id: "earlier", content: "An earlier reply.", timestamp: timestamp - 5 * 60_000 }), current]);
+    expect(container.querySelector('[data-chat-scroll-message-id="current"]')).toBe(row);
+    expect(Array.from(container.querySelectorAll('[data-testid="chat-time-divider"]')).map(divider => divider.getAttribute("data-before-message-id"))).toEqual(["earlier"]);
+  });
+
+  it("restores participant attribution at the beginning of a later session", async () => {
+    const timestamp = new Date(2026, 10, 2, 9).getTime();
+    const messages = [0, 5, 65].map((minute, index) => createMessage({ id: `reply-${index}`, content: `Reply ${index}`, timestamp: timestamp + minute * 60_000, metadata: { agent: { handle: "octo" } } }));
+    await renderSpeakerBoundaryMessages(messages);
+    expect(container.querySelector('[data-chat-scroll-message-id="reply-0"] [data-testid="chat-speaker-name"]')).not.toBeNull();
+    expect(container.querySelector('[data-chat-scroll-message-id="reply-1"] [data-testid="chat-speaker-name"]')).toBeNull();
+    expect(container.querySelector('[data-chat-scroll-message-id="reply-2"] [data-testid="chat-speaker-name"]')).not.toBeNull();
+  });
+
+  it("keeps solo search attribution and explicit in-progress or failed reply headings", async () => {
+    const message = createMessage({ content: "The route is ready.", timestamp: Date.UTC(2026, 10, 2, 10), metadata: { agent: { handle: "octo" } } });
+    await renderSpeakerBoundaryMessages([message], message.id, message.id, "solo");
+    expect(container.querySelector('.chat-message-row time')).not.toBeNull();
+    for (const status of ["in_progress", "failed"]) {
+      await renderSpeakerBoundaryMessages([{ ...message, metadata: { ...message.metadata, status } }], undefined, undefined, "solo");
+      expect(container.querySelector('[data-testid="chat-speaker-inline"]')).not.toBeNull();
+    }
+  });
+
   it("reveals a matched runtime event's canonical text with attribution and a target marker", async () => {
     const target = createMessage({ id: "matched-event", content: "Recovered the missing report", messageType: "status", timestamp: Date.UTC(2026, 8, 10, 12, 30),
       metadata: { messageType: "status", agent: { handle: "octo" } } });
@@ -192,7 +255,7 @@ describe("ConversationMessageRows", () => {
     expect(container.querySelector('[data-testid="chat-matched-message-content"]')?.textContent).toContain("Recovered the missing report");
     expect(container.querySelector('[data-chat-message-target="true"]')?.getAttribute("data-chat-scroll-message-id")).toBe(target.id);
     expect(container.querySelector(CHAT_SPEAKER_MARKER_SELECTOR)).not.toBeNull();
-    expect(container.querySelector("time")).not.toBeNull();
+    expect(container.querySelector('.chat-message-row time')).not.toBeNull();
   });
 
   it("keeps the search destination focusable after its temporary highlight clears", async () => {
@@ -1304,7 +1367,7 @@ describe("ConversationMessageRows", () => {
     expect(container.querySelectorAll('[data-testid="chat-avatar-human"]')).toHaveLength(4);
     for (const label of labels) {
       const labelAvatarWrapper = label.querySelector('[data-testid="chat-avatar-human"]')?.parentElement;
-      expect(labelAvatarWrapper?.className).toContain("sm:hidden");
+      expect(labelAvatarWrapper?.className).toContain("chat-speaker-inline-avatar--narrow");
     }
   });
 
@@ -1594,11 +1657,12 @@ describe("ConversationMessageRows", () => {
       "reviewer",
       "octo",
     ]);
-    // The label's own avatar only serves narrow layouts where the gutter
-    // collapses; desktop shows the gutter face instead.
+    // The label's own avatar follows the pane's compact layout. The name
+    // remains a profile target when the avatar is hidden.
     for (const inlineSpeaker of inlineSpeakers) {
       const profileDoor = inlineSpeaker.querySelector('[data-testid="chat-speaker-agent-profile"]');
-      expect(profileDoor?.className).toContain("sm:hidden");
+      expect(profileDoor?.querySelector(".chat-speaker-inline-avatar--narrow")).not.toBeNull();
+      expect(profileDoor?.querySelector('[data-testid="chat-speaker-name"]')).not.toBeNull();
     }
   });
 
