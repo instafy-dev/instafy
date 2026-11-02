@@ -370,7 +370,7 @@ describe("a browser card a building turn posted", () => {
     }
   });
 
-  // Local drive, Oct 28: two live cards stacked up in one chat.
+  // Two live cards never stack up in one chat: the newer one carries the task on.
   it("leaves the chat once a newer card followed it, and the newer one stays while it needs the person", () => {
     const later = [...mapTurn, mapStep(LATER_JOB, "later-step", 20), mapCard(LATER_JOB, "later-card", 21),
       mapReply(LATER_JOB, "later-reply", 22)];
