@@ -63,7 +63,7 @@
   --color-octo-coin-dark: #262626;
   --color-octo-coin-ring-dark: rgb(255 255 255 / 0.22);
 
-  /* The AI tile's edge (AI_TILE_CLASS in src/components/OctoCoin.tsx,
+  /* The AI tile's edge (AI_TILE_EDGE_CLASS in src/components/OctoCoin.tsx,
      docs/Brand.md): every AI face is a rounded square, and a 1px hairline
      drawn just inside its edge keeps a white tile's corners on white. Ink at
      14% in light; in dark the tile uses the faint light ring above. */

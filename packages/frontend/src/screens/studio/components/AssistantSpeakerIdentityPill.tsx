@@ -90,7 +90,7 @@ export function AssistantSpeakerIdentityLabel({
         <ChatMessageAvatar
           kind="assistant"
           metadata={metadata ?? null}
-          agent={{ handle: normalizedHandle, avatarSeed }}
+          agent={{ handle: normalizedHandle, avatarSeed, id: agentIdentity?.id }}
           motion={motion}
           scrollReactive={motion === "thinking"}
           size="xs"

@@ -197,9 +197,10 @@ test("standalone configs do not import the authenticated development harness", (
   assert.match(vite, /cacheDir: path\.join\(frontendRoot, "node_modules", "\.vite-browser-ui-ci"\)/);
   // The history fixtures use the real Router; a clean lane must optimize it
   // explicitly instead of inheriting a developer's dependency-scan cache.
-  // Prebundle the icon barrel too: thousands of per-icon requests previously
-  // exhausted the required lane's budget before every case could execute.
-  assert.match(vite, /include: \["react", "react-dom\/client", "react-aria-components", "react-router-dom", "iconoir-react"\]/);
+  // Prebundle the icon barrel and its separate solid entry too: thousands of
+  // per-icon requests previously exhausted the required lane's budget before
+  // every case could execute.
+  assert.match(vite, /include: \["react", "react-dom\/client", "react-aria-components", "react-router-dom", "iconoir-react", "iconoir-react\/solid"\]/);
   assert.match(vite, /noDiscovery: true/);
   assert.doesNotMatch(vite, /from ["']\.\/vite\.config|loadEnv\(/);
   const resolver = read("packages/frontend/tests/playwright/component/viteComponentDependencies.ts");
@@ -259,7 +260,7 @@ test("the expanded browser UI inventory has a bounded suite budget without relax
   assert.match(config, /^\s+forbidOnly: true,$/m);
   assert.match(config, /^\s+testMatch: REQUIRED_BROWSER_UI_SPECS,$/m);
   assert.match(config, /required-browser-reporter\.mjs", \{ lane: "browser-ui" \}/);
-  assert.equal(REQUIRED_BROWSER_LANES["browser-ui"].minimumTests, 53);
+  assert.equal(REQUIRED_BROWSER_LANES["browser-ui"].minimumTests, 59);
   // Each part keeps the lane's former 40-minute job budget; the aggregate has five.
   for (const key of partKeys) {
     assert.match(jobSource(key), /\|\| 'ubuntu-24\.04' }}/);

@@ -21,6 +21,12 @@ export interface ControllerPlanWorkerStatus {
   retriedAs?: string | null;
   /** Why: "turn_continuation" or "rate_limit". */
   retriedFor?: string | null;
+  /**
+   * The face the controller stamped on this job's agent (metadata.agent.avatarSeed,
+   * "hatchling:<n>" for a helper). Optional: a controller from before faces
+   * leaves it out.
+   */
+  avatarSeed?: string | null;
 }
 
 export interface ControllerPlanGroupStatus {

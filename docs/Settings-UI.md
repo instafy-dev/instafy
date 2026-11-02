@@ -747,18 +747,35 @@ the database and controller both reject values outside the palette.
 ## Bot profiles
 
 Bot creation and editing use the same `SettingsIdentityRow`, persistent fields and
-`SettingsFormActions` as personal profiles: picture beside Display name, then Handle and
-About. Keep provider, credential, model and Style guidance in a separate Bot behavior
-section. Changing a public profile must not pin or change inherited runtime defaults.
+`SettingsFormActions` as personal profiles: picture beside Display name, the **Face** row
+for a bot without a picture, then Handle and About. Keep provider, credential, model and
+Style guidance in a separate Bot behavior section. Changing a public profile must not pin or
+change inherited runtime defaults.
 
 Bot pictures use the shared PNG/JPEG/WebP validation and 2 MB limit. Native file selection
 creates a local preview; Save profile uploads and then saves the URL. Cancel discards the
-draft, removal restores the bot's fallback identity, and failed metadata saves reuse the
-uploaded picture on retry. Disable editing and dismissal during a save. Reset drafts on
-account changes and do not save a completed upload into a different account's bot.
-`AgentAvatar` renders the same saved or draft identity in the editor and bot list as the AI tile
-([One rule for faces](Brand.md#one-rule-for-faces)), including Octo's own tile and a fallback for
-unavailable images.
+draft, removing a picture gives the bot a hatchling again (the face in the **Face** row,
+which comes back once the picture is gone), and failed metadata saves reuse the uploaded
+picture on retry. Removing Octo's picture resets its seed to its id, so Octo keeps its own
+tile. Disable editing and dismissal during a save. Reset drafts on account changes and do not
+save a completed upload into a different account's bot. `AgentAvatar` renders the same saved
+or draft identity in the editor and bot list as the AI tile
+([One rule for faces](Brand.md#one-rule-for-faces)): Octo's own tile, the bot's picture, or
+its hatchling, which also stands in for a picture that fails to load.
+
+A bot without a picture wears one of Octo's eight hatchlings
+([Octo's hatchlings](Brand.md#octos-hatchlings)), chosen in the **Face** row: eight native
+radios named for their poses (Hooray to Swim), each a 44px target around a 32px face, with a
+selected border on the tile's corners and arrow keys between them; eight in a row from `sm`,
+two rows of four on phones. The row is hidden while the bot has a picture and never shown for
+Octo. A new bot starts on the face its owner's picture-less bots wear least, counting down
+from 8, and Create agent (Save profile when editing) sends the face as the `avatarSeed`
+`hatchling:<n>`. An edit sends it only when it changed, so an existing bot keeps its seed, and
+the face that seed hashes to, until its owner picks a different one. Removing a picture moves
+focus to the face the bot now wears in the **Face** row, or for Octo to its picture button.
+The controller ignores `avatarSeed` when it creates a bot from a connection without a handle,
+so the editor then saves the picture or face in a follow-up update; if that update fails, the
+bot still exists and the status says its picture or face did not save.
 
 Apply `20260915110000_agent_identity_images.sql` after the identity-image migration. Bot
 uploads use `agents/<owner-user-id>/<random-uuid>.<extension>` in the public `identity-images`

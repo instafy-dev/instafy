@@ -324,7 +324,6 @@ describe("a message queued behind a turn a person's Stop cut off", () => {
     const presentation = useChatSendQueuePresentation({
       activeConversationControllerId: entry.conversationId,
       activeConversationRun: null,
-      agentByHandle: new Map(),
       chatSendQueue,
       currentRuntime: null,
       hostedRuntimeEnsuring: false,

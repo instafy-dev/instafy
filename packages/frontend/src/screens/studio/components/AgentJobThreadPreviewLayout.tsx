@@ -12,15 +12,11 @@ import {
 } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
+import { AiFace } from "../../../components/AiFace";
 import { formatAiAccessibleName } from "../../../components/AiTag";
-import { AI_TILE_CLASS, AI_TILE_SHAPE_CLASS, OctoCoin } from "../../../components/OctoCoin";
+import { AI_TILE_SHAPE_CLASS } from "../../../components/OctoCoin";
 import { Spinner } from "../../../components/Spinner";
-import {
-  OCTO_AVATAR_SRC,
-  resolveAgentAvatarGradient,
-  resolveAgentAvatarImageSrc,
-  resolveAgentAvatarText,
-} from "../../../utils/agentAvatar";
+import { aiFaceKey, stackAiFaces } from "../../../utils/aiFace";
 import type { ChatMessage, ChatMessageCommitRange,
   ChatMessageFileChange, ChatMessageUnsavedReason } from "../types";
 import { ActionRequestOrPreviewEntry } from "./ActionRequestOrPreviewEntry";
@@ -143,31 +139,14 @@ function normalizeInlineUpdateDedupeKey(content: string, updateType: string): st
 const BRANCH_PARTICIPANT_SLOT_CLASS = `inline-flex h-5 w-5 shrink-0 first:ml-0 -ml-1.5 ${AI_TILE_SHAPE_CLASS} *:ring-1 *:ring-white dark:*:ring-slate-950`;
 
 function BranchParticipantAvatar({ participant }: { participant: AgentThreadBranchParticipant }) {
-  const avatarImageSrc = resolveAgentAvatarImageSrc(participant);
-  const avatarText = resolveAgentAvatarText({ handle: participant.handle });
   const title = `@${participant.handle}`;
   // Each slot is one image named for its AI ("@ben, AI"); the tooltip keeps
-  // the handle alone.
+  // the handle alone. The face inside is AiFace (Octo's tile, the AI's own
+  // picture or one of Octo's hatchlings), whose root is the tile itself, so
+  // the slot's separator ring lands on it.
   return (
     <span role="img" className={BRANCH_PARTICIPANT_SLOT_CLASS} title={title} aria-label={formatAiAccessibleName(title)}>
-      {avatarImageSrc === OCTO_AVATAR_SRC ? (
-        // Octo is its tile (OctoCoin, docs/Brand.md).
-        <OctoCoin className="h-full w-full" />
-      ) : (
-        // Every other agent is the same AI tile around its own gradient and
-        // initial or its uploaded picture.
-        <span
-          aria-hidden="true"
-          className={`flex h-full w-full items-center justify-center overflow-hidden ${AI_TILE_CLASS} bg-slate-100 text-3xs font-semibold text-white shadow-avatar-coin dark:bg-slate-800`}
-          style={avatarImageSrc ? undefined : { backgroundImage: resolveAgentAvatarGradient(participant.avatarSeed ?? participant.handle) }}
-        >
-          {avatarImageSrc ? (
-            <img src={avatarImageSrc} alt="" className="h-full w-full object-cover" decoding="async" draggable={false} />
-          ) : (
-            avatarText
-          )}
-        </span>
-      )}
+      <AiFace identity={participant} className="h-full w-full" />
     </span>
   );
 }
@@ -179,7 +158,9 @@ function AgentThreadBranchRowEntry({
   branch: AgentThreadBranchRow;
   onOpen: (threadLocalId: string) => void;
 }) {
-  const participants = branch.participants.slice(0, 3);
+  // Up to three faces, never the same one twice: a repeat (two helpers that
+  // wear one face) folds into the +N with everyone past three.
+  const participants = stackAiFaces(branch.participants, (participant) => participant, 3);
   const title = branch.title || "Thread";
   return (
     <div
@@ -193,11 +174,16 @@ function AgentThreadBranchRowEntry({
       <span className="min-w-0 flex-1 truncate font-medium text-slate-700 dark:text-slate-100" title={title}>
         {title}
       </span>
-      {participants.length > 1 ? (
-        <span role="group" className="flex flex-none items-center" aria-label={`Participants: ${participants.map((entry) => `@${entry.handle}`).join(", ")}`}>
-          {participants.map((participant) => (
-            <BranchParticipantAvatar key={participant.handle} participant={participant} />
+      {branch.participants.length > 1 ? (
+        <span role="group" className="flex flex-none items-center" aria-label={`Participants: ${branch.participants.map((entry) => `@${entry.handle}`).join(", ")}`}>
+          {participants.shown.map((participant) => (
+            <BranchParticipantAvatar key={aiFaceKey(participant)} participant={participant} />
           ))}
+          {participants.more > 0 ? (
+            <span aria-hidden="true" className="pl-1 text-xxs font-medium text-slate-500 dark:text-slate-400">
+              +{participants.more}
+            </span>
+          ) : null}
         </span>
       ) : null}
       {branch.hiddenActivityCount > 0 ? (
@@ -606,8 +592,14 @@ export function AgentJobThreadPreviewLayout({
       return <ActionRequestOrPreviewEntry message={card} details={cardDetails} projectId={projectId ?? null} />;
     }
     const content = card.content.trim();
+    // Give the card's clip 4px of room for an outside focus ring (the plan
+    // chips'): -ml-1 and -my-1 cancel p-1 on the left, top and bottom, and the
+    // max-width grows by the 4px taken on the left. Not on the right, where
+    // the bubble clips x flush with its edge: there the card ends 4px inside
+    // it. On touch the clip reaches 10px under the last line (the card grows
+    // by 6px), so Workstreams' and Cancel group's 44px targets stay whole.
     return (
-      <div className="min-w-0 max-w-full overflow-hidden">
+      <div className="-ml-1 -my-1 min-w-0 max-w-[calc(100%+0.25rem)] overflow-hidden p-1 pointer-coarse:pb-2.5">
         {content ? <MessageContent content={content} projectId={projectId ?? null} /> : null}
         <MultiAgentPlanEntry details={cardDetails} planMessage={card} />
       </div>
