@@ -121,9 +121,10 @@ finish from the controller's observed title, URL, visible text, and elements. Ke
 the same visible page focused. The controller accepts only these high-level
 operations and never exposes arbitrary JavaScript execution.
 
-Set a list (a select) with `choose` and its option's label, never by clicking
-it. Choosing does not send the form, though some pages send it when a list
-changes; the form's own button sends it, and asks.
+Set a list (a select) with `choose` and `option`, the option's label as the
+list shows it, never by clicking it. Choosing does not send the form, though
+some pages send it when a list changes; the form's own button sends it, and
+asks.
 
 Find pages as "Finding a page" says. A site asks once per run; its pages then
 open without asking. A declined site stays closed: take another route that fits
@@ -143,7 +144,7 @@ the request, or end the turn and ask.
 - In Personal or Shared Browser, reuse the current tab when it already matches the task. If you must open or switch tabs, bring the controlled tab to the front so the user sees the same state.
 - For a recommendation, a results list is a starting point: open the strongest candidates' own pages and open map data until you can name concrete options with evidence (or the strongest observed shortlist), or a concrete blocker; never just links, unless asked. Never open a site on `instafy-web-research`'s link-only list.
 - In Personal or Shared Browser, “another window” or “another browser” usually means a new tab in this session: an isolated session only when they mention separate login or cookie state, a new runtime only when they ask for a fully separate browser.
-- Prefer a compact action path and at most one repair attempt. Do not fall into inspect/retry loops unless a direct attempt produced a concrete blocker.
+- Prefer a compact action path. Do not fall into inspect/retry loops unless a direct attempt produced a concrete blocker.
 - Treat sign-in, one-time codes, consent and payment as the person's steps: pause on them with `request_human_input`, and continue when they choose Let Octo continue.
 - Opening, reading and navigating a signed-in site needs no extra confirmation in chat, and the browser's own site and action prompts still apply; ask before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step unless the person's current message named it.
 - Treat purchases, transfers, record-changing submissions, messages, permission changes, credential changes, downloads of private data, and destructive actions as high impact on every site, signed in or not.
@@ -211,7 +212,7 @@ When reporting or learning from multi-site work:
 - Use `instafy_personal_browser` only when that server is exposed and `instafy_shared_browser` only when that server is exposed. Do not invoke Shared Browser merely because this skill file exists.
 - When `instafy_local_browser.observe` is exposed, use it only for credential-free public HTTP(S) page observation. It is not a fallback for login, clicking, typing, or other interactive work.
 - In a Shared Browser turn, if no browser panel is visible yet, still start with the exposed `snapshot` tool. A successful snapshot can create or reveal the shared headed browser session for the user.
-- In a Shared Browser turn, if the first controller action fails, say plainly what failed or use it to drive one small repair attempt. Do not attempt the Shared controller in Personal or owner-local turns.
+- Do not attempt the Shared controller in Personal or owner-local turns.
 - Prefer one compact execution step that both acts and prints structured evidence over multi-step exploratory loops.
 - If the task asks for multiple fields from the same page, complete the full extraction inside one browser tool call whenever possible. Do not split “open page”, “read title/url”, and “read token/label” into separate repair calls unless the first call produced a concrete blocker.
 - If one browser tool call already produced every field the user or harness asked for, stop there. Reply immediately from the observed values instead of launching a second call, rereading learned blocks, or adding a formatting-only repair step.
@@ -248,5 +249,5 @@ A routing step before Octo's turn can send the person's message straight to Inst
 
 - `browser`: the person names Instafy's browser ("in your browser"), the work happens on a website (open a site to use it, sign in, fill in or send a form, press its buttons, walk through its screens), or it carries on browser work this chat started, whether or not that found the answer.
 - `browser_then_build`: the same, and Octo then makes or changes something in this space (a page, a map, a table). So is research whose answer ends in a page (a comparison, prices, a route), from the first message. A request to make one with no site to use first ("on a map", "put this on a page") is `direct`.
-- Stay `direct`, even when the message names Instafy's browser, when the browser part needs what only this space or another chat holds (what a page, map or file here says, or "those" from a reply that was not the browser's): the building turn reads it and names it in a card, unless the message carries on this chat's browser work: filling in, checking again or going on with that work is `browser_then_build`. Also when the site runs in this space (a preview card), the person says not to use the browser, or it has attachments.
+- Stay `direct`, even when the message names Instafy's browser, when the site runs in this space (a preview card), the person says not to use the browser, or it has attachments. Also when the browser part needs what only this space or another chat holds (what a page, map or file here says, or "those" from a reply that was not the browser's): the building turn reads it and names it in a card, unless all it needs is what this chat's browser work found: filling in, checking again or going on with that work is `browser_then_build`.
 - Research whose answer is a reply (facts, a price, opening hours, reviews) stays `direct` when the message does not name the browser, unless it carries on this chat's browser work: the building turn reads first and opens the browser itself if a page needs it.

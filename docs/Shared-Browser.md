@@ -1728,8 +1728,12 @@ step decides whether it goes to the browser, as for any message, and a message
 that carries on this chat's browser work ("Now find how to get there by
 metro", "keep going") goes there, whether or not that work found its answer,
 and so does one that fills in, checks again or goes on with that work while it
-needs what a page here says ("Fill in what's still missing.", as
-`browser_then_build`; the browser skill's "Routing preflight"). A
+needs what a page here says, when all it needs is what that work found ("Fill
+in what's still missing.", as `browser_then_build`). The browser turn's task is
+the person's words, and it has no shell, so a follow-up that also needs a file
+here or another chat's words ("Fill in the delivery instructions from
+notes.md") stays with Octo's building turn, which reads them and names them in
+its card (the browser skill's "Routing preflight"). A
 browser turn has only the browser's tools, so a message that asks Octo to build
 ("Put the hours and the route on a small page I can share") is made by a
 building turn, right away or once the browser has done its part

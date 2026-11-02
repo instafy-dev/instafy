@@ -417,10 +417,11 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // own notes and what a browser script keeps in mind moved to
     // `references/learning-and-local-browsers.md`, so a browser turn carries the whole skill.
     include_str!("legacy/browser-automation-v24.md"),
-    // From before a failed tool call was never repeated the same way (it was retried once), a
-    // route was planned for the day and time the person travels, a page's links were printed
-    // with its text, and a message that carries on the chat's browser work went to the browser
-    // also when it needs what a page here says.
+    // From before a failed tool call was never repeated the same way (it was retried once, and a
+    // failed first step was reported or repaired once), a list was set by the field `choose`
+    // takes, a route was planned for the day and time the person travels, a page's links were
+    // printed with its text, and a message that carries on the chat's browser work went to the
+    // browser also when it needs what a page here says, if all it needs is what that work found.
     include_str!("legacy/browser-automation-v25.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a

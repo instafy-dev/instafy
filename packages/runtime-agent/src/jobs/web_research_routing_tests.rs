@@ -642,9 +642,11 @@ fn a_page_that_fails_sends_the_turn_to_the_places_own_site_in_the_same_turn() {
 }
 
 /// A journey planner's station list was clicked and asked as a commit, and no step could pick a station. The Shared
-/// Browser section says to set a list with `choose` and its option's label, never by clicking it, and that choosing
-/// does not send the form though some pages send it when a list changes, within the part a snapshot carries and
-/// without pushing the sign-in rules out of it. An unedited earlier copy is upgraded.
+/// Browser section says to set a list with `choose` and the field the tool takes for the option's label, never by
+/// clicking it, and that choosing does not send the form though some pages send it when a list changes, within the
+/// part a snapshot carries and without pushing the sign-in rules out of it. A turn told "its option's label" sent a
+/// `label` field, which the tool refused (a local test, Nov 2), so the skill names the field as the Shared Browser's
+/// server lists it, as the turn's run text does. An unedited earlier copy is upgraded.
 #[test]
 fn the_browser_skill_sets_a_list_with_choose_never_by_clicking_it() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -653,8 +655,26 @@ fn the_browser_skill_sets_a_list_with_choose_never_by_clicking_it() {
         .expect("section");
     let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
     let section = flat(&BROWSER_SKILL[start..end]);
-    let line = "Set a list (a select) with `choose` and its option's label, never by clicking it. Choosing does not send the form, though some pages send it when a list changes; the form's own button sends it, and asks.";
-    assert!(section.contains(line), "{section}");
+    // The field `choose` takes besides its target, as its server lists it.
+    let choose = crate::shared_browser::shared_browser_mcp_tools()
+        .into_iter()
+        .find(|tool| tool.name == "choose")
+        .expect("the Shared Browser serves choose");
+    let fields: Vec<&str> = choose.input_schema["required"]
+        .as_array()
+        .expect("required fields")
+        .iter()
+        .filter_map(JsonValue::as_str)
+        .filter(|field| !matches!(*field, "index" | "snapshotId"))
+        .collect();
+    assert_eq!(fields, ["option"]);
+    let line = format!(
+        "Set a list (a select) with `choose` and `{}`, the option's label as the list shows it, never by clicking it. Choosing does not send the form, though some pages send it when a list changes; the form's own button sends it, and asks.",
+        fields[0]
+    );
+    assert!(section.contains(&line), "{section}");
+    assert!(!flat(BROWSER_SKILL).contains("its option's label"));
+    let line = line.as_str();
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(line));
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
@@ -985,8 +1005,8 @@ fn a_follow_up_on_the_chats_browser_work_browses_even_when_it_needs_a_page_here(
         .find(|line| line.starts_with("- Stay `direct`"))
         .expect("the line that keeps a message direct");
     assert!(
-        stay.contains(
-            "the building turn reads it and names it in a card, unless the message carries on this chat's browser work: filling in, checking again or going on with that work is `browser_then_build`. Also when"
+        stay.ends_with(
+            "the building turn reads it and names it in a card, unless all it needs is what this chat's browser work found: filling in, checking again or going on with that work is `browser_then_build`."
         ),
         "{stay}"
     );
@@ -1021,16 +1041,70 @@ fn a_follow_up_on_the_chats_browser_work_browses_even_when_it_needs_a_page_here(
     assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
+/// A follow-up on this chat's browser work goes to the browser only when all it needs is what that
+/// work found. A routed browser turn's task is the person's own words, and the turn has no shell, so
+/// it never sees a file here or another chat: "Fill in the delivery instructions from notes.md, then
+/// send it." after the browser filled a form stays with the building turn, which reads the file and
+/// names what it says in a card. The line names its own `direct` conditions (a site that runs in
+/// this space, the person saying not to use the browser, attachments) first and ends with that
+/// exception, so none of them reads as one of `browser_then_build`'s.
+#[test]
+fn a_follow_up_goes_to_the_browser_only_with_what_its_browser_work_found() {
+    let start = BROWSER_SKILL
+        .find("\n## Routing preflight\n")
+        .expect("routing section")
+        + 1;
+    let section = &BROWSER_SKILL[start..];
+    assert!(section.contains(
+        "That browser turn sees only those words and this chat's earlier browser turns."
+    ));
+    let stay = section
+        .lines()
+        .find(|line| line.starts_with("- Stay `direct`"))
+        .expect("the line that keeps a message direct");
+    assert!(
+        stay.starts_with(
+            "- Stay `direct`, even when the message names Instafy's browser, when the site runs in this space (a preview card), the person says not to use the browser, or it has attachments. Also when the browser part needs what only this space or another chat holds"
+        ),
+        "{stay}"
+    );
+    assert!(
+        stay.contains(
+            "names it in a card, unless all it needs is what this chat's browser work found: filling in"
+        ),
+        "{stay}"
+    );
+    assert!(
+        !stay.contains("unless the message carries on this chat's browser work:"),
+        "{stay}"
+    );
+    // The exception ends the line: nothing after it reads as `browser_then_build`.
+    let exception = stay.find(", unless ").expect("the exception");
+    assert!(!stay[exception..].contains(". "), "{}", &stay[exception..]);
+    assert!(stay.ends_with("is `browser_then_build`."), "{stay}");
+
+    // A routed card carries the person's words and nothing else from this space.
+    let words = "Fill in the delivery instructions from notes.md, then send it.";
+    let card = browser_request::BrowserRequest::routed(words, true).expect("a routed card");
+    let request =
+        card.message().metadata.expect("card metadata")["details"]["browserRequest"].clone();
+    assert_eq!(request["task"], json!(words));
+}
+
 /// A site that failed is not tried again the same way, and a browser turn knows which readers
 /// it has. A local test, Nov 2: a browser turn asked for a bookshop's opening hours opened a
 /// tourism site that never answered, opened the same address again, then looked through its
 /// tools for the research skill's `instafy web read` and `instafy web search` (a browser turn
 /// has neither) and replied with no hours, while the bookshop's own site answered in 5 s. The
 /// browser skill said to retry a failed tool call once, then say what did not work; it now says
-/// not to repeat it the same way, as a failed page ends that page, not the task. The research
-/// skill, which a browser turn loads whole, says that a browser turn's readers are its browser
-/// tools and the `instafy` commands are a building turn's, within its loaded size. Unedited
-/// earlier copies of both are upgraded.
+/// not to repeat it the same way, as a failed page ends that page, not the task. Two more lines
+/// of the skill, which a browser turn carries whole, said the same: "at most one repair attempt",
+/// and, when the first controller action fails, "say plainly what failed or use it to drive one
+/// small repair attempt". They go: a browser that cannot start is reported by its tool's error,
+/// and what did not work is said when nothing is left to try. The research skill, which a browser
+/// turn loads whole, says that a browser turn's readers are its browser tools and the `instafy`
+/// commands are a building turn's, within its loaded size. Unedited earlier copies of both are
+/// upgraded.
 #[test]
 fn a_failed_call_is_not_repeated_and_a_browser_turn_reads_with_its_browser_tools() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1038,8 +1112,24 @@ fn a_failed_call_is_not_repeated_and_a_browser_turn_reads_with_its_browser_tools
     assert!(browser.contains(
         "If the tool returns an error, don't repeat it the same way: a failed page ends that page, not the task (\"Finding a page\" says what comes next)."
     ));
-    for earlier in ["retry it at most once", "retry it once"] {
+    for earlier in [
+        "retry it at most once",
+        "retry it once",
+        "at most one repair attempt",
+        "say plainly what failed",
+        "one small repair attempt",
+    ] {
         assert!(!browser.contains(earlier), "{earlier}");
+    }
+    // What stands in their place: the tool's own error when the browser cannot start, and what did
+    // not work only when nothing is left to try.
+    for kept in [
+        "report the tool's concrete error if provisioning failed.",
+        "When nothing is left to try, tell the person in plain words what did not work",
+        "Do not fall into inspect/retry loops unless a direct attempt produced a concrete blocker.",
+        "Do not attempt the Shared controller in Personal or owner-local turns.",
+    ] {
+        assert!(browser.contains(kept), "{kept}");
     }
     let readers = "Read pages only with these readers (a browser turn's are its browser tools; the `instafy` commands are for Octo's building turns):";
     assert!(RESEARCH_SKILL.contains(&format!("\n{readers}\n")));
