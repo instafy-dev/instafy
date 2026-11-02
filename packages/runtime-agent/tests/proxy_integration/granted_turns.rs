@@ -1,10 +1,13 @@
 //! A granted turn, end to end without a model key: a leased job that holds a device grant runs
 //! through the job processor, the real proxy and an inert localhost provider that scripts the
-//! model's tool calls, and the real `provider-mcp` broker calls a stub controller.
+//! model's tool calls, and the real `provider-mcp` broker calls a stub controller. GPT-5.5 calls
+//! the broker's tools directly; a code-mode-only model, as the managed model and the own-AI
+//! default are, calls them from a code cell, which runs in `codex-code-mode-host`.
 
 use super::*;
 use axum::extract::{Path as AxumPath, Query};
 use axum::routing::get;
+use runtime_contracts::own_ai_model::OWN_AI_DEFAULT_MODEL_ID;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::os::unix::fs::PermissionsExt;
@@ -18,12 +21,31 @@ const NAMESPACE: &str = "mcp__instafy_provider";
 const INSTRUCTIONS: &str = "Use the example device's tools only when the person asks.";
 const PROMPT: &str = "Read the device's state.";
 const SUMMARY: &str = "The device is idle.";
+/// A model that calls its tools directly.
+const DIRECT_MODEL: &str = "gpt-5.5";
+/// The managed lane's model (the controller's `DEFAULT_MANAGED_AI_MODEL_ID`), code-mode-only.
+const MANAGED_MODEL: &str = "gpt-6-luna";
+/// The broker's tools, as the model sees them.
+const DEVICE_TOOLS: [&str; 3] = [
+    "example_part_move",
+    "example_state_read",
+    "instafy_messages_search",
+];
+/// Codex's MCP resource tools, which read only the turn's own server's resources.
+const MCP_RESOURCE_TOOLS: [&str; 3] = [
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+];
 
 type Turn = fn() -> Pin<Box<dyn Future<Output = Result<()>>>>;
 
-/// Runs `turn` in this binary's isolated child, on a production-sized stack.
-fn isolated(test_name: &str, turn: Turn) -> Result<()> {
+/// Runs `turn` on `model` in this binary's isolated child, on a production-sized stack.
+fn isolated(test_name: &str, model: &str, turn: Turn) -> Result<()> {
     if std::env::var(CHILD).as_deref() != Ok("1") {
+        if runtime_agent::code_mode_host::bundled_model_is_code_mode_only(model)? {
+            stage_code_mode_host()?;
+        }
         return run_isolated_fixture(CHILD, test_name, "granted-turns");
     }
     const STACK: usize = 32 * 1024 * 1024;
@@ -47,7 +69,28 @@ fn a_granted_turn_calls_its_device_tools_through_the_broker_and_nothing_else_via
 -> Result<()> {
     isolated(
         "granted_turns::a_granted_turn_calls_its_device_tools_through_the_broker_and_nothing_else_via_proxy",
-        || Box::pin(a_granted_turn()),
+        DIRECT_MODEL,
+        || Box::pin(a_granted_turn(DIRECT_MODEL)),
+    )
+}
+
+#[test]
+fn a_granted_turn_on_the_managed_model_calls_its_device_tools_from_a_code_cell_via_proxy()
+-> Result<()> {
+    isolated(
+        "granted_turns::a_granted_turn_on_the_managed_model_calls_its_device_tools_from_a_code_cell_via_proxy",
+        MANAGED_MODEL,
+        || Box::pin(a_granted_turn(MANAGED_MODEL)),
+    )
+}
+
+#[test]
+fn a_granted_turn_on_the_own_ai_default_calls_its_device_tools_from_a_code_cell_via_proxy()
+-> Result<()> {
+    isolated(
+        "granted_turns::a_granted_turn_on_the_own_ai_default_calls_its_device_tools_from_a_code_cell_via_proxy",
+        OWN_AI_DEFAULT_MODEL_ID,
+        || Box::pin(a_granted_turn(OWN_AI_DEFAULT_MODEL_ID)),
     )
 }
 
@@ -55,6 +98,7 @@ fn a_granted_turn_calls_its_device_tools_through_the_broker_and_nothing_else_via
 fn a_granted_turn_that_ends_without_its_answer_is_not_run_again_via_proxy() -> Result<()> {
     isolated(
         "granted_turns::a_granted_turn_that_ends_without_its_answer_is_not_run_again_via_proxy",
+        DIRECT_MODEL,
         || Box::pin(a_granted_turn_without_its_answer()),
     )
 }
@@ -63,6 +107,7 @@ fn a_granted_turn_that_ends_without_its_answer_is_not_run_again_via_proxy() -> R
 fn a_granted_turn_whose_answer_quotes_an_upstream_error_answers_with_it_via_proxy() -> Result<()> {
     isolated(
         "granted_turns::a_granted_turn_whose_answer_quotes_an_upstream_error_answers_with_it_via_proxy",
+        DIRECT_MODEL,
         || Box::pin(a_granted_turn_answering_with_an_upstream_error()),
     )
 }
@@ -71,6 +116,7 @@ fn a_granted_turn_whose_answer_quotes_an_upstream_error_answers_with_it_via_prox
 fn a_granted_turn_whose_model_fails_upstream_fails_once_via_proxy() -> Result<()> {
     isolated(
         "granted_turns::a_granted_turn_whose_model_fails_upstream_fails_once_via_proxy",
+        DIRECT_MODEL,
         || Box::pin(a_granted_turn_failing_upstream()),
     )
 }
@@ -79,7 +125,18 @@ fn a_granted_turn_whose_model_fails_upstream_fails_once_via_proxy() -> Result<()
 fn a_canceled_granted_turn_ends_only_once_its_broker_is_gone_via_proxy() -> Result<()> {
     isolated(
         "granted_turns::a_canceled_granted_turn_ends_only_once_its_broker_is_gone_via_proxy",
-        || Box::pin(a_canceled_granted_turn()),
+        DIRECT_MODEL,
+        || Box::pin(a_canceled_granted_turn(DIRECT_MODEL)),
+    )
+}
+
+#[test]
+fn a_canceled_granted_turn_on_the_managed_model_ends_only_once_its_broker_is_gone_via_proxy()
+-> Result<()> {
+    isolated(
+        "granted_turns::a_canceled_granted_turn_on_the_managed_model_ends_only_once_its_broker_is_gone_via_proxy",
+        MANAGED_MODEL,
+        || Box::pin(a_canceled_granted_turn(MANAGED_MODEL)),
     )
 }
 
@@ -212,10 +269,11 @@ const PROGRESS_NOTE: &str = "Checking the device now.";
 const QUOTED_UPSTREAM_ERROR: &str =
     "The device answered: unexpected status 502 Bad Gateway: upstream request failed.";
 
-fn response(output: Value) -> axum::response::Response {
+/// The model's reply to `request`, from the model it asked for.
+fn response(request: &Value, output: Value) -> axum::response::Response {
     Json(json!({
         "id": format!("resp_{}", Uuid::new_v4()), "object": "response",
-        "status": "completed", "model": "gpt-5.5",
+        "status": "completed", "model": request["model"],
         "output": [output],
         "usage": { "input_tokens": 70, "output_tokens": 10, "total_tokens": 80 }
     }))
@@ -223,31 +281,130 @@ fn response(output: Value) -> axum::response::Response {
 }
 
 /// The model's message in `phase`: in the final JSON object's summary for its answer.
-fn message(phase: &str, text: &str) -> axum::response::Response {
+fn message(request: &Value, phase: &str, text: &str) -> axum::response::Response {
     let text = if phase == "final_answer" {
         json!({ "summary": text, "code": "", "files": [], "actions": [] }).to_string()
     } else {
         text.to_string()
     };
-    response(json!({
-        "id": format!("msg_{}", Uuid::new_v4()), "type": "message",
-        "role": "assistant", "status": "completed", "phase": phase,
-        "content": [{ "type": "output_text", "text": text }]
-    }))
+    response(
+        request,
+        json!({
+            "id": format!("msg_{}", Uuid::new_v4()), "type": "message",
+            "role": "assistant", "status": "completed", "phase": phase,
+            "content": [{ "type": "output_text", "text": text }]
+        }),
+    )
 }
 
-fn tool_call(call_id: &str, name: &str, arguments: Value) -> axum::response::Response {
-    response(json!({
-        "id": format!("fc_{call_id}"), "type": "function_call", "status": "completed",
-        "call_id": call_id, "namespace": NAMESPACE, "name": name,
-        "arguments": arguments.to_string(),
-    }))
+/// The tools a request offers: its `tools`, or the `additional_tools` input item a Responses Lite
+/// model's request carries them in.
+fn offered_tools(request: &Value) -> Vec<&Value> {
+    let additional = request["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item["type"] == "additional_tools")
+        .flat_map(|item| item["tools"].as_array().into_iter().flatten());
+    request["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(additional)
+        .collect()
 }
 
-/// The output the turn sent back for one of the model's calls.
+/// Every tool a request offers, by namespace and name: a namespace's tools in it, a tool of the
+/// default namespace (`functions`) by its plain name, and a tool with no name, such as a hosted
+/// web search, by its type.
+fn offered(request: &Value) -> Vec<(Option<&str>, &str, &Value)> {
+    let mut found = Vec::new();
+    for tool in offered_tools(request) {
+        if tool["type"] == "namespace" {
+            let namespace = tool["name"].as_str().filter(|name| *name != "functions");
+            for nested in tool["tools"].as_array().into_iter().flatten() {
+                found.push((namespace, nested["name"].as_str().unwrap_or("?"), nested));
+            }
+        } else {
+            let name = tool["name"].as_str().or(tool["type"].as_str());
+            found.push((None, name.unwrap_or("?"), tool));
+        }
+    }
+    found
+}
+
+/// Code mode's `exec`, when the request offers it: a code-mode-only model's tool for every call.
+fn code_cell_tool(request: &Value) -> Option<&Value> {
+    offered(request)
+        .into_iter()
+        .find(|(namespace, name, _)| namespace.is_none() && *name == "exec")
+        .map(|(_, _, tool)| tool)
+}
+
+/// The end of every code cell: it reports what it can reach (`CellReport`).
+const CELL_REPORT: &str = r#"let imported = "imported";
+try { await import("node:fs"); } catch (error) { imported = String(error); }
+text(JSON.stringify({
+  tools: Object.getOwnPropertyNames(tools),
+  globals: [typeof console, typeof fetch, typeof require, typeof process],
+  imported,
+}));"#;
+
+/// What a code cell can reach, as it reported it.
+#[derive(serde::Deserialize)]
+struct CellReport {
+    /// The names on its `tools` object, the tools it can call.
+    tools: Vec<String>,
+    /// The types of `console`, `fetch`, `require` and `process`.
+    globals: Vec<String>,
+    /// What its import of `node:fs` gave it: the error, or "imported".
+    imported: String,
+}
+
+/// The model's call of the broker's tool `name`: a call in the broker's namespace, or, when the
+/// request offers code mode's `exec`, a code cell that calls it, returns its result and then
+/// reports what else it can reach (`CELL_REPORT`).
+fn tool_call(
+    request: &Value,
+    call_id: &str,
+    name: &str,
+    arguments: Value,
+) -> axum::response::Response {
+    let call = if code_cell_tool(request).is_some() {
+        json!({
+            "id": format!("ctc_{call_id}"), "type": "custom_tool_call", "status": "completed",
+            "call_id": call_id, "name": "exec",
+            "input": format!(
+                "text(JSON.stringify(await tools.{NAMESPACE}__{name}({arguments})));\n{CELL_REPORT}"
+            ),
+        })
+    } else {
+        json!({
+            "id": format!("fc_{call_id}"), "type": "function_call", "status": "completed",
+            "call_id": call_id, "namespace": NAMESPACE, "name": name,
+            "arguments": arguments.to_string(),
+        })
+    };
+    response(request, call)
+}
+
+/// The report of the code cell `call_id`.
+fn cell_report(request: &Value, call_id: &str) -> Option<CellReport> {
+    request["input"]
+        .as_array()?
+        .iter()
+        .filter(|item| item["type"] == "custom_tool_call_output" && item["call_id"] == call_id)
+        .flat_map(|item| item["output"].as_array().into_iter().flatten())
+        .find_map(|content| serde_json::from_str(content["text"].as_str()?).ok())
+}
+
+/// The output the turn sent back for one of the model's calls, or for its code cell.
 fn call_output(request: &Value, call_id: &str) -> Option<String> {
     request["input"].as_array()?.iter().find_map(|item| {
-        (item["type"] == "function_call_output" && item["call_id"] == call_id)
+        (matches!(
+            item["type"].as_str(),
+            Some("function_call_output" | "custom_tool_call_output")
+        ) && item["call_id"] == call_id)
             .then(|| item["output"].to_string())
     })
 }
@@ -270,13 +427,14 @@ async fn provider_request(
         (Script::UpstreamFailure, 2..) => {
             (StatusCode::BAD_GATEWAY, "upstream request failed").into_response()
         }
-        (Script::CallThen { phase, text }, _) if index % 2 == 0 => message(phase, text),
+        (Script::CallThen { phase, text }, _) if index % 2 == 0 => message(&body, phase, text),
         (Script::UpstreamFailure | Script::CallThen { .. }, _) => tool_call(
+            &body,
             &format!("call_state_{index}"),
             "example_state_read",
             json!({}),
         ),
-        (Script::Answer, 1) => tool_call("call_state", "example_state_read", json!({})),
+        (Script::Answer, 1) => tool_call(&body, "call_state", "example_state_read", json!({})),
         (Script::Answer, 2) => {
             let output = call_output(&body, "call_state").unwrap_or_default();
             assert!(
@@ -284,6 +442,7 @@ async fn provider_request(
                 "the state reached the model: {output}"
             );
             tool_call(
+                &body,
                 "call_search",
                 "instafy_messages_search",
                 json!({ "query": "red cup" }),
@@ -295,7 +454,7 @@ async fn provider_request(
                 output.contains("the red cup is on the left"),
                 "the search reached the model: {output}"
             );
-            message("final_answer", SUMMARY)
+            message(&body, "final_answer", SUMMARY)
         }
     }
 }
@@ -315,7 +474,7 @@ struct Rig {
 }
 
 impl Rig {
-    async fn start(hold_calls: bool, script: Script) -> Result<Self> {
+    async fn start(model: &str, hold_calls: bool, script: Script) -> Result<Self> {
         // macOS assesses a freshly linked executable on its first launch, which can take longer
         // than the broker's 10 s startup budget; let that happen before the turn starts.
         let warmed = std::process::Command::new(env!("CARGO_BIN_EXE_runtime-agent"))
@@ -338,7 +497,7 @@ impl Rig {
             ("PROXY_REQUIRE_CREDENTIAL_CLAIM", "false"),
             ("OPENAI_API_KEY", "inert-granted-turn-runtime-key"),
             ("CODEX_API_KEY", "inert-granted-turn-runtime-key"),
-            ("CODEX_MODEL", "gpt-5.5"),
+            ("CODEX_MODEL", model),
             ("CODEX_MODEL_PROVIDER", "openai"),
             ("CODEX_DISABLED", "false"),
             ("CODEX_PERSIST_STRUCTURED_CONVERSATION_THREAD", "true"),
@@ -409,7 +568,7 @@ impl Rig {
         let credentials = auth::Credentials::ApiKey {
             key: PROVIDER_KEY.to_string(),
             endpoint: Some(format!("http://{upstream}/backend-api/codex/responses")),
-            default_model: Some("gpt-5.5".to_string()),
+            default_model: Some(model.to_string()),
         };
         let (shutdown, rx) = oneshot::channel();
         tasks.push(tokio::spawn(async move {
@@ -513,55 +672,83 @@ impl Rig {
     }
 }
 
-async fn a_granted_turn() -> Result<()> {
+async fn a_granted_turn(model: &'static str) -> Result<()> {
     let _env = env_guard().await;
-    let rig = Rig::start(false, Script::Answer).await?;
+    let rig = Rig::start(model, false, Script::Answer).await?;
     let execution = rig.run().await.context("granted turn")?;
     assert_eq!(execution.summary, SUMMARY);
 
     // Three model requests: no routing preflight ran before the turn.
     let requests = rig.provider.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 3, "one request per step of the script");
-    // The model saw the broker's tools directly, described by the device's catalog, and no
-    // shell, patch, image, web or other server's tool.
-    let tools = requests[0]["tools"].as_array().context("tools")?;
-    let names: Vec<&str> = tools
-        .iter()
-        .filter_map(|tool| tool["name"].as_str())
-        .collect();
-    for name in &names {
-        assert!(
-            matches!(
-                *name,
-                NAMESPACE
-                    | "list_mcp_resources"
-                    | "list_mcp_resource_templates"
-                    | "read_mcp_resource"
+    assert!(requests.iter().all(|request| request["model"] == model));
+    // What the turn offers the model or a cell: the broker's tools, described by the device's
+    // catalog, and Codex's MCP resource tools, which read only the turn's own server. No shell,
+    // patch, image, web or other server's tool.
+    let first = &requests[0];
+    let tools = offered(first);
+    let (offered_names, mut allowed) =
+        if runtime_agent::code_mode_host::bundled_model_is_code_mode_only(model)? {
+            // A code-mode-only model is offered `exec`, which runs a code cell, and `wait`, which
+            // resumes one. A cell's `tools` are those `exec` declares; the model's catalog entry
+            // adds upstream's `clock`, whose one tool reads the time while the sleep tool is off.
+            let names: Vec<&str> = tools.iter().map(|(_, name, _)| *name).collect();
+            assert_eq!(names, ["exec", "wait"], "{model}");
+            let exec = code_cell_tool(first).context("exec")?;
+            let description = exec["description"].as_str().context("exec description")?;
+            assert!(
+                description.contains(&format!("## {NAMESPACE}\n{INSTRUCTIONS}\n")),
+                "{model}: the grant's instructions describe the broker's tools"
+            );
+            let mut declared: Vec<String> = description
+                .lines()
+                .filter_map(|line| line.strip_prefix("### `")?.split('`').next())
+                .map(str::to_string)
+                .collect();
+            let report = cell_report(&requests[1], "call_state").context("the cell's report")?;
+            let mut cell_tools = report.tools;
+            declared.sort_unstable();
+            cell_tools.sort_unstable();
+            assert_eq!(
+                cell_tools, declared,
+                "{model}: a cell's `tools` are what exec declares"
+            );
+            // A cell has no `console`, `fetch`, `require` or `process`, and its import is refused.
+            assert_eq!(
+                report.globals, ["undefined"; 4],
+                "{model}: console, fetch, require, process"
+            );
+            assert_eq!(report.imported, "unsupported import in exec", "{model}");
+            (cell_tools, vec!["clock__curr_time"])
+        } else {
+            let device = offered_tools(first)
+                .into_iter()
+                .find(|tool| tool["name"] == NAMESPACE)
+                .context("the broker's tools")?;
+            assert_eq!(device["description"], json!(INSTRUCTIONS));
+            let names = tools
+                .iter()
+                .map(|(namespace, name, _)| match namespace {
+                    Some(namespace) => format!("{namespace}__{name}"),
+                    None => name.to_string(),
+                })
+                .collect();
+            (names, Vec::new())
+        };
+    allowed.extend(MCP_RESOURCE_TOOLS);
+    let mut device_tools = Vec::new();
+    for name in &offered_names {
+        match name.strip_prefix(&format!("{NAMESPACE}__")) {
+            Some(tool) => device_tools.push(tool),
+            None => assert!(
+                allowed.contains(&name.as_str()),
+                "{model}: the granted turn offered {name}: {offered_names:?}"
             ),
-            "the granted turn offered {name}: {names:?}"
-        );
+        }
     }
-    let device = tools
-        .iter()
-        .find(|tool| tool["name"] == NAMESPACE)
-        .context("the broker's tools")?;
-    assert_eq!(device["description"], json!(INSTRUCTIONS));
-    let mut device_tools: Vec<&str> = device["tools"]
-        .as_array()
-        .context("device tools")?
-        .iter()
-        .filter_map(|tool| tool["name"].as_str())
-        .collect();
     device_tools.sort_unstable();
-    assert_eq!(
-        device_tools,
-        [
-            "example_part_move",
-            "example_state_read",
-            "instafy_messages_search"
-        ]
-    );
-    let first = requests[0].to_string();
+    assert_eq!(device_tools, DEVICE_TOOLS, "{model}");
+    let first = first.to_string();
     // Nothing from the workspace reaches a granted turn.
     assert!(!first.contains("Project preferences snapshot"));
     // The grant token never reaches the model.
@@ -593,7 +780,7 @@ async fn a_granted_turn_without_its_answer() -> Result<()> {
         phase: "commentary",
         text: PROGRESS_NOTE,
     };
-    let rig = Rig::start(false, script).await?;
+    let rig = Rig::start(DIRECT_MODEL, false, script).await?;
     let result = rig.run().await;
     let calls = rig.controller.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 1, "the device was called once: {calls:?}");
@@ -628,7 +815,7 @@ async fn a_granted_turn_answering_with_an_upstream_error() -> Result<()> {
         phase: "final_answer",
         text: QUOTED_UPSTREAM_ERROR,
     };
-    let rig = Rig::start(false, script).await?;
+    let rig = Rig::start(DIRECT_MODEL, false, script).await?;
     let execution = rig.run().await.map_err(|error| {
         anyhow::anyhow!(
             "a granted turn that answered failed: {}",
@@ -650,7 +837,7 @@ async fn a_granted_turn_answering_with_an_upstream_error() -> Result<()> {
 /// is the Codex client's limit of no replay for a run-once turn.
 async fn a_granted_turn_failing_upstream() -> Result<()> {
     let _env = env_guard().await;
-    let rig = Rig::start(false, Script::UpstreamFailure).await?;
+    let rig = Rig::start(DIRECT_MODEL, false, Script::UpstreamFailure).await?;
     let result = rig.run().await;
     let error = match result {
         Ok(execution) => anyhow::bail!(
@@ -673,9 +860,9 @@ async fn a_granted_turn_failing_upstream() -> Result<()> {
     rig.stop().await
 }
 
-async fn a_canceled_granted_turn() -> Result<()> {
+async fn a_canceled_granted_turn(model: &'static str) -> Result<()> {
     let _env = env_guard().await;
-    let rig = Rig::start(true, Script::Answer).await?;
+    let rig = Rig::start(model, true, Script::Answer).await?;
     // A broker that ignores SIGTERM, the signal Codex's own MCP shutdown sends first. It lives
     // in Cargo's target directory, which runs executables, unlike a `noexec` temp directory.
     let scripts = TempDir::new_in(env!("CARGO_TARGET_TMPDIR"))?;

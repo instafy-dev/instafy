@@ -325,16 +325,24 @@ fn feature_pin(feature: Feature) -> FeaturePin {
 
         // Upstream removed the in-process V8 runtime, so code-mode-only models (the catalog's
         // `code_mode_only` entries, GPT-6 Luna and the own-AI default among them) run every
-        // tool through this host.
+        // tool through this host, in bounded turns too.
         Feature::CodeModeHost => On,
+
+        // These pick code mode only for a model whose catalog entry names no tool mode (gpt-5.5,
+        // a model outside the catalog): Codex takes the entry's tool mode first
+        // (`requested_tool_mode` in codex-rs/core/src/tools/mod.rs). A code-mode-only model keeps
+        // code mode in a bounded turn, where a cell can call only the tools Codex declares for
+        // the turn: the host's `tools` object holds just those, every import is refused, and the
+        // isolate has no console, file system or network (no `console`, `fetch`, `require` or
+        // `process`). The granted-turn tests (tests/proxy_integration/granted_turns.rs) check all
+        // three from a cell, so a Codex bump that changes one fails them.
+        Feature::CodeModeOnly | Feature::CodeMode => OffInBounded,
 
         Feature::ShellTool
         | Feature::ShellZshFork
         | Feature::ExecPermissionApprovals
         | Feature::ApplyPatchStreamingEvents
         | Feature::ViewImage
-        | Feature::CodeModeOnly
-        | Feature::CodeMode
         | Feature::SpawnCsv
         | Feature::MultiAgentV2
         | Feature::Collab
