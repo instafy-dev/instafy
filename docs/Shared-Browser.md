@@ -1297,7 +1297,9 @@ hand-off on a page too busy to highlight in time leaves no prompt, and a load
 of a site that does not answer is stopped (a navigation, from a blank tab or
 from a page that had loaded, after about 20 seconds; a link clicked on a page
 once the click stops waiting, after about 15): the next step reaches the
-browser at once, and the site's late answer never loads.
+browser at once, and the site's late answer never loads. A navigation the site
+answers 404 or 410 for fails within a second or two, even when the rest of its
+not-found page would come later than a step's time (see below).
 
 Each read of a page finds its controls with one query and describes them all in
 one call to the page, so the describer's source (over 50 KB with the rules it
@@ -1367,7 +1369,14 @@ ends with, says the page stopped loading before it opened; any other code says
 only that the page didn't load, so no reason claims the site was unreachable
 when it answered. The browser policy and the
 `instafy-browser-automation` skill tell Octo to give the person that reason in
-plain words and never to paste a raw error code into a reply. Any other failed
+plain words and never to paste a raw error code into a reply. A `navigate` or
+`open_tab` whose site answers 404 or 410 for the page it loads (the tab's own
+document, after any redirects) fails as soon as that answer comes, without
+waiting for the not-found page to load: "This address has no page. Open a link
+from a page you read, or that site's own search." Its line reads as the step it
+tried ("Tried opening <site>"), and a tab `open_tab` opened for it closes again.
+Any other answer, a page whose text says it was not found included, is the
+step's page. Any other failed
 call keeps the controller's masked error text. A failed call whose result also
 carries facts for the turn's Details (`activity`, `browserUnavailable`) gives
 that text in `structuredContent.error.reason` too: a model that calls the tools

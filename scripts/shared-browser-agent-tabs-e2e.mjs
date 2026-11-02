@@ -11,7 +11,7 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 
 // Real-browser proof of Octo's own tabs in the Shared Browser: the production
 // controller script, composed as runtime-agent composes it, drives a real
-// Chromium over CDP against two loopback fixture sites. Every page, identity,
+// Chromium over CDP against loopback fixture sites. Every page, identity,
 // approval and profile is disposable; no model, Studio, controller, account
 // or external site is used, and Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -69,7 +69,7 @@ async function listenSite(name, routes) {
       response.writeHead(302, { location: route.redirect, "cache-control": "no-store" }).end();
       return;
     }
-    response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+    response.writeHead(route.status ?? 200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
     response.end(page(route.title, route.body, route.script, route.frame));
   });
   await new Promise((resolve, reject) => {
@@ -112,6 +112,9 @@ export async function runSharedBrowserAgentTabsFixture() {
       "/timetable": { title: "Timetable", body: "<p>Trains leave every 20 minutes.</p><form method=\"post\" action=\"/order\"><button>Place order</button></form>" },
       "/hours": { title: "Opening hours", body: "<p>Open daily 9 to 17.</p>" },
       "/prices": { title: "Prices", body: "<p>Entry 12 EUR.</p>" },
+      // A guessed address and a page that is gone: the site's own not-found pages.
+      "/reviews/guessed": { status: 404, title: "Page not found", body: "<p>Oops! That page can't be found.</p>" },
+      "/reviews/gone": { status: 410, title: "Page gone", body: "<p>This review was removed.</p>" },
       "/to-link-only": { redirect: "https://www.booking.com/hotel/fixture.html" },
       "/to-review": { redirect: linkOnlyReview },
       "/new-window": { title: "Reviews", body: "<p><a href=\"/to-review\" target=\"_blank\">Read the review</a></p>" },
@@ -408,6 +411,28 @@ export async function runSharedBrowserAgentTabsFixture() {
     assert.equal(await hasFocus(runPage), true, "After Octo closes its last tab, the run's page is in front");
     assert.equal(runPage.url(), `${research.origin}/`, "The person's page was not touched by Octo's tabs");
 
+    // 11b. A tab opened at an address the site answers 404 or 410 for (a
+    // guessed review address, a page that is gone) fails as a step Octo
+    // tried, saying the address has no page and where to look instead, never
+    // as the browser going away; the tab it opened closes again, so no
+    // not-found page is left among Octo's tabs, and the run's page is in
+    // front. A tab at a page the site has opens as before.
+    for (const address of ["/reviews/guessed", "/reviews/gone"]) {
+      await refused(
+        /This address has no page\. Open a link from a page you read, or that site's own search\./u,
+        "POST", "/v1/tabs/open", { url: `${sources.origin}${address}` }, ["allow_origin"],
+      );
+      assert.ok(sources.requests.includes(`GET ${address}`), "The site was asked");
+      assert.deepEqual(browserPages(), [runPage, personsTab], "The tab it opened closed again");
+      assert.deepEqual(tabsRecord().tabs, [], "No tab of Octo's is left");
+      assert.equal(tabsRecord().currentTabId, null);
+      assert.equal(await hasFocus(runPage), true, "The run's page is in front");
+    }
+    const found = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/prices` }, ["allow_origin"]);
+    assert.match(found.visibleText, /Entry 12 EUR/u);
+    assert.equal(tabsRecord().tabs.length, 1);
+    await ok("POST", "/v1/tabs/close", { tabId: found.tabId });
+
     // 12. The page the person chose is guarded like Octo's own tabs: Octo
     // never opens a link-only site there, not even through a redirect, and
     // reads nothing once the page is on one, all before any prompt.
@@ -521,6 +546,7 @@ export async function runSharedBrowserAgentTabsFixture() {
         "each tab keeps its number and label; numbers are never reused",
         "windows a page in Octo's tab opens by itself are closed before the next step",
         "closing Octo's tab, and its last tab, brings the run's page to the front",
+        "a tab at an address the site answers 404 or 410 for fails saying the address has no page, and the tab closes again",
         "turn-end close through the DevTools HTTP endpoint",
         "the person's page: link-only refused before any prompt, through a redirect, and once the page is on one",
         "a page that frames a link-only site loads and Octo's step succeeds, reading nothing of the frame",

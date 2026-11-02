@@ -368,10 +368,11 @@ export function findTerms(raw: string): string[] {
 
 /**
  * The passages of `lines` that mention any term: each matching line with one line either side, overlapping windows
- * merged, most distinct terms first and then page order, until `maxChars`.
+ * merged, most distinct terms first and then page order, until `maxChars`. `places` counts every such passage on the
+ * page, and `matchedLines` every line that mentions a term.
  */
-export function findPassages(lines: string[], terms: string[], maxChars: number): { passages: string[]; matchedLines: number } {
-  if (!terms.length) return { passages: [], matchedLines: 0 };
+export function findPassages(lines: string[], terms: string[], maxChars: number): { passages: string[]; matchedLines: number; places: number } {
+  if (!terms.length) return { passages: [], matchedLines: 0, places: 0 };
   const hits: number[] = [];
   lines.forEach((line, index) => {
     const lower = line.toLowerCase();
@@ -401,5 +402,5 @@ export function findPassages(lines: string[], terms: string[], maxChars: number)
     if (used >= maxChars || chosen.length >= 12) break;
   }
   chosen.sort((a, b) => a.order - b.order);
-  return { passages: chosen.map((passage) => passage.text), matchedLines: hits.length };
+  return { passages: chosen.map((passage) => passage.text), matchedLines: hits.length, places: windows.length };
 }

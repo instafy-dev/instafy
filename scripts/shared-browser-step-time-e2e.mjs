@@ -25,7 +25,10 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // go next, never as a blank page to navigate again nor as the page the tab
 // still shows; the next step reaches the browser at once, and the site's late
 // answer never loads. A form sent to such a site has reached it, so its load
-// runs on and the step never says nothing was opened. A page with a few
+// runs on and the step never says nothing was opened. An address the site
+// answers 404 or 410 for fails as soon as that answer comes, saying it has no
+// page, without waiting for the not-found page to load; a page that only reads
+// as not found is still the step's page. A page with a few
 // hundred controls is described in one call to the page each time a step
 // reads it, not in one call per control. No model, Studio, controller, account
 // or external site is used, and Chromium resolves no other host.
@@ -113,6 +116,12 @@ const UNANSWERED_LOADED_MESSAGE = `The site did not answer in time, so nothing w
 // How long a step whose site did not answer may take past its time: stopping
 // the load and ending its guards, never a read of the page while it waits.
 const UNANSWERED_ANSWER_MS = 5_000;
+// What a navigation answers when the site says the address has no page.
+const NO_PAGE_MESSAGE = "This address has no page. Open a link from a page you read, or that site's own search.";
+// A site's not-found page: its head and heading come at once, and the rest of
+// it takes longer than a step (a heavy page's scripts hold its load as long).
+const NOT_FOUND_START = `<!doctype html><html lang="en"><head><meta charset="utf-8"><link rel="icon" href="data:,">
+<title>Page not found</title></head><body><h1>Page not found</h1><p>Oops! That page can't be found.</p>${" ".repeat(2048)}`;
 // How long a click waits for the page it opens (the controller's action
 // timeout), which may end before the step's time does.
 const CLICK_WAIT_MS = 15_000;
@@ -235,6 +244,8 @@ export async function runSharedBrowserStepTimeFixture() {
   let context;
   // Answers of the site that does not answer in time, held until the case ends.
   const unanswered = [];
+  // Not-found pages whose rest has not been sent yet.
+  const unfinished = [];
   try {
     const requests = [];
     server = createServer((request, response) => {
@@ -244,11 +255,24 @@ export async function runSharedBrowserStepTimeFixture() {
         unanswered.push(response);
         return;
       }
+      if (url.pathname === "/reviews/slow-not-found") {
+        response.writeHead(404, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        response.write(NOT_FOUND_START);
+        unfinished.push(response);
+        return;
+      }
+      const noPage = { "/reviews/not-found": [404, "Page not found"], "/reviews/gone": [410, "Page gone"] }[url.pathname];
+      if (noPage) {
+        response.writeHead(noPage[0], { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        response.end(page(noPage[1], "<p>Oops! That page can't be found.</p>"));
+        return;
+      }
       const body = {
         "/": [page("Places", SEARCH)], "/results": [page("Results", RESULTS, BUSY)], "/places/tower": [page("The tower", "<p>Open daily.</p>")],
         "/window": [page("Details", WINDOW, OPENS_WINDOW)], "/popup": [page("Popup", "<p>Another window.</p>")], "/form": [page("Your details", FORM, BUSY_ON_HIGHLIGHT)],
         "/hidden": [HIDDEN], "/places/live": [page("The tower", "<p>Open daily.</p>", LIVE)], "/planner": [page("Plan a journey", PLANNER)],
         "/visit": [page("Visiting", "<p><a href=\"/slow\">Opening hours</a></p>")],
+        "/reviews/soft-not-found": [page("Page not found", "<p>Sorry! Page not found.</p>")],
         "/ask": [page("Ask us", "<form action=\"/slow\" method=\"post\"><label>Your question <input name=\"question\"></label><button>Send question</button></form>")],
       }[url.pathname];
       if (!body) {
@@ -560,6 +584,40 @@ export async function runSharedBrowserStepTimeFixture() {
     await delay(1_000);
     assert.equal(new URL(runPage.url()).pathname, "/slow", "The form's late answer landed");
 
+    // 1g. An address the site answers 404 or 410 for (a guessed review
+    // address, a page that is gone) has no page: the step fails as soon as
+    // that answer comes, saying so and where to look instead, so its line
+    // reads as a step it tried, never as a page it opened or read. It does
+    // not wait for the not-found page to load: one whose rest comes later
+    // than a step took a guessed address past the step's time, and the step
+    // answered with that page as one it had read. A page that only reads as
+    // not found, under any other answer, is still the step's page.
+    await ok("POST", "/v1/navigate", { url: `${origin}/places/tower` });
+    const noPageMs = {};
+    for (const address of ["/reviews/slow-not-found", "/reviews/not-found", "/reviews/gone"]) {
+      requests.length = 0;
+      const actionsBeforeNoPage = actions().length;
+      const noPage = await runTool("POST", "/v1/navigate", { url: `${origin}${address}` });
+      noPageMs[address] = Math.round(noPage.wallMs);
+      assert.deepEqual(requests, [`GET ${address}`], "The site was asked once");
+      assert.equal(noPage.code, 1, `The step fails, as a step and not as the browser going away: ${noPage.stdout}`);
+      assert.equal(noPage.stdout, "", "A failed navigation answers with no page");
+      assert.ok(noPage.stderr.includes(NO_PAGE_MESSAGE), noPage.stderr);
+      assert.doesNotMatch(noPage.stderr, /still running|Check what the step did|Timeout/u);
+      assert.ok(noPage.wallMs < 5_000, `It failed when the site answered (${Math.round(noPage.wallMs)} ms)`);
+      // What the view's line follows shows only the navigation the step started.
+      assert.deepEqual(actions().slice(actionsBeforeNoPage).map((action) => action.type), ["navigate"]);
+    }
+    for (const response of unfinished.splice(0)) response.destroy();
+    const soft = await ok("POST", "/v1/navigate", { url: `${origin}/reviews/soft-not-found` });
+    assert.equal(soft.payload.url, `${origin}/reviews/soft-not-found`);
+    assert.match(soft.payload.visibleText, /Sorry! Page not found\./u);
+    assert.equal(soft.payload.activity.step, "navigate");
+    const tower = await ok("POST", "/v1/navigate", { url: `${origin}/places/tower` });
+    assert.equal(tower.payload.url, `${origin}/places/tower`);
+    assert.match(tower.payload.visibleText, /Open daily\./u);
+    assert.equal(prompts.length, promptsBeforeForm + 1, "Nothing asked for the addresses");
+
     // 2. A click that opens another window and then keeps the page busy: the
     // step's time runs out, and it still ends as a step does. The window is
     // closed before it loads anything and the step says so, and once the page
@@ -632,17 +690,18 @@ export async function runSharedBrowserStepTimeFixture() {
         "a navigation from a page that had loaded, and keeps changing its own address, to a site that does not answer in time is stopped and fails the same way, never naming the page the tab still shows; the next step reaches the browser at once and finds that page, and the site's late answer never lands",
         "a link clicked on a page that had loaded, to a site that does not answer, is stopped once the click stops waiting for it and fails the same way, never as the page the tab still shows nor as the click's own timeout; the next step reaches the browser at once, and the site's late answer never lands",
         "a form sent to a site that does not answer is not stopped and never reads as nothing opened: the step answers once its time is up and says to check what it did, and the form's late answer lands",
+        "a navigation the site answers 404 or 410 for fails as soon as that answer comes, saying the address has no page, even when the rest of its not-found page comes later than a step; a page that only reads as not found, and a 200, are the step's page",
         "a click that opens a window and keeps the page busy fails once the step's time is up, as it would in its time: the window is closed and never loads anything, then or later",
         "a hand-off whose fields the page is too busy to highlight in time answers with the page as it is and leaves no hand-off behind",
         "a search whose results page keeps the page busy answers once the step's time is up, with the page's address and a note that it is still busy, never waiting out the page; its line says no page was read",
       ],
-      timings: { slowAnswerMs: Math.round(slow.wallMs), manyControlsReadMs: Math.round(planner.wallMs), manyControlsChoiceMs: Math.round(chose.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), unansweredLoadMs: Math.round(loading.wallMs), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs) },
+      timings: { slowAnswerMs: Math.round(slow.wallMs), manyControlsReadMs: Math.round(planner.wallMs), manyControlsChoiceMs: Math.round(chose.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), unansweredLoadMs: Math.round(loading.wallMs), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs), noPageMs },
       limitations: ["No model, Studio UI, origin or runtime shutdown guard; those are unit-tested."],
     };
     fs.writeFileSync(resultFile, `${JSON.stringify(result, null, 2)}\n`);
     return result;
   } finally {
-    for (const response of unanswered) response.destroy();
+    for (const response of [...unanswered, ...unfinished]) response.destroy();
     for (const child of children) child.kill("SIGKILL");
     await context?.close().catch(() => {});
     if (server) await new Promise((resolve) => server.close(resolve));

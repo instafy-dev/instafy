@@ -241,16 +241,56 @@ describe("reading a page", () => {
     }
   });
 
-  it("returns only the matching passages with --find", async () => {
-    const lines = ["Welcome", "News of the week", "The museum opens at 10:00.", "Gift shop", "Cafe", "Parking is limited", "Garden", "Tickets cost 12 EUR.", "Contact", "Main Street 1"];
+  it("returns only the matching passages with --find on a page longer than the reader's ceiling", async () => {
+    // Over 12,000 characters of text, so --find cuts it to its passages.
+    const archive = Array.from({ length: 200 }, (_, n) => `Archive note ${n + 1}: letters, prints and maps kept in the reading room.`);
+    const lines = ["Welcome", "News of the week", "The museum opens at 10:00.", "Gift shop", "Cafe", "Parking is limited", "Garden", "Tickets cost 12 EUR.", "Contact", "Main Street 1", ...archive];
+    expect(lines.join("\n").length).toBeGreaterThan(LIMITS.maxChars);
     routes["news.example.org/museum"] = { body: page(lines.map((line) => `<p>${line}</p>`).join("")) };
     const result = await one("http://news.example.org/museum", { find: 'tickets "opens at"' });
     expect(result.find).toEqual({ terms: ["tickets", "opens at"], passages: 2, matchedLines: 2 });
     expect(result.text).toMatch(/opens at 10:00/);
     expect(result.text).toMatch(/12 EUR/);
-    expect(result.text).not.toMatch(/Main Street|Parking|Welcome/);
+    expect(result.text).not.toMatch(/Main Street|Parking|Welcome|Archive note/);
+    expect(formatWebRead(await read("http://news.example.org/museum", { find: 'tickets "opens at"' }))).toMatch(/--find: 2 passage\(s\) for tickets, opens at\n/);
     const none = await one("http://news.example.org/museum", { find: "lockers" });
-    expect(none.find).toMatchObject({ passages: 0 });
+    expect(none.find).toEqual({ terms: ["lockers"], passages: 0, matchedLines: 0 });
+  });
+
+  it("returns a page within the reader's ceiling whole with --find, with the counts", async () => {
+    // A venue's homepage of about 4,300 characters: its hours sit under its name and name no term, next to a line
+    // about another room that does. Passages kept the hours and cut the name, so the hours read as the other room's.
+    const shelves = Array.from({ length: 48 }, (_, n) => `Shelf ${n + 1}: novels, poetry, essays and old maps from small local presses and printers.`);
+    const lines = [
+      "Old Town Bookshop",
+      "Plan your visit",
+      ...shelves.slice(0, 24),
+      "A bookshop and a reading room in one building since 1906.",
+      "Old Town Bookshop",
+      "open daily, 09:00 - 19:30",
+      "A visit to the Reading Room is included in the bookshop's ticket.",
+      "Reading Room hours follow the bookshop's.",
+      ...shelves.slice(24),
+      "Buy tickets",
+    ];
+    const whole = lines.join("\n");
+    expect(whole.length).toBeGreaterThan(4_200);
+    expect(whole.length).toBeLessThan(4_400);
+    routes["news.example.org/bookshop"] = { body: page(lines.map((line) => `<p>${line}</p>`).join(""), "Old Town Bookshop") };
+    const result = await one("http://news.example.org/bookshop", { find: "opening hours visit" });
+    expect(result.find).toEqual({ terms: ["opening", "hours", "visit"], passages: 2, matchedLines: 3, whole: true });
+    // All of it, past the default --max-chars, with the hours under the name they belong to.
+    expect(result.textChars).toBe(whole.length);
+    expect(result.truncated).toBe(false);
+    expect(result.text).toContain("Old Town Bookshop\nopen daily, 09:00 - 19:30\n");
+    expect(result.text).toContain("Shelf 48:");
+    const text = formatWebRead(await read("http://news.example.org/bookshop", { find: "opening hours visit" }));
+    expect(text).toContain(`--find: 2 passage(s) for opening, hours, visit, in the whole page below (a page of up to ${LIMITS.maxChars} characters comes back whole)\n`);
+    // A page with no line that names a term comes back whole too, never as "this page does not say it".
+    const none = await one("http://news.example.org/bookshop", { find: "lockers" });
+    expect(none.find).toEqual({ terms: ["lockers"], passages: 0, matchedLines: 0, whole: true });
+    expect(none.textChars).toBe(whole.length);
+    expect(formatWebRead(await read("http://news.example.org/bookshop", { find: "lockers" }))).not.toMatch(/does not say it/);
   });
 
   it("bounds the text to --max-chars (default 4000)", async () => {
