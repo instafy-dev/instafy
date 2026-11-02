@@ -220,6 +220,17 @@ The final assistant message must be exactly one JSON object matching the require
 For a read-only file reference, set `change` to `"read"` and set inline content fields to null. These entries display a workspace reference and never request a write.
 For file-only create/edit/delete requests, returning inline `files[]` entries with full `content` or `contentBase64` is an executable runtime write path and does not require `exec_command` or `shell`.
 "#;
+/// A Shared Browser turn's base instructions: the structured lane's, without what they tell a
+/// turn with a shell about its command tool and its file writes, since a browser turn's only
+/// tools are its browser's. It answers in the structured lane's JSON.
+const SHARED_BROWSER_BASE_INSTRUCTIONS: &str = r#"You are Codex running inside Instafy Studio as a non-interactive background automation agent.
+
+Complete the user's latest request using the available tools. Do not emit interim progress, preamble, or status-only assistant messages.
+
+Apply skills silently. When the prompt includes a focused skill snapshot, compact workspace memory, or loaded learned blocks, treat that material as already loaded unless the latest request explicitly asks you to re-read it.
+
+The final assistant message must be exactly one JSON object matching the required output schema. Put user-facing prose in the JSON `summary` field.
+"#;
 const PLAIN_FINAL_RUNTIME_BASE_INSTRUCTIONS: &str = r#"You are Codex running inside Instafy Studio as a non-interactive background automation agent.
 
 Complete the user's latest request using the available evidence and tools. Do not emit interim progress, preamble, or status-only assistant messages.
@@ -1213,17 +1224,19 @@ pub(crate) struct RuntimeBaseInstructionsLane {
 /// Ordinary lanes (and team plan workers) replace the model prompt with the
 /// runtime's own non-interactive automation contract, and so does a Shared
 /// Browser turn: its thread is its own, and it answers in the structured lane's
-/// JSON, as it did while it resumed the chat's ordinary thread and read that
-/// thread's base instructions. Other MCP and browser lanes keep the model's
-/// Codex prompt, minus its Codex-product sections. Either way the Codex policy
-/// appends Instafy's Destructive Actions section afterwards.
+/// JSON, on the structured lane's contract without its command tool and file
+/// writes ([`SHARED_BROWSER_BASE_INSTRUCTIONS`]). A thread keeps the base
+/// instructions it began with when a later run resumes it
+/// ([`resumed_shared_browser_base_instructions`]). Other MCP and browser lanes
+/// keep the model's Codex prompt, minus its Codex-product sections. Either way
+/// the Codex policy appends Instafy's Destructive Actions section afterwards.
 pub(crate) fn runtime_base_instructions(
     lane: RuntimeBaseInstructionsLane,
     operator_override: Option<String>,
 ) -> Option<String> {
     if lane.shared_browser {
         return Some(
-            operator_override.unwrap_or_else(|| STRUCTURED_RUNTIME_BASE_INSTRUCTIONS.to_string()),
+            operator_override.unwrap_or_else(|| SHARED_BROWSER_BASE_INSTRUCTIONS.to_string()),
         );
     }
     if lane.mcp || lane.browser {
@@ -1238,6 +1251,28 @@ pub(crate) fn runtime_base_instructions(
             STRUCTURED_RUNTIME_BASE_INSTRUCTIONS.to_string()
         }
     }))
+}
+
+/// The base instructions a Shared Browser thread began with, from its rollout's session
+/// metadata, for a run that resumes it: a chat's browser thread keeps one start, so each of its
+/// requests begins as its first did and a provider serves that from its cache, and a thread
+/// begun before [`SHARED_BROWSER_BASE_INSTRUCTIONS`] changed keeps working as it began. None
+/// when the rollout has none (Codex then renders the model's own) or the operator set the base
+/// instructions, which every run reads.
+async fn resumed_shared_browser_base_instructions(
+    rollout_path: &Path,
+    operator_override: bool,
+) -> Option<String> {
+    if operator_override {
+        return None;
+    }
+    let meta = codex_core::read_session_meta_line(rollout_path)
+        .await
+        .ok()?;
+    meta.meta
+        .base_instructions
+        .map(|instructions| instructions.text)
+        .filter(|text| !text.trim().is_empty())
 }
 
 async fn start_codex_thread(
@@ -2189,10 +2224,22 @@ impl CodexClient {
                         );
                         if let Some(rollout_path) = active_rollout_path.clone() {
                             if rollout_path.exists() {
+                                // A Shared Browser thread keeps the base instructions it began with.
+                                let mut resume_config = config.clone();
+                                if shared_browser_mode
+                                    && let Some(began_with) =
+                                        resumed_shared_browser_base_instructions(
+                                            &rollout_path,
+                                            optional_env("CODEX_BASE_INSTRUCTIONS").is_some(),
+                                        )
+                                        .await
+                                {
+                                    resume_config.base_instructions = Some(began_with);
+                                }
                                 match resume_codex_thread_after_writer_release(
                                     &attempt_threads,
                                     Arc::clone(&thread_manager),
-                                    &config,
+                                    &resume_config,
                                     &rollout_path,
                                     &auth_manager,
                                 )
@@ -7010,11 +7057,11 @@ mod tests {
         assert!(PLAIN_FINAL_RUNTIME_BASE_INSTRUCTIONS.contains("exec_command"));
     }
 
-    /// A Shared Browser turn runs on a thread of its own, and reads the structured lane's base
-    /// instructions there, as it did while it resumed the chat's ordinary thread: it answers in
-    /// that lane's JSON. Other browser and MCP turns keep the model's own prompt.
+    /// A Shared Browser turn runs on a thread of its own, on the runtime's own base instructions,
+    /// as it did while it resumed the chat's ordinary thread: it answers in the structured lane's
+    /// JSON. Other browser and MCP turns keep the model's own prompt.
     #[test]
-    fn a_shared_browser_turn_runs_on_the_structured_base_instructions() {
+    fn a_shared_browser_turn_runs_on_the_runtimes_own_base_instructions() {
         let shared = RuntimeBaseInstructionsLane {
             mcp: true,
             browser: true,
@@ -7023,7 +7070,7 @@ mod tests {
         };
         assert_eq!(
             runtime_base_instructions(shared, None).as_deref(),
-            Some(STRUCTURED_RUNTIME_BASE_INSTRUCTIONS)
+            Some(SHARED_BROWSER_BASE_INSTRUCTIONS)
         );
         assert_eq!(
             runtime_base_instructions(shared, Some("Operator's own.".to_string())).as_deref(),
@@ -7045,6 +7092,39 @@ mod tests {
             },
         ] {
             assert_eq!(runtime_base_instructions(other, None), None, "{other:?}");
+        }
+    }
+
+    /// A Shared Browser turn's only tools are its browser's, so its base instructions say nothing
+    /// of a command tool or of writing files, which the structured lane's tell a turn with a
+    /// shell (a local test, Nov 1: two browser turns searched their tools for `exec_command` and
+    /// `shell`, and replied when they found neither). It still answers in that lane's JSON.
+    #[test]
+    fn a_shared_browser_turns_base_instructions_name_no_command_tool_or_file() {
+        let shared = RuntimeBaseInstructionsLane {
+            mcp: true,
+            browser: true,
+            shared_browser: true,
+            ..RuntimeBaseInstructionsLane::default()
+        };
+        let base = runtime_base_instructions(shared, None).expect("a Shared Browser base");
+        for gone in [
+            "exec_command",
+            "shell",
+            "command tool",
+            "files[]",
+            "`files`",
+            "observing the workspace",
+        ] {
+            assert!(!base.contains(gone), "{gone}");
+        }
+        for kept in [
+            "You are Codex running inside Instafy Studio as a non-interactive background automation agent.",
+            "Do not emit interim progress, preamble, or status-only assistant messages.",
+            "Apply skills silently.",
+            "The final assistant message must be exactly one JSON object matching the required output schema. Put user-facing prose in the JSON `summary` field.",
+        ] {
+            assert!(base.contains(kept), "{kept}");
         }
     }
 
