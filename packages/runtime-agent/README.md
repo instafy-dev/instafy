@@ -128,8 +128,10 @@ rate limit reaches Codex as a streamed `rate_limit_exceeded` failure, which Code
 retries inside the turn; when those retries run out, the run is not restarted. Codex does not
 retry an HTTP 429 at all, so a proxy 429, such as a plan limit, a rate-limit window measured in
 hours or a rate limit on a request that does not stream, ends the turn without waiting. A retry in progress is reported as a
-`Retrying:` status message (kind `codex_stream_retry`), which the Studio shows as calm progress
-while the message keeps the cause, and only a failure that ends the turn is reported as an error.
+`Retrying:` status message (kind `codex_stream_retry`) that keeps the cause but gives the turn's
+line in Studio no words: Codex sends nothing when the resent stream is back, so the line keeps its
+step and then says "Thinking…" as after any pause. Only a failure that ends the turn is reported
+as an error.
 
 See `TODO.md` for upcoming work: streaming progress, implementing plan/approval, and tying into credit accounting.
 
