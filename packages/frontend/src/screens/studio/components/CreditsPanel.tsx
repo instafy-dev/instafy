@@ -902,7 +902,7 @@ export function CreditsPanel() {
               Usage rates
             </Heading>
             <Text variant="body" tone="secondary">
-              AI prompts and hosted runtimes both burn from the same {personal ? "" : "team "}balance.
+              Everything below uses the same {personal ? "" : "team "}balance.
             </Text>
           </div>
           {policyLoading ? (

@@ -351,11 +351,12 @@ by definition, so they keep their own refund reasons.
 A turn the person stops (**Stop** in the chat) costs its reserve, 1 credit by default, however
 much or little it used. The Stop cancels its job and its run at once and gives nothing back
 (`conversation_stop.rs`), whether or not a machine had started it. The turn sends no usage after
-the Stop, so its tokens are never settled against the reserve, neither more nor less, and its
-daily prompt slot stays used. A message the routing step sent to Instafy's browser has already
-paid for that step's card (1 credit, "Turns Instafy starts by itself" below), so stopping its
-browser turn leaves 2 credits in all. A turn Instafy started by itself follows its own rule below:
-stopped, it costs nothing unless it left the person something.
+the Stop (a report it sends then names only what it changed: `agent/stopped_turn.rs`), so its
+tokens are never settled against the reserve, neither more nor less, and its daily prompt slot
+stays used. A message the routing step sent to Instafy's browser has already paid for that step's
+card (1 credit, "Turns Instafy starts by itself" below), so stopping its browser turn leaves 2
+credits in all. A turn Instafy started by itself follows its own rule below:
+stopped, it costs nothing unless it had already done what that rule charges for.
 
 ### Turns Instafy starts by itself
 
