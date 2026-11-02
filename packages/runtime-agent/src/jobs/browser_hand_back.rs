@@ -409,8 +409,7 @@ pub(super) fn format_browser_hand_back_section(metadata: Option<&JsonValue>) -> 
             "\n\nThe person's request, which went to Instafy's browser first:\n{}\n\n\
              Instafy's browser opened no page for it: it asks Octo to make or change something in this space, \
              which this turn does.\n\
-             - Make what the person's request above asks. Read any public page it needs yourself; this turn \
-             cannot open the browser.\n\
+             - Make what the person's request above asks. Read any public page it needs yourself.\n\
              - Anything that needs the person's approval (a purchase, a message, a sign-in, a submitted form, \
              a destructive change) still needs it: ask them.\n\
              - Say what you made or changed.",
@@ -1171,13 +1170,15 @@ mod tests {
             "{section}"
         );
         assert!(
-            section.contains("\n- Make what the person's request above asks."),
+            section.contains(
+                "\n- Make what the person's request above asks. Read any public page it needs yourself.\n"
+            ),
             "{section}"
         );
-        assert!(
-            section.contains("this turn cannot open the browser"),
-            "{section}"
-        );
+        // Nothing says the turn cannot open the browser: a hand-back has no browser card to post,
+        // so the words guarded nothing, and they stayed in the chat's building thread, where a
+        // later turn told the person it couldn't open the browser in place of opening it.
+        assert!(!section.contains("cannot open the browser"), "{section}");
         assert!(section.contains("still needs it: ask them."), "{section}");
         for gone in ["```", "Browser findings", "page data", "findings"] {
             assert!(!section.contains(gone), "{gone}: {section}");

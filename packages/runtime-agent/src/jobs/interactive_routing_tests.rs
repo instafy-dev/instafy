@@ -262,6 +262,46 @@ fn a_page_written_by_hand_follows_light_and_dark() {
     assert_eq!(fs::read_to_string(&path).unwrap(), edited);
 }
 
+/// `instafy preview open` takes the folder it runs in for the card's site: where opening the card
+/// starts it again, and the folder whose changes take a new picture for the card. Told to run it
+/// "from the site's folder", a comparison's turn ran it from the space's folder with the site's
+/// path in the serve command (`instafy bind serve sites/<slug>`), so the card's site was the whole
+/// space and another chat's build took a new picture of it. The card step's command goes into the
+/// site's folder itself and serves `.`, as the map skill's does. An unedited earlier copy of the
+/// hub is upgraded; an edited one is kept.
+#[test]
+fn a_pages_card_starts_inside_the_sites_own_folder() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hub =
+        include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
+    let previous = include_str!("legacy/interactive-artifacts-v7.md");
+    let step = r#"1. One command, run inside the site's folder, starts it so it outlives your turn and posts
+        its card: `(cd sites/<slug> && instafy preview open --title '<short title>' --serve-cmd
+        "<serve command>" --start --json)`, with `{port}` where the serve command takes its port. The
+        serve command is the builder skill's; a bound or plain site's is `instafy bind serve . --port
+        {port} --preview`."#;
+    assert!(flat(hub).contains(&flat(step)), "{hub}");
+    assert!(!hub.contains("from the site's folder"), "{hub}");
+    assert!(flat(previous).contains("1. One command, from the site's folder, starts it"));
+    assert!(
+        hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+        "{} bytes",
+        hub.len()
+    );
+
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    learn::ensure_project_memory_scaffold(root);
+    let path = root.join(learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
+    fs::write(&path, previous).unwrap();
+    learn::ensure_project_memory_scaffold(root);
+    assert_eq!(fs::read_to_string(&path).unwrap(), hub);
+    let edited = format!("{previous}\nLocal page preference.\n");
+    fs::write(&path, &edited).unwrap();
+    learn::ensure_project_memory_scaffold(root);
+    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+}
+
 /// A hand-back's own words are always the controller's one line, which names no page. Research
 /// that ends in a page goes to the browser first, so the hand-back is often its chat's first
 /// building turn: its skills were picked from that line, the browser skill and no page builder,
