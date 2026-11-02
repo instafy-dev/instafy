@@ -157,14 +157,12 @@ export function ChatTypingRows({
     options?: AssistantAvatarRenderOptions,
   ) => JSX.Element;
 }) {
-  // A row that shows a turn's own state covers this one, except the
-  // runtime-busy notice: it asks the person to act, which no line above it
-  // says (a routed card reads "Opening Instafy's browser…" over a turn that
-  // waits for a machine).
-  const showAssistantStatus =
-    isAssistantTyping &&
-    (!isAssistantTypingCoveredByJobThreadPreview || typingStatusWraps) &&
-    !suppressAssistantStatus;
+  // The newest row already says what the turn is doing (its own line, or a
+  // routed card's "Opening Instafy's browser…"): it holds the place, so this
+  // row shows nothing, not even the spacer below, which would be a second
+  // face with no words under that row.
+  const coveredByNewestRow = isAssistantTyping && isAssistantTypingCoveredByJobThreadPreview;
+  const showAssistantStatus = isAssistantTyping && !coveredByNewestRow && !suppressAssistantStatus;
   const usesCanonicalOcto = usesCanonicalOctoAvatar({
     handle: typingAgentHandle,
     avatarSeed: typingAgentAvatarSeed,
@@ -264,7 +262,8 @@ export function ChatTypingRows({
     }
     if (
       (latestDisplayedMessageId ?? null) !== statusAnchorMessageIdRef.current ||
-      statusAnchorEndsTurnRef.current
+      statusAnchorEndsTurnRef.current ||
+      coveredByNewestRow
     ) {
       setLingeringAssistantStatus(null);
       return;
@@ -277,6 +276,7 @@ export function ChatTypingRows({
     return () => window.clearTimeout(timeoutId);
   }, [
     assistantStatusSnapshot,
+    coveredByNewestRow,
     latestDisplayedMessageEndsActiveTurn,
     latestDisplayedMessageId,
     lingeringAssistantStatus,
@@ -300,7 +300,7 @@ export function ChatTypingRows({
 
   const assistantStatusToRender = showAssistantStatus
     ? assistantStatusSnapshot
-    : lingeringAssistantStatus;
+    : coveredByNewestRow ? null : lingeringAssistantStatus;
   const assistantAvatarMotion =
     showAssistantStatus && assistantStatusToRender?.phase === "thinking" ? "thinking" : "idle";
   // Two lanes that wear the same face (one persona in two plans) draw it

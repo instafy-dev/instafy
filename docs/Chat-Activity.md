@@ -144,9 +144,9 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   runs (a person wrote in the meantime), says "Starting…", never Octo's notes or reasoning
   titles, for the same reason as the line. It goes as soon as a row of that turn says what the
   turn is doing: its own line, a routed card's `Opening Instafy's browser…`, or the card the
-  routing step posted while that run's record catches up. So a turn shows one Octo row, and
-  "Starting…" never comes back under its line. Only the runtime-busy notice stays, since it asks
-  the person to act.
+  routing step posted while that run's record catches up. It leaves nothing under that row, not
+  even its blank space. So a turn shows one Octo row, and "Starting…" never comes back under its
+  line.
 - The running line is the turn's one polite live region; it announces a new label at most every
   5 seconds. Reduced motion turns the sweep off. On coarse pointers the line and the rows are at
   least 44 px tall.

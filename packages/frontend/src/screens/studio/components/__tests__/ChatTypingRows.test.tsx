@@ -315,24 +315,26 @@ describe("ChatTypingRows", () => {
     expect(shown()).toBe("Starting…");
   });
 
-  it("keeps the runtime-busy notice when the row above covers the typing row", async () => {
-    // A routed card reads "Opening Instafy's browser…" for its browser turn
-    // and covers the typing row's "Starting…"; a turn that waits for a free
-    // machine still asks the person to act, so its notice stays.
-    const notice =
-      'Your cloud runtime is busy in "Space B". Stop it there or let it go idle, and this message sends once a runtime is free. It waits up to 30 minutes.';
-    const row = (text: string, wraps: boolean) => (
+  it("leaves nothing under the newest row once that row covers it, not even its spacer", async () => {
+    // A routed card is the newest row while another AI's turn starts: the
+    // typing row says "Starting…" for that turn under the card. Then Studio
+    // sends the card's task on, and the card reads "Opening Instafy's
+    // browser…" for its browser turn, covering the typing row. The spacer
+    // the row keeps for a reply on its way stayed under the card for twelve
+    // seconds, a second face with no words, and then went by itself.
+    vi.useFakeTimers();
+    const row = (covered: boolean, label: string, wraps = false) => (
       <ChatTypingRows
         peerTypingLabel={null}
         isAssistantTyping
-        isAssistantTypingCoveredByJobThreadPreview
+        isAssistantTypingCoveredByJobThreadPreview={covered}
         typingAgents={[]}
         hasMultipleTypingAgents={false}
         typingAgentHandle="octo"
         typingAgentAvatarSeed="octo"
         typingIndicatorState={{ phase: "waiting", label: null }}
-        typingStatusLabel={text}
-        typingStatusAriaLabel={text}
+        typingStatusLabel={label}
+        typingStatusAriaLabel={label}
         typingStatusWraps={wraps}
         isThinkingLabelExpanded={false}
         onToggleThinkingLabel={() => undefined}
@@ -340,17 +342,36 @@ describe("ChatTypingRows", () => {
         renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
       />
     );
-    const shown = () =>
-      container.querySelector('[data-testid="assistant-typing-indicator"]:not([aria-hidden="true"]) [data-sweep-text]')
-        ?.textContent ?? null;
-    await act(async () => {
-      root.render(row(notice, true));
+    const rowShown = () => ({
+      faces: container.querySelectorAll('[data-testid="assistant-avatar"]').length,
+      speakers: container.querySelectorAll('[data-testid="chat-speaker-marker"]').length,
+      typingRow: container.querySelector('[data-testid="assistant-typing-indicator"]') !== null,
     });
-    expect(shown()).toBe(notice);
+    const nothing = { faces: 0, speakers: 0, typingRow: false };
     await act(async () => {
-      root.render(row("Starting…", false));
+      root.render(row(false, "Starting…"));
     });
-    expect(shown()).toBeNull();
+    expect(rowShown()).toEqual({ faces: 1, speakers: 1, typingRow: true });
+    await act(async () => {
+      root.render(row(true, "Starting…"));
+    });
+    expect(rowShown()).toEqual(nothing);
+    await act(async () => {
+      vi.advanceTimersByTime(6_000);
+    });
+    expect(rowShown()).toEqual(nothing);
+
+    // So does the runtime-busy notice: under a row that covers the typing
+    // row it shows nothing, and it leaves nothing once it ends.
+    await act(async () => {
+      root.render(row(true, 'Your cloud runtime is busy in "Space B".', true));
+    });
+    expect(rowShown()).toEqual(nothing);
+    await act(async () => {
+      root.render(row(true, "Starting…"));
+      vi.advanceTimersByTime(1_000);
+    });
+    expect(rowShown()).toEqual(nothing);
   });
 
   it("keeps every typing label on one truncated line except the runtime-busy notice", async () => {

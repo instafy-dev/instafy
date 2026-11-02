@@ -14,6 +14,7 @@ import {
   type BrowserRequestCardState,
   type BrowserRequestHost,
 } from "../browserRequest";
+import { resolveTypingAgentLanes, type AssistantTypingAgent } from "../chatAssistantIdentity";
 import { ChatTypingRows } from "../ChatTypingRows";
 import { collapseLifecycleMessages, shouldDisplayChatMessage, synthesizeAgentJobThreadMessages } from "../chatMessagePresentation";
 import { ConversationMessageRows } from "../ConversationMessageRows";
@@ -22,6 +23,7 @@ import { resolveAgentWaitingActivityCopy } from "../runtimeAlertPresentation";
 import {
   isTranscriptTailActiveTurnOutcome,
   resolveJobThreadTypingCoverage,
+  resolveMultiAgentTypingStatus,
   resolveSingleAgentTypingStatus,
   resolveTranscriptTailKey,
   resolveTypingIndicatorState,
@@ -257,8 +259,16 @@ function chatPanel(step: Step) {
   const tail = displayed.at(-1);
   const isAssistantTyping = step.runs.length > 0 || step.awaitingLease === true;
   const coverage = isAssistantTyping ? resolveJobThreadTypingCoverage(tail, step.runs, messages) : "none";
-  // The typing row's phase and words, as ChatPanel works them out: a run in
-  // progress is thinking (Octo's phone-only face moves), anything else waits.
+  // Who the typing row speaks for, as ChatPanel works it out: one lane per AI
+  // at work (the newest run first), Octo while a send waits for its run.
+  const lanes = resolveTypingAgentLanes(step.runs, new Map());
+  const agents: AssistantTypingAgent[] = lanes.agents.length > 0
+    ? lanes.agents
+    : [{ handle: "octo", avatarSeed: "octo", displayName: "Octo", isThinking: false }];
+  const lead = agents[0]!;
+  // The typing row's phase and words: a run in progress is thinking (Octo's
+  // phone-only face moves), anything else waits; two AIs at work read as a
+  // count.
   const activeRun = step.runs[0] ?? null;
   const state = isAssistantTyping
     ? resolveTypingIndicatorState(
@@ -267,8 +277,20 @@ function chatPanel(step: Step) {
       activeRun,
     )
     : null;
-  const waiting = resolveAgentWaitingActivityCopy({ displayNames: ["Octo"], workspaceStarting: false, queued: false });
-  const status = resolveSingleAgentTypingStatus({ state, runStatus: activeRun?.status ?? null, agentName: "Octo", waiting });
+  const waiting = resolveAgentWaitingActivityCopy({
+    displayNames: agents.map((agent) => agent.displayName),
+    workspaceStarting: false,
+    queued: activeRun?.status === "queued",
+  });
+  const multiple = agents.length > 1;
+  const multiStatus = multiple
+    ? resolveMultiAgentTypingStatus(step.runs.map((entry) => ({
+      status: entry.status,
+      displayName: lanes.agentByRunId.get(entry.id)?.displayName ?? "Agent",
+    })))
+    : null;
+  const status = multiStatus ??
+    resolveSingleAgentTypingStatus({ state, runStatus: activeRun?.status ?? null, agentName: lead.displayName, waiting });
   const host: BrowserRequestHost = {
     transport: "shared",
     personalAvailable: false,
@@ -287,7 +309,10 @@ function chatPanel(step: Step) {
       covered: coverage !== "none",
       tailKey: resolveTranscriptTailKey(tail),
       tailEndsTurn: isAssistantTyping && isTranscriptTailActiveTurnOutcome(tail, step.runs, messages),
-      state,
+      agents,
+      multiple,
+      lead,
+      state: multiStatus ? { phase: multiStatus.phase, label: null } : state,
       label: status.label,
       ariaLabel: status.ariaLabel,
     },
@@ -355,8 +380,8 @@ describe("a message Octo sends straight to Instafy's browser", () => {
             conversationControllerId={CONVERSATION}
             firstPlanMessageId={null}
             humanLabelByUserId={new Map()}
-            runAgentIdentityByRunId={new Map()}
-            runAgentHandleByRunId={new Map()}
+            runAgentIdentityByRunId={new Map([[ROUTING_RUN, OCTO], [BROWSER_RUN, OCTO]])}
+            runAgentHandleByRunId={new Map([[ROUTING_RUN, OCTO.handle], [BROWSER_RUN, OCTO.handle]])}
             renderAssistantAvatar={() => <span data-testid="octo-face" />}
             assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
             onRequestActions={vi.fn()}
@@ -368,10 +393,10 @@ describe("a message Octo sends straight to Instafy's browser", () => {
             peerTypingLabel={null}
             isAssistantTyping={view.typing.isAssistantTyping}
             isAssistantTypingCoveredByJobThreadPreview={view.typing.covered}
-            typingAgents={[]}
-            hasMultipleTypingAgents={false}
-            typingAgentHandle="octo"
-            typingAgentAvatarSeed="octo"
+            typingAgents={view.typing.agents}
+            hasMultipleTypingAgents={view.typing.multiple}
+            typingAgentHandle={view.typing.lead.handle}
+            typingAgentAvatarSeed={view.typing.lead.avatarSeed}
             typingIndicatorState={view.typing.state}
             typingStatusLabel={view.typing.label}
             typingStatusAriaLabel={view.typing.ariaLabel}
@@ -390,8 +415,9 @@ describe("a message Octo sends straight to Instafy's browser", () => {
   /**
    * What the chat says at that moment: every Octo row (the transcript's rows
    * that name Octo, and the typing row, named with or without its words),
-   * every face, and what each says, top to bottom: a card shown as a card,
-   * a turn's line, or the typing row's words.
+   * every face (a typing row for two AIs draws both), and what each says,
+   * top to bottom: a card shown as a card, a turn's line, or the typing
+   * row's words.
    */
   function read(time: string) {
     const says: string[] = [];
@@ -408,9 +434,13 @@ describe("a message Octo sends straight to Instafy's browser", () => {
     const faces = Array.from(container.querySelectorAll(
       '[data-testid="octo-face"], [data-testid="chat-avatar-assistant"], [data-testid="assistant-thinking-octo-compact"]',
     ));
+    // Octo's rows: those that name Octo, and its turns' rows, whose marker
+    // names no AI (a turn's row is the turn's); another AI's rows name it.
+    const octoRows = Array.from(container.querySelectorAll<HTMLElement>('[data-testid="chat-speaker-marker"]'))
+      .filter((marker) => !marker.dataset.agentHandle || marker.dataset.agentHandle === "octo").length;
     return {
       time,
-      octoRows: container.querySelectorAll('[data-testid="chat-speaker-marker"]').length,
+      octoRows,
       faces: {
         desktop: faces.filter((face) => shows(face, "desktop")).length,
         phone: faces.filter((face) => shows(face, "phone")).length,
@@ -429,8 +459,10 @@ describe("a message Octo sends straight to Instafy's browser", () => {
     // Its card lands; that run's record says it ended 20 ms later. The card
     // is all that turn says, so "Starting…" hands over to it.
     seen.push(await show({ time: "13:07:59.673", runs: [routingRun("in_progress")] }));
+    // Studio decides once that run ended: the card shows as a card meanwhile.
+    seen.push(await show({ time: "13:07:59.693", runs: [] }));
     // Studio opens the card by itself: it reads as the browser turn's line.
-    seen.push(await show({ time: "13:07:59.693", runs: [], card: { kind: "opening", note: null } }));
+    seen.push(await show({ time: "13:08:00.084", runs: [], card: { kind: "opening", note: null } }));
     // The person's words go on to the browser turn, queued and then leased.
     seen.push(await show({ time: "13:08:00.463", runs: [browserRun("queued")], card: { kind: "opening", note: null } }));
     seen.push(await show({ time: "13:08:00.572", runs: [browserRun("in_progress")], card: { kind: "opened" } }));
@@ -449,7 +481,8 @@ describe("a message Octo sends straight to Instafy's browser", () => {
     expect(seen).toEqual([
       one("13:07:55.960", ["Starting…"], "Octo is starting", 0),
       one("13:07:59.673", ["card"]),
-      one("13:07:59.693", ["Opening Instafy's browser…"]),
+      one("13:07:59.693", ["card"]),
+      one("13:08:00.084", ["Opening Instafy's browser…"]),
       one("13:08:00.463", ["Opening Instafy's browser…"]),
       one("13:08:00.572", ["Opening Instafy's browser…"]),
       one("13:08:04.037", ["Using the browser…"]),
@@ -483,13 +516,45 @@ describe("a message Octo sends straight to Instafy's browser", () => {
       one("13:08:04.037", ["Using the browser…"]),
     ]);
   });
+
+  // A second AI in the chat starts its own turn on the same message. While
+  // Studio opens Octo's card, the typing row says that AI is starting: it has
+  // no row of its own yet. Once Octo's browser turn is on its way, the card
+  // reads that turn's line and covers the typing row, as that turn's own row
+  // does once it shows something. No row speaks for Octo's browser turn under
+  // its line, and no face stays behind.
+  it("never speaks for Octo's browser turn under its line while another AI's turn runs", async () => {
+    const researcher = run("77777777-7777-4777-8777-777777777777", "88888888-8888-4888-8888-888888888888", "in_progress", {
+      agent: { id: "researcher-id", handle: "researcher", avatarSeed: "hatchling:3" },
+    });
+    const seen: Array<ReturnType<typeof read>> = [];
+    seen.push(await show({ time: "13:08:00.084", runs: [researcher], card: { kind: "opening", note: null } }));
+    seen.push(await show({ time: "13:08:00.463", runs: [browserRun("queued"), researcher], card: { kind: "opening", note: null } }));
+    seen.push(await show({ time: "13:08:00.572", runs: [browserRun("in_progress"), researcher], card: { kind: "opened" } }));
+    seen.push(await show({ time: "13:08:04.037", runs: [browserRun("in_progress"), researcher], card: { kind: "opened" } }));
+
+    const octoAlone = (time: string, says: string) =>
+      ({ time, octoRows: 1, faces: { desktop: 1, phone: 1 }, says: [says], typingAnnounces: null });
+    expect(seen).toEqual([
+      {
+        time: "13:08:00.084",
+        octoRows: 1,
+        faces: { desktop: 2, phone: 1 },
+        says: ["Opening Instafy's browser…", "Starting…"],
+        typingAnnounces: "@researcher is starting",
+      },
+      octoAlone("13:08:00.463", "Opening Instafy's browser…"),
+      octoAlone("13:08:00.572", "Opening Instafy's browser…"),
+      octoAlone("13:08:04.037", "Using the browser…"),
+    ]);
+  });
 });
 
 describe("what a routed card covers", () => {
   const [ask, card, continuation, firstStep] = CHAT as [ChatMessage, ChatMessage, ChatMessage, ChatMessage];
   const another = run("77777777-7777-4777-8777-777777777777", "88888888-8888-4888-8888-888888888888", "queued");
 
-  it("stands for its own turns only: the routing step until that run's record ends, its browser turn until that turn shows something", () => {
+  it("stands for its routing step until that run's record ends, and for its browser turn until that turn shows something", () => {
     // All the routing step says is its card: the run's record catches up.
     expect(resolveJobThreadTypingCoverage(card, [routingRun("in_progress")], [ask, card])).toBe("answered");
     expect(isTranscriptTailActiveTurnOutcome(card, [routingRun("in_progress")], [ask, card])).toBe(true);
@@ -507,14 +572,15 @@ describe("what a routed card covers", () => {
     expect(synthesizeAgentJobThreadMessages(shown, shown.filter(shouldDisplayChatMessage)).map((row) => row.id))
       .toEqual([ask.id, `agent-job-thread:${BROWSER_JOB}`]);
 
-    // It stands for nothing else: another turn starting gets its own typing
-    // row. Nothing went on from the card yet (Studio left it a button, or it
-    // is still deciding) and another run starts.
+    // Before anything went on from it (Studio left it a button, or it is
+    // still deciding), it is only its routing step's answer: another turn
+    // starting gets its own typing row.
     expect(resolveJobThreadTypingCoverage(card, [another], [ask, card])).toBe("none");
     expect(isTranscriptTailActiveTurnOutcome(card, [another], [ask, card])).toBe(false);
-    // Another turn (a second AI in the chat, say) starts while the browser
-    // turn is on its way: the typing row speaks for it.
-    expect(resolveJobThreadTypingCoverage(card, [browserRun("queued"), another], [ask, card, continuation])).toBe("none");
+    // Once its browser turn is on its way, it is that turn's row: it covers
+    // the typing row whatever else runs, as a running turn's own row does, so
+    // nothing under it speaks for that turn again (a second AI's turn, say).
+    expect(resolveJobThreadTypingCoverage(card, [browserRun("queued"), another], [ask, card, continuation])).toBe("live");
     // The person pressed it themselves: their press is a turn of its own.
     const pressed: ChatMessage = {
       ...continuation,
@@ -522,7 +588,8 @@ describe("what a routed card covers", () => {
     };
     expect(resolveJobThreadTypingCoverage(card, [browserRun("queued")], [ask, card, pressed])).toBe("none");
     // Its browser turn was stopped before it showed anything: the card is a
-    // card again, and the next turn's typing row says it is starting.
+    // card again and stands for that turn no more, also while the stopped
+    // run's record catches up; the next turn's typing row says it is starting.
     const stopped = stored({
       id: "stopped",
       role: "assistant",
@@ -535,6 +602,8 @@ describe("what a routed card covers", () => {
         details: { runIds: [BROWSER_RUN], jobIds: [BROWSER_JOB], outcome: "canceled", runStatus: "canceled" },
       },
     });
+    expect(resolveJobThreadTypingCoverage(card, [browserRun("in_progress")], [ask, card, continuation, stopped]))
+      .toBe("none");
     expect(resolveJobThreadTypingCoverage(card, [another], [ask, card, continuation, stopped])).toBe("none");
     // A card that the routing step did not send is any card.
     const ordinary: ChatMessage = {
