@@ -219,44 +219,96 @@ impl Space {
         runtime_id: &Uuid,
         job_id: &Uuid,
     ) -> anyhow::Result<StatusCode> {
-        let token =
-            crate::auth::issue_agent_token(&state.config, &self.project_id, runtime_id, None, None)
-                .map_err(|error| controller_error("issue agent token", error))?
-                .token;
+        self.report_with(state, runtime_id, job_id, &[PAGE], &[])
+            .await
+    }
+
+    /// The end report of `job_id`'s turn naming `paths` (by their place in
+    /// the turn's folder, as the runtime names them), with the turn's save
+    /// among `more_artifacts` when it ran one.
+    async fn report_with(
+        &self,
+        state: &AppState,
+        runtime_id: &Uuid,
+        job_id: &Uuid,
+        paths: &[&str],
+        more_artifacts: &[JsonValue],
+    ) -> anyhow::Result<StatusCode> {
         let body = json!({
             "job_id": job_id.to_string(),
-            "content": "Applied file changes: sites/porto/app.js",
+            "content": format!("Applied file changes: {}", paths.join(", ")),
             "message_type": "file_change",
             "metadata": {
                 "kind": "codex_file_change",
                 "itemId": "stopped-turn-files",
                 "eventType": "item.completed",
                 "status": "completed",
-                "paths": ["sites/porto/app.js"],
-                "activity": {
-                    "v": 1, "key": "builtin/edit", "role": "content", "live": "Editing files",
-                    "done": { "one": "edited a file", "other": "edited {n} files", "some": "edited files" },
-                    "count": 1, "also": [],
-                },
+                "paths": paths,
+                "activity": edit_label(paths.len()),
             },
-            "artifacts": [{
+            "artifacts": std::iter::once(json!({
                 "kind": "apply/files",
-                "files": [{
-                    "path": "sites/porto/app.js",
-                    "workspacePath": "sites/porto/app.js",
-                    "change": { "type": "changed" },
-                    "changeType": "changed",
-                    "source": "workspace",
-                }],
+                "files": paths.iter().map(|path| {
+                    let relative = path.trim_start_matches(WORKSPACE);
+                    json!({
+                        "path": relative,
+                        "workspacePath": relative,
+                        "change": { "type": "changed" },
+                        "changeType": "changed",
+                        "source": "workspace",
+                    })
+                }).collect::<Vec<_>>(),
                 "metadata": { "provider": "codex-embedded" },
-            }],
+            }))
+            .chain(more_artifacts.iter().cloned())
+            .collect::<Vec<_>>(),
         });
+        self.post(state, runtime_id, "/agent/stopped", body).await
+    }
+
+    /// A step `job_id`'s runtime streams while its turn runs: an edit of
+    /// `paths`, as item `item_id`.
+    async fn streamed_edit(
+        &self,
+        state: &AppState,
+        runtime_id: &Uuid,
+        job_id: &Uuid,
+        item_id: &str,
+        paths: &[&str],
+    ) -> anyhow::Result<StatusCode> {
+        let body = json!({
+            "job_id": job_id.to_string(),
+            "content": format!("Applied file changes: {}", paths.join(", ")),
+            "message_type": "file_change",
+            "metadata": {
+                "kind": "codex_file_change",
+                "itemId": item_id,
+                "eventType": "item.completed",
+                "status": "completed",
+                "paths": paths,
+                "activity": edit_label(paths.len()),
+            },
+        });
+        self.post(state, runtime_id, "/agent/message", body).await
+    }
+
+    async fn post(
+        &self,
+        state: &AppState,
+        runtime_id: &Uuid,
+        uri: &str,
+        body: JsonValue,
+    ) -> anyhow::Result<StatusCode> {
+        let token =
+            crate::auth::issue_agent_token(&state.config, &self.project_id, runtime_id, None, None)
+                .map_err(|error| controller_error("issue agent token", error))?
+                .token;
         let response = agent::router()
             .with_state(state.clone())
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/agent/stopped")
+                    .uri(uri)
                     .header(axum::http::header::CONTENT_TYPE, "application/json")
                     .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::from(body.to_string()))?,
@@ -266,6 +318,22 @@ impl Space {
         let _ = to_bytes(response.into_body(), usize::MAX).await?;
         Ok(status)
     }
+}
+
+/// The folder the turns ran in, as the runtime names a file in it.
+const WORKSPACE: &str = "/workspace/space/";
+/// The page the stopped turns edited.
+const PAGE: &str = "/workspace/space/sites/porto/app.js";
+/// A page a command of the turn wrote, which no edit step named.
+const ROUTE: &str = "/workspace/space/sites/porto/route.html";
+
+/// The runtime's label of an edit of `files` files.
+fn edit_label(files: usize) -> JsonValue {
+    json!({
+        "v": 1, "key": "builtin/edit", "role": "content", "live": "Editing files",
+        "done": { "one": "edited a file", "other": "edited {n} files", "some": "edited files" },
+        "count": files, "also": [],
+    })
 }
 
 /// The messages of a chat that its job `job_id`'s runtime reported.
@@ -388,7 +456,7 @@ async fn a_stopped_turn_reports_its_edit_once_and_its_charge_stays_the_reserve(
         let steps = job_steps(&pool, &turn.conversation_id, &turn.job_id).await?;
         assert_eq!(steps.len(), 1, "{steps:?}");
         let (content, metadata, run_id) = &steps[0];
-        assert_eq!(content, "Applied file changes: sites/porto/app.js");
+        assert_eq!(content, &format!("Applied file changes: {PAGE}"));
         assert_eq!(*run_id, Some(turn.run_id));
         assert_eq!(metadata["source"], "agent");
         assert_eq!(metadata["kind"], "update");
@@ -398,7 +466,8 @@ async fn a_stopped_turn_reports_its_edit_once_and_its_charge_stays_the_reserve(
         assert_eq!(metadata["details"]["status"], "completed");
         // The edit's own label, which the turn's line counts.
         assert_eq!(metadata["activity"]["key"], "builtin/edit");
-        assert_eq!(metadata["details"]["paths"], json!(["sites/porto/app.js"]));
+        assert_eq!(metadata["details"]["paths"], json!([PAGE]));
+        assert_eq!(metadata["details"]["itemId"], "stopped-turn-files");
         assert_eq!(metadata["artifacts"][0]["kind"], "apply/files");
         assert_eq!(
             metadata["artifacts"][0]["files"][0]["workspacePath"],
@@ -410,6 +479,7 @@ async fn a_stopped_turn_reports_its_edit_once_and_its_charge_stays_the_reserve(
         let (status, artifacts) = job_state(&pool, &turn.job_id).await?;
         assert_eq!(status, "canceled");
         assert_eq!(artifacts[0]["kind"], "apply/files");
+        assert_eq!(artifacts[1]["kind"], "stopped-turn/reported");
         assert_eq!(run_status(&pool, &turn.run_id).await?, "canceled");
         assert_eq!(
             ledger_rows(&pool, &space.project_id).await?,
@@ -478,4 +548,193 @@ async fn a_stopped_turn_reports_its_edit_once_and_its_charge_stays_the_reserve(
         .execute("delete from auth.users where id = $1", &[&owner])
         .await;
     result.and(cleanup.map(|_| ()).map_err(anyhow::Error::from))
+}
+
+/// Runs `body` on a seeded space, then removes what it made.
+async fn on_a_space<F, Fut>(label: &'static str, body: F) -> anyhow::Result<()>
+where
+    F: FnOnce(PgPool, AppState, Space) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let pool = require_origin_test_pool(label).await?;
+    let space = Space::seed(&pool, label).await?;
+    let fixture = SharedDbFixture {
+        organizations: vec![space.org_id],
+        projects: vec![space.project_id],
+    };
+    let owner = space.owner_user_id;
+    let state = build_test_state(pool.clone(), test_config(label));
+    let result = with_shared_db_fixture(fixture, body(pool.clone(), state, space)).await;
+    let cleanup = pool
+        .get()
+        .await?
+        .execute("delete from auth.users where id = $1", &[&owner])
+        .await;
+    result.and(cleanup.map(|_| ()).map_err(anyhow::Error::from))
+}
+
+/// The usual Stop: the turn's edit was recorded as its own step before the
+/// press. The report does not name it again: it restates that step, the same
+/// item, with the turn's files, so the chat still counts one edited file and
+/// lists one row for it. A file only a command wrote, which no edit step
+/// named, is what the report names.
+#[tokio::test]
+async fn a_stopped_turns_report_names_only_what_its_chat_does_not_show_yet() -> anyhow::Result<()> {
+    on_a_space(
+        "stopped-turn-report-shown",
+        |pool, state, space| async move {
+            // The edit's step reached the chat while the turn ran.
+            let turn = space.running_turn(&pool, &space.runtime_id).await?;
+            assert_eq!(
+                space
+                    .streamed_edit(
+                        &state,
+                        &space.runtime_id,
+                        &turn.job_id,
+                        "call_edit",
+                        &[PAGE]
+                    )
+                    .await?,
+                StatusCode::OK
+            );
+            space.stop(&state, &turn).await?;
+            assert_eq!(
+                space
+                    .report(&state, &space.runtime_id, &turn.job_id)
+                    .await?,
+                StatusCode::OK
+            );
+            let steps = job_steps(&pool, &turn.conversation_id, &turn.job_id).await?;
+            assert_eq!(steps.len(), 2, "{steps:?}");
+            let (streamed, restated) = (&steps[0], &steps[1]);
+            assert_eq!(restated.0, streamed.0);
+            assert_eq!(restated.1["details"]["itemId"], "call_edit");
+            assert_eq!(restated.1["details"]["paths"], json!([PAGE]));
+            assert_eq!(restated.1["activity"]["key"], "builtin/edit");
+            assert_eq!(restated.1["activity"]["count"], 1);
+            assert_eq!(restated.1["outcome"], "canceled");
+            assert_eq!(restated.1["artifacts"][0]["kind"], "apply/files");
+            assert_eq!(
+                restated.1["artifacts"][0]["files"][0]["workspacePath"],
+                "sites/porto/app.js"
+            );
+            assert!(streamed.1.get("artifacts").is_none());
+
+            // A turn that edited the page, then wrote another with a command: the
+            // report names only that one, as one edited file.
+            let turn = space.running_turn(&pool, &space.runtime_id).await?;
+            space
+                .streamed_edit(
+                    &state,
+                    &space.runtime_id,
+                    &turn.job_id,
+                    "call_edit",
+                    &[PAGE],
+                )
+                .await?;
+            space.stop(&state, &turn).await?;
+            assert_eq!(
+                space
+                    .report_with(&state, &space.runtime_id, &turn.job_id, &[PAGE, ROUTE], &[])
+                    .await?,
+                StatusCode::OK
+            );
+            let steps = job_steps(&pool, &turn.conversation_id, &turn.job_id).await?;
+            assert_eq!(steps.len(), 2, "{steps:?}");
+            let (content, metadata, _) = &steps[1];
+            assert_eq!(content, &format!("Applied file changes: {ROUTE}"));
+            assert_eq!(metadata["details"]["itemId"], "stopped-turn-files");
+            assert_eq!(metadata["details"]["paths"], json!([ROUTE]));
+            assert_eq!(metadata["activity"]["count"], 1);
+            assert_eq!(
+                metadata["artifacts"][0]["files"].as_array().map(Vec::len),
+                Some(2)
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A Stop that reached the turn while it saved: its report carries the
+/// turn's own save, which the chat's files then read as that save left them.
+/// Nothing else rides along: a report with the turn's usage is refused.
+#[tokio::test]
+async fn a_turn_stopped_while_it_saved_reports_its_save_and_never_its_usage() -> anyhow::Result<()>
+{
+    on_a_space("stopped-turn-report-saved", |pool, state, space| async move {
+        let turn = space.running_turn(&pool, &space.runtime_id).await?;
+        space
+            .streamed_edit(&state, &space.runtime_id, &turn.job_id, "call_edit", &[PAGE])
+            .await?;
+        space.stop(&state, &turn).await?;
+        let usage = json!({ "kind": "ai/task-usage", "usage": { "inputTokens": 42 } });
+        assert_eq!(
+            space
+                .report_with(&state, &space.runtime_id, &turn.job_id, &[PAGE], &[usage])
+                .await?,
+            StatusCode::BAD_REQUEST
+        );
+        let save = json!({
+            "kind": "origin/apply",
+            "metadata": { "gitSyncStatus": "synced", "gitRev": "abc1234", "gitBaseRev": "def5678" },
+        });
+        assert_eq!(
+            space
+                .report_with(&state, &space.runtime_id, &turn.job_id, &[PAGE], &[save.clone()])
+                .await?,
+            StatusCode::OK
+        );
+        let steps = job_steps(&pool, &turn.conversation_id, &turn.job_id).await?;
+        assert_eq!(steps.len(), 2, "{steps:?}");
+        assert_eq!(steps[1].1["artifacts"][1], save);
+        Ok(())
+    })
+    .await
+}
+
+/// A turn a short rate limit put back in the queue keeps what its first
+/// attempt left among its job's artifacts. Stopped on its next attempt, its
+/// report is taken, and only once.
+#[tokio::test]
+async fn a_turn_retried_after_a_rate_limit_is_reported_once_when_stopped() -> anyhow::Result<()> {
+    on_a_space(
+        "stopped-turn-report-retried",
+        |pool, state, space| async move {
+            let turn = space.running_turn(&pool, &space.runtime_id).await?;
+            // The failed first attempt's usage, as its completion stored it.
+            pool.get()
+                .await?
+                .execute(
+                    "update agent_jobs
+                    set artifacts = '[{\"kind\": \"ai/task-usage\", \"usage\": {}}]'::jsonb
+                  where id = $1",
+                    &[&turn.job_id],
+                )
+                .await?;
+            space.stop(&state, &turn).await?;
+            assert_eq!(
+                space
+                    .report(&state, &space.runtime_id, &turn.job_id)
+                    .await?,
+                StatusCode::OK
+            );
+            assert_eq!(
+                space
+                    .report(&state, &space.runtime_id, &turn.job_id)
+                    .await?,
+                StatusCode::CONFLICT
+            );
+            let (_, artifacts) = job_state(&pool, &turn.job_id).await?;
+            assert_eq!(artifacts[0]["kind"], "ai/task-usage");
+            assert_eq!(
+                job_steps(&pool, &turn.conversation_id, &turn.job_id)
+                    .await?
+                    .len(),
+                1
+            );
+            Ok(())
+        },
+    )
+    .await
 }

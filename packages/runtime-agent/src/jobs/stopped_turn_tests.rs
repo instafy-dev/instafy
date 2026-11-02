@@ -165,11 +165,13 @@ async fn only_a_turn_that_lost_its_lease_after_changing_files_carries_changes() 
 }
 
 /// The report names the edit as the turn's step, with the label a finished
-/// turn's edit has, and lists the files as a finished turn's reply does.
+/// turn's edit has and the file by its place in the turn's folder, as the
+/// turn's own edit steps name it, and lists the files as a finished turn's
+/// reply does: not saved, since a turn that lost its lease never saved.
 #[test]
 fn the_report_is_the_edit_step_and_the_files_it_changed() {
     let changes = StoppedTurnChanges {
-        workspace_dir: PathBuf::from("/workspace"),
+        workspace_dir: PathBuf::from("/workspace/project"),
         files: vec![CodexFileDescriptor {
             path: "sites/porto/app.js".to_string(),
             workspace_path: "sites/porto/app.js".to_string(),
@@ -180,15 +182,22 @@ fn the_report_is_the_edit_step_and_the_files_it_changed() {
             content_base64: None,
             change: super::super::FileChangeDescriptor::parse(json!({ "type": "changed" })),
         }],
+        save: None,
     };
     let runtime_id = Uuid::new_v4();
     let (step, artifacts) = changes.report(&runtime_id);
     assert_eq!(step.message_type.as_deref(), Some("file_change"));
-    assert_eq!(step.content, "Applied file changes: sites/porto/app.js");
+    assert_eq!(
+        step.content,
+        "Applied file changes: /workspace/project/sites/porto/app.js"
+    );
     let metadata = step.metadata.expect("step metadata");
     assert_eq!(metadata["kind"], "codex_file_change");
     assert_eq!(metadata["status"], "completed");
-    assert_eq!(metadata["paths"], json!(["sites/porto/app.js"]));
+    assert_eq!(
+        metadata["paths"],
+        json!(["/workspace/project/sites/porto/app.js"])
+    );
     assert_eq!(metadata["runtimeId"], json!(runtime_id.to_string()));
     assert_eq!(
         metadata["activity"],
@@ -196,11 +205,90 @@ fn the_report_is_the_edit_step_and_the_files_it_changed() {
     );
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0]["kind"], "apply/files");
+    assert_eq!(artifacts[0]["metadata"]["stoppedBeforeSave"], true);
     let files = artifacts[0]["files"].as_array().unwrap();
     assert_eq!(files.len(), 1);
     assert_eq!(files[0]["path"], "sites/porto/app.js");
     assert_eq!(files[0]["workspacePath"], "sites/porto/app.js");
     assert_eq!(files[0]["changeType"], "changed");
+}
+
+fn finished_execution(artifacts: Vec<JsonValue>) -> JobExecution {
+    JobExecution {
+        summary: "I put the hours on the page.".to_string(),
+        suggested_replies: Vec::new(),
+        provider: "codex-embedded".to_string(),
+        artifacts,
+        credit_snapshot: None,
+        provider_conversation_state: None,
+        messages: Vec::new(),
+        messages_streamed: true,
+        final_messages: Vec::new(),
+    }
+}
+
+/// A Stop that reached the turn after its model was done: what it changed is
+/// what its reply would have listed (not the files it only read), with its
+/// save, and never its usage.
+#[test]
+fn a_finished_turns_changes_are_the_files_its_reply_lists_and_its_save() {
+    let save = json!({
+        "kind": "origin/apply",
+        "metadata": { "gitSyncStatus": "synced", "gitRev": "abc1234", "gitBaseRev": "def5678" },
+    });
+    let execution = finished_execution(vec![
+        json!({ "kind": "codex/run-log", "events": [] }),
+        json!({
+            "kind": "apply/files",
+            "files": [
+                { "path": "sites/porto/app.js", "workspacePath": "sites/porto/app.js", "changeType": "changed", "change": { "type": "changed" } },
+                { "path": "sites/porto/README.md", "workspacePath": "sites/porto/README.md", "changeType": "read", "change": { "type": "read" } },
+                { "path": "./sites/porto/route.html", "workspacePath": "./sites/porto/route.html", "changeType": "created", "change": { "type": "created" } },
+                { "path": "../outside.txt", "workspacePath": "../outside.txt", "changeType": "changed", "change": { "type": "changed" } },
+            ],
+        }),
+        save.clone(),
+        json!({ "kind": "ai/task-usage", "usage": { "inputTokens": 42 } }),
+    ]);
+    let changes =
+        StoppedTurnChanges::of_finished_turn(PathBuf::from("/workspace/project"), &execution)
+            .expect("the turn changed files");
+    let (step, artifacts) = changes.report(&Uuid::new_v4());
+    assert_eq!(
+        step.metadata.unwrap()["paths"],
+        json!([
+            "/workspace/project/sites/porto/app.js",
+            "/workspace/project/sites/porto/route.html"
+        ])
+    );
+    assert_eq!(artifacts.len(), 2, "{artifacts:?}");
+    assert_eq!(artifacts[0]["kind"], "apply/files");
+    assert!(artifacts[0]["metadata"].get("stoppedBeforeSave").is_none());
+    let listed: Vec<&str> = artifacts[0]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["workspacePath"].as_str().unwrap())
+        .collect();
+    assert_eq!(listed, ["sites/porto/app.js", "sites/porto/route.html"]);
+    assert_eq!(artifacts[1], save);
+
+    // A turn that only read files, or listed none, changed nothing.
+    let read_only = finished_execution(vec![json!({
+        "kind": "apply/files",
+        "files": [{ "path": "a.md", "workspacePath": "a.md", "changeType": "read", "change": { "type": "read" } }],
+    })]);
+    assert!(
+        StoppedTurnChanges::of_finished_turn(PathBuf::from("/workspace/project"), &read_only)
+            .is_none()
+    );
+    assert!(
+        StoppedTurnChanges::of_finished_turn(
+            PathBuf::from("/workspace/project"),
+            &finished_execution(Vec::new())
+        )
+        .is_none()
+    );
 }
 
 /// A controller that answers `/agent/stopped` with `status`, and what it was sent.
@@ -253,16 +341,21 @@ async fn the_stopped_turns_report_ends_the_job_here_only_when_recorded() {
 
         let registration = crate::jobs::tests::test_registration_with_proxy();
         let client = ControllerClient::new(&config).unwrap();
-        processor
-            .report_stopped_turn(&client, &registration, &job, &error)
-            .await;
+        let changes = StoppedTurnChanges::of_lost_lease(&error).expect("the turn's changes");
+        assert_eq!(
+            processor
+                .report_stopped_turn(&client, &registration, &job, changes)
+                .await,
+            recorded
+        );
 
         let body = received.try_recv().expect("one end report");
         assert!(received.try_recv().is_err(), "only one");
+        let page = workspace.join("sites/porto/app.js").display().to_string();
         assert_eq!(body["job_id"], json!(job.id.to_string()));
         assert_eq!(body["message_type"], "file_change");
-        assert_eq!(body["content"], "Applied file changes: sites/porto/app.js");
-        assert_eq!(body["metadata"]["paths"], json!(["sites/porto/app.js"]));
+        assert_eq!(body["content"], format!("Applied file changes: {page}"));
+        assert_eq!(body["metadata"]["paths"], json!([page]));
         assert_eq!(
             body["artifacts"][0]["files"][0]["workspacePath"],
             "sites/porto/app.js"
@@ -273,17 +366,6 @@ async fn the_stopped_turns_report_ends_the_job_here_only_when_recorded() {
         assert_eq!(baseline_kept, !recorded, "{status}");
     }
 
-    // A turn that changed nothing sends nothing.
-    let (config, mut received) = controller(StatusCode::OK).await;
-    let processor = JobProcessor::new(Arc::new(config.clone()));
-    let job = test_lease_job(Some("feature"), json!({}));
-    processor
-        .report_stopped_turn(
-            &ControllerClient::new(&config).unwrap(),
-            &crate::jobs::tests::test_registration_with_proxy(),
-            &job,
-            &anyhow!("lease lost"),
-        )
-        .await;
-    assert!(received.try_recv().is_err());
+    // A turn that changed nothing has nothing to report.
+    assert!(StoppedTurnChanges::of_lost_lease(&anyhow!("lease lost")).is_none());
 }

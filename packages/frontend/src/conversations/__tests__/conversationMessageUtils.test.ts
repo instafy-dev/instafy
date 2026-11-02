@@ -1109,6 +1109,28 @@ describe("extractUnsavedReasonFromMetadata", () => {
     expect(extractUnsavedReasonFromMetadata(null)).toBeNull();
   });
 
+  // A stopped turn's end report: files the turn changed before the Stop
+  // reached it, which no save took. With the turn's own save (a Stop that came
+  // while it saved), that save says.
+  it("reports a stopped turn's files that no save took", () => {
+    const stoppedFiles = {
+      kind: "apply/files",
+      files: [{ path: "sites/porto/app.js" }],
+      metadata: { provider: "codex-embedded", stoppedBeforeSave: true },
+    };
+    expect(extractUnsavedReasonFromMetadata({ artifacts: [stoppedFiles] })).toBe("stopped_before_save");
+    expect(
+      extractUnsavedReasonFromMetadata({
+        artifacts: [{ ...stoppedFiles, metadata: { provider: "codex-embedded" } }, originApply("synced")],
+      }),
+    ).toBeNull();
+    expect(
+      extractUnsavedReasonFromMetadata({
+        artifacts: [{ ...stoppedFiles, metadata: { stoppedBeforeSave: "yes" } }],
+      }),
+    ).toBeNull();
+  });
+
   it("reports a skipped save as failed when real files rode in the refused request", () => {
     // The origin refuses the whole /git/sync when any path is excluded from
     // history, so profile.json was never saved even though the runtime calls

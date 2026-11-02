@@ -13,7 +13,8 @@ Rust binary that runs inside the hosted runtime container. Responsibilities:
 - Collect Codex event logs and return artifacts via `/agent/complete`.
 - Heartbeat each running job every second: a Stop cancels the job on the controller, and the turn
   learns of it from its next heartbeat. A stopped turn that already changed files sends one end
-  report of them via `/agent/stopped` (see [Chat activity](../../docs/Chat-Activity.md#a-stopped-turns-changes)).
+  report of them via `/agent/stopped`, as does one whose completion the controller refused because
+  a Stop reached it while it saved (see [Chat activity](../../docs/Chat-Activity.md#a-stopped-turns-changes)).
 - Stop per-job heartbeat and secret-refresh requests when cleanup begins, including requests
   awaiting an HTTP response, so completed jobs cannot block the next lease poll.
 

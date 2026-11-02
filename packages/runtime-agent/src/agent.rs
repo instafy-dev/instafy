@@ -28,6 +28,7 @@ use crate::controller::{
     SpaceDeleted,
 };
 use crate::job_cancel::JobCancelSignal;
+use crate::jobs::stopped_turn::StoppedTurnChanges;
 use crate::jobs::{JobExecution, JobFailureWithArtifacts, JobProcessor};
 use crate::origin::{OriginLaunchOverrides, OriginService};
 use crate::personal_browser::validate_personal_browser_job_capability;
@@ -1484,6 +1485,7 @@ impl RuntimeAgent {
                             messages_streamed: false,
                             final_messages: Vec::new(),
                         },
+                        &executor.processor(),
                     )
                     .await;
                 } else {
@@ -1515,19 +1517,22 @@ impl RuntimeAgent {
                     end = TurnEnd::after_run(&execution_result);
                     match execution_result {
                         Ok(execution) => {
-                            Self::complete_job(&client, registration, &job, execution).await;
+                            Self::complete_job(
+                                &client,
+                                registration,
+                                &job,
+                                execution,
+                                &executor.processor(),
+                            )
+                            .await;
                         }
                         Err(error) => {
                             if end == TurnEnd::LeaseLost {
                                 // No completion for a turn that lost its lease. A
                                 // Stop cancelled it, or a stop of this runtime put
-                                // it back in the queue; what it already changed is
-                                // reported, and recorded only for the former.
+                                // it back in the queue; the executor reported what
+                                // it already changed, recorded only for the former.
                                 info!(job_id = %job.id, "job cancelled; skipping completion");
-                                executor
-                                    .processor()
-                                    .report_stopped_turn(&client, registration, &job, &error)
-                                    .await;
                                 turn.end(end);
                                 executor.processor().cleanup_after_lease_lost(&job).await;
                                 if let Some(task) = periodic_heartbeat.take() {
@@ -1659,6 +1664,7 @@ impl RuntimeAgent {
         registration: &Registration,
         job: &LeaseJob,
         mut execution: JobExecution,
+        processor: &JobProcessor,
     ) {
         // A browser turn's finding lines are for Octo: the reply goes out
         // without them, and a Details note keeps them.
@@ -1747,9 +1753,34 @@ impl RuntimeAgent {
             }
             Err(error) => {
                 warn!(?error, job_id = %job.id, "failed to report job completion");
+                // A Stop that reached the job after its model was done (while
+                // its changes were saved, say) cancelled it: the controller
+                // refuses its completion. What the turn changed goes in the
+                // stopped turn's one end report instead, which the controller
+                // takes only for a job it cancelled.
+                if completion_refused(&error)
+                    && let Some(changes) =
+                        processor
+                            .workspace_dir_for_job(job)
+                            .and_then(|workspace_dir| {
+                                StoppedTurnChanges::of_finished_turn(workspace_dir, &execution)
+                            })
+                {
+                    processor
+                        .report_stopped_turn(client, registration, job, &changes)
+                        .await;
+                }
             }
         }
     }
+}
+
+/// Whether the controller turned a completion down (a 4xx answer: the job is
+/// no longer this runtime's to complete), as opposed to not answering.
+fn completion_refused(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains("status=4"))
 }
 
 fn should_self_disposition_runtime_on_shutdown(parent_dispositions_runtime: bool) -> bool {

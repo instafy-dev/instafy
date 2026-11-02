@@ -90,7 +90,7 @@ mod skill_routing;
 #[cfg(test)]
 mod skill_routing_eval_tests;
 mod skills;
-mod stopped_turn;
+pub(crate) mod stopped_turn;
 mod turn_baseline;
 mod turn_continuation;
 pub(crate) mod user_input_request;

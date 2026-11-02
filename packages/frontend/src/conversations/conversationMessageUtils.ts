@@ -820,7 +820,8 @@ function skippedSaveLeftPathsUnsaved(artifactMetadata: Record<string, unknown>):
 // "synced" is saved and "partial" saved all but some files, which are marked
 // one by one (extractUnsavedPathsFromMetadata). No artifact means no save was
 // attempted, and Desktop folders keep the files on the user's disk, so those
-// return null.
+// return null, unless the files are a stopped turn's that it never saved: its
+// report marks its apply/files artifact `stoppedBeforeSave`.
 export function extractUnsavedReasonFromMetadata(
   metadata: Record<string, unknown> | null | undefined
 ): ChatMessageUnsavedReason | null {
@@ -859,7 +860,14 @@ export function extractUnsavedReasonFromMetadata(
     }
     return null;
   }
-  return null;
+  const stoppedBeforeSave = artifacts.some(
+    (artifact) =>
+      isPlainObject(artifact) &&
+      artifact.kind === "apply/files" &&
+      isPlainObject(artifact["metadata"]) &&
+      artifact["metadata"]["stoppedBeforeSave"] === true,
+  );
+  return stoppedBeforeSave ? "stopped_before_save" : null;
 }
 
 function serializeFileChanges(files: ChatMessage["files"]): string {

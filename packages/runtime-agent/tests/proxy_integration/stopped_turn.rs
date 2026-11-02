@@ -2,9 +2,9 @@
 //! localhost provider. The model's edit of a page it sent before the turn
 //! learned of the Stop runs; the Stop then reaches the turn (its cancel, as the
 //! job's heartbeat sets it) while the model is answering, and the turn ends on
-//! its lost lease. As the job loop does, the runtime then sends the one end
-//! report of what the turn changed, and the card of the site it changed gets
-//! a new picture.
+//! its lost lease. The executor that ran it then sends the one end report of
+//! what the turn changed, and the card of the site it changed gets a new
+//! picture.
 
 use super::*;
 use axum::extract::Path as AxumPath;
@@ -16,38 +16,93 @@ use std::sync::Mutex as StdMutex;
 const CHILD: &str = "INSTAFY_STOPPED_TURN_TEST_CHILD";
 const TEST_NAME: &str =
     "stopped_turn::a_stopped_building_turn_reports_the_edit_it_made_and_pictures_its_site_again";
+const PATCH_CHILD: &str = "INSTAFY_STOPPED_TURN_PATCH_TEST_CHILD";
+const PATCH_TEST_NAME: &str =
+    "stopped_turn::a_stopped_turns_report_names_an_edit_as_its_own_step_did";
 const PROVIDER_KEY: &str = "inert-stopped-turn-provider-key";
 const PAGE: &str = "sites/porto/app.js";
 const SAVED_PAGE: &str = "hours: \"Not checked\"\n";
 const EDITED_PAGE: &str = "hours: \"Hours not found\"\n";
+
+/// How the model's step that ran after the press changed the page.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Edit {
+    /// A command wrote it: no edit step names the file.
+    Command,
+    /// The model's own patch: its edit step reached the chat first.
+    Patch,
+}
+
+fn run_stopped_turn(edit: Edit) -> Result<()> {
+    const STACK: usize = 32 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("stopped-turn-proxy".to_string())
+        .stack_size(STACK)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .thread_stack_size(STACK)
+                .build()?
+                .block_on(run_case(edit))
+        })?
+        .join()
+        .map_err(|_| anyhow::anyhow!("stopped-turn fixture panicked"))?
+}
 
 #[test]
 fn a_stopped_building_turn_reports_the_edit_it_made_and_pictures_its_site_again() -> Result<()> {
     if std::env::var(CHILD).as_deref() != Ok("1") {
         return run_isolated_fixture(CHILD, TEST_NAME, "stopped-turn");
     }
-    const STACK: usize = 32 * 1024 * 1024;
-    std::thread::Builder::new()
-        .name("stopped-turn-proxy".to_string())
-        .stack_size(STACK)
-        .spawn(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .worker_threads(2)
-                .thread_stack_size(STACK)
-                .build()?
-                .block_on(run_case())
-        })?
-        .join()
-        .map_err(|_| anyhow::anyhow!("stopped-turn fixture panicked"))?
+    run_stopped_turn(Edit::Command)
+}
+
+/// The usual Stop: the model's own patch ran, and its edit step reached the
+/// chat, before the turn learned of the press. The report names the file
+/// exactly as that step did, which is how the controller knows the chat
+/// already shows it and does not count it twice.
+#[test]
+fn a_stopped_turns_report_names_an_edit_as_its_own_step_did() -> Result<()> {
+    if std::env::var(PATCH_CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(PATCH_CHILD, PATCH_TEST_NAME, "stopped-turn-patch");
+    }
+    run_stopped_turn(Edit::Patch)
 }
 
 struct Provider {
+    edit: Edit,
     requests: StdMutex<Vec<Value>>,
     /// The job's cancel: set as the turn's heartbeat sets it after a Stop.
     stop: JobCancelSignal,
     /// Lets the request the Stop cut off end, once the test is done.
     released: JobCancelSignal,
+}
+
+/// The model's patch of the page, in the form the turn offers its patch tool.
+fn patch_call(request: &Value) -> Value {
+    let patch = format!(
+        "*** Begin Patch\n*** Update File: {PAGE}\n@@\n-{}\n+{}\n*** End Patch\n",
+        SAVED_PAGE.trim_end(),
+        EDITED_PAGE.trim_end()
+    );
+    let offered_as_function = request["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|tool| tool["name"] == "apply_patch" && tool["type"] == "function");
+    if offered_as_function {
+        json!({
+            "id":"tool_edit","type":"function_call","name":"apply_patch",
+            "call_id":"call_edit","status":"completed",
+            "arguments":json!({ "input": patch }).to_string()
+        })
+    } else {
+        json!({
+            "id":"tool_edit","type":"custom_tool_call","name":"apply_patch",
+            "call_id":"call_edit","status":"completed","input":patch
+        })
+    }
 }
 
 fn response(item: Value) -> axum::response::Response {
@@ -65,11 +120,12 @@ async fn provider_request(
 ) -> axum::response::Response {
     let index = {
         let mut requests = state.requests.lock().unwrap();
-        requests.push(body);
+        requests.push(body.clone());
         requests.len() - 1
     };
     match index {
         // The edit the model sent after the press, before the turn knew.
+        0 if state.edit == Edit::Patch => response(patch_call(&body)),
         0 => response(json!({
             "id":"tool_edit","type":"function_call","name":"exec_command",
             "call_id":"call_edit","status":"completed",
@@ -94,6 +150,8 @@ async fn provider_request(
 
 #[derive(Default)]
 struct Controller {
+    /// The steps the turn streamed, as the chat records them.
+    steps: StdMutex<Vec<Value>>,
     stopped_reports: StdMutex<Vec<Value>>,
     pictures: StdMutex<Vec<(String, String)>>,
 }
@@ -106,7 +164,8 @@ async fn stopped_report(
     Json(json!({ "ok": true }))
 }
 
-async fn job_message() -> Json<Value> {
+async fn job_message(State(state): State<Arc<Controller>>, Json(body): Json<Value>) -> Json<Value> {
+    state.steps.lock().unwrap().push(body);
     Json(json!({ "ok": true }))
 }
 
@@ -118,7 +177,7 @@ async fn preview_picture(
     Json(json!({ "ok": true }))
 }
 
-async fn run_case() -> Result<()> {
+async fn run_case(edit: Edit) -> Result<()> {
     let _env = env_guard().await;
     let workspace_root = TempDir::new()?;
     let runtime_home = TempDir::new()?;
@@ -219,6 +278,7 @@ printf '{"previewId":"preview-1","description":"Livraria Lello","takenAt":%s}' "
     ));
 
     let provider = Arc::new(Provider {
+        edit,
         requests: StdMutex::new(Vec::new()),
         stop: JobCancelSignal::new(),
         released: JobCancelSignal::new(),
@@ -365,18 +425,45 @@ printf '{"previewId":"preview-1","description":"Livraria Lello","takenAt":%s}' "
     // The edit sent before the turn knew of the Stop ran.
     assert_eq!(fs::read_to_string(workspace.join(PAGE))?, EDITED_PAGE);
 
-    // What the job loop does with a lost lease.
-    executor
-        .processor()
-        .report_stopped_turn(&client, &registration, &job, &error)
-        .await;
-
+    // The executor that ran the turn sent its one end report before it
+    // returned the lost lease to the job loop.
     let reports = controller.stopped_reports.lock().unwrap().clone();
     assert_eq!(reports.len(), 1, "one end report: {reports:?}");
     let report = &reports[0];
     assert_eq!(report["job_id"], json!(job.id.to_string()));
     assert_eq!(report["message_type"], "file_change");
-    assert_eq!(report["metadata"]["paths"], json!([PAGE]));
+    // Named as the turn's own edit steps name a file: by its place in the
+    // turn's folder.
+    assert_eq!(
+        report["metadata"]["paths"],
+        json!([workspace.join(PAGE).display().to_string()])
+    );
+    assert_eq!(
+        report["artifacts"][0]["metadata"]["stoppedBeforeSave"],
+        true
+    );
+    let edit_steps: Vec<Value> = controller
+        .steps
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|step| {
+            step["message_type"] == "file_change" && step["metadata"]["status"] == "completed"
+        })
+        .cloned()
+        .collect();
+    match edit {
+        // No step named the file: the report is its only record.
+        Edit::Command => assert!(edit_steps.is_empty(), "{edit_steps:?}"),
+        // The patch's own step named it first, in the same words.
+        Edit::Patch => {
+            assert_eq!(edit_steps.len(), 1, "{edit_steps:?}");
+            assert_eq!(
+                edit_steps[0]["metadata"]["paths"],
+                report["metadata"]["paths"]
+            );
+        }
+    }
     assert!(report["metadata"]["activity"].is_object(), "{report}");
     let files = report["artifacts"][0]["files"]
         .as_array()
