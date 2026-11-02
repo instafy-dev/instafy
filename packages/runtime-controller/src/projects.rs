@@ -944,6 +944,10 @@ const BROWSER_AUTOMATION_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/.agents/skills/instafy-browser-automation/SKILL.md"
 ));
+const BROWSER_AUTOMATION_REFERENCE_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-browser-automation/references/learning-and-local-browsers.md"
+));
 const AUTOMATIONS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/.agents/skills/instafy-automations/SKILL.md"
@@ -996,7 +1000,7 @@ const PROJECT_MEMORY_ASSETS_ROOT_ENV: &str = "INSTAFY_PROJECT_MEMORY_ASSETS_ROOT
 /// Every file the runtime bundles under `assets/instafy`. In a git-canonical
 /// space with history the runtime commits none of them, so this bootstrap is
 /// what brings each one to `main`.
-const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 38] = [
+const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 39] = [
     ProjectMemoryTemplateFile {
         path: "INSTAFY.md",
         asset_relative_path: "INSTAFY.md",
@@ -1132,6 +1136,12 @@ const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 38] = [
         path: ".agents/skills/instafy-browser-automation/SKILL.md",
         asset_relative_path: ".agents/skills/instafy-browser-automation/SKILL.md",
         fallback_content: BROWSER_AUTOMATION_TEMPLATE,
+    },
+    ProjectMemoryTemplateFile {
+        path: ".agents/skills/instafy-browser-automation/references/learning-and-local-browsers.md",
+        asset_relative_path:
+            ".agents/skills/instafy-browser-automation/references/learning-and-local-browsers.md",
+        fallback_content: BROWSER_AUTOMATION_REFERENCE_TEMPLATE,
     },
     ProjectMemoryTemplateFile {
         path: ".agents/skills/instafy-automations/SKILL.md",

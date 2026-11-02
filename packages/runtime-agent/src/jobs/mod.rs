@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::ffi::OsString;
@@ -43,6 +44,8 @@ use uuid::Uuid;
 pub(crate) mod activity_labels;
 pub(crate) mod browser_hand_back;
 mod browser_request;
+#[cfg(test)]
+mod browser_turn_prompt_tests;
 mod card_text;
 mod chat_attachments;
 #[cfg(test)]
@@ -1979,36 +1982,81 @@ fn format_project_memory_snapshot(
     format_project_memory_snapshot_with_preferences(workspace_dir, prompt_text, &preferences, None)
 }
 
-/// A skill a turn carries whatever its words, and the section of it a turn on a
-/// restored thread is given again.
+/// A skill a turn carries whatever its words, whole, and the section of it a turn on a
+/// restored thread is given again. The turn it is pinned to cannot open a file, so it reads
+/// the skill only in its prompt.
 struct PinnedSkill {
     /// The skill's folder under `.agents/skills`.
     id: &'static str,
     relative_path: &'static str,
     /// The heading of the section a restored thread is given.
     section: &'static str,
+    /// The only other skills the turn loads, when its words route them: those it can use with
+    /// no shell. Every other skill (one that builds, runs commands or plans a team, and the
+    /// space's own skills about running the workspace) is left out of its prompt.
+    reads_with: &'static [&'static str],
 }
 
-/// The browser skill, which says how to find a page.
+/// The browser skill, which says how to find a page. With it, a browser turn reads which
+/// sources to trust and how to cite them, and when to ask for the person's location.
 const BROWSER_TURN_SKILL: PinnedSkill = PinnedSkill {
     id: "instafy-browser-automation",
     relative_path: learn::BROWSER_AUTOMATION_RELATIVE_PATH,
     section: "## Finding a page",
+    reads_with: &["instafy-web-research", "instafy-location-sharing"],
 };
+
+/// How much of its pinned skill a turn carries: the browser skill whole. A turn that routes a
+/// skill by its words carries `PROJECT_MEMORY_MAX_FILE_BYTES` of it.
+const PINNED_SKILL_MAX_BYTES: usize = 2 * PROJECT_MEMORY_MAX_FILE_BYTES;
+
+/// The section of a skill only the routing step reads ([`format_browser_routing_preflight_snapshot`]):
+/// a turn that carries the skill whole leaves it out.
+const ROUTING_PREFLIGHT_SECTION: &str = "Routing preflight";
 
 /// `AGENTS.md`'s replies guide. Codex withdraws the space's `AGENTS.md` from a turn without the
 /// workspace ("The previously provided AGENTS.md instructions no longer apply"), so a browser
 /// turn on a restored thread is given this section with the browser skill's.
 const BROWSER_TURN_REPLIES_SECTION: &str = "## Replies";
 
+/// A Personal or Shared Browser turn: its only tools are its browser's. It has no shell, so it
+/// runs no command, changes no file and starts no team plan or goal, and its prompt says
+/// nothing about how to (`build_prompt_with_preferences`), as it offers no browser card.
+fn is_browser_turn(job: &LeaseJob) -> bool {
+    crate::personal_browser::payload_requests_personal_browser(&job.payload)
+        || crate::shared_browser::payload_requests_shared_browser(&job.payload)
+}
+
 /// A Personal or Shared Browser turn carries the browser skill whatever its
 /// words. The router weighs words, and a browser turn's request often has none
 /// of the skill's ("Now find how to get there by tram", or a task that names an
 /// address).
 fn pinned_skill_for_turn(job: &LeaseJob) -> Option<&'static PinnedSkill> {
-    (crate::personal_browser::payload_requests_personal_browser(&job.payload)
-        || crate::shared_browser::payload_requests_shared_browser(&job.payload))
-    .then_some(&BROWSER_TURN_SKILL)
+    is_browser_turn(job).then_some(&BROWSER_TURN_SKILL)
+}
+
+/// `text` without its `## <heading>` section, up to the next `## ` heading.
+fn without_markdown_h2_section<'a>(text: &'a str, heading: &str) -> Cow<'a, str> {
+    let target = format!("## {heading}");
+    let mut offset = 0;
+    let mut start = None;
+    let mut end = text.len();
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if start.is_none() {
+            if trimmed == target {
+                start = Some(offset);
+            }
+        } else if trimmed.starts_with("## ") {
+            end = offset;
+            break;
+        }
+        offset += line.len();
+    }
+    match start {
+        Some(start) => Cow::Owned(format!("{}{}", &text[..start], &text[end..])),
+        None => Cow::Borrowed(text),
+    }
 }
 
 /// The pinned skill's section, from the space's own copy of the skill, for a
@@ -2061,9 +2109,9 @@ fn format_project_memory_snapshot_with_preferences(
     workspace_dir: &Path,
     prompt_text: &str,
     preferences: &ProjectPreferencesSnapshot,
-    pinned_skill: Option<&PinnedSkill>,
+    pinned: Option<&PinnedSkill>,
 ) -> Option<ProjectMemorySnapshot> {
-    let pinned_skill = pinned_skill.map(|pinned| pinned.id);
+    let pinned_skill = pinned.map(|pinned| pinned.id);
     let mut remaining = PROJECT_MEMORY_MAX_TOTAL_BYTES;
     if remaining == 0 {
         return None;
@@ -2103,6 +2151,33 @@ fn format_project_memory_snapshot_with_preferences(
             *remaining = remaining.saturating_sub(text.as_bytes().len().min(budget));
         }
     };
+    // A turn's pinned skill is carried whole, up to `PINNED_SKILL_MAX_BYTES`, but for the
+    // section only the routing step reads: the turn cannot open the file for the rest.
+    let append_pinned_skill =
+        |label: &str, path: &Path, remaining: &mut usize, out: &mut String| {
+            if *remaining == 0 || !path.exists() {
+                return;
+            }
+            let Some((text, cut)) =
+                read_text_file_lossy_truncated(path, PROJECT_MEMORY_MAX_TOTAL_BYTES)
+            else {
+                return;
+            };
+            let text = without_markdown_h2_section(&text, ROUTING_PREFLIGHT_SECTION);
+            let mut end = text.len().min(PINNED_SKILL_MAX_BYTES.min(*remaining));
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            let rel = path.strip_prefix(workspace_dir).unwrap_or(path);
+            let _ = writeln!(out, "\n## {} ({})", label, rel.display());
+            out.push_str("```markdown\n");
+            out.push_str(text[..end].trim_end());
+            out.push_str("\n```\n");
+            if cut || end < text.len() {
+                out.push_str("[truncated]\n");
+            }
+            *remaining = remaining.saturating_sub(end);
+        };
 
     append_file("AGENTS.md", &agents_doc_path, &mut remaining, &mut out);
     // Use the same read as the narrow preference snapshot. Do not project a
@@ -2187,6 +2262,26 @@ fn format_project_memory_snapshot_with_preferences(
             } else {
                 Vec::new()
             };
+            // A turn with a pinned skill loads, besides it, only the skills it reads with; the
+            // learned blocks its words route still come.
+            if let Some(pinned) = pinned {
+                selected_contexts.retain(|context| {
+                    context.id == pinned.id || pinned.reads_with.contains(&context.id.as_str())
+                });
+                let kept: HashSet<String> = selected_contexts
+                    .iter()
+                    .map(|context| context.id.clone())
+                    .collect();
+                for context in &mut selected_contexts {
+                    if context
+                        .parent
+                        .as_ref()
+                        .is_some_and(|parent| !kept.contains(parent))
+                    {
+                        context.parent = None;
+                    }
+                }
+            }
 
             if let Some(tree) = render_selected_context_tree(&selected_contexts, &selected_blocks) {
                 if tree.as_bytes().len() <= remaining {
@@ -2213,7 +2308,11 @@ fn format_project_memory_snapshot_with_preferences(
                     break;
                 }
                 let label = format!("Context: {}", context.label);
-                append_file(&label, &context.path, &mut remaining, &mut out);
+                if Some(context.id.as_str()) == pinned_skill {
+                    append_pinned_skill(&label, &context.path, &mut remaining, &mut out);
+                } else {
+                    append_file(&label, &context.path, &mut remaining, &mut out);
+                }
             }
 
             if !selected_blocks.is_empty() {
@@ -9453,6 +9552,8 @@ impl JobProcessor {
         let explicit_team_planning_job = is_explicit_team_planning_job(job);
         let multi_agent_planning_turn = explicit_team_planning_job;
         let runtime_expectations = runtime_job_expectations(&job.payload);
+        // A browser turn's only tools are its browser's: what it is told is what it can use.
+        let browser_turn = is_browser_turn(job);
         let cross_chat_context_lookup = !lead_continuation_checkpoint
             && !multi_agent_worker
             && !multi_agent_planning_turn
@@ -9561,6 +9662,10 @@ impl JobProcessor {
             "You are the Instafy Studio assistant continuing an existing provider thread inside the project workspace.\n\
 The prior thread state already contains the full Studio instructions and previous conversation context. Focus on the latest user request and only re-read workspace state when the request needs fresh evidence.\n"
                 .to_string()
+        } else if browser_turn {
+            // Its repositories, installs and caches are the building turn's.
+            "You are the Instafy Studio assistant collaborating with a teammate inside the project workspace.\n"
+                .to_string()
         } else {
             "You are the Instafy Studio assistant collaborating with a teammate inside the project workspace.\n\
 When a repo is imported or cloned into a subdirectory, treat that repo directory as the working directory for repo-local commands.\n\
@@ -9650,9 +9755,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
         let mut skill_hints: Option<(&'static str, Vec<String>)> = None;
         // Neither a Personal nor a Shared Browser thread can run the shell, so
         // naming a skill file to read gives it nothing.
-        let skill_hints_apply = include_workspace_memory
-            && !crate::personal_browser::payload_requests_personal_browser(&job.payload)
-            && !crate::shared_browser::payload_requests_shared_browser(&job.payload);
+        let skill_hints_apply = include_workspace_memory && !browser_turn;
         if lead_continuation_checkpoint {
             append_prompt_section(
                 &mut prompt,
@@ -9789,8 +9892,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
         if !multi_agent_planning_turn
             && !lead_continuation_checkpoint
             && !multi_agent_worker
-            && !crate::personal_browser::payload_requests_personal_browser(&job.payload)
-            && !crate::shared_browser::payload_requests_shared_browser(&job.payload)
+            && !browser_turn
             && let Some(section) = format_collaboration_delegation_snapshot(workspace_dir)
         {
             append_prompt_section(
@@ -9992,30 +10094,44 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 &[
                     "\nResponse contract reminder:\n\
                 - Return one JSON object only: { \"summary\": string, \"files\": [], optional \"actions\": [] }.\n\
-                - Put the natural-language answer in `summary`; do not wrap the JSON in Markdown.\n\
-                - Populate `files` only for real workspace changes.\n",
+                - Put the natural-language answer in `summary`; do not wrap the JSON in Markdown.\n",
+                    // A browser turn changes no file, runs no command and starts no goal or
+                    // team plan: it is told none of how to.
+                    if browser_turn {
+                        ""
+                    } else {
+                        "- Populate `files` only for real workspace changes.\n"
+                    },
                     // A turn that may not ask for the browser is not offered its card: a browser
                     // turn that ended on one stopped where it could have taken the step itself.
-                    if browser_request_unsupported(job) {
+                    if browser_turn {
+                        "- Use `actions` for required secrets, integrations or location.\n"
+                    } else if browser_request_unsupported(job) {
                         "- Use `actions` for required secrets, integrations, location, goal creation/status updates, or skill-authored multi-agent coordination.\n"
                     } else {
                         "- Use `actions` for required secrets, integrations, location, opening Instafy's browser (`request_browser`), goal creation/status updates, or skill-authored multi-agent coordination.\n"
                     },
                     SECRET_REJECTION_CONTRACT,
-                    "- A request to create/start a goal also starts goal execution. Do not only acknowledge goal creation or suggest starting later.\n\
+                    if browser_turn {
+                        ""
+                    } else {
+                        "- A request to create/start a goal also starts goal execution. Do not only acknowledge goal creation or suggest starting later.\n\
                 - For a newly requested goal that can be fully satisfied in this turn, satisfy it in `summary` and emit one completed `goal_update`; do not leave simple finite goals active.\n\
                 - If a newly requested goal explicitly requires separate assistant turns, do the next useful step in `summary` and emit `goal_update` with status `active`; do not block just because this response is one final JSON object.\n\
                 - For a newly requested goal, do not block only because evidence has not been gathered yet. If safe read-only tools or project context can materially advance the goal, use them before deciding status.\n\
                 - Block a newly requested goal only when required evidence, permissions, runtime access, or user input cannot be obtained with the available safe tools. Explain the concrete blocker in `summary` and emit one blocked `goal_update`.\n\
-                - If task success depends on current workspace/runtime state, use tools before answering and report concrete observations. For command execution, call the available runtime command tool (`exec_command` or `shell`); if neither is callable, return that concrete blocker in `summary`. Do not treat missing command tools as a blocker for file-only create/edit/delete requests when you can return inline `files[]` content.\n",
+                - If task success depends on current workspace/runtime state, use tools before answering and report concrete observations. For command execution, call the available runtime command tool (`exec_command` or `shell`); if neither is callable, return that concrete blocker in `summary`. Do not treat missing command tools as a blocker for file-only create/edit/delete requests when you can return inline `files[]` content.\n"
+                    },
                 ]
                 .concat(),
             );
-            append_prompt_section(
-                &mut prompt,
-                &mut prompt_section_metrics,
-                "studioRuntimeInvariants",
-                "\nCurrent Studio runtime invariants:\n\
+            // Its lookups, context cards, workers and device checks all need a command tool.
+            if !browser_turn {
+                append_prompt_section(
+                    &mut prompt,
+                    &mut prompt_section_metrics,
+                    "studioRuntimeInvariants",
+                    "\nCurrent Studio runtime invariants:\n\
                 - Treat read-only as no workspace mutation. Safe inspection commands and CLI lookups are allowed when needed to answer.\n\
                 - Compact agent context cards are soft hints/cache for prior context, current work focus, and coordination direction. Use the relevant cards included in this prompt when present; otherwise query them with `instafy agents context list --json --query \"<topic>\"` when the latest request asks for prior project, coordination, audit, host, or hardware context.\n\
                 - Agent-to-agent conversations are first-class conversations. For unknown-focus follow-ups, lookup first, answer directly when evidence is sufficient, ask one clear prior thread when durable context matters, and do not poll all agents to discover soft focus.\n\
@@ -10024,7 +10140,8 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n\
                 - Hardware/IO context card facts are not proof. Verify on the active runtime before claiming serial, BLE, USB, or flashing access.\n\
                 - If the active runtime cannot access host-native IO, say that a Desktop/CLI runtime on the attached machine is needed.\n",
-            );
+                );
+            }
         } else if cross_chat_context_lookup {
             append_prompt_section(
                 &mut prompt,
@@ -10129,21 +10246,27 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
         } else {
             full_contract_carries_skill_setup = true;
             let response_contract_start = prompt.len();
-            prompt.push_str(
+            // A browser turn has only its browser's tools: it is told nothing of how to run a
+            // command, change a file or start a team plan or a goal, as it is not offered the
+            // browser card. A chat keeps one browser thread, so what its first turn is told
+            // stays in every later browser turn's history.
+            let workspace_tools = |lines: &'static str| if browser_turn { "" } else { lines };
+            prompt.push_str(&[
             "\nPlease follow these constraints:\n\
             - Respond with a single JSON object shaped as { \"summary\": string, \"files\": [], optional \"actions\": [] }. Do not wrap the JSON in Markdown or code fences.\n\
-            - Do not use the final assistant message for progress or status updates. If you need to inspect or execute something, do the tool work first, then return the final JSON object only after the task is complete.\n\
-            - When runtime metadata marks command execution or concrete workspace/runtime observation as required, call the available runtime command tool (`exec_command` or `shell`) before returning the final JSON. Do not only reason about commands. If no command tool is callable, return a JSON `summary` that states that concrete blocker. This does not block file-only create/edit/delete requests that can be satisfied with inline `files[]` content.\n\
-            - If the user requests a different output format, still return the JSON object; satisfy the request inside `summary` as closely as possible.\n\
-            - `summary` must be a natural, conversational reply to the latest user request. Use the workspace context only when it helps answer the question or the user explicitly asks.\n\
-            - Workspace memory/instructions may exist in `AGENTS.md`, `INSTAFY.md`, and `.agents/skills/*/SKILL.md` (legacy `learnings/*` may also exist). A snapshot is included above when available. Treat it as authoritative and avoid re-reading it via shell commands unless the user explicitly asks, you suspect it changed during this run, or you are running `/learn`. For `/learn`, run `python AGENTS.py` if present and use its output as the memory snapshot.\n\
+            - Do not use the final assistant message for progress or status updates. If you need to inspect or execute something, do the tool work first, then return the final JSON object only after the task is complete.\n",
+            workspace_tools("- When runtime metadata marks command execution or concrete workspace/runtime observation as required, call the available runtime command tool (`exec_command` or `shell`) before returning the final JSON. Do not only reason about commands. If no command tool is callable, return a JSON `summary` that states that concrete blocker. This does not block file-only create/edit/delete requests that can be satisfied with inline `files[]` content.\n"),
+            "- If the user requests a different output format, still return the JSON object; satisfy the request inside `summary` as closely as possible.\n\
+            - `summary` must be a natural, conversational reply to the latest user request. Use the workspace context only when it helps answer the question or the user explicitly asks.\n",
+            workspace_tools("- Workspace memory/instructions may exist in `AGENTS.md`, `INSTAFY.md`, and `.agents/skills/*/SKILL.md` (legacy `learnings/*` may also exist). A snapshot is included above when available. Treat it as authoritative and avoid re-reading it via shell commands unless the user explicitly asks, you suspect it changed during this run, or you are running `/learn`. For `/learn`, run `python AGENTS.py` if present and use its output as the memory snapshot.\n\
             - If the latest user request is general knowledge (e.g. arithmetic) and does not require filesystem state, answer immediately and avoid running shell commands first.\n\
             - Avoid exploratory commands (especially `--help` output dumps). Only run commands that are needed to complete the task or to resolve a concrete error. When an Instafy capability you need seems missing, `instafy <group> --help` counts as needed.\n\
             - When the user asks about metadata the prompt doesn’t include (e.g. token usage), do not guess; retrieve it via the Instafy CLI (`instafy history ...` first, `instafy api get` as advanced fallback), not raw HTTP (curl/wget).\n\
-            - Do not call controller APIs with curl/wget; use `instafy history` / `instafy api get` so auth works consistently and the command is logged.\n\
-            - For integration workflows, do a capability preflight before claiming success. Emit `request_integration` or `request_secret` only when evidence identifies missing third-party credentials or account scopes that the person can supply through that integration. A first-party Instafy operation denied by the current job's scope is not evidence that the person is signed out or missing a secret: report that the operation could not be saved or performed, without requesting credentials, reconnecting, or trying another identity.\n\
+            - Do not call controller APIs with curl/wget; use `instafy history` / `instafy api get` so auth works consistently and the command is logged.\n"),
+            "- For integration workflows, do a capability preflight before claiming success. Emit `request_integration` or `request_secret` only when evidence identifies missing third-party credentials or account scopes that the person can supply through that integration. A first-party Instafy operation denied by the current job's scope is not evidence that the person is signed out or missing a secret: report that the operation could not be saved or performed, without requesting credentials, reconnecting, or trying another identity.\n\
             - For integration requests (for example \"connect <provider>\"), if runtime/tool capability is unclear, do a skills preflight: check installed skills first, and if no clear match exists, use skill discovery/import before concluding unsupported.\n",
-        );
+            ]
+            .concat());
             prompt.push_str(SECRET_REJECTION_CONTRACT);
             prompt.push_str(
             "- The skill's own check rejects a held value when its token request answers 401 or its status says the credential is wrong. When the provider's answer does not say which value it rejected, ask again for all of them, so the person gets the fields back in the chat instead of a detour to settings. Say in one sentence that the provider did not accept the values, quote the provider's own reason when it gives one, and give the skill's copy hints for those values.\n\
@@ -10170,7 +10293,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             } else {
                 ""
             },
-            "- { type: 'multi_agent_plan', rationale: string, thresholdReason: string, mode: 'read_only' | 'write_scoped', optional handoffPaths: string[], agents: [{ handle: string, label: string, prompt: string, scopeSummary: string, optional writeScope: object }, ...the selected durable worker lanes], lead: { leadHandle: string, continuationPrompt: string, optional expectedReportFormat: string only for an explicit user-requested format }, optional runtimeRouting: { strategy: 'reuse' | 'spread', optional desiredSlots: number, optional rationale: string }, optional presentation: { optional workerEvidenceVisibility: 'hidden' | 'compact' | 'expanded' | 'surface_on_failure', optional leadSummaryVisibility: 'hidden' | 'compact', optional showThresholdReason: boolean } }\n\
+            workspace_tools("- { type: 'multi_agent_plan', rationale: string, thresholdReason: string, mode: 'read_only' | 'write_scoped', optional handoffPaths: string[], agents: [{ handle: string, label: string, prompt: string, scopeSummary: string, optional writeScope: object }, ...the selected durable worker lanes], lead: { leadHandle: string, continuationPrompt: string, optional expectedReportFormat: string only for an explicit user-requested format }, optional runtimeRouting: { strategy: 'reuse' | 'spread', optional desiredSlots: number, optional rationale: string }, optional presentation: { optional workerEvidenceVisibility: 'hidden' | 'compact' | 'expanded' | 'surface_on_failure', optional leadSummaryVisibility: 'hidden' | 'compact', optional showThresholdReason: boolean } }\n\
               - { type: 'goal_update', status: 'active' | 'paused' | 'completed' | 'blocked' | 'canceled', optional objective: string, optional progressSummary: string, optional doneWhen: string, optional stopWhen: string, optional operation: 'clear' }\n\
               - Emit `goal_update` when the latest user request explicitly asks to create, set, start, update, pause, resume, complete, block, cancel, or clear a conversation goal, or when an active conversation goal is included and this turn has concrete evidence that the goal changed. Use status `active` with `objective` to create or update a goal. Do not infer goals from ordinary questions or small one-off requests.\n\
               - A request to create/start a goal also authorizes starting the work now. Do not respond with only a goal-created acknowledgement or a suggestion to start later.\n\
@@ -10190,8 +10313,8 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - For follow-ups about lanes, workers, files, or evidence, prefer the most recent matching user-visible evidence in this active conversation, but what you observe in the workspace during this turn beats what earlier turns or `instafy conversation show` say, including earlier failure notices. Use older same-topic context cards or prior conversation search results only if current conversation evidence is absent or clearly not the target.\n\
               - For current-conversation evidence-only follow-ups, do not search workspace files, source trees, `.instafy`, `.codex-runtime*`, `.codex-runtime-fallback`, or runtime logs. If restored provider context is insufficient, inspect only the active conversation with `instafy conversation show --include-threads --transcript --json`, which reads this conversation's id from the environment. Only if an older CLI reports a missing conversation argument, add the Conversation ID from Runtime context.\n\
               - Broad or cross-chat coordination should search compact context cards and prior conversations first. Save/update compact cards for durable work focus and open questions; do not invent a separate first-class topic-focus object.\n\
-              - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n\
-              - If you emit `request_integration`, your `summary` must actively close the gap with: (1) what is blocked, (2) the exact next UI step using the action card in this message, and (3) the exact retry phrase the user should send.\n\
+              - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n"),
+            "- If you emit `request_integration`, your `summary` must actively close the gap with: (1) what is blocked, (2) the exact next UI step using the action card in this message, and (3) the exact retry phrase the user should send.\n\
               - If you emit `request_secret`, keep `summary` short: what is blocked, and that the value goes in the card on this message. Do not write a retry phrase or any instruction to reply: the card saves the value and continues the run itself. Do not name the environment variable in `summary`; call the value what the provider calls it on screen. Assume the person has never made an API token and has never seen the provider's developer screens. Teaching them is not `summary`'s job: carry the skill's own \"## Getting started\" walkthrough in the conversation beside the card, a step or two at a time, waiting for each answer, and naming the screens the skill declares. While a value's card is unanswered, carry on in words and do not emit `request_secret` for it again; a value the service or the skill's check rejected is a new ask, not a repeat. Write to the person in plain sentences: no \"please\", no em dashes, no exclamation marks.\n\
               - In a skill setup and its `request_secret` cards, addresses come only from the skill. If the skill declares an address, use that exact one and no other. If it declares none, name the screen in words and ask the person what they see. Never write a host or a link you did not read in the skill, and never offer two candidate addresses: a guessed address is a link the person will trust because it is yours.",
             if offers_browser_card {
@@ -10215,8 +10338,8 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - If upstream guidance does not define a canonical env var name, choose a clear UPPER_SNAKE_CASE name and keep it consistent (do not leave `suggestedSecretNames` empty).\n\
               - If multiple secret inputs are required, include all names in `suggestedSecretNames` (ordered by setup priority).\n\
               Never include secret values or tokens in chat or JSON.\n\
-            - When referencing UI onboarding/actions in `summary`, do not use positional wording (for example \"above\", \"below\", \"left\", \"right\"). Use position-agnostic wording like \"the integration action card in this message\".\n\
-            - If the user asks you to create/edit/delete files, you MUST actually perform the filesystem changes in the workspace (prefer the `apply_patch` tool). Do not claim a file was changed unless it truly exists in the workspace.\n\
+            - When referencing UI onboarding/actions in `summary`, do not use positional wording (for example \"above\", \"below\", \"left\", \"right\"). Use position-agnostic wording like \"the integration action card in this message\".\n",
+            workspace_tools("- If the user asks you to create/edit/delete files, you MUST actually perform the filesystem changes in the workspace (prefer the `apply_patch` tool). Do not claim a file was changed unless it truly exists in the workspace.\n\
             - If you cannot apply file changes via tools, you MUST include the full post-change contents inline in the JSON `files` array using either `content` (UTF-8 text) or `contentBase64` (base64-encoded bytes). The runtime will write the files for you; this does not require `exec_command` or `shell`. Do not treat missing command tools as a blocker for file-only create/edit/delete requests when you can return inline `files[]` content.\n\
             - If you use `apply_patch`, follow the patch format exactly. Example (create a file):\n\
               *** Begin Patch\n\
@@ -10228,11 +10351,11 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - Populate `files` with any workspace files you changed; otherwise return an empty array.\n\
             - Each entry in `files` should include at least { path: string, workspacePath: string }. For created/changed files include either `content` or `contentBase64`.\n\
             - Example `files` entry: { \"path\": \"hello.txt\", \"workspacePath\": \"hello.txt\", \"change\": { \"type\": \"created\" }, \"content\": \"hello\\n\" }\n\
-            - When you describe file changes, include a `change` object such as { type: 'created' | 'deleted' | 'changed', optional lines: [{ from: number, to: number }] } whenever you can do so reliably.\n\
-            - When the user references another conversation (see \"Referenced conversations\"), treat it as additional context.\n\
-            - If the user asks about token usage for a previous answer, retrieve it (do not guess) via `instafy history messages` (it already knows this conversation; `instafy api get` is the fallback) and then reply in the exact format `Token usage — input: <n>, cached: <n>, output: <n>`.\n\
+            - When you describe file changes, include a `change` object such as { type: 'created' | 'deleted' | 'changed', optional lines: [{ from: number, to: number }] } whenever you can do so reliably.\n"),
+            "- When the user references another conversation (see \"Referenced conversations\"), treat it as additional context.\n",
+            workspace_tools("- If the user asks about token usage for a previous answer, retrieve it (do not guess) via `instafy history messages` (it already knows this conversation; `instafy api get` is the fallback) and then reply in the exact format `Token usage — input: <n>, cached: <n>, output: <n>`.\n\
             - Those `token_usage` rows are per turn: each counts only its own turn's tokens, not the conversation's running total. For how much one answer used, add the rows whose `metadata.details.usageScope` is `turn` and whose `metadata.jobId` is that answer's job: a recovery retry adds its own row, marked with `metadata.details.attempt`. The row without `usageScope` and the credit ledger reflect only the first attempt, so do not add that row or quote either for the answer. For a total across answers, add only the rows whose `metadata.details.usageScope` is `turn`; rows from before per-turn reporting have none and hold a running total. If an answer's job has no `usageScope` `turn` row, its usage was not reported: say so rather than quoting a neighbouring row or a zero. A final wrap-up pass after a missing answer is not reported as a row, so a job that ran one used somewhat more than its rows add up to.\n\
-            - When the request depends on observable workspace, runtime, repo, process, or server state, use the appropriate tool calls before answering and report concrete observed output (for example: exit code, process status, line counts, tail output).\n",
+            - When the request depends on observable workspace, runtime, repo, process, or server state, use the appropriate tool calls before answering and report concrete observed output (for example: exit code, process status, line counts, tail output).\n"),
             if offers_browser_card {
                 "- For browser/UI tasks, use this turn's browser tools when it has them and report observed page output. Without them, emit `request_browser`: it is a handoff to Instafy's browser, not evidence that a page was opened or a task completed.\n"
             } else {
@@ -10309,8 +10432,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
         let leased_attachments = chat_attachments::leased_attachment_names(&job.payload);
         // A Personal or Shared Browser turn selects no execution environment,
         // so it has no image tools.
-        let image_tools = !crate::personal_browser::payload_requests_personal_browser(&job.payload)
-            && !crate::shared_browser::payload_requests_shared_browser(&job.payload);
+        let image_tools = !browser_turn;
         let attachment_section = format_image_attachment_section(
             job.payload.get("metadata"),
             workspace_dir,
@@ -10367,7 +10489,10 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             );
         }
 
-        if let Some(section) = format_active_goal_section(job.payload.get("metadata")) {
+        // A browser turn neither offers nor updates a goal: its goal lines are the building turn's.
+        if !browser_turn
+            && let Some(section) = format_active_goal_section(job.payload.get("metadata"))
+        {
             append_prompt_section(
                 &mut prompt,
                 &mut prompt_section_metrics,
@@ -25739,8 +25864,11 @@ mod tests {
                 !reminder.contains("request_browser"),
                 "{metadata}: {reminder}"
             );
+            // Nor a goal or a team plan, which a browser turn cannot start either
+            // (`a_restored_browser_turn_is_reminded_only_of_what_it_can_use`).
             assert!(
-                reminder.contains("- Use `actions` for required secrets, integrations, location, goal creation/status updates, or skill-authored multi-agent coordination.\n"),
+                reminder
+                    .contains("- Use `actions` for required secrets, integrations or location.\n"),
                 "{metadata}: {reminder}"
             );
         }
@@ -25806,7 +25934,7 @@ mod tests {
             );
             for kept in [
                 "- Use `actions` for interactive UI help: secrets, integrations and location. Supported actions:\n",
-                "- { type: 'request_location', optional precision: 'approximate' | 'precise', optional description: string }\n- { type: 'multi_agent_plan',",
+                "- { type: 'request_location', optional precision: 'approximate' | 'precise', optional description: string }\n- If you emit `request_integration`,",
                 "never offer two candidate addresses: a guessed address is a link the person will trust because it is yours.\n",
                 "- For browser/UI tasks, use this turn's browser tools when it has them and report observed page output.\n",
                 "do not claim success without real execution.\n- Ask for clarification",

@@ -2567,7 +2567,78 @@ fn check(harness: &Harness) -> Result<()> {
     check_browser_turns_go_on_past_a_page(harness)?;
     // (xi) A message the browser turn asked Octo to make.
     check_messages_the_browser_could_not_make(harness)?;
+    // (xii) What a browser turn is told it can do.
+    check_browser_turns_are_told_only_what_they_can_use(harness)?;
     println!("every turn read its own run instructions");
+    Ok(())
+}
+
+/// Lines of a turn's prompt about running commands, changing files, team plans and goals.
+const WORKSPACE_TOOL_LINES: &[&str] = &[
+    "call the available runtime command tool (`exec_command` or `shell`) before returning the final JSON",
+    "For command execution, call the available runtime command tool",
+    "If you cannot apply file changes via tools",
+    "Populate `files`",
+    "{ type: 'multi_agent_plan'",
+    "goal_update",
+    "Current Studio runtime invariants:",
+];
+
+/// (xii) Every Shared and Personal Browser turn: its only tools are its browser's, so what the
+/// job's prompt tells it (the request message, not Codex's own instructions) says nothing of
+/// running a command, changing a file, or starting a team plan or a goal, on a fresh browser
+/// thread or a resumed one, and a fresh thread carries the browser skill whole but for the
+/// routing step's section. Each building thread's first turn is still told all of it.
+fn check_browser_turns_are_told_only_what_they_can_use(harness: &Harness) -> Result<()> {
+    let request_message = |request: &Value| -> Option<String> {
+        request["input"]
+            .as_array()?
+            .iter()
+            .filter(|item| item["role"] == "user")
+            .map(item_text)
+            .filter(|text| text.contains("\nLatest user request:\n"))
+            .last()
+    };
+    let mut fresh_browser_threads = 0;
+    for turn in thread_turns(harness) {
+        let browser = matches!(turn.lane, Lane::Shared(_) | Lane::Personal);
+        for (index, request) in sampling_requests(turn) {
+            let Some(message) = request_message(request) else {
+                continue;
+            };
+            if browser {
+                for line in WORKSPACE_TOOL_LINES {
+                    ensure!(
+                        !message.contains(line),
+                        "{}#{index} is a browser turn and reads: {line}",
+                        turn.label
+                    );
+                }
+                if message.contains("\nProject memory snapshot (from workspace; already loaded):\n")
+                {
+                    fresh_browser_threads += 1;
+                    ensure!(
+                        message.contains("## Good outputs")
+                            && !message.contains("## Routing preflight"),
+                        "{}#{index} does not carry the browser skill whole",
+                        turn.label
+                    );
+                }
+            } else if turn.label == "A1" && index == 0 {
+                for line in &WORKSPACE_TOOL_LINES[..1] {
+                    ensure!(message.contains(line), "A1 never read: {line}");
+                }
+                ensure!(
+                    message.contains("{ type: 'multi_agent_plan'"),
+                    "A1 never read the team plan"
+                );
+            }
+        }
+    }
+    ensure!(
+        fresh_browser_threads > 0,
+        "no browser turn started a browser thread"
+    );
     Ok(())
 }
 

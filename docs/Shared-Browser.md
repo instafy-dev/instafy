@@ -789,7 +789,17 @@ Every Personal or Shared Browser turn carries the `instafy-browser-automation`
 skill, whatever its words: the router loads a skill by the words of a request,
 and a browser turn's often has none of the skill's ("Now find how to get there
 by tram", or a task that names an address). On a fresh thread the skill loads
-first of the turn's skills, so the snapshot's budget never runs out before it.
+first of the turn's skills, so the snapshot's budget never runs out before it,
+and whole, but for its "Routing preflight", which only the routing step reads.
+Besides it the turn loads only the skills it can use with no shell
+(`instafy-web-research` and `instafy-location-sharing`, when its words route
+them): never one that builds, runs commands or plans a team, nor the space's
+skills about running the workspace. Nor does its prompt say how to run a
+command, change a file, or start a team plan or a goal, since a browser turn's
+only tools are its browser's. What other turns read of the skill when they need
+it (how to write a learned block, the owner-local `observe` tool and the
+Personal Browser's own notes) is in its
+`references/learning-and-local-browsers.md`.
 Most browser turns resume their chat's browser thread instead, which loads no
 snapshot, and a browser turn cannot read a skill file, so such a turn is given
 the skill's "Finding a page" section again, from the space's own copy. A chat's
