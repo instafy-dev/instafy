@@ -73,7 +73,7 @@
   "dependencies": {
     "@capacitor/app": "^8.0.0",
     "@capacitor/browser": "^8.0.0",
-    "@capacitor/core": "^8.0.0",
+    "@capacitor/core": "^8.5.3",
     "@capacitor/geolocation": "^8.1.0",
     "@capacitor/keyboard": "^8.0.5",
     "@capacitor/local-notifications": "^8.0.0",
@@ -109,9 +109,9 @@
     "zustand": "^4.5.2"
   },
   "devDependencies": {
-    "@capacitor/android": "^8.0.0",
-    "@capacitor/cli": "^8.0.2",
-    "@capacitor/ios": "^8.0.0",
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/cli": "^8.5.3",
+    "@capacitor/ios": "^8.5.3",
     "@fontsource/inter": "5.2.8",
     "@instafy/desktop-runtime-agent": "workspace:*",
     "@playwright/test": "^1.61.1",
@@ -129,7 +129,7 @@
     "postcss": "^8.5.28",
     "tailwindcss": "^4.1.13",
     "typescript": "^5.4.2",
-    "vite": "^7.3.6",
-    "vitest": "^4.1.11"
+    "vite": "^7.3.7",
+    "vitest": "^4.1.12"
   }
 }
