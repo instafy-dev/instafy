@@ -219,21 +219,13 @@ impl JobProxyAuth {
 
     /// Direct HTTP workers use the same renewable source as native Codex.
     pub async fn token(&self) -> io::Result<String> {
-        self.current_auth(false)
-            .await?
-            .api_key()
-            .map(str::to_owned)
-            .ok_or_else(|| invalid_grant("job proxy grant is missing"))
+        self.current_auth(false).await?.get_token()
     }
 
     /// An isolated child cannot renew. Mint its bounded capability immediately
     /// before spawn instead of handing it a nearly-expired cached grant.
     pub async fn fresh_token(&self) -> io::Result<String> {
-        self.current_auth(true)
-            .await?
-            .api_key()
-            .map(str::to_owned)
-            .ok_or_else(|| invalid_grant("job proxy grant is missing"))
+        self.current_auth(true).await?.get_token()
     }
 
     async fn while_active<T>(&self, future: impl std::future::Future<Output = T>) -> io::Result<T> {
@@ -255,7 +247,7 @@ impl JobProxyAuth {
         }
     }
 
-    async fn current_auth(&self, unauthorized: bool) -> io::Result<CodexAuth> {
+    async fn current_auth(&self, force_refresh: bool) -> io::Result<CodexAuth> {
         self.ensure_active()?;
         // Overlapping refresh callbacks share a renewal. AuthManager may
         // serialize callbacks before reaching us; each Codex request still has
@@ -266,7 +258,7 @@ impl JobProxyAuth {
         let now = (self.clock)();
         let needs_refresh = cached.expires_at
             <= now + chrono::Duration::seconds(REFRESH_MARGIN_SECONDS)
-            || (unauthorized && observed_generation == self.generation.load(Ordering::SeqCst));
+            || (force_refresh && observed_generation == self.generation.load(Ordering::SeqCst));
         if needs_refresh {
             let renewal = self.client.renew_job_proxy_token(
                 &self.registration,
@@ -384,7 +376,6 @@ fn parse_grant(envelope: &ProxyEnvelopePayload) -> io::Result<(Url, GrantClaims,
 mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
-    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     use axum::body::Bytes;
@@ -400,7 +391,6 @@ mod tests {
 
     struct MockController {
         reply: StdMutex<(StatusCode, Value)>,
-        calls: AtomicUsize,
         requests: StdMutex<Vec<(String, String, Value)>>,
         probe_headers: StdMutex<Vec<String>>,
         hold: AtomicBool,
@@ -414,7 +404,6 @@ mod tests {
         headers: HeaderMap,
         body: Bytes,
     ) -> axum::response::Response {
-        mock.calls.fetch_add(1, Ordering::SeqCst);
         mock.requests.lock().unwrap().push((
             job_id,
             headers["authorization"].to_str().unwrap().to_owned(),
@@ -464,7 +453,6 @@ mod tests {
         async fn new() -> Self {
             let mock = Arc::new(MockController {
                 reply: StdMutex::new((StatusCode::OK, Value::Null)),
-                calls: AtomicUsize::new(0),
                 requests: StdMutex::new(Vec::new()),
                 probe_headers: StdMutex::new(Vec::new()),
                 hold: AtomicBool::new(false),
@@ -598,7 +586,7 @@ mod tests {
             fixture.auth.resolve().await.unwrap().api_key(),
             Some(fixture.job.proxy.as_ref().unwrap().token.as_str())
         );
-        assert_eq!(fixture.mock.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.mock.requests.lock().unwrap().len(), 0);
         let debug = format!("{:?}", fixture.auth);
         assert!(!debug.contains(&fixture.job.proxy.as_ref().unwrap().token));
         assert!(!debug.contains("test-spawn-time-agent"));
@@ -615,7 +603,6 @@ mod tests {
         for result in results {
             assert_eq!(result.unwrap().api_key(), Some(replacement.token.as_str()));
         }
-        assert_eq!(fixture.mock.calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             *fixture.mock.requests.lock().unwrap(),
             [(
@@ -636,7 +623,7 @@ mod tests {
             fixture.auth.resolve().await.unwrap().api_key(),
             Some(replacement.token.as_str())
         );
-        assert_eq!(fixture.mock.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.mock.requests.lock().unwrap().len(), 1);
         fixture.advance(1);
         let next = fixture.replacement();
         fixture.reply(next.clone());
@@ -646,7 +633,7 @@ mod tests {
         for result in results {
             assert_eq!(result.unwrap().api_key(), Some(next.token.as_str()));
         }
-        assert_eq!(fixture.mock.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.mock.requests.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -698,7 +685,7 @@ mod tests {
             .unwrap();
         assert_eq!(second.status().as_u16(), 200);
         assert!(recovery.next().await.is_err());
-        assert_eq!(fixture.mock.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.mock.requests.lock().unwrap().len(), 1);
         assert_eq!(
             *fixture.mock.probe_headers.lock().unwrap(),
             [
@@ -720,7 +707,7 @@ mod tests {
         assert!(manager.auth_cached().is_none());
         assert!(fixture.signal.is_canceled());
         assert!(fixture.auth.cached.lock().await.token.is_empty());
-        assert_eq!(fixture.mock.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.mock.requests.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -738,7 +725,7 @@ mod tests {
                 io::ErrorKind::PermissionDenied
             );
             assert!(helper.refresh(unauthorized()).await.is_err());
-            assert_eq!(fixture.mock.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(fixture.mock.requests.lock().unwrap().len(), 0);
         }
     }
 
@@ -770,7 +757,7 @@ mod tests {
             fixture.mock.release.notify_one();
             assert!(fixture.auth.resolve().await.is_err());
             assert_ne!(fixture.auth.cached.lock().await.token, replacement.token);
-            assert_eq!(fixture.mock.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.mock.requests.lock().unwrap().len(), 1);
         }
     }
 
@@ -791,7 +778,7 @@ mod tests {
             assert!(fixture.auth.cached.lock().await.token.is_empty());
             assert!(fixture.auth.resolve().await.is_err());
             assert!(fixture.auth.refresh(unauthorized()).await.is_err());
-            assert_eq!(fixture.mock.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.mock.requests.lock().unwrap().len(), 1);
         }
     }
 
@@ -918,9 +905,9 @@ mod tests {
             fixture.auth.token().await.unwrap(),
             fixture.job.proxy.as_ref().unwrap().token
         );
-        assert_eq!(fixture.mock.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.mock.requests.lock().unwrap().len(), 0);
         assert_eq!(fixture.auth.fresh_token().await.unwrap(), replacement.token);
-        assert_eq!(fixture.mock.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.mock.requests.lock().unwrap().len(), 1);
     }
 
     #[test]

@@ -825,7 +825,6 @@ pub(crate) async fn verify_proxy_job_token(
     let row = client
         .query_opt(
             "select t.token_sha256_by_attempt ->> $2 as own_sha256,
-                    t.token_sha256_by_attempt ->> j.lease_attempts::text as current_sha256,
                     j.lease_attempts as current_attempt,
                     exists (
                         select 1 from ai_usage_job_proxy_tokens renewed
@@ -856,10 +855,9 @@ pub(crate) async fn verify_proxy_job_token(
         {
             return false;
         }
-        let bound_sha256: Option<String> = row.get(match mode {
-            ProxyJobTokenMode::Live => "current_sha256",
-            ProxyJobTokenMode::Settle => "own_sha256",
-        });
+        // Live already required this attempt to be current; settlement can
+        // still use the recorded grant of an older attempt.
+        let bound_sha256: Option<String> = row.get("own_sha256");
         row.get::<_, bool>("renewed_token")
             || bound_sha256.is_some_and(|bound| {
                 bool::from(bound.as_bytes().ct_eq(verified.token_sha256.as_bytes()))

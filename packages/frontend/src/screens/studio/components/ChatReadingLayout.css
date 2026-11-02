@@ -1,0 +1,33 @@
+/* The transcript and composer use the same content edges. Query each pane,
+   not the window: desktop browser splits can be as narrow as a phone. */
+.chat-reading-inset {
+  --chat-reading-inline-inset: 1rem;
+  padding-inline-start: max(var(--chat-reading-inline-inset), var(--instafy-safe-area-inset-left, 0px));
+  padding-inline-end: max(var(--chat-reading-inline-inset), var(--instafy-safe-area-inset-right, 0px));
+}
+
+@container chat-reading-area (min-width: 24rem) {
+  .chat-reading-inset { --chat-reading-inline-inset: 1.5rem; }
+}
+
+.chat-transcript-viewport {
+  container-type: inline-size;
+  container-name: chat-transcript chat-reading-area;
+}
+
+.chat-transcript-scroll {
+  /* Reserve classic scrollbars before content overflows. Overlay scrollbars
+     still need the reading inset above; stable alone reserves no space there. */
+  scrollbar-gutter: stable;
+}
+
+.chat-composer-reading-area {
+  container-type: inline-size;
+  container-name: chat-reading-area;
+}
+
+.chat-composer-reading-column {
+  /* The transcript's 56rem limit is inside its inset; match that visible
+     width rather than subtracting the composer's padding from it twice. */
+  max-width: calc(56rem + 2 * var(--chat-reading-inline-inset));
+}

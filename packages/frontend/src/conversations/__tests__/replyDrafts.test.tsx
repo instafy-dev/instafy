@@ -14,7 +14,6 @@ import {
   parseReplyDraftEvent,
   REPLY_DRAFT_RUN_ENDED_GRACE_MS,
   replyDraftChatMessage,
-  resetReplyDraftsForTests,
   selectVisibleReplyDrafts,
   useReplyDraftMessages,
   type ReplyDraft,
@@ -62,7 +61,7 @@ const reply = message({
 });
 
 describe("reply drafts", () => {
-  afterEach(() => resetReplyDraftsForTests());
+  afterEach(clearReplyDrafts);
 
   it("reads a draft event and refuses a malformed one", () => {
     expect(parseReplyDraftEvent(draftEvent({}), 5)).toEqual({
@@ -70,7 +69,7 @@ describe("reply drafts", () => {
       jobId: "job-1",
       runId: "run-1",
       attempt: 1,
-    segment: 1,
+      segment: 1,
       seq: 1,
       text: "Hel",
       startedAt: 5,
@@ -92,7 +91,7 @@ describe("reply drafts", () => {
     applyReplyDraft(draft({ seq: 3, text: "Hello there", startedAt: 300, updatedAt: 300 }));
     expect(latest()).toMatchObject({ seq: 3, text: "Hello there", startedAt: 100, updatedAt: 300 });
 
-    // Another attempt's text replaces it, placed where that attempt began.
+    // Another segment's text replaces it, placed where that segment began.
     applyReplyDraft(draft({ seq: 4, segment: 2, text: "Sorry,", startedAt: 500, updatedAt: 500 }));
     expect(latest()).toMatchObject({ segment: 2, text: "Sorry,", startedAt: 500 });
 
@@ -187,7 +186,7 @@ describe("useReplyDraftMessages", () => {
 
   afterEach(async () => {
     await act(async () => root.unmount());
-    resetReplyDraftsForTests();
+    clearReplyDrafts();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -218,9 +217,9 @@ describe("useReplyDraftMessages", () => {
     expect(rendered.at(-1)).toEqual({ messages: [], draftingRunActive: false });
   });
 
-  it("does not bring a finished run's draft back when the transcript changes later", async () => {
+  it("keeps expiry current as the transcript changes and newer snapshots arrive", async () => {
     const user = message({ id: "ask", role: "user", content: "Say hello", timestamp: 500 });
-    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.useFakeTimers();
     try {
       vi.setSystemTime(10_000);
       await act(async () => root.render(<Transcript messages={[user]} activeRunIds={activeRuns} />));
@@ -232,6 +231,17 @@ describe("useReplyDraftMessages", () => {
       // A minute on, a jump to older history leaves the reply out of the transcript.
       vi.setSystemTime(80_000);
       await act(async () => root.render(<Transcript messages={[user]} activeRunIds={new Set()} />));
+      expect(rendered.at(-1)).toEqual({ messages: [], draftingRunActive: false });
+
+      // A later job's run snapshot is missing. Its grace timer must move with
+      // each draft, and remove it on time without another transcript update.
+      const later = (seq: number) => draftEvent({ jobId: "job-2", runId: "run-2", seq, text: "A later reply" });
+      await act(async () => applyReplyDraftEvent(later(1)));
+      await act(async () => vi.advanceTimersByTime(15_000));
+      await act(async () => applyReplyDraftEvent(later(2)));
+      await act(async () => vi.advanceTimersByTime(REPLY_DRAFT_RUN_ENDED_GRACE_MS - 1));
+      expect(rendered.at(-1)!.messages.map((entry) => entry.content)).toEqual(["A later reply"]);
+      await act(async () => vi.advanceTimersByTime(1));
       expect(rendered.at(-1)).toEqual({ messages: [], draftingRunActive: false });
     } finally {
       vi.useRealTimers();

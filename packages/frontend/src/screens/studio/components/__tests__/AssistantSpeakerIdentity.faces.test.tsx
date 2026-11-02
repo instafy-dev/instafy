@@ -2,7 +2,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   classTokens,
@@ -14,10 +14,11 @@ import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
 import { AssistantAvatarPopover } from "../AssistantAvatarPopover";
 import { AssistantSpeakerIdentityLabel } from "../AssistantSpeakerIdentityPill";
 import { ViewerAgentsContext } from "../viewerAgents";
+import { OPEN_AGENT_PROFILE_EVENT } from "../agentProfileOpen";
 
 // One rule for faces (docs/Brand.md): the speaker identity draws an AI as its
-// rounded-square tile, so everything that hugs the face (the profile button's
-// focus ring) follows the tile, and the face's accessible name says it is an AI.
+// rounded-square tile. The combined face/name profile control remains available
+// when a solo transcript omits the face; its accessible name still says AI.
 describe("assistant speaker identity faces", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -40,19 +41,40 @@ describe("assistant speaker identity faces", () => {
   it.each([
     ["Octo", "octo", "Octo"],
     ["a saved agent", "reviewer", "reviewer"],
-  ])("names %s as Studio does, names its profile button as an AI and shapes its focus ring like the tile", async (_name, handle, shown) => {
+  ])("names %s as Studio does and keeps its AI tile inside the shared profile control", async (_name, handle, shown) => {
     await act(async () => root.render(<AssistantSpeakerIdentityLabel handle={handle} />));
     expect(container.querySelector('[data-testid="chat-speaker-name"]')?.textContent).toBe(shown);
     const button = container.querySelector('[data-testid="chat-speaker-agent-profile"]');
     expect(button?.getAttribute("aria-label")).toBe(`View profile for ${shown}, AI`);
-    expect(classTokens(button)).toContain(AI_TILE_SHAPE_CLASS);
+    expect(classTokens(button)).toContain("rounded-lg");
     expect(classTokens(button)).not.toContain("rounded-full");
-    const face = button?.firstElementChild;
+    expect(classTokens(button?.firstElementChild ?? null)).toContain(AI_TILE_SHAPE_CLASS);
+    const face = button?.querySelector('[data-testid="chat-avatar-assistant"]');
     if (handle === "octo") expectCanonicalOctoCoin(face);
     else expectAiTile(face);
     // The label never carries the AI tag: the transcript's speaker line is a
     // thread row, where the tile alone says it.
     expect(container.querySelector('[data-testid="ai-tag"]')).toBeNull();
+  });
+
+  it("opens the exact observed agent from its name, without depending on the avatar target", async () => {
+    const opened = vi.fn();
+    window.addEventListener(OPEN_AGENT_PROFILE_EVENT, opened);
+    try {
+      await act(async () => root.render(
+        <AssistantSpeakerIdentityLabel handle="reviewer" avatarVisibility="narrow"
+          agentIdentity={{ handle: "reviewer", avatarSeed: "hatchling:4", id: "other-reviewer" }} />,
+      ));
+      const name = container.querySelector<HTMLElement>('[data-testid="chat-speaker-name"]');
+      expect(name?.closest("button")?.getAttribute("aria-label")).toBe("View profile for reviewer, AI");
+      await act(async () => name?.click());
+      expect(opened).toHaveBeenCalledTimes(1);
+      expect((opened.mock.calls[0][0] as CustomEvent).detail).toEqual({
+        handle: "reviewer", agentId: "other-reviewer", avatarSeed: "hatchling:4",
+      });
+    } finally {
+      window.removeEventListener(OPEN_AGENT_PROFILE_EVENT, opened);
+    }
   });
 
   it("draws the viewer's own saved agent in the label as the gutter does, by the row's agent id", async () => {

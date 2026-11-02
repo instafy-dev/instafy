@@ -200,7 +200,7 @@ instafy agents context list --query "auth flow"
 instafy agents context put --agent @octo --scope-kind conversation --scope-id <conversationId> "User prefers the short checkout copy from the auth thread."
 ```
 
-Agent context cards are optional compact coordination hints/cache, not the primary collaboration path. They are keyed by `agent`, `scopeKind`, and `scopeId`; for now `scopeKind=conversation` maps to the Instafy conversation/work-thread boundary. The controller keeps the newest 200 cards per user/project/agent, so cards should summarize durable coordination context rather than every conversation fact.
+Agent context cards are optional compact coordination hints/cache, not the primary collaboration path. They are keyed by `agent`, `scopeKind`, and `scopeId`; for now `scopeKind=conversation` maps to the Instafy conversation/work-thread boundary. The controller keeps the newest 200 cards per user/project/agent, so cards should summarize durable coordination context rather than every conversation fact. Inside an agent's turn, `--agent` naming an agent without a profile, such as a plan helper's own handle, saves the card to the plan's lead (outside a plan, the turn's own agent) when that agent has a profile, else to Octo: a turn never creates an agent.
 
 Use context cards for soft work focus instead of a first-class ownership ledger. A useful card says which agent/thread is investigating which area, paths, open questions, and where focused follow-up should go. It is a hint for coordination, not a lock. For concurrent file edits, the separate structured `writeScope` metadata still controls safety.
 

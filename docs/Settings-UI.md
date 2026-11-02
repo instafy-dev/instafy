@@ -90,6 +90,12 @@ determines the winner. Arbitrary layout classes remain supported.
   description slot; utility icons are plain 16px icons, not nested bordered tiles.
   Shared separators reset the native rule border so only the themed 1px divider
   is visible. Popover scroll areas follow the selected theme's native color scheme.
+- The opt-in `studio-scrollbar` preset gives pointer-driven transcript and message
+  action surfaces a consistent themed scrollbar. Chromium/Electron reserve a
+  12px lane around a 6px painted thumb; other engines use native thin scrollbars.
+  Touch and forced-color modes keep native styling. Reading insets are separate
+  from the scrollbar gutter; adjacent surfaces align using its measured occupied
+  width, including when the platform uses overlay scrollbars.
 - Slash-command and mention suggestions use `ComposerSuggestions` for the floating
   surface and native menu-row presentation. Labels and descriptions share the
   menu typography; mention avatars remain round. Lexical owns anchoring,
@@ -781,8 +787,14 @@ Apply `20260915110000_agent_identity_images.sql` after the identity-image migrat
 uploads use `agents/<owner-user-id>/<random-uuid>.<extension>` in the public `identity-images`
 bucket, which also permits uploading before a new bot has an ID. Only that user can upload
 or delete objects in their directory; overwrite is not allowed. The existing controller
-checks bot ownership when saving `avatarSeed`. Existing saved image URLs remain readable,
-but the editor uses the native file picker rather than an image-URL field.
+checks bot ownership when saving `avatarSeed`. On a create with a handle, or an update, it
+accepts only a picture (an `http(s)` URL,
+a `/` path or a `data:image/` URI) or exactly `hatchling:1` to `hatchling:8`, which Octo
+never takes; an update may also send the bot's own id or its unchanged saved seed, and any
+other value is rejected with a 400. A missing or blank seed keeps the saved one (on create,
+the bot's id).
+Existing saved image URLs remain readable, but the editor uses the native file picker rather
+than an image-URL field.
 
 
 Docked side panels use `DrawerHeader frame="rail"`: a 48px row with 16px horizontal

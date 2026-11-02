@@ -159,6 +159,60 @@ ephemeral worker when a request names a saved profile. Verify the controller-sta
 before attributing a run to that profile, then inspect the effective worker settings. Correct
 settings on an explicitly selected worker do not establish reliable autonomous profile selection.
 
+### Worker faces
+
+Every AI without a profile, plan lanes included, wears one of Octo's eight hatchlings in its
+chat (see [Brand](Brand.md)). Dispatch stamps it once, as `metadata.agent.avatarSeed =
+"hatchling:<n>"`, so the AI's runs, jobs and questions, the messages written from its jobs'
+payloads, the Home rows of its runs and of those messages, and its entry in the plan-group
+status (`workers[].avatarSeed`) carry the same face. Two rows written for its turns are built
+without it, a preview-ready card and a refused build hand-back's reason: Home shows them as
+system rows, and Studio's chat draws them through their run. A face belongs to a handle in the
+root conversation, and threads share the root's faces. A turn continuation, rate-limit retry or
+answered question copies its predecessor's seed, and a returning handle gets its last face back
+unless another AI at work holds it. An AI at work is a queued or leased job, a question that is
+pending or answered, or the AI that made a plan. That AI stays at work while a job of its plan
+(a helper's, or its lead's checkpoint) is at work, and for two minutes after one ends, whether
+or not the plan names it as its lead; so a lead that made its plan still holds its face when its
+continuation is queued. Fresh lanes take faces that no AI at work and no picture-less saved
+agent among the chat's 200 most recently used jobs wears (a saved agent as its profile shows it
+now), least recently used first. Once no face is free, faces repeat, which can happen with fewer
+than eight at work when picture-less saved agents seen in the chat wear the others. A plan
+helper's runtime alert speaks as the AI that made the plan, and a lead checkpoint's alert as the
+lead the plan names (`lead.leadHandle`, `octo` when it names none); they are the same AI only
+when the plan names its maker as its lead. Question rows and alerts keep a saved agent's id.
+
+Saved agents keep their own seed: a picture, the `hatchling:<n>` their owner picked, or the seed
+they were saved with. That seed is the agent's id for one made when an AI connection is added or
+saved without a seed, its handle for one a person's context card made, and `octo` for Octo's own
+profile; an agent saved before `/me/agents` checked seeds may keep an older free-form seed. On a
+create with a handle, `/me/agents` accepts only a picture or `hatchling:1` to `hatchling:8`. An
+update also accepts the agent's own id (what Studio sends when Octo's picture is removed, and
+what an older Studio sends for any agent) and the seed the agent already has. Octo never takes a
+hatchling, and a create from a connection without a handle ignores `avatarSeed`. Octo stays
+Octo: the runtime's lane uniquifier renames a lane named `octo` or `ai` before the plan is
+posted, and a lane an older runtime named `ai` keeps its name and Octo's tile. A job never
+creates a saved agent: a context card it saves for an AI without a profile, its own helper
+handle included, goes to the lead its plan names (outside a plan, its own agent) when that has a
+profile, else to Octo. Dispatch stamps `metadata.agent` only on the runs and jobs of the AIs it
+sends and on its own runtime alert (for a plan helper's dispatch it speaks as the AI that made
+the plan, else as the first AI it sends), and drops any `agent` a member's dispatch carries. A
+message a member records directly keeps the `agent` it carries, as a user or an assistant row:
+`/messages/record`, steer inputs, and a recorded row that the member's later dispatch with the
+same `clientMessageId` attaches to. Recording drops that `agent` only when the same metadata
+also claims to be a controller notice (a `source` of `controller`, a `kind` or `messageType` of
+`runtime_alert` or `run_cancellation`, or such a `message_type` when the same object has no
+`messageType` key) or carries group-participation metadata (`groupParticipation` or
+`groupAiParticipants`, camelCase or snake_case), at its top level or nested under `details` or
+prompt metadata. Studio's own Octo follow-ups are such recorded rows, so `metadata.agent` on a
+message does not by itself show that the controller wrote it. Faces are allocated from jobs,
+questions and saved agents, never from messages, so such a row never changes which face an AI
+gets. Allocating dispatches lock the root conversation's row, then take
+`conversation-faces:<root>`, and read the chat's faces in one statement; other dispatches take
+neither lock. These reads run in a savepoint: if one fails, the dispatch goes on and its AIs
+wear their handles' faces. Rows from before the stamp keep their handle seeds. There is no
+migration.
+
 ## Shared Team Capacity
 
 A space defaults to 64 agents per plan and eight concurrently leased team workers across

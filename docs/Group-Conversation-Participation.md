@@ -96,6 +96,44 @@ Normal provisioning must not create a standalone controller-style **Runtime** ps
 
 A terminal failure may offer actions such as **Try again** or **Open Runtime & AI**, but its ownership must remain visually attached to the verified selected agent. A custom-agent failure must never be labeled Octo, and a legacy controller notice without verified agent metadata remains neutral. Controller notices are reserved provenance: human-authored record-only messages cannot claim controller runtime/cancellation metadata or custom-agent ownership, including through nested metadata. Electron, browser, Android, and iPhone clients must render the same lifecycle in the same transcript order.
 
+## Transcript reading space
+
+Chat spacing follows the chat pane's width, including when a browser is open
+beside it. The shared transcript, composer and presence header use 16px side
+insets below 384px and 24px at wider sizes, plus any native scrollbar reservation.
+Long messages and code stay inside the reading column.
+
+Below 640px, participant faces and clickable names sit above the message instead
+of taking a separate avatar column. Wider group conversations keep that column.
+A confirmed conversation with only the current user and built-in Octo omits the
+repeated avatar, name and timestamp on ordinary replies at every width. Octo's
+small face stays beside the live thinking or working status; waiting states do
+not animate. Message actions expose the exact sent time, and the existing
+participant rail provides profile access. Group and custom-agent replies retain
+their identities, as do targeted results and explicit active or failed states.
+Unresolved membership, partial history, custom agents or earlier collaborators
+keep participant attribution; clients do not load older history just to choose
+a cosmetic layout. These presentation rules do not change participation policy.
+
+The transcript uses quiet, centered time landmarks before its first dated
+message, at local calendar-day changes and after at least an hour without
+recorded message activity. Labels show **Today**, **Yesterday** or a calendar
+date, followed by the local sent time; older years are explicit. A folded task's
+latest nested message counts as activity, so a long run does not create a false
+idle break. Invalid timestamps and unsent browser continuations do not create
+landmarks. These are chronological cues, not stored session boundaries.
+Reopening the app does not add a divider. Labels refresh at local midnight or
+when the app regains focus/visibility. Loading earlier history recomputes its
+first landmark while preserving message keys and scroll anchors. Group speaker
+attribution restarts after a time break; the quiet solo-reply treatment remains.
+
+Desktop transcript and message-menu scroll areas share the opt-in
+`studio-scrollbar` preset. Chromium/Electron use a 12px lane with a 6px painted
+thumb; other engines retain their native thin scrollbar. Touch and forced-color
+environments keep native styling. The transcript reserves a stable gutter and
+measures its actual occupied width to align the composer and presence header,
+rather than assuming the visual thumb width is the layout reservation.
+
 ## Scenario matrix
 
 The matrix asserts user-observable outcomes. For "stays silent" rows the invariant is: no visible Octo output, no thinking indicator, and no AI debit — the turn dispatches an evaluation run whose swallowed `NO_RESPONSE` never renders and never bills.

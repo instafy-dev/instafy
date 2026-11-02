@@ -8,11 +8,11 @@
 //! it to know which faces a chat already shows. `agent_face_fixtures.json` pins
 //! both, so a rule changed on one side and not the other fails both suites.
 //!
-//! [`allocate_faces`] is the controller's half. When it dispatches an AI without
-//! a profile, it stamps the face that AI keeps in the chat (`hatchling:<n>` in
-//! `metadata.agent.avatarSeed`), and every later run, message and Home row of
-//! that AI carries the stamp. Nothing here reads a database or a clock: the
-//! caller passes in what it read.
+//! [`allocate_faces`] is the controller's half. When it dispatches an AI
+//! without a profile, it stamps the face that AI keeps in the chat
+//! (`hatchling:<n>` in `metadata.agent.avatarSeed`) on that AI's runs and jobs,
+//! and the rows that copy a job's `agent` carry it too. Nothing here reads a
+//! database or a clock: the caller passes in what it read.
 
 use std::collections::HashMap;
 
