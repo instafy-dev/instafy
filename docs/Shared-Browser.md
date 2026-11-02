@@ -1327,7 +1327,9 @@ hand-off on a page too busy to highlight in time leaves no prompt, and a load
 of a site that does not answer is stopped (a navigation, from a blank tab or
 from a page that had loaded, after about 20 seconds; a link clicked on a page
 once the click stops waiting, after about 15): the next step reaches the
-browser at once, and the site's late answer never loads. A navigation the site
+browser at once, the site's late answer never loads, and the same address by
+`navigate` or `open_tab` is then refused in well under a second without
+asking the site again. A navigation the site
 answers 404 or 410 for fails within a second or two, even when the rest of its
 not-found page would come later than a step's time (see below).
 
