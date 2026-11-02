@@ -2,7 +2,8 @@ import { ChatBubble, Check, NavArrowRight } from "iconoir-react";
 import { EntityRow } from "../../../components/EntityRow";
 
 export interface OpenChatListOptions {
-  tabs: { id: string; title: string; spaceName: string; badge?: string | null }[];
+  /** `attention`: a browser prompt of the person's waits in the chat. */
+  tabs: { id: string; title: string; spaceName: string; badge?: string | null; attention?: boolean }[];
   activeId: string | null;
   onSelect: (id: string) => void;
   onBrowseChats?: () => void;
@@ -19,12 +20,13 @@ export function OpenChatList({
         <EntityRow title={tab.title} subtitle={showSpaces ? tab.spaceName : undefined}
           start={<ChatBubble className="h-5 w-5" aria-hidden="true" />}
           end={<span className="flex items-center gap-2">
+            {tab.attention ? <span className="text-xs text-amber-600" data-testid={`${testIdPrefix}-approve-${tab.id}`}>Approve</span> : null}
             {tab.badge ? <span className="text-xs" aria-label={`${tab.badge} unread messages`}>{tab.badge}</span> : null}
             {tab.id === activeId ? <Check className="h-4 w-4" aria-hidden="true" /> : null}
           </span>}
           surface={tab.id === activeId ? "selected" : "interactive"} pressable
           aria-label={[tab.title, showSpaces ? tab.spaceName : null, tab.id === activeId ? "Current" : null,
-            tab.badge ? `${tab.badge} unread messages` : null].filter(Boolean).join(", ")}
+            tab.attention ? "approval needed" : null, tab.badge ? `${tab.badge} unread messages` : null].filter(Boolean).join(", ")}
           aria-current={tab.id === activeId ? "page" : undefined}
           titleClassName="!whitespace-normal line-clamp-2 [overflow-wrap:anywhere]"
           className="!min-h-12" data-testid={`${testIdPrefix}-tab-${tab.id}`}

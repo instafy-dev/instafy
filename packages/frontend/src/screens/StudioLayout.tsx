@@ -74,6 +74,12 @@ import { MobileBottomDock } from "./studio/components/MobileBottomDock";
 import { ProjectLauncher } from "./studio/components/ProjectLauncher";
 import { ChatPanel } from "./studio/components/ChatPanel";
 import {
+  chatReadingOwnPrompts,
+  openChatAwaitingOk,
+  WaitingBrowserPrompts,
+  withChatsAwaitingOk,
+} from "./studio/components/WaitingBrowserPrompts";
+import {
   ControllerNoticeActionsProvider,
   type ControllerNoticeActionsContextValue,
 } from "./studio/components/ControllerNoticeActions";
@@ -274,7 +280,8 @@ function StudioLayoutInner() {
     consumeUrlNavigation,
     resetTabs,
     activeTab: activeWorkspaceTab,
-    setPanelTabMeta
+    setPanelTabMeta,
+    conversationSurfaces,
   } =
     useWorkspaceTabs();
   const requestHistoryPush = useCallback(() => {
@@ -289,9 +296,10 @@ function StudioLayoutInner() {
     projectAccessBlocked: projectAccessBlockedFromProject,
     activeProjectName,
     activeProjectId,
+    canWriteProject,
   } = useProject();
   const { billing: creditBilling, controllerEnabled: creditsControllerEnabled } = useCredits();
-  const { runtime, runtimeReady, effectiveRuntimeId, runtimeStatuses, showDesktopRuntimeHelp, localWorkspace, desktopOrigin } =
+  const { runtime, runtimeReady, effectiveRuntimeId, runtimeStatuses, showDesktopRuntimeHelp, localWorkspace, desktopOrigin, runs } =
     useRuntime();
 
   const controllerProjectMissing =
@@ -693,8 +701,17 @@ function StudioLayoutInner() {
     });
   }, [consumeUrlNavigation, runAfterSidebarClose]);
   const navigateToDestination = useStudioNavigation(runStudioNavigation);
+  // The chats where a prompt of the person's browser turn waits, off screen
+  // (WaitingBrowserPrompts): their tabs say Approve.
+  const [chatsAwaitingOk, setChatsAwaitingOk] = useState<ReadonlySet<string>>(() => new Set());
+  const updateConversationSurfaces = conversationSurfaces.update;
+  const viewChatAwaitingOk = useCallback((chat: { conversationId: string; localId: string | null }) => {
+    if (!activeProjectId) return;
+    openChatAwaitingOk({ userId: currentUserId, projectId: activeProjectId, chat,
+      updateSurfaces: updateConversationSurfaces, navigate: navigateToDestination });
+  }, [activeProjectId, currentUserId, navigateToDestination, updateConversationSurfaces]);
   const organizationTabActions = {
-    tabs: organizationTabs.tabs,
+    tabs: withChatsAwaitingOk(organizationTabs.tabs, chatsAwaitingOk),
     activeId: activeProjectId && activeConversationId ? organizationChatId(activeProjectId, activeConversationId) : null,
     onSelect: (id: string) => {
       const tab = organizationTabs.tabs.find(item => item.id === id);
@@ -2170,6 +2187,16 @@ function StudioLayoutInner() {
         />
       ) : null}
       <ProviderBindingApprovalHost />
+      <WaitingBrowserPrompts
+        enabled={controllerClient.core.enabled && canWriteProject && projectReadyForWorkspace && !controllerProjectMissing}
+        userId={currentUserId}
+        projectId={activeProjectId}
+        runs={runs}
+        chats={conversations}
+        chatOnScreen={chatReadingOwnPrompts(activeWorkspaceTab?.kind, visibleConversationControllerId)}
+        onView={viewChatAwaitingOk}
+        onWaitingChange={setChatsAwaitingOk}
+      />
       <Status />
       <DesktopRuntimeHelpDialog />
     </ControllerNoticeActionsProvider>

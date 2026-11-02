@@ -14,7 +14,11 @@ export type OrganizationChatReference = {
   viewTabId?: string;
   badge?: string | null;
 };
-export type OrganizationChatTab = OrganizationChatReference & { spaceName: string };
+export type OrganizationChatTab = OrganizationChatReference & {
+  spaceName: string;
+  /** A browser prompt of the person's waits in this chat (never kept). */
+  attention?: boolean;
+};
 type State = Record<string, OrganizationChatReference[]>;
 const key = (userId: string) => `instafy:organization-chat-tabs:v1:${userId}`;
 export const organizationChatId = (projectId: string, conversationId: string) => JSON.stringify([projectId, conversationId]);

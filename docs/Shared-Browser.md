@@ -1447,6 +1447,26 @@ waiting. The pending and decision
 endpoints, their scopes and the origin's initiator and page checks are unchanged.
 A teammate polls nothing and sees no card.
 
+A prompt waiting in a chat the person is not looking at reaches them where they
+are (`WaitingBrowserPrompts.tsx`). Studio also reads the prompts of the person's
+running Shared Browser runs in the space's other chats, as the chat on screen
+reads its own. Only the run that holds a machine's browser can ask, so it reads
+one prompt a machine, of the person's newest such run there, however many chats
+run browser turns, and none for the chat on screen. Each is the chat's own read
+(1.5 s after each answer, every 400 ms while a prompt waits, nothing while the
+tab is hidden), with a grant of its own that has `browser.view` only: nothing
+there can answer a prompt. While one waits, a toast says "Octo is waiting for
+your OK in “…”." with **View**, and that chat's tab among the open chats (the
+tab strip, or a phone's chat list) says **Approve**. The toast names the chat
+and nothing else: not the step, the page or the site. **View** opens the chat
+with Chat in front, or its Browser view if that was in front, where the prompt
+shows and is answered as above. The toast and the tab's **Approve** go when the
+prompt is answered or runs out, or when its chat comes on screen. Another toast
+(a copy, an error) takes its place for a while, and the waiting toast comes back
+once that one closes (`StatusProvider` puts a background toast with no timeout
+back in line, not away, when another replaces it); once the person closes it,
+it does not come back for the same prompt. A teammate's run is never read.
+
 Prompts are raised only inside a run, and only the agent writes the action log,
 so the browser view reads both fast only while work can produce them. While a
 run is active in the space or the agent controls the browser, it reads the

@@ -262,7 +262,7 @@ controller's lease or the proxy's static credentials, with their kind and pinned
 
 The controller now reserves units at prompt dispatch and then reconciles the final charge after completion from actual input/cached/output token usage. Cached tokens are a subset of the reported input tokens, so only the uncached remainder is billed at the input rate and the cached prefix is billed once at the cached rate. The shared ledger keeps both the usage metadata and any follow-up adjustment row when the final charge differs from the reserve.
 
-That usage is the `turn.completed` event at the end of the turn's Codex run log, so every turn is settled from its own tokens, short or long. The runtime cuts a long run log down to its first and last events within the completion payload's limit of 80 entries per list, which keeps that last event. (A runtime older than this keeps only the first 80 events of a long log, so a turn of more than 80 events reaches the controller without its usage and costs only its reserve.)
+That usage is the `turn.completed` event at the end of the turn's Codex run log, so every turn that runs to its end, with a reply or a failure, is settled from its own tokens, short or long (a failed one may then be given back: "Failed turns" below). A turn the person stops is not: it sends no usage, and costs its reserve ("Stopped turns" below). The runtime cuts a long run log down to its first and last events within the completion payload's limit of 80 entries per list, which keeps that last event. (A runtime older than this keeps only the first 80 events of a long log, so a turn of more than 80 events reaches the controller without its usage and costs only its reserve.)
 
 Reconciliation never holds a turn's reply back. The completion first commits and publishes the reply and the run's end, and then lets the conversation's next queued send dispatch, which reserves its own credits; after a plan worker's turn that drain waits until the lead's continuation is queued. The completion then writes Home's rows, reconciles in a transaction of its own, and only after that queues a plan lead's continuation and announces `credits.updated`; its response waits for all of it. An attempt fails when the reconciliation returns an error (the org lookup, a ledger write) or when any statement in it failed, even one that was only logged (a ledger reference, the run's credit trace): Postgres turns `COMMIT` on such an aborted transaction into a rollback without an error, so the controller checks the transaction before it commits. A failed attempt is logged as an error, rolled back whole and tried once more, right away; the adjustment row is idempotent per prompt, so a retry never charges twice. A reconciliation whose second attempt fails too no longer fails the completion: the run keeps its reply, the reserve stands as the charge, the controller logs the failure as an error, and nothing retries it later.
 
@@ -345,6 +345,18 @@ ended without a final answer, and a model can be asked to do that after doing th
 stay in the space, and a command's output and Octo's notes stay in Details. So a failed turn that
 left any of these is charged as any turn is, from its own tokens. The refusals above leave nothing
 by definition, so they keep their own refund reasons.
+
+### Stopped turns
+
+A turn the person stops (**Stop** in the chat) costs its reserve, 1 credit by default, however
+much or little it used. The Stop cancels its job and its run at once and gives nothing back
+(`conversation_stop.rs`), whether or not a machine had started it. The turn sends no usage after
+the Stop (a report it sends then names only what it changed: `agent/stopped_turn.rs`), so its
+tokens are never settled against the reserve, neither more nor less, and its daily prompt slot
+stays used. A message the routing step sent to Instafy's browser has already paid for that step's
+card (1 credit, "Turns Instafy starts by itself" below), so stopping its browser turn leaves 2
+credits in all. A turn Instafy started by itself follows its own rule below:
+stopped, it costs nothing unless it had already done what that rule charges for.
 
 ### Turns Instafy starts by itself
 

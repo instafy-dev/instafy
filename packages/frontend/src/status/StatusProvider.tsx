@@ -24,7 +24,10 @@ export interface StatusToastOptions {
   /**
    * Queue this toast until the current toast closes instead of replacing it.
    * Use for background notifications that must not hide an active error or
-   * warning while still remaining actionable afterward.
+   * warning while still remaining actionable afterward. One that also has no
+   * timeout waits for the person: a toast that replaces it puts it back at
+   * the front of the queue, so it shows again once that toast closes, until
+   * the person closes it or its owner hides it.
    */
   nonPreemptive?: boolean;
   /**
@@ -60,12 +63,31 @@ interface PendingStatusToast {
   timeout: number | undefined;
   onClose: (() => void) | undefined;
   onShow?: () => void;
+  /** A background toast with no timeout: see `nonPreemptive`. */
+  standing?: boolean;
 }
 
 export function StatusProvider({ children }: { children: ReactNode }) {
   const queue = useMemo(() => new UNSTABLE_ToastQueue<StatusToast>({ maxVisibleToasts: 1 }), []);
   const pendingToastsRef = useRef<PendingStatusToast[]>([]);
   const suppressPendingFlushRef = useRef(false);
+  // The standing toasts on screen, by their key in the queue.
+  const standingToastsRef = useRef(new Map<string, PendingStatusToast>());
+
+  const addToast = useCallback((toast: PendingStatusToast) => {
+    let key = "";
+    key = queue.add(toast.content, {
+      timeout: toast.timeout,
+      onClose: () => {
+        standingToastsRef.current.delete(key);
+        toast.onClose?.();
+      },
+    });
+    if (toast.standing) {
+      standingToastsRef.current.set(key, toast);
+    }
+    toast.onShow?.();
+  }, [queue]);
 
   const flushPendingToast = useCallback(() => {
     if (suppressPendingFlushRef.current || queue.visibleToasts.length > 0) {
@@ -73,23 +95,34 @@ export function StatusProvider({ children }: { children: ReactNode }) {
     }
     const next = pendingToastsRef.current.shift();
     if (next) {
-      queue.add(next.content, { timeout: next.timeout, onClose: next.onClose });
-      next.onShow?.();
+      addToast(next);
     }
-  }, [queue]);
+  }, [addToast, queue]);
 
   useEffect(() => queue.subscribe(flushPendingToast), [flushPendingToast, queue]);
 
-  const clearVisibleToasts = useCallback(() => {
+  /**
+   * Closes the toasts on screen. With `keepStanding` (a toast replaces them),
+   * a standing one is not closed but goes back to the front of the queue.
+   */
+  const clearVisibleToasts = useCallback((keepStanding: boolean) => {
     suppressPendingFlushRef.current = true;
+    const kept: PendingStatusToast[] = [];
     try {
       for (const toast of queue.visibleToasts) {
-        queue.close(toast.key);
+        const standing = keepStanding ? standingToastsRef.current.get(toast.key) : undefined;
+        if (standing) {
+          kept.push(standing);
+        } else {
+          queue.close(toast.key);
+        }
       }
       queue.clear();
+      standingToastsRef.current.clear();
     } finally {
       suppressPendingFlushRef.current = false;
     }
+    pendingToastsRef.current.unshift(...kept);
   }, [queue]);
 
   const hideStatus = useCallback((id?: string) => {
@@ -115,7 +148,7 @@ export function StatusProvider({ children }: { children: ReactNode }) {
       toast.onClose?.();
     }
     pendingToastsRef.current = [];
-    clearVisibleToasts();
+    clearVisibleToasts(false);
   }, [clearVisibleToasts, queue]);
 
   const showStatus = useCallback(
@@ -152,22 +185,28 @@ export function StatusProvider({ children }: { children: ReactNode }) {
         onAction: options?.onAction ?? null,
       };
       const timeout = duration > 0 ? duration : undefined;
+      const toast: PendingStatusToast = {
+        content,
+        timeout,
+        onClose: options?.onClose,
+        onShow: options?.onShow,
+        standing: Boolean(options?.nonPreemptive) && timeout === undefined,
+      };
       if (options?.nonPreemptive && queue.visibleToasts.length > 0) {
         if (
           content.id &&
-          (queue.visibleToasts.some((toast) => toast.content.id === content.id) ||
-            pendingToastsRef.current.some((toast) => toast.content.id === content.id))
+          (queue.visibleToasts.some((visible) => visible.content.id === content.id) ||
+            pendingToastsRef.current.some((pending) => pending.content.id === content.id))
         ) {
           return;
         }
-        pendingToastsRef.current.push({ content, timeout, onClose: options?.onClose, onShow: options?.onShow });
+        pendingToastsRef.current.push(toast);
         return;
       }
-      clearVisibleToasts();
-      queue.add(content, { timeout, onClose: options?.onClose });
-      options?.onShow?.();
+      clearVisibleToasts(true);
+      addToast(toast);
     },
-    [clearVisibleToasts, queue]
+    [addToast, clearVisibleToasts, queue]
   );
 
   const value = useMemo<StatusContextValue>(

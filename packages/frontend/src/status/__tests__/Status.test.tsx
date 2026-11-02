@@ -128,6 +128,67 @@ describe("Status toast presentations", () => {
     expect(shown).toHaveBeenCalledOnce();
   });
 
+  // A prompt waited in another chat; its toast, which waits for the person,
+  // was closed for good by a "Copied message." confirmation, and the prompt
+  // ran out unseen.
+  it("brings a waiting background toast back once a toast that replaced it closes", async () => {
+    const closed = vi.fn();
+    const shown = vi.fn();
+    const text = () => [...document.querySelectorAll('[data-testid="status-toast"]')].map((toast) => toast.textContent);
+    await act(async () => {
+      statusContext?.showStatus("Octo is waiting for your OK in “Porto”.", "info", 0, {
+        id: "waiting", actionLabel: "View", onAction: vi.fn(), nonPreemptive: true, onClose: closed, onShow: shown,
+      });
+    });
+    expect(text()).toEqual(["Octo is waiting for your OK in “Porto”.View"]);
+    await act(async () => {
+      statusContext?.showStatus("Copied message.", "success", 2000, { presentation: "confirmation" });
+    });
+    expect(text()).toEqual(["Copied message."]);
+    // Set aside, not closed.
+    expect(closed).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(text()).toEqual(["Octo is waiting for your OK in “Porto”.View"]);
+    expect(shown).toHaveBeenCalledTimes(2);
+
+    // Its owner can still take it away while it is set aside.
+    await act(async () => {
+      statusContext?.showStatus("Publishing failed.", "error", 0);
+      statusContext?.hideStatus("waiting");
+    });
+    expect(closed).toHaveBeenCalledOnce();
+    await act(async () => {
+      const current = statusContext?.queue?.visibleToasts[0];
+      if (current) statusContext?.queue?.close(current.key);
+    });
+    expect(text()).toEqual([]);
+  });
+
+  it("keeps a waiting background toast closed once the person closes it", async () => {
+    await act(async () => {
+      statusContext?.showStatus("Octo is waiting for your OK in “Porto”.", "info", 0, {
+        id: "waiting", actionLabel: "View", onAction: vi.fn(), nonPreemptive: true,
+      });
+    });
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Dismiss notification"]')!.click());
+    await act(async () => {
+      statusContext?.showStatus("Copied message.", "success", 2000, { presentation: "confirmation" });
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(document.querySelector('[data-testid="status-toast"]')).toBeNull();
+  });
+
+  it("does not bring back a background toast with a timeout that another toast replaced", async () => {
+    await act(async () => {
+      statusContext?.showStatus("There is a new reply in “Porto”.", "info", 10_000, {
+        id: "reply", actionLabel: "View", onAction: vi.fn(), nonPreemptive: true,
+      });
+      statusContext?.showStatus("Copied message.", "success", 2000, { presentation: "confirmation" });
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(document.querySelector('[data-testid="status-toast"]')).toBeNull();
+  });
+
   it("does not acknowledge a queued toast removed during signout", async () => {
     const shown = vi.fn();
     await act(async () => {
