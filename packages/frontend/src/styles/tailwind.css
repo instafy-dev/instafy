@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./scrollbars.css";
 @config "../../tailwind.config.ts";
 @source not "../../hosted";
 

@@ -1,6 +1,7 @@
 import { WarningTriangle } from "iconoir-react";
 import { formatAiAccessibleName } from "../../../components/AiTag";
 import { AI_TILE_SHAPE_CLASS } from "../../../components/OctoCoin";
+import { Button } from "../../../components/Button";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import { requestAgentProfile } from "./agentProfileOpen";
 import type {
@@ -11,6 +12,7 @@ import { extractAgentIdentityFromMetadata, resolveObservedAgentIdentity } from "
 import { normalizeAssistantHandleLabel } from "./assistantSpeakerIdentity";
 import { getBuiltInAssistantDisplayName } from "../../../assistants/localBuiltInAssistantCatalog";
 import { formatSpeakerTimestamp } from "./chatSpeakerTimestamp";
+import "./ChatIdentityLayout.css";
 
 function resolveAvatarSeed(
   normalizedHandle: string,
@@ -57,8 +59,8 @@ export function AssistantSpeakerIdentityLabel({
   agentIdentity?: AssistantAgentIdentity | null;
   motion?: AssistantAvatarMotion;
   /**
-   * "narrow" hides the label's own avatar at sm+ where the avatar gutter of
-   * the message row shows the face instead — name, timestamp, and body then
+   * "narrow" hides the label's own avatar in a wide transcript where the message
+   * row's gutter shows the face instead — name, timestamp, and body then
    * share one left alignment line (#177). Narrow layouts keep the inline
    * avatar because the gutter collapses there.
    */
@@ -77,28 +79,31 @@ export function AssistantSpeakerIdentityLabel({
       data-agent-handle={normalizedHandle}
     >
       {/* Preserve the exact observed agent when the avatar gutter is collapsed. */}
-      <button
+      <Button
         type="button"
-        onClick={() => requestAgentProfile(normalizedHandle,
+        variant="text"
+        size="xs"
+        radius="lg"
+        onPress={() => requestAgentProfile(normalizedHandle,
           resolveObservedAgentIdentity(agentIdentity, extractAgentIdentityFromMetadata(metadata)))}
         aria-label={formatAiAccessibleName(`View profile for ${shownName}`)}
         data-testid="chat-speaker-agent-profile"
-        className={`flex-none ${AI_TILE_SHAPE_CLASS} outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 ${
-          avatarVisibility === "narrow" ? "sm:hidden" : ""
-        }`.trim()}
+        className="min-w-0 max-w-full justify-start"
       >
-        <ChatMessageAvatar
-          kind="assistant"
-          metadata={metadata ?? null}
-          agent={{ handle: normalizedHandle, avatarSeed, id: agentIdentity?.id }}
-          motion={motion}
-          scrollReactive={motion === "thinking"}
-          size="xs"
-        />
-      </button>
-      <span className="min-w-0 truncate font-semibold text-slate-600 dark:text-slate-300" data-testid="chat-speaker-name">
-        {shownName}
-      </span>
+        <span className={`chat-speaker-inline-avatar flex-none ${AI_TILE_SHAPE_CLASS} ${avatarVisibility === "narrow" ? "chat-speaker-inline-avatar--narrow" : ""}`}>
+          <ChatMessageAvatar
+            kind="assistant"
+            metadata={metadata ?? null}
+            agent={{ handle: normalizedHandle, avatarSeed, id: agentIdentity?.id }}
+            motion={motion}
+            scrollReactive={motion === "thinking"}
+            size="xs"
+          />
+        </span>
+        <span className="min-w-0 truncate font-semibold text-slate-600 dark:text-slate-300" data-testid="chat-speaker-name">
+          {shownName}
+        </span>
+      </Button>
       {timestampInfo ? (
         <time
           className="flex-none text-xxs font-medium text-slate-400 dark:text-slate-500"

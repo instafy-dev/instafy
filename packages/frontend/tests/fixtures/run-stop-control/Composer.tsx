@@ -13,7 +13,7 @@ const noop = () => {};
 const reviewImageBytes = Uint8Array.from(atob(reviewImageUrl.split(",")[1]), character => character.charCodeAt(0));
 
 /** The real composer and Lexical editor; only submission and peripheral panes are inert. */
-export function Composer({ controller, readOnly, recording, viewNavigation, queueReview, utilityReview, attachmentCount, attachmentSending = false, fullPage = false, newTab = false, stashMessages, composerActions }: { controller: ChatRunStopController; readOnly: boolean; recording: boolean; viewNavigation?: ReactNode; queueReview?: { count: number; initialDraft?: string; withStash?: boolean }; utilityReview?: { goalStatus: "active" | "paused" | "blocked" }; attachmentCount?: number; attachmentSending?: boolean; fullPage?: boolean; newTab?: boolean; stashMessages?: string[]; composerActions?: Partial<Parameters<typeof ChatComposerSurface>[0]["composerActionMenuProps"]> }) {
+export function Composer({ controller, readOnly, recording, viewNavigation, queueReview, utilityReview, attachmentCount, attachmentSending = false, fullPage = false, newTab = false, stashMessages, composerActions, scrollbarInset }: { controller: ChatRunStopController; readOnly: boolean; recording: boolean; viewNavigation?: ReactNode; queueReview?: { count: number; initialDraft?: string; withStash?: boolean }; utilityReview?: { goalStatus: "active" | "paused" | "blocked" }; attachmentCount?: number; attachmentSending?: boolean; fullPage?: boolean; newTab?: boolean; stashMessages?: string[]; composerActions?: Partial<Parameters<typeof ChatComposerSurface>[0]["composerActionMenuProps"]>; scrollbarInset?: number }) {
   const overlay = useRef<HTMLDivElement>(null);
   const input = useRef<ChatInputHandle>(null);
   const image = useRef<HTMLInputElement>(null);
@@ -66,7 +66,7 @@ export function Composer({ controller, readOnly, recording, viewNavigation, queu
   return <>
     <div className={[fullPage ? "" : "relative", viewNavigation ? "min-h-48" : "min-h-28"].filter(Boolean).join(" ")} data-testid="composer-preview">
       <ChatComposerSurface
-        composerOverlayRef={overlay} composerAutoHidden={false} compactBrowserViewport={matchMedia("(max-width: 639px)").matches}
+        composerOverlayRef={overlay} {...{scrollbarInset}} composerAutoHidden={false} compactBrowserViewport={matchMedia("(max-width: 639px)").matches}
         viewNavigation={viewNavigation} touchLikeInput={Boolean(viewNavigation)}
         pendingNewTab={newTabPending ? { onCancel: () => setNewTabPending(false) } : null}
         onSubmit={event => { event.preventDefault(); send(); }}

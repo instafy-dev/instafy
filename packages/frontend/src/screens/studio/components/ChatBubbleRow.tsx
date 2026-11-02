@@ -7,6 +7,7 @@ import {
 } from "react";
 import { ThreadSpine } from "./ThreadSpine";
 import type { ChatSpeakerMarker } from "./chatSpeakerMarker";
+import "./ChatIdentityLayout.css";
 
 export type ChatBubbleAlignment = "left" | "right";
 
@@ -28,6 +29,7 @@ export function ChatBubbleRow({
   workflowSpineContinuesBefore = false,
   workflowSpineContinuesAfter = false,
   testId,
+  accessibleSpeakerLabel,
 }: {
   align?: ChatBubbleAlignment;
   avatar?: ReactNode | null;
@@ -41,6 +43,8 @@ export function ChatBubbleRow({
   workflowSpineContinuesBefore?: boolean;
   workflowSpineContinuesAfter?: boolean;
   testId?: string;
+  /** Speaker context when a confirmed solo reply omits its visible heading. */
+  accessibleSpeakerLabel?: string;
 }) {
   const isLeftAligned = align === "left";
   const showWorkflowSpine = isLeftAligned && workflowSpineActive;
@@ -135,19 +139,21 @@ export function ChatBubbleRow({
   return (
     <div
       ref={rowRef}
-      className="relative w-full"
+      className="chat-bubble-row relative w-full"
       onContextMenu={onContextMenu}
       data-testid={testId}
+      role={accessibleSpeakerLabel ? "article" : undefined}
+      aria-label={accessibleSpeakerLabel}
     >
       {showWorkflowSpine ? (
         <ThreadSpine
           testId="chat-workflow-spine"
           tone="primary"
           className={[
-            "pointer-events-none absolute left-[11.5px] z-0 w-4",
+            "chat-message-gutter-spine pointer-events-none absolute left-[11.5px] z-0 w-4",
             workflowSpineTopClass,
             workflowSpineBottomClass,
-            collapseAvatarOnNarrow ? "hidden sm:block" : "",
+            collapseAvatarOnNarrow ? "chat-message-gutter-spine--responsive" : "",
           ].filter(Boolean).join(" ")}
           notches={[{ offsetPx: workflowSpineNotchOffsetPx, maskLine: true }]}
         />
@@ -156,7 +162,7 @@ export function ChatBubbleRow({
         {avatar ? (
           // Single faces keep their 32px gutter; stacks reserve their full
           // intrinsic width so their overlap never reaches the message text.
-          <div className={`h-8 min-w-8 flex-none ${collapseAvatarOnNarrow ? "hidden sm:block" : ""}`}>
+          <div className={`chat-message-avatar-gutter h-8 min-w-8 flex-none ${collapseAvatarOnNarrow ? "chat-message-avatar-gutter--responsive" : ""}`}>
             {avatar}
           </div>
         ) : null}
@@ -187,7 +193,7 @@ export function ChatBubbleRow({
             </div>
           ) : null}
           {narrowSpeakerIdentity ? (
-            <div className="mb-1.5 flex w-fit max-w-full sm:hidden" data-testid="chat-speaker-inline">
+            <div className="chat-narrow-speaker-identity mb-1.5 w-fit max-w-full" data-testid="chat-speaker-inline">
               {narrowSpeakerIdentity}
             </div>
           ) : null}

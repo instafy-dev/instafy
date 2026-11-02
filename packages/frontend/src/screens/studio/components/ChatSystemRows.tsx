@@ -14,7 +14,7 @@ import type { WorkspaceFileStaleNotice } from "./workspaceFileStaleNoticeStore";
 import { SAVE_COPY } from "./versioningCopy";
 import type { UnsavedWorkNotice } from "./useUnsavedWorkNotice";
 
-const CHAT_LEFT_SPINE_OFFSET_CLASS = "left-[-26px]";
+const CHAT_LEFT_SPINE_OFFSET_CLASS = "chat-message-gutter-spine left-[-26px]";
 const ASSISTANT_AVATAR_GUTTER_PLACEHOLDER = (
   <span aria-hidden="true" className="h-8 w-8 shrink-0 pointer-events-none" />
 );
