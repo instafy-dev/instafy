@@ -150,32 +150,6 @@ fn run(case: Case) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("native-subagent fixture panicked"))?
 }
 
-/// Match the existing proxy_retry_budget harness: Cargo puts tests in deps,
-/// whereas the packaged companion host is built in the enclosing profile dir.
-fn stage_code_mode_host() -> Result<()> {
-    static STAGED: std::sync::OnceLock<std::result::Result<(), String>> =
-        std::sync::OnceLock::new();
-    STAGED.get_or_init(|| {
-        let stage = || -> Result<()> {
-            let executable = std::env::current_exe()?;
-            let deps = executable.parent().context("test binary directory")?;
-            let name = runtime_agent::code_mode_host::EXECUTABLE_NAME;
-            let built = deps.parent().context("Cargo profile directory")?.join(name);
-            anyhow::ensure!(
-                built.is_file(),
-                "native V2 fixture needs the packaged host; run cargo build --features code-mode-host -p runtime-agent -p codex-code-mode-host"
-            );
-            let staged = deps.join(name);
-            let _ = fs::remove_file(&staged);
-            if fs::hard_link(&built, &staged).is_err() {
-                fs::copy(&built, &staged)?;
-            }
-            Ok(())
-        };
-        stage().map_err(|error| format!("{error:#}"))
-    }).clone().map_err(anyhow::Error::msg)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Surface {
     V1,

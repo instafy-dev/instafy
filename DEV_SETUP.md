@@ -115,7 +115,8 @@ checksums, it beside the bundled runtime-agent (a prebuilt `INSTAFY_RUNTIME_AGEN
 the host in the same directory). The
 runtime-agent integration tests link a built host next to their test binaries automatically; a
 `proxy_retry_budget` run for a code-mode-only model (the default `gpt-6-luna`, or whatever
-`INSTAFY_TEST_CODEX_MODEL` names) fails with this build command when the host is missing. CI
+`INSTAFY_TEST_CODEX_MODEL` names) and the code-mode cases of `proxy_integration granted_turns::`
+fail with this build command when the host is missing. CI
 builds the host and runs `proxy_retry_budget` for `gpt-6-luna`, the own-AI default
 (`INSTAFY_TEST_CODEX_MODEL=own-ai-default`, a test-only name) and `gpt-5.5`.
 

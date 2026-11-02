@@ -1849,7 +1849,10 @@ whatever it finds, a new grant replacing those it could not work beside, even on
 same moment, and a steer,
 which cancels that call and answers it once the turn took the new words. The runtime half runs without a model key, and CI runs it: `cargo test --manifest-path
 packages/runtime-agent/Cargo.toml --test provider_mcp` (the broker) and `--test proxy_integration
-granted_turns:: -- --test-threads=1` (a granted turn through the real proxy and a scripted model).
+granted_turns:: -- --test-threads=1` (a granted turn through the real proxy and a scripted model:
+on `gpt-5.5`, which calls the broker's tools directly, and on `gpt-6-luna` and the own-AI default,
+which are code-mode-only and call them from a code cell, so these need the code-mode host built
+first, as [DEV_SETUP.md](../DEV_SETUP.md) describes).
 
 ## Local Tri-Client Camera Smoke
 - Run: `pnpm test:camera:tri-client:smoke`
