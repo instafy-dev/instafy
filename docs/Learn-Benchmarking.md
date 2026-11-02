@@ -56,7 +56,7 @@ Important files:
 
 - `packages/runtime-agent/assets/instafy/.agents/skills/instafy-learning-policy/SKILL.md`
 - `packages/runtime-agent/assets/instafy/.agents/skills/instafy-browser-automation/SKILL.md`
-- `packages/runtime-agent/assets/instafy/.agents/skills/instafy-browser-automation/references/learning-and-local-browsers.md` (how to write a learned block for a site, with examples)
+- `packages/runtime-agent/assets/instafy/.agents/skills/instafy-browser-automation/references/learning-and-local-browsers.md` (how to write a learned block for a site, with examples, and the `workedCues` a run reports for one)
 
 ### Rust runtime code
 
