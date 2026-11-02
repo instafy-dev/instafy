@@ -67,13 +67,13 @@ function route(key, github, enabled = '') {
 const cancellationWorkflows = [
   // Build includes the reviewed proxy_retry_budget, provider_mcp and read-reference selectors, the
   // code-mode host build, per-model proxy_retry_budget runs, inert native compaction,
-  // native chat image, granted turn, native subagent, browser hand-back, stopped turn and evidence retry selectors, the inert run_instructions target, and provider unit tests, independently bound by check-rust-ci, and the CLI git
+  // native chat image, granted turn, native subagent, browser hand-back, stopped turn, evidence retry and reply draft stream selectors, the inert run_instructions target, and provider unit tests, independently bound by check-rust-ci, and the CLI git
   // wrapper, preview check, bound-sites binder, web read (with its offline fixtures), preview picture and web search and link suites bound below, and the local author pseudonym key
   // test in the contracts lane, and the tunnel broker test lane in the Rust tests
   // aggregate, also bound by check-rust-ci; other commands and authority are exact.
   // Both hashes are taken after reversing the main-only cache change exactly.
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
-    previousHash: 'd2d531a11d8a5be1b5572197e6535cb0e97cf69662ff85dd74db00a3f36a9c8d' },
+    previousHash: 'fb9576a7c9a4e94acabac0146ecca5775c928fd8e350917f51323062e668dac5' },
   // The Browser UI rendering aggregate came with the lane's split into parts;
   // reversing that split exactly (inside withoutBrowserUiJobBudget) removes it.
   { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),
