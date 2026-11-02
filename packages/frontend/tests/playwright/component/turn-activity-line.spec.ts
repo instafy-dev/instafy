@@ -168,6 +168,22 @@ async function lineLook(page: Page) {
   });
 }
 
+/**
+ * Over the line the pointer is a hand, and its words darken and underline
+ * with their arrow, also while they sweep.
+ */
+async function expectHoverLook(page: Page) {
+  const resting = await lineLook(page);
+  expect(resting.labelDecoration).toBe("none");
+  await page.getByTestId("turn-activity-line").hover();
+  await expect.poll(async () => (await lineLook(page)).labelDecoration).toBe("underline");
+  const hovered = await lineLook(page);
+  expect(hovered.cursor).toBe("pointer");
+  expect(hovered.labelColor).not.toBe(resting.labelColor);
+  expect(hovered.arrowColor).toBe(hovered.labelColor);
+  return resting;
+}
+
 /** The arrow sits right after the words, inside the line and the screen. */
 function expectArrowAfterWords(geometry: Awaited<ReturnType<typeof lineGeometry>>) {
   expect(geometry.arrowWidth).toBeGreaterThan(0);
@@ -196,6 +212,11 @@ for (const dark of [false, true]) {
       expect(running.height).toBe(20);
       expect(running.documentWidth).toBe(running.viewportWidth);
       expectArrowAfterWords(running);
+      // The sweep's own colour gives way on hover: the words change with
+      // their arrow, never one without the other.
+      await expectHoverLook(page);
+      await page.mouse.move(0, 0);
+      await expect.poll(async () => (await lineLook(page)).labelDecoration).toBe("none");
 
       // A long line stays one line and truncates, with the whole text as its title.
       // The line holds its label a moment before it changes.
@@ -218,17 +239,9 @@ for (const dark of [false, true]) {
       expectArrowAfterWords(await lineGeometry(page));
       await page.screenshot({ path: testInfo.outputPath(`turn-done-${width}-${dark ? "dark" : "light"}.png`) });
 
-      // The arrow is the line's own muted colour. Over the line the pointer
-      // is a hand, and the words darken and underline.
-      const resting = await lineLook(page);
+      // The arrow is the line's own muted colour.
+      const resting = await expectHoverLook(page);
       expect(resting.arrowColor).toBe(resting.labelColor);
-      expect(resting.labelDecoration).toBe("none");
-      await line.hover();
-      await expect.poll(async () => (await lineLook(page)).labelDecoration).toBe("underline");
-      const hovered = await lineLook(page);
-      expect(hovered.cursor).toBe("pointer");
-      expect(hovered.labelColor).not.toBe(resting.labelColor);
-      expect(hovered.arrowColor).toBe(hovered.labelColor);
       await page.screenshot({ path: testInfo.outputPath(`turn-hover-${width}-${dark ? "dark" : "light"}.png`) });
       await page.mouse.move(0, 0);
       await expect.poll(async () => (await lineLook(page)).labelDecoration).toBe("none");

@@ -64,11 +64,11 @@ export type TurnActivityLineProps = {
 };
 
 /**
- * One quiet line that says what the turn did, in plain words. Once a step
- * exists the whole line is one button that opens Details. It adds no words of
- * its own: on hover it shows a pointer and its words darken and underline,
- * and a small arrow after them (› closed, ⌄ open) is the sign that it opens
- * where nothing hovers, as on a phone.
+ * One quiet line that says what the turn did, in plain words. Once Details
+ * has something to show, the whole line is one button that opens it. It adds
+ * no words of its own: on hover it shows a pointer and its words darken and
+ * underline, and a small arrow after them (› closed, ⌄ open) is the sign that
+ * it opens where nothing hovers, as on a phone.
  */
 export function TurnActivityLine({
   text,
@@ -80,9 +80,14 @@ export function TurnActivityLine({
   onToggleDetails,
 }: TurnActivityLineProps) {
   const sweep = live && animate ? "instafy-status-sweep" : "";
-  const hoverUnderline = interactive ? "underline-offset-2 group-hover/turn-activity:underline" : "";
+  // On hover the words darken with their arrow and underline. The sweep sets
+  // the words' own colour outside Tailwind's layers, so the line's hover
+  // colour reaches them only as an important rule.
+  const hoverLook = interactive
+    ? "underline-offset-2 group-hover/turn-activity:underline group-hover/turn-activity:text-inherit!"
+    : "";
   const label = (
-    <span className={`${sweep} min-w-0 truncate ${hoverUnderline}`} data-sweep-text={text}>
+    <span className={`${sweep} min-w-0 truncate ${hoverLook}`} data-sweep-text={text}>
       {text}
     </span>
   );
