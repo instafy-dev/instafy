@@ -430,14 +430,15 @@ async fn a_stopped_turn_reports_its_edit_once_and_its_charge_stays_the_reserve(
             .await?
             .is_empty());
 
-        // Later turns of the chat read what the stopped turn left.
+        // Later turns of the chat (Octo's, as its next job loads them) read
+        // what the stopped turn left.
         let mut connection = pool.get().await?;
         let transaction = connection.transaction().await?;
         let history = crate::agent::load_conversation_history_for_agent(
             &transaction,
             &turn.conversation_id,
             None,
-            None,
+            Some("octo"),
             None,
             50,
         )
