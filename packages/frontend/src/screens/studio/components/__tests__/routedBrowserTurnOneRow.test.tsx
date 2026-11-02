@@ -493,10 +493,15 @@ describe("what a routed card covers", () => {
     // All the routing step says is its card: the run's record catches up.
     expect(resolveJobThreadTypingCoverage(card, [routingRun("in_progress")], [ask, card])).toBe("answered");
     expect(isTranscriptTailActiveTurnOutcome(card, [routingRun("in_progress")], [ask, card])).toBe(true);
-    // Its browser turn on its way: the card is that turn's line.
+    // Its browser turn on its way: the card is that turn's line, also before
+    // Studio has that run's record, and while the routing step's record
+    // still catches up.
     for (const status of ["queued", "in_progress"] as const) {
       expect(resolveJobThreadTypingCoverage(card, [browserRun(status)], [ask, card, continuation])).toBe("live");
     }
+    expect(resolveJobThreadTypingCoverage(card, [], [ask, card, continuation])).toBe("live");
+    expect(resolveJobThreadTypingCoverage(card, [routingRun("in_progress"), browserRun("queued")], [ask, card, continuation]))
+      .toBe("live");
     // Once that turn shows something, its own row takes the card's place.
     const shown = [ask, card, continuation, firstStep];
     expect(synthesizeAgentJobThreadMessages(shown, shown.filter(shouldDisplayChatMessage)).map((row) => row.id))
@@ -507,6 +512,9 @@ describe("what a routed card covers", () => {
     // is still deciding) and another run starts.
     expect(resolveJobThreadTypingCoverage(card, [another], [ask, card])).toBe("none");
     expect(isTranscriptTailActiveTurnOutcome(card, [another], [ask, card])).toBe(false);
+    // Another turn (a second AI in the chat, say) starts while the browser
+    // turn is on its way: the typing row speaks for it.
+    expect(resolveJobThreadTypingCoverage(card, [browserRun("queued"), another], [ask, card, continuation])).toBe("none");
     // The person pressed it themselves: their press is a turn of its own.
     const pressed: ChatMessage = {
       ...continuation,

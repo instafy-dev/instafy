@@ -10,7 +10,7 @@ import {
 } from "./assistantStatusHeuristics";
 import { getMessageType } from "./chatMessageMetadata";
 import { isAutomaticRetryPending } from "./automaticRetryFold";
-import { browserRequestFromMessage, browserRequestKey } from "./browserRequest";
+import { BROWSER_REQUEST_OF_METADATA_KEY, browserRequestFromMessage, browserRequestKey } from "./browserRequest";
 import { routedBrowserWaitingKeys } from "./routedBrowserFold";
 import {
   coerceThreadMessages,
@@ -208,15 +208,44 @@ function outcomeNamesRun(outcomeIds: readonly string[], run: RunRecord): boolean
 }
 
 /**
+ * Whether the newest row is a routed card that stands for its browser turn
+ * (the fold's waiting cards) and every run the typing row speaks for is one of
+ * that card's own: the browser turn, whose prompt names the card
+ * (`browserRequestOf`), or the routing step that posted it, whose record has
+ * not caught up yet. Another turn starting meanwhile keeps its typing row.
+ */
+function isRoutedCardStandingInForItsTurns(
+  card: ChatMessage,
+  typingRuns: readonly RunRecord[],
+  messages: readonly ChatMessage[],
+): boolean {
+  if (!isRoutedBrowserCard(card)) {
+    return false;
+  }
+  const key = browserRequestKey(card);
+  if (!routedBrowserWaitingKeys(messages).has(key)) {
+    return false;
+  }
+  const cardIds = [extractAgentJobId(card), extractRunIdFromMetadata(card.metadata)].filter(
+    (id): id is string => Boolean(id),
+  );
+  return typingRuns.every((run) => {
+    const continues = run.metadata?.[BROWSER_REQUEST_OF_METADATA_KEY];
+    return (typeof continues === "string" && continues.trim() === key) || outcomeNamesRun(cardIds, run);
+  });
+}
+
+/**
  * How the newest transcript row covers the assistant typing row.
  *
  * - `live`: the row is a job thread still running. It shows the run's state
  *   itself (rail and caption), so a typing row under it would say it twice.
  *   So is a failed turn Instafy is trying again by itself whose retry has
  *   shown nothing yet: it reads "Trying again…". So is a routed card whose
- *   browser turn is on its way: it is that turn's one line, "Opening
- *   Instafy's browser…", until the turn shows something (routedBrowserFold.ts),
- *   and a "Starting…" under it was a second Octo for the same turn.
+ *   browser turn is on its way, while only its own turns run: it is that
+ *   turn's one line, "Opening Instafy's browser…", until the turn shows
+ *   something (routedBrowserFold.ts), and a "Starting…" under it was a second
+ *   Octo for the same turn.
  * - `answered`: the row is the turn's reply (inside its job thread, a plain
  *   reply when the turn used no tools, or a routed card), and every run still
  *   marked active is that turn's own run, whose record has not caught up yet.
@@ -248,14 +277,12 @@ export function resolveJobThreadTypingCoverage(
     if (resolveThreadRunStatusFromMessages(threadMessages).phase !== "completed") {
       return "live";
     }
-  } else if (
-    isRoutedBrowserCard(latestDisplayedMessage) &&
-    routedBrowserWaitingKeys(messages).has(browserRequestKey(latestDisplayedMessage))
-  ) {
+  }
+  const typingRuns = resolveTypingRuns(activeRuns, messages);
+  if (isRoutedCardStandingInForItsTurns(latestDisplayedMessage, typingRuns, messages)) {
     return "live";
   }
   const outcomeIds = resolveTurnOutcomeIds(latestDisplayedMessage);
-  const typingRuns = resolveTypingRuns(activeRuns, messages);
   return outcomeIds && typingRuns.length > 0 && typingRuns.every((run) => outcomeNamesRun(outcomeIds, run))
     ? "answered"
     : "none";
