@@ -3084,6 +3084,59 @@ function animationsSettledInPage(request) {
   ]);
 }
 
+// The site's answers that an address has no page: a guessed address, or a page
+// that is gone. Any other answer, a page whose text says it was not found
+// included, is the step's page.
+const NO_PAGE_STATUSES = new Set([404, 410]);
+class NoPageError extends Error {
+  constructor() {
+    super("This address has no page. Open a link from a page you read, or that site's own search.");
+  }
+}
+
+// Loads the address navigate or open_tab asked for, as one page.goto that waits
+// for the document to load would, but reads the site's answer as soon as the
+// tab has it: an address with no page fails the step then (its line reads
+// "Tried opening <site>"), without waiting for the not-found page to load.
+async function openAddress(page, url) {
+  const deadline = Date.now() + 30_000;
+  // The site's answer for the tab's own document, after any redirects, as it
+  // comes: Chromium fails the load of a 404 or 410 with an empty body itself
+  // (net::ERR_HTTP_RESPONSE_CODE_FAILURE), so page.goto never returns it.
+  let status = null;
+  const answered = (response) => {
+    try {
+      const request = response.request();
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) status = response.status();
+    } catch (_) {
+      // An answer that belongs to no frame is not the tab's document.
+    }
+  };
+  page.on("response", answered);
+  let response;
+  try {
+    response = await page.goto(url, { waitUntil: "commit", timeout: 30_000 });
+  } catch (error) {
+    if (NO_PAGE_STATUSES.has(status) && /\bERR_HTTP_RESPONSE_CODE_FAILURE\b/u.test(String(error?.message || ""))) {
+      throw new NoPageError();
+    }
+    throw error;
+  } finally {
+    page.off("response", answered);
+  }
+  if (response && NO_PAGE_STATUSES.has(response.status())) {
+    // The not-found page stops loading while the step's guards still hold, and
+    // they hold as long after that as after any page a step loads
+    // (settleAfterAction): what it would load next (a refresh, or a script
+    // that sends the tab on, to a link-only site too) is stopped before it
+    // leaves the browser, as it was while the step waited for the page.
+    await within(GUARD_RELEASE_MS, stopLoading(page).catch(() => false), false);
+    await page.waitForTimeout(250).catch(() => {});
+    throw new NoPageError();
+  }
+  await page.waitForLoadState("domcontentloaded", { timeout: Math.max(deadline - Date.now(), 1) });
+}
+
 async function settleAfterAction(page) {
   await page.waitForLoadState("domcontentloaded", { timeout: 8_000 }).catch(() => {});
   await page.waitForTimeout(250).catch(() => {});
@@ -3604,7 +3657,7 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
         assertStepOnTime();
         emitAction({ type: "navigate", label: `Open a tab: ${url}`, url });
         loading = true;
-        await opened.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+        await openAddress(opened, url);
         await settleAfterAction(opened);
         documents.assertNoneBlocked();
       } catch (error) {
@@ -3620,10 +3673,10 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
         stepActivity(settled, "open_tab", stepApproval()),
       );
     } catch (error) {
-      if (!loading) {
-        // Nothing was approved or loaded: the blank tab goes again. When the
-        // run's authority is gone the record cannot be written; the end of
-        // the run closes the tab then.
+      if (!loading || error instanceof NoPageError) {
+        // Nothing was approved or loaded, or the address has no page: the
+        // tab goes again. When the run's authority is gone the record cannot
+        // be written; the end of the run closes the tab then.
         try {
           const current = approvalProtocol.readTabs();
           tabs.registry = approvalProtocol.writeTabs({
@@ -3635,6 +3688,9 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
           await page.close({ runBeforeUnload: false }).catch(() => {});
           tabs.pages.delete(tabId);
           await frontOctoTab(tabs);
+          // The page the step acts on is the one Octo is back on, so the
+          // closed tab never reads as the browser going away.
+          await resolveExpectedPage(browser);
         } catch (_) {
           // Keep the approval error, which may end the run.
         }
@@ -4269,7 +4325,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     }
     assertStepOnTime();
     emitAction({ type: "navigate", label: `Go to ${url}`, url });
-    await page.goto(revalidatedUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    await openAddress(page, revalidatedUrl);
     await settleAfterAction(page);
     page = await resolveExpectedPage(browser);
     await emitNavigationResult(page);

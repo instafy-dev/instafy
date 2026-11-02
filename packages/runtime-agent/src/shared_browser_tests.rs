@@ -857,6 +857,10 @@ const makePage = (targetId, opened = null) => {
       // A new document drops the page's withheld mark.
       if (markPath) fs.rmSync(markPath, { force: true });
       if (documentPath) fs.writeFileSync(documentPath, `DOCUMENT${Date.now()}`);
+      // "answers-<status>": the site's answer for the page, as Playwright
+      // returns it; any other mode returns none, as a same-page load does.
+      const answered = /^answers-(\d{3})$/u.exec(mode);
+      return answered ? { status: () => Number(answered[1]) } : null;
     },
     waitForLoadState: async () => {},
     waitForTimeout: async () => {},
@@ -7893,6 +7897,70 @@ fn failure_of(output: &Output) -> String {
         String::from_utf8_lossy(&output.stdout)
     );
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// A guessed address, or a page that is gone: the site answers 404 or 410 for
+/// the page a navigate or open_tab loads, which Details read as opened. The
+/// step fails instead, saying the address has no page and where to look, as
+/// an error result whose step names the site it tried (Details:
+/// "Tried opening <site>", not done), and never as the browser going away.
+/// The tab open_tab opened for it closes again. Any other answer is the
+/// step's page.
+#[test]
+fn an_address_with_no_page_fails_its_navigate_and_open_tab() {
+    const NO_PAGE: &str =
+        "This address has no page. Open a link from a page you read, or that site's own search.";
+    let arguments = json!({ "url": "https://example.test/reviews/guessed" });
+    let body = arguments.to_string();
+    for status in ["404", "410"] {
+        let mode = format!("answers-{status}");
+        let fixture = EmbeddedControllerFixture::new();
+        fixture.prepare_routine_start("page-target");
+        for (path, tool) in [("/v1/navigate", "navigate"), ("/v1/tabs/open", "open_tab")] {
+            let output = fixture.call(&mode, "POST", path, Some(&body));
+            let stderr = failure_of(&output);
+            assert!(stderr.contains(NO_PAGE), "{mode} {tool}: {stderr}");
+            assert_eq!(output.status.code(), Some(1), "{mode} {tool}: {stderr}");
+            assert!(
+                output.stdout.is_empty(),
+                "{mode} {tool}: nothing was allowed or read"
+            );
+            let error = controller_failure(output.status, &output.stderr, &output.stdout);
+            let result = failed_call_result(&error);
+            assert_eq!(result.is_error, Some(true), "{mode} {tool}");
+            let text = &result.content[0].as_text().expect("text content").text;
+            assert!(text.contains(NO_PAGE), "{mode} {tool}: {text}");
+            assert_eq!(
+                crate::shared_browser_activity::browser_step_facts(
+                    tool,
+                    Some(&arguments),
+                    result.structured_content.as_ref(),
+                    None,
+                    &mut None,
+                ),
+                Some(json!({ "step": tool, "host": "example.test" })),
+                "{mode} {tool}"
+            );
+        }
+        assert!(
+            fixture.browser_tabs().is_empty(),
+            "{mode}: the tab closed again"
+        );
+        assert_eq!(fixture.tab_record()["tabs"], json!([]), "{mode}");
+        assert_eq!(
+            fixture.tab_record()["currentTabId"],
+            JsonValue::Null,
+            "{mode}"
+        );
+    }
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    let opened = payload_of(&fixture.call("answers-200", "POST", "/v1/navigate", Some(&body)));
+    assert_eq!(opened["url"], "https://example.test/reviews/guessed");
+    assert_eq!(opened["activity"]["step"], "navigate");
+    let tab = payload_of(&fixture.call("answers-200", "POST", "/v1/tabs/open", Some(&body)));
+    assert_eq!(tab["openedTab"], true);
+    assert_eq!(fixture.browser_tabs().len(), 1);
 }
 
 #[test]

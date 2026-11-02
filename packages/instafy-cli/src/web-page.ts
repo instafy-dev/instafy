@@ -367,8 +367,9 @@ export function findTerms(raw: string): string[] {
 }
 
 /**
- * The passages of `lines` that mention any term: each matching line with one line either side, overlapping windows
- * merged, most distinct terms first and then page order, until `maxChars`.
+ * The passages of `lines` that mention any term: each matching line with the two lines above it (where the name or
+ * heading it belongs to usually is) and the one below, windows that touch merged, most distinct terms first and then
+ * page order, until `maxChars`. `matchedLines` counts every line that mentions a term.
  */
 export function findPassages(lines: string[], terms: string[], maxChars: number): { passages: string[]; matchedLines: number } {
   if (!terms.length) return { passages: [], matchedLines: 0 };
@@ -379,7 +380,7 @@ export function findPassages(lines: string[], terms: string[], maxChars: number)
   });
   const windows: Array<{ start: number; end: number }> = [];
   for (const index of hits) {
-    const start = Math.max(0, index - 1);
+    const start = Math.max(0, index - 2);
     const end = Math.min(lines.length - 1, index + 1);
     const last = windows[windows.length - 1];
     if (last && start <= last.end + 1) last.end = Math.max(last.end, end);
