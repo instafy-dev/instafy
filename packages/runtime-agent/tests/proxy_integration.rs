@@ -669,6 +669,40 @@ fn write_inert_chatgpt_login(dir: &Path) -> Result<PathBuf> {
     Ok(auth_path)
 }
 
+/// Code-mode-only models run every tool in `codex-code-mode-host`, which runtime-agent looks for
+/// beside its own executable: in these tests the test binary, in `target/<profile>/deps`. Links
+/// the host that `cargo build --features code-mode-host -p runtime-agent -p codex-code-mode-host`
+/// left in `target/<profile>`, as proxy_retry_budget does, and fails naming that command when it
+/// is missing.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn stage_code_mode_host() -> Result<()> {
+    static STAGED: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+    STAGED
+        .get_or_init(|| {
+            let stage = || -> Result<()> {
+                let executable = std::env::current_exe()?;
+                let deps = executable.parent().context("test binary directory")?;
+                let name = runtime_agent::code_mode_host::EXECUTABLE_NAME;
+                let built = deps.parent().context("Cargo profile directory")?.join(name);
+                anyhow::ensure!(
+                    built.is_file(),
+                    "a code-mode model needs {name} in {}; build it with `cargo build --features code-mode-host -p runtime-agent -p codex-code-mode-host` (see DEV_SETUP.md)",
+                    deps.parent().unwrap_or(deps).display()
+                );
+                let staged = deps.join(name);
+                // Replace any earlier copy so a rebuilt host is the one under test.
+                let _ = fs::remove_file(&staged);
+                if fs::hard_link(&built, &staged).is_err() {
+                    fs::copy(&built, &staged)?;
+                }
+                Ok(())
+            };
+            stage().map_err(|error| format!("{error:#}"))
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)
+}
+
 /// Runs this binary's `test_name` again in a child process that sets
 /// `child_flag=1`, so the child runs the fixture itself. As in
 /// proxy_retry_budget, the whole model-capable run has an owned HOME and an
