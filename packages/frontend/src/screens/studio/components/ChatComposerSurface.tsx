@@ -78,11 +78,14 @@ import {
 } from "./useChatComposerAttachments";
 import { CHAT_IMAGE_ACCEPT } from "../../../lib/chatAttachments";
 import { CHAT_COMPOSER_COLUMN_CLASS_NAME } from "./ChatColumn";
+import "./ChatReadingLayout.css";
 import { useTouchSendModePicker } from "./useTouchSendModePicker";
 import type { TouchSendModePickerOutcome } from "./touchSendModePicker";
 
 type ChatComposerSurfaceProps = {
   overlayWidth?: string;
+  /** Native scrollbar space reserved by the transcript in this pane. */
+  scrollbarInset?: number;
   composerOverlayRef: RefObject<HTMLDivElement | null>;
   composerAutoHidden: boolean;
   aboveComposer?: ReactNode;
@@ -301,6 +304,7 @@ function ComposerContextToken({ label, cancelLabel, onCancel, testId }: {
 
 export function ChatComposerSurface({
   overlayWidth,
+  scrollbarInset = 0,
   composerOverlayRef,
   composerAutoHidden,
   aboveComposer,
@@ -1160,7 +1164,7 @@ export function ChatComposerSurface({
     <>
       <div
         ref={composerOverlayRef}
-        className={`pointer-events-none absolute inset-x-0 bottom-0 z-20 transition-transform duration-200 ease-out ${
+        className={`chat-composer-reading-area pointer-events-none absolute inset-x-0 bottom-0 z-20 transition-transform duration-200 ease-out ${
           // One mechanism at a time: Tailwind's translate-y-full sets the CSS `translate` property, which adds to an
           // inline `transform`, so the compact peek (inline) must not also get the class or it slides fully off.
           composerHidden && !compactBrowserViewport ? "translate-y-full" : "translate-y-0"
@@ -1178,6 +1182,7 @@ export function ChatComposerSurface({
         {aboveComposer ? <div className="pointer-events-none absolute inset-x-0 bottom-full flex justify-center pb-2">
           {aboveComposer}
         </div> : null}
+        <div className={draftExpanded ? "h-full min-h-0" : undefined} style={{ paddingInlineEnd: Math.max(0, scrollbarInset) }}>
         <form
           onSubmit={onSubmit}
           onKeyDown={(event) => {
@@ -1187,15 +1192,8 @@ export function ChatComposerSurface({
               setDraftExpanded(false);
             }
           }}
-          className={`${
-            compactNavigationLayout
-              ? `pointer-events-auto ${CHAT_COMPOSER_COLUMN_CLASS_NAME} px-3.5`
-              : `pointer-events-auto ${CHAT_COMPOSER_COLUMN_CLASS_NAME} px-3 sm:px-4`
-          } ${draftExpanded ? "h-full min-h-0" : ""}`}
+          className={`chat-composer-reading-column chat-reading-inset pointer-events-auto ${CHAT_COMPOSER_COLUMN_CLASS_NAME} ${draftExpanded ? "h-full min-h-0" : ""}`}
           style={{
-            paddingInline: compactNavigationLayout
-              ? "clamp(0.875rem, var(--instafy-safe-area-inset-bottom), 1.125rem)"
-              : undefined,
             paddingBottom: nativeKeyboardOpen
               ? "0.5rem"
               : "max(var(--instafy-safe-area-inset-bottom), 0.5rem)",
@@ -1755,6 +1753,7 @@ export function ChatComposerSurface({
             </Surface>
           </div>
         </form>
+        </div>
         <ComposerInviteModal {...inviteModalProps} />
         {touchSendModePicker.overlay}
       </div>

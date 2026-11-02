@@ -199,15 +199,18 @@ test.describe("Octo thinking motion", () => {
       );
     });
     expect(presentedPathChanges).toBe(true);
-    await expect(page.getByTestId("chat-avatar-assistant")).toBeVisible();
+    const gutterAvatar = page
+      .locator(".chat-message-avatar-gutter")
+      .getByTestId("chat-avatar-assistant");
+    await expect(gutterAvatar).toBeVisible();
     await expect(page.getByTestId("assistant-thinking-octo-compact")).toBeHidden();
 
-    const avatarBox = await page.getByTestId("chat-avatar-assistant").boundingBox();
+    const avatarBox = await gutterAvatar.boundingBox();
     expect(avatarBox?.width).toBe(32);
     expect(avatarBox?.height).toBe(32);
 
     await page.setViewportSize({ width: 390, height: 720 });
-    await expect(page.getByTestId("chat-avatar-assistant")).toBeHidden();
+    await expect(gutterAvatar).toBeHidden();
     await expect(page.getByTestId("assistant-thinking-octo-compact")).toBeVisible();
     await expect(
       page

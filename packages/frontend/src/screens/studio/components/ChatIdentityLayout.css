@@ -1,0 +1,102 @@
+/* Standalone rows retain their viewport fallback. Within a transcript, the
+   pane owns density: a desktop split can be narrower than a phone window. */
+.chat-message-avatar-gutter--responsive,
+.chat-message-gutter-spine--responsive {
+  display: none;
+}
+
+.chat-narrow-speaker-identity,
+.chat-speaker-inline-avatar {
+  display: flex;
+}
+
+@media (min-width: 640px) {
+  .chat-message-avatar-gutter--responsive,
+  .chat-message-gutter-spine--responsive {
+    display: block;
+  }
+
+  .chat-narrow-speaker-identity,
+  .chat-speaker-inline-avatar--narrow {
+    display: none;
+  }
+}
+
+/* Standalone typing fixtures retain their existing face/status layout. The
+   transcript supplies a named compact heading when its gutter disappears. */
+.chat-narrow-speaker-identity:has(> .chat-typing-speaker-header) {
+  display: none;
+}
+
+[data-chat-identity-layout] .chat-typing-status-face {
+  display: none;
+}
+
+@container chat-transcript (width < 640px) {
+  .chat-message-avatar-gutter,
+  .chat-message-gutter-spine {
+    display: none;
+  }
+
+  .chat-narrow-speaker-identity,
+  .chat-speaker-inline-avatar--narrow {
+    display: flex;
+  }
+
+  [data-chat-identity-layout] .chat-narrow-speaker-identity:has(> .chat-typing-speaker-header) {
+    display: flex;
+  }
+}
+
+@container chat-transcript (width >= 640px) {
+  .chat-message-avatar-gutter--responsive,
+  .chat-message-gutter-spine--responsive {
+    display: block;
+  }
+
+  .chat-narrow-speaker-identity,
+  .chat-speaker-inline-avatar--narrow {
+    display: none;
+  }
+}
+
+/* A confirmed conversation with only the viewer and Octo needs no permanent
+   face column. Its live status keeps a small inline face beside the label.
+   Only gutter decorations collapse; spines inside message content remain. */
+[data-chat-identity-layout="solo"] .chat-message-avatar-gutter,
+[data-chat-identity-layout="solo"] .chat-message-gutter-spine,
+[data-chat-identity-layout="solo"] .chat-speaker-inline-avatar {
+  display: none;
+}
+
+[data-chat-identity-layout="solo"] .chat-typing-status-face {
+  display: flex;
+}
+
+/* Keep message details reachable to keyboard and assistive technology even
+   when touch has no hover affordance. Revealing it never reflows the text. */
+.chat-message-actions-trigger {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chat-message-shell:focus-within .chat-message-actions-trigger,
+.chat-message-actions-trigger:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .chat-message-shell:hover .chat-message-actions-trigger {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+@media (pointer: coarse) {
+  .chat-message-actions-trigger {
+    /* Keep the 44px target and its 4px focus outline inside a 320px pane;
+       the painted icon remains outside the message text. */
+    transform: translateX(-16px);
+  }
+}

@@ -34,7 +34,7 @@ import { normalizeAssistantHandleLabel } from "./assistantSpeakerIdentity";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import { HumanProfilePopover } from "../../../profile/HumanProfilePopover";
 import { extractAgentJobId } from "./chatMessagePresentation";
-import { resolveThreadRunStatusFromMessages } from "./threadPreviewHelpers";
+import { extractThreadRunStatus, resolveThreadRunStatusFromMessages } from "./threadPreviewHelpers";
 import { resolveSpineToneFromStatus } from "./ThreadSpine";
 import {
   HumanSpeakerIdentityLabel,
@@ -45,6 +45,10 @@ import { sanitizeChatMessageCopyEvent } from "./chatSelectionCopy";
 import { DeferredChatMessageRow, DeferredChatRows } from "./DeferredChatMessageRow";
 import { getConversationScrollAnchorMessageId } from "./useChatScrollOrchestration";
 import { MessageContent } from "./ChatMessageContent";
+import { getBuiltInAssistantDisplayName, getDefaultAssistantHandle } from "../../../assistants/localBuiltInAssistantCatalog";
+import { ChatTimeDivider } from "./ChatTimeDivider";
+import { buildChatTimeDividers } from "./chatTimeDividers";
+import { useChatTimelineClock } from "./useChatTimelineClock";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -187,6 +191,7 @@ export function ConversationMessageRows({
   projectId,
   runtimeId,
   conversationLocalId,
+  identityLayout = "participants",
   scrollSnapshotKey = null,
   targetedMessageId = null,
   highlightedMessageId = null,
@@ -213,6 +218,7 @@ export function ConversationMessageRows({
   projectId: string | null;
   runtimeId: string | null;
   conversationLocalId: string | null;
+  identityLayout?: "solo" | "participants";
   scrollSnapshotKey?: string | null;
   targetedMessageId?: string | null;
   highlightedMessageId?: string | null;
@@ -238,6 +244,10 @@ export function ConversationMessageRows({
   onCancelTerminalCommand?: (() => void | Promise<void>) | null;
   onMessageContextMenu: (event: ReactMouseEvent<HTMLDivElement>, messageId: string) => void;
 }) {
+  const timelineNow = useChatTimelineClock();
+  // Visibility of failed browser continuations can change independently of
+  // the message array. Derive landmarks from the current rendered sequence.
+  const timeDividers = buildChatTimeDividers(messages);
   useEffect(() => {
     document.addEventListener("copy", sanitizeChatMessageCopyEvent);
     return () => {
@@ -275,6 +285,12 @@ export function ConversationMessageRows({
   let lastAssistantHandle: string | null = null;
   for (const [messageIndex, message] of messages.entries()) {
         flushTimedRowsBefore(message.timestamp);
+        const dividerTimestamp = timeDividers.get(message.id);
+        const startsTimePeriod = dividerTimestamp !== undefined;
+        if (startsTimePeriod) {
+          lastAssistantHandle = null;
+          rows.push(<ChatTimeDivider key={`time-divider:${message.id}`} timestamp={dividerTimestamp} now={timelineNow} messageId={message.id} />);
+        }
         // A continuation sent to Instafy's browser for a card, or a hand-back
         // of what the browser found, reads as a one-line notice, not as a
         // message the person wrote. One whose dispatch failed shows nothing;
@@ -298,7 +314,7 @@ export function ConversationMessageRows({
         const previousAssistantHandle = lastAssistantHandle;
         const currentAssistantHandle = resolveAssistantHandleForMessage(message, runAgentHandleByRunId);
         if (currentAssistantHandle) lastAssistantHandle = currentAssistantHandle;
-        const previousVisibleAssistantMessage = resolvePreviousVisibleAssistantMessage(messages, messageIndex);
+        const previousVisibleAssistantMessage = startsTimePeriod ? null : resolvePreviousVisibleAssistantMessage(messages, messageIndex);
         const previousVisibleAssistantHandle = previousVisibleAssistantMessage
           ? resolveAssistantDisplayHandleForMessage(previousVisibleAssistantMessage, runAgentHandleByRunId)
           : null;
@@ -325,7 +341,7 @@ export function ConversationMessageRows({
               ? "user:self"
               : humanIdentity?.groupIdentity ?? "user:teammate";
         const groupKey = `${isLeftAligned ? "left" : "right"}:${groupIdentity}`;
-        const previousMessage = messages[messageIndex - 1] ?? null;
+        const previousMessage = startsTimePeriod ? null : messages[messageIndex - 1] ?? null;
         const previousIsOwnUserMessage = previousMessage
           ? isCurrentUserChatMessage(previousMessage, normalizedCurrentUserId, chatClientSessionId)
           : false;
@@ -355,7 +371,7 @@ export function ConversationMessageRows({
         const isGroupHead = !(previousIsSameOwnUserGroup || previousIsSameLeftHumanGroup);
         let isGroupTail = true;
         const nextMessage = messages[messageIndex + 1] ?? null;
-        if (nextMessage) {
+        if (nextMessage && !timeDividers.has(nextMessage.id)) {
           const nextIsOwnUserMessage = isCurrentUserChatMessage(
             nextMessage,
             normalizedCurrentUserId,
@@ -395,8 +411,8 @@ export function ConversationMessageRows({
         const workflowSpineKey = workflowSpineKeys[messageIndex] ?? null;
         const previousWorkflowSpineKey = messageIndex > 0 ? workflowSpineKeys[messageIndex - 1] ?? null : null;
         const nextWorkflowSpineKey = workflowSpineKeys[messageIndex + 1] ?? null;
-        const spineBridgeBefore = Boolean(workflowSpineKey && workflowSpineKey === previousWorkflowSpineKey);
-        const spineBridgeAfter = Boolean(workflowSpineKey && workflowSpineKey === nextWorkflowSpineKey);
+        const spineBridgeBefore = !startsTimePeriod && Boolean(workflowSpineKey && workflowSpineKey === previousWorkflowSpineKey);
+        const spineBridgeAfter = !timeDividers.has(nextMessage?.id ?? "") && Boolean(workflowSpineKey && workflowSpineKey === nextWorkflowSpineKey);
         const isWorkflowSpineContinuation = message.role === "assistant" && spineBridgeBefore;
         const suppressOuterAssistantAvatar =
           message.role === "assistant" &&
@@ -431,6 +447,14 @@ export function ConversationMessageRows({
           message.role === "assistant" &&
           normalizedMessageType === "runtime_alert" &&
           assistantHandleForMessage.length > 0;
+        // The participant rail establishes the sole speaker. Ordinary replies
+        // need no repeated heading; activity, failures and search destinations
+        // still keep their own attribution/status context.
+        const messageRunStatus = extractThreadRunStatus(message);
+        const quietSoloReply = identityLayout === "solo" && message.role === "assistant" &&
+          ["", "message", "text", "assistant_message"].includes(normalizedMessageType) &&
+          (messageRunStatus === null || ["completed", "success", "succeeded"].includes(messageRunStatus)) &&
+          message.id !== targetedMessageId && activeAssistantAvatarMotion?.messageId !== message.id;
         const showInlineNarrowSpeakerIdentity =
           (message.role === "assistant" && message.id === targetedMessageId) ||
           showRuntimeNoticeIdentity ||
@@ -537,7 +561,7 @@ export function ConversationMessageRows({
               avatarVisibility="narrow"
             />
           ) : null;
-        const inlineSpeakerIdentity = showInlineNarrowSpeakerIdentity ? (
+        const inlineSpeakerIdentity = showInlineNarrowSpeakerIdentity && !quietSoloReply ? (
           <AssistantSpeakerIdentityLabel
             handle={assistantHandleForMessage}
             timestamp={message.timestamp}
@@ -575,7 +599,7 @@ export function ConversationMessageRows({
             message={message}
             targeted={message.id === targetedMessageId}
             highlighted={message.id === highlightedMessageId}
-            layoutKey={`${isLeftAligned}:${Boolean(speakerIdentity)}:${Boolean(narrowSpeakerIdentity)}`}
+            layoutKey={`${identityLayout}:${isLeftAligned}:${Boolean(speakerIdentity)}:${Boolean(narrowSpeakerIdentity)}`}
             eager={anchorIndex >= 0 ? Math.abs(messageIndex - anchorIndex) <= 10 : messageIndex >= messages.length - 20}
             eligible={
               ["", "message", "text", "assistant_message", "user_message"].includes(normalizedMessageType) &&
@@ -583,6 +607,7 @@ export function ConversationMessageRows({
             }
           >
           <ChatBubbleRow
+            accessibleSpeakerLabel={quietSoloReply ? getBuiltInAssistantDisplayName(assistantHandleForMessage || getDefaultAssistantHandle()) ?? assistantHandleForMessage : undefined}
             align={isLeftAligned ? "left" : "right"}
             avatar={avatar}
             collapseAvatarOnNarrow={avatar !== null}

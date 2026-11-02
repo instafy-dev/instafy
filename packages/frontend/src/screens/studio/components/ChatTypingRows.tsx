@@ -5,6 +5,7 @@ import { aiFaceKey, resolveAiFace, stackAiFaces, type AiFaceIdentity } from "../
 import { ChatActivityBubble } from "./ChatActivityBubble";
 import { ChatBubbleRow } from "./ChatBubbleRow";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
+import { AssistantSpeakerIdentityLabel } from "./AssistantSpeakerIdentityPill";
 import type {
   AssistantAgentIdentity,
   AssistantAvatarRenderOptions,
@@ -112,6 +113,7 @@ function AssistantTypingStatusLine({
 }
 
 export function ChatTypingRows({
+  identityLayout = "participants",
   peerTypingLabel,
   isAssistantTyping,
   isAssistantTypingCoveredByJobThreadPreview,
@@ -131,6 +133,7 @@ export function ChatTypingRows({
   typingStatusWraps = false,
   renderAssistantAvatar,
 }: {
+  identityLayout?: "solo" | "participants";
   peerTypingLabel: string | null;
   isAssistantTyping: boolean;
   isAssistantTypingCoveredByJobThreadPreview: boolean;
@@ -167,6 +170,7 @@ export function ChatTypingRows({
     handle: typingAgentHandle,
     avatarSeed: typingAgentAvatarSeed,
   });
+  const showSoloOctoStatus = identityLayout === "solo" && !hasMultipleTypingAgents && usesCanonicalOcto;
   const compactThinkingOcto = hasMultipleTypingAgents
     ? typingAgents.find((agent) => agent.isThinking && usesCanonicalOctoAvatar(agent)) ?? null
     : usesCanonicalOcto && typingIndicatorState?.phase === "thinking"
@@ -193,19 +197,18 @@ export function ChatTypingRows({
             className="h-3.5 w-3.5 flex-shrink-0 text-slate-500 dark:text-slate-300"
             aria-hidden="true"
           />
-        ) : compactThinkingOctoHandle !== null ? (
-          // Phones hide the avatar gutter, so this is the row's only face. It
-          // is the same chat face as the gutter and the posted reply header,
-          // at the header's inline size, so Octo keeps its coin (OctoCoin,
-          // docs/Brand.md) instead of turning into the bare logo mark.
-          <span className="flex flex-shrink-0 sm:hidden">
+        ) : showSoloOctoStatus || compactThinkingOctoHandle !== null ? (
+          // Solo Octo stays beside its status in one row. Participant panes use
+          // their named header; standalone compact rows retain this same coin.
+          <span className="chat-typing-status-face chat-speaker-inline-avatar chat-speaker-inline-avatar--narrow flex-shrink-0">
             <ChatMessageAvatar
               kind="assistant"
               agent={{
-                handle: compactThinkingOctoHandle,
-                avatarSeed: compactThinkingOctoAvatarSeed,
+                handle: showSoloOctoStatus ? typingAgentHandle : compactThinkingOctoHandle!,
+                avatarSeed: showSoloOctoStatus ? typingAgentAvatarSeed : compactThinkingOctoAvatarSeed,
+                ...(showSoloOctoStatus && typingAgentId ? { id: typingAgentId } : {}),
               }}
-              motion="thinking"
+              motion={showSoloOctoStatus && typingIndicatorState?.phase !== "thinking" ? "idle" : "thinking"}
               scrollReactive
               size="xs"
               testId="assistant-thinking-octo-compact"
@@ -218,6 +221,10 @@ export function ChatTypingRows({
       compactThinkingOctoHandle,
       hasMultipleTypingAgents,
       isThinkingLabelExpanded,
+      showSoloOctoStatus,
+      typingAgentAvatarSeed,
+      typingAgentHandle,
+      typingAgentId,
       typingIndicatorState?.label,
       typingIndicatorState?.phase,
       typingStatusAriaLabel,
@@ -337,6 +344,23 @@ export function ChatTypingRows({
         <ChatBubbleRow
           align="left"
           collapseAvatarOnNarrow
+          narrowSpeakerIdentity={showSoloOctoStatus ? null : (
+            <div className="chat-typing-speaker-header flex min-w-0 max-w-full flex-wrap items-center gap-x-3 gap-y-1">
+              {(hasMultipleTypingAgents ? typingAgents : [{
+                handle: typingAgentHandle,
+                avatarSeed: typingAgentAvatarSeed,
+                id: typingAgentId,
+                isThinking: assistantAvatarMotion === "thinking",
+              }]).map((agent, index) => (
+                <AssistantSpeakerIdentityLabel
+                  key={`${agent.id ?? agent.handle}-${index}`}
+                  handle={agent.handle}
+                  agentIdentity={{ handle: agent.handle, avatarSeed: agent.avatarSeed, ...(agent.id ? { id: agent.id } : {}) }}
+                  motion={showAssistantStatus && agent.isThinking ? "thinking" : "idle"}
+                />
+              ))}
+            </div>
+          )}
           speakerMarker={
             hasMultipleTypingAgents
               ? { kind: "boundary" }
@@ -347,7 +371,7 @@ export function ChatTypingRows({
                   ...(typingAgentId ? { agentId: typingAgentId } : {}),
                 }
           }
-          avatar={(
+          avatar={showSoloOctoStatus ? null : (
             <div className="self-center">
               {hasMultipleTypingAgents ? (
                 // The next face covers a quarter of the one before, as in the

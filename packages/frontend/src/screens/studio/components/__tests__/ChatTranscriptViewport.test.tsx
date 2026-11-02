@@ -2,7 +2,7 @@
 
 import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatTranscriptViewport } from "../ChatTranscriptViewport";
 
 describe("ChatTranscriptViewport", () => {
@@ -24,7 +24,7 @@ describe("ChatTranscriptViewport", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function renderViewport(options: { scrollPaddingBottom?: number | null; header?: boolean } = {}) {
+  async function renderViewport(options: { scrollPaddingBottom?: number | null; header?: boolean; onScrollbarWidthChange?: (width: number) => void } = {}) {
     const scrollContainerRef = createRef<HTMLDivElement>();
     await act(async () => {
       root.render(
@@ -32,6 +32,7 @@ describe("ChatTranscriptViewport", () => {
           ariaLabel="Conversation"
           scrollContainerRef={scrollContainerRef}
           scrollPaddingBottom={options.scrollPaddingBottom}
+          onScrollbarWidthChange={options.onScrollbarWidthChange}
           header={options.header ? <button type="button">Participants</button> : undefined}
         >
           <p data-testid="transcript-line">First message</p>
@@ -93,5 +94,21 @@ describe("ChatTranscriptViewport", () => {
       expect(readStyle(scroller).maskImage || "").toBe("");
       expect(readStyle(scroller).WebkitMaskImage || "").toBe("");
     }
+  });
+
+  it("reports native scrollbar space as it changes without remounting the transcript", async () => {
+    const onScrollbarWidthChange = vi.fn();
+    const { scroller, scrollContainerRef } = await renderViewport({ onScrollbarWidthChange, header: true });
+    const header = container.querySelector<HTMLElement>('[data-testid="chat-transcript-header"]')!;
+    Object.defineProperty(scroller, "offsetWidth", { configurable: true, value: 400 });
+    Object.defineProperty(scroller, "clientWidth", { configurable: true, value: 385 });
+    await act(async () => window.dispatchEvent(new Event("resize")));
+    expect(onScrollbarWidthChange).toHaveBeenLastCalledWith(15);
+    expect(header.style.paddingInlineEnd).toBe("15px");
+    Object.defineProperty(scroller, "clientWidth", { configurable: true, value: 400 });
+    await act(async () => window.dispatchEvent(new Event("resize")));
+    expect(onScrollbarWidthChange).toHaveBeenLastCalledWith(0);
+    expect(Number.parseFloat(header.style.paddingInlineEnd)).toBe(0);
+    expect(scrollContainerRef.current).toBe(scroller);
   });
 });

@@ -1114,6 +1114,17 @@ mod tests {
     }
 
     #[test]
+    fn a_home_actor_keeps_the_face_dispatch_stamped() {
+        let metadata = json!({
+            "agent": { "handle": "reading_list", "avatarSeed": "hatchling:3" }
+        });
+        assert_eq!(
+            agent_actor_from_metadata(&metadata),
+            Some(json!({ "handle": "reading_list", "avatarSeed": "hatchling:3" }))
+        );
+    }
+
+    #[test]
     fn previews_are_bounded() {
         let long = "x".repeat(2_000);
         let preview = bounded_preview(&long).expect("preview");
