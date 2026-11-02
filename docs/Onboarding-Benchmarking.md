@@ -39,6 +39,20 @@ The empty conversation should be task-first and usable without completing a wiza
 
 Interest/task starters stay collapsed behind a user-invoked **Need ideas?** disclosure. They must not render automatically just because the conversation is empty. Opening one only prefills the same composer; it does not create a separate mandatory onboarding path. Once AI access is settled, the collapsed disclosure is the only remaining first-run guidance.
 
+## ChatGPT device-code connection
+
+Browser users can connect their ChatGPT subscription without installing Instafy Desktop:
+enable device-code authorization in ChatGPT Settings → Security (or ask the workspace admin
+to allow it), generate a code in Instafy, then open the OpenAI login page and enter that code.
+Keep the Instafy tab open; it waits for approval and finishes connecting automatically.
+
+The controller must treat HTTP **403 and 404 from the token polling endpoint as pending**,
+matching Codex's device-login client. These responses can arrive before the user even opens
+the OpenAI page; they do not establish that the user's device-code setting is disabled.
+Keep the code usable until authorization, cancellation, or its 15-minute expiry. A 404 when
+initially requesting a code means the configured authentication server's device-code endpoint
+is unavailable, not that a particular user's ChatGPT setting is off.
+
 ## Private-repo fallback
 
 When repo access fails because GitHub auth or scope is missing:

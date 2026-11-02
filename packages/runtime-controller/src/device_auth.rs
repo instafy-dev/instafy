@@ -29,7 +29,7 @@ const DEFAULT_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const GITHUB_DEVICE_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const USER_OAUTH_TOKEN_PROVIDER_GITHUB: &str = "github";
-const CODEX_DEVICE_AUTH_FORBIDDEN_MESSAGE: &str = "ChatGPT device-code login is not enabled. Enable it in ChatGPT Settings → Security, or ask your workspace admin to allow it in workspace permissions, then generate a new code.";
+const CODEX_DEVICE_AUTH_UNAVAILABLE_MESSAGE: &str = "Device-code login is unavailable on the configured Codex authentication server. Check the server configuration or try another connection method.";
 const GITHUB_DEVICE_AUTH_ASSERTION_TTL_MINUTES: i64 = 30;
 const GITHUB_DEVICE_AUTH_TERMINAL_RETENTION_MINUTES: i64 = 30;
 const GITHUB_DEVICE_AUTH_STORAGE_UNAVAILABLE_MESSAGE: &str =
@@ -1597,7 +1597,7 @@ async fn request_codex_user_code(
         .map_err(|error| internal_error(format!("device auth request failed: {error}")))?;
     let status = response.status();
     if status == reqwest::StatusCode::NOT_FOUND {
-        return Err(bad_request(CODEX_DEVICE_AUTH_FORBIDDEN_MESSAGE));
+        return Err(bad_request(CODEX_DEVICE_AUTH_UNAVAILABLE_MESSAGE));
     }
     if !status.is_success() {
         return Err(internal_error(format!(
@@ -2553,12 +2553,12 @@ async fn poll_codex_token(
 fn codex_poll_http_error(
     status: reqwest::StatusCode,
 ) -> Result<Option<CodexTokenPollResp>, String> {
-    if status == reqwest::StatusCode::NOT_FOUND {
+    // Codex's device token endpoint uses both 403 and 404 while the user has
+    // not finished authorizing the code. A polling 403 does not tell us whether
+    // their account has device-code login enabled. Match codex-login's pending
+    // semantics and let the session's existing expiry/cancellation end polling.
+    if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
-    }
-
-    if status == reqwest::StatusCode::FORBIDDEN {
-        return Err(CODEX_DEVICE_AUTH_FORBIDDEN_MESSAGE.to_string());
     }
 
     Err(format!(
@@ -2673,15 +2673,19 @@ mod device_auth_session_tests {
     use bb8::Pool;
     use bb8_postgres::PostgresConnectionManager;
     use chrono::{Duration as ChronoDuration, Utc};
+    use httpmock::{Method::POST, MockServer};
+    use serde_json::json;
     use uuid::Uuid;
 
     use super::{
-        codex_poll_http_error, github_device_auth_assertion_expires_at,
-        github_device_auth_completion_outcome, github_device_auth_expires_at,
-        github_device_auth_poll_interval, github_token_poll_http_error, prune_sessions,
-        release_github_device_auth_start, reserve_github_device_auth_start,
-        DeviceAuthProviderState, DeviceAuthRegistry, DeviceAuthSession, DeviceAuthStatus,
-        GithubDeviceAuthCompletionOutcome, GithubDeviceAuthStartReservation, GithubTokenPollError,
+        codex_poll_http_error, exchange_codex_code_for_tokens,
+        github_device_auth_assertion_expires_at, github_device_auth_completion_outcome,
+        github_device_auth_expires_at, github_device_auth_poll_interval,
+        github_token_poll_http_error, poll_codex_token, prune_sessions,
+        release_github_device_auth_start, request_codex_user_code,
+        reserve_github_device_auth_start, DeviceAuthProviderState, DeviceAuthRegistry,
+        DeviceAuthSession, DeviceAuthStatus, GithubDeviceAuthCompletionOutcome,
+        GithubDeviceAuthStartReservation, GithubTokenPollError,
         GITHUB_DEVICE_AUTH_ASSERTION_TTL_MINUTES, GITHUB_DEVICE_AUTH_INTERRUPTED_MESSAGE,
         GITHUB_DEVICE_AUTH_MAX_LIFETIME_SECONDS, GITHUB_DEVICE_AUTH_MAX_POLL_INTERVAL_SECONDS,
     };
@@ -3028,18 +3032,166 @@ mod device_auth_session_tests {
     }
 
     #[test]
-    fn codex_forbidden_poll_is_actionable_and_not_pending() {
-        let error = codex_poll_http_error(reqwest::StatusCode::FORBIDDEN)
-            .expect_err("403 must stop polling");
-        // Studio keys its no-code card on this phrase (deviceAuthErrors.ts).
-        assert!(error.contains("device-code login is not enabled"));
-        assert!(error.contains("ChatGPT Settings"));
-        assert!(error.contains("Security"));
-        assert!(error.contains("workspace permissions"));
-        assert!(matches!(
-            codex_poll_http_error(reqwest::StatusCode::NOT_FOUND),
-            Ok(None)
-        ));
+    fn codex_forbidden_and_not_found_polls_remain_pending() {
+        for status in [
+            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::NOT_FOUND,
+        ] {
+            assert!(matches!(codex_poll_http_error(status), Ok(None)));
+        }
+    }
+
+    #[test]
+    fn codex_unexpected_poll_errors_still_fail() {
+        for status in [
+            reqwest::StatusCode::BAD_REQUEST,
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            let result = codex_poll_http_error(status);
+            assert!(matches!(result, Err(error) if error.contains(&status.as_u16().to_string())));
+        }
+    }
+
+    // These HTTP contract tests never acquire a database connection or contact
+    // OpenAI. Use inert fixtures instead of a developer's ChatGPT credentials.
+    fn codex_http_test_state() -> crate::AppState {
+        let manager = PostgresConnectionManager::new_from_stringlike(
+            "postgresql://localhost:1/unused",
+            crate::config::database_tls(),
+        )
+        .expect("parse unused test database URL");
+        let pool = Pool::builder().max_size(1).build_unchecked(manager);
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "codex-device-auth-test",
+        );
+        crate::tests::build_test_state(pool, config)
+    }
+
+    #[tokio::test]
+    async fn codex_device_login_waits_for_authorization_then_exchanges_code() {
+        let server = MockServer::start_async().await;
+        let state = codex_http_test_state();
+        let start = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/api/accounts/deviceauth/usercode")
+                    .json_body(json!({ "client_id": "test-client" }));
+                then.status(200).json_body(json!({
+                    "device_auth_id": "test-device-auth",
+                    "user_code": "ABCD-EFGH",
+                    "interval": "5",
+                }));
+            })
+            .await;
+        let challenge = request_codex_user_code(&state, &server.base_url(), "test-client")
+            .await
+            .expect("issue a code");
+        start.assert_async().await;
+        assert_eq!(challenge.user_code, "ABCD-EFGH");
+        assert_eq!(challenge.interval, 5);
+
+        // The first poll happens before the user has opened OpenAI's page.
+        // Subsequent polls must keep the same challenge alive while they sign in.
+        for status in [403, 403, 404] {
+            let pending = server
+                .mock_async(|when, then| {
+                    when.method(POST)
+                        .path("/api/accounts/deviceauth/token")
+                        .json_body(json!({
+                            "device_auth_id": "test-device-auth",
+                            "user_code": "ABCD-EFGH",
+                        }));
+                    then.status(status);
+                })
+                .await;
+            let result = poll_codex_token(
+                &state,
+                &server.base_url(),
+                &challenge.device_auth_id,
+                &challenge.user_code,
+            )
+            .await;
+            assert!(
+                matches!(result, Ok(None)),
+                "HTTP {status} must remain pending"
+            );
+            pending.assert_async().await;
+            pending.delete_async().await;
+        }
+
+        let authorized = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/api/accounts/deviceauth/token")
+                    .json_body(json!({
+                        "device_auth_id": "test-device-auth",
+                        "user_code": "ABCD-EFGH",
+                    }));
+                then.status(200).json_body(json!({
+                    "authorization_code": "test-authorization-code",
+                    "code_verifier": "test-code-verifier",
+                }));
+            })
+            .await;
+        let exchange = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body_contains("grant_type=authorization_code")
+                    .body_contains("code=test-authorization-code")
+                    .body_contains("client_id=test-client")
+                    .body_contains("code_verifier=test-code-verifier")
+                    .body_contains(format!(
+                        "redirect_uri={}",
+                        urlencoding::encode(&format!("{}/deviceauth/callback", server.base_url()))
+                    ));
+                then.status(200).json_body(json!({
+                    "id_token": "test-id-token",
+                    "access_token": "test-access-token",
+                    "refresh_token": "test-refresh-token",
+                }));
+            })
+            .await;
+        let code = poll_codex_token(
+            &state,
+            &server.base_url(),
+            &challenge.device_auth_id,
+            &challenge.user_code,
+        )
+        .await
+        .expect("poll succeeds")
+        .expect("authorization code is ready");
+        let tokens =
+            exchange_codex_code_for_tokens(&state, &server.base_url(), "test-client", &code)
+                .await
+                .expect("exchange authorized code");
+        assert_eq!(tokens.access_token, "test-access-token");
+        authorized.assert_async().await;
+        exchange.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn codex_missing_usercode_endpoint_does_not_claim_account_setting_is_off() {
+        let server = MockServer::start_async().await;
+        let unavailable = server
+            .mock_async(|when, then| {
+                when.method(POST).path("/api/accounts/deviceauth/usercode");
+                then.status(404);
+            })
+            .await;
+        let result =
+            request_codex_user_code(&codex_http_test_state(), &server.base_url(), "test-client")
+                .await;
+        let Err((_, error)) = result else {
+            panic!("missing endpoint must fail")
+        };
+        assert!(error.0.message.contains("authentication server"));
+        assert!(!error.0.message.contains("Settings"));
+        unavailable.assert_async().await;
     }
 
     #[test]
