@@ -1344,7 +1344,12 @@ only that the page didn't load, so no reason claims the site was unreachable
 when it answered. The browser policy and the
 `instafy-browser-automation` skill tell Octo to give the person that reason in
 plain words and never to paste a raw error code into a reply. Any other failed
-call keeps the controller's masked error text.
+call keeps the controller's masked error text. A failed call whose result also
+carries facts for the turn's Details (`activity`, `browserUnavailable`) gives
+that text in `structuredContent.error.reason` too: a model that calls the tools
+one at a time, not from code, reads only a result's structured content when it
+has one, so a refused step still tells it what to do, with its
+`[step_refused_…]` code.
 If the client temporarily loses its network, it retains the exact visible
 request, shows reconnecting state, and retries the bounded poll/decision path;
 the origin's one-use fingerprint and replay checks remain authoritative.
