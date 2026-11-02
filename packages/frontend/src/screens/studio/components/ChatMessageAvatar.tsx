@@ -1,58 +1,42 @@
-import { useMemo } from "react";
-import { AI_TILE_CLASS, OctoCoin } from "../../../components/OctoCoin";
+import { useContext } from "react";
+import { getDefaultAssistantHandle } from "../../../assistants/localBuiltInAssistantCatalog";
+import { AiFace } from "../../../components/AiFace";
 import { HumanAvatar } from "../../../components/HumanAvatar";
-import {
-  OCTO_AVATAR_SRC,
-  resolveAgentAvatarGradient,
-  resolveAgentAvatarImageSrc,
-  resolveAgentAvatarText,
-} from "../../../utils/agentAvatar";
+import { normalizeAgentAvatarHandle } from "../../../utils/agentAvatar";
+import { aiFaceIdentityFromMetadata, withSavedAgentFace, type AiFaceIdentity } from "../../../utils/aiFace";
 import type { AssistantAvatarMotion } from "./chatAssistantIdentity";
+import { ViewerAgentsContext } from "./viewerAgents";
 
 export type ChatMessageAvatarKind = "assistant" | "human";
-
-type AgentAvatarIdentity = { handle: string; avatarSeed: string };
 
 type ChatMessageAgentAvatarOverride = {
   handle?: string | null;
   avatarSeed?: string | null;
+  /**
+   * The saved agent's id: the viewer's own agent is drawn from its current
+   * profile by it, and any agent's face falls back to it behind a picture
+   * that fails to load.
+   */
+  id?: string | null;
+  /** Known only by its handle (a mention chip's card, a roster entry): the hollow face, unless it is Octo. */
+  textOnly?: boolean;
 };
 
-function extractAgentAvatarIdentity(metadata: unknown): AgentAvatarIdentity | null {
-  if (!metadata || typeof metadata !== "object") {
-    return null;
+/**
+ * Who an assistant face belongs to: the caller's identity when it names an
+ * agent (a profile card's, the viewer's own saved agent), else the agent the
+ * row's metadata stamps, its id included, else Octo, who speaks every
+ * unattributed row. Values pass through raw: resolveAiFace normalizes them
+ * and reads a stamp exactly as stamped.
+ */
+function resolveAssistantFaceIdentity(
+  agent: ChatMessageAgentAvatarOverride | null | undefined,
+  metadata: unknown,
+): AiFaceIdentity {
+  if (agent && normalizeAgentAvatarHandle(agent.handle)) {
+    return { handle: agent.handle, avatarSeed: agent.avatarSeed, agentId: agent.id, textOnly: agent.textOnly };
   }
-  const agent = (metadata as Record<string, unknown>).agent;
-  if (!agent || typeof agent !== "object") {
-    return null;
-  }
-  const handleRaw = (agent as Record<string, unknown>).handle;
-  const handleValue = typeof handleRaw === "string" ? handleRaw.trim() : "";
-  const normalizedHandle = handleValue.startsWith("@") ? handleValue.slice(1).trim().toLowerCase() : handleValue.toLowerCase();
-  if (!normalizedHandle) {
-    return null;
-  }
-  const avatarSeedRaw = (agent as Record<string, unknown>).avatarSeed;
-  const avatarSeed =
-    typeof avatarSeedRaw === "string" && avatarSeedRaw.trim().length > 0 ? avatarSeedRaw.trim() : normalizedHandle;
-  return { handle: normalizedHandle, avatarSeed };
-}
-
-function extractAgentAvatarIdentityFromOverride(
-  override: ChatMessageAgentAvatarOverride | null | undefined,
-): AgentAvatarIdentity | null {
-  if (!override || typeof override !== "object") {
-    return null;
-  }
-  const handleRaw = typeof override.handle === "string" ? override.handle.trim() : "";
-  const handleValue = handleRaw.startsWith("@") ? handleRaw.slice(1).trim() : handleRaw;
-  const normalizedHandle = handleValue.toLowerCase();
-  if (!normalizedHandle) {
-    return null;
-  }
-  const avatarSeedRaw = typeof override.avatarSeed === "string" ? override.avatarSeed.trim() : "";
-  const avatarSeed = avatarSeedRaw || normalizedHandle;
-  return { handle: normalizedHandle, avatarSeed };
+  return aiFaceIdentityFromMetadata(metadata) ?? { handle: getDefaultAssistantHandle() };
 }
 
 export function ChatMessageAvatar({
@@ -83,34 +67,9 @@ export function ChatMessageAvatar({
    */
   testId?: string;
 }) {
-  const agentIdentity =
-    kind === "assistant"
-      ? extractAgentAvatarIdentityFromOverride(agent) ?? extractAgentAvatarIdentity(metadata)
-      : null;
-  const assistantAvatarImageSrc =
-    kind === "assistant"
-      ? resolveAgentAvatarImageSrc({
-          handle: agentIdentity?.handle ?? "octo",
-          avatarSeed: agentIdentity?.avatarSeed ?? null,
-        })
-      : null;
-  const usesAssistantImageAvatar = kind === "assistant" && Boolean(assistantAvatarImageSrc);
-  const usesCanonicalOctoAvatar =
-    kind === "assistant" && assistantAvatarImageSrc === OCTO_AVATAR_SRC;
   const testId =
     testIdOverride ?? (kind === "assistant" ? "chat-avatar-assistant" : "chat-avatar-human");
-  // An uploaded picture sits on white (slate in dark) behind any
-  // transparency; a generated face is its gradient with a white initial.
-  const wrapperClass = usesAssistantImageAvatar
-    ? "bg-white dark:bg-slate-900"
-    : "text-white";
-
-  const gradientStyle = useMemo(() => {
-    if (kind !== "assistant" || usesAssistantImageAvatar || !agentIdentity) {
-      return undefined;
-    }
-    return { backgroundImage: resolveAgentAvatarGradient(agentIdentity.avatarSeed) };
-  }, [agentIdentity, kind, usesAssistantImageAvatar]);
+  const viewerAgents = useContext(ViewerAgentsContext);
 
   // "2xs" exists for ambient presence surfaces (the top-bar conversation
   // roster), where a transcript-sized face reads far too loud.
@@ -122,51 +81,26 @@ export function ChatMessageAvatar({
         : size === "xs"
           ? "h-7 w-7"
           : "h-8 w-8";
-  const textClassName = size === "lg" ? "text-sm" : size === "2xs" ? "text-xxs" : "text-xs";
 
   if (kind === "human") {
+    const textClassName = size === "lg" ? "text-sm" : size === "2xs" ? "text-xxs" : "text-xs";
     // HumanAvatar draws the shared avatar coin shadow in light; dark keeps
     // the small shadow these faces always had.
     return <HumanAvatar userId={seed} displayName={label} avatarUrl={avatarUrl}
       data-testid={testId} className={`${sizeClassName} ${textClassName} dark:shadow-sm`} />;
   }
 
-  // Octo is its tile (OctoCoin, docs/Brand.md), which draws its own edges.
-  if (usesCanonicalOctoAvatar) {
-    return (
-      <OctoCoin
-        testId={testId}
-        className={sizeClassName}
-        motion={motion}
-        scrollReactive={scrollReactive}
-      />
-    );
-  }
-
-  // Every other agent is the same AI tile as Octo (AI_TILE_CLASS, the one
-  // rule for faces): the rounded square, its inside hairline over the
-  // gradient or picture, and the avatar coin shadow in light. No border, so
-  // the hairline is the tile's only edge in dark, as it is Octo's.
+  // Every AI is AiFace (docs/Brand.md, "Octo's hatchlings"): Octo is its
+  // tile, the only face that takes the motion; any other AI wears its own
+  // picture or one of Octo's hatchlings on the same tile. The viewer's own
+  // saved agents wear their current profile's face.
   return (
-    <div
-      data-testid={testId}
-      aria-hidden="true"
-      className={`flex ${sizeClassName} shrink-0 items-center justify-center overflow-hidden ${AI_TILE_CLASS} shadow-avatar-coin ${wrapperClass}`}
-      style={gradientStyle}
-    >
-      {usesAssistantImageAvatar && assistantAvatarImageSrc ? (
-        <img
-          src={assistantAvatarImageSrc}
-          alt=""
-          className="h-full w-full object-cover"
-          decoding="async"
-          draggable={false}
-        />
-      ) : (
-        <span className={`${textClassName} font-semibold`}>
-          {resolveAgentAvatarText({ handle: agentIdentity?.handle ?? "agent" })}
-        </span>
-      )}
-    </div>
+    <AiFace
+      identity={withSavedAgentFace(resolveAssistantFaceIdentity(agent, metadata), viewerAgents)}
+      className={sizeClassName}
+      motion={motion}
+      scrollReactive={scrollReactive}
+      testId={testId}
+    />
   );
 }

@@ -36,6 +36,8 @@ export interface AgentProfileCardProps {
   agentAvatarSeed: string;
   agentHandle: string;
   agentId?: string | null;
+  /** The card opened from a mention chip for an AI the viewer has no saved agent for: the hollow face. */
+  agentTextOnly?: boolean;
   projectId?: string | null;
   canEditProfile?: boolean;
   displayName: string;
@@ -110,6 +112,7 @@ export function AgentProfileCardContent({
   agentAvatarSeed: initialAvatarSeed,
   agentHandle: initialAgentHandle,
   agentId = null,
+  agentTextOnly = false,
   projectId = null,
   canEditProfile = false,
   displayName: initialDisplayName,
@@ -196,7 +199,7 @@ export function AgentProfileCardContent({
         <ChatMessageAvatar
           kind="assistant"
           metadata={metadata ?? null}
-          agent={{ handle: agentHandle, avatarSeed: agentAvatarSeed }}
+          agent={{ handle: agentHandle, avatarSeed: agentAvatarSeed, id: agentId, textOnly: agentTextOnly }}
           size="lg"
         />
         <div className="min-w-0 flex-1">
@@ -371,6 +374,7 @@ export function AssistantAvatarPopover({
           agent={{
             handle: cardProps.agentHandle,
             avatarSeed: cardProps.agentAvatarSeed,
+            id: cardProps.agentId,
           }}
           motion={motion}
           scrollReactive={scrollReactive}

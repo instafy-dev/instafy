@@ -8,10 +8,12 @@ import {
   classTokens,
   expectAiTile,
   expectCanonicalOctoCoin,
+  expectHatchling,
 } from "../../../../components/__tests__/octoCoinExpectations";
 import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
 import { AssistantAvatarPopover } from "../AssistantAvatarPopover";
 import { AssistantSpeakerIdentityLabel } from "../AssistantSpeakerIdentityPill";
+import { ViewerAgentsContext } from "../viewerAgents";
 
 // One rule for faces (docs/Brand.md): the speaker identity draws an AI as its
 // rounded-square tile, so everything that hugs the face (the profile button's
@@ -51,6 +53,16 @@ describe("assistant speaker identity faces", () => {
     // The label never carries the AI tag: the transcript's speaker line is a
     // thread row, where the tile alone says it.
     expect(container.querySelector('[data-testid="ai-tag"]')).toBeNull();
+  });
+
+  it("draws the viewer's own saved agent in the label as the gutter does, by the row's agent id", async () => {
+    // The viewer picked Pia's face again after the row was stamped.
+    await act(async () => root.render(
+      <ViewerAgentsContext.Provider value={new Map([["own-pia", { avatarSeed: "hatchling:7" }]])}>
+        <AssistantSpeakerIdentityLabel handle="pia" agentIdentity={{ handle: "pia", avatarSeed: "hatchling:2", id: "own-pia" }} />
+      </ViewerAgentsContext.Provider>,
+    ));
+    expect(expectHatchling(container.querySelector('[data-testid="chat-avatar-assistant"]'))).toBe("7");
   });
 
   it("names the transcript gutter's AI face as an AI", async () => {

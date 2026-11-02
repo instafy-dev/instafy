@@ -23,6 +23,7 @@ import {
   expectAiTile,
   expectAvatarCoinLightEdge,
   expectCanonicalOctoCoin,
+  expectHatchling,
   expectPersonCircle,
 } from "../../../components/__tests__/octoCoinExpectations";
 
@@ -389,9 +390,10 @@ describe("landing studio window turn column", () => {
     expect(all(".animate-pulse").length).toBeGreaterThan(0);
   });
 
-  // Crew colours follow roster order (pink Ada, green Kim, flame agent) with
-  // the label colour that reads on each fill; Octo stays ink on its own coin.
-  it("paints the crew in roster order and keeps Octo ink", async () => {
+  // Crew colours follow roster order (pink Ada, green Kim) with the label
+  // colour that reads on each fill. No AI takes one: Octo stays ink on its
+  // own tile, and the scenario agent wears its hatchling.
+  it("paints the crew in roster order and keeps every AI ink", async () => {
     const scenario = SESSION_SCENARIOS[0];
     await act(async () => {
       root.render(
@@ -416,11 +418,11 @@ describe("landing studio window turn column", () => {
     const kim = coin("kim").querySelector("[data-crew-fill]") as HTMLElement;
     expect(kim.style.backgroundColor).toBe("rgb(27, 134, 75)");
     expect(kim.style.color).toBe("rgb(255, 255, 255)");
-    // The scenario agent: a flame AI tile with its ink initial, never Octo's mark in a crew colour.
-    const agent = coin("agent").querySelector("[data-crew-fill]") as HTMLElement;
-    expect(agent.textContent).toBe(scenario.presenceAgent.charAt(0));
-    expect(agent.style.backgroundColor).toBe("rgb(250, 88, 21)");
-    expect(agent.style.color).toBe("rgb(15, 23, 42)");
+    // The scenario agent: the studio's hatchling tile with the face its seed
+    // stamps, one ink. No crew fill, no initial, never Octo's mark.
+    const agent = coin("agent").firstElementChild as HTMLElement;
+    expect(expectHatchling(agent)).toBe(scenario.presenceSeed.slice("hatchling:".length));
+    expect(coin("agent").querySelector("[data-crew-fill], [style]")).toBeNull();
     expect(coin("agent").getAttribute("data-agent-name")).toBe(scenario.presenceAgent);
     expect(coin("agent").querySelector("svg.octo-mark")).toBeNull();
 
@@ -468,6 +470,21 @@ describe("landing studio window turn column", () => {
     for (const retired of ["233, 61, 130", "140, 185, 59", "124, 77, 216", "245, 150, 10"]) {
       expect(html).not.toContain(retired);
     }
+  });
+
+  // Each scenario's agent keeps the face its seed stamps (Quill waves, Canary
+  // drifts, Pixel cheers), not its handle's hash, and no two scenarios share
+  // one, so a scenario change brings in a different AI.
+  it("gives each scenario's agent its own fixed hatchling", async () => {
+    const faces: (string | null)[] = [];
+    for (const scenario of SESSION_SCENARIOS) {
+      await act(async () => {
+        root.render(<RosterStack scenario={scenario} agentVisible />);
+      });
+      faces.push(expectHatchling(container.querySelector('[data-roster-coin="agent"]')?.firstElementChild));
+    }
+    expect(faces).toEqual(SESSION_SCENARIOS.map((scenario) => scenario.presenceSeed.slice("hatchling:".length)));
+    expect(faces).toEqual(["5", "2", "1"]);
   });
 
   it("keeps Kim green with a white label in the transcript", async () => {

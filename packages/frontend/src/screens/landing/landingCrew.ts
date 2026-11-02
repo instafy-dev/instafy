@@ -1,11 +1,13 @@
-// The landing's crew palette: one colour per participant, in roster order,
+// The landing's crew palette: one colour per person, in roster order,
 // matching the logo's nodes left to right (docs/Brand.md). Coins, pills and
 // cursors are inline styles, so these fill and label pairs are fixed: they keep
 // the light set in both themes, and each label colour is the one that reads on
 // its fill (ink on pink and flame, white on green and violet).
 //
-// Octo is never a crew colour. Octo stays ink: the brand-ink mark on a white
-// coin, or brand-ink / brand-paper through the theme classes.
+// No AI is ever a crew colour. Octo stays ink: the brand-ink mark on a white
+// tile, or brand-ink / brand-paper through the theme classes. The scenario's
+// agent wears one of Octo's hatchlings, one ink as well (landingTurnScript.ts
+// presenceSeed).
 //
 // The theme-aware --crew-N variables in src/styles/tailwind.css carry the same
 // light values (plus the dark lift below) for the logo's crew nodes. The
@@ -39,10 +41,8 @@ export const CREW_SLOTS: readonly [CrewColor, CrewColor, CrewColor, CrewColor] =
  */
 export const CREW_DARK_LIFT: readonly [string, string, string, string] = ["#FF3C9F", "#3CA063", "#FA5815", "#A672FA"];
 
-/** Who holds which slot on the landing (roster order, Octo skipped). */
+/** Who holds which slot on the landing: its people, in roster order. */
 export const LANDING_CREW = {
   ada: CREW_SLOTS[0],
   kim: CREW_SLOTS[1],
-  // The scenario's own agent (Quill, Canary or Pixel).
-  agent: CREW_SLOTS[2],
 } as const;

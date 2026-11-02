@@ -1,4 +1,4 @@
-import { useRef, type ReactNode } from "react";
+import { useRef, type ReactNode, type Ref } from "react";
 import { EditPencil } from "iconoir-react";
 import { Button } from "./Button";
 
@@ -18,7 +18,7 @@ const PHOTO_BUTTON_RADIUS = {
 
 /** One accessible photo target shared by people, bots, teams and spaces. */
 export function IdentityPhotoButton({ children, label, disabled, shape = "circle", onSelect,
-  accept = "image/*", testId, inputTestId }: {
+  accept = "image/*", testId, inputTestId, buttonRef }: {
   children: ReactNode;
   label: string;
   disabled?: boolean;
@@ -27,6 +27,8 @@ export function IdentityPhotoButton({ children, label, disabled, shape = "circle
   accept?: string;
   testId?: string;
   inputTestId?: string;
+  /** The photo target itself, for a form that moves focus to it. */
+  buttonRef?: Ref<HTMLButtonElement>;
 }) {
   const input = useRef<HTMLInputElement>(null);
   return <>
@@ -36,7 +38,7 @@ export function IdentityPhotoButton({ children, label, disabled, shape = "circle
         event.target.value = "";
         if (file) onSelect(file);
       }} />
-    <Button aria-label={label} title={label} onPress={() => input.current?.click()}
+    <Button ref={buttonRef} aria-label={label} title={label} onPress={() => input.current?.click()}
       isDisabled={disabled} variant="ghost" size="icon" radius={PHOTO_BUTTON_RADIUS[shape]}
       className="group relative h-16 w-16 shrink-0" data-testid={testId}>
       {children}

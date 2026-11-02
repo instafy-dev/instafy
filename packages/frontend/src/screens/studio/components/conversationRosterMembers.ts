@@ -1,7 +1,14 @@
+import { getBuiltInAssistantDisplayName } from "../../../assistants/localBuiltInAssistantCatalog";
 import type { ConversationHumanPeerPresence } from "../../../conversations/groupParticipation";
 
 type RosterHumanSourceMember = {
   userId: string;
+};
+
+type RosterAgentProfile = {
+  id: string;
+  avatarSeed?: string | null;
+  displayName?: string | null;
 };
 
 export type ConversationRosterHuman = {
@@ -15,6 +22,12 @@ export type ConversationRosterAgent = {
   handle: string;
   displayName: string;
   avatarSeed: string;
+  /**
+   * The conversation names this AI by its handle alone and the viewer has no
+   * saved agent with it, so it wears the hollow face, as in the mention
+   * picker (docs/Brand.md, "Octo's hatchlings"), unless it is Octo.
+   */
+  textOnly?: boolean;
 };
 
 /**
@@ -80,6 +93,47 @@ export function resolveConversationRosterHumans({
   }
 
   return humans;
+}
+
+/**
+ * The AIs shown in the conversation roster and the participants drawer: the
+ * conversation's agent handles, each as the viewer's own saved agent with that
+ * handle (its seed and id, so the roster faces match the transcript). A handle
+ * the viewer has no saved agent for is known here only by name, so it wears
+ * the hollow face, as the mention picker draws it (docs/Brand.md, "Octo's
+ * hatchlings"); Octo is Octo all the same.
+ */
+export function resolveConversationRosterAgents({
+  agentHandles,
+  agentByHandle,
+}: {
+  agentHandles: readonly string[];
+  /** The viewer's own saved agents by lowercased handle. */
+  agentByHandle: ReadonlyMap<string, RosterAgentProfile>;
+}): ConversationRosterAgent[] {
+  const seen = new Set<string>();
+  const rosterAgents: ConversationRosterAgent[] = [];
+  for (const rawHandle of agentHandles) {
+    const handle = rawHandle.trim().toLowerCase();
+    if (!handle || seen.has(handle)) {
+      continue;
+    }
+    seen.add(handle);
+    const profile = agentByHandle.get(handle) ?? null;
+    const avatarSeed =
+      typeof profile?.avatarSeed === "string" && profile.avatarSeed.trim().length > 0
+        ? profile.avatarSeed.trim()
+        : handle;
+    const displayName =
+      getBuiltInAssistantDisplayName(handle) ??
+      (profile?.displayName?.trim() ? profile.displayName.trim() : `@${handle}`);
+    rosterAgents.push(
+      profile
+        ? { handle, displayName, avatarSeed, agentId: profile.id }
+        : { handle, displayName, avatarSeed, agentId: null, textOnly: true },
+    );
+  }
+  return rosterAgents;
 }
 
 /**

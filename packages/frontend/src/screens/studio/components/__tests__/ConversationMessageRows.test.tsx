@@ -577,6 +577,48 @@ describe("ConversationMessageRows", () => {
     expect(speakerIdentityNodes).toEqual(["chat-speaker-marker", "chat-speaker-inline"]);
   });
 
+  it("marks the row's speaker with its agent id and its seed as stamped", async () => {
+    const message = createMessage({
+      id: "assistant-pia",
+      role: "assistant",
+      content: "Here is the summary.",
+      timestamp: 1,
+      metadata: { agent: { handle: "pia", id: "own-pia", avatarSeed: "hatchling:2" } },
+    });
+    await act(async () => {
+      root.render(
+        <ConversationMessageRows
+          messages={[message]}
+          currentUserId="user-1"
+          chatClientSessionId="session-1"
+          projectId="project-1"
+          runtimeId={null}
+          conversationLocalId="conversation-local"
+          conversationControllerId="conversation-controller"
+          firstPlanMessageId={null}
+          humanLabelByUserId={new Map()}
+          runAgentIdentityByRunId={new Map()}
+          runAgentHandleByRunId={new Map()}
+          renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+          assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
+          onRequestActions={vi.fn()}
+          onRequestActionsAtPoint={vi.fn()}
+          onCancelTerminalCommand={null}
+          onMessageContextMenu={vi.fn()}
+        />,
+      );
+    });
+    // The marker names the exact agent the row was written as, not only its
+    // handle, and carries its seed as stamped.
+    const marker = container.querySelector('[data-testid="chat-speaker-marker"]');
+    expect(marker?.getAttribute("data-agent-id")).toBe("own-pia");
+    expect(readSpeakerMarker(marker)).toEqual({
+      kind: "assistant",
+      handle: "pia",
+      avatarSeed: "hatchling:2",
+    });
+  });
+
   it("names the human author at an assistant-to-human boundary", async () => {
     const assistantMessage = createMessage({
       id: "assistant-response",
@@ -1321,6 +1363,74 @@ describe("ConversationMessageRows", () => {
     ).toEqual(["octo", "reviewer"]);
   });
 
+  it("gives two AIs that share a handle each its own face, and keeps one AI's rows under one", async () => {
+    const reply = (id: string, agent: Record<string, unknown>, multiAgentPlan?: Record<string, unknown>) =>
+      createMessage({ id, role: "assistant", content: `Answer ${id}.`, timestamp: 1, metadata: { agent, ...(multiAgentPlan ? { multiAgentPlan } : {}) } });
+    const renderRows = async (messages: ChatMessage[]) => {
+      await act(async () => {
+        root.render(
+          <ConversationMessageRows
+            messages={messages}
+            currentUserId="user-1"
+            chatClientSessionId="session-1"
+            projectId="project-1"
+            runtimeId={null}
+            conversationLocalId="conversation-local"
+            conversationControllerId="conversation-controller"
+            firstPlanMessageId={null}
+            humanLabelByUserId={new Map()}
+            runAgentIdentityByRunId={new Map()}
+            runAgentHandleByRunId={new Map()}
+            renderAssistantAvatar={(_metadata, identity) => (
+              <span data-testid="assistant-avatar" data-agent-id={identity?.id} data-seed={identity?.avatarSeed} />
+            )}
+            assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
+            onRequestActions={vi.fn()}
+            onRequestActionsAtPoint={vi.fn()}
+            onCancelTerminalCommand={null}
+            onMessageContextMenu={vi.fn()}
+          />,
+        );
+      });
+      return Array.from(container.querySelectorAll('[data-testid="assistant-avatar"]'));
+    };
+
+    // Two members' @pia, back to back: two speakers, two faces.
+    const members = await renderRows([
+      reply("own", { handle: "pia", id: "own-pia", avatarSeed: "hatchling:2" }),
+      reply("peer", { handle: "pia", id: "peer-pia", avatarSeed: "hatchling:5" }),
+      reply("peer-again", { handle: "pia", id: "peer-pia", avatarSeed: "hatchling:5" }),
+    ]);
+    expect(members.map((face) => face.getAttribute("data-agent-id"))).toEqual(["own-pia", "peer-pia"]);
+    expect(container.querySelectorAll('[data-testid="chat-speaker-inline"]')).toHaveLength(2);
+    // Two members' Octos (each member's own Octo profile) are two speakers too.
+    const octos = await renderRows([
+      reply("octo-a", { handle: "octo", id: "octo-of-member-a", avatarSeed: "octo" }),
+      reply("octo-b", { handle: "octo", id: "octo-of-member-b", avatarSeed: "octo" }),
+    ]);
+    expect(octos.map((face) => face.getAttribute("data-agent-id"))).toEqual(["octo-of-member-a", "octo-of-member-b"]);
+    // Two plans' @reviewer, stamped apart.
+    const helpers = await renderRows([
+      reply("a", { handle: "reviewer", avatarSeed: "hatchling:2" }),
+      reply("b", { handle: "reviewer", avatarSeed: "hatchling:5" }),
+    ]);
+    expect(helpers.map((face) => face.getAttribute("data-seed"))).toEqual(["hatchling:2", "hatchling:5"]);
+    // The same two as a plan's helper rows draw them: on the avatar rail.
+    const railHelpers = await renderRows([
+      reply("rail-a", { handle: "reviewer", avatarSeed: "hatchling:2" }, { groupId: "group-1", role: "worker" }),
+      reply("rail-b", { handle: "reviewer", avatarSeed: "hatchling:5" }, { groupId: "group-2", role: "worker" }),
+    ]);
+    expect(railHelpers.map((face) => face.getAttribute("data-seed"))).toEqual(["hatchling:2", "hatchling:5"]);
+    // One saved agent whose face was picked again between its rows, and one
+    // row that names it without its id, are still one speaker.
+    const oneAgent = await renderRows([
+      reply("before", { handle: "pia", id: "own-pia", avatarSeed: "hatchling:2" }),
+      reply("after", { handle: "pia", id: "own-pia", avatarSeed: "hatchling:7" }),
+      reply("no-id", { handle: "pia" }),
+    ]);
+    expect(oneAgent).toHaveLength(1);
+  });
+
   it("restores visible speaker identity for agent job thread rows after a short user turn", async () => {
     const firstFailure = createMessage({
       id: "first-failure",
@@ -1926,6 +2036,139 @@ describe("ConversationMessageRows", () => {
     expect(container.querySelector('[data-testid="multi-agent-runtime-metrics"]')?.textContent).toBe(
       "runtime 11111111 · wait 2.3s · ran 4.3s · 3 tool updates",
     );
+  });
+
+  describe("a touch long-press in a plan message", () => {
+    // A one-lane plan in the real message bubble, whose own touch long-press
+    // opens the message's actions.
+    const onRequestActionsAtPoint = vi.fn();
+    const onMessageContextMenu = vi.fn();
+    const lane = () => container.querySelector<HTMLButtonElement>('[data-testid="multi-agent-evidence-row"]')!;
+    const text = () => findTextNode(container, "I'm splitting this into workstreams.").parentElement!;
+    const pointer = (target: Element, type: string, pointerType = "touch", pointerId = 3) => {
+      const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: 30, clientY: 20 });
+      Object.defineProperties(event, { pointerType: { value: pointerType }, pointerId: { value: pointerId } });
+      return target.dispatchEvent(event);
+    };
+    const hold = async (target: Element) => {
+      await act(async () => {
+        pointer(target, "pointerdown");
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(600);
+      });
+    };
+    const tap = (target: HTMLElement, pointerType = "touch") =>
+      act(async () => {
+        pointer(target, "pointerdown", pointerType, 5);
+        pointer(target, "pointerup", pointerType, 5);
+        target.click();
+      });
+
+    beforeEach(async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      onRequestActionsAtPoint.mockReset();
+      onMessageContextMenu.mockReset();
+      const planMessage = createMessage({
+        id: "plan-message",
+        content: "I'm splitting this into workstreams.",
+        messageType: "multi_agent_plan",
+        metadata: {
+          messageType: "multi_agent_plan",
+          jobId: "plan-job-1",
+          details: {
+            mode: "read_only",
+            agents: [{ handle: "runtime", label: "Runtime/tool boundaries", writeScope: { mode: "read_only" } }],
+            lead: { leadHandle: "octo", expectedReportFormat: "Final report." },
+          },
+        },
+      });
+      const workerMessage = createMessage({
+        id: "worker-message",
+        content: "Worker evidence.",
+        metadata: {
+          jobId: "worker-job-1",
+          agent: { handle: "runtime" },
+          outcome: "succeeded",
+          multiAgentPlan: { role: "worker", parentJobId: "plan-job-1", groupId: "group-1" },
+        },
+      });
+      await act(async () => {
+        root.render(
+          <ConversationMessageRows
+            messages={[planMessage]}
+            allConversationMessages={[planMessage, workerMessage]}
+            currentUserId={null}
+            chatClientSessionId="session-1"
+            projectId="project-1"
+            runtimeId={null}
+            conversationLocalId="conversation-local"
+            conversationControllerId="conversation-controller"
+            firstPlanMessageId={null}
+            humanLabelByUserId={new Map()}
+            runAgentIdentityByRunId={new Map()}
+            runAgentHandleByRunId={new Map()}
+            renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+            assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
+            onRequestActions={vi.fn()}
+            onRequestActionsAtPoint={onRequestActionsAtPoint}
+            onCancelTerminalCommand={null}
+            onMessageContextMenu={onMessageContextMenu}
+          />,
+        );
+      });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("opens a plan lane's menu on a touch long-press without the message's own actions or the lane's run trace", async () => {
+      // Touch has no hover, so a lane's "…" never shows there; the long-press
+      // that opens a message's actions opens the lane's menu instead.
+      await hold(lane());
+      const menu = document.body.querySelector('[data-testid="multi-agent-chip-menu"]');
+      expect(menu?.textContent).toContain("Copy reference");
+      expect(onRequestActionsAtPoint).not.toHaveBeenCalled();
+      // Nor does Android's long-press contextmenu open the message's menu,
+      // whether it lands on the chip or, once the menu is open, on the menu
+      // (as a right-click there does too).
+      for (const target of [lane(), menu!.querySelector('[role="menuitem"]')!, menu!]) {
+        expect(target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }))).toBe(false);
+      }
+      expect(onMessageContextMenu).not.toHaveBeenCalled();
+      // Nor the click that ends the gesture the run trace.
+      await act(async () => {
+        pointer(lane(), "pointerup");
+        lane().click();
+      });
+      expect(workspaceTabsMocks.openJobThreadTab).not.toHaveBeenCalled();
+
+      // Anywhere else in the message, the long-press still opens its actions.
+      await hold(text());
+      expect(onRequestActionsAtPoint).toHaveBeenCalledExactlyOnceWith("plan-message", 30, 20);
+    });
+
+    it("lets the next tap or click on a lane through after a long-press on the message", async () => {
+      // The message's menu takes the click that ends its long-press (it lands
+      // on the menu's backdrop, outside the bubble), and Android sends none.
+      // The lane stops its own touch presses, yet the bubble's latch must not
+      // swallow the next one.
+      const opened = { jobId: "worker-job-1", conversationId: "conversation-local", title: "Runtime/tool boundaries run" };
+      await hold(text());
+      await act(async () => {
+        pointer(text(), "pointerup");
+      });
+      expect(onRequestActionsAtPoint).toHaveBeenCalledTimes(1);
+      await tap(lane());
+      expect(workspaceTabsMocks.openJobThreadTab).toHaveBeenCalledExactlyOnceWith(opened);
+
+      await hold(text());
+      await act(async () => {
+        pointer(text(), "pointerup");
+      });
+      await tap(lane(), "mouse");
+      expect(workspaceTabsMocks.openJobThreadTab).toHaveBeenCalledTimes(2);
+    });
   });
 
   it("summarizes runtime spread on the workstreams chip without adding visible metric badges", async () => {

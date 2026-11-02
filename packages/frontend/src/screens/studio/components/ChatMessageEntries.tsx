@@ -56,6 +56,7 @@ import {
 } from "./controllerConversationNotice";
 import { resolveSpineToneFromStatus, ThreadSpine, type ThreadSpineTone } from "./ThreadSpine";
 import { buildAgentThreadBranchRows } from "./agentThreadBranchRows";
+import { ViewerAgentsContext } from "./viewerAgents";
 import { extractThreadRunStatus } from "./threadPreviewHelpers";
 import { useAgentJobThreadPreviewState } from "./useAgentJobThreadPreviewState";
 import { useAuthorizedImage, useNearViewport } from "./useAuthorizedImage";
@@ -82,6 +83,7 @@ export type NotchedMessageShellProps = {
   width?: "fit" | "full";
   padding?: "normal" | "none";
   className?: string;
+  onPointerDownCapture?: (event: PointerEvent<HTMLDivElement>) => void;
   onPointerDown?: (event: PointerEvent<HTMLDivElement>) => void;
   onPointerMove?: (event: PointerEvent<HTMLDivElement>) => void;
   onPointerUp?: (event: PointerEvent<HTMLDivElement>) => void;
@@ -98,6 +100,7 @@ export function NotchedMessageShell({
   width = "fit",
   padding = "normal",
   className,
+  onPointerDownCapture,
   onPointerDown,
   onPointerMove,
   onPointerUp,
@@ -122,6 +125,7 @@ export function NotchedMessageShell({
       data-chat-message-copy-root="true"
       className={`group relative inline-flex ${widthClassName} min-w-0 flex-col items-start ${paddingClassName} text-sm text-slate-700 dark:text-slate-200 ${className ?? ""}`.trim()}
       onCopy={handleChatMessageCopy}
+      onPointerDownCapture={onPointerDownCapture}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -652,10 +656,11 @@ function AgentJobThreadPreviewEntry({
     hideThreadSpine,
   });
   const { conversations } = useConversations();
+  const savedAgents = useContext(ViewerAgentsContext);
   const { openConversationTab, requestUrlPush } = useWorkspaceTabs();
   const branchThreads = useMemo(
-    () => buildAgentThreadBranchRows({ message, conversations }),
-    [conversations, message],
+    () => buildAgentThreadBranchRows({ message, conversations, savedAgents }),
+    [conversations, message, savedAgents],
   );
   const handleOpenBranchThread = useCallback(
     (threadLocalId: string) => {
@@ -977,6 +982,16 @@ export function AssistantMessageEntry({
     event.stopPropagation();
   }, []);
 
+  // A plan's helper chips stop their own touch presses (a long-press there
+  // opens the lane's menu instead), so handleBubblePointerDown never sees
+  // them. Every press in a plan bubble resets the latch here, in the capture
+  // phase, before any inner handler: after a long-press on the message, whose
+  // closing click lands on the message menu's backdrop (or never comes, on
+  // Android), the next tap or click on a chip must still go through.
+  const handleBubblePointerDownCapture = useCallback(() => {
+    longPressTriggeredRef.current = false;
+  }, []);
+
   const controllerNoticeKind = getControllerConversationNoticeKind(message);
   if (controllerNoticeKind) {
     return (
@@ -1086,6 +1101,7 @@ export function AssistantMessageEntry({
         messageType={messageType}
         showNotch={showNotch}
         className="pr-2"
+        onPointerDownCapture={handleBubblePointerDownCapture}
         onPointerDown={handleBubblePointerDown}
         onPointerMove={handleBubblePointerMove}
         onPointerUp={handleBubblePointerUp}

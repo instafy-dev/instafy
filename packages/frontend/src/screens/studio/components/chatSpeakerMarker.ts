@@ -6,6 +6,8 @@ export type ChatSpeakerMarker =
       kind: "assistant";
       handle: string;
       avatarSeed: string;
+      /** The row's agent id, so the marker names the exact agent, not only its handle. */
+      agentId?: string;
     }
   | {
       kind: "human";

@@ -2,9 +2,11 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resolveAiFace } from "../../../../utils/aiFace";
 import { useChatAgentRoster } from "../useChatAgentRoster";
 import { AssistantSpeakerIdentityLabel } from "../AssistantSpeakerIdentityPill";
-import { OPEN_AGENT_PROFILE_EVENT, type OpenAgentProfileDetail } from "../agentProfileOpen";
+import type { AgentProfileCardProps } from "../AssistantAvatarPopover";
+import { OPEN_AGENT_PROFILE_EVENT, resolveOpenedAgentIdentity, type OpenAgentProfileDetail } from "../agentProfileOpen";
 
 const mocks = vi.hoisted(() => ({ list: vi.fn() }));
 vi.mock("../../../../sdk/instafy", () => ({ controllerClient: { core: { enabled: true }, agents: { list: mocks.list } } }));
@@ -33,11 +35,13 @@ describe("exact bot profile identities", () => {
     container = document.createElement("div"); document.body.append(container); root = createRoot(container);
   });
   afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
-  function Harness({ userId = "viewer" }: { userId?: string }) {
-    roster = useChatAgentRoster({ ...args, currentUserId: userId });
+  function Harness({ userId = "viewer", extraAgentHandles = [] }: { userId?: string; extraAgentHandles?: string[] }) {
+    roster = useChatAgentRoster({ ...args, currentUserId: userId, extraAgentHandles });
     return null;
   }
-  async function render(userId = "viewer") { await act(async () => root.render(<Harness userId={userId} />)); }
+  async function render(userId = "viewer", extraAgentHandles?: string[]) {
+    await act(async () => root.render(<Harness userId={userId} extraAgentHandles={extraAgentHandles} />));
+  }
 
   it("does not mix a teammate's bio with the same-handle own bot's identity or settings", async () => {
     await render();
@@ -71,6 +75,45 @@ describe("exact bot profile identities", () => {
     await act(async () => { resolveOld({ success: true, agents: [ownAgent] }); await pending; });
     expect(roster.availableAgents).toEqual([]);
     expect(roster.resolveAgentProfileCardProps("build", { id: "own-bot", handle: "build", avatarSeed: "own-photo" }).canEditProfile).toBe(false);
+  });
+
+  it("draws a mention chip's card for the viewer's own agent with the gutter's face, and any other as known by name", async () => {
+    await render();
+    const face = (props: AgentProfileCardProps) => resolveAiFace({
+      handle: props.agentHandle, avatarSeed: props.agentAvatarSeed, agentId: props.agentId, textOnly: props.agentTextOnly,
+    });
+    // The gutter of a row the viewer's bot wrote, stamped with its id.
+    const gutter = roster.renderAssistantAvatar({ agent: { id: "own-bot", handle: "build", avatarSeed: "older-photo" } });
+    // A "@build" chip in a message names the bot by its handle alone.
+    const mentioned = resolveOpenedAgentIdentity({ handle: "build" }, roster.agentByHandle);
+    const card = { ...roster.resolveAgentProfileCardProps("build", mentioned), agentTextOnly: !mentioned };
+    expect(card).toMatchObject({ agentId: "own-bot", canEditProfile: true, agentAvatarSeed: "own-photo" });
+    expect(face(card)).toEqual(face(gutter.props as AgentProfileCardProps));
+    // No saved agent of the viewer's has the handle: the hollow face.
+    const unknown = resolveOpenedAgentIdentity({ handle: "zed" }, roster.agentByHandle);
+    expect(unknown).toBeNull();
+    expect(face({ ...roster.resolveAgentProfileCardProps("zed", unknown), agentTextOnly: true })).toEqual({ kind: "unknown" });
+    // A speaker label hands over its row's identity as observed.
+    expect(resolveOpenedAgentIdentity({ handle: "build", agentId: "peer-bot", avatarSeed: "peer-photo" }, roster.agentByHandle))
+      .toEqual({ handle: "build", avatarSeed: "peer-photo", id: "peer-bot" });
+    expect(resolveOpenedAgentIdentity({ handle: "build", agentId: "peer-bot" }, roster.agentByHandle))
+      .toEqual({ handle: "build", avatarSeed: "peer-bot", id: "peer-bot" });
+  });
+
+  it("draws a system row with Octo off as the conversation's primary agent, with the face the roster gives it", async () => {
+    mocks.list.mockResolvedValue({ success: true, agents: [{ ...ownAgent, avatarSeed: "hatchling:8" }] });
+    await render("viewer", ["build"]);
+    // The getting-started card, a credential gate or a notice names no AI.
+    const card = roster.renderAssistantAvatar(null).props as AgentProfileCardProps;
+    expect(card).toMatchObject({ agentHandle: "build", agentId: "own-bot", agentAvatarSeed: "hatchling:8", canEditProfile: true });
+    const profile = roster.agentByHandle.get("build");
+    const rosterFace = resolveAiFace({ handle: "build", avatarSeed: profile?.avatarSeed, agentId: profile?.id });
+    expect(resolveAiFace({ handle: card.agentHandle, avatarSeed: card.agentAvatarSeed, agentId: card.agentId }))
+      .toEqual(rosterFace);
+    expect(rosterFace).toEqual({ kind: "hatchling", n: 8, reason: "stamp" });
+    // A handle on its own still names no one: only the conversation's own
+    // primary agent is looked up by it.
+    expect(roster.resolveAgentProfileCardProps("build")).toMatchObject({ agentId: null, canEditProfile: false });
   });
 
   it("forwards the observed identity when the mobile speaker avatar opens a profile", async () => {
