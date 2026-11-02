@@ -94,6 +94,18 @@ describe("MobileConversationSwitcher", () => {
     expect(query("")).toBeNull();
   });
 
+  // A prompt waited in one chat while the person was in another. On a phone
+  // the open chats list is where that chat's tab is.
+  it("says Approve beside an open chat whose browser prompt waits, and only there", async () => {
+    props.tabs = [{ ...props.tabs[0]!, attention: true }, props.tabs[1]!];
+    await render();
+    await click("trigger");
+    expect(query("approve-gateway")?.textContent).toBe("Approve");
+    expect(query("tab-gateway")?.getAttribute("aria-label")).toContain("approval needed");
+    expect(query("approve-current")).toBeNull();
+    expect(query("tab-current")?.getAttribute("aria-label")).not.toContain("approval needed");
+  });
+
   it("dismisses the current chat without navigating and selects another open chat once", async () => {
     await render();
     await click("trigger");

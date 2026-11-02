@@ -99,6 +99,11 @@ export function selectConversationView(state: ConversationSurfaces, id: string):
   return { ...state, activeId: id, resourceId: id === "chat" ? state.resourceId : id };
 }
 
+/** A browser prompt shows in Chat and in Browser: either stays in front, anything else gives way to Chat. */
+export function showPromptView(state: ConversationSurfaces): ConversationSurfaces {
+  return state.activeId === "chat" || state.activeId === "browser" ? state : selectConversationView(state, "chat");
+}
+
 export function openConversationFile(state: ConversationSurfaces, file: ConversationFileView): ConversationSurfaces {
   return {
     ...selectConversationView(state, file.id),

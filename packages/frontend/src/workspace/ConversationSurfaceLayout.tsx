@@ -4,6 +4,7 @@ import { IconButton } from "../components/Button";
 import { ResizablePanels } from "../components/ResizablePanels";
 import { HorizontalTabStrip } from "../components/tabs/HorizontalTabStrip";
 import { TabLabel, TabCloseButton, tabItemStyles, tabTriggerStyles } from "../components/tabs/TabPresentation";
+import { useToastClearanceRef } from "../status/toastClearance";
 import { DARK_DIVIDER_BORDER_CLASS, DARK_PANEL_BG_CLASS } from "../theme/darkSurfaces";
 
 export type ConversationSurface = {
@@ -45,6 +46,8 @@ export function ConversationSurfaceTabs({
 }: ConversationSurfaceTabsProps) {
   const besideComposer = presentation === "composer";
   const tabPreset = besideComposer ? "contained" : "underline";
+  // At the top of the screen, toasts start below this bar, not over it.
+  const toastClearance = useToastClearanceRef<HTMLDivElement>(!besideComposer);
   const tabs = useRef(new Map<string, HTMLButtonElement>());
   const restoreFocus = useRef(false);
   const views: ConversationSurface[] = split ? resources : [
@@ -63,7 +66,7 @@ export function ConversationSurfaceTabs({
     view.onClose();
   };
   return resources.length || chatActions ? (
-    <div className={`flex min-w-0 shrink-0 items-center ${besideComposer ? "w-fit max-w-full self-start py-1" : `border-b border-slate-200/70 bg-white ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS}`}`} data-testid="conversation-subtabs" data-presentation={presentation} data-browser-session-safe-zone="true">
+    <div ref={toastClearance} className={`flex min-w-0 shrink-0 items-center ${besideComposer ? "w-fit max-w-full self-start py-1" : `border-b border-slate-200/70 bg-white ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS}`}`} data-testid="conversation-subtabs" data-presentation={presentation} data-browser-session-safe-zone="true">
       {split || !resources.length ? <div data-testid="conversation-chat-toolbar" className="flex min-w-0 shrink-0 items-center gap-1.5 px-4 text-xs text-slate-500 dark:text-slate-400" style={{ width: split ? `calc((1 - var(--conversation-resource-ratio, ${ratio})) * 100%)` : "100%" }}>
         <ChatBubble className="h-3.5 w-3.5 shrink-0" aria-hidden="true" /><span>Chat</span><div className="ml-auto">{chatActions}</div>
       </div> : null}

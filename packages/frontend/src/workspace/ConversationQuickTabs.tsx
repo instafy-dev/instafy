@@ -11,6 +11,8 @@ export type ConversationQuickTab = {
   badge?: string | null;
   spaceName?: string;
   projectId?: string;
+  /** A browser prompt of the person's waits in this chat: Approve, as its Browser tab says. */
+  attention?: boolean;
 };
 import "./ConversationQuickTabs.css";
 
@@ -50,7 +52,7 @@ export function ConversationQuickTabs({ tabs, activeId, scopeName, onSelect, onC
         className="conversation-quick-tab">
         <button type="button" ref={node => { if (node) buttons.current.set(tab.id, node); else buttons.current.delete(tab.id); }}
           aria-current={tab.id === activeId ? "page" : undefined}
-          aria-label={named(tab)}
+          aria-label={tab.attention ? `${named(tab)}, approval needed` : named(tab)}
           title={`${named(tab)}${tab.preview ? " — preview; double-click to keep open" : ""}`}
           className={`flex h-11 min-w-0 items-center gap-2 px-3 text-sm ${tab.preview ? "italic" : "font-medium"} ${TAB_FOCUS_CLASS}`}
           onClick={() => onSelect(tab.id)} onDoubleClick={() => onKeep(tab.id)}
@@ -62,6 +64,7 @@ export function ConversationQuickTabs({ tabs, activeId, scopeName, onSelect, onC
           }}>
           <ChatBubble className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="flex min-w-0 max-w-44 flex-col items-start text-left leading-4"><span className="w-full truncate">{tab.title}</span>
             {multipleSpaces && tab.spaceName ? <span className="w-full truncate text-[10px] font-normal not-italic opacity-75">{tab.spaceName}</span> : null}</span>
+          {tab.attention ? <span className="shrink-0 text-xs font-normal not-italic text-amber-600" data-testid="conversation-quick-tab-approve">Approve</span> : null}
           {tab.badge ? <span className="text-[10px] not-italic" aria-label={`${tab.badge} unread`}>{tab.badge}</span> : null}
           {tab.dirty ? <span aria-label="Unsaved draft" className="h-1.5 w-1.5 shrink-0 rounded-full bg-current" /> : null}
         </button>

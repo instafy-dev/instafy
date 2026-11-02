@@ -12,12 +12,12 @@ type LedgerRow = {
 const TEAM_SPACE = [{ id: "project-a", orgName: "Acme Research" }];
 const mocks = vi.hoisted(() => ({ checkout: vi.fn(), portal: vi.fn(), planChange: vi.fn(), showStatus: vi.fn(),
   billing: { creditBalance: 1000, creditLimit: 2000, subscription: null }, ledger: [] as LedgerRow[],
-  projectList: [] as { id: string; orgName: string }[] }));
+  projectList: [] as { id: string; orgName: string }[], controllerEnabled: false, fetchCreditPolicy: vi.fn() }));
 vi.mock("../../../../credits/useCredits", () => ({ CREDITS_UPDATED_EVENT: "credits-updated", useCredits: () => ({
-  billing: mocks.billing, controllerEnabled: false,
+  billing: mocks.billing, controllerEnabled: mocks.controllerEnabled,
   hasLoaded: true, lastError: null, ledger: mocks.ledger, ledgerError: null, refresh: async () => {},
 }) }));
-vi.mock("../../../../credits/creditService", () => ({ fetchCreditPolicy: vi.fn() }));
+vi.mock("../../../../credits/creditService", () => ({ fetchCreditPolicy: mocks.fetchCreditPolicy }));
 vi.mock("../../../../credits/checkoutService", () => ({ requestCheckoutSession: mocks.checkout,
   requestBillingPortalSession: mocks.portal, requestPlanChange: mocks.planChange }));
 vi.mock("../../../../projects/useProjects", () => ({
@@ -47,6 +47,7 @@ describe("Credits display choices", () => {
     mocks.billing = { creditBalance: 1000, creditLimit: 2000, subscription: null };
     mocks.ledger = [];
     mocks.projectList = TEAM_SPACE;
+    mocks.controllerEnabled = false;
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
   });
   afterEach(async () => {
@@ -199,8 +200,8 @@ describe("Credits display choices", () => {
     expect(container.textContent).toContain("Your balance tops back up daily (UTC) to the selected plan limit.");
     expect(container.textContent).not.toMatch(/shared|team-specific|your team/i);
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="section-usage"]')!.click());
-    expect(container.textContent).toContain("hosted runtimes all burn from the same balance.");
-    expect(container.textContent).not.toMatch(/team|shared/i);
+    expect(container.textContent).toContain("Everything below uses the same balance.");
+    expect(container.textContent).not.toMatch(/team|shared|live access/i);
 
     await act(async () => root.unmount());
     root = createRoot(container);
@@ -213,7 +214,33 @@ describe("Credits display choices", () => {
     expect(container.textContent).toContain("Your shared balance tops back up daily (UTC)");
     expect(container.textContent).toContain("team-specific overrides may apply.");
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="section-usage"]')!.click());
-    expect(container.textContent).toContain("hosted runtimes all burn from the same team balance.");
+    expect(container.textContent).toContain("Everything below uses the same team balance.");
+  });
+
+  // Usage said "AI prompts and hosted runtimes both burn from the same
+  // balance." over a table whose first row can read "Live access · Metered".
+  it("says in Usage that everything under it uses the one balance, whatever is metered", async () => {
+    mocks.projectList = [{ id: "project-a", orgName: "Personal" }];
+    mocks.controllerEnabled = true;
+    const rate = (reason: string, enabled: boolean) => ({ reason, enabled, amount: enabled ? 10 : 0, intervalSeconds: 480, creditsPerMinute: enabled ? 1.25 : 0 });
+    mocks.fetchCreditPolicy.mockResolvedValue({ success: true, policy: {
+      display: { unitLabel: "credits", currency: "USD", unitsPerUsd: 1000 },
+      refill: { kind: "daily", timezone: "UTC" },
+      plans: [],
+      usage: {
+        tunnel: rate("tunnel", true),
+        hostedRuntime: rate("hosted_runtime", false),
+        managedAi: { reason: "managed_ai_prompt", enabled: true, label: "Instafy AI", provider: "openai", creditsPerPrompt: 1,
+          dailyPromptLimit: 0, modelLabel: "GPT-6 Luna", inputUsdMicrosPer1k: 1250, cachedInputUsdMicrosPer1k: 125, outputUsdMicrosPer1k: 10000 },
+      },
+    } });
+    await act(async () => root.render(<MemoryRouter><CreditsPanel /></MemoryRouter>));
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="section-usage"]')!.click());
+    const services = [...container.querySelectorAll('[data-testid="credits-active-services-mobile"] > div')]
+      .map((row) => row.textContent);
+    expect(services).toEqual([expect.stringMatching(/^Live accessMetered/), expect.stringMatching(/^Hosted runtimesNot metered/)]);
+    expect(container.textContent).toContain("Everything below uses the same balance.");
+    expect(container.textContent).not.toMatch(/AI prompts|burn/);
   });
 
   // Local drive 3: Activity showed only the newest 8 rows, with no way to see more.
