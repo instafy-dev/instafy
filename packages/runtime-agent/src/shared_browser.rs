@@ -634,6 +634,31 @@ fn write_agent_control_marker(
     browser_page_id: &str,
     display_name: &str,
 ) -> Result<()> {
+    write_agent_control_marker_until(
+        path,
+        owner_id,
+        run_id,
+        initiator_user_id,
+        browser_page_id,
+        display_name,
+        unix_time_millis()
+            .saturating_add(AGENT_CONTROL_TTL.as_millis().try_into().unwrap_or(u64::MAX)),
+    )
+}
+
+/// Writes the run's marker with its deadline at `expires_at_ms`. A marker
+/// past its deadline still holds the browser for the run (origin keeps people
+/// out of it until the guard removes the marker), but the browser tools refuse
+/// every step of the run before it acts.
+fn write_agent_control_marker_until(
+    path: &Path,
+    owner_id: &str,
+    run_id: Uuid,
+    initiator_user_id: Uuid,
+    browser_page_id: &str,
+    display_name: &str,
+    expires_at_ms: u64,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| {
             format!(
@@ -651,8 +676,6 @@ fn write_agent_control_marker(
             },
         )?;
     }
-    let expires_at_ms = unix_time_millis()
-        .saturating_add(AGENT_CONTROL_TTL.as_millis().try_into().unwrap_or(u64::MAX));
     let payload = serde_json::to_vec(&json!({
         "version": 2,
         "ownerId": owner_id,
@@ -1294,7 +1317,15 @@ impl SharedBrowserAgentControlGuard {
             // immediate first tick so it is not redundantly rewritten.
             interval.tick().await;
             loop {
-                interval.tick().await;
+                // The run's cancel (a Stop, once this runtime learns of it, or
+                // the run's deadline) ends its authority at once rather than
+                // at the marker's next deadline: a step Codex sends while it
+                // shuts down is refused before it acts.
+                let stopped = tokio::select! {
+                    biased;
+                    _ = heartbeat_cancel_signal.cancelled() => true,
+                    _ = interval.tick() => false,
+                };
                 if !heartbeat_active.load(Ordering::SeqCst) {
                     break;
                 }
@@ -1312,15 +1343,42 @@ impl SharedBrowserAgentControlGuard {
                     if !heartbeat_active.load(Ordering::SeqCst) {
                         break;
                     }
-                    write_agent_control_marker(
-                        &heartbeat_path,
-                        &heartbeat_owner_id,
-                        run_id,
-                        initiator_user_id,
-                        &heartbeat_browser_page_id,
-                        &heartbeat_display_name,
-                    )
+                    // A stopped run keeps its marker, past its deadline: origin
+                    // still keeps people out of the browser until this guard
+                    // removes it once the run's tools are gone, and the
+                    // browser tools refuse every later step of the run.
+                    let expires_at_ms = stopped.then(unix_time_millis);
+                    match expires_at_ms {
+                        Some(expires_at_ms) => write_agent_control_marker_until(
+                            &heartbeat_path,
+                            &heartbeat_owner_id,
+                            run_id,
+                            initiator_user_id,
+                            &heartbeat_browser_page_id,
+                            &heartbeat_display_name,
+                            expires_at_ms,
+                        ),
+                        None => write_agent_control_marker(
+                            &heartbeat_path,
+                            &heartbeat_owner_id,
+                            run_id,
+                            initiator_user_id,
+                            &heartbeat_browser_page_id,
+                            &heartbeat_display_name,
+                        ),
+                    }
                 };
+                if stopped {
+                    if let Err(error) = result {
+                        // The marker keeps its last deadline, a few seconds
+                        // away, and the run's teardown goes on as before.
+                        tracing::warn!(
+                            ?error,
+                            "Shared Browser: could not end a stopped run's authority early"
+                        );
+                    }
+                    break;
+                }
                 if let Err(error) = result {
                     tracing::error!(
                         ?error,

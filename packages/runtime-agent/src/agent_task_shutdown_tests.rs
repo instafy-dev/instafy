@@ -47,62 +47,9 @@ impl TestController {
                 release_response: release_response.clone(),
                 secret_key: secret_key.clone(),
             });
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base_url: reqwest::Url = format!("http://{}", listener.local_addr().unwrap())
-            .parse()
-            .unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let workspace = tempfile::tempdir().unwrap();
-        let config = Config {
-            controller_base_url: base_url.clone(),
-            controller_jwks_url: base_url.join("/.well-known/jwks.json").unwrap(),
-            project_id: Uuid::new_v4(),
-            runtime_id: None,
-            runtime_lease_id: None,
-            provider: "test-runtime".into(),
-            runtime_version: "0.0.1".into(),
-            capabilities: json!({}),
-            metadata: json!({}),
-            lease_scope: None,
-            workspace_manifest: None,
-            tenant_projects: Vec::new(),
-            parent_lease_id: None,
-            poll_interval: Duration::from_millis(10),
-            lease_wait: Duration::ZERO,
-            lease_max_jobs: 1,
-            lease_seconds: 120,
-            heartbeat_seconds: 60,
-            workspace_root: workspace.path().to_path_buf(),
-            project_workspace_override: None,
-            strict_mode: false,
-            dev_isolation_mode: true,
-            display_name: None,
-            origin: None,
-            codex_bin: None,
-            require_codex_bin: false,
-            runtime_access_token: Some("inert-test-runtime-token".into()),
-            parent_dispositions_runtime_on_shutdown: false,
-        };
-        let registration = Registration {
-            runtime_id: Uuid::new_v4(),
-            agent_token: "inert-test-agent-token".into(),
-            runtime_token: None,
-            lease_url: base_url.join("/agent/lease").unwrap(),
-            heartbeat_url: base_url.join("/agent/heartbeat").unwrap(),
-            stop_url: None,
-            lease_id: None,
-            proxy: None,
-            lease_scope: None,
-            tenant_projects: Vec::new(),
-            workspace_manifest: None,
-            parent_lease_id: None,
-            agent_token_scopes: Vec::new(),
-            agent_token_issued_at: None,
-            agent_token_expires_at: None,
-            agent_token_ttl: None,
-        };
+        let (client, registration, server, workspace) = serve_controller(app).await;
         Self {
-            client: Arc::new(ControllerClient::new(&config).unwrap()),
+            client,
             registration,
             requests: receiver,
             release_response,
@@ -121,6 +68,78 @@ impl TestController {
     }
 }
 
+/// Serves `app` as the controller on a loopback port, and gives a client and a
+/// registration that call it.
+async fn serve_controller(
+    app: Router,
+) -> (
+    Arc<ControllerClient>,
+    Registration,
+    JoinHandle<()>,
+    tempfile::TempDir,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url: reqwest::Url = format!("http://{}", listener.local_addr().unwrap())
+        .parse()
+        .unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let workspace = tempfile::tempdir().unwrap();
+    let config = Config {
+        controller_base_url: base_url.clone(),
+        controller_jwks_url: base_url.join("/.well-known/jwks.json").unwrap(),
+        project_id: Uuid::new_v4(),
+        runtime_id: None,
+        runtime_lease_id: None,
+        provider: "test-runtime".into(),
+        runtime_version: "0.0.1".into(),
+        capabilities: json!({}),
+        metadata: json!({}),
+        lease_scope: None,
+        workspace_manifest: None,
+        tenant_projects: Vec::new(),
+        parent_lease_id: None,
+        poll_interval: Duration::from_millis(10),
+        lease_wait: Duration::ZERO,
+        lease_max_jobs: 1,
+        lease_seconds: 120,
+        heartbeat_seconds: 60,
+        workspace_root: workspace.path().to_path_buf(),
+        project_workspace_override: None,
+        strict_mode: false,
+        dev_isolation_mode: true,
+        display_name: None,
+        origin: None,
+        codex_bin: None,
+        require_codex_bin: false,
+        runtime_access_token: Some("inert-test-runtime-token".into()),
+        parent_dispositions_runtime_on_shutdown: false,
+    };
+    let registration = Registration {
+        runtime_id: Uuid::new_v4(),
+        agent_token: "inert-test-agent-token".into(),
+        runtime_token: None,
+        lease_url: base_url.join("/agent/lease").unwrap(),
+        heartbeat_url: base_url.join("/agent/heartbeat").unwrap(),
+        stop_url: None,
+        lease_id: None,
+        proxy: None,
+        lease_scope: None,
+        tenant_projects: Vec::new(),
+        workspace_manifest: None,
+        parent_lease_id: None,
+        agent_token_scopes: Vec::new(),
+        agent_token_issued_at: None,
+        agent_token_expires_at: None,
+        agent_token_ttl: None,
+    };
+    (
+        Arc::new(ControllerClient::new(&config).unwrap()),
+        registration,
+        server,
+        workspace,
+    )
+}
+
 #[tokio::test]
 async fn periodic_task_shutdown_before_first_poll_is_sticky() {
     let mut controller = TestController::new().await;
@@ -128,7 +147,6 @@ async fn periodic_task_shutdown_before_first_poll_is_sticky() {
         controller.client.clone(),
         controller.registration.clone(),
         Uuid::new_v4(),
-        5,
         None,
     );
     // No yield between spawn and shutdown: the stop arrives before the task
@@ -157,7 +175,6 @@ async fn periodic_task_shutdown_cancels_in_flight_heartbeat() {
         controller.client.clone(),
         controller.registration.clone(),
         Uuid::new_v4(),
-        5,
         Some(lease_lost.clone()),
     );
     controller.next_request("/agent/heartbeat").await;
@@ -194,17 +211,41 @@ async fn periodic_task_shutdown_cancels_in_flight_secrets_without_applying_late_
     assert!(controller.requests.try_recv().is_err());
 }
 
-#[test]
-fn a_granted_job_heartbeats_every_second_and_others_as_before() {
-    let job = |grants: serde_json::Value| {
-        serde_json::from_value::<LeaseJob>(
-            json!({ "id": Uuid::new_v4(), "payload": {}, "grants": grants }),
-        )
-        .expect("a leased job")
-    };
-    let refused = json!([{ "providerId": "device:test", "refused": "the device was stopped" }]);
-    assert_eq!(heartbeat_interval_seconds(60, &job(refused)), 1);
-    assert_eq!(heartbeat_interval_seconds(60, &job(json!([]))), 10);
-    assert_eq!(heartbeat_interval_seconds(12, &job(json!([]))), 5);
-    assert_eq!(heartbeat_interval_seconds(300, &job(json!([]))), 15);
+/// A Stop cancels the job on the controller, and its turn learns of that only
+/// from its next heartbeat (or a report the controller refuses). Every running
+/// job heartbeats each second, so a turn holding no device grants learns of
+/// the Stop within about a second too, not 5 to 15 s later.
+#[tokio::test]
+async fn a_running_job_learns_of_a_stop_within_about_a_second() {
+    let (heartbeats, mut seen) = mpsc::unbounded_channel::<Instant>();
+    let app = Router::new().route(
+        "/agent/heartbeat",
+        post(move || {
+            let heartbeats = heartbeats.clone();
+            async move {
+                heartbeats.send(Instant::now()).unwrap();
+                (
+                    axum::http::StatusCode::CONFLICT,
+                    Json(json!({ "message": "agent job lease is no longer active" })),
+                )
+            }
+        }),
+    );
+    let (client, registration, server, _workspace) = serve_controller(app).await;
+    let lease_lost = JobCancelSignal::new();
+    let started = Instant::now();
+    // A job holding no device grants, as handle_job starts its heartbeat.
+    let task = HeartbeatTask::spawn(
+        client,
+        registration,
+        Uuid::new_v4(),
+        Some(lease_lost.clone()),
+    );
+    tokio::time::timeout(Duration::from_millis(2_500), lease_lost.cancelled())
+        .await
+        .expect("the stopped job must learn of the stop within about a second");
+    assert!(seen.try_recv().is_ok(), "the heartbeat told it");
+    assert!(started.elapsed() < Duration::from_millis(2_500));
+    task.shutdown().await;
+    server.abort();
 }

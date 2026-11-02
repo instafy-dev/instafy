@@ -291,8 +291,8 @@ async fn the_job_loop_records_whether_a_turn_was_interrupted() {
             .await
         }
     });
-    // The first heartbeat runs at once; the periodic one (every 5 s) cancels
-    // the job.
+    // The first heartbeat runs at once; the periodic one (every second)
+    // cancels the job.
     let deadline = Instant::now() + Duration::from_secs(20);
     while harness.stand_in.heartbeats.load(Ordering::SeqCst) < 2 {
         assert!(Instant::now() < deadline, "no periodic heartbeat");

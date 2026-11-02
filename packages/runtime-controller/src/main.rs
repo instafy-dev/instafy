@@ -135,6 +135,8 @@ mod tests_provider_request_lifecycle;
 mod tests_provider_space;
 #[cfg(test)]
 mod tests_runtime_stop_fence;
+#[cfg(test)]
+mod tests_stopped_turn_report;
 mod tokens;
 mod tunnels;
 mod turn_rate_limit_retry;

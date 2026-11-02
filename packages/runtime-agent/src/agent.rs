@@ -113,16 +113,11 @@ impl ShutdownSignal {
     }
 }
 
-/// How often a running job heartbeats, in seconds, so that a cancel, which it learns of only from
-/// its heartbeat, stops it within about that long: every second for a job that holds device
-/// grants, and every `heartbeat_seconds / 6`, 5 to 15 s, for any other.
-fn heartbeat_interval_seconds(heartbeat_seconds: u32, job: &LeaseJob) -> u64 {
-    if job.grants.is_empty() {
-        u64::from((heartbeat_seconds / 6).clamp(5, 15))
-    } else {
-        1
-    }
-}
+/// How often a running job heartbeats: every second, whatever the job. A job learns of a Stop (the
+/// controller cancelled it) only from its next heartbeat or from a report the controller refuses,
+/// so this is about how long a stopped turn can go on before it knows. Each heartbeat is one
+/// request to the controller and one short transaction there (`agent_heartbeat`).
+const JOB_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
 struct HeartbeatTask {
     stop_signal: ShutdownSignal,
@@ -134,18 +129,15 @@ impl HeartbeatTask {
         client: Arc<ControllerClient>,
         registration: Registration,
         job_id: Uuid,
-        interval_seconds: u64,
         lease_lost_signal: Option<JobCancelSignal>,
     ) -> Self {
         let stop_signal = ShutdownSignal::new();
         let stop_listener = stop_signal.clone();
         let lease_lost_signal = lease_lost_signal.clone();
         let handle = tokio::spawn(async move {
-            // `interval_seconds` comes from `heartbeat_interval_seconds`. Keep heartbeats frequent
-            // enough to detect lease loss promptly and keep the controller-side runtime
-            // `last_seen_at` fresh (important for stale-runtime sweeps).
-            let interval_duration = Duration::from_secs(interval_seconds.max(1));
-            let mut ticker = interval(interval_duration);
+            // Frequent enough to learn of a Stop within about a second, and to keep the
+            // controller-side runtime `last_seen_at` fresh (stale-runtime sweeps read it).
+            let mut ticker = interval(JOB_HEARTBEAT_INTERVAL);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
             let mut skip_first = true;
@@ -1366,7 +1358,6 @@ impl RuntimeAgent {
                 client.clone(),
                 registration.clone(),
                 job.id,
-                heartbeat_interval_seconds(heartbeat_seconds, &job),
                 Some(lease_lost_signal.clone()),
             ));
 
@@ -1528,7 +1519,15 @@ impl RuntimeAgent {
                         }
                         Err(error) => {
                             if end == TurnEnd::LeaseLost {
+                                // No completion for a turn that lost its lease. A
+                                // Stop cancelled it, or a stop of this runtime put
+                                // it back in the queue; what it already changed is
+                                // reported, and recorded only for the former.
                                 info!(job_id = %job.id, "job cancelled; skipping completion");
+                                executor
+                                    .processor()
+                                    .report_stopped_turn(&client, registration, &job, &error)
+                                    .await;
                                 turn.end(end);
                                 executor.processor().cleanup_after_lease_lost(&job).await;
                                 if let Some(task) = periodic_heartbeat.take() {
