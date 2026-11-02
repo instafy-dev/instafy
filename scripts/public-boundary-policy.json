@@ -19,7 +19,7 @@
     "packages/tunnel-broker/.env.example"
   ],
   "approvedGitlinks": {
-    "codex": "e4fee99d8f9c3b1923fa569ba2d3ceba230c0923"
+    "codex": "1df143893007ea96b897acfe0c264b8d33d46dca"
   },
   "binaryAssetCount": 74,
   "binarySha256": {

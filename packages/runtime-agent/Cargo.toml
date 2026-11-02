@@ -57,7 +57,8 @@ zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2
 # "deflate" feature would switch to zlib-rs and add zopfli.
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 unicode-normalization = "0.1"
-rmcp = { version = "3.2.0", default-features = false, features = ["server", "transport-async-rw"] }
+# The rmcp revision Codex's workspace pins, so the lock holds one rmcp.
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "98a54789b80110ad210495c4ad845c89e1980471", version = "=3.5.1", default-features = false, features = ["server", "transport-async-rw"] }
 # The Shared Browser window watch: target discovery on the browser's loopback
 # DevTools socket. The same version origin-http-server already uses.
 tokio-tungstenite = "0.24"
