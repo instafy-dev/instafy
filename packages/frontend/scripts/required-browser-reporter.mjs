@@ -57,6 +57,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "segmented-control-responsive.spec.ts",
       "studio-history-controls.spec.ts",
       "thread-spine-surface.spec.ts",
+      "toast-view-bar-clearance.spec.ts",
       "turn-activity-line.spec.ts",
       "typing-agent-stack.spec.ts",
     ],

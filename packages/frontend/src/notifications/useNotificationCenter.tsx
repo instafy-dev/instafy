@@ -39,17 +39,23 @@ export function replyConversationId(item: ProductNotification): string | null {
 /** The longest chat name a toast quotes; a longer one is cut with "…". */
 const TOAST_CHAT_NAME_MAX_CHARS = 60;
 
+/** A chat's name as a toast quotes it, on one line and cut with "…"; null when it has none. */
+export function toastChatName(chatName: string | null | undefined): string | null {
+  const name = chatName?.replace(/\s+/g, " ").trim() ?? "";
+  if (!name) return null;
+  return [...name].length > TOAST_CHAT_NAME_MAX_CHARS
+    ? `${[...name].slice(0, TOAST_CHAT_NAME_MAX_CHARS - 1).join("").trimEnd()}…`
+    : name;
+}
+
 /**
  * What a toast in Studio says: a reply names its chat when Studio knows the
  * chat's name, so the person knows which chat it is before they open it. A
  * notification shown outside Studio keeps the registry text alone.
  */
 export function notificationToastText(item: ProductNotification, chatName: string | null): string {
-  const name = chatName?.replace(/\s+/g, " ").trim() ?? "";
-  if (!replyConversationId(item) || !name) return item.body;
-  const shown = [...name].length > TOAST_CHAT_NAME_MAX_CHARS
-    ? `${[...name].slice(0, TOAST_CHAT_NAME_MAX_CHARS - 1).join("").trimEnd()}…`
-    : name;
+  const shown = toastChatName(chatName);
+  if (!replyConversationId(item) || !shown) return item.body;
   return `There is a new reply in “${shown}”.`;
 }
 

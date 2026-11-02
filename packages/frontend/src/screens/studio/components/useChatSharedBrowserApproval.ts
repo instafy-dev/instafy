@@ -21,18 +21,21 @@ const GRANT_FALLBACK_LIFETIME_MS = 8 * 60 * 1_000;
 type Grant = { key: string; endpoint: string; accessToken: string };
 
 /**
- * The approval lane's own `browser.view` + `browser.control` grant for the
- * run's machine, separate from the browser view's, so a view that is
- * reconnecting, failed or never opened in this tab does not take it away.
- * Minting `browser.control` needs builder access, as the browser view's does.
+ * An approval lane's own grant for the run's machine, separate from the
+ * browser view's, so a view that is reconnecting, failed or never opened in
+ * this tab does not take it away: `browser.view` + `browser.control` for a
+ * lane that answers prompts (minting `browser.control` needs builder access,
+ * as the browser view's does), `browser.view` alone for one that only reads
+ * them.
  */
-function useApprovalGrant(params: {
+export function useApprovalGrant(params: {
   projectId: string | null;
   runtimeId: string | null;
   browserSessionId: string;
+  answers?: boolean;
 }): Grant | null {
-  const { projectId, runtimeId, browserSessionId } = params;
-  const key = projectId && runtimeId ? `${projectId}\n${runtimeId}\n${browserSessionId}` : null;
+  const { projectId, runtimeId, browserSessionId, answers = true } = params;
+  const key = projectId && runtimeId ? `${projectId}\n${runtimeId}\n${browserSessionId}\n${answers}` : null;
   const [grant, setGrant] = useState<Grant | null>(null);
   useEffect(() => {
     if (!key || !projectId || !runtimeId) {
@@ -51,7 +54,7 @@ function useApprovalGrant(params: {
         const token = await controllerClient.workspace.origin.requestAccessToken({
           projectId,
           protocol: "http",
-          scopes: ["browser.view", "browser.control"],
+          scopes: answers ? ["browser.view", "browser.control"] : ["browser.view"],
           preferRuntime: runtimeId,
           browserSessionId,
           forceRefresh,
@@ -76,7 +79,7 @@ function useApprovalGrant(params: {
       abort.abort();
       if (timer !== null) window.clearTimeout(timer);
     };
-    // The key names the project, machine and session.
+    // The key names the project, machine, session and scopes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
   return grant?.key === key ? grant : null;

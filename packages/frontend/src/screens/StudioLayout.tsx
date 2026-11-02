@@ -73,6 +73,8 @@ import { WorkspaceHydratingFrame } from "./studio/components/WorkspaceHydratingF
 import { MobileBottomDock } from "./studio/components/MobileBottomDock";
 import { ProjectLauncher } from "./studio/components/ProjectLauncher";
 import { ChatPanel } from "./studio/components/ChatPanel";
+import { WaitingBrowserPrompts } from "./studio/components/WaitingBrowserPrompts";
+import { conversationSurfaceScope, showPromptView } from "../workspace/conversationSurfaces";
 import {
   ControllerNoticeActionsProvider,
   type ControllerNoticeActionsContextValue,
@@ -274,7 +276,8 @@ function StudioLayoutInner() {
     consumeUrlNavigation,
     resetTabs,
     activeTab: activeWorkspaceTab,
-    setPanelTabMeta
+    setPanelTabMeta,
+    conversationSurfaces,
   } =
     useWorkspaceTabs();
   const requestHistoryPush = useCallback(() => {
@@ -289,9 +292,10 @@ function StudioLayoutInner() {
     projectAccessBlocked: projectAccessBlockedFromProject,
     activeProjectName,
     activeProjectId,
+    canWriteProject,
   } = useProject();
   const { billing: creditBilling, controllerEnabled: creditsControllerEnabled } = useCredits();
-  const { runtime, runtimeReady, effectiveRuntimeId, runtimeStatuses, showDesktopRuntimeHelp, localWorkspace, desktopOrigin } =
+  const { runtime, runtimeReady, effectiveRuntimeId, runtimeStatuses, showDesktopRuntimeHelp, localWorkspace, desktopOrigin, runs } =
     useRuntime();
 
   const controllerProjectMissing =
@@ -693,8 +697,18 @@ function StudioLayoutInner() {
     });
   }, [consumeUrlNavigation, runAfterSidebarClose]);
   const navigateToDestination = useStudioNavigation(runStudioNavigation);
+  // The chats where a prompt of the person's browser turn waits, off screen
+  // (WaitingBrowserPrompts): their tabs say Approve.
+  const [chatsAwaitingOk, setChatsAwaitingOk] = useState<ReadonlySet<string>>(() => new Set());
+  const openChatAwaitingOk = useCallback(({ conversationId, localId }: { conversationId: string; localId: string | null }) => {
+    if (!activeProjectId) return;
+    // Its prompt shows in the chat and in its Browser view, not over a file or a site.
+    if (localId) conversationSurfaces.update(conversationSurfaceScope(currentUserId, activeProjectId, localId), showPromptView);
+    navigateToDestination({ kind: "conversation", projectId: activeProjectId, conversationId: localId, conversationControllerId: conversationId });
+  }, [activeProjectId, conversationSurfaces, currentUserId, navigateToDestination]);
   const organizationTabActions = {
-    tabs: organizationTabs.tabs,
+    tabs: chatsAwaitingOk.size === 0 ? organizationTabs.tabs : organizationTabs.tabs.map(tab =>
+      tab.controllerId && chatsAwaitingOk.has(tab.controllerId.toLowerCase()) ? { ...tab, attention: true } : tab),
     activeId: activeProjectId && activeConversationId ? organizationChatId(activeProjectId, activeConversationId) : null,
     onSelect: (id: string) => {
       const tab = organizationTabs.tabs.find(item => item.id === id);
@@ -2170,6 +2184,17 @@ function StudioLayoutInner() {
         />
       ) : null}
       <ProviderBindingApprovalHost />
+      <WaitingBrowserPrompts
+        enabled={controllerClient.core.enabled && canWriteProject && projectReadyForWorkspace && !controllerProjectMissing}
+        userId={currentUserId}
+        projectId={activeProjectId}
+        runs={runs}
+        chats={conversations}
+        // A job thread's tab does not read its chat's prompts; the chat's own tab does.
+        chatOnScreen={activeWorkspaceTab?.kind === "jobThread" ? null : visibleConversationControllerId}
+        onView={openChatAwaitingOk}
+        onWaitingChange={setChatsAwaitingOk}
+      />
       <Status />
       <DesktopRuntimeHelpDialog />
     </ControllerNoticeActionsProvider>

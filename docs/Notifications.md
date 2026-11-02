@@ -129,7 +129,9 @@ A notification about the conversation open on screen (its target names that
 toast while the app is in the foreground; the chat already shows it, so the
 center marks it seen instead. The conversation counts as on screen while its Chat
 view or its Browser view is in front (the reply belongs to the turn the person is
-watching there), not while one of its files or previews is.
+watching there), not while one of its files or previews is. An in-app toast starts
+under the chat's view bar (Chat | Browser) when that bar is at the top of the
+screen, so it never covers it (`toastClearance.ts`).
 
 The worker's `NotificationTransport` interface accepts an account-bound, static
 envelope and returns a classified delivery result. Its registered implementation

@@ -30,6 +30,7 @@ import {
   formatCreditsPerMinute,
   formatIntervalSeconds,
   formatUnits,
+  unitFor,
 } from "./CreditsUsageRates";
 import { SettingsShell, type SettingsCategory } from "./SettingsShell";
 
@@ -58,11 +59,6 @@ function formatUsdAmount(value: number, currency: string): string {
     minimumFractionDigits: value >= 10 ? 0 : 2,
     maximumFractionDigits: 2,
   }).format(value);
-}
-
-/** `unitLabel` for an amount of `value`: "1 credit", "2 credits". */
-function unitFor(value: number, unitLabel: string): string {
-  return Math.abs(value) === 1 ? unitLabel.replace(/s$/, "") : unitLabel;
 }
 
 function formatEstimateSeconds(seconds: number): string {
@@ -906,7 +902,7 @@ export function CreditsPanel() {
               Usage rates
             </Heading>
             <Text variant="body" tone="secondary">
-              AI prompts, live access, and hosted runtimes all burn from the same {personal ? "" : "team "}balance.
+              AI prompts and hosted runtimes both burn from the same {personal ? "" : "team "}balance.
             </Text>
           </div>
           {policyLoading ? (
@@ -918,7 +914,6 @@ export function CreditsPanel() {
           ) : policy?.usage ? (
             <div className="space-y-2">
               <CreditsUsageRates
-                personal={personal}
                 usageRateRows={usageRateRows}
                 managedAiUsage={managedAiUsage}
                 unitLabel={unitLabel}

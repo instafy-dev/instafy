@@ -1,8 +1,44 @@
 import { Xmark } from "iconoir-react";
+import { useCallback, useLayoutEffect, useState, useSyncExternalStore } from "react";
 import type { StatusIntent, StatusToast } from "./StatusProvider";
-import { UNSTABLE_Toast, UNSTABLE_ToastContent, UNSTABLE_ToastList, UNSTABLE_ToastRegion } from "react-aria-components";
+import {
+  UNSTABLE_Toast,
+  UNSTABLE_ToastContent,
+  UNSTABLE_ToastList,
+  UNSTABLE_ToastRegion,
+  type UNSTABLE_ToastQueue,
+} from "react-aria-components";
 import { Button } from "../components/Button";
+import { subscribeToastClearance, toastClearanceBottom } from "./toastClearance";
 import { useStatus } from "./useStatus";
+
+/** Where a toast starts when nothing is in its way: under the top bar. */
+const TOAST_TOP = "calc(3.75rem + var(--instafy-safe-area-inset-top))";
+/** The space between a bar a toast stays below and the toast. */
+const TOAST_CLEARANCE_GAP_PX = 8;
+
+/**
+ * Where toasts start: under the top bar, or under the view bar when one is
+ * on screen (`useToastClearanceRef`), so a toast never covers Chat | Browser.
+ * Measured while a toast shows, and again when a bar comes, goes or resizes.
+ */
+function useToastTop(queue: UNSTABLE_ToastQueue<StatusToast>): string {
+  const subscribe = useCallback((onChange: () => void) => queue.subscribe(onChange), [queue]);
+  const showing = useSyncExternalStore(subscribe, () => queue.visibleToasts.length > 0, () => false);
+  const [clearance, setClearance] = useState(0);
+  useLayoutEffect(() => {
+    if (!showing) return;
+    const measure = () => setClearance(toastClearanceBottom());
+    measure();
+    const unsubscribe = subscribeToastClearance(measure);
+    window.addEventListener("resize", measure);
+    return () => {
+      unsubscribe();
+      window.removeEventListener("resize", measure);
+    };
+  }, [showing]);
+  return clearance > 0 ? `max(${TOAST_TOP}, ${clearance + TOAST_CLEARANCE_GAP_PX}px)` : TOAST_TOP;
+}
 
 function getIntentStyles(intent: StatusIntent): string {
   switch (intent) {
@@ -24,11 +60,17 @@ export function Status() {
     return null;
   }
 
+  return <StatusRegion queue={queue} />;
+}
+
+function StatusRegion({ queue }: { queue: UNSTABLE_ToastQueue<StatusToast> }) {
+  const top = useToastTop(queue);
   return (
     <UNSTABLE_ToastRegion
       queue={queue}
-      className="pointer-events-none fixed inset-x-0 top-[calc(3.75rem+var(--instafy-safe-area-inset-top))] z-[1100] flex justify-center"
+      className="pointer-events-none fixed inset-x-0 z-[1100] flex justify-center"
       style={{
+        top,
         paddingLeft: "var(--instafy-safe-area-inset-left)",
         paddingRight: "var(--instafy-safe-area-inset-right)",
       }}

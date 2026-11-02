@@ -32,3 +32,27 @@ it("selects chats, keeps previews, and restores keyboard focus after closing", a
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   }
 });
+
+// A prompt waited 2 minutes in one chat while the person was in another, and
+// nothing on that chat's tab said so.
+it("says Approve on the tab of a chat whose browser prompt waits, and only there", async () => {
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  const node = document.createElement("div"); document.body.append(node);
+  const root = createRoot(node);
+  const tabs = [
+    { id: "porto", title: "Open visitporto.travel in your browser", attention: true },
+    { id: "seville", title: "Plan 3 days in Seville" },
+  ];
+  try {
+    await act(async () => root.render(<ConversationQuickTabs tabs={tabs} activeId="seville" scopeName="Workshop" onSelect={vi.fn()} onKeep={vi.fn()} onClose={vi.fn()} />));
+    const porto = node.querySelector<HTMLButtonElement>('[data-tab-id="porto"] button')!;
+    const seville = node.querySelector<HTMLButtonElement>('[data-tab-id="seville"] button')!;
+    expect(porto.textContent).toBe("Open visitporto.travel in your browserApprove");
+    expect(porto.getAttribute("aria-label")).toBe("Open visitporto.travel in your browser, approval needed");
+    expect(seville.textContent).toBe("Plan 3 days in Seville");
+    expect(seville.getAttribute("aria-label")).toBe("Plan 3 days in Seville");
+  } finally {
+    await act(async () => root.unmount()); node.remove();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  }
+});

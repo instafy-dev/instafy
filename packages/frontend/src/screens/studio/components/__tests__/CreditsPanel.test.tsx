@@ -199,8 +199,8 @@ describe("Credits display choices", () => {
     expect(container.textContent).toContain("Your balance tops back up daily (UTC) to the selected plan limit.");
     expect(container.textContent).not.toMatch(/shared|team-specific|your team/i);
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="section-usage"]')!.click());
-    expect(container.textContent).toContain("hosted runtimes all burn from the same balance.");
-    expect(container.textContent).not.toMatch(/team|shared/i);
+    expect(container.textContent).toContain("AI prompts and hosted runtimes both burn from the same balance.");
+    expect(container.textContent).not.toMatch(/team|shared|live access/i);
 
     await act(async () => root.unmount());
     root = createRoot(container);
@@ -213,7 +213,7 @@ describe("Credits display choices", () => {
     expect(container.textContent).toContain("Your shared balance tops back up daily (UTC)");
     expect(container.textContent).toContain("team-specific overrides may apply.");
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="section-usage"]')!.click());
-    expect(container.textContent).toContain("hosted runtimes all burn from the same team balance.");
+    expect(container.textContent).toContain("AI prompts and hosted runtimes both burn from the same team balance.");
   });
 
   // Local drive 3: Activity showed only the newest 8 rows, with no way to see more.

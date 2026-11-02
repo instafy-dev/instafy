@@ -14,8 +14,6 @@ interface CreditsUsageRatesProps {
   managedAiUsage: ManagedAiUsageRate | null;
   unitLabel: string;
   displayCurrency: string;
-  /** A space of the person's own, whose ledger no team shares. */
-  personal?: boolean;
 }
 
 export function formatIntervalSeconds(seconds: number): string {
@@ -37,8 +35,13 @@ export function formatCreditsPerMinute(value: number): string {
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(value);
 }
 
+/** `unitLabel` for an amount of `value`: "1 credit", "2 credits". */
+export function unitFor(value: number, unitLabel: string): string {
+  return Math.abs(value) === 1 ? unitLabel.replace(/s$/, "") : unitLabel;
+}
+
 export function formatUnits(value: number, unitLabel: string): string {
-  return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value)} ${unitLabel}`;
+  return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value)} ${unitFor(value, unitLabel)}`;
 }
 
 function formatUsdAmount(value: number, currency: string): string {
@@ -77,7 +80,6 @@ export function CreditsUsageRates({
   managedAiUsage,
   unitLabel,
   displayCurrency,
-  personal = false,
 }: CreditsUsageRatesProps) {
   const managedAiProviderLabel = formatProviderLabel(managedAiUsage?.provider);
 
@@ -175,7 +177,7 @@ export function CreditsUsageRates({
               <div className="min-w-0">
                 <dt className="text-xs font-medium text-slate-500 dark:text-slate-400">Reserve</dt>
                 <dd className="mt-0.5 break-words text-slate-700 dark:text-slate-200">
-                  {formatUnits(managedAiUsage.creditsPerPrompt, unitLabel)}/prompt
+                  {formatUnits(managedAiUsage.creditsPerPrompt, unitLabel)} a message
                 </dd>
               </div>
               <div className="min-w-0">
@@ -227,7 +229,7 @@ export function CreditsUsageRates({
                   {managedAiUsage.modelLabel}
                 </span>
               </span>
-              <span>{formatUnits(managedAiUsage.creditsPerPrompt, unitLabel)}/prompt</span>
+              <span>{formatUnits(managedAiUsage.creditsPerPrompt, unitLabel)} a message</span>
               <span className="text-xs leading-5 text-slate-500 dark:text-slate-400">
                 In {formatUsdMicros(managedAiUsage.inputUsdMicrosPer1k * 1000, displayCurrency)}/1M
                 <br />
@@ -252,9 +254,7 @@ export function CreditsUsageRates({
           </div>
 
           <Text variant="caption" tone="muted">
-            Managed AI prompt usage is charged from actual input/cached/output tokens after the run
-            completes. The reserve prompt debit is reconciled against the final token-based cost on the
-            {personal ? " ledger." : " shared ledger."}
+            Each message holds {formatUnits(managedAiUsage.creditsPerPrompt, unitLabel)}, then costs what it used.
           </Text>
         </div>
       ) : null}
