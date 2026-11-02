@@ -125,9 +125,11 @@ export async function runSharedBrowserAgentTabsFixture() {
       "/reviews/empty-gone": { status: 410, empty: true },
       // Not-found pages that send their tab on to the link-only site by
       // themselves: at once, from a script, and from a script a moment later.
+      // The scripts follow the page's own link, so no address is written into
+      // code.
       "/reviews/moved-on": { status: 404, title: "Page not found", body: `<meta http-equiv="refresh" content="0;url=${linkOnlyReview}"><p>Taking you to our partner.</p>` },
-      "/reviews/sent-on": { status: 404, title: "Page not found", body: "<p>Taking you to our partner.</p>", script: `location.href = ${JSON.stringify(linkOnlyReview)};` },
-      "/reviews/sent-on-soon": { status: 404, title: "Page not found", body: "<p>Taking you to our partner.</p>", script: `setTimeout(() => { location.href = ${JSON.stringify(linkOnlyReview)}; }, 50);` },
+      "/reviews/sent-on": { status: 404, title: "Page not found", body: `<p><a id="partner" href="${linkOnlyReview}">Taking you to our partner.</a></p>`, script: "location.href = document.getElementById(\"partner\").href;" },
+      "/reviews/sent-on-soon": { status: 404, title: "Page not found", body: `<p><a id="partner" href="${linkOnlyReview}">Taking you to our partner.</a></p>`, script: "setTimeout(() => { location.href = document.getElementById(\"partner\").href; }, 50);" },
       "/to-link-only": { redirect: "https://www.booking.com/hotel/fixture.html" },
       "/to-review": { redirect: linkOnlyReview },
       "/new-window": { title: "Reviews", body: "<p><a href=\"/to-review\" target=\"_blank\">Read the review</a></p>" },
