@@ -6,11 +6,15 @@ import { RUN_STOP_FIXTURE_STUBS } from "../../fixtures/run-stop-control/dataStub
 // A turn's plain-language activity line and its Details, mounted alone with
 // the production layout: one quiet line that never wraps or scrolls the page,
 // a real button with its state for keyboards and screen readers, and output
-// that stays collapsed until asked for.
+// that stays collapsed until asked for. The line adds no words of its own: its
+// own words open Details, with a pointer and an underline on hover and a small
+// arrow after them, the one sign a phone has that the line opens.
 
 const FIXTURE_PATH = "/__turn-activity-line-fixture__";
 const LONG_SUMMARY =
   "Looked up 14 places in the old town of Lisbon, read 6 pages about Belém, built the map";
+// Longer than a phone's line once the arrow follows it.
+const LONG_LIVE = "Judging calm and lively areas around the river and the old town…";
 
 type LineState = { running: boolean; long: boolean; longStep: boolean; approval: boolean };
 // The longest a done label may be (48 characters once {n} is 999).
@@ -68,7 +72,7 @@ async function mountFixture(page: Page, { dark = false }: { dark?: boolean } = {
           submitting: false, error: null, routineApprovedRunId: null, lastDecision: null, decide: async () => {},
       };
       const activity = {
-        live: state.running ? (state.approval ? "Waiting for you" : state.long ? "Judging calm and lively areas around the river…" : "Looking up places…") : null,
+        live: state.running ? (state.approval ? "Waiting for you" : state.long ? ${JSON.stringify(LONG_LIVE)} : "Looking up places…") : null,
         summary: state.running ? null : (state.long ? ${JSON.stringify(LONG_SUMMARY)} : "Looked up 14 places, read 6 pages, built the map"),
         stepCount: 2,
         details: steps(state.running, state.longStep),
@@ -133,16 +137,44 @@ async function setLine(page: Page, update: Partial<LineState>) {
 async function lineGeometry(page: Page) {
   return page.getByTestId("turn-activity-line").evaluate((line) => {
     const label = line.querySelector<HTMLElement>("[data-sweep-text]")!;
+    const arrow = line.querySelector('[data-testid="turn-activity-line-arrow"]')!.getBoundingClientRect();
     const box = line.getBoundingClientRect();
     return {
       height: box.height,
       right: box.right,
       labelTruncated: label.scrollWidth > label.clientWidth,
+      labelRight: label.getBoundingClientRect().right,
+      arrowLeft: arrow.left,
+      arrowRight: arrow.right,
+      arrowWidth: arrow.width,
       title: line.getAttribute("title"),
       documentWidth: document.documentElement.scrollWidth,
       viewportWidth: innerWidth,
     };
   });
+}
+
+/** What the line's words and arrow look like, and the pointer over them. */
+async function lineLook(page: Page) {
+  return page.getByTestId("turn-activity-line").evaluate((line) => {
+    const label = getComputedStyle(line.querySelector<HTMLElement>("[data-sweep-text]")!);
+    const arrow = getComputedStyle(line.querySelector('[data-testid="turn-activity-line-arrow"]')!);
+    return {
+      cursor: getComputedStyle(line).cursor,
+      labelColor: label.color,
+      labelDecoration: label.textDecorationLine,
+      arrowColor: arrow.color,
+    };
+  });
+}
+
+/** The arrow sits right after the words, inside the line and the screen. */
+function expectArrowAfterWords(geometry: Awaited<ReturnType<typeof lineGeometry>>) {
+  expect(geometry.arrowWidth).toBeGreaterThan(0);
+  expect(geometry.arrowLeft).toBeGreaterThanOrEqual(geometry.labelRight - 0.5);
+  expect(geometry.arrowLeft - geometry.labelRight).toBeLessThanOrEqual(4);
+  expect(geometry.arrowRight).toBeLessThanOrEqual(geometry.right + 0.5);
+  expect(geometry.arrowRight).toBeLessThanOrEqual(geometry.viewportWidth);
 }
 
 for (const dark of [false, true]) {
@@ -154,37 +186,60 @@ for (const dark of [false, true]) {
       const line = page.getByTestId("turn-activity-line");
 
       // Running: the current step in plain words, swept, and announced politely.
-      await expect(line).toHaveAccessibleName("Looking up places… Details");
+      // A screen reader hears what pressing it does; the screen shows only the words.
+      await expect(line).toHaveAccessibleName("Looking up places…, show details");
+      await expect(line).toHaveText("Looking up places…");
       await expect(line).toHaveAttribute("aria-expanded", "false");
       await expect(page.getByTestId("turn-activity-announcement")).toHaveAttribute("aria-live", "polite");
       await expect(line.locator(".instafy-status-sweep")).toHaveCount(1);
       const running = await lineGeometry(page);
       expect(running.height).toBe(20);
       expect(running.documentWidth).toBe(running.viewportWidth);
+      expectArrowAfterWords(running);
 
       // A long line stays one line and truncates, with the whole text as its title.
       // The line holds its label a moment before it changes.
       await setLine(page, { long: true });
-      await expect(line).toHaveAttribute("title", "Judging calm and lively areas around the river…");
+      await expect(line).toHaveAttribute("title", LONG_LIVE);
       const long = await lineGeometry(page);
       expect(long.height).toBe(20);
       expect(long.documentWidth).toBe(long.viewportWidth);
       if (width === 390) expect(long.labelTruncated).toBe(true);
-      expect(long.title).toBe("Judging calm and lively areas around the river…");
+      expect(long.title).toBe(LONG_LIVE);
+      // Cut short, the words still end in the arrow, on screen.
+      expectArrowAfterWords(long);
 
       // Done: the summary, no sweep, and the same one line.
       await setLine(page, { running: false, long: false });
-      await expect(line).toHaveAccessibleName("Looked up 14 places, read 6 pages, built the map Details");
+      await expect(line).toHaveAccessibleName("Looked up 14 places, read 6 pages, built the map, show details");
+      await expect(line).toHaveText("Looked up 14 places, read 6 pages, built the map");
       await expect(page.locator(".instafy-status-sweep")).toHaveCount(0);
       await expect(page.getByText("Here's your Lisbon weekend")).toBeVisible();
+      expectArrowAfterWords(await lineGeometry(page));
       await page.screenshot({ path: testInfo.outputPath(`turn-done-${width}-${dark ? "dark" : "light"}.png`) });
+
+      // The arrow is the line's own muted colour. Over the line the pointer
+      // is a hand, and the words darken and underline.
+      const resting = await lineLook(page);
+      expect(resting.arrowColor).toBe(resting.labelColor);
+      expect(resting.labelDecoration).toBe("none");
+      await line.hover();
+      await expect.poll(async () => (await lineLook(page)).labelDecoration).toBe("underline");
+      const hovered = await lineLook(page);
+      expect(hovered.cursor).toBe("pointer");
+      expect(hovered.labelColor).not.toBe(resting.labelColor);
+      expect(hovered.arrowColor).toBe(hovered.labelColor);
+      await page.screenshot({ path: testInfo.outputPath(`turn-hover-${width}-${dark ? "dark" : "light"}.png`) });
+      await page.mouse.move(0, 0);
+      await expect.poll(async () => (await lineLook(page)).labelDecoration).toBe("none");
 
       // Keyboard: Tab reaches the line, Enter opens Details, which lists the steps.
       await page.keyboard.press("Tab");
       await expect(line).toBeFocused();
       await page.keyboard.press("Enter");
       await expect(line).toHaveAttribute("aria-expanded", "true");
-      await expect(line).toHaveAccessibleName("Looked up 14 places, read 6 pages, built the map Hide details");
+      await expect(line).toHaveAccessibleName("Looked up 14 places, read 6 pages, built the map, hide details");
+      await expect(line).toHaveText("Looked up 14 places, read 6 pages, built the map");
       const details = page.getByRole("list", { name: "Steps" });
       await expect(details).toBeVisible();
       await expect(details.getByRole("listitem")).toHaveCount(2);
@@ -209,7 +264,7 @@ for (const dark of [false, true]) {
 
       // Live test, 2026-10-27: the old step-count chip hid the steps for good.
       // The line reopens them, by pointer and keyboard, and never moves.
-      // Its start stays put; only "Details" becomes "Hide details".
+      // Its start stays put; only its arrow turns.
       const place = async () => {
         const box = await line.boundingBox();
         return box && { x: box.x, y: box.y, height: box.height };
@@ -241,8 +296,13 @@ test.describe("touch", () => {
     await setLine(page, { running: false });
     const line = page.getByTestId("turn-activity-line");
     expect((await line.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+    // A phone has no hover: the arrow after the words is the sign the line opens.
+    await expect(line.getByTestId("turn-activity-line-arrow")).toBeVisible();
+    expectArrowAfterWords(await lineGeometry(page));
     await line.tap();
     await expect(line).toHaveAttribute("aria-expanded", "true");
+    // A tap leaves no hover underline behind.
+    expect((await lineLook(page)).labelDecoration).toBe("none");
     const toggle = page.getByTestId("turn-activity-command-output-toggle").first();
     const box = await toggle.boundingBox();
     expect(box?.height).toBeGreaterThanOrEqual(44);
@@ -296,7 +356,7 @@ test("a browser prompt is one compact row under the turn's line on a desktop", a
   const row = page.getByTestId("agent-job-thread-preview").getByTestId("browser-approval-row");
   await expect(row).toBeVisible();
   await expect(row).toHaveAccessibleName("Octo wants to send the form “Search places, events and things to do” on visitlisboa.com.");
-  await expect(page.getByTestId("turn-activity-line")).toHaveAccessibleName("Waiting for you Details");
+  await expect(page.getByTestId("turn-activity-line")).toHaveAccessibleName("Waiting for you, show details");
   await expect(page.getByTestId("browser-approval-expiry")).toHaveCount(0);
   await expect(row.locator("img, [data-testid='agent-job-thread-avatar']")).toHaveCount(0);
   const geometry = await row.evaluate((element) => {

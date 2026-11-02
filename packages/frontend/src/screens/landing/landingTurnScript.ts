@@ -235,7 +235,7 @@ export interface BrowserScript {
   /** The label of the control Octo clicks (Click "…"). */
   clickLabel: string;
   steps: TurnStep[];
-  /** The run's done line ("Opened …, read a page"), before Details. */
+  /** The run's done line ("Opened …, read a page"), which opens Details. */
   activity: string;
   summary: string;
 }
@@ -259,7 +259,7 @@ export interface SessionScenario {
   presenceSeed: `hatchling:${Hatchling}`;
   opener: string;
   steps: [TurnStep, TurnStep, TurnStep, TurnStep, TurnStep];
-  /** The run's done line ("Ran tests, edited 3 files"), before Details. */
+  /** The run's done line ("Ran tests, edited 3 files"), which opens Details. */
   activity: string;
   /** Octo's summary as rendered. */
   summaryParts: MessagePart[];

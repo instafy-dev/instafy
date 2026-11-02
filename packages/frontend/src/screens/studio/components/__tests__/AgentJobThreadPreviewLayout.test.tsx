@@ -287,7 +287,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     });
 
     const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
-    expect(line?.textContent).toBe("Read 6 pages, looked up 3 places" + "Details");
+    expect(line?.textContent).toBe("Read 6 pages, looked up 3 places");
   });
 
   it("shows the turn's plain-language line instead of the run rail, chips and command surface", async () => {
@@ -313,7 +313,7 @@ describe("AgentJobThreadPreviewLayout", () => {
 
     const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
     expect(line?.tagName).toBe("BUTTON");
-    expect(line?.textContent).toBe("Read 6 pages, looked up 2 places" + "Details");
+    expect(line?.textContent).toBe("Read 6 pages, looked up 2 places");
     expect(line?.getAttribute("aria-expanded")).toBe("false");
     expect(container.textContent).toContain("Here's your Lisbon weekend.");
     for (const retired of [
@@ -343,7 +343,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     });
 
     const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
-    expect(line?.textContent).toBe("Looking up places…" + "Details");
+    expect(line?.textContent).toBe("Looking up places…");
     expect(line?.querySelector("[data-sweep-text]")?.className).toContain("instafy-status-sweep");
     expect(container.querySelector('[data-testid="turn-activity-announcement"]')?.getAttribute("aria-live")).toBe(
       "polite",
@@ -358,7 +358,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     const details = container.querySelector('[data-testid="turn-activity-details"]');
     expect(line?.getAttribute("aria-expanded")).toBe("true");
     expect(line?.getAttribute("aria-controls")).toBe(details?.id);
-    expect(line?.textContent).toBe("Looking up places…" + "Hide details");
+    expect(line?.textContent).toBe("Looking up places…");
     expect(details?.querySelector('[role="list"]')?.getAttribute("aria-label")).toBe("Steps");
     const commands = details?.querySelectorAll('[data-testid="turn-activity-command"]') ?? [];
     expect(commands).toHaveLength(2);
@@ -388,7 +388,8 @@ describe("AgentJobThreadPreviewLayout", () => {
   // for good. The line that replaced it must open, close and reopen Details,
   // and opening Details must not move it: a short settled reply drops the
   // turn's chrome, and bringing that chrome back on open pushed the line down
-  // from under the pointer.
+  // from under the pointer. The line says only what the turn did: its own
+  // words are what the person presses.
   it("opens, closes and reopens Details from the line, which stays where it was", async () => {
     const now = Date.now();
     const message = threadMessage([
@@ -418,11 +419,14 @@ describe("AgentJobThreadPreviewLayout", () => {
 
       for (const expectedOpen of [true, false, true, false, true]) {
         await act(async () => {
-          line?.click();
+          line?.querySelector<HTMLElement>("[data-sweep-text]")?.click();
         });
         expect(container.querySelector('[data-testid="turn-activity-line"]'), String(showHeaderAvatar)).toBe(line);
         expect(line?.getAttribute("aria-expanded")).toBe(String(expectedOpen));
-        expect(line?.textContent).toBe(`Read 6 pages, looked up a place${expectedOpen ? "Hide details" : "Details"}`);
+        expect(line?.getAttribute("aria-label")).toBe(
+          `Read 6 pages, looked up a place, ${expectedOpen ? "hide" : "show"} details`,
+        );
+        expect(line?.textContent).toBe("Read 6 pages, looked up a place");
         expect(details() !== null).toBe(expectedOpen);
         expect({ header: header(), spine: spine() }, `header avatar ${showHeaderAvatar}`).toEqual(closedChrome);
       }
@@ -500,7 +504,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
     expect(line?.tagName).toBe("BUTTON");
     // Counts only: never the notes' own words.
-    expect(line?.textContent).toBe("Wrote 2 notes" + "Details");
+    expect(line?.textContent).toBe("Wrote 2 notes");
     expect(line?.textContent).not.toContain("hotel");
     await act(async () => {
       line?.click();
@@ -530,7 +534,7 @@ describe("AgentJobThreadPreviewLayout", () => {
       root.render(<LiveAgentJobThreadPreview message={message} />);
     });
 
-    expect(container.querySelector('[data-testid="turn-activity-line"]')?.textContent).toBe("Thinking…" + "Details");
+    expect(container.querySelector('[data-testid="turn-activity-line"]')?.textContent).toBe("Thinking…");
     expect(container.textContent).not.toContain("Clarifying whitespace handling");
     expect(container.textContent).not.toContain("evil.example");
   });
@@ -560,7 +564,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     });
 
     const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
-    expect(line?.textContent).toBe("Thinking…" + "Details");
+    expect(line?.textContent).toBe("Thinking…");
     expect(container.textContent).not.toContain("Choosing where to stay");
 
     await act(async () => {
@@ -574,7 +578,7 @@ describe("AgentJobThreadPreviewLayout", () => {
       expect.stringContaining("Read 6 pages"),
     ]);
     expect(rows[1]?.querySelector('[data-testid="agent-thread-inline-update-row"]')).not.toBeNull();
-    expect(line?.textContent).toBe("Thinking…" + "Hide details");
+    expect(line?.textContent).toBe("Thinking…");
   });
 
   it("gives a failed turn one Details, the failure block's, and lists the steps there", async () => {
@@ -686,7 +690,7 @@ describe("AgentJobThreadPreviewLayout", () => {
 
       // One plain line and the reply: no failure, no status, no retry chip.
       const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
-      expect(line?.textContent).toBe("Ran a command" + "Details");
+      expect(line?.textContent).toBe("Ran a command");
       expect(container.textContent).toContain("I can't try www.roborock.com in this run");
       for (const absent of ["run-failure-body", "run-failure-auto-retry", "agent-thread-terminal-status", "run-failure-retried"]) {
         expect(container.querySelector(`[data-testid="${absent}"]`), absent).toBeNull();
@@ -719,7 +723,7 @@ describe("AgentJobThreadPreviewLayout", () => {
       });
 
       const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
-      expect(line?.textContent).toBe("Took two tries" + "Details");
+      expect(line?.textContent).toBe("Took two tries");
       await act(async () => {
         line?.click();
       });
@@ -747,7 +751,7 @@ describe("AgentJobThreadPreviewLayout", () => {
         root.render(<LiveAgentJobThreadPreview message={turn([reply(now)])} />);
       });
       const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
-      expect(line?.textContent).toBe("Took three tries" + "Details");
+      expect(line?.textContent).toBe("Took three tries");
       await act(async () => {
         line?.click();
       });
@@ -878,7 +882,7 @@ describe("AgentJobThreadPreviewLayout", () => {
         });
 
         const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
-        expect(line?.textContent).toBe("Ran a command" + "Details");
+        expect(line?.textContent).toBe("Ran a command");
         // Only focus that was on the failed turn moves.
         expect(document.activeElement).toBe(focused ? line : document.body);
         line?.blur();

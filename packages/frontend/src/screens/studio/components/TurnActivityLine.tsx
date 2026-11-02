@@ -52,7 +52,11 @@ export type TurnActivityLineProps = {
   /** The turn is running: the line sweeps and announces its changes. */
   live: boolean;
   animate: boolean;
-  /** The line opens Details. False on a failed turn, whose failure block has the one Details. */
+  /**
+   * The line opens Details. False before the turn has anything to show, and
+   * on a failed turn, whose failure block has the one Details: the line is
+   * then plain text, with no arrow and no pointer.
+   */
   interactive: boolean;
   detailsOpen: boolean;
   detailsId: string;
@@ -61,7 +65,10 @@ export type TurnActivityLineProps = {
 
 /**
  * One quiet line that says what the turn did, in plain words. Once a step
- * exists the whole line is one button that opens Details.
+ * exists the whole line is one button that opens Details. It adds no words of
+ * its own: on hover it shows a pointer and its words darken and underline,
+ * and a small arrow after them (› closed, ⌄ open) is the sign that it opens
+ * where nothing hovers, as on a phone.
  */
 export function TurnActivityLine({
   text,
@@ -73,11 +80,13 @@ export function TurnActivityLine({
   onToggleDetails,
 }: TurnActivityLineProps) {
   const sweep = live && animate ? "instafy-status-sweep" : "";
+  const hoverUnderline = interactive ? "underline-offset-2 group-hover/turn-activity:underline" : "";
   const label = (
-    <span className={`${sweep} min-w-0 truncate`} data-sweep-text={text}>
+    <span className={`${sweep} min-w-0 truncate ${hoverUnderline}`} data-sweep-text={text}>
       {text}
     </span>
   );
+  const Arrow = detailsOpen ? NavArrowDown : NavArrowRight;
   return (
     <div className="relative min-w-0" data-testid="turn-activity">
       {interactive ? (
@@ -87,24 +96,20 @@ export function TurnActivityLine({
           variant="caption"
           tone="muted"
           data-testid="turn-activity-line"
-          // The sweep repeats the label in a pseudo-element, which would be
-          // read into the name twice: the name is the line plus its action.
-          aria-label={`${text} ${detailsOpen ? "Hide details" : "Details"}`}
+          // A screen reader hears the line and what pressing it does. The
+          // name is set here, since the sweep repeats the line in a
+          // pseudo-element, which would be read into it twice.
+          aria-label={`${text}, ${detailsOpen ? "hide details" : "show details"}`}
           aria-expanded={detailsOpen}
           aria-controls={detailsId}
           title={text}
           onClick={onToggleDetails}
-          className={`group/turn-activity flex h-5 max-w-full min-w-0 items-center gap-1.5 rounded-md text-left leading-5 hover:text-slate-800 dark:hover:text-slate-100 pointer-coarse:min-h-11 ${LINE_FOCUS_CLASS}`}
+          // The preflight leaves buttons on the default cursor.
+          className={`group/turn-activity flex h-5 max-w-full min-w-0 cursor-pointer items-center gap-0.5 rounded-md text-left leading-5 hover:text-slate-800 dark:hover:text-slate-100 pointer-coarse:min-h-11 ${LINE_FOCUS_CLASS}`}
         >
           {label}
-          <span className="inline-flex flex-none items-center gap-0.5 font-medium group-hover/turn-activity:underline">
-            {detailsOpen ? "Hide details" : "Details"}
-            {detailsOpen ? (
-              <NavArrowDown aria-hidden="true" className="h-3 w-3" />
-            ) : (
-              <NavArrowRight aria-hidden="true" className="h-3 w-3" />
-            )}
-          </span>
+          {/* At 12px the icon's own stroke draws fainter than the words beside it. */}
+          <Arrow aria-hidden="true" data-testid="turn-activity-line-arrow" strokeWidth={2} className="h-3 w-3 flex-none" />
         </Text>
       ) : (
         <Text

@@ -252,12 +252,13 @@ export const THREAD_SPINE_NOTCH = "pointer-events-none absolute top-0 h-full lef
 // TurnActivityLine.tsx: the turn's one activity line, muted caption text on
 // one 20px line that truncates, at every beat, so the pinned transcript never
 // bobs as its words change; while the turn runs its words sweep, and once it
-// ended Details follows them.
+// ended a small arrow in the line's own colour follows them: the line opens
+// Details, and adds no words of its own.
 export const ACTIVITY_SECTION = "relative py-1";
-export const ACTIVITY_ROW = "flex h-5 max-w-full min-w-0 items-center gap-1.5 pl-1 text-xs leading-5 text-slate-500 dark:text-slate-400";
+export const ACTIVITY_ROW = "flex h-5 max-w-full min-w-0 items-center gap-0.5 pl-1 text-xs leading-5 text-slate-500 dark:text-slate-400";
 export const ACTIVITY_TEXT = "min-w-0 truncate";
 export const ACTIVITY_TEXT_LIVE = "instafy-status-sweep min-w-0 truncate";
-export const ACTIVITY_DETAILS = "inline-flex flex-none items-center gap-0.5 font-medium";
+export const ACTIVITY_ARROW = "h-3 w-3 flex-none";
 // AgentJobThreadPreviewLayout.tsx:1626-1650 the completed summary section.
 export const SUMMARY_SECTION = "relative pt-2 pb-0";
 export const SUMMARY_STACK = "space-y-1.5";
