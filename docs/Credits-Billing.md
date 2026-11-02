@@ -458,9 +458,10 @@ depends on the turn's lane (runtime-agent `final_output_mode_for_runtime_job` an
   schema;
 - a question or a one-command turn runs `strict_structured`, with other base instructions and the
   final JSON schema, which the provider puts ahead of the instructions;
-- a Shared Browser turn runs with the `strict_structured` base instructions and output format, the
-  browser's developer instructions and only the browser's tools: a page's text is untrusted, so it
-  has no shell, file or helper-agent tools.
+- a Shared Browser turn runs with the `strict_structured` output format, base instructions of its
+  own (the `strict_structured` ones without the command tool and file writes, which its thread
+  keeps for its life), the browser's developer instructions and only the browser's tools: a page's
+  text is untrusted, so it has no shell, file or helper-agent tools.
 
 Each chat keeps two Codex threads (runtime-agent `ThreadLane`). Its Shared Browser turns resume its
 browser thread, which holds only those turns: each starts from what it is asked (the person's words

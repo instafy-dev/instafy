@@ -1364,6 +1364,24 @@ async fn run_every_chain(harness: &mut Harness) {
             .run(labels[2], Spec::new(chat, Lane::Default, second))
             .await;
     }
+
+    // Y: a chat's browser thread begun on an earlier runtime, whose base instructions were the
+    // structured lane's. Its first turn's rollout is made into such a thread's, and the chat's
+    // next browser turn resumes it.
+    let cy = Uuid::new_v4();
+    let y1 = harness
+        .run("Y1", Spec::new(cy, Lane::Shared("page-y"), None))
+        .await;
+    let made = y1
+        .as_ref()
+        .and_then(|state| state["sharedBrowserRolloutPath"].as_str())
+        .context("the first browser turn saved no rollout")
+        .and_then(|rollout| make_older_browser_thread(Path::new(rollout), OLDER_BROWSER_BASE))
+        .map_err(|error| format!("{error:#}"));
+    harness.older_threads.push(("Y1", made));
+    harness
+        .run("Y2", Spec::new(cy, Lane::Shared("page-y"), y1))
+        .await;
 }
 
 /// What Studio sends when the person presses Let Octo continue after a pause
@@ -2089,6 +2107,38 @@ fn make_older_thread(rollout: &Path, older_text: &str) -> Result<()> {
     Ok(())
 }
 
+/// The base instructions a chat's browser thread began with on an earlier runtime (the
+/// structured lane's, which told a turn how to run commands and write files), with a line of
+/// their own to find them by.
+const OLDER_BROWSER_BASE: &str = "You are Codex running inside Instafy Studio as a non-interactive background automation agent.\n\nWhen runtime context marks command execution as required, invoke the available runtime command tool (`exec_command` or `shell`) before answering.\n\nOLDER-BROWSER-THREAD-BASE-WITNESS";
+
+/// Makes a browser thread's rollout into the rollout of one begun on an earlier runtime: its
+/// session metadata keeps the base instructions that runtime gave it.
+fn make_older_browser_thread(rollout: &Path, older_base: &str) -> Result<()> {
+    let mut rewritten = 0;
+    let mut lines = Vec::new();
+    for line in fs::read_to_string(rollout)?.lines() {
+        let mut value: Value = serde_json::from_str(line)?;
+        if value["type"] == "session_meta"
+            && let Some(base) = value
+                .get_mut("payload")
+                .and_then(|payload| payload.get_mut("base_instructions"))
+                .and_then(Value::as_object_mut)
+        {
+            base.insert("text".into(), json!(older_base));
+            rewritten += 1;
+        }
+        lines.push(value.to_string());
+    }
+    ensure!(
+        rewritten == 1,
+        "{} holds {rewritten} session base instructions",
+        rollout.display()
+    );
+    fs::write(rollout, lines.join("\n") + "\n")?;
+    Ok(())
+}
+
 fn item_text(item: &Value) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(content) = item["content"].as_array() {
@@ -2567,7 +2617,122 @@ fn check(harness: &Harness) -> Result<()> {
     check_browser_turns_go_on_past_a_page(harness)?;
     // (xi) A message the browser turn asked Octo to make.
     check_messages_the_browser_could_not_make(harness)?;
+    // (xii) What a browser turn is told it can do.
+    check_browser_turns_are_told_only_what_they_can_use(harness)?;
     println!("every turn read its own run instructions");
+    Ok(())
+}
+
+/// What the structured lane's base instructions tell a turn with a shell about its command tool
+/// and its file writes.
+const SHELL_BASE_LINES: &[&str] = &[
+    "invoke the available runtime command tool (`exec_command` or `shell`)",
+    "If no command tool can be called",
+    "Include `files` entries only for concrete workspace files",
+    "returning inline `files[]` entries",
+];
+
+/// Lines of a turn's prompt about running commands, changing files, team plans and goals.
+const WORKSPACE_TOOL_LINES: &[&str] = &[
+    "call the available runtime command tool (`exec_command` or `shell`) before returning the final JSON",
+    "For command execution, call the available runtime command tool",
+    "If you cannot apply file changes via tools",
+    "Populate `files`",
+    "{ type: 'multi_agent_plan'",
+    "goal_update",
+    "Current Studio runtime invariants:",
+];
+
+/// (xii) Every Shared and Personal Browser turn: its only tools are its browser's, so what the
+/// job's prompt tells it (the request message, not Codex's own instructions) says nothing of
+/// running a command, changing a file, or starting a team plan or a goal, on a fresh browser
+/// thread or a resumed one, and a fresh thread carries the browser skill whole but for the
+/// routing step's section. Each building thread's first turn is still told all of it.
+fn check_browser_turns_are_told_only_what_they_can_use(harness: &Harness) -> Result<()> {
+    let request_message = |request: &Value| -> Option<String> {
+        request["input"]
+            .as_array()?
+            .iter()
+            .filter(|item| item["role"] == "user")
+            .map(item_text)
+            .filter(|text| text.contains("\nLatest user request:\n"))
+            .last()
+    };
+    let mut fresh_browser_threads = 0;
+    for turn in thread_turns(harness) {
+        let browser = matches!(turn.lane, Lane::Shared(_) | Lane::Personal);
+        for (index, request) in sampling_requests(turn) {
+            let Some(message) = request_message(request) else {
+                continue;
+            };
+            if browser {
+                for line in WORKSPACE_TOOL_LINES {
+                    ensure!(
+                        !message.contains(line),
+                        "{}#{index} is a browser turn and reads: {line}",
+                        turn.label
+                    );
+                }
+                // Nor do the base instructions of a browser thread this runtime began; one begun
+                // on an earlier runtime keeps its own, so its cached start holds.
+                if matches!(turn.lane, Lane::Shared(_)) && !turn.label.starts_with('Y') {
+                    let instructions = instructions_text(request);
+                    for line in SHELL_BASE_LINES {
+                        ensure!(
+                            !instructions.contains(line),
+                            "{}#{index} is a browser turn and its instructions read: {line}",
+                            turn.label
+                        );
+                    }
+                }
+                if message.contains("\nProject memory snapshot (from workspace; already loaded):\n")
+                {
+                    fresh_browser_threads += 1;
+                    ensure!(
+                        message.contains("## Good outputs")
+                            && !message.contains("## Routing preflight"),
+                        "{}#{index} does not carry the browser skill whole",
+                        turn.label
+                    );
+                }
+            } else if turn.label == "A1" && index == 0 {
+                for line in &WORKSPACE_TOOL_LINES[..1] {
+                    ensure!(message.contains(line), "A1 never read: {line}");
+                }
+                ensure!(
+                    message.contains("{ type: 'multi_agent_plan'"),
+                    "A1 never read the team plan"
+                );
+            }
+        }
+    }
+    ensure!(
+        fresh_browser_threads > 0,
+        "no browser turn started a browser thread"
+    );
+    let made = harness
+        .older_threads
+        .iter()
+        .find(|(label, _)| *label == "Y1")
+        .map(|(_, made)| made.clone());
+    ensure!(
+        made == Some(Ok(())),
+        "Y1's thread was not made a browser thread begun on an earlier runtime: {made:?}"
+    );
+    // Y2 resumes Y1's thread (its recovery run, if any, starts a thread of its own).
+    let witness = OLDER_BROWSER_BASE.lines().last().unwrap_or_default();
+    let older_thread = &first_sampling_request(harness.turn("Y1"))["prompt_cache_key"];
+    let mut resumed = 0;
+    for (index, request) in sampling_requests(harness.turn("Y2"))
+        .filter(|(_, request)| &request["prompt_cache_key"] == older_thread)
+    {
+        resumed += 1;
+        ensure!(
+            instructions_text(request).matches(witness).count() == 1,
+            "Y2#{index} resumes a browser thread begun on an earlier runtime without the base instructions it began with"
+        );
+    }
+    ensure!(resumed > 0, "Y2 did not resume Y1's browser thread");
     Ok(())
 }
 

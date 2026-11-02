@@ -850,8 +850,9 @@ fn the_browser_skills_sign_in_and_secret_rules_end_inside_the_carried_bytes() {
 }
 
 /// The routing step reads the browser skill's "Routing preflight" section from the space's copy: it is
-/// the skill's last section, after the bytes a snapshot carries, so a browser turn's own snapshot is
-/// unchanged, and the routing step reads all of it within its budget.
+/// the skill's last section, after the bytes a building turn's snapshot carries, and a browser turn,
+/// which carries the skill whole, leaves it out (`a_browser_turn_carries_its_browser_skill_whole`), so
+/// neither turn's snapshot holds it, and the routing step reads all of it within its budget.
 #[test]
 fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_budget() {
     let start = BROWSER_SKILL
@@ -1540,7 +1541,7 @@ fn fresh_prompt(tmp: &std::path::Path, request: &str, metadata: JsonValue) -> St
 
 /// The router weighs a request's words, and a browser turn's often has none of the browser skill's (29 Oct drive 4:
 /// the tram follow-up loaded no skill at all, and a task that names an address loaded only the research skill). So a
-/// Personal or Shared Browser turn carries the browser skill whatever its words, first and whole (its carried part),
+/// Personal or Shared Browser turn carries the browser skill whatever its words, first and whole,
 /// while an ordinary turn with the same words still routes by them.
 #[test]
 fn a_browser_turn_carries_the_browser_skill_whatever_its_words() {

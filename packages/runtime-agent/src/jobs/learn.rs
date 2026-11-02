@@ -53,6 +53,8 @@ pub const SKILL_IMPORT_COMPAT_RELATIVE_PATH: &str =
     ".agents/skills/instafy-skill-import-compat/SKILL.md";
 pub const BROWSER_AUTOMATION_RELATIVE_PATH: &str =
     ".agents/skills/instafy-browser-automation/SKILL.md";
+pub const BROWSER_AUTOMATION_REFERENCE_RELATIVE_PATH: &str =
+    ".agents/skills/instafy-browser-automation/references/learning-and-local-browsers.md";
 pub const SKILL_READING_RELATIVE_PATH: &str = ".agents/skills/instafy-skill-reading/SKILL.md";
 pub const LEARNED_INDEX_RELATIVE_PATH: &str = ".agents/skills/instafy-learned/SKILL.md";
 pub const LEARNED_BLOCKS_DIR_RELATIVE_PATH: &str = ".agents/skills/instafy-learned/blocks";
@@ -411,7 +413,18 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // out of the browser, research that ends in a page went to it from the first message, and
     // browser work that did not find its answer still carried on there.
     include_str!("legacy/browser-automation-v23.md"),
+    // From before how to write a learned block, the owner-local tool, the Personal Browser's
+    // own notes and what a browser script keeps in mind moved to
+    // `references/learning-and-local-browsers.md`, so a browser turn carries the whole skill.
+    include_str!("legacy/browser-automation-v24.md"),
 ];
+/// What a turn with a shell reads of the browser skill only when it needs it: how to write a
+/// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,
+/// the Personal Browser's own notes, and what a script that drives a browser keeps in mind.
+const BROWSER_AUTOMATION_REFERENCE_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-browser-automation/references/learning-and-local-browsers.md"
+));
 const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
     include_str!("legacy/skill-import-compat-v1.md"),
     include_str!("legacy/skill-import-compat-v2.md"),
@@ -589,6 +602,8 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     let skill_router_path = workspace_dir.join(SKILL_ROUTER_RELATIVE_PATH);
     let skill_import_compat_path = workspace_dir.join(SKILL_IMPORT_COMPAT_RELATIVE_PATH);
     let browser_automation_path = workspace_dir.join(BROWSER_AUTOMATION_RELATIVE_PATH);
+    let browser_automation_reference_path =
+        workspace_dir.join(BROWSER_AUTOMATION_REFERENCE_RELATIVE_PATH);
     let skill_reading_path = workspace_dir.join(SKILL_READING_RELATIVE_PATH);
     let learned_index_path = workspace_dir.join(LEARNED_INDEX_RELATIVE_PATH);
     let learned_blocks_dir_path = workspace_dir.join(LEARNED_BLOCKS_DIR_RELATIVE_PATH);
@@ -857,6 +872,14 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     ) {
         wrote_any = true;
     }
+    if upgrade_bundled_skill(
+        workspace_dir,
+        &browser_automation_reference_path,
+        &[],
+        BROWSER_AUTOMATION_REFERENCE_TEMPLATE,
+    ) {
+        wrote_any = true;
+    }
 
     if upgrade_bundled_skill(
         workspace_dir,
@@ -1044,6 +1067,7 @@ fn maybe_commit_project_memory_scaffold(workspace_dir: &Path, _wrote_any: bool) 
         SKILL_ROUTER_RELATIVE_PATH,
         SKILL_IMPORT_COMPAT_RELATIVE_PATH,
         BROWSER_AUTOMATION_RELATIVE_PATH,
+        BROWSER_AUTOMATION_REFERENCE_RELATIVE_PATH,
         SKILL_READING_RELATIVE_PATH,
         LEARNED_INDEX_RELATIVE_PATH,
         BOUND_SITES_RELATIVE_PATH,

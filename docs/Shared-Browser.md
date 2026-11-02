@@ -798,7 +798,31 @@ Every Personal or Shared Browser turn carries the `instafy-browser-automation`
 skill, whatever its words: the router loads a skill by the words of a request,
 and a browser turn's often has none of the skill's ("Now find how to get there
 by tram", or a task that names an address). On a fresh thread the skill loads
-first of the turn's skills, so the snapshot's budget never runs out before it.
+first of the turn's skills, so the snapshot's budget never runs out before it,
+and whole, but for its "Routing preflight", which only the routing step reads.
+Besides it the turn is told of, and loads when its words route them, only the
+skills it can use with no shell (runtime-agent `usable_with_no_shell`): not the
+space's memory, routing and team skills (`context_kind` `root`, `meta` or
+`learned_index`), not a skill that runs code of its own (a `scripts/` folder, or
+a skill pack whose manifest names commands, such as the map pack), and not the
+runtime's own skills that build, run commands or plan a team
+(`SHELL_TURN_SKILLS`). Every other skill its words route loads, one the space
+added or imported included; a skill it cannot use takes no routing place from
+one it can, and its skills index lists only the ones it can use. Its browser
+skill counts against the snapshot's budget as much as a routed skill does, so
+those keep their room beside it. Nor is it told how to run a command, change a
+file, or start a team plan or a goal, since a browser turn's only tools are its
+browser's: its request leaves those lines out, its client context gives the
+person's time zone without the commands that take one, and a Shared Browser
+thread begins on base instructions without the structured lane's paragraphs on
+the command tool and file writes (`SHARED_BROWSER_BASE_INSTRUCTIONS`), which it
+keeps when a later run resumes it, as a thread begun before keeps its own. The
+space's `AGENTS.md` and `INSTAFY.md`, and a skill it can use, may still name
+commands that other turns run. What other turns read of the skill when they
+need it (how to write a learned block and the cues a run reports for one, the
+owner-local `observe` tool, the Personal Browser's own notes, and what a script
+that drives a browser keeps in mind) is in its
+`references/learning-and-local-browsers.md`.
 Most browser turns resume their chat's browser thread instead, which loads no
 snapshot, and a browser turn cannot read a skill file, so such a turn is given
 the skill's "Finding a page" section again, from the space's own copy. A chat's

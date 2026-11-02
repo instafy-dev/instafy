@@ -152,46 +152,13 @@ the request, or end the turn and ask.
 - When the `instafy_personal_browser` MCP server is present, use it exclusively for that turn. Do not attach Playwright or CDP in that runtime.
 - Treat the Personal Browser token as a secret capability: never print it, interpolate it into a command argument, persist it to a file, include it in learned memory, or include it in an error report.
 
-## Learning boundary
+## Learned blocks and the other browsers
 
-- Pinned skills own generic browser workflow.
-- If a learned block already gives you an entry route and one actionable cue, use it directly instead of rediscovering the page from scratch.
-- If a learned block gives you a direct entry route (for example `/search`) and the task does not require visiting a broader landing page first, prefer the direct route over a homepage detour.
-- Do not let an older learned route override a newer prompt that clearly names a different sibling surface. Example:
-  - prompt: `/lookup`, button text `Find`, query `beta dossier`
-  - older memory: `/search`, button text `Search`, query `beta`
-  - correct behavior: use `/lookup` + `Find` + `beta dossier`, while keeping any still-valid learned invariant such as `direct article links are gated` or `read "Article token:" from the detail page`
-- Learned blocks should only capture task- or site-specific delta:
-  - where to start
-  - exact cues to act on
-  - pitfalls that are specific to that target
-  - short verify conditions
-- Do not restate generic browser hygiene in learned blocks unless the site has an unusual variant that is itself the learned fact.
-- Good learned browser delta usually includes selector-grade cues, such as:
-  - search input labels / ids / names
-  - submit button labels
-  - exact pagination control labels
-  - exact result-link text or stable relative href
-  - article field labels that contain the final answer
-  - stable relative routes like `/search` or `/article/<slug>`
-- Weak learned browser delta sounds like intent without the worked cue, for example:
-  - `use page 2`
-  - `open the matching result`
-  - `search for beta`
-- Weak execution on the live page also looks like:
-  - waiting for `/epsilon/i` when the row actually shows `Epsilon account`
-  - clicking a generic `visible filter control` when the page exposes `Apply filter`
-- Rewrite those into exact control memory, for example:
-  - `click the page button text "2"`
-  - `open the result link text "Fixture News: Beta"`
-  - `open the result link text "Epsilon account"`
-  - `submit with button text "Apply filter"`
-  - `fill the textbox labeled "Search" and submit with button text "Go"`
-- Avoid storing:
-  - debugger endpoints
-  - browser launch flags
-  - runtime-specific CLI commands
-  - absolute `http://host.docker.internal:<port>` origins unless the origin itself matters
+`references/learning-and-local-browsers.md` has how to write a learned block for a
+site (with examples and the cues a run reports for it), the owner-local `observe`
+tool with an example call, the Personal Browser's own notes, and what a script that
+drives a browser keeps in mind. A turn with a shell reads it when it needs it; a
+browser turn's own run text already says how its browser works.
 
 ## Default decision order
 
@@ -224,7 +191,8 @@ Interactive Personal/Shared escalation order is:
 This means:
 
 - Personal or Shared Browser may keep multiple sites open for comparison, monitoring, or automation prep
-- describe Personal or Shared pages as tabs/pages within the same session unless the user explicitly asked for isolation
+- in the Personal Browser, a comparison or several related reads open each page in a tab of your own (`open_tab`, at most three of your tabs, each asking for its own site) and `select_tab` between them; `close_tab` the ones you no longer need. Agent tabs open public pages only, and the person's own tab is never closed.
+- describe Personal or Shared pages as tabs in the same browser unless the user explicitly asked for isolation
 - if the UI only shows one visible browser surface, background Personal or Shared pages can stay open for later revisits, but they are not separate user-managed cards yet
 
 When reporting or learning from multi-site work:
@@ -243,15 +211,6 @@ When reporting or learning from multi-site work:
 - In a Shared Browser turn, if no browser panel is visible yet, still start with the exposed `snapshot` tool. A successful snapshot can create or reveal the shared headed browser session for the user.
 - In a Shared Browser turn, if the first controller action fails, say plainly what failed or use it to drive one small repair attempt. Do not attempt the Shared controller in Personal or owner-local turns.
 - Prefer one compact execution step that both acts and prints structured evidence over multi-step exploratory loops.
-- When a task involves more than one actionable browser cue (for example route + field + submit + result link + extraction label), print those exact successful cues in the command's structured JSON evidence under a compact `workedCues` object or array. Use only cues that actually worked:
-  - route or relative path
-  - consent button text
-  - field label / name / id
-  - chosen query / option value / option text
-  - exact submit button text / aria label / stable selector
-  - exact result-link text / stable selector
-  - exact page label used for the final extraction
-- Do not include failed guesses, alternative controls that were not used, or generic summaries like `visible search control` or `matching result`.
 - If the task asks for multiple fields from the same page, complete the full extraction inside one browser tool call whenever possible. Do not split “open page”, “read title/url”, and “read token/label” into separate repair calls unless the first call produced a concrete blocker.
 - If one browser tool call already produced every field the user or harness asked for, stop there. Reply immediately from the observed values instead of launching a second call, rereading learned blocks, or adding a formatting-only repair step.
 - A one-off browser tool call is complete only when it returns cleanly. Do not leave timers, watchers, hanging promises, or open interactive waits behind.
@@ -259,59 +218,11 @@ When reporting or learning from multi-site work:
 - If the user or harness requested an exact reply format, emit that final assistant reply immediately after you have the observed values. Do not leave the answer buried only in command output, preview text, or “one more repair attempt” narration.
 - If a browser command already produced the requested evidence successfully, do not launch a second repair command just because you are worried about disconnect/timeout cleanup. Use the observed evidence and reply.
 - Do not reopen `.agents/skills/instafy-learned/**`, `INSTAFY.md`, or other memory files after a successful browser extraction just to justify the answer. Memory is for deciding what to do before action, not for post-hoc explanation after the answer is already known.
-- If one field is missing but you are already on the correct page, prefer a broader in-process fallback before launching a new command:
-  - read the nearest parent text,
-  - read the surrounding section text,
-  - read `body.innerText()` and extract the needed value from the actual visible label.
-- When the prompt asks for an output key like `ARTICLE_TOKEN` but the page uses a human label like `Article token:`, extract from the actual page label and then map it into the requested final reply line. Do not assume the page literally contains the requested output key.
-- When a successful cue is an exact visible control or link text, report only that exact cue. Do not append nearby helper text, sibling labels, or surrounding UI copy such as `Search result` once the worked cue is already known to be `Beta`.
-- Preserve the shared browser safely during cleanup:
-  - never call `browser.close()` unless the user explicitly asked to close the session
-  - guard `browser.disconnect()` because some attached browser objects do not expose it
-- Preserve the shared session:
+- Preserve the shared browser:
   - do not intentionally close the browser
   - do not leave the controlled tab hidden behind a different tab if the user should keep seeing it
 - If you need repair logic, keep it small and driven by concrete observed state.
-- When a task is likely to recur, store the reusable cue pattern in a learned block instead of encoding tool/runtime syntax into memory.
 - If a harness or user requested exact final output lines, produce them immediately from the first successful browser command result. Do not spend another turn rereading memory or re-explaining the action path.
-
-## Owner-local read-only observation
-
-When the `instafy_local_browser.observe` tool is present, it opens a fresh headless browser for one bounded observation and closes it afterward. It always returns the match count for each selector, can return bounded text and named computed CSS properties, and can save one PNG below `artifacts/browser/`.
-
-For example, one call can verify a page and produce a screenshot artifact:
-
-```json
-{
-  "url": "https://instafy.dev",
-  "observations": [
-    { "name": "headline", "selector": "h1", "text": true, "computedStyles": ["font-size"] },
-    { "name": "page", "selector": "body", "computedStyles": ["background-color"] },
-    { "name": "headings", "selector": "h1,h2,h3" }
-  ],
-  "screenshot": { "path": "artifacts/browser/instafy-dev.png", "fullPage": true }
-}
-```
-
-Do not use it for authenticated/private pages, interactions, arbitrary JavaScript, session reuse, or non-HTTP(S) URLs. If the task needs those and no Personal or Shared Browser server is present, emit `request_browser` (see Open or resume from Chat).
-
-## Personal Browser MCP
-
-Use this path only when the `instafy_personal_browser` MCP server is exposed. It
-controls the native browser visible inside the desktop app and keeps its private
-login state on that device. Use its `status`, `snapshot`, `navigate`, `click`,
-`type`, `press`, `scroll`, `list_tabs`, `open_tab`, `select_tab`, and `close_tab`
-tools directly; never invoke them through the shell.
-
-Every tool acts on the tab on screen. Reuse a tab with `navigate` when one page at
-a time is enough. For a comparison or several related reads, `open_tab` each page
-(at most three of your tabs; each asks for its own site approval), read it, and
-`select_tab` between them; close the ones you no longer need. Agent tabs open
-public pages only, and the person's own tab is never closed. Do not invent window
-endpoints or silently switch transports. Prefer an element
-`index` from the immediately preceding snapshot and snapshot again after any DOM
-change. A `423` response means the user paused control; a `401` response means the
-short-lived capability expired. Stop rather than inspecting or retrying the token.
 
 ## Shared Browser implementation boundary
 
@@ -322,23 +233,6 @@ replace it with shell commands, inline Node, Playwright, CDP, direct action-log
 writes, or a new browser process. If the tool returns an error, retry it at most
 once, then say in plain words what did not work: a failed page ends that page,
 not the task ("Finding a page" says what comes next).
-
-## Browser learning examples
-
-Good:
-- “Start from `/search`, fill the input labeled `Search`, submit with the visible search button, then read `ARTICLE_TOKEN` from the article labels.”
-- “Start from `/search`, fill the input labeled `Search`, submit with the visible search button, then read the page label `Article token:` and map it into the final `ARTICLE_TOKEN` reply line.”
-- Command JSON evidence that includes:
-  - `workedCues.route = "/directory"`
-  - `workedCues.field = "Team"`
-  - `workedCues.option = { value: "green", text: "Green" }`
-  - `workedCues.submit = "Apply filter"`
-  - `workedCues.resultLink = "Epsilon account"`
-  - `workedCues.extractLabel = "Article token:"`
-
-Bad:
-- “Attach to `http://127.0.0.1:9223`, open `http://host.docker.internal:56768/`, then run these exact commands...”
-- “Use this exact browser CLI / debugger command...”
 
 ## Good outputs
 
