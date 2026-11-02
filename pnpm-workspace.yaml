@@ -81,3 +81,9 @@ overrides:
   # source-map-js indexed source-map DoS (GHSA-68fv-2mgg-jv7q, high), via
   # postcss and @tailwindcss/node; build/test tooling only.
   'source-map-js@>=1.0.0 <1.2.2': '^1.2.2'
+  # glob keeps reading directories after an AbortSignal aborts an async walk
+  # (GHSA-3g3m-2fjr-6pw4, #379) — rimraf 6, via @capacitor/cli, still asks for
+  # glob 11, and rimraf 6.1.3 for 13. Build tooling only: Capacitor never turns
+  # on rimraf's glob mode, so glob is loaded but never called. Drop the entry
+  # once @capacitor/cli's rimraf requires glob >= 14.0.2 itself.
+  'rimraf@6>glob': '^14.0.2'
