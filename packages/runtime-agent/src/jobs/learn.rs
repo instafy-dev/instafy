@@ -161,9 +161,11 @@ const FRONTEND_PREVIEWS_TEMPLATE: &str = include_str!(concat!(
 // before the location, Present and tunnel material moved to references/),
 // v10 the one that said rerunning `instafy preview open` refreshes the card,
 // v11 the one from before the card showed a picture and a summary of the site,
-// v12 the one that had the reply report exit codes and a stopped site's process, and
+// v12 the one that had the reply report exit codes and a stopped site's process,
 // v13 the one from before `instafy preview open --start` picked the site's port, which
-// sent the person to the card and stopped a site with `kill`. A
+// sent the person to the card and stopped a site with `kill`, and v14 the one that had
+// a reply say a check loaded nothing ("nothing was checked; say so"), not that nobody
+// has looked at the page yet. A
 // workspace still holding an unedited earlier bundled copy of this skill,
 // browser automation or skill import compat is upgraded; an edited one is kept.
 const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
@@ -180,6 +182,7 @@ const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
     include_str!("legacy/frontend-previews-v11.md"),
     include_str!("legacy/frontend-previews-v12.md"),
     include_str!("legacy/frontend-previews-v13.md"),
+    include_str!("legacy/frontend-previews-v14.md"),
 ];
 /// What a previewed site asks Studio for (the person's location, Present and
 /// Follow), read only when a site needs it.
@@ -2135,7 +2138,8 @@ mod tests {
     /// a don't, a reply said the page "displays correctly on phone and desktop" after a check that
     /// only loaded it, and others said "in this browser run", "this pass" and "the page snapshot
     /// was stale". `AGENTS.md` gives one rule in place of those examples. What could not be looked
-    /// at still stays in the reply, in plain words (the builder skill's "what is unverified").
+    /// at still stays in the reply, in plain words (the builder skill's "what is unverified", and
+    /// the page skill's "nobody has looked at the page yet").
     /// The copies from before, with the examples or from before them, are upgraded.
     #[test]
     fn agents_doc_says_never_to_describe_the_turn_itself() {
@@ -2200,6 +2204,19 @@ mod tests {
         ] {
             assert!(doc.contains(needle), "{needle}");
         }
+        // Its example of a failure said "the shop's site didn't load", of a site no page said
+        // was down: the example says which page wasn't reached, as the rule does, and nothing
+        // else in "Replies" says a page didn't load.
+        let replies = doc
+            .split("## Replies")
+            .nth(1)
+            .and_then(|rest| rest.split("## ").next())
+            .expect("Replies section");
+        assert!(
+            replies.contains("\"I couldn't reach the shop's site, so I read its www. address instead\""),
+            "{replies}"
+        );
+        assert_eq!(replies.matches("didn't load").count(), 1, "{replies}");
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
         let previous = include_str!("legacy/agents-doc-v4.md");
         assert!(!previous.contains("not checked\", or stays out"));
@@ -2870,6 +2887,33 @@ mod tests {
         fs::write(&skill, &customized).unwrap();
         ensure_project_memory_scaffold(workspace.path());
         assert_eq!(fs::read_to_string(&skill).unwrap(), customized);
+    }
+
+    /// A page check that loaded nothing (exit 4, no browser here, or 70, the check itself failed)
+    /// stays in the reply as what it means for the page. The skill said "nothing was checked; say
+    /// so", while `AGENTS.md` says a reply never describes the turn's own checks: it says nobody
+    /// has looked at the page yet. The copy from before is upgraded.
+    #[test]
+    fn frontend_previews_says_a_check_that_loaded_nothing_in_the_pages_words() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let skill = flat(FRONTEND_PREVIEWS_TEMPLATE);
+        assert!(
+            skill.contains(
+                "Exit 4 (no browser here) or 70 (the check itself failed) means nobody has looked at the page yet; say that in the reply."
+            ),
+            "{skill}"
+        );
+        assert!(!skill.contains("say so"), "{skill}");
+        assert!(FRONTEND_PREVIEWS_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+        let previous = include_str!("legacy/frontend-previews-v14.md");
+        assert!(previous.contains("means nothing was checked; say so."));
+        assert!(LEGACY_FRONTEND_PREVIEWS_TEMPLATES.contains(&previous));
+        let workspace = tempdir().expect("workspace tempdir");
+        ensure_project_memory_scaffold(workspace.path());
+        let path = workspace.path().join(FRONTEND_PREVIEWS_RELATIVE_PATH);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), FRONTEND_PREVIEWS_TEMPLATE);
     }
 
     /// The bundled browser skill names the Personal Browser's tab tools; v7 is

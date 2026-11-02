@@ -125,10 +125,15 @@ kept, and an absent value is the person's tab. A compact **Octo is reading**
 row under the toolbar lists those tabs as host and title text (page titles are
 shown as text only, never followed; never a tab's number such as "Octo's tab 1",
 the label Octo's own prompts use) with one **Take over** button. It says only what
-is so: until one of those tabs has a title of its own (a page that has answered;
-one with no title is named by its address), it reads **Opening visitporto.travel…**
-with no list, and while a prompt in the view waits for the person viewing, it reads
-**Waiting for you** beside the pages. A tab still
+is so: until one of those tabs has arrived at its page, it reads **Opening visitporto.travel…**
+with no list (and the stage, when it has no picture to show, **Octo is opening
+visitporto.travel…**), and while a prompt in the view waits for the person viewing, it reads
+**Waiting for you** beside the pages. `GET /browser/pages` says whether each tab is
+still on its way (`loading`): its listed title is the page it is leaving, the blank
+tab's, or none. A page that has arrived may still have no title to show (an svg shown
+on its own lists a bare media type), so Studio goes by `loading`, and by the title
+only for a browser that does not say it (one with no title of its own is named by its
+address, so it has arrived). A tab still
 loading another address is named by the site it opens, with no title until that
 page arrives: DevTools' tab list gives the new address with the title of the page
 the tab is leaving (a blank tab's "about:blank"), so `GET /browser/pages` drops a

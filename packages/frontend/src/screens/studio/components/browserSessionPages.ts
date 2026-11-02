@@ -6,6 +6,8 @@ export type BrowserSessionPage = {
   host: string;
   label: string;
   title: string | null;
+  /** The tab is still on its way to `url`, when the browser says so. */
+  loading?: boolean;
   lastReferencedAt: number;
   isActive: boolean;
   canGoBack?: boolean;

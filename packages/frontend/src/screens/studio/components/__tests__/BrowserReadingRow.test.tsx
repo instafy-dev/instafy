@@ -142,6 +142,26 @@ describe("BrowserReadingRow", () => {
     expect(container.querySelector('[data-testid="browser-reading-opening"]')).toBeNull();
   });
 
+  // A local test: the row said "Opening visitlisboa.com…" for as long as Octo
+  // read an svg shown on its own. Its tab has no title to show (a bare media
+  // type names nothing), as a tab still on its way has none; the browser says
+  // which of the two it is.
+  it("says Octo reads a page with no title to show once the browser says it has arrived", async () => {
+    const svg = (loading: boolean) => page("svg", {
+      url: "https://www.visitlisboa.com/logo.svg",
+      host: "visitlisboa.com",
+      title: null,
+      loading,
+    });
+    await act(async () => root.render(<BrowserReadingRow pages={[svg(true)]} canTakeOver onTakeOver={vi.fn()} />));
+    expect(container.querySelector('[data-testid="browser-reading-opening"]')?.textContent).toBe("Opening visitlisboa.com…");
+    await act(async () => root.render(<BrowserReadingRow pages={[svg(false)]} canTakeOver onTakeOver={vi.fn()} />));
+    expect(container.querySelector('[data-testid="browser-reading-opening"]')).toBeNull();
+    expect(container.querySelector("span[id]")?.textContent).toBe("Octo is reading 1 page");
+    expect([...container.querySelectorAll('[data-testid="browser-reading-page"]')].map((item) => item.textContent))
+      .toEqual(["visitlisboa.com"]);
+  });
+
   // A local test: while a prompt waited for the person, the row said "Octo
   // is reading httpbin.org · httpbin.org/forms/post" above it.
   it("says it is waiting for you while a prompt waits, beside the page it is about", async () => {

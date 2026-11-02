@@ -52,7 +52,7 @@ import {
 import { RemoteControlSurface } from "./RemoteControlSurface";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
 import { BrowserReadingRow } from "./BrowserReadingRow";
-import { browserReadingHost, resolveAgentReadingPages } from "./browserAgentTabs";
+import { browserPageAnswered, browserReadingHost, resolveAgentReadingPages } from "./browserAgentTabs";
 import { browserPageOrigin, selectSharedBrowserHumanInput } from "./browserHandoffRouting";
 import { ActionTicker } from "./ActionTicker";
 import { SharedBrowserCollaborationControls } from "./SharedBrowserCollaborationControls";
@@ -3390,9 +3390,13 @@ export function BrowserSessionModal({
     ? browserArrivalNote(agentArrival, stageShowsPage ? sharedBrowserActivePage : null,
       effectiveAgentControlOwner?.displayName ?? "Octo", { anotherChatTurn })
     : null;
+  // A page that has not arrived yet is one Octo is opening, as the row of
+  // pages above says.
   const agentWhereabouts = effectiveAgentControlOwner && viewLive && !agentPictureShown && !agentArrivalNote
     ? agentPage
-      ? `${effectiveAgentControlOwner.displayName} is on ${browserReadingHost(agentPage)}`
+      ? browserPageAnswered(agentPage)
+        ? `${effectiveAgentControlOwner.displayName} is on ${browserReadingHost(agentPage)}`
+        : `${effectiveAgentControlOwner.displayName} is opening ${browserReadingHost(agentPage)}…`
       : `${effectiveAgentControlOwner.displayName} is using the browser`
     : null;
   // Around a live page the stage follows the theme like the chrome above it

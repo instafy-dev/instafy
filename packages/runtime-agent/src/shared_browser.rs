@@ -2771,6 +2771,12 @@ impl ServerHandler for SharedBrowserMcpServer {
 /// the browser never answered its step, so that step does not stand in for the
 /// browser work of the turn (runtime-agent's retry of a turn with none still
 /// runs).
+///
+/// A model that calls the tools one at a time (not from code) reads only a
+/// result's structured content when it has one, so structured content that
+/// carries these facts also carries the failure's own words (`error.reason`),
+/// as a page the network did not deliver does: a refused step still tells it
+/// what to do, and its `[step_refused_…]` code.
 fn failed_call_result(error: &anyhow::Error) -> CallToolResult {
     let mut result = failed_tool_result(&format!("{error:#}"));
     let activity = error
@@ -2785,7 +2791,17 @@ fn failed_call_result(error: &anyhow::Error) -> CallToolResult {
             Some(JsonValue::Object(structured)) => {
                 structured.insert(field.to_string(), value);
             }
-            _ => result.structured_content = Some(json!({ field: value })),
+            _ => {
+                let reason = result
+                    .content
+                    .iter()
+                    .find_map(|content| content.as_text().map(|text| text.text.clone()))
+                    .unwrap_or_default();
+                result.structured_content = Some(json!({
+                    "error": { "reason": reason },
+                    field: value,
+                }));
+            }
         }
     }
     result

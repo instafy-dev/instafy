@@ -6,6 +6,11 @@ export type RuntimeBrowserSessionPage = {
   host: string;
   label: string;
   title: string | null;
+  /**
+   * The tab is still on its way to `url`, when the browser says so: absent
+   * from a browser that does not.
+   */
+  loading?: boolean;
   isActive: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
@@ -320,6 +325,7 @@ export function mapRuntimeBrowserSessionPagesPayload(payload: unknown): RuntimeB
         host,
         label,
         title: title && title.length > 0 ? title : null,
+        ...(typeof record.loading === "boolean" ? { loading: record.loading } : {}),
         isActive,
         canGoBack: record.canGoBack === true,
         canGoForward: record.canGoForward === true,

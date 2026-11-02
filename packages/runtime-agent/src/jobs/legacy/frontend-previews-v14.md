@@ -1,0 +1,80 @@
+---
+name: instafy-frontend-previews
+description: Show a site or server running in this space (localhost, a dev server) to people as a private Studio preview card (instafy preview open), check it yourself (instafy preview check), keep it running after your turn, or share a public link with consent. Not for Instafy's browser.
+context_kind: workflow
+context_parent: instafy-skill-router
+routing_keywords: preview, previews, preview card, localhost, 127.0.0.1, 0.0.0.0, on port, which port, port number, dev server, local server, web server, running site, running server, static site, landing page, tunnel, shareable link, demo link, förhandsvisning, vista previa, プレビュー
+---
+
+# Previews: show a site running in this space
+
+Use this whenever a site or server runs in this space (or should) and someone should see it: on any port, for any kind of site. `instafy preview` is a CLI command group, not a tool; run it in the shell. `instafy preview --help` lists its commands.
+
+## What can see what
+
+- **People in Studio** see the site through a private preview card with a picture of the page: `instafy preview open`. Only space members can open it; nothing becomes public.
+- **You** look at it with `instafy preview check --port <port>`: it loads the page in a headless browser here, lists console errors, failed requests and a blank page, and writes desktop and phone screenshots. Exit 4 (no browser here) or 70 (the check itself failed) means nothing was checked; say so. It loads only the site itself and public addresses: a request it lists as `blocked` for another local port or a private address fails for viewers too, so serve what the page needs from the site itself. Link-only sites are left out of the check and the card's picture only.
+- **Instafy's browser** opens public web addresses only: its safety policy blocks this space's own addresses (localhost, 127.0.0.1, 0.0.0.0, private addresses) and non-web ports. Do not try to work around it. Never send it, or a `request_browser` task, to such an address, and after "destination denied" do not retry, re-approve or request the browser again: open a preview card instead, and say why in one line. Only a public tunnel URL (below, with consent) can be opened there.
+
+## Show it (do this first)
+
+1. From the site's folder inside the workspace (not a temporary folder), start it and show it in one command:
+   `instafy preview open --title "<short name>" --serve-cmd "<command>" --start --json`
+   Write `{port}` where the command takes its port (`--serve-cmd "python3 -m http.server {port} --bind 127.0.0.1"`): it picks a free port for this site, starts the command on it, waits for the site, posts the card and takes the card's picture. Never choose a port yourself: the JSON's `port` is the site's. Add `--path /<page>` for a sub-page. See "Keep it running after your turn" for what `--start` does.
+   - Add `--summary "<facts>"` for one line under the card's title: numbers and plain words, at most 80 characters, such as `Trip · 3 days · 14 places`. Without it the card shows the page's own `<meta name="description">`.
+   - Once the site is live it takes a picture of the page for the card (`thumbnail` in the JSON says whether it did). A page that draws itself after it loads (a map, a chart) marks `<html data-instafy-ready="false">` and sets it to `"true"` once drawn; the picture waits for that. `--thumbnail <file>` uses a picture you made instead (JPEG, PNG or WebP); `--no-thumbnail` puts none.
+   - It posts the card in this conversation and prints no URL. Do not paste a preview, tunnel or localhost URL for it, and do not send the person to the card: it is there when the command succeeded.
+   - The same command again from the same folder is the same site: it keeps its port and preview, and starts nothing while the site runs. In the same turn it reuses that turn's card; in a later turn it posts a new card, and the person opens the newest card. It never refreshes an earlier card. `instafy preview list` lists open previews.
+2. Check it: `instafy preview check --port <port>` (the JSON's). Fix what it lists, then run the same `instafy preview open` again. After a later change to the site, run the check again: it also takes a new picture for the card.
+3. Allow the preview host before you reply. Dev servers that check the `Host` header (Vite dev and `vite preview`, webpack-dev-server, Angular) show "Blocked request" to everyone who opens the card, and you cannot see that page yourself. The first time you open a preview for such a server, add `viewerHostSuffix` from the JSON, with a leading dot and without `:port`, to its allowed hosts (Vite: `server.allowedHosts` and `preview.allowedHosts`; webpack-dev-server and Angular: `allowedHosts`), stop it with `instafy preview close <previewId>`, and run the same `instafy preview open` again before you reply. Static file servers need nothing.
+4. Read `status`: `live` means the card works. `not_responding`: check the server is up on that port, then run `instafy preview open` again. `unknown`: the server did not say. Only `status: live` from an `instafy preview open` you ran this turn shows the site is up: never say a preview is live, restarted or refreshed from anything else.
+5. Read `restartable`. `true` means opening the card starts the site again after it stops or the space sleeps, with no turn: it reruns the recorded command. `false`: `restartNote` says why; run it again with `--serve-cmd "<command>"`.
+6. If it fails:
+   - Exit `2`: nothing answers on 127.0.0.1 at that port, the site answers with a server error, or the command `--start` ran exited or stayed silent (the message names its log: read it, fix the cause, run it again). If the message says the site answers only on [::1], do not start a second one; bind it to 127.0.0.1 or 0.0.0.0, restart it, run it again.
+   - Exit `3`: the port is not allowed, or another site holds it (the message names it). Run the same command without `--port`: it picks a free one. `--replace` only when this site replaces that one.
+   - Exit `5` ("Previews are not available on this server"), or `instafy preview` is not a command here: previews are off. Post the local URL; create a public tunnel only when the person asks for a shareable link, after consent.
+   - Exit `1` (any other error): run it once more. If it fails again, say in one plain line that the preview didn't open, and post the local URL. No public tunnel unless asked.
+7. If the person reports "Blocked request" or "host is not allowed" on the card's page, do step 3 for that server.
+
+## Keep it running after your turn
+
+Every process your turn starts is killed with its terminal's process group when the turn ends. A server started in the foreground or with `&` is gone by the next message, and the card goes dark.
+
+- Start a site that must outlive the turn with the command above, from the site's folder. It starts the command in its own session without Instafy credentials, logs to `.instafy/agent/logs`, waits for the port, posts the card, and returns `port`, `startedPid` and `logFile` (`startedPid` is null when this same site already ran on its port and nothing was started).
+- `--serve-cmd` is one command and its arguments: no shell syntax, and no secret on the line (the site reads secrets from an env file). A command that needs shell syntax (environment assignments, `cd`, a pipeline) goes in a script file in the site's folder, passed as `--serve-cmd "sh ./serve.sh"`.
+- Do not start a site that must outlive the turn with `&`, `nohup` or `setsid` by hand: it keeps this turn's credentials.
+- In a later turn, rerun the same command from the same folder: it keeps the site's port and preview, starts the site only if it stopped, and posts this turn's card. Do not start a second server for the same site.
+- When the space's machine stops or restarts, its sites stop: their cards read Stopped and `instafy preview list` no longer lists them. That is expected. Open on a `restartable` card starts the site again with no turn, and the card says so itself; or rerun the same `instafy preview open ... --start` and read its `status`.
+- When a start fails, read `logFile` before trying again.
+- A site with a `bound.json` is served by `--serve-cmd "instafy bind serve . --port {port} --preview"`.
+
+## Building a site to show
+
+- Don't assume a framework. Inspect the workspace (`package.json`, `vite.config.*`, `next.config.*`, etc) and use its own dev or preview command with `{port}` for its port and a reachable host (Vite: `npx vite --host 127.0.0.1 --port {port} --strictPort`).
+- With no toolchain, prefer one `index.html` (React through ESM CDN imports such as `https://esm.sh/react@18` if needed) served by a static file server, for example `--serve-cmd "python3 -m http.server {port} --bind 127.0.0.1"`.
+- Install dependencies only when needed, and say you did.
+- Reuse the running site: rerun the same command instead of starting a duplicate.
+- Never store secrets in the workspace. Request them with `request_secret` actions; if a provider's screens are involved, open Instafy's browser on the provider's public site to show the way.
+- If this is a git repo, make sure `.gitignore` excludes `.instafy/agent/`.
+- A site that uses the person's location, or that people will Present and Follow together in Studio: read `references/studio-host-messages.md` before writing that code.
+
+## Public links (tunnel mode, consent first)
+
+Only when the person wants a shareable, public or phone link, or previews are not available:
+
+- Never auto-create a public tunnel URL. Ask for explicit consent first. Say that anyone with the link can open it. If they decline, stop at the card or the local URL.
+- Then `instafy tunnel start --port <port> --json` (parse `url`, `tunnelId`, `localPort`, `pid`), and post the URL as a normal link. `instafy tunnel list`, `instafy tunnel logs <tunnelId> --follow` and `instafy tunnel stop <tunnelId>` manage it.
+- A tunneled site is a new website origin: backends on localhost, auth callback allowlists and Host-checking dev servers need changes. Read `references/tunnels.md` for those, the controller API flow and what to do when tunnels are unavailable.
+
+## "I can't reach the preview" (preview doctor)
+
+- Does the port answer (`curl -fsS http://127.0.0.1:<port>/`)? If not, read the site's log and run the same `instafy preview open ... --start` again.
+- `instafy preview list` lists open previews: its status says the preview is open, not that the site answers, and a stopped preview is not listed. Rerunning the same `instafy preview open ... --start` starts the site when needed and posts this turn's card; read its `status`.
+- Run `instafy preview check --port <port>` for page errors (framework config, base paths, env vars).
+- For a tunnel, see `references/tunnels.md`.
+
+Go by what each command returned (its exit code and `status`), not by what you expect a card to show, and tell the person in plain words ("the page is up", "the page didn't start"), without the port, exit code or log file.
+
+## Cleanup
+
+When asked to stop a site or its preview: `instafy preview close <previewId>` (`instafy preview list` lists them). It stops the site `--start` started, and its card reads Stopped. Never stop a site with `kill`, `pkill` or `pgrep` and a name pattern: that can stop another chat's site. Stop any tunnel too. Then say which site stopped ("Stopped the hello page."), never its process ID or port.

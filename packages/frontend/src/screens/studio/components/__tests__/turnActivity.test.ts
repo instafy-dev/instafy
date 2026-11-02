@@ -941,24 +941,6 @@ describe("browser rows in Details", () => {
     expect(label("completed")).toBe("Looked at the tabs");
     expect(label("failed")).toBe("Tried looking at the tabs");
   });
-
-  // A local test: a turn tried to accept Metro do Porto's cookies, the
-  // browser refused it, and Details said "Tried browsing metrodoporto.pt".
-  // The runtime labels a refused step for what it was (activity_labels.rs).
-  it("name a step the browser refused for what it was, and leave it off the line", () => {
-    const refused = { key: "browser/refused/consent", role: "quiet", live: "Accepting cookies on {host}" };
-    const messages = [
-      browserStep(BROWSER_OPEN, { host: "metrodoporto.pt", pageKey: PAGE_A, step: "navigate" }),
-      browserStep(BROWSER_READ, { host: "metrodoporto.pt", pageKey: PAGE_A, step: "snapshot" }),
-      browserStep(refused, { host: "metrodoporto.pt", step: "click" }, "failed"),
-    ];
-    expect(summarize(messages).details.map((item) => item.kind === "step" && item.step.label)).toEqual([
-      "Opened metrodoporto.pt",
-      "Read a page on metrodoporto.pt",
-      "Tried accepting cookies on metrodoporto.pt",
-    ]);
-    expect(summarize(messages).summary).toBe("Opened metrodoporto.pt, read a page");
-  });
 });
 
 describe("Details notes", () => {

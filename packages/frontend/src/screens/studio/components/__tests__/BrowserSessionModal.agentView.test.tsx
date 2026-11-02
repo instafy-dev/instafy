@@ -157,11 +157,16 @@ type HostProps = {
   earlierRunIds?: string[];
   teammates?: boolean;
   onContinue?: (message: string) => Promise<boolean>;
+  /** The page's listed title: its host unless given; null while it has none. */
+  pageTitle?: string | null;
+  /** Whether the browser says the page is still on its way. */
+  pageLoading?: boolean;
 };
 
 /** Studio's part: tabs are read only while the view is opening or live. */
 function Host({ agentHolds, viewOnly = false, conversationId = "chat-a", pageUrl = "https://www.visitlisboa.com/",
-  agentPageIds, hidden = false, compact = false, pausedRunId, earlierRunIds = [], teammates = false, onContinue }: HostProps) {
+  agentPageIds, hidden = false, compact = false, pausedRunId, earlierRunIds = [], teammates = false, onContinue,
+  pageTitle, pageLoading }: HostProps) {
   const [kind, setKind] = useState<HostedBrowserViewKind | null>(null);
   const pagesActive = hostedBrowserPagesActive(kind);
   const [ready, setReady] = useState(false);
@@ -175,7 +180,8 @@ function Host({ agentHolds, viewOnly = false, conversationId = "chat-a", pageUrl
   }, [pagesActive]);
   const host = new URL(pageUrl).host;
   const pages: BrowserSessionPage[] = ready
-    ? [{ id: "PAGE1", label: host, title: host, lastReferencedAt: 0, host, url: pageUrl, isActive: true }]
+    ? [{ id: "PAGE1", label: host, title: pageTitle === undefined ? host : pageTitle, lastReferencedAt: 0, host,
+      url: pageUrl, isActive: true, ...(pageLoading === undefined ? {} : { loading: pageLoading }) }]
     : [];
   return <BrowserSessionModal isOpen onOpenChange={noop} projectId={projectId} currentUserId="user-1"
     browserSessionId="browser-session-1" preferRuntimeId={null} resumeRuntimeId={runtimeId}
@@ -316,6 +322,38 @@ describe("Shared Browser view while Octo drives", () => {
     await advance(50);
     expect(still()).toBeNull();
     expect(whereabouts()).toBe("Octo is on visitlisboa.com");
+  });
+
+  // A local test: while a slow site never answered, the row of pages said
+  // "Opening visitporto.travel…" and the stage, with no picture to show,
+  // "Octo is on visitporto.travel": two statuses for one tab.
+  it("says Octo is opening a site on the stage too, until its page has arrived", async () => {
+    const visitPorto = "https://www.visitporto.travel/";
+    const row = () => document.querySelector('[data-testid="browser-reading-row"]')?.textContent ?? null;
+    await octoTakesControl({ pageUrl: visitPorto, pageTitle: null, agentPageIds: ["PAGE1"] });
+    // Another chat drops the still: the stage says where Octo is.
+    await act(async () => root.render(
+      <Host agentHolds conversationId="chat-b" pageUrl={visitPorto} pageTitle={null} agentPageIds={["PAGE1"]} />,
+    ));
+    await advance(50);
+    expect(still()).toBeNull();
+    expect(whereabouts()).toBe("Octo is opening visitporto.travel…");
+    expect(row()).toContain("Opening visitporto.travel…");
+    // The page arrives.
+    await act(async () => root.render(
+      <Host agentHolds conversationId="chat-b" pageUrl={visitPorto} pageTitle="Visit Porto" agentPageIds={["PAGE1"]} />,
+    ));
+    await advance(50);
+    expect(whereabouts()).toBe("Octo is on visitporto.travel");
+    expect(row()).toContain("Octo is reading");
+    // A page with no title to show, which the browser says has arrived.
+    await act(async () => root.render(
+      <Host agentHolds conversationId="chat-b" pageUrl={visitPorto} pageTitle={null} pageLoading={false}
+        agentPageIds={["PAGE1"]} />,
+    ));
+    await advance(50);
+    expect(whereabouts()).toBe("Octo is on visitporto.travel");
+    expect(row()).toContain("Octo is reading");
   });
 
   it("drops the still when the page goes to another address", async () => {

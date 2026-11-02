@@ -2282,6 +2282,14 @@ fn embedded_controller_hard_blocks_hidden_sensitive_fields() {
             "unexpected sensitive-field error for {mode}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        // The failed step says, in the browser's own word, that it was the
+        // person's private detail, so Details name it for what it was.
+        assert_eq!(
+            failed_step(&output.stdout).and_then(|failed| failed.refused),
+            Some("sensitive"),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
     }
 }
 
@@ -3055,18 +3063,23 @@ fn a_failed_step_keeps_the_persons_yes_in_its_result() {
         }
         .into()
     };
+    // Beside the failure's own words (see
+    // `a_failed_step_with_facts_still_tells_the_model_what_failed`).
+    let words = json!({
+        "reason": "Shared Browser action failed: Shared Browser command exited with exit status: 1: The page changed after the person said yes",
+    });
     let allowed = failed_call_result(&failure(r#"{"ok":false,"activity":{"approval":"once"}}"#));
     assert_eq!(allowed.is_error, Some(true));
     assert_eq!(
         allowed.structured_content.expect("structured"),
-        json!({"activity": {"approval": "once"}})
+        json!({"activity": {"approval": "once"}, "error": words})
     );
     // A step refused as the person's says which it was.
     let consent = failed_call_result(&failure(r#"{"ok":false,"activity":{"refused":"consent"}}"#));
     assert_eq!(consent.is_error, Some(true));
     assert_eq!(
         consent.structured_content.expect("structured"),
-        json!({"activity": {"refused": "consent"}})
+        json!({"activity": {"refused": "consent"}, "error": words})
     );
     let plain = failed_call_result(&failure(""));
     assert_eq!(plain.is_error, Some(true));
@@ -3089,6 +3102,55 @@ fn a_failed_step_keeps_the_persons_yes_in_its_result() {
         structured["error"]["details"],
         "net::ERR_CONNECTION_REFUSED"
     );
+}
+
+/// What a model that calls the browser's tools one at a time (not from code)
+/// reads of a failed step: Codex gives it a result's structured content alone
+/// when the result has one. A failed step's facts for Details (which of the
+/// person's steps the browser refused, their yes) are structured content, so a
+/// refused step read `{"activity":{"refused":"consent"}}` there: none of the
+/// refusal's words, and no `[step_refused_…]` code for the run's instructions
+/// to act on. The failure's own words come with its facts, as a page the
+/// network did not deliver gives its reason.
+#[tokio::test]
+async fn a_failed_step_with_facts_still_tells_the_model_what_failed() {
+    use std::os::unix::process::ExitStatusExt;
+    for (stderr, stdout, words) in [
+        (
+            "Shared Browser command failed: Accepting cookies or other consent is the user's step. Leave the banner up and read on under it. [step_refused_consent]",
+            r#"{"ok":false,"activity":{"refused":"consent"}}"#,
+            "Leave the banner up and read on under it. [step_refused_consent]",
+        ),
+        (
+            "Shared Browser command failed: Shared Browser refuses to type authentication, payment, or identity secrets; let the user enter this value directly",
+            r#"{"ok":false,"activity":{"refused":"sensitive"}}"#,
+            "let the user enter this value directly",
+        ),
+        (
+            "Shared Browser command failed: The page changed after the person said yes",
+            r#"{"ok":false,"activity":{"approval":"once"}}"#,
+            "The page changed after the person said yes",
+        ),
+    ] {
+        let failure = controller_failure(
+            std::process::ExitStatus::from_raw(1 << 8),
+            stderr.as_bytes(),
+            stdout.as_bytes(),
+        );
+        let result = failed_call_result(&failure);
+        assert!(result.structured_content.is_some(), "{stdout}");
+        let wire = wire_result(result).await;
+        let result: codex_protocol::mcp::CallToolResult =
+            serde_json::from_value(wire.clone()).expect("a tool result");
+        let read = result
+            .as_function_call_output_payload()
+            .body
+            .to_text()
+            .unwrap_or_default();
+        assert!(read.contains(words), "{read}");
+        // Details still read the step's facts from the same result.
+        assert!(wire["structuredContent"]["activity"].is_object(), "{wire}");
+    }
 }
 
 #[tokio::test]
@@ -4821,9 +4883,10 @@ fn a_call_that_could_not_reach_the_browser_is_marked_in_its_result() {
         b"",
     ));
     assert_eq!(unreachable.is_error, Some(true));
+    let text = unreachable.content[0].as_text().expect("text content").text.clone();
     assert_eq!(
         unreachable.structured_content,
-        Some(json!({ "browserUnavailable": true }))
+        Some(json!({ "browserUnavailable": true, "error": { "reason": text } }))
     );
 
     let answered = failed_call_result(&controller_failure(
@@ -11414,6 +11477,8 @@ async fn mcp_wire_carries_each_kind_of_browser_result_whole() {
         page_changed: false,
     }
     .into();
+    // Both keep the failure's own words beside them: a model that calls the
+    // tools one at a time reads only the structured content.
     assert_eq!(
         wire_result(failed_call_result(&allowed)).await,
         json!({
@@ -11421,7 +11486,12 @@ async fn mcp_wire_carries_each_kind_of_browser_result_whole() {
                 "type": "text",
                 "text": "Shared Browser action failed: The page changed after the person said yes",
             }],
-            "structuredContent": { "activity": { "step": "submit", "approval": "once" } },
+            "structuredContent": {
+                "activity": { "step": "submit", "approval": "once" },
+                "error": {
+                    "reason": "Shared Browser action failed: The page changed after the person said yes",
+                },
+            },
             "isError": true,
         })
     );
@@ -11438,7 +11508,12 @@ async fn mcp_wire_carries_each_kind_of_browser_result_whole() {
                 "type": "text",
                 "text": "Shared Browser action failed: Shared Browser command exited with exit status: 75: Shared Browser command failed: Instafy's browser could not be reached",
             }],
-            "structuredContent": { "browserUnavailable": true },
+            "structuredContent": {
+                "browserUnavailable": true,
+                "error": {
+                    "reason": "Shared Browser action failed: Shared Browser command exited with exit status: 75: Shared Browser command failed: Instafy's browser could not be reached",
+                },
+            },
             "isError": true,
         })
     );
