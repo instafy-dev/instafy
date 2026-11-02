@@ -72,6 +72,13 @@ Review these connected stories, including actions after scrolling rather than sc
 | Manage queued messages | Scroll a six-item queue, reorder by keyboard and pointer, edit/save/cancel, send one now and remove one. Check order, draft protection, focus restoration and every action's full hit area, including enlarged text. | [Queue spec](../packages/frontend/tests/playwright/component/queue-composer.spec.ts); persistence and authorization require controller database tests. |
 | Recover browser controls | Open and close the mobile keyboard utility, type, switch Shared/Personal, and exercise error/retry pending/completed states. Check focus and controls after resize. | [Browser keyboard/status fixture](../packages/frontend/tests/fixtures/browser-keyboard-status/README.md); remote page input and streaming need a live transport. |
 
+Staged chat attachments stay in account-scoped session memory when a Studio panel replaces
+the composer. Test Home/settings/Files round trips as well as Chat/Browser switching: those
+panels unmount the composer. Images and sent-page files must return to their originating chat,
+and completing an upload while away must remove only the files that send carried. Signing out
+releases the previews. Unsent files are not persisted across a page reload; the separate text
+draft restoration and server queue persistence checks do not imply file persistence.
+
 For the signed-in local app, follow [development setup](../DEV_SETUP.md) and mint a throwaway
 local user with `node scripts/mint-test-user.mjs --json`. Use its returned storage key rather
 than assuming a project reference. Keep the session data out of logs, screenshots and tracked

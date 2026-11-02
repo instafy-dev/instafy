@@ -228,19 +228,28 @@ it("discards batched scroll input when the connection receives a different grant
 
 it("Explore requests owner approval, scopes frames and input, and returns to Follow without reconnecting",async()=>{
   const {localExploreFrame}=await import("../../../../services/runtimeController/localTabExplore");
-  Object.assign(socket,{readyState:WebSocket.OPEN,bufferedAmount:0});await frame();
-  const viewId="11111111-1111-4111-8111-111111111111";
-  const state={type:"exploreState",available:true,requested:false,view:null as null|{viewId:string;connectionId:string;userId:string;viewport:{width:number;height:number;dpr:number}}};
-  const update=async()=>act(async()=>socket.dispatchEvent(new MessageEvent("message",{data:JSON.stringify(state)})));
-  await update();await exploreAction();
-  expect(JSON.parse(socket.send.mock.calls.at(-1)![0])).toMatchObject({type:"exploreRequest",viewport:{width:390,height:700}});
-  state.view={viewId,connectionId:"own",userId:"viewer",viewport:{width:390,height:700,dpr:1}};await update();expect(image()).toBeNull();
-  await act(async()=>socket.dispatchEvent(new MessageEvent("message",{data:new Uint8Array([255,216,255,217]).buffer})));expect(image()).toBeNull();
-  await act(async()=>socket.dispatchEvent(new MessageEvent("message",{data:localExploreFrame(viewId,new Uint8Array([255,216,255,217])).buffer})));
-  await act(async()=>image().dispatchEvent(new KeyboardEvent("keydown",{key:"a",bubbles:true,cancelable:true})));
-  expect(JSON.parse(socket.send.mock.calls.at(-1)![0])).toEqual({type:"exploreInput",viewId,input:{type:"text",text:"a"}});
-  await exploreAction();expect(socket.send).toHaveBeenLastCalledWith('{"type":"exploreReturn"}');
-  state.view=null;await update();expect(image()).toBeNull();await frame();expect(image()).not.toBeNull();expect(connect).toHaveBeenCalledTimes(1);
+  vi.useFakeTimers();
+  try {
+    Object.assign(socket,{readyState:WebSocket.OPEN,bufferedAmount:0});await frame();
+    const viewId="11111111-1111-4111-8111-111111111111";
+    const state={type:"exploreState",available:true,requested:false,view:null as null|{viewId:string;connectionId:string;userId:string;viewport:{width:number;height:number;dpr:number}}};
+    const update=async()=>act(async()=>socket.dispatchEvent(new MessageEvent("message",{data:JSON.stringify(state)})));
+    await update();await exploreAction();
+    expect(JSON.parse(socket.send.mock.calls.at(-1)![0])).toMatchObject({type:"exploreRequest",viewport:{width:390,height:700}});
+    state.view={viewId,connectionId:"own",userId:"viewer",viewport:{width:390,height:700,dpr:1}};await update();expect(image()).toBeNull();
+    // Settle the new view's debounced size before asserting later input and
+    // Return commands; it may otherwise arrive between those real-time acts.
+    await act(async () => vi.advanceTimersByTimeAsync(150));
+    expect(JSON.parse(socket.send.mock.calls.at(-1)![0])).toEqual({type:"exploreResize",viewId,viewport:{width:390,height:700,dpr:1}});
+    await act(async()=>socket.dispatchEvent(new MessageEvent("message",{data:new Uint8Array([255,216,255,217]).buffer})));expect(image()).toBeNull();
+    await act(async()=>socket.dispatchEvent(new MessageEvent("message",{data:localExploreFrame(viewId,new Uint8Array([255,216,255,217])).buffer})));
+    await act(async()=>image().dispatchEvent(new KeyboardEvent("keydown",{key:"a",bubbles:true,cancelable:true})));
+    expect(JSON.parse(socket.send.mock.calls.at(-1)![0])).toEqual({type:"exploreInput",viewId,input:{type:"text",text:"a"}});
+    await exploreAction();expect(socket.send).toHaveBeenLastCalledWith('{"type":"exploreReturn"}');
+    state.view=null;await update();expect(image()).toBeNull();await frame();expect(image()).not.toBeNull();expect(connect).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it("opens view choices without requesting authority or reconnecting, and restores focus on Escape", async () => {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -8,6 +8,8 @@ import {
   formatAttachmentSize,
   useChatComposerAttachments,
 } from "../useChatComposerAttachments";
+import { StudioDraftsProvider } from "../../../../workspace/StudioDrafts";
+import { ChatAttachmentDraftsProvider } from "../ChatAttachmentDrafts";
 
 type Attachments = ReturnType<typeof useChatComposerAttachments>;
 let latest: Attachments;
@@ -15,9 +17,12 @@ const showStatus = vi.fn();
 
 function Probe({ draftKey, unavailableReason = null }: { draftKey: string; unavailableReason?: string | null }) {
   latest = useChatComposerAttachments({ draftKey, isInputLocked: () => false, showStatus, unavailableReason });
-  return <div>{latest.imageAttachments.map((attachment) => (
-    <img key={attachment.id} src={attachment.previewUrl} alt={attachment.file.name} />
-  ))}</div>;
+  return <div>
+    <button disabled={latest.hasSendingAttachments}>Send</button>
+    {latest.imageAttachments.map((attachment) => (
+      <img key={attachment.id} src={attachment.previewUrl} alt={attachment.file.name} />
+    ))}
+  </div>;
 }
 
 describe("useChatComposerAttachments", () => {
@@ -66,6 +71,75 @@ describe("useChatComposerAttachments", () => {
     expect(names()).toEqual(["a.png"]);
     expect(latest.imageAttachments[0]).toBe(original);
     expect(revokeObjectURL).not.toHaveBeenCalled();
+  });
+
+  it("keeps staged images when a Studio panel replaces the composer", async () => {
+    const panel = (chat: boolean) => (
+      <StudioDraftsProvider>
+        <ChatAttachmentDraftsProvider>
+          {chat ? <Probe draftKey="user-1:space-1:chat-a" /> : <div>Home</div>}
+        </ChatAttachmentDraftsProvider>
+      </StudioDraftsProvider>
+    );
+    await act(async () => root.render(panel(true)));
+    await attach("screenshot.png");
+    const original = latest.imageAttachments[0];
+    await act(async () => root.render(panel(false)));
+    await act(async () => root.render(panel(true)));
+    expect(names()).toEqual(["screenshot.png"]);
+    expect(latest.imageAttachments[0]).toBe(original);
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+  });
+
+  it("finishes an upload in its original draft while another panel is open", async () => {
+    const panel = (chat: boolean) => (
+      <ChatAttachmentDraftsProvider>
+        {chat ? <Probe draftKey="chat-a" /> : <div>Settings</div>}
+      </ChatAttachmentDraftsProvider>
+    );
+    await act(async () => root.render(panel(true)));
+    await attach("sending.png");
+    const originalSend = latest;
+    const files = latest.imageAttachments.map(item => item.file);
+    await act(async () => latest.markImageAttachmentsSending(files, true));
+    await attach("next-message.png");
+    await act(async () => root.render(panel(false)));
+    // Return before the original request finishes: a new composer must not
+    // offer to send the same uploading files a second time.
+    await act(async () => root.render(panel(true)));
+    expect(latest.hasSendingAttachments).toBe(true);
+    expect(container.querySelector("button")?.disabled).toBe(true);
+    await act(async () => originalSend.removeSentImageAttachments(files));
+    expect(names()).toEqual(["next-message.png"]);
+    expect(latest.hasSendingAttachments).toBe(false);
+    expect(container.querySelector("button")?.disabled).toBe(false);
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith("blob:attachment-1");
+  });
+
+  it("releases every account's previews on sign out and ignores callbacks from it", async () => {
+    const panel = (account: string, chat = "chat-a") => (
+      <StrictMode>
+        <ChatAttachmentDraftsProvider key={account}>
+          <Probe draftKey={`${account}:${chat}`} />
+        </ChatAttachmentDraftsProvider>
+      </StrictMode>
+    );
+    await act(async () => root.render(panel("first")));
+    await attach("a.png");
+    const oldAccount = latest;
+    await act(async () => root.render(panel("first", "chat-b")));
+    await attach("b.png");
+    await act(async () => root.render(panel("second")));
+    expect(names()).toEqual([]);
+    expect(revokeObjectURL.mock.calls.map(([url]) => url).sort()).toEqual([
+      "blob:attachment-1", "blob:attachment-2",
+    ]);
+    await attach("new-account.png");
+    await act(async () => oldAccount.attachImageFiles([new File(["image"], "late.png", { type: "image/png" })]));
+    expect(names()).toEqual(["new-account.png"]);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:attachment-4");
+    await act(async () => root.render(panel("first")));
+    expect(names()).toEqual([]);
   });
 
   it("keeps asynchronous send cleanup bound to the originating chat", async () => {

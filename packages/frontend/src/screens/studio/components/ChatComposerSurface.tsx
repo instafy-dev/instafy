@@ -8,7 +8,7 @@ import type {
   ReactNode,
   RefObject,
 } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import "./ChatComposerSurface.css";
 import {
   Archery,
@@ -31,6 +31,7 @@ import {
 import { Button, IconButton } from "../../../components/Button";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { useVisualViewportBounds } from "../../../hooks/useVisualViewportBounds";
+import { revealFocusedEditable } from "../../../utils/revealFocusedEditable";
 import { Surface } from "../../../components/Surface";
 import { AttachmentThumbnail } from "../../../components/AttachmentThumbnail";
 import { Text } from "../../../components/Text";
@@ -367,7 +368,13 @@ export function ChatComposerSurface({
   const composerGhostActionClass = `chat-composer-action ${ghostActionClass}`;
   const composerPrimaryActionClass = `chat-composer-action ${primaryActionClass}`;
   const [draftExpanded, setDraftExpanded] = useState(false);
-  const visibleViewport = useVisualViewportBounds(imageAttachments.length > 0);
+  const visibleViewport = useVisualViewportBounds();
+  const formRef = useRef<HTMLFormElement>(null);
+  useLayoutEffect(() => {
+    revealFocusedEditable(formRef.current, {
+      context: formRef.current?.querySelector<HTMLElement>('[data-testid="chat-composer-text-row"]'),
+    });
+  }, [visibleViewport.height, visibleViewport.width]);
   useEffect(() => setDraftExpanded(false), [chatInputProps.draftKey]);
   // Dialogs and menus keep precedence over this in-pane layout change.
   useNativeBackButtonAction(draftExpanded, () => setDraftExpanded(false), 90);
@@ -1179,6 +1186,7 @@ export function ChatComposerSurface({
           {aboveComposer}
         </div> : null}
         <form
+          ref={formRef}
           onSubmit={onSubmit}
           onKeyDown={(event) => {
             if (draftExpanded && event.key === "Escape" && !event.defaultPrevented && !event.nativeEvent.isComposing && !composerMenuIsOpen()) {
@@ -1187,19 +1195,20 @@ export function ChatComposerSurface({
               setDraftExpanded(false);
             }
           }}
-          className={`${
+          className={`chat-composer-form ${
             compactNavigationLayout
               ? `pointer-events-auto ${CHAT_COMPOSER_COLUMN_CLASS_NAME} px-3.5`
               : `pointer-events-auto ${CHAT_COMPOSER_COLUMN_CLASS_NAME} px-3 sm:px-4`
           } ${draftExpanded ? "h-full min-h-0" : ""}`}
           style={{
+            "--chat-composer-viewport-height": `${visibleViewport.height}px`,
             paddingInline: compactNavigationLayout
               ? "clamp(0.875rem, var(--instafy-safe-area-inset-bottom), 1.125rem)"
               : undefined,
             paddingBottom: nativeKeyboardOpen
               ? "0.5rem"
               : "max(var(--instafy-safe-area-inset-bottom), 0.5rem)",
-          }}
+          } as CSSProperties}
         >
           <div className={draftExpanded ? "flex h-full min-h-0 flex-col gap-2" : "space-y-2"}>
             {replyContext}

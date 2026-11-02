@@ -14,7 +14,10 @@ const TAB_PRESETS = {
   contained: {
     item: "rounded-xl",
     selectedItem: "bg-white dark:bg-slate-700",
-    trigger: "flex-1 justify-center rounded-xl text-sm aria-selected:font-medium aria-selected:text-primary-700 dark:aria-selected:text-primary-300 forced-colors:aria-selected:outline forced-colors:aria-selected:outline-solid forced-colors:aria-selected:outline-[Highlight]",
+    // At enlarged text sizes the enclosing control surface can be only a few
+    // rem wide. Give labels room before introducing scrolling, retaining the
+    // same font and hit-area height. Normal-size and header tabs keep padding.
+    trigger: "flex-1 justify-center rounded-xl text-sm @max-[9rem]:px-1.5 aria-selected:font-medium aria-selected:text-primary-700 dark:aria-selected:text-primary-300 forced-colors:aria-selected:outline forced-colors:aria-selected:outline-solid forced-colors:aria-selected:outline-[Highlight]",
   },
   underline: {
     item: "",

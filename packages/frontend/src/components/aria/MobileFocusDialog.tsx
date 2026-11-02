@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, type ReactNode, type Ref } from "react";
 import { NavArrowLeft } from "iconoir-react";
 import { useVisualViewportBounds } from "../../hooks/useVisualViewportBounds";
+import { revealFocusedEditable } from "../../utils/revealFocusedEditable";
 import { IconButton } from "../Button";
 import { StudioDialogModal, type StudioDialogAppearance } from "./StudioModal";
 import type { StudioDialogGutter } from "./StudioDialogSpacing";
@@ -33,22 +34,8 @@ export function MobileFocusDialog({
   const bodyRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     if (!isOpen) return;
-    const field = document.activeElement;
     const scroller = shortViewport ? contentRef.current : bodyRef.current;
-    if (!(field instanceof HTMLElement) || !scroller?.contains(field) ||
-      !field.matches("input, textarea, select, [contenteditable='true'], [contenteditable='']")) return;
-    const visible = scroller.getBoundingClientRect();
-    const focused = field.getBoundingClientRect();
-    if (visible.height <= 0 || focused.height <= 0) return;
-    const top = visible.top + 4;
-    const bottom = visible.bottom - 4;
-    // Adjust this scroll area only, and only when the existing focused field
-    // is clipped. No focus/reparenting, or jump back after ordinary form scroll.
-    if (focused.top < top || focused.height > bottom - top) {
-      scroller.scrollTop += focused.top - top;
-    } else if (focused.bottom > bottom) {
-      scroller.scrollTop += focused.bottom - bottom;
-    }
+    revealFocusedEditable(scroller);
   }, [bounds.height, bounds.width, bounds.top, bounds.left, isOpen, shortViewport]);
   const close = () => { if (!closeDisabled) onOpenChange(false); };
   return <StudioDialogModal

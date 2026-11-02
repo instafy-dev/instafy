@@ -1,3 +1,13 @@
+.chat-composer-form {
+  /* Enlarged text plus a short keyboard viewport can exceed the whole screen.
+     Keep the form's top reachable; normal composers do not gain a scrollbar.
+     Menus and saved-message popovers remain in their existing portals. */
+  max-block-size: calc(min(100dvh, var(--chat-composer-viewport-height, 100dvh)) - var(--instafy-safe-area-inset-top, 0px) - 0.5rem);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scroll-padding-block: 0.5rem;
+}
+
 .chat-composer-surface {
   --chat-composer-radius: 1.5rem;
   border-radius: var(--chat-composer-radius);

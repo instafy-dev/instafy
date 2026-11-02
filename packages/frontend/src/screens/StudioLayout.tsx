@@ -73,6 +73,7 @@ import { WorkspaceHydratingFrame } from "./studio/components/WorkspaceHydratingF
 import { MobileBottomDock } from "./studio/components/MobileBottomDock";
 import { ProjectLauncher } from "./studio/components/ProjectLauncher";
 import { ChatPanel } from "./studio/components/ChatPanel";
+import { ChatAttachmentDraftsProvider } from "./studio/components/ChatAttachmentDrafts";
 import {
   ControllerNoticeActionsProvider,
   type ControllerNoticeActionsContextValue,
@@ -202,15 +203,17 @@ export function StudioLayout() {
     <StudioDraftsProvider key={user?.id ?? "signed-out"}>
       <StudioFileBufferDrafts />
       <StudioDraftNavigationGuard>
-        <StudioStartupGate>
-          <WorkspaceTabsProvider
-            conversationWorkspaceUserId={user?.id ?? null}
-            locationSearch={location.search}
-            onRestorePanelDestination={restorePanelDestination}
-          >
+        <ChatAttachmentDraftsProvider>
+          <StudioStartupGate>
+            <WorkspaceTabsProvider
+              conversationWorkspaceUserId={user?.id ?? null}
+              locationSearch={location.search}
+              onRestorePanelDestination={restorePanelDestination}
+            >
               <StudioWorkspaceAvailability><StudioLayoutInner /></StudioWorkspaceAvailability>
-          </WorkspaceTabsProvider>
-        </StudioStartupGate>
+            </WorkspaceTabsProvider>
+          </StudioStartupGate>
+        </ChatAttachmentDraftsProvider>
       </StudioDraftNavigationGuard>
     </StudioDraftsProvider>
   );

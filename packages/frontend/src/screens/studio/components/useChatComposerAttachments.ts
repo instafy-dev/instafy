@@ -1,9 +1,7 @@
 import {
   useCallback,
-  useEffect,
   useLayoutEffect,
   useRef,
-  useState,
   type ChangeEvent,
   type ClipboardEvent,
   type DragEvent,
@@ -16,20 +14,8 @@ import {
   isChatImageMimeType,
 } from "../../../lib/chatAttachments";
 import type { SentPageAttachmentInfo } from "./sentPageAttachment";
-
-export type PendingChatImageAttachment = {
-  id: string;
-  file: File;
-  /** An object URL for an image; empty for a sent page, which has no preview. */
-  previewUrl: string;
-  /** Set while a send carrying this image uploads it; it can't be removed then. */
-  sending?: boolean;
-  /**
-   * Set for a page sent with Send page to Octo: a Markdown copy of the page
-   * that its browser read and masked, sent as a `kind: "file"` attachment.
-   */
-  page?: SentPageAttachmentInfo;
-};
+import { revokeAttachmentPreview, useChatAttachmentDrafts, type PendingChatImageAttachment } from "./ChatAttachmentDrafts";
+export type { PendingChatImageAttachment } from "./ChatAttachmentDrafts";
 
 /** At most this many sent pages wait in one message. */
 export const MAX_STAGED_SENT_PAGES = 5;
@@ -58,15 +44,6 @@ export function describeSendingImages(count: number, pageCount = 0): string {
 
 const EMPTY_ATTACHMENTS: PendingChatImageAttachment[] = [];
 
-function revokePreviewUrl(previewUrl: string) {
-  if (!previewUrl) return;
-  try {
-    URL.revokeObjectURL(previewUrl);
-  } catch (_error) {
-    // ignore cleanup failure
-  }
-}
-
 // A pasted image is taken over from the editor even when its type is one the
 // bucket refuses, so the person hears why it was not added instead of nothing.
 function isImageLike(type: string | null | undefined): boolean {
@@ -87,8 +64,7 @@ export function useChatComposerAttachments({
   /** Set when this server cannot store attachments; paste and drop say it. */
   unavailableReason?: string | null;
 }) {
-  const attachmentDraftsRef = useRef(new Map<string, PendingChatImageAttachment[]>());
-  const [attachmentDrafts, setAttachmentDrafts] = useState(attachmentDraftsRef.current);
+  const { drafts: attachmentDrafts, store: attachmentDraftsStore } = useChatAttachmentDrafts();
   const imageAttachments = attachmentDrafts.get(draftKey) ?? EMPTY_ATTACHMENTS;
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const activeDraftKeyRef = useRef(draftKey);
@@ -103,15 +79,8 @@ export function useChatComposerAttachments({
   const setImageAttachments = useCallback((update: (
     previous: PendingChatImageAttachment[],
   ) => PendingChatImageAttachment[]) => {
-    const current = attachmentDraftsRef.current.get(draftKey) ?? EMPTY_ATTACHMENTS;
-    const next = update(current);
-    if (next === current) return;
-    const drafts = new Map(attachmentDraftsRef.current);
-    if (next.length > 0) drafts.set(draftKey, next);
-    else drafts.delete(draftKey);
-    attachmentDraftsRef.current = drafts;
-    setAttachmentDrafts(drafts);
-  }, [draftKey]);
+    attachmentDraftsStore.update(draftKey, update);
+  }, [attachmentDraftsStore, draftKey]);
 
   const openImagePicker = useCallback(() => {
     imageInputRef.current?.click();
@@ -120,7 +89,7 @@ export function useChatComposerAttachments({
   const clearImageAttachments = useCallback(() => {
     setImageAttachments((previous) => {
       for (const attachment of previous) {
-        revokePreviewUrl(attachment.previewUrl);
+        revokeAttachmentPreview(attachment.previewUrl);
       }
       return [];
     });
@@ -137,7 +106,7 @@ export function useChatComposerAttachments({
         // An image already uploading goes out with its message.
         return previous;
       }
-      revokePreviewUrl(match.previewUrl);
+      revokeAttachmentPreview(match.previewUrl);
       return previous.filter((attachment) => attachment.id !== attachmentId);
     });
   }, [setImageAttachments]);
@@ -173,7 +142,7 @@ export function useChatComposerAttachments({
         if (!sent.has(attachment.file)) {
           return true;
         }
-        revokePreviewUrl(attachment.previewUrl);
+        revokeAttachmentPreview(attachment.previewUrl);
         return false;
       });
     });
@@ -264,7 +233,7 @@ export function useChatComposerAttachments({
       if (problem || file.type !== "text/markdown") {
         return false;
       }
-      const current = attachmentDraftsRef.current.get(draftKey) ?? EMPTY_ATTACHMENTS;
+      const current = attachmentDraftsStore.get(draftKey);
       if (current.filter((attachment) => attachment.page).length >= MAX_STAGED_SENT_PAGES) {
         showStatus(`A message can carry up to ${MAX_STAGED_SENT_PAGES} pages.`, "info", 4000);
         return false;
@@ -277,7 +246,7 @@ export function useChatComposerAttachments({
       setImageAttachments((previous) => [...previous, { id, file, previewUrl: "", page }]);
       return true;
     },
-    [draftKey, isInputLocked, onAttachmentsAdded, setImageAttachments, showStatus, unavailableReason],
+    [attachmentDraftsStore, draftKey, isInputLocked, onAttachmentsAdded, setImageAttachments, showStatus, unavailableReason],
   );
 
   const handleImageInputChange = useCallback(
@@ -368,15 +337,6 @@ export function useChatComposerAttachments({
     [attachImageFiles, isInputLocked, showStatus],
   );
 
-  useEffect(() => {
-    return () => {
-      for (const attachments of attachmentDraftsRef.current.values()) {
-        for (const attachment of attachments) revokePreviewUrl(attachment.previewUrl);
-      }
-      attachmentDraftsRef.current.clear();
-    };
-  }, []);
-
   return {
     attachImageFiles,
     attachSentPage,
@@ -385,6 +345,7 @@ export function useChatComposerAttachments({
     handleComposerDrop,
     handleComposerPaste,
     handleImageInputChange,
+    hasSendingAttachments: imageAttachments.some(attachment => attachment.sending),
     imageAttachments,
     imageInputRef,
     markImageAttachmentsSending,
