@@ -6622,6 +6622,47 @@ mod tests {
         assert!(!skill.contains("exact execution error"));
     }
 
+    /// The browser skill's notes on the Personal Browser and the owner-local tool live in its
+    /// `references/learning-and-local-browsers.md`, which a browser turn cannot open: each turn
+    /// that has one of those browsers reads what the notes say in its own run text.
+    #[test]
+    fn the_run_text_says_what_the_skills_notes_on_the_local_browsers_say() {
+        let notes = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/instafy/.agents/skills/instafy-browser-automation/references/learning-and-local-browsers.md"
+        ));
+        assert!(notes.contains("## Personal Browser MCP"));
+        assert!(notes.contains("## Owner-local read-only observation"));
+        for said in [
+            "`status`, `snapshot`, `navigate`, `click`, `type`, `press`, `scroll`, `request_human_input`, `list_tabs`, `open_tab`, `select_tab`, and `close_tab`",
+            "Do not invoke Personal Browser through shell commands.",
+            "Every page tool acts on the tab on screen.",
+            "at most three of your tabs can be open, and each new tab asks the user for its own site approval",
+            "the user's own tab cannot be closed",
+            "Reuse a tab with `navigate` when that is enough, close tabs you no longer need, and never silently switch",
+            "Snapshot again before every subsequent indexed action and after navigation, scrolling, or DOM changes.",
+            "Stop on a 423 response because the user paused control.",
+            "Stop on 401 because the session capability was rotated or revoked; do not inspect or retry the token.",
+        ] {
+            assert!(
+                PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS.contains(said),
+                "{said}"
+            );
+        }
+        for said in [
+            "`instafy_local_browser.observe`",
+            "one public HTTP(S) URL in a fresh headless browser",
+            "count matching elements, read bounded text and computed CSS",
+            "save a PNG under `artifacts/browser/`",
+            "no saved login state and cannot click, type, run arbitrary JavaScript, or access non-HTTP(S) URLs",
+        ] {
+            assert!(
+                LOCAL_BROWSER_DEVELOPER_INSTRUCTIONS.contains(said),
+                "{said}"
+            );
+        }
+    }
+
     /// Octo opens Instafy's browser without a press, but nothing in a browser
     /// turn's run-level policy may tell it to skip the browser's own site and
     /// action prompts, or claim Studio grants routine browsing for it.
