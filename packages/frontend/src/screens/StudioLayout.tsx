@@ -73,8 +73,12 @@ import { WorkspaceHydratingFrame } from "./studio/components/WorkspaceHydratingF
 import { MobileBottomDock } from "./studio/components/MobileBottomDock";
 import { ProjectLauncher } from "./studio/components/ProjectLauncher";
 import { ChatPanel } from "./studio/components/ChatPanel";
-import { WaitingBrowserPrompts } from "./studio/components/WaitingBrowserPrompts";
-import { conversationSurfaceScope, showPromptView } from "../workspace/conversationSurfaces";
+import {
+  chatReadingOwnPrompts,
+  openChatAwaitingOk,
+  WaitingBrowserPrompts,
+  withChatsAwaitingOk,
+} from "./studio/components/WaitingBrowserPrompts";
 import {
   ControllerNoticeActionsProvider,
   type ControllerNoticeActionsContextValue,
@@ -700,15 +704,14 @@ function StudioLayoutInner() {
   // The chats where a prompt of the person's browser turn waits, off screen
   // (WaitingBrowserPrompts): their tabs say Approve.
   const [chatsAwaitingOk, setChatsAwaitingOk] = useState<ReadonlySet<string>>(() => new Set());
-  const openChatAwaitingOk = useCallback(({ conversationId, localId }: { conversationId: string; localId: string | null }) => {
+  const updateConversationSurfaces = conversationSurfaces.update;
+  const viewChatAwaitingOk = useCallback((chat: { conversationId: string; localId: string | null }) => {
     if (!activeProjectId) return;
-    // Its prompt shows in the chat and in its Browser view, not over a file or a site.
-    if (localId) conversationSurfaces.update(conversationSurfaceScope(currentUserId, activeProjectId, localId), showPromptView);
-    navigateToDestination({ kind: "conversation", projectId: activeProjectId, conversationId: localId, conversationControllerId: conversationId });
-  }, [activeProjectId, conversationSurfaces, currentUserId, navigateToDestination]);
+    openChatAwaitingOk({ userId: currentUserId, projectId: activeProjectId, chat,
+      updateSurfaces: updateConversationSurfaces, navigate: navigateToDestination });
+  }, [activeProjectId, currentUserId, navigateToDestination, updateConversationSurfaces]);
   const organizationTabActions = {
-    tabs: chatsAwaitingOk.size === 0 ? organizationTabs.tabs : organizationTabs.tabs.map(tab =>
-      tab.controllerId && chatsAwaitingOk.has(tab.controllerId.toLowerCase()) ? { ...tab, attention: true } : tab),
+    tabs: withChatsAwaitingOk(organizationTabs.tabs, chatsAwaitingOk),
     activeId: activeProjectId && activeConversationId ? organizationChatId(activeProjectId, activeConversationId) : null,
     onSelect: (id: string) => {
       const tab = organizationTabs.tabs.find(item => item.id === id);
@@ -2190,9 +2193,8 @@ function StudioLayoutInner() {
         projectId={activeProjectId}
         runs={runs}
         chats={conversations}
-        // A job thread's tab does not read its chat's prompts; the chat's own tab does.
-        chatOnScreen={activeWorkspaceTab?.kind === "jobThread" ? null : visibleConversationControllerId}
-        onView={openChatAwaitingOk}
+        chatOnScreen={chatReadingOwnPrompts(activeWorkspaceTab?.kind, visibleConversationControllerId)}
+        onView={viewChatAwaitingOk}
         onWaitingChange={setChatsAwaitingOk}
       />
       <Status />

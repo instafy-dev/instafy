@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getBuiltInAssistantDisplayName } from "../../../assistants/localBuiltInAssistantCatalog";
 import { isDefaultConversationTitle } from "../../../conversations/conversationAutoTitle";
+import type { StudioDestination } from "../../../navigation/studioNavigation";
 import { toastChatName } from "../../../notifications/useNotificationCenter";
 import type { RuntimeSharedBrowserApprovalRequest } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
 import type { RunRecord } from "../../../types";
 import { generateUUID } from "../../../utils/uuid";
+import {
+  conversationSurfaceScope,
+  showPromptView,
+  type ConversationSurfaces,
+} from "../../../workspace/conversationSurfaces";
 import { BROWSER_AGENT_DEFAULT_NAME } from "./browserAgentTabs";
 import { extractAgentIdentityFromMetadata } from "./chatAssistantIdentity";
 import {
@@ -22,6 +28,14 @@ export type WaitingPromptChat = { localId: string; controllerId?: string | null;
 const AGENT_NAME_MAX_CHARS = 40;
 
 /**
+ * How long a prompt a read lane stopped holding still counts as waiting,
+ * unless its time ran out: a lane whose grant is renewed (every few minutes)
+ * reads its prompt again from nothing, and the toast and the tab's Approve do
+ * not blink, nor a closed toast come back, meanwhile.
+ */
+export const WAITING_PROMPT_REREAD_GRACE_MS = 2_000;
+
+/**
  * What the toast says: who waits and in which chat, by the chat's name, never
  * the step, the page or the site the prompt is about.
  */
@@ -30,6 +44,45 @@ export function waitingPromptToastText(agentName: string, chatName: string | nul
   return shown
     ? `${agentName} is waiting for your OK in “${shown}”.`
     : `${agentName} is waiting for your OK in another chat.`;
+}
+
+/**
+ * The chat whose own prompts are on screen, read by its chat panel: the chat
+ * shown, unless it shows as a job thread, whose panel does not read them.
+ */
+export function chatReadingOwnPrompts(
+  activeTabKind: string | null | undefined,
+  visibleConversationControllerId: string | null,
+): string | null {
+  return activeTabKind === "jobThread" ? null : visibleConversationControllerId;
+}
+
+/** The open chats' tabs, Approve on those a prompt waits in (`waiting`: lowercased controller ids). */
+export function withChatsAwaitingOk<T extends { controllerId?: string | null }>(
+  tabs: T[],
+  waiting: ReadonlySet<string>,
+): (T & { attention?: boolean })[] {
+  if (waiting.size === 0) return tabs;
+  return tabs.map((tab) => {
+    const controllerId = tab.controllerId?.trim().toLowerCase();
+    return controllerId && waiting.has(controllerId) ? { ...tab, attention: true } : tab;
+  });
+}
+
+/**
+ * View on a waiting prompt's toast: opens its chat where the prompt shows,
+ * Chat in front, or its Browser view if that was in front (never a file or a
+ * site, which would hide it).
+ */
+export function openChatAwaitingOk({ userId, projectId, chat, updateSurfaces, navigate }: {
+  userId: string | null;
+  projectId: string;
+  chat: { conversationId: string; localId: string | null };
+  updateSurfaces: (scope: string | null, change: (state: ConversationSurfaces) => ConversationSurfaces) => void;
+  navigate: (destination: StudioDestination) => void;
+}): void {
+  if (chat.localId) updateSurfaces(conversationSurfaceScope(userId, projectId, chat.localId), showPromptView);
+  navigate({ kind: "conversation", projectId, conversationId: chat.localId, conversationControllerId: chat.conversationId });
 }
 
 /** The AI the run is for, by the name the chat shows it with. */
@@ -48,7 +101,8 @@ function runAgentName(metadata: Record<string, unknown>): string {
 /**
  * Reads the prompt of one running browser turn, with a grant that can only
  * read it: nothing here answers a prompt. It reports the prompt's id while one
- * waits, and nothing of what it is about.
+ * waits (and through a re-read, `WAITING_PROMPT_REREAD_GRACE_MS`), and nothing
+ * of what it is about.
  */
 function WaitingBrowserPromptLane({ projectId, userId, target, browserSessionId, onChange }: {
   projectId: string;
@@ -73,10 +127,33 @@ function WaitingBrowserPromptLane({ projectId, userId, target, browserSessionId,
     acceptsRequest: forThisRun,
   });
   const approvalId = lane.pending?.request.approvalId ?? null;
+  const expiresAtMs = lane.pending?.request.expiresAtMs ?? null;
+  const [waitingId, setWaitingId] = useState<string | null>(null);
+  const lastPrompt = useRef<{ approvalId: string; expiresAtMs: number } | null>(null);
   useEffect(() => {
-    onChange(target.runId, approvalId);
+    if (approvalId && expiresAtMs !== null) {
+      lastPrompt.current = { approvalId, expiresAtMs };
+      setWaitingId(approvalId);
+      return;
+    }
+    const gone = () => {
+      lastPrompt.current = null;
+      setWaitingId(null);
+    };
+    const leftMs = lastPrompt.current
+      ? Math.min(WAITING_PROMPT_REREAD_GRACE_MS, lastPrompt.current.expiresAtMs - Date.now())
+      : 0;
+    if (leftMs <= 0) {
+      gone();
+      return;
+    }
+    const timer = window.setTimeout(gone, leftMs);
+    return () => window.clearTimeout(timer);
+  }, [approvalId, expiresAtMs]);
+  useEffect(() => {
+    onChange(target.runId, waitingId);
     return () => onChange(target.runId, null);
-  }, [approvalId, onChange, target.runId]);
+  }, [onChange, target.runId, waitingId]);
   return null;
 }
 
@@ -155,8 +232,10 @@ export function WaitingBrowserPrompts({
   chatsRef.current = chats;
   const onViewRef = useRef(onView);
   onViewRef.current = onView;
-  // One toast per prompt: it goes when the prompt does, and once closed it
-  // does not come back for the same prompt (the chat's tab still says Approve).
+  // One toast per prompt: it goes when the prompt does. It has no timeout, so
+  // a toast that takes its place puts it back in line (StatusProvider), and
+  // once the person closes it, it does not come back for the same prompt (the
+  // chat's tab still says Approve).
   const toasts = useRef(new Map<string, string>());
   useEffect(() => {
     const live = new Set(waiting.map(({ approvalId }) => approvalId));
