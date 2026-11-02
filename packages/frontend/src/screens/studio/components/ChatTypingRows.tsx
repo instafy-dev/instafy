@@ -157,8 +157,12 @@ export function ChatTypingRows({
     options?: AssistantAvatarRenderOptions,
   ) => JSX.Element;
 }) {
-  const showAssistantStatus =
-    isAssistantTyping && !isAssistantTypingCoveredByJobThreadPreview && !suppressAssistantStatus;
+  // The newest row already says what the turn is doing (its own line, or a
+  // routed card's "Opening Instafy's browser…"): it holds the place, so this
+  // row shows nothing, not even the spacer below, which would be a second
+  // face with no words under that row.
+  const coveredByNewestRow = isAssistantTyping && isAssistantTypingCoveredByJobThreadPreview;
+  const showAssistantStatus = isAssistantTyping && !coveredByNewestRow && !suppressAssistantStatus;
   const usesCanonicalOcto = usesCanonicalOctoAvatar({
     handle: typingAgentHandle,
     avatarSeed: typingAgentAvatarSeed,
@@ -258,7 +262,8 @@ export function ChatTypingRows({
     }
     if (
       (latestDisplayedMessageId ?? null) !== statusAnchorMessageIdRef.current ||
-      statusAnchorEndsTurnRef.current
+      statusAnchorEndsTurnRef.current ||
+      coveredByNewestRow
     ) {
       setLingeringAssistantStatus(null);
       return;
@@ -271,6 +276,7 @@ export function ChatTypingRows({
     return () => window.clearTimeout(timeoutId);
   }, [
     assistantStatusSnapshot,
+    coveredByNewestRow,
     latestDisplayedMessageEndsActiveTurn,
     latestDisplayedMessageId,
     lingeringAssistantStatus,
@@ -294,7 +300,7 @@ export function ChatTypingRows({
 
   const assistantStatusToRender = showAssistantStatus
     ? assistantStatusSnapshot
-    : lingeringAssistantStatus;
+    : coveredByNewestRow ? null : lingeringAssistantStatus;
   const assistantAvatarMotion =
     showAssistantStatus && assistantStatusToRender?.phase === "thinking" ? "thinking" : "idle";
   // Two lanes that wear the same face (one persona in two plans) draw it

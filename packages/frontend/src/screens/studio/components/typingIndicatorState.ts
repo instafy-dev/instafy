@@ -10,6 +10,8 @@ import {
 } from "./assistantStatusHeuristics";
 import { getMessageType } from "./chatMessageMetadata";
 import { isAutomaticRetryPending } from "./automaticRetryFold";
+import { browserRequestFromMessage, browserRequestKey } from "./browserRequest";
+import { routedBrowserWaitingKeys } from "./routedBrowserFold";
 import {
   coerceThreadMessages,
   isFinalAgentOutcomeMessage,
@@ -171,9 +173,19 @@ function resolveTypingRuns(activeRuns: readonly RunRecord[], messages: readonly 
 }
 
 /**
+ * A card the routing step posted for a message Octo sent straight to the
+ * browser (`browserRequest.routed`). Its job runs no model turn: the card is
+ * all that turn says (routedBrowserFold.ts).
+ */
+function isRoutedBrowserCard(message: ChatMessage): boolean {
+  return message.role === "assistant" && browserRequestFromMessage(message)?.routed === true;
+}
+
+/**
  * The job and run ids of the reply that ended a turn, when the newest row is
- * one: a job thread that already holds its reply, or a plain reply (a turn
- * with no tool use posts no thread). Null for anything else.
+ * one: a job thread that already holds its reply, a plain reply (a turn with
+ * no tool use posts no thread), or a routed card, the whole of its routing
+ * turn. Null for anything else.
  */
 function resolveTurnOutcomeIds(latestDisplayedMessage: ChatMessage): string[] | null {
   if (isJobThreadRow(latestDisplayedMessage)) {
@@ -181,7 +193,7 @@ function resolveTurnOutcomeIds(latestDisplayedMessage: ChatMessage): string[] | 
     if (threadMessages.length === 0 || resolveThreadRunStatusFromMessages(threadMessages).phase !== "completed") {
       return null;
     }
-  } else if (!isFinalAgentOutcomeMessage(latestDisplayedMessage)) {
+  } else if (!isFinalAgentOutcomeMessage(latestDisplayedMessage) && !isRoutedBrowserCard(latestDisplayedMessage)) {
     return null;
   }
   const ids = [
@@ -196,17 +208,30 @@ function outcomeNamesRun(outcomeIds: readonly string[], run: RunRecord): boolean
 }
 
 /**
+ * Whether the newest row is a routed card that stands for its browser turn:
+ * Studio sent the person's words on by itself, and that turn has shown
+ * nothing yet (the fold's waiting cards, routedBrowserFold.ts).
+ */
+function isRoutedCardStandingIn(card: ChatMessage, messages: readonly ChatMessage[]): boolean {
+  return isRoutedBrowserCard(card) && routedBrowserWaitingKeys(messages).has(browserRequestKey(card));
+}
+
+/**
  * How the newest transcript row covers the assistant typing row.
  *
  * - `live`: the row is a job thread still running. It shows the run's state
  *   itself (rail and caption), so a typing row under it would say it twice.
  *   So is a failed turn Instafy is trying again by itself whose retry has
- *   shown nothing yet: it reads "Trying again…".
- * - `answered`: the row is the turn's reply (inside its job thread, or a plain
- *   reply when the turn used no tools), and every run still marked active is
- *   that turn's own run, whose record has not caught up yet. A typing row here
- *   would say "Thinking…" (or the turn's last reasoning title) under the
- *   finished answer, and then drop out seconds later.
+ *   shown nothing yet: it reads "Trying again…". So is a routed card whose
+ *   browser turn is on its way: it is that turn's one line, "Opening
+ *   Instafy's browser…", until the turn shows something (routedBrowserFold.ts),
+ *   and covers the typing row as that turn's own row then does, whatever else
+ *   runs; a "Starting…" under it was a second Octo for the same turn.
+ * - `answered`: the row is the turn's reply (inside its job thread, a plain
+ *   reply when the turn used no tools, or a routed card), and every run still
+ *   marked active is that turn's own run, whose record has not caught up yet.
+ *   A typing row here would say "Thinking…" (or the turn's last reasoning
+ *   title) under the finished answer, and then drop out seconds later.
  * - `none`: anything else, including a different run starting after the reply.
  *
  * `activeRuns` may hold silent skill-mode evaluations; they are left out here
@@ -233,6 +258,9 @@ export function resolveJobThreadTypingCoverage(
     if (resolveThreadRunStatusFromMessages(threadMessages).phase !== "completed") {
       return "live";
     }
+  }
+  if (isRoutedCardStandingIn(latestDisplayedMessage, messages)) {
+    return "live";
   }
   const outcomeIds = resolveTurnOutcomeIds(latestDisplayedMessage);
   const typingRuns = resolveTypingRuns(activeRuns, messages);
