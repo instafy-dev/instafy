@@ -606,9 +606,10 @@ A list (a select, a combobox or a listbox) is named by its own label ("Start"),
 or by the option it shows when it has none, never by its options run together:
 the shared rules read what a select draws as the option it holds, and a label
 that holds the list is read without the list's options. Octo sets a select
-with `choose` and an option's label as the open list shows it (case, accents
-and spacing aside), never by clicking it; a list that holds several options at
-once is left to the person. An option the list does not have, or one the page
+with `choose` and an option's label as the open list shows it (its `option`;
+case, accents and spacing aside), never by clicking it; a list that holds
+several options at once is left to the person. An option the list does not
+have, or one the page
 turned off, chooses nothing, and the answer lists the options, except on a
 page that may show a secret. The option is chosen by its label and its place
 together, so a list that moves its options meanwhile chooses nothing. A choice
@@ -837,13 +838,16 @@ a fact no page read this turn states, and only steps the turn started). The
 `instafy-web-research` skill points to (a research turn without the browser
 skill prints just that section with one command), says how every reader finds a
 page: an address the person, a skill or a search result gave, a link on a page
-read, or the official site's home page, never a search engine or a guessed
-path; a missing page's own site search; a page that fails (busy, blank or an
+read (its links printed with its text), or the official site's home page, never
+a search engine or a guessed path; a missing page's own site search; a page
+that fails (busy, blank or an
 error page such as a 504) sends the turn to the place's own site at once, in the
 same turn, and then to another official source; facts from a place's
 own page, and a route from the operator's journey planner with its stations
-chosen, not a listing or a kiosk page; "not checked" on anything not read this
-turn; a comparison's models, those a page's menu names included, each read on
+chosen, for the day and time the person travels (a daytime hour when they gave
+none) and saying which, not a listing or a kiosk page; "not checked" on
+anything not read this turn; a comparison's models, those a page's menu names
+included, each read on
 its own page; and a cookie banner's refusal, so the banner does not cover the
 page. A sign-in, a bot check, a paywall or a refused read ends that page, never
 the task: nothing a turn carries tells it to stop there, so neither a card's
@@ -1270,10 +1274,12 @@ a page that had loaded: while it waited, Instafy's browser could not be reached
 by the next step, and it would have landed after the step ended. So the step
 opened nothing, and it fails with "The site did not answer in time, so nothing
 was opened and the page is still blank." (or "…and the tab still shows the page
-it showed before."), followed by "Open the place's own site now (the venue's or
-the operator's), or another official source if this was it.": never the blank
-page's "Call navigate", which sent Octo to load the same site again, nor the
-page the tab still shows, which was read as that step's page, nor the click's
+it showed before."), followed by "Don't open this address again in this turn:
+open the venue's, shop's or operator's own site now, else another official
+source.": never the blank page's "Call navigate", which sent Octo to load the
+same site again, nor "Open the place's own site now", which a turn read as the
+site that had just failed and opened again, nor the page the tab still shows,
+which was read as that step's page, nor the click's
 own timeout. Its line reads as the step it tried ("Tried opening <site>" for a
 navigation). Whether the site answered is judged by the load's own request,
 never by the tab's address, which a page's script may change while the load
@@ -1310,6 +1316,15 @@ per control took about 9 s locally for a choice, and 12 s on the operator's own
 site; one call per read takes about 2 s, with the same read, control for
 control. The step-time fixture counts what goes to the page on the browser's
 own socket: one description for a read, at most three for a choice.
+
+A Shared or Personal Browser turn's tools are in its first request, never
+deferred behind a tool search: Codex defers a server's tools for a model that
+supports tool search, and in a code-mode turn they were then left out of the
+`exec` tool's description, so every fresh browser turn's first step listed
+`ALL_TOOLS` to find them. The bounded browser servers opt out of that
+(`omit_tools_from = ["deferred"]`), as the device broker of a granted turn does,
+and the run text names the tools as a turn calls them
+(`tools.mcp__instafy_shared_browser__snapshot({})` in a code cell).
 
 In a Shared or Personal Browser turn, a code-mode cell that waits on a browser
 step yields to the model only after the browser server's tool timeout (180
@@ -1725,8 +1740,14 @@ A follow-up typed in the chat keeps them too. A message from the chat
 composer is an ordinary message, also right after a browser turn: the routing
 step decides whether it goes to the browser, as for any message, and a message
 that carries on this chat's browser work ("Now find how to get there by
-metro", "keep going") goes there, whether or not that work found its answer
-(the browser skill's "Routing preflight"). A
+metro", "keep going") goes there, whether or not that work found its answer,
+and so does one that fills in, checks again or goes on with that work while it
+needs what a page here says, when all it needs is what that work found ("Fill
+in what's still missing.", as `browser_then_build`). The browser turn's task is
+the person's words, and it has no shell, so a follow-up that also needs a file
+here or another chat's words ("Fill in the delivery instructions from
+notes.md") stays with Octo's building turn, which reads them and names them in
+its card (the browser skill's "Routing preflight"). A
 browser turn has only the browser's tools, so a message that asks Octo to build
 ("Put the hours and the route on a small page I can share") is made by a
 building turn, right away or once the browser has done its part
@@ -2305,7 +2326,13 @@ unless the policy is `"covered"`.
   whose findings name no page it read (`browser_hand_back_nothing_read`). The
   runtime shows that record to the building turn as quoted page data: not the
   person's words, not their consent, and no instruction; the turn says what it
-  built with it. Any other browser turn reaches the building thread the same
+  built with it. Its own words name nothing that was asked, so the skills it
+  loads, and those its prompt names on a restored thread, are picked from the
+  request it carries on: `personRequest`, else what the browser turn was asked.
+  Research that ends in a page goes to the browser first, so a hand-back is
+  often its chat's first building turn, on a new thread: the page skill, with
+  its starter and its card, reaches it from the person's words.
+  Any other browser turn reaches the building thread the same
   way, as data: each building job's lease lists the chat's finished browser
   turns since the building thread's last turn (`browser_turns_since`: the
   newest six of this agent's, never the one a hand-back's record carries, and

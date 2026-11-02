@@ -642,9 +642,11 @@ fn a_page_that_fails_sends_the_turn_to_the_places_own_site_in_the_same_turn() {
 }
 
 /// A journey planner's station list was clicked and asked as a commit, and no step could pick a station. The Shared
-/// Browser section says to set a list with `choose` and its option's label, never by clicking it, and that choosing
-/// does not send the form though some pages send it when a list changes, within the part a snapshot carries and
-/// without pushing the sign-in rules out of it. An unedited earlier copy is upgraded.
+/// Browser section says to set a list with `choose` and the field the tool takes for the option's label, never by
+/// clicking it, and that choosing does not send the form though some pages send it when a list changes, within the
+/// part a snapshot carries and without pushing the sign-in rules out of it. A turn told "its option's label" sent a
+/// `label` field, which the tool refused (a local test, Nov 2), so the skill names the field as the Shared Browser's
+/// server lists it, as the turn's run text does. An unedited earlier copy is upgraded.
 #[test]
 fn the_browser_skill_sets_a_list_with_choose_never_by_clicking_it() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -653,8 +655,26 @@ fn the_browser_skill_sets_a_list_with_choose_never_by_clicking_it() {
         .expect("section");
     let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
     let section = flat(&BROWSER_SKILL[start..end]);
-    let line = "Set a list (a select) with `choose` and its option's label, never by clicking it. Choosing does not send the form, though some pages send it when a list changes; the form's own button sends it, and asks.";
-    assert!(section.contains(line), "{section}");
+    // The field `choose` takes besides its target, as its server lists it.
+    let choose = crate::shared_browser::shared_browser_mcp_tools()
+        .into_iter()
+        .find(|tool| tool.name == "choose")
+        .expect("the Shared Browser serves choose");
+    let fields: Vec<&str> = choose.input_schema["required"]
+        .as_array()
+        .expect("required fields")
+        .iter()
+        .filter_map(JsonValue::as_str)
+        .filter(|field| !matches!(*field, "index" | "snapshotId"))
+        .collect();
+    assert_eq!(fields, ["option"]);
+    let line = format!(
+        "Set a list (a select) with `choose` and `{}`, the option's label as the list shows it, never by clicking it. Choosing does not send the form, though some pages send it when a list changes; the form's own button sends it, and asks.",
+        fields[0]
+    );
+    assert!(section.contains(&line), "{section}");
+    assert!(!flat(BROWSER_SKILL).contains("its option's label"));
+    let line = line.as_str();
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(line));
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
@@ -963,6 +983,243 @@ fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() 
     let snapshot = format_browser_routing_preflight_snapshot(tmp.path()).expect("snapshot");
     assert!(snapshot.contains(section.trim_end()), "{snapshot}");
     assert!(!snapshot.contains("(truncated)"), "{snapshot}");
+}
+
+/// A follow-up on this chat's browser work goes to the browser, also when it needs what a page
+/// here says. A local test, Nov 2: after a comparison's browser turn and its page, "Fill in
+/// what's still missing." stayed `direct`, because the routing section kept a message that
+/// needs a page here with the building turn, which could not open the browser in its turn and
+/// said so; "keep going" stayed there too. Filling in, checking again or going on with that
+/// work is `browser_then_build`, while a request to make a page from what the browser found,
+/// with no site to use first, stays `direct`. The routing step reads the whole section, and an
+/// unedited earlier copy is upgraded.
+#[test]
+fn a_follow_up_on_the_chats_browser_work_browses_even_when_it_needs_a_page_here() {
+    let start = BROWSER_SKILL
+        .find("\n## Routing preflight\n")
+        .expect("routing section")
+        + 1;
+    let section = &BROWSER_SKILL[start..];
+    let stay = section
+        .lines()
+        .find(|line| line.starts_with("- Stay `direct`"))
+        .expect("the line that keeps a message direct");
+    assert!(
+        stay.ends_with(
+            "the building turn reads it and names it in a card, unless all it needs is what this chat's browser work found: filling in, checking again or going on with that work is `browser_then_build`."
+        ),
+        "{stay}"
+    );
+    // Making a page from what the browser found, with no site to use first, is still a build.
+    assert!(section.contains("(\"on a map\", \"put this on a page\") is `direct`."));
+
+    // The routing prompt for such a follow-up carries the line, whole.
+    let tmp = scaffolded_space();
+    for request in ["Fill in what's still missing.", "keep going"] {
+        let job = test_lease_job(
+            Some("feature"),
+            json!({ "prompt_text": request, "metadata": {} }),
+        );
+        let routes = browser_routing_snapshot_for_job(&job, tmp.path(), request)
+            .expect("a follow-up is offered the browser routes");
+        assert!(!routes.contains("(truncated)"), "{routes}");
+        let prompt = build_agent_routing_preflight_prompt_with_browser_routes(
+            tmp.path(),
+            request,
+            None,
+            None,
+            Some(&routes),
+        );
+        assert!(prompt.contains(stay), "{request}");
+    }
+
+    let previous = include_str!("legacy/browser-automation-v25.md");
+    assert!(!previous.contains("filling in, checking again"));
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+}
+
+/// A follow-up on this chat's browser work goes to the browser only when all it needs is what that
+/// work found. A routed browser turn's task is the person's own words, and the turn has no shell, so
+/// it never sees a file here or another chat: "Fill in the delivery instructions from notes.md, then
+/// send it." after the browser filled a form stays with the building turn, which reads the file and
+/// names what it says in a card. The line names its own `direct` conditions (a site that runs in
+/// this space, the person saying not to use the browser, attachments) first and ends with that
+/// exception, so none of them reads as one of `browser_then_build`'s.
+#[test]
+fn a_follow_up_goes_to_the_browser_only_with_what_its_browser_work_found() {
+    let start = BROWSER_SKILL
+        .find("\n## Routing preflight\n")
+        .expect("routing section")
+        + 1;
+    let section = &BROWSER_SKILL[start..];
+    assert!(section.contains(
+        "That browser turn sees only those words and this chat's earlier browser turns."
+    ));
+    let stay = section
+        .lines()
+        .find(|line| line.starts_with("- Stay `direct`"))
+        .expect("the line that keeps a message direct");
+    assert!(
+        stay.starts_with(
+            "- Stay `direct`, even when the message names Instafy's browser, when the site runs in this space (a preview card), the person says not to use the browser, or it has attachments. Also when the browser part needs what only this space or another chat holds"
+        ),
+        "{stay}"
+    );
+    assert!(
+        stay.contains(
+            "names it in a card, unless all it needs is what this chat's browser work found: filling in"
+        ),
+        "{stay}"
+    );
+    assert!(
+        !stay.contains("unless the message carries on this chat's browser work:"),
+        "{stay}"
+    );
+    // The exception ends the line: nothing after it reads as `browser_then_build`.
+    let exception = stay.find(", unless ").expect("the exception");
+    assert!(!stay[exception..].contains(". "), "{}", &stay[exception..]);
+    assert!(stay.ends_with("is `browser_then_build`."), "{stay}");
+
+    // A routed card carries the person's words and nothing else from this space.
+    let words = "Fill in the delivery instructions from notes.md, then send it.";
+    let card = browser_request::BrowserRequest::routed(words, true).expect("a routed card");
+    let request =
+        card.message().metadata.expect("card metadata")["details"]["browserRequest"].clone();
+    assert_eq!(request["task"], json!(words));
+}
+
+/// A site that failed is not tried again the same way, and a browser turn knows which readers
+/// it has. A local test, Nov 2: a browser turn asked for a bookshop's opening hours opened a
+/// tourism site that never answered, opened the same address again, then looked through its
+/// tools for the research skill's `instafy web read` and `instafy web search` (a browser turn
+/// has neither) and replied with no hours, while the bookshop's own site answered in 5 s. The
+/// browser skill said to retry a failed tool call once, then say what did not work; it now says
+/// not to repeat it the same way, as a failed page ends that page, not the task. Two more lines
+/// of the skill, which a browser turn carries whole, said the same: "at most one repair attempt",
+/// and, when the first controller action fails, "say plainly what failed or use it to drive one
+/// small repair attempt". They go: a browser that cannot start is reported by its tool's error,
+/// and what did not work is said when nothing is left to try. The research skill, which a browser
+/// turn loads whole, says that a browser turn's readers are its browser tools and the `instafy`
+/// commands are a building turn's, within its loaded size. Unedited earlier copies of both are
+/// upgraded.
+#[test]
+fn a_failed_call_is_not_repeated_and_a_browser_turn_reads_with_its_browser_tools() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let browser = flat(BROWSER_SKILL);
+    assert!(browser.contains(
+        "If the tool returns an error, don't repeat it the same way: a failed page ends that page, not the task (\"Finding a page\" says what comes next)."
+    ));
+    for earlier in [
+        "retry it at most once",
+        "retry it once",
+        "at most one repair attempt",
+        "say plainly what failed",
+        "one small repair attempt",
+    ] {
+        assert!(!browser.contains(earlier), "{earlier}");
+    }
+    // What stands in their place: the tool's own error when the browser cannot start, and what did
+    // not work only when nothing is left to try.
+    for kept in [
+        "report the tool's concrete error if provisioning failed.",
+        "When nothing is left to try, tell the person in plain words what did not work",
+        "Do not fall into inspect/retry loops unless a direct attempt produced a concrete blocker.",
+        "Do not attempt the Shared controller in Personal or owner-local turns.",
+    ] {
+        assert!(browser.contains(kept), "{kept}");
+    }
+    let readers = "Read pages only with these readers (a browser turn's are its browser tools; the `instafy` commands are for Octo's building turns):";
+    assert!(RESEARCH_SKILL.contains(&format!("\n{readers}\n")));
+    assert!(
+        RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+        "{} bytes",
+        RESEARCH_SKILL.len()
+    );
+    // A browser turn's prompt carries it.
+    let tmp = scaffolded_space();
+    for transport in ["shared", "desktop-personal"] {
+        let prompt = fresh_prompt(
+            tmp.path(),
+            "Open visitporto.travel in your browser and find the opening hours of Livraria Lello.",
+            json!({ "browserTransport": transport }),
+        );
+        assert!(prompt.contains(readers), "{transport}");
+    }
+
+    for (relative, previous, current, earlier) in [
+        (
+            learn::BROWSER_AUTOMATION_RELATIVE_PATH,
+            include_str!("legacy/browser-automation-v25.md"),
+            BROWSER_SKILL,
+            "retry it at most\nonce",
+        ),
+        (
+            learn::WEB_RESEARCH_RELATIVE_PATH,
+            include_str!("legacy/web-research-v13.md"),
+            RESEARCH_SKILL,
+            "Read pages only with these readers:\n",
+        ),
+    ] {
+        assert!(previous.contains(earlier), "{relative}");
+        let skill = tmp.path().join(relative);
+        fs::write(&skill, previous).unwrap();
+        learn::ensure_project_memory_scaffold(tmp.path());
+        assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
+    }
+}
+
+/// A journey planner answers for the hour it plans: a turn that chose both stations and left
+/// the planner's day and time at "now", in the small hours, got a walk and a night bus, and its
+/// reply and page said no metro route was confirmed, without saying for when (a local test,
+/// Nov 2). A route is planned for the day and time the person travels, a daytime hour when they
+/// gave none, and the answer says which day and time it is for. In "Finding a page", within the
+/// part a snapshot carries, without pushing the sign-in rules out of it. An unedited earlier copy
+/// is upgraded.
+#[test]
+fn a_route_is_planned_for_the_day_and_time_the_person_travels() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let start = BROWSER_SKILL.find("## Finding a page").expect("section");
+    let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
+    let section = flat(&BROWSER_SKILL[start..end]);
+    let line = "- A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner, its stations chosen), not a listing or a kiosk page: those only lead to it. Plan a route for the day and time the person travels (a daytime hour when they gave none); say which day and time it is for.";
+    assert!(section.contains(line), "{section}");
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
+    assert!(carried.contains(line));
+    assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
+
+    let previous = include_str!("legacy/browser-automation-v25.md");
+    assert!(!previous.contains("the day and time the person travels"));
+    let tmp = scaffolded_space();
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+}
+
+/// An address comes from a link on a page the turn read, and a turn that printed only a slice of
+/// each page's text never saw them: it guessed three review addresses, each "Page not found",
+/// though a page it had read linked the review it wanted (a local test, Nov 2). "Finding a page"
+/// says to print a page's links with its text, within the part a snapshot carries, without
+/// pushing the sign-in rules out of it. An unedited earlier copy is upgraded.
+#[test]
+fn a_turn_prints_a_pages_links_with_its_text() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
+    assert!(carried.contains(
+        "- Open an address the person, a skill or a search result gave, a link on a page you read (print a page's links with its text), or the home page of the official site the task is about. Never a search engine or a guessed path."
+    ));
+    assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
+
+    let previous = include_str!("legacy/browser-automation-v25.md");
+    assert!(!previous.contains("print a page's links"));
+    let tmp = scaffolded_space();
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// The kinds of link-only site and guided mode: a `no-agents` site is never read or opened and the person is
@@ -1342,7 +1599,7 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
     for needle in [
         "## Finding a page",
         "For every reader, browser or not:",
-        "Open an address the person, a skill or a search result gave, a link on a page you read, or the home page of the official site the task is about.",
+        "Open an address the person, a skill or a search result gave, a link on a page you read (print a page's links with its text), or the home page of the official site the task is about.",
         "Never a search engine or a guessed path.",
         "A page that says it is missing (\"not found\", \"are you lost?\"): use that site's own search box or menu.",
         "A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.",
@@ -1442,7 +1699,7 @@ fn a_failed_page_ends_that_page_and_never_the_research() {
         assert!(!whole.contains(stop), "{stop}");
     }
     assert!(whole.contains(
-        "If the tool returns an error, retry it at most once, then say in plain words what did not work: a failed page ends that page, not the task (\"Finding a page\" says what comes next)."
+        "If the tool returns an error, don't repeat it the same way: a failed page ends that page, not the task (\"Finding a page\" says what comes next)."
     ));
 
     let tmp = scaffolded_space();

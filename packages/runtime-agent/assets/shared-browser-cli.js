@@ -3812,8 +3812,10 @@ const BUSY_PAGE_MESSAGE = "The page is still busy, so it could not be read yet. 
 // What a load answers whose site sent nothing back before the step stopped
 // waiting for it (its time ran out, or a click's own wait for the page did):
 // the tab still shows what it showed before, and Octo goes to the next source
-// in the same turn (the browser skill's "Finding a page").
-const UNANSWERED_NEXT_SOURCE = "Open the place's own site now (the venue's or the operator's), or another official source if this was it.";
+// in the same turn (the browser skill's "Finding a page"), never to the same
+// address again: a turn read "the place's own site" as the one that had just
+// failed, and opened it a second time.
+const UNANSWERED_NEXT_SOURCE = "Don't open this address again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
 const UNANSWERED_PAGE_MESSAGE = `The site did not answer in time, so nothing was opened and the page is still blank. ${UNANSWERED_NEXT_SOURCE}`;
 const UNANSWERED_LOADED_PAGE_MESSAGE = `The site did not answer in time, so nothing was opened and the tab still shows the page it showed before. ${UNANSWERED_NEXT_SOURCE}`;
 

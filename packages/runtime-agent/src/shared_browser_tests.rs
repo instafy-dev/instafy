@@ -3205,6 +3205,34 @@ async fn the_call_that_ends_the_run_names_its_step_in_its_answer() {
     assert_eq!(server.terminal_step.lock().await.take(), None);
 }
 
+/// The answer of a step whose site did not answer in time says not to open that address again
+/// in this turn, then where to go next, whatever page the tab still shows: a turn told "Open the
+/// place's own site now (the venue's or the operator's)" opened the address that had just failed
+/// a second time, 20 seconds each (a local test, Nov 2). Only the words ask it; nothing refuses
+/// a second visit.
+#[test]
+fn a_site_that_did_not_answer_says_not_to_open_it_again() {
+    let next = "Don't open this address again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
+    let source = SHARED_BROWSER_SCRIPT
+        .lines()
+        .find(|line| line.starts_with("const UNANSWERED_NEXT_SOURCE = "))
+        .expect("the next-source hint");
+    assert_eq!(source, format!("const UNANSWERED_NEXT_SOURCE = {next:?};"));
+    for message in ["UNANSWERED_PAGE_MESSAGE", "UNANSWERED_LOADED_PAGE_MESSAGE"] {
+        let line = SHARED_BROWSER_SCRIPT
+            .lines()
+            .find(|line| line.starts_with(&format!("const {message} = ")))
+            .unwrap_or_else(|| panic!("{message}"));
+        assert!(
+            line.starts_with(&format!(
+                "const {message} = `The site did not answer in time, so nothing was opened and "
+            )) && line.ends_with(" ${UNANSWERED_NEXT_SOURCE}`;"),
+            "{line}"
+        );
+    }
+    assert!(!SHARED_BROWSER_SCRIPT.contains("Open the place's own site now"));
+}
+
 /// A browser turn goes on past a step that failed on the page rather than on
 /// the person: a stale snapshot, a site that did not answer in time and a
 /// refused address each fail only their own call, and the next call (another

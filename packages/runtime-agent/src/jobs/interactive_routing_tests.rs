@@ -2,6 +2,7 @@
 //! the builder from the installed skills (a skill pack's own skill when one fits), and the hub, the
 //! router and an installed pack's skill all load whole within the project memory budget.
 
+use super::tests::{test_job_processor, test_lease_job};
 use super::*;
 use tempfile::tempdir;
 
@@ -259,4 +260,128 @@ fn a_page_written_by_hand_follows_light_and_dark() {
     fs::write(&path, &edited).unwrap();
     learn::ensure_project_memory_scaffold(root);
     assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+}
+
+/// `instafy preview open` takes the folder it runs in for the card's site: where opening the card
+/// starts it again, and the folder whose changes take a new picture for the card. Told to run it
+/// "from the site's folder", a comparison's turn ran it from the space's folder with the site's
+/// path in the serve command (`instafy bind serve sites/<slug>`), so the card's site was the whole
+/// space and another chat's build took a new picture of it. The card step's command goes into the
+/// site's folder itself and serves `.`, as the map skill's does. An unedited earlier copy of the
+/// hub is upgraded; an edited one is kept.
+#[test]
+fn a_pages_card_starts_inside_the_sites_own_folder() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hub =
+        include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
+    let previous = include_str!("legacy/interactive-artifacts-v7.md");
+    let step = r#"1. One command, run inside the site's folder, starts it so it outlives your turn and posts
+        its card: `(cd sites/<slug> && instafy preview open --title '<short title>' --serve-cmd
+        "<serve command>" --start --json)`, with `{port}` where the serve command takes its port. The
+        serve command is the builder skill's; a bound or plain site's is `instafy bind serve . --port
+        {port} --preview`."#;
+    assert!(flat(hub).contains(&flat(step)), "{hub}");
+    assert!(!hub.contains("from the site's folder"), "{hub}");
+    assert!(flat(previous).contains("1. One command, from the site's folder, starts it"));
+    assert!(
+        hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+        "{} bytes",
+        hub.len()
+    );
+
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    learn::ensure_project_memory_scaffold(root);
+    let path = root.join(learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
+    fs::write(&path, previous).unwrap();
+    learn::ensure_project_memory_scaffold(root);
+    assert_eq!(fs::read_to_string(&path).unwrap(), hub);
+    let edited = format!("{previous}\nLocal page preference.\n");
+    fs::write(&path, &edited).unwrap();
+    learn::ensure_project_memory_scaffold(root);
+    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+}
+
+/// A hand-back's own words are always the controller's one line, which names no page. Research
+/// that ends in a page goes to the browser first, so the hand-back is often its chat's first
+/// building turn: its skills were picked from that line, the browser skill and no page builder,
+/// and it wrote the page by hand, posted no card and replied with the page's path. Its skills come
+/// from the request it carries on: on a new thread its snapshot loads the hub, and on a restored
+/// one its hints name it. Without the person's words, what the browser turn was asked; any other
+/// turn, and a record the controller did not check, from its own words.
+#[test]
+fn a_hand_back_picks_its_skills_from_the_request_it_carries_on() {
+    let tmp = tempdir().expect("tmp");
+    learn::ensure_project_memory_scaffold(tmp.path());
+    let processor = test_job_processor(tmp.path());
+    let project_id = Uuid::new_v4();
+    let hand_back = "Continue building with what the browser turn found.";
+    let person = "Compare the three latest laptops of one maker: CPU, battery, weight and price, with two independent reviews each, as a comparison page.";
+    let restored = json!({"defaultThreadId": "existing-thread", "historyReplayRequired": false});
+    let prompt = |record: JsonValue, thread: Option<&JsonValue>| {
+        let mut job = test_lease_job(
+            Some("feature"),
+            json!({ "prompt_text": hand_back, "metadata": { "browserHandBack": record } }),
+        );
+        job.project_id = Some(project_id);
+        processor
+            .build_prompt_with_text(
+                &project_id,
+                &job,
+                tmp.path(),
+                hand_back,
+                true,
+                thread,
+                &[],
+                None,
+                None,
+            )
+            .expect("prompt should build")
+    };
+    let selected_tree = |prompt: &str| {
+        prompt
+            .split_once("## Persistent context tree (selected)\n")
+            .and_then(|(_, rest)| rest.split("\n## ").next())
+            .expect("the selected tree")
+            .to_string()
+    };
+    let hub_heading = format!("## Context: {HUB} (");
+    let record = |request: JsonValue, person_request: JsonValue| {
+        json!({
+            "verified": true,
+            "reply": "Read 3 pages.",
+            "findings": [],
+            "request": request,
+            "personRequest": person_request,
+        })
+    };
+
+    // A message the routing step sent straight to the browser: the person's own words.
+    let routed = record(json!(person), json!(person));
+    let (first, ..) = prompt(routed.clone(), None);
+    assert!(selected_tree(&first).contains(HUB), "{first}");
+    assert!(first.contains(&hub_heading), "{first}");
+    let (later, _, metrics) = prompt(routed, Some(&restored));
+    assert!(later.contains("Skills that match this request"), "{later}");
+    assert!(
+        metrics["restoredSkillHints"]
+            .as_array()
+            .is_some_and(|hinted| hinted.iter().any(|id| id == HUB)),
+        "{metrics}"
+    );
+
+    // A card's own task, when no person's words came with it.
+    let card = record(
+        json!("Read each laptop's own page, then put them side by side in a comparison table."),
+        JsonValue::Null,
+    );
+    let (first, ..) = prompt(card, None);
+    assert!(selected_tree(&first).contains(HUB), "{first}");
+
+    // A record the controller did not check: the turn's own words, which name no page.
+    let mut unchecked = record(json!(person), json!(person));
+    unchecked["verified"] = json!(false);
+    let (first, ..) = prompt(unchecked, None);
+    assert!(!selected_tree(&first).contains(HUB), "{first}");
+    assert!(!first.contains(&hub_heading), "{first}");
 }
