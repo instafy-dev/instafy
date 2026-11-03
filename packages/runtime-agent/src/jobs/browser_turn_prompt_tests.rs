@@ -588,7 +588,10 @@ fn a_routed_browser_turn_that_hands_back_is_offered_no_build_request() {
     let request = "Compare the three latest laptops of one maker: processor, battery, weight and price, with two independent reviews each, as a comparison page.";
 
     let (prompt, _) = prompt_for_request(tmp.path(), request, routed(true), None);
-    assert!(prompt.contains("\nFindings for the building turn:\n"), "{prompt}");
+    assert!(
+        prompt.contains("\nFindings for the building turn:\n"),
+        "{prompt}"
+    );
     assert!(
         prompt.contains("- This turn reads pages; the building turn after it makes the page.\n"),
         "{prompt}"
@@ -600,6 +603,12 @@ fn a_routed_browser_turn_that_hands_back_is_offered_no_build_request() {
     assert!(!prompt.contains("request_build"), "{prompt}");
 
     let (prompt, _) = prompt_for_request(tmp.path(), request, routed(false), None);
-    assert!(prompt.contains(browser_hand_back::BUILD_REQUEST_LINE), "{prompt}");
-    assert!(!prompt.contains("Findings for the building turn:"), "{prompt}");
+    assert!(
+        prompt.contains(browser_hand_back::BUILD_REQUEST_LINE),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.contains("Findings for the building turn:"),
+        "{prompt}"
+    );
 }

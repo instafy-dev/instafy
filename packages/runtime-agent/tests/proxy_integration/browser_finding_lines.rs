@@ -92,7 +92,8 @@ struct Provider {
 }
 
 fn final_answer(summary: &str, actions: Value) -> axum::response::Response {
-    let text = json!({ "summary": summary, "code": "", "actions": actions, "files": [] }).to_string();
+    let text =
+        json!({ "summary": summary, "code": "", "actions": actions, "files": [] }).to_string();
     Json(json!({
         "id":format!("resp_{}", Uuid::new_v4()),"object":"response","status":"completed",
         "model":"gpt-5.5",
@@ -145,10 +146,10 @@ async fn provider_request(
     state.requests.lock().unwrap().push(body.clone());
     if last_user_text(&body).contains(PASS_OPENING) {
         return match state.pass {
-            Pass::WritesLines => {
-                final_answer(&format!("{READ_13}\n{READ_REVIEW}"), json!([]))
+            Pass::WritesLines => final_answer(&format!("{READ_13}\n{READ_REVIEW}"), json!([])),
+            Pass::WritesNone => {
+                final_answer("I read the maker's pages and two reviews.", json!([]))
             }
-            Pass::WritesNone => final_answer("I read the maker's pages and two reviews.", json!([])),
         };
     }
     // The browser turn: the comparison's answer, a build request and no finding line.
@@ -361,13 +362,18 @@ async fn run_case(pass: Pass) -> Result<()> {
         .iter()
         .find(|request| !last_user_text(request).contains(PASS_OPENING))
         .context("the browser turn's request")?;
-    assert_eq!(turn_request["reasoning"]["effort"], "medium", "{turn_request}");
+    assert_eq!(
+        turn_request["reasoning"]["effort"], "medium",
+        "{turn_request}"
+    );
     // No tool is required first: the lines are its answer.
     assert_ne!(pass_request["tool_choice"], "required", "{pass_request}");
     // Its run log follows the turn's, so the turn is billed from its first run only.
     assert!(
-        artifacts.iter().any(|artifact| artifact["kind"] == "codex/run-log"
-            && artifact["metadata"]["purpose"] == "finding-lines-wrap-up"),
+        artifacts
+            .iter()
+            .any(|artifact| artifact["kind"] == "codex/run-log"
+                && artifact["metadata"]["purpose"] == "finding-lines-wrap-up"),
         "{artifacts:?}"
     );
     let receipt = task_usage.artifact().context("the pass's usage receipt")?;
@@ -388,7 +394,10 @@ async fn run_case(pass: Pass) -> Result<()> {
         ),
     };
     assert_eq!(summary, format!("{PROMISED_BUILD}\n\n{lines}"));
-    assert!(!summary.contains(NOT_MADE), "a hand-back follows: {summary}");
+    assert!(
+        !summary.contains(NOT_MADE),
+        "a hand-back follows: {summary}"
+    );
 
     // The turn posts no reply bubble: its words and its lines go into its note, which names the
     // pages read that Studio and the controller hand back on.

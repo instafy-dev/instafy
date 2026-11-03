@@ -337,10 +337,10 @@ fn with_runtime_metadata_vec(messages: Vec<JobMessage>, runtime_id: &Uuid) -> Ve
 }
 
 pub type JobMessageSender = UnboundedSender<JobMessage>;
-pub use reply_draft::{ReplyDraft, ReplyDraftSender};
 /// How a browser turn's finding lines leave its reply for a Details note, as the runtime ends
 /// each turn (`agent::complete_job`); public for the stub-provider tests.
 pub use browser_hand_back::move_findings_into_details;
+pub use reply_draft::{ReplyDraft, ReplyDraftSender};
 
 #[derive(Clone)]
 pub struct JobProgress {
@@ -33466,7 +33466,10 @@ mod tests {
                 }
             }),
         );
-        assert_eq!(browser_hand_back::build_request_retry_line(&handing_back), "");
+        assert_eq!(
+            browser_hand_back::build_request_retry_line(&handing_back),
+            ""
+        );
         let line = browser_hand_back::build_request_retry_line(&job(json!(true)));
         assert_eq!(line, browser_hand_back::BUILD_REQUEST_RETRY_LINE);
         let retry = shared_browser_execution_retry_prompt("Plan three days, on a map.", line);

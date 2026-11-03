@@ -278,7 +278,11 @@ mod tests {
         );
         for tool in ["snapshot", "scroll", "list_tabs", "status"] {
             assert_eq!(
-                step_page_address(tool, None, Some(&payload("snapshot", "https://maker.example/"))),
+                step_page_address(
+                    tool,
+                    None,
+                    Some(&payload("snapshot", "https://maker.example/"))
+                ),
                 None,
                 "{tool}"
             );

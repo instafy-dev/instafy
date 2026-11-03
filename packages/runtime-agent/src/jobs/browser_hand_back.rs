@@ -1397,7 +1397,10 @@ mod tests {
         let mut card = routed_turn(false);
         card["browserCardTurn"]["routed"] = json!(false);
         assert!(!offers_the_build_request(&card));
-        assert_eq!(build_request_retry_line(&browser_job(routed_turn(true))), "");
+        assert_eq!(
+            build_request_retry_line(&browser_job(routed_turn(true))),
+            ""
+        );
         assert_eq!(
             build_request_retry_line(&browser_job(routed_turn(false))),
             BUILD_REQUEST_RETRY_LINE
@@ -1421,8 +1424,15 @@ mod tests {
             Some(&hands_back),
             &format!("{PROMISED_BUILD}\n\n{stopped}")
         ));
-        for metadata in [routed_turn(false), json!({ "browserTransport": "shared" }), json!({})] {
-            assert!(!needs_finding_lines(Some(&metadata), PROMISED_BUILD), "{metadata}");
+        for metadata in [
+            routed_turn(false),
+            json!({ "browserTransport": "shared" }),
+            json!({}),
+        ] {
+            assert!(
+                !needs_finding_lines(Some(&metadata), PROMISED_BUILD),
+                "{metadata}"
+            );
         }
         assert!(!needs_finding_lines(None, PROMISED_BUILD));
     }
@@ -1555,7 +1565,10 @@ mod tests {
                 answer,
                 &mut summary
             ));
-            assert_eq!(summary, format!("{PROMISED_BUILD}\n\n{BUILD_NOT_MADE_LINE}"));
+            assert_eq!(
+                summary,
+                format!("{PROMISED_BUILD}\n\n{BUILD_NOT_MADE_LINE}")
+            );
         }
         // With no words of its own, the line is the reply.
         let mut summary = String::new();
@@ -1588,7 +1601,10 @@ mod tests {
 
         let mut summary = PROMISED_BUILD.to_string();
         for (metadata, answer) in [
-            (routed_turn(false), json!({ "summary": PROMISED_BUILD, "actions": [] })),
+            (
+                routed_turn(false),
+                json!({ "summary": PROMISED_BUILD, "actions": [] }),
+            ),
             (json!({}), build.clone()),
         ] {
             assert!(!say_a_build_request_nothing_acts_on(
@@ -1598,7 +1614,11 @@ mod tests {
             ));
             assert_eq!(summary, PROMISED_BUILD);
         }
-        assert!(!say_a_build_request_nothing_acts_on(None, &build, &mut summary));
+        assert!(!say_a_build_request_nothing_acts_on(
+            None,
+            &build,
+            &mut summary
+        ));
         // Plain words a first-time user reads: no "build request", no "findings".
         for word in ["findings", "build request", "request_build"] {
             assert!(!BUILD_NOT_MADE_LINE.contains(word), "{word}");

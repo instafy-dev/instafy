@@ -10980,9 +10980,24 @@ required = true
         let page = |step: &str, url: &str| json!({"activity": {"step": step, "url": url}});
         let shared = "instafy_shared_browser";
         for event in [
-            end(shared, "snapshot", false, page("snapshot", "https://start.example/")),
-            end(shared, "navigate", false, page("navigate", "https://maker.example/laptop-13#specs")),
-            end(shared, "navigate", true, page("navigate", "https://down.example/")),
+            end(
+                shared,
+                "snapshot",
+                false,
+                page("snapshot", "https://start.example/"),
+            ),
+            end(
+                shared,
+                "navigate",
+                false,
+                page("navigate", "https://maker.example/laptop-13#specs"),
+            ),
+            end(
+                shared,
+                "navigate",
+                true,
+                page("navigate", "https://down.example/"),
+            ),
             end(
                 shared,
                 "click",
@@ -10992,9 +11007,24 @@ required = true
                     "activity": {"step": "click", "url": "https://refused.example/"},
                 }),
             ),
-            end(shared, "open_tab", false, page("open_tab", "https://reviews.example/laptop-13")),
-            end(shared, "navigate", false, page("navigate", "https://maker.example/laptop-13")),
-            end("other_server", "navigate", false, page("navigate", "https://other.example/")),
+            end(
+                shared,
+                "open_tab",
+                false,
+                page("open_tab", "https://reviews.example/laptop-13"),
+            ),
+            end(
+                shared,
+                "navigate",
+                false,
+                page("navigate", "https://maker.example/laptop-13"),
+            ),
+            end(
+                "other_server",
+                "navigate",
+                false,
+                page("navigate", "https://other.example/"),
+            ),
         ] {
             for projected in adapter.collect(&event) {
                 for address in ["https://", "laptop-13"] {
