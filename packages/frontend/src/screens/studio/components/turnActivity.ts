@@ -29,6 +29,12 @@ export type ActivityEntry = {
   /** How many times the step ran; null when that is not known (a loop). */
   count: number | null;
   when?: "success";
+  /**
+   * "unknown": the step's own result is not this command's (it ran before the
+   * step's last command, and not joined to it with `&&`), so whether it did
+   * what its words say is not known.
+   */
+  result?: "unknown";
   host?: string;
   pageKey?: string;
   step?: string;
@@ -45,7 +51,7 @@ const MAX_HOST_CHARS = 64;
 const LABEL_PUNCTUATION = "'’,.-–·:;()&!?";
 const ROLES: readonly string[] = ["content", "outcome", "quiet"];
 const APPROVALS: readonly string[] = ["once", "routine", "free", "denied", "expired"];
-const ENTRY_KEYS = new Set(["key", "role", "live", "done", "count", "when", "host", "pageKey", "step", "approval"]);
+const ENTRY_KEYS = new Set(["key", "role", "live", "done", "count", "when", "result", "host", "pageKey", "step", "approval"]);
 const ALPHABETIC = /^\p{Alphabetic}$/u;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -204,6 +210,12 @@ function checkEntry(value: unknown, topLevel: boolean): ActivityEntry | null {
       return null;
     }
     entry.when = "success";
+  }
+  if (value.result !== undefined) {
+    if (value.result !== "unknown") {
+      return null;
+    }
+    entry.result = "unknown";
   }
   if (value.pageKey !== undefined) {
     if (typeof value.pageKey !== "string" || !/^[0-9a-f]{16}$/u.test(value.pageKey)) {
@@ -417,6 +429,19 @@ export function primaryEntry(activity: StepActivity): ActivityEntry {
   return [activity, ...activity.also].find((entry) => entry.role !== "quiet") ?? activity;
 }
 
+/**
+ * The entry a step that ended is named by: the one `primaryEntry` would pick
+ * among the commands its result is about (its last command, and those joined
+ * to it with `&&`), or null when it is about none of them. A command that ran
+ * before them may have failed whatever the step's result says ("uw cite …; uw
+ * add-point …" exits as the add-point did), so a step whose labelled commands
+ * all ran before an unlabelled last one reads as a plain command.
+ */
+function endedEntry(activity: StepActivity): ActivityEntry | null {
+  const known = [activity, ...activity.also].filter((entry) => entry.result !== "unknown");
+  return known.find((entry) => entry.role !== "quiet") ?? known[0] ?? null;
+}
+
 // Steps no runtime labelled (an unlisted command, an older runtime) read as
 // what is sure of their kind, the words the line's own neutral count uses. An
 // unlabelled command may read a file, but as often stops a site by its
@@ -581,7 +606,9 @@ function sameStepOnTwoSites(first: Group, second: Group): string | null {
  * places"), then the step that answered and the biggest other thing it did.
  * Only a step that ended counts, and the steps are in the order they last
  * changed (a step's newest message), as the turn's stored steps are. A step
- * that failed counts for nothing it would have done. A preview the turn opened,
+ * that failed counts for nothing it would have done, and a command its step's
+ * result is not about (one that ran before the step's last command, not joined
+ * to it with `&&`) counts for nothing at all. A preview the turn opened,
  * and a look at the page the turn started on, are named only when the turn did
  * nothing else; a preview it stopped, when it made nothing. When nothing else
  * is left to say, the line names that look, which worked, and otherwise what
@@ -603,6 +630,11 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
     // A step the person said no to, or left, is named by its answer instead.
     const declined = step.activity.approval === "denied" || step.activity.approval === "expired";
     for (const entry of [step.activity, ...step.activity.also]) {
+      // A command the step's result is not about did what its words say, or
+      // did not: it neither counts nor is what the step tried.
+      if (entry.result === "unknown") {
+        continue;
+      }
       if (step.state === "failed") {
         if (!tried && !declined && entry.role !== "quiet" && entry.live) {
           tried = entry;
@@ -900,7 +932,13 @@ function isBrowserTabsStep(entry: ActivityEntry | null): boolean {
 }
 
 function stepLabel(kind: StepKind, message: ChatMessage, activity: StepActivity | null, state: StepState): string {
-  const entry = activity ? primaryEntry(activity) : null;
+  // A step that ended is named by a command its result is about; one that
+  // runs, or that its turn ended before, by what it is doing.
+  const entry = !activity
+    ? null
+    : state === "done" || state === "failed"
+      ? endedEntry(activity)
+      : primaryEntry(activity);
   const tabs = isBrowserTabsStep(entry);
   const unlabelledBrowserStep = !entry && isBrowserToolStep({ kind, message, activity });
   const live = tabs

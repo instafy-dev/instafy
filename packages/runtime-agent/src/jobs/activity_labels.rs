@@ -318,6 +318,11 @@ struct Found {
     success_only: bool,
     /// How many times it ran; `None` when that is not known (inside a loop).
     count: Option<u64>,
+    /// The step's exit status is not this command's (`result: "unknown"`): it ran before the
+    /// script's last command and is not joined to it with `&&` (`uw cite …; uw add-point …`
+    /// exits as the add-point did), runs in the background, in a condition or in a loop that
+    /// may never have run. Studio then neither ticks nor counts it.
+    result_unknown: bool,
 }
 
 impl Found {
@@ -335,6 +340,7 @@ impl Found {
             done,
             success_only: false,
             count,
+            result_unknown: false,
         }
     }
 
@@ -346,6 +352,7 @@ impl Found {
             done: label.done.as_ref().map(DoneLabel::to_json),
             success_only: label.success_only,
             count: Some(1),
+            result_unknown: false,
         }
     }
 
@@ -363,6 +370,9 @@ impl Found {
         );
         if self.success_only {
             entry.insert("when".into(), JsonValue::from("success"));
+        }
+        if self.result_unknown {
+            entry.insert("result".into(), JsonValue::from("unknown"));
         }
         entry
     }
@@ -394,11 +404,16 @@ impl Scan {
 }
 
 /// The step's `activity`: the first label and up to [`MAX_ALSO`] further distinct ones, each
-/// counted. `None` when nothing is labelled or the result breaks a label rule.
+/// counted. `None` when nothing is labelled or the result breaks a label rule. A label is two
+/// entries when the step's exit status is the result of some of its commands and not of the
+/// others (`uw cite A; uw cite B`), and when more entries are found than fit, those the exit
+/// status is the result of stay.
 fn activity_json(found: Vec<Found>) -> Option<JsonValue> {
     let mut merged: Vec<Found> = Vec::new();
     for item in found {
-        match merged.iter_mut().find(|existing| existing.key == item.key) {
+        match merged.iter_mut().find(|existing| {
+            existing.key == item.key && existing.result_unknown == item.result_unknown
+        }) {
             Some(existing) => {
                 existing.count = match (existing.count, item.count) {
                     (Some(a), Some(b)) => Some(a.saturating_add(b)),
@@ -407,6 +422,25 @@ fn activity_json(found: Vec<Found>) -> Option<JsonValue> {
             }
             None => merged.push(item),
         }
+    }
+    let room = 1 + MAX_ALSO;
+    if merged.len() > room {
+        let mut known_room = merged
+            .iter()
+            .filter(|item| !item.result_unknown)
+            .count()
+            .min(room);
+        let mut unknown_room = room - known_room;
+        merged.retain(|item| {
+            let left = if item.result_unknown {
+                &mut unknown_room
+            } else {
+                &mut known_room
+            };
+            let kept = *left > 0;
+            *left = left.saturating_sub(1);
+            kept
+        });
     }
     let mut items = merged.into_iter();
     let first = items.next()?;
@@ -845,8 +879,16 @@ impl<'a> Matcher<'a> {
         }
     }
 
-    /// The label of one simple command, in precedence order.
-    fn label_words(&self, words: &[Word], in_loop: bool, depth: usize, scan: &mut Scan) {
+    /// The label of one simple command, in precedence order. `last` says whether the step's exit
+    /// status is this command's result (see [`Matcher::visit`]).
+    fn label_words(
+        &self,
+        words: &[Word],
+        in_loop: bool,
+        last: bool,
+        depth: usize,
+        scan: &mut Scan,
+    ) {
         let words = Self::strip_prefixes(words);
         let Some(program) = words.first() else {
             return;
@@ -861,7 +903,7 @@ impl<'a> Matcher<'a> {
             {
                 match words.get(2).and_then(Word::exact) {
                     Some(script) if depth < MAX_NESTED_SHELLS => {
-                        self.label_script(script, in_loop, depth + 1, scan);
+                        self.label_script(script, in_loop, last, depth + 1, scan);
                     }
                     _ => scan.other = true,
                 }
@@ -901,6 +943,7 @@ impl<'a> Matcher<'a> {
             if in_loop {
                 label.count = None;
             }
+            label.result_unknown = !last;
             scan.found.push(label);
         } else if is_look(words) {
             scan.looks.push(look());
@@ -909,7 +952,7 @@ impl<'a> Matcher<'a> {
         }
     }
 
-    fn label_script(&self, script: &str, in_loop: bool, depth: usize, scan: &mut Scan) {
+    fn label_script(&self, script: &str, in_loop: bool, last: bool, depth: usize, scan: &mut Scan) {
         if script.len() > MAX_SCRIPT_BYTES {
             scan.other = true;
             return;
@@ -931,7 +974,7 @@ impl<'a> Matcher<'a> {
             shadowed: self.shadowed.clone(),
         };
         nested.collect_aliases(root, script);
-        nested.visit(root, script, in_loop, depth, scan);
+        nested.visit(root, script, in_loop, last, depth, scan);
     }
 
     fn collect_aliases(&mut self, node: Node<'_>, src: &str) {
@@ -987,7 +1030,21 @@ impl<'a> Matcher<'a> {
         (forwards_arguments && is_shell_name(&name)).then_some((name, (pack, bin)))
     }
 
-    fn visit(&self, node: Node<'_>, src: &str, in_loop: bool, depth: usize, scan: &mut Scan) {
+    /// Labels every simple command under `node`. `last` says whether the step's exit status is
+    /// the result of what `node` runs: the script's last statement, and in it what its exit
+    /// status follows (the end of a pipeline, a group's last statement, a loop's body when the
+    /// loop surely runs), and both sides of `&&`, since the right side runs only once the left
+    /// one exited 0. Either side of `||`, a negation, a condition, a statement sent to the
+    /// background with `&` and a loop that may not run at all are never the step's result.
+    fn visit(
+        &self,
+        node: Node<'_>,
+        src: &str,
+        in_loop: bool,
+        last: bool,
+        depth: usize,
+        scan: &mut Scan,
+    ) {
         match node.kind() {
             "command" => {
                 // A command or process substitution runs a command of its own, never read here.
@@ -995,7 +1052,7 @@ impl<'a> Matcher<'a> {
                     scan.other = true;
                 }
                 match command_words(node, src) {
-                    Some(words) => self.label_words(&words, in_loop, depth, scan),
+                    Some(words) => self.label_words(&words, in_loop, last, depth, scan),
                     None => scan.other = true,
                 }
             }
@@ -1014,8 +1071,19 @@ impl<'a> Matcher<'a> {
                 {
                     scan.other = true;
                 }
+                // `cmd <<'JSON' && next`: the statement after the here-document's start runs
+                // after the body, as the right side of a list does.
+                let chained = redirects.iter().find_map(|redirect| {
+                    let right = redirect.child_by_field_name("right")?;
+                    let operator = redirect.child_by_field_name("operator")?;
+                    Some((right, node_text(operator, src) == "&&"))
+                });
+                let body_last = last && chained.is_none_or(|(_, and)| and);
                 if let Some(body) = body {
-                    self.visit(body, src, in_loop, depth, scan);
+                    self.visit(body, src, in_loop, body_last, depth, scan);
+                }
+                if let Some((right, and)) = chained {
+                    self.visit(right, src, in_loop, last && and, depth, scan);
                 }
             }
             "for_statement" | "c_style_for_statement" => {
@@ -1023,8 +1091,18 @@ impl<'a> Matcher<'a> {
                 if has_substitution(node) {
                     scan.other = true;
                 }
+                // A loop's status is its last round's, and a loop over words written out runs at
+                // least once; any other may not run at all, and then exits 0.
+                let mut cursor = node.walk();
+                let values: Vec<Node<'_>> =
+                    node.children_by_field_name("value", &mut cursor).collect();
+                let runs = node.kind() == "for_statement"
+                    && !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|value| shell_word(*value, src).exact().is_some());
                 if let Some(body) = node.child_by_field_name("body") {
-                    self.visit(body, src, true, depth, scan);
+                    self.visit(body, src, true, last && runs, depth, scan);
                 }
             }
             "while_statement" => {
@@ -1033,16 +1111,44 @@ impl<'a> Matcher<'a> {
                     let parts: Vec<Node<'_>> =
                         node.children_by_field_name(field, &mut cursor).collect();
                     for part in parts {
-                        self.visit(part, src, true, depth, scan);
+                        self.visit(part, src, true, false, depth, scan);
                     }
                 }
             }
-            "program" | "list" | "pipeline" | "compound_statement" | "subshell"
-            | "negated_command" | "do_group" | "if_statement" | "elif_clause" | "else_clause" => {
+            // Statements in order: the last one's status is the whole's.
+            "program" | "compound_statement" | "subshell" | "do_group" => {
+                self.visit_statements(node, src, in_loop, last, depth, scan);
+            }
+            // `a && b`: b runs only once a exited 0, so the list's status is the result of both;
+            // after `a || b`, a's result is not known and b may not have run.
+            "list" => {
+                let mut cursor = node.walk();
+                let and = node
+                    .children(&mut cursor)
+                    .any(|child| !child.is_named() && child.kind() == "&&");
                 let mut cursor = node.walk();
                 let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
                 for child in children {
-                    self.visit(child, src, in_loop, depth, scan);
+                    self.visit(child, src, in_loop, last && and, depth, scan);
+                }
+            }
+            // A pipeline's status is its last command's.
+            "pipeline" => {
+                let mut cursor = node.walk();
+                let children: Vec<Node<'_>> = node
+                    .named_children(&mut cursor)
+                    .filter(|child| child.kind() != "comment")
+                    .collect();
+                let end = children.len().saturating_sub(1);
+                for (index, child) in children.into_iter().enumerate() {
+                    self.visit(child, src, in_loop, last && index == end, depth, scan);
+                }
+            }
+            "negated_command" | "if_statement" | "elif_clause" | "else_clause" => {
+                let mut cursor = node.walk();
+                let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
+                for child in children {
+                    self.visit(child, src, in_loop, false, depth, scan);
                 }
             }
             // A function body runs only when called, and a call is a command of its own.
@@ -1060,6 +1166,29 @@ impl<'a> Matcher<'a> {
             }
             // `case` bodies and anything else are not followed: whatever they run is unknown.
             _ => scan.other = true,
+        }
+    }
+
+    /// The statements of a script, a group or a loop's body: only the last of them, unless it is
+    /// sent to the background with `&`, is the group's status.
+    fn visit_statements(
+        &self,
+        node: Node<'_>,
+        src: &str,
+        in_loop: bool,
+        last: bool,
+        depth: usize,
+        scan: &mut Scan,
+    ) {
+        let mut cursor = node.walk();
+        let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
+        let end = children.iter().rposition(|child| child.kind() != "comment");
+        for (index, child) in children.into_iter().enumerate() {
+            let in_background = child
+                .next_sibling()
+                .is_some_and(|next| !next.is_named() && next.kind() == "&");
+            let is_last = last && Some(index) == end && !in_background;
+            self.visit(child, src, in_loop, is_last, depth, scan);
         }
     }
 }
@@ -1192,12 +1321,13 @@ fn label_command_with(
     let argv: Option<Vec<&str>> = argv
         .and_then(JsonValue::as_array)
         .and_then(|items| items.iter().map(JsonValue::as_str).collect());
+    // The whole command is the step: its exit status is the step's.
     match argv {
         Some(argv) if !argv.is_empty() => {
             let words: Vec<Word> = argv.iter().map(|word| Word::literal(word)).collect();
-            matcher.label_words(&words, false, 0, &mut scan);
+            matcher.label_words(&words, false, true, 0, &mut scan);
         }
-        _ => matcher.label_script(command, false, 0, &mut scan),
+        _ => matcher.label_script(command, false, true, 0, &mut scan),
     }
     scan.activity()
 }
@@ -1457,6 +1587,202 @@ mod tests {
         )
         .unwrap();
         assert_eq!(while_loop["count"], JsonValue::Null);
+    }
+
+    /// A step's entries as (subcommand or key, count, whether the step's exit status is its
+    /// command's result).
+    fn results(activity: &JsonValue) -> Vec<(String, JsonValue, bool)> {
+        std::iter::once(activity)
+            .chain(activity["also"].as_array().expect("also"))
+            .map(|entry| {
+                let key = entry["key"].as_str().expect("key");
+                (
+                    key.strip_prefix("pack/interactive-map/uw/")
+                        .unwrap_or(key)
+                        .to_string(),
+                    entry["count"].clone(),
+                    match entry.get("result") {
+                        None => true,
+                        Some(result) => {
+                            assert_eq!(result, &json!("unknown"));
+                            false
+                        }
+                    },
+                )
+            })
+            .collect()
+    }
+
+    // A step's exit status is its last command's: a map turn's `uw set …; uw validate …; uw
+    // reload …; instafy preview check …` exited 0 with validate's error standing, and Details
+    // said "Built the map". Only the last command, and those joined to it with `&&`, take the
+    // step's result; every other one is `result: "unknown"`, and Studio neither ticks nor
+    // counts it.
+    #[test]
+    fn only_the_last_command_and_those_joined_to_it_with_and_take_the_steps_result() {
+        let root = tempfile::tempdir().expect("tmp");
+        let packs = map_packs(root.path());
+        let entry = |name: &str, count: Option<u64>, known: bool| {
+            (
+                name.to_string(),
+                count.map_or(JsonValue::Null, JsonValue::from),
+                known,
+            )
+        };
+        let cases = [
+            (
+                "uw cite a; uw cite b; uw add-point c",
+                vec![
+                    entry("cite", Some(2), false),
+                    entry("add-point", Some(1), true),
+                ],
+            ),
+            (
+                "uw cite a && uw add-point b",
+                vec![
+                    entry("cite", Some(1), true),
+                    entry("add-point", Some(1), true),
+                ],
+            ),
+            // The same label is two entries when only one of its commands ran last.
+            (
+                "uw cite a; uw cite b",
+                vec![entry("cite", Some(1), false), entry("cite", Some(1), true)],
+            ),
+            (
+                "uw add-point a; uw cite b && uw validate",
+                vec![
+                    entry("add-point", Some(1), false),
+                    entry("cite", Some(1), true),
+                    entry("validate", Some(1), true),
+                ],
+            ),
+            // After `||` neither side's result is known.
+            (
+                "uw cite a || uw cite b",
+                vec![entry("cite", Some(2), false)],
+            ),
+            (
+                "uw validate || true",
+                vec![entry("validate", Some(1), false)],
+            ),
+            // A pipeline's status is its last command's.
+            (
+                "uw validate 2>&1 | tail -5",
+                vec![entry("validate", Some(1), false)],
+            ),
+            // In the background.
+            (
+                "uw cite a & uw add-point b",
+                vec![
+                    entry("cite", Some(1), false),
+                    entry("add-point", Some(1), true),
+                ],
+            ),
+            (
+                "uw add-point b; uw cite a &",
+                vec![
+                    entry("add-point", Some(1), false),
+                    entry("cite", Some(1), false),
+                ],
+            ),
+            // Groups end with their last statement.
+            (
+                "(uw cite a; uw add-point b)",
+                vec![
+                    entry("cite", Some(1), false),
+                    entry("add-point", Some(1), true),
+                ],
+            ),
+            (
+                "{ uw cite a; uw add-point b; }",
+                vec![
+                    entry("cite", Some(1), false),
+                    entry("add-point", Some(1), true),
+                ],
+            ),
+            (
+                "cd sites && bash -lc 'uw cite a; uw add-point b'",
+                vec![
+                    entry("cite", Some(1), false),
+                    entry("add-point", Some(1), true),
+                ],
+            ),
+            // A negation, a condition, and a statement after the last command.
+            ("! uw validate", vec![entry("validate", Some(1), false)]),
+            (
+                "if uw validate; then uw add-point a; fi",
+                vec![
+                    entry("validate", Some(1), false),
+                    entry("add-point", Some(1), false),
+                ],
+            ),
+            (
+                "uw validate; status=$?",
+                vec![entry("validate", Some(1), false)],
+            ),
+            ("uw cite a\n# read it", vec![entry("cite", Some(1), true)]),
+            // Here-documents, one command after another, and one joined with `&&`.
+            (
+                "uw add-point a --props-file - <<'JSON'\n{\"x\":1}\nJSON\nuw add-point b --props-file - <<'JSON'\n{\"y\":2}\nJSON",
+                vec![
+                    entry("add-point", Some(1), false),
+                    entry("add-point", Some(1), true),
+                ],
+            ),
+            (
+                "uw add-point a --props-file - <<'JSON' && uw validate\n{\"x\":1}\nJSON",
+                vec![
+                    entry("add-point", Some(1), true),
+                    entry("validate", Some(1), true),
+                ],
+            ),
+            // A loop over words written out runs, and exits as its last round did; any other
+            // loop may not run at all.
+            (
+                "for q in a 'b c'; do uw add-point \"$q\"; done",
+                vec![entry("add-point", None, true)],
+            ),
+            (
+                "for q in \"$@\"; do uw add-point \"$q\"; done",
+                vec![entry("add-point", None, false)],
+            ),
+            (
+                "while read -r q; do uw add-point \"$q\"; done < places.txt",
+                vec![entry("add-point", None, false)],
+            ),
+            // The map turn's last step: only the preview check's result is known.
+            (
+                "uw set s sights:a --props-file - <<'JSON'\n{\"a\":1}\nJSON\nuw validate s --signal; uw reload s --note \"x\"; instafy preview check --port 28610",
+                vec![
+                    entry("*", Some(2), false),
+                    entry("validate", Some(1), false),
+                    entry("instafy/preview-check", Some(1), true),
+                ],
+            ),
+        ];
+        for (script, expected) in cases {
+            let activity = label(&packs, script).unwrap_or_else(|| panic!("{script}"));
+            assert_eq!(results(&activity), expected, "{script}");
+        }
+        // A command on its own is the step.
+        let argv = label_command_with(&packs, Some(&json!(["uw", "validate"])), "").unwrap();
+        assert_eq!(results(&argv), vec![entry("validate", Some(1), true)]);
+        // With more labels than fit, those the step's result is about stay.
+        let long = label(
+            &packs,
+            "uw cite a; uw add-point b; uw fit; uw snapshot x.png; instafy web read https://a.example/; uw validate",
+        )
+        .unwrap();
+        assert_eq!(
+            results(&long),
+            vec![
+                entry("cite", Some(1), false),
+                entry("add-point", Some(1), false),
+                entry("fit", Some(1), false),
+                entry("validate", Some(1), true),
+            ]
+        );
     }
 
     #[test]
