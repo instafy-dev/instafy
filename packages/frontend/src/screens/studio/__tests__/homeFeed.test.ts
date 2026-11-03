@@ -686,6 +686,18 @@ describe("buildHomeFeed with ledger rows", () => {
     expect(model.activity.some((day) => day.key === "live")).toBe(false);
   });
 
+  // A person stopped a run: its started row is gone from the ledger, and the
+  // stop row ends it, newer than the earlier run that finished.
+  it("ends a stopped run with Stopped, never an earlier run's Run finished", () => {
+    const model = ledgerFeed([
+      activityItem({ id: "20", kind: "run.finished", at: new Date(NOW - 60000).toISOString(), run: { id: "run-routing", status: "success", promptId: null } }),
+      activityItem({ id: "21", kind: "run.started", live: true, at: new Date(NOW - 50000).toISOString(), run: { id: "run-1", status: "in_progress", promptId: null } }),
+      activityItem({ id: "22", kind: "run.stopped", at: new Date(NOW).toISOString(), run: { id: "run-1", status: "canceled", promptId: null } }),
+    ]);
+    expect(model.activity.flatMap((day) => day.events).map((event) => event.kind)).toEqual(["run_stopped"]);
+    expect(model.activity.some((day) => day.key === "live")).toBe(false);
+  });
+
   it("keeps another genuinely live run in the same conversation", () => {
     const model = ledgerFeed([
       activityItem({ id: "20", kind: "run.started", live: true, run: { id: "run-old", status: "in_progress", promptId: null } }),

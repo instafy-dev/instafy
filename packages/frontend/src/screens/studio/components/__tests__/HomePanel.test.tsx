@@ -312,6 +312,24 @@ describe("HomePanel activity states", () => {
     expect(container.textContent?.match(/Recent work/g)).toHaveLength(1);
   });
 
+  // A local test, Nov 2: a chat whose last run the person stopped read "Run
+  // finished", with a check mark: the routing step's run before it had
+  // finished, and nothing ended the stopped one on Home.
+  it("says a chat's stopped run is Stopped, with no check mark", async () => {
+    mocks.activity.activityItems = [
+      activityItem({ id: "22", kind: "run.stopped", at: "2026-09-06T12:05:00Z", preview: null,
+        run: { id: "run-2", status: "canceled", promptId: null }, data: { outcome: "stopped" } }),
+      activityItem({ id: "21", kind: "run.finished", at: "2026-09-06T12:01:00Z", preview: null,
+        run: { id: "run-1", status: "success", promptId: null } }),
+    ];
+    await render();
+    const row = query("home-recent-item-22")!;
+    expect(row.textContent).toContain("Recent work");
+    expect(row.textContent).toContain("Stopped");
+    expect(container.textContent).not.toContain("Run finished");
+    expect(row.querySelector(".text-emerald-600")).toBeNull();
+  });
+
   // On a phone Unread shows four rows: the chat Continue working gave way to
   // must not be left behind View all.
   it("puts the chat Continue working gave way to first under Unread", async () => {

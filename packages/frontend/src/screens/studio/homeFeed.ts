@@ -18,7 +18,7 @@ import type { HomeSupportReport } from "./homeSupportReports";
 
 export type HomeFeedLane = "needs" | "activity";
 export type HomeFeedKind = "running" | "queued" | "reply" | "conversation" | "run_finished" | "run_failed" |
-  "support_reply" | "support_resolved" | "automation_completed" | "automation_failed";
+  "run_stopped" | "support_reply" | "support_resolved" | "automation_completed" | "automation_failed";
 
 export interface HomeFeedTeam {
   /** Org id, or "personal" for spaces without an org. */
@@ -276,6 +276,9 @@ function kindForActivity(item: ActivityItem): HomeFeedKind | null {
       return item.live ? "running" : null;
     case "run.finished":
       return "run_finished";
+    // A run stopped before it ended: "Stopped", never "Run finished".
+    case "run.stopped":
+      return "run_stopped";
     case "run.failed":
     case "automation.failed":
     case "credit.exhausted":
@@ -306,7 +309,7 @@ function runKeyForActivity(item: ActivityItem): string | null {
 }
 
 function isTerminalRunActivity(item: ActivityItem): boolean {
-  return item.kind === "run.finished" || item.kind === "run.failed" ||
+  return item.kind === "run.finished" || item.kind === "run.failed" || item.kind === "run.stopped" ||
     item.kind === "automation.failed" || item.kind === "credit.exhausted" ||
     ["succeeded", "failed", "canceled", "cancelled", "completed"].includes(item.run?.status ?? "");
 }
@@ -325,6 +328,7 @@ const LIVE_KIND_RANK: Record<HomeFeedKind, number> = {
   conversation: 3,
   run_finished: 3,
   run_failed: 3,
+  run_stopped: 3,
   support_reply: 3,
   support_resolved: 3,
   automation_completed: 3,
