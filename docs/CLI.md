@@ -544,7 +544,8 @@ site under a new title, for example). A site `--start` started for a preview the
 
 `open`:
 
-1. Checks that the site answers on `http://127.0.0.1:<port><path>` (5 s; any status below 500).
+1. Checks that the site answers on `http://127.0.0.1:<port><path>` (5 s; any status below 500). A page that answers
+   `404` (or `410`) is not there: no preview is asked for and no card is posted (exit `2`, below).
 2. Asks the server for a private preview tunnel, then starts a detached rathole client for it
    (logs: `~/.instafy/cli-preview-logs/*`). If anything fails before the client runs, the preview is
    closed on the server again.
@@ -613,7 +614,10 @@ the space sleeps. A `--serve-cmd` that carries what looks like a secret is refus
 Exit codes:
 
 - `2`: nothing answers on `127.0.0.1` at the port, or the site answered with a server error (`5xx`).
-  Start or fix the site, then retry. When a server takes the connection but sends no answer within 5 s
+  Start or fix the site, then retry. Also when the page answers `404` (or `410`): a card would open a "not found"
+  page, so none is posted, and a site this `--start` started is stopped again, so no server is left serving that
+  folder. The message says so plainly: run the command inside the site's own folder, or pass `--path` with a page the
+  site has. A site that was already running is left running. When a server takes the connection but sends no answer within 5 s
   (often a dev server still compiling its first request), the message says so instead: wait for it rather
   than starting a second server. A site that answers only on `[::1]` (a server bound to `localhost` that
   resolves to `::1`) is named as such: it is running, so bind it to `127.0.0.1` or `0.0.0.0` instead of

@@ -3,6 +3,7 @@
  *
  *   site.start({ data: "data.json", state: (data) => ({ sort: "price", open: "" }), render(data, state) {…},
  *                select(ref, data) { return { open: site.slug(ref) }; } });
+ *   (data: the data file's address, null for none, or the data itself: { stops: […] }.)
  *
  * - Query state: site.state(defaults), site.setState(patch) (history.replaceState, then render), site.onState(fn).
  *   Only the keys in `state` go in the query, so Studio's Present / Follow and shared links show the same view.
@@ -29,7 +30,9 @@
  *   would check is fresh, or is left only with failed rows (each has its own "Try again").
  * - Links: a source in a caption is a quiet citation (muted, a faint underline); an action ("Open Amazon ↗",
  *   "where to check ↗", "Try again") is in the link colour.
- * - Safety: every text goes through textContent; site.link() only links https: URLs.
+ * - Safety: every text goes through textContent; site.link() only links https: URLs; site.h() never sets an "on…"
+ *   attribute from text, nor an address (href, src…) that could run script or load a page of its own: javascript:,
+ *   and data: or blob: anywhere but a picture's or a video's source and a link that downloads (blob:).
  * SPDX-License-Identifier: AGPL-3.0-only */
 (function () {
   "use strict";
@@ -48,23 +51,64 @@
   function bind() { return window.instafyBind || null; }
 
   // ---------- DOM ----------
-  /** h("li", {class, id, text, attrs: {...}, on: {click}}, ...children). Strings become text nodes; null is skipped. */
+  /** h("li", {class, id, text, attrs: {...}, on: {click}}, ...children). Strings become text nodes; null is skipped.
+   * className is class, and any other key is an attribute: h("a", {href, target: "_blank", rel: "noopener"}, "Site")
+   * is a link. A second argument that is not an object (a string, a node, a list) is the first child. Never set, and
+   * said in the console: an "on…" attribute that is not a function (onClick: fn, or on: {click: fn}), srcdoc, and an
+   * address (href, src, action…) other than a relative one, http(s), mailto, tel or sms, except a picture the page
+   * holds (data:image/…) or a file it made (blob:) as an img's, video's, audio's or source's src or poster, and a file
+   * it made as the href of a link that downloads (download). */
   function h(tag, props) {
     var el = document.createElement(tag);
+    var children = Array.prototype.slice.call(arguments, 2);
+    if (props != null && (typeof props !== "object" || Array.isArray(props) || props.nodeType)) { children.unshift(props); props = null; }
     props = props || {};
-    if (props["class"]) el.className = props["class"];
+    var cls = [props["class"], props.className].filter(Boolean).join(" ");
+    if (cls) el.className = cls;
     if (props.id) el.id = props.id;
     if (props.text != null) el.textContent = String(props.text);
     var attrs = props.attrs || {};
-    Object.keys(attrs).forEach(function (k) {
-      var v = attrs[k];
-      if (v === false || v == null) return;
-      el.setAttribute(k, v === true ? "" : String(v));
-    });
+    var downloads = [props.download, attrs.download].some(function (v) { return v != null && v !== false; });
+    Object.keys(props).forEach(function (k) { if (!OWN_PROPS[k]) attr(el, k, props[k], downloads); });
+    Object.keys(attrs).forEach(function (k) { attr(el, k, attrs[k], downloads); });
     var on = props.on || {};
     Object.keys(on).forEach(function (k) { el.addEventListener(k, on[k]); });
-    for (var i = 2; i < arguments.length; i++) append(el, arguments[i]);
+    children.forEach(function (child) { append(el, child); });
     return el;
+  }
+  var OWN_PROPS = { "class": 1, className: 1, id: 1, text: 1, attrs: 1, on: 1 };
+  // attributes the browser loads or follows as an address
+  var ADDRESS_ATTRS = { href: 1, src: 1, action: 1, formaction: 1, poster: 1, cite: 1, data: 1, background: 1, ping: 1, "xlink:href": 1 };
+  // elements whose src or poster is only ever shown or played: a picture or a file the page made may be one
+  var MEDIA = { IMG: 1, VIDEO: 1, AUDIO: 1, SOURCE: 1, TRACK: 1 };
+  /** One attribute of h(): false and null leave it out, true sets it empty; what could run script is refused. */
+  function attr(el, key, v, downloads) {
+    var name = String(key === "htmlFor" ? "for" : key);
+    var lower = name.toLowerCase();
+    if (v === false || v == null) return;
+    if (lower.slice(0, 2) === "on") {
+      if (typeof v === "function") el.addEventListener(lower.slice(2), v);
+      else console.error("[site] h(): " + name + " needs a function (on: {" + lower.slice(2) + ": fn}); text is never run");
+      return;
+    }
+    if (typeof v === "object" || typeof v === "function") { console.error("[site] h(): " + name + " needs text, a number or true"); return; }
+    var text = v === true ? "" : String(v);
+    if (lower === "srcdoc" || (ADDRESS_ATTRS[lower] && !safeAddress(text, el.tagName, lower, downloads))) {
+      console.error("[site] h(): left out " + name + ": not an address this page may use");
+      return;
+    }
+    try { el.setAttribute(name, text); } catch (e) { console.error("[site] h(): " + name + " is not an attribute name"); }
+  }
+  /** An address an attribute may hold: relative to the page, http(s), mailto, tel or sms; a picture the page holds
+   * (data:image/…) or a file it made (blob:) as a medium's src or poster; a file it made as a downloading link's href.
+   * Never javascript:, nor a page or a script by data: or blob:. */
+  function safeAddress(url, tag, name, downloads) {
+    var u;
+    try { u = new URL(url, location.href); } catch (e) { return false; }
+    if (/^(https?|mailto|tel|sms):$/.test(u.protocol)) return true;
+    var medium = MEDIA[String(tag).toUpperCase()] && (name === "src" || name === "poster");
+    if (u.protocol === "blob:") return !!(medium || (downloads && name === "href" && /^(A|AREA)$/i.test(tag)));
+    return u.protocol === "data:" && !!medium && /^data:image\//i.test(u.href);
   }
   /** Append children to el, skipping null and false (site.rowAction returns null when a row has no action). */
   function append(el, child) {
@@ -962,8 +1006,9 @@
     // The page draws after its data loads: Studio says it is opening the site until the first view is drawn.
     var b = bind();
     if (b && typeof b.drawsLater === "function") b.drawsLater();
+    // data: the address of the page's data file (data.json when left out), null for none, or the data itself
     var dataUrl = o.data === undefined ? "data.json" : o.data;
-    var got = dataUrl ? load(dataUrl) : Promise.resolve({});
+    var got = dataUrl && typeof dataUrl === "object" ? Promise.resolve(dataUrl) : dataUrl ? load(dataUrl) : Promise.resolve({});
     return got.then(function (data) {
       state(typeof o.state === "function" ? o.state(data) : (o.state || {}));
       if (o.select) hooks.select = function (ref) { return o.select(ref, data); };
@@ -990,7 +1035,7 @@
   }
 
   window.site = {
-    version: "1.6.1",
+    version: "1.7.0",
     h: h, append: append, icon: icon, link: link, slug: slug, rowAttrs: rowAttrs, safeUrl: safeUrl,
     date: date, dayDate: dayDate, ago: ago, money: money, num: num, valueText: valueText, host: host, seen: seenText,
     cite: cite, shown: shown, known: known, within: within, byFilter: byFilter, old: isOld, expired: expired,

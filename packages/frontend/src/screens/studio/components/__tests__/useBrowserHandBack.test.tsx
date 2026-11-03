@@ -28,7 +28,7 @@ import {
   type BrowserHandBackInput,
 } from "../browserHandBack";
 import { shouldDisplayChatMessage } from "../chatMessagePresentation";
-import { useBrowserHandBack } from "../useBrowserHandBack";
+import { browserHandBackRetry, browserHandBackSender, useBrowserHandBack } from "../useBrowserHandBack";
 import { BROWSER_HUMAN_INPUT_CONTINUE_PROMPT } from "../useBrowserHumanInput";
 
 // The browser turn's reply and the hand-back's claim and prompt are the
@@ -269,6 +269,92 @@ describe("browser hand-back: how the chat shows it", () => {
     expect(isUnsentBrowserNoticePrompt(message)).toBe(false);
     recordSendFailedForPromptSentFromThisPage(message);
     expect(isUnsentBrowserNoticePrompt(message)).toBe(true);
+  });
+});
+
+// Try again on a hand-back whose turn failed (its save was refused) sent the
+// notice the chat shows, "Octo continued in the chat", as the person's
+// message: Octo read it as their request, with no record of the browser
+// turn, so it chose no skill from what they asked.
+describe("browser hand-back: Try again on one that failed", () => {
+  // The controller's own hand-back, as the chat stores it. The controller
+  // gives a hand-back to the agent whose card it carries on, whichever
+  // agents the send names.
+  const controllers: ChatMessage = { id: "stored", role: "user", content: "Octo continued in the chat", timestamp: 1,
+    metadata: { prompt_metadata: {
+      displayContent: "Octo continued in the chat",
+      agentSelection: { active: ["octo"], mentions: ["octo"] },
+      [BROWSER_HAND_BACK_RECORD_KEY]: { version: 1, browserJobId: BROWSER_JOB, cardJobId: CARD_JOB, findingCount: 0 },
+    } } };
+
+  it("sends the hand-back again: its claim and Studio's words", () => {
+    expect(browserHandBackRetry(controllers, { retryOfMessageId: "failure-1" })).toEqual({
+      message: fixtures.handBackPrompt,
+      extras: {
+        display: "Octo continued in the chat",
+        metadata: { retryOfMessageId: "failure-1", [fixtures.claimKey]: BROWSER_JOB },
+      },
+    });
+    // Studio's own, as this page sent it: the claim as sent.
+    const studios: ChatMessage = { id: "local", role: "user", content: browserHandBackNotice("Octo"), timestamp: 1,
+      metadata: { clientMessageId: "client-hb", [BROWSER_HAND_BACK_CLAIM_KEY]: BROWSER_JOB } };
+    expect(browserHandBackRetry(studios, { retryOfMessageId: "failure-2" })).toEqual({
+      message: BROWSER_HAND_BACK_PROMPT,
+      extras: {
+        display: "Octo continued with what it found in the browser",
+        metadata: { retryOfMessageId: "failure-2", [BROWSER_HAND_BACK_CLAIM_KEY]: BROWSER_JOB },
+      },
+    });
+    // The retry's metadata never names another browser turn.
+    expect(browserHandBackRetry(studios, { [BROWSER_HAND_BACK_CLAIM_KEY]: "job-other" })?.extras.metadata)
+      .toEqual({ [BROWSER_HAND_BACK_CLAIM_KEY]: BROWSER_JOB });
+    // Any other prompt, and Octo's own words, are not hand-backs.
+    expect(browserHandBackRetry({ role: "user", content: "Make the page dark.", metadata: {} }, {})).toBeNull();
+    expect(browserHandBackRetry({ ...controllers, role: "assistant" }, {})).toBeNull();
+  });
+
+  // What Try again then sends, through the panel's own send: Studio's words
+  // with the claim, shown as the notice, never the notice as what Octo reads.
+  it("goes out as the hand-back through the panel's send, shown as its notice", async () => {
+    const submit = vi.fn(async () => undefined);
+    const send = browserHandBackSender({ submit, conversationId: "conversation-1", agentHandle: "octo" });
+    const retry = browserHandBackRetry(controllers, { retryOfMessageId: "failure-1" });
+    expect(retry).not.toBeNull();
+    await expect(send(retry!.message, retry!.extras)).resolves.toBe(true);
+    expect(submit).toHaveBeenCalledExactlyOnceWith("conversation-1", "Octo continued in the chat", {
+      agentHandles: ["octo"],
+      imageFiles: [],
+      editorState: null,
+      expectedLaneIdle: true,
+      requireDispatch: true,
+      dispatchInput: fixtures.handBackPrompt,
+      metadata: { retryOfMessageId: "failure-1", [fixtures.claimKey]: BROWSER_JOB },
+      callerReportsDispatchErrors: true,
+    });
+  });
+});
+
+describe("browser hand-back: the send", () => {
+  it("goes to the building lane as Studio's words with the claim, and says whether it went out", async () => {
+    const submit = vi.fn(async () => undefined);
+    const send = browserHandBackSender({ submit, conversationId: "conversation-1", agentHandle: "octo" });
+    const extras = { display: browserHandBackNotice("Octo"), metadata: { [BROWSER_HAND_BACK_CLAIM_KEY]: BROWSER_JOB } };
+    await expect(send(BROWSER_HAND_BACK_PROMPT, extras)).resolves.toBe(true);
+    const [conversation, shown, options] = submit.mock.calls[0] as unknown as [string, string, Record<string, unknown>];
+    expect(conversation).toBe("conversation-1");
+    expect(shown).toBe("Octo continued with what it found in the browser");
+    expect(options).toMatchObject({
+      dispatchInput: BROWSER_HAND_BACK_PROMPT,
+      metadata: { [BROWSER_HAND_BACK_CLAIM_KEY]: BROWSER_JOB },
+      // It resumes an idle lane or is refused, and a refusal adds no row of
+      // its own to the chat: the browser turn stays the last word.
+      expectedLaneIdle: true,
+      requireDispatch: true,
+      callerReportsDispatchErrors: true,
+    });
+    // A refusal resolves false, and throws nothing at the caller.
+    submit.mockRejectedValueOnce(new Error("That browser turn finished too long ago to hand back."));
+    await expect(send(BROWSER_HAND_BACK_PROMPT, extras)).resolves.toBe(false);
   });
 });
 

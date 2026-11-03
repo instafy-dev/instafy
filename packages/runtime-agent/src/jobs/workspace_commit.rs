@@ -825,6 +825,10 @@ async fn acquire_workspace_lease(
 enum LeaseAcquireError {
     #[error("workspace lease conflict: {0}")]
     Conflict(String),
+    /// The controller does not let this job write the space (403): no later
+    /// try of the same job gets the lease either.
+    #[error("workspace lease acquire failed (403 Forbidden): {0}")]
+    Refused(String),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -869,6 +873,9 @@ async fn acquire_workspace_lease_once(
 
     if status == StatusCode::CONFLICT {
         return Err(LeaseAcquireError::Conflict(text));
+    }
+    if status == StatusCode::FORBIDDEN {
+        return Err(LeaseAcquireError::Refused(text));
     }
     if !status.is_success() {
         return Err(anyhow!("workspace lease acquire failed ({}): {}", status, text).into());
@@ -1219,6 +1226,9 @@ pub(crate) struct PreTurnRefreshOutcome {
     /// Why no workspace lease was used, when the read-only refresh ran.
     pub(crate) lease_error: Option<String>,
     pub(crate) skipped_reason: Option<&'static str>,
+    /// The controller refused this job the workspace lease (403): it may not
+    /// write the space, so its save at the end of the turn is refused too.
+    pub(crate) saves_refused: bool,
 }
 
 impl PreTurnRefreshOutcome {
@@ -1278,7 +1288,10 @@ impl PreTurnRefreshOutcome {
 /// checkout to `main`. When no lease can be had (a read-only run, or someone
 /// else holds it), the origin hosted by this process fetches with its own
 /// read credential and moves the checkout only when nothing local is
-/// unpublished. Failures are recorded, never fatal.
+/// unpublished. Failures are recorded, never fatal. A lease the controller
+/// refuses this job outright is recorded as `saves_refused`: its save would
+/// be refused too, so a turn that must write files ends before its model
+/// runs (`jobs::turn_that_cannot_save`).
 pub(crate) async fn refresh_before_turn(params: PreTurnRefresh<'_>) -> PreTurnRefreshOutcome {
     if !params.has_git_remote {
         return PreTurnRefreshOutcome::skipped("no_git_remote", None);
@@ -1287,6 +1300,7 @@ pub(crate) async fn refresh_before_turn(params: PreTurnRefresh<'_>) -> PreTurnRe
         return PreTurnRefreshOutcome::skipped("no_local_origin", None);
     };
 
+    let mut saves_refused = false;
     let lease_error = match params.workspace_token {
         None => Some("missing workspace token".to_string()),
         Some(token) => {
@@ -1343,26 +1357,35 @@ pub(crate) async fn refresh_before_turn(params: PreTurnRefresh<'_>) -> PreTurnRe
                         Err(error) => PreTurnRefreshOutcome::failed(format!("{error:#}"), None),
                     };
                 }
-                Err(error) => Some(error.to_string()),
+                Err(error) => {
+                    saves_refused = matches!(error, LeaseAcquireError::Refused(_));
+                    Some(error.to_string())
+                }
             }
         }
     };
 
-    let Some(refresh) = local_origin.read_only_refresh.as_ref() else {
-        return PreTurnRefreshOutcome::skipped("no_read_only_refresh", lease_error);
+    let outcome = match local_origin.read_only_refresh.as_ref() {
+        None => PreTurnRefreshOutcome::skipped("no_read_only_refresh", lease_error),
+        Some(refresh) => {
+            match tokio::time::timeout(PRE_TURN_REFRESH_TIMEOUT, refresh.run()).await {
+                Ok(Ok(report)) => PreTurnRefreshOutcome {
+                    mode: "read_only",
+                    response: Some(OriginSaveResponse::from_value(report)),
+                    lease_error,
+                    ..PreTurnRefreshOutcome::default()
+                },
+                Ok(Err(error)) => PreTurnRefreshOutcome::failed(format!("{error:#}"), lease_error),
+                Err(_) => PreTurnRefreshOutcome::failed(
+                    "the read-only refresh timed out".to_string(),
+                    lease_error,
+                ),
+            }
+        }
     };
-    match tokio::time::timeout(PRE_TURN_REFRESH_TIMEOUT, refresh.run()).await {
-        Ok(Ok(report)) => PreTurnRefreshOutcome {
-            mode: "read_only",
-            response: Some(OriginSaveResponse::from_value(report)),
-            lease_error,
-            ..PreTurnRefreshOutcome::default()
-        },
-        Ok(Err(error)) => PreTurnRefreshOutcome::failed(format!("{error:#}"), lease_error),
-        Err(_) => PreTurnRefreshOutcome::failed(
-            "the read-only refresh timed out".to_string(),
-            lease_error,
-        ),
+    PreTurnRefreshOutcome {
+        saves_refused,
+        ..outcome
     }
 }
 
@@ -2573,6 +2596,93 @@ mod tests {
         ensure!(outcome.mode == "read_only", "{outcome:?}");
         ensure!(read_only_calls.load(Ordering::SeqCst) == 2);
         ensure!(requests.load(Ordering::SeqCst) == 1);
+        Ok(())
+    }
+
+    /// A controller whose `/lease/acquire` answers `status` with `body`.
+    async fn spawn_lease_answering_controller(
+        status: AxumStatusCode,
+        body: &'static str,
+    ) -> reqwest::Url {
+        let app = Router::new().route(
+            "/lease/acquire",
+            post(move || async move { (status, body) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        reqwest::Url::parse(&format!("http://{address}/")).unwrap()
+    }
+
+    /// The controller refusing the job the workspace lease outright (403) is
+    /// recorded: the job may not write the space, so its save will be refused
+    /// too, and a turn that must write files ends before its model runs
+    /// (`jobs::turn_that_cannot_save`). A lease someone else holds for a
+    /// moment (409), or any other failure, is not a refusal: the save may
+    /// still land. The refresh still runs read-only either way, and the
+    /// lease's error reads as it did.
+    #[tokio::test]
+    async fn pre_turn_refresh_records_a_lease_the_controller_refuses_this_job() -> Result<()> {
+        let refused_body =
+            r#"{"message":"legacy job token is not allowed to mutate this workspace scope"}"#;
+        for (status, body, saves_refused) in [
+            (AxumStatusCode::FORBIDDEN, refused_body, true),
+            (AxumStatusCode::CONFLICT, r#"{"message":"held"}"#, false),
+            (AxumStatusCode::BAD_GATEWAY, "", false),
+        ] {
+            let controller = spawn_lease_answering_controller(status, body).await;
+            let (read_only, read_only_calls) = counting_read_only_refresh();
+            let outcome = refresh_before_turn(pre_turn_refresh(
+                &controller,
+                Some("workspace-token"),
+                Some(LocalOriginSync {
+                    origin_id: Uuid::new_v4(),
+                    endpoint: "http://127.0.0.1:9".to_string(),
+                    read_only_refresh: Some(read_only),
+                    working_state: None,
+                }),
+            ))
+            .await;
+            ensure!(outcome.mode == "read_only", "{status}: {outcome:?}");
+            ensure!(read_only_calls.load(Ordering::SeqCst) == 1);
+            ensure!(
+                outcome.saves_refused == saves_refused,
+                "{status}: {outcome:?}"
+            );
+            if saves_refused {
+                ensure!(
+                    outcome.lease_error.as_deref()
+                        == Some(
+                            format!(
+                                "workspace lease acquire failed (403 Forbidden): {refused_body}"
+                            )
+                            .as_str()
+                        ),
+                    "{outcome:?}"
+                );
+            }
+        }
+
+        // Refused, with nothing to refresh read-only from: still recorded.
+        let controller =
+            spawn_lease_answering_controller(AxumStatusCode::FORBIDDEN, refused_body).await;
+        let outcome = refresh_before_turn(pre_turn_refresh(
+            &controller,
+            Some("workspace-token"),
+            Some(LocalOriginSync {
+                origin_id: Uuid::new_v4(),
+                endpoint: "http://127.0.0.1:9".to_string(),
+                read_only_refresh: None,
+                working_state: None,
+            }),
+        ))
+        .await;
+        ensure!(
+            outcome.mode == "skipped" && outcome.saves_refused,
+            "{outcome:?}"
+        );
         Ok(())
     }
 

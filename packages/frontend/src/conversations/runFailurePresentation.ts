@@ -14,6 +14,7 @@ import type { ChatMessage } from "../screens/studio/types";
 export type RunFailureKind =
   | "missing_final_message"
   | "no_workspace_changes"
+  | "changes_not_saved"
   | "missing_verification"
   | "needs_ai"
   | "provider_rate_limited"
@@ -40,6 +41,10 @@ const RUN_FAILURE_FRIENDLY_TEXT: Record<RunFailureKind, string> = {
     "The reply didn't come through. This is usually temporary.",
   // Used when the failure names no agent; see noChangesFriendlyText.
   no_workspace_changes: "Octo didn't finish the changes.",
+  // The turn made its changes and only their save failed: the files are
+  // marked Not saved (extractUnsavedReasonFromMetadata). Used when the
+  // failure names no agent; see notSavedFriendlyText.
+  changes_not_saved: "Octo made the changes but couldn't save them.",
   missing_verification: "The turn ended before it could check its work.",
   needs_ai:
     "No AI is connected for this turn. Connect AI, then try again.",
@@ -93,6 +98,11 @@ function failedAgentName(metadata: Record<string, unknown> | null): string | nul
 function noChangesFriendlyText(metadata: Record<string, unknown> | null): string {
   const name = failedAgentName(metadata);
   return name ? `${name} didn't finish the changes.` : RUN_FAILURE_FRIENDLY_TEXT.no_workspace_changes;
+}
+
+function notSavedFriendlyText(metadata: Record<string, unknown> | null): string {
+  const name = failedAgentName(metadata);
+  return name ? `${name} made the changes but couldn't save them.` : RUN_FAILURE_FRIENDLY_TEXT.changes_not_saved;
 }
 
 /** Longest inline failure reason before it is truncated (…) with the full text
@@ -172,6 +182,12 @@ const NO_WORKSPACE_CHANGES_PATTERNS = [
   /requires workspace file changes, but the codex reply produced no files/i,
   /reported file changes but no workspace files were written/i,
 ];
+
+// The runtime made the turn's changes and its save of them failed before it
+// reached the space (runtime-agent jobs/mod.rs, "Workspace sync failed: …"),
+// as when the controller refused the save. Said as what failed, never as the
+// turn having stopped: the files are there, marked Not saved.
+const CHANGES_NOT_SAVED_PATTERNS = [/\bworkspace sync failed:/i];
 
 const MISSING_VERIFICATION_PATTERNS = [
   /command observation required by runtime routing/i,
@@ -311,6 +327,8 @@ const PROVIDER_QUOTA_EXHAUSTED_PATTERN =
  * `generic`), and a
  * spent usage window is `provider_usage_limit`, which waits hours or days, so
  * it is neither retried automatically nor offered a manual "Try again".
+ * `changes_not_saved` is excluded because the turn already made its changes:
+ * sent again it would make them again, and be charged for it.
  * `response_incomplete` is excluded because the provider already billed the
  * cut-short answer, and the same request would most likely stop the same way.
  * `browser_page_missing` is excluded because the person has to open a page or
@@ -712,6 +730,9 @@ export function classifyRunFailureText(rawText: string): Exclude<RunFailureKind,
   if (BROWSER_PAGE_MISSING_PATTERNS.some((pattern) => pattern.test(rawText))) {
     return "browser_page_missing";
   }
+  if (CHANGES_NOT_SAVED_PATTERNS.some((pattern) => pattern.test(rawText))) {
+    return "changes_not_saved";
+  }
   if (MISSING_FINAL_MESSAGE_PATTERNS.some((pattern) => pattern.test(rawText))) {
     return "missing_final_message";
   }
@@ -830,6 +851,8 @@ function runFailureFriendlyText(
       return inlineGenericFailureText(rawText);
     case "no_workspace_changes":
       return noChangesFriendlyText(metadata);
+    case "changes_not_saved":
+      return notSavedFriendlyText(metadata);
     case "response_incomplete":
       return incompleteResponseFriendlyText(rawText);
     case "provider_usage_limit":

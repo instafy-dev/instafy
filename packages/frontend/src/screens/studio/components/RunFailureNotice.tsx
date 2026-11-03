@@ -42,6 +42,12 @@ export type RunFailureRetryContextValue = {
    */
   isRetrySuperseded?: (failureMessage: ChatMessage) => boolean;
   /**
+   * True once a press of Try again found that the failure's prompt cannot be
+   * sent again from its card (a hand-back the controller refused). Such a
+   * card offers neither "Try again" nor "Retried": nothing was sent.
+   */
+  isRetryWithdrawn?: (failureMessage: ChatMessage) => boolean;
+  /**
    * Opens the AI connect/settings surface. Rendered as a "Connect AI" action on
    * failures whose cause is a missing credential (kind === "needs_ai").
    */
@@ -228,6 +234,11 @@ export function RunFailureMessageBody({
     () => isRetrySuperseded?.(message) ?? false,
     [isRetrySuperseded, message],
   );
+  const isRetryWithdrawn = retryContext?.isRetryWithdrawn;
+  const withdrawn = useMemo(
+    () => isRetryWithdrawn?.(message) ?? false,
+    [isRetryWithdrawn, message],
+  );
   const needsAi = presentation.kind === "needs_ai";
   // A spent usage window reopens in hours or days, so a resend now would fail
   // the same way. Instafy AI's own limit leaves the person nothing to do; on
@@ -249,7 +260,7 @@ export function RunFailureMessageBody({
   const detailsText = sameSentence(presentation.rawText, presentation.friendlyText) ? null : presentation.rawText;
   const hasDetails = Boolean(detailsText?.trim()) || Boolean(steps);
   const showManualControls = retryContext !== null && !quiet && !needsAi && !usageLimit;
-  const showRetry = showManualControls && (retryPending || !superseded);
+  const showRetry = showManualControls && (retryPending || (!superseded && !withdrawn));
   const showRetried = showManualControls && superseded && !retryPending;
 
   const retryButtonRef = useRef<HTMLButtonElement | null>(null);

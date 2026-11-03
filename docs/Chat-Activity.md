@@ -75,7 +75,12 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 - Every failed turn shows the same failure block (`RunFailureMessageBody`): one plain sentence,
   "Try again", and Details with the raw error. A turn that did not make the file changes it was
   asked for reads "Octo didn't finish the changes." (the agent's own name when the failure names
-  one). When the AI refused or dropped the request (the Instafy proxy's `unexpected status …`,
+  one). A turn that made its changes and whose save of them failed (the runtime's "Workspace sync
+  failed: …", as when the controller refused the save) reads "Octo made the changes but couldn't
+  save them.", never that the turn stopped, and its files read "Not saved"
+  (`origin/apply-error`), with the note "These changes weren't saved to the space. They're kept
+  under History, in Unsaved work.": the save never reached the space, and a later turn saves only
+  what it changes itself, so nothing promises them a save. When the AI refused or dropped the request (the Instafy proxy's `unexpected status …`,
   read by `proxyError.ts`), the sentence never names the plumbing. On Instafy AI
   (`aiAccessMode: managed` on the run's final message) it reads "Instafy AI isn't answering right
   now."; on the person's own AI it says what happened ("Your AI connection needs you to sign in
@@ -97,7 +102,15 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   that left the person nothing costs nothing either
   ([Failed turns](Credits-Billing.md#failed-turns)). A hand-back is never
   sent again by itself: its words alone would go out as a turn of their own, without what the
-  browser found, and be charged (`isRunFailurePromptAutoResendable`). An AI that didn't answer
+  browser found, and be charged (`isRunFailurePromptAutoResendable`). "Try again" on a hand-back
+  sends that hand-back again, its claim on the browser turn and Studio's words, never the notice
+  the chat shows in its place ("Octo continued in the chat"), which alone would reach Octo as the
+  person's request with nothing the browser turn found (`browserHandBackRetry`); it is a
+  hand-back, charged as one, and goes to the agent whose card it carries on. When the controller
+  refuses it (someone wrote after the browser turn, that turn is over half an hour old, or it was
+  someone else's), the chat adds no row for the refusal: one line says "Octo can't try this again
+  from here. Ask Octo to continue instead.", and the card's "Try again" goes, with no "Retried".
+  An AI that didn't answer
   (`ai_unavailable`) is not sent again by itself either: at once it would most likely fail the
   same way, so the person decides when to press "Try again". Every resend names the failure it
   retries (`retryOfMessageId`); Instafy's own is also marked `retryAutomatic`, which only billing

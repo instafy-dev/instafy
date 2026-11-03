@@ -47,9 +47,10 @@ own kind of page.
   ("No options yet") while a page you read named what to compare.
 - Keep sort, filters and the open tab in the URL query and give rows ids, so links and Studio's Follow keep them.
 - Every item the request names (stops, products, entries) is on the page, or the reply says plainly which is
-  missing and why. Check before the card with the builder skill's own check, else
-  `instafy bind check <dir> --expect "<item>,<item>"`; it also lists blank values, values without their page or
-  date, and a filter applied without `site.byFilter`. Fix each.
+  missing and why. Post the card first (step 3), then check with the builder skill's own check, else
+  `instafy bind check <dir> --expect "<item>,<item>"` (it also lists blank values, values without their page or
+  date, and a filter applied without `site.byFilter`), and fix what it lists. A failing check never holds the card
+  back.
 - Facts come from pages you opened this turn, never from memory: the builder skill's source or fetch command when
   it has one, else `instafy-web-research` (its "Comparing items" for prices and reviews per item) or Instafy's
   browser (`instafy-browser-automation`). Keep each fact's link and date.

@@ -1419,9 +1419,11 @@ pub(crate) async fn process_dispatch_prompt_timed(
     }
 
     // A hand-back resumes the building turn with what a browser turn found,
-    // once per browser turn and one hop only (crate::browser_hand_back).
+    // once per browser turn and one hop only (crate::browser_hand_back): in
+    // the lane of the turn whose card it carries on, with no more than that
+    // turn could write.
     if let Some(claim) = hand_back_claim.as_ref() {
-        let record = crate::browser_hand_back::require_hand_back(
+        let checked = crate::browser_hand_back::require_hand_back(
             &transaction,
             &conversation.id,
             context,
@@ -1429,8 +1431,12 @@ pub(crate) async fn process_dispatch_prompt_timed(
             &request.metadata,
         )
         .await?;
-        ensure_object(&mut request.metadata)
-            .insert(crate::browser_hand_back::HAND_BACK_KEY.to_string(), record);
+        let metadata = ensure_object(&mut request.metadata);
+        checked.continues.bind(metadata);
+        metadata.insert(
+            crate::browser_hand_back::HAND_BACK_KEY.to_string(),
+            checked.record,
+        );
         // It asks only what Studio asks: it costs nothing unless it ends with
         // a reply (crate::system_turns), so no request of the sender's rides
         // on it.

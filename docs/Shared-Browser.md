@@ -2399,7 +2399,15 @@ unless the policy is `"covered"`.
   who ran the browser turn, and whose turn sent the card, can send it, once per
   browser turn, within 30 minutes, only while no prompt was sent in the
   conversation after the browser turn (`browser_hand_back_superseded`), and
-  never as a send-queue entry. Like any turn Instafy starts by itself, a hand-back costs nothing
+  never as a send-queue entry. An earlier hand-back of the same browser turn
+  that failed, was stopped or expired neither counts as Octo having continued
+  nor as a prompt sent after the browser turn: "Try again" on a failed one
+  sends the hand-back again, its claim and Studio's words, never the notice
+  the chat shows for it. A hand-back resumes the building lane of the turn
+  whose card the browser turn carried on: it goes to that turn's agent alone,
+  whichever agents its send names, and writes no more than that turn could,
+  with no write intent when that turn had none and only its owned paths when
+  it had some (`browser_hand_back::ContinuedTurn`). Like any turn Instafy starts by itself, a hand-back costs nothing
   unless it ends with Octo's reply
   ([Credits and Billing](Credits-Billing.md#turns-instafy-starts-by-itself)), so it carries
   nothing of the person's: dispatch replaces whatever words it was sent with by Studio's own, and
@@ -2510,7 +2518,10 @@ unless the policy is `"covered"`.
   sends this hand-back itself, in the name of the person who sent the browser
   turn, as soon as that turn's completion is committed
   (`browser_hand_back::hand_back_build_request`): it never waits for a page of
-  theirs to be open, and Studio sends none for it. It goes through the same
+  theirs to be open, and Studio sends none for it. Like every send of Studio's,
+  it says the turn may write the space's files (`writeIntent`), so its job is
+  leased with the token its save needs, when the person's message could write
+  them: a message sent read-only gets a hand-back that cannot either. It goes through the same
   dispatch and checks as Studio's, except that the card need not continue
   building and the browser turn need not have read a page or replied, and only
   for a card the routing step posted; it stamps `buildRequest` with the

@@ -274,6 +274,17 @@ describe("RunFailureMessageBody", () => {
     expect(query("run-failure-details-toggle")).not.toBeNull();
   });
 
+  // A resend that cannot go out from this card (a hand-back the controller
+  // refused) withdraws Try again: nothing was sent, so it never reads
+  // Retried, and Details stays.
+  it("shows neither Try again nor Retried once Try again is withdrawn", async () => {
+    await render(contextValue({ isRetryWithdrawn: () => true }));
+
+    expect(query("run-failure-retry")).toBeNull();
+    expect(query("run-failure-retried")).toBeNull();
+    expect(query("run-failure-details-toggle")).not.toBeNull();
+  });
+
   it("keeps the pressed Try again pending until its request settles", async () => {
     await render(
       contextValue({ pendingRetryKey: "failure-1", isRetrySuperseded: () => true }),

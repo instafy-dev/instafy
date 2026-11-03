@@ -794,7 +794,15 @@ loses only work that never reached the remote:
   read-only run, or someone else holds it) refreshes read-only instead: the
   origin fetches with its own `git.read` credential and moves the checkout
   only when it holds nothing unpublished. The outcome is recorded on the turn
-  as an `origin/refresh` artifact; a failure never fails the turn.
+  as an `origin/refresh` artifact; a failure never fails the turn. When the
+  controller refuses the job the lease outright (403: the job may not write
+  the space), its save at the end would be refused too, so a turn that must
+  write files (a hand-back, or a turn whose route or sender requires file
+  changes) ends before its model starts the work (a routing step, when the
+  turn takes one, has only decided that it must write), with "Octo can't
+  save changes in this space right now, so it didn't start making them." and
+  that record (`turn_that_cannot_save`). Any other turn goes on read-only,
+  and a lease someone else holds is no refusal.
 - The files the runtime bundles (`INSTAFY.md`, `AGENTS.md`, `CLAUDE.md`,
   `AGENTS.py` and the `.agents/skills/instafy-*` skills in
   `packages/runtime-agent/assets/instafy`) reach `main` through the

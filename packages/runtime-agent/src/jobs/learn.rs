@@ -340,10 +340,15 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     include_str!("legacy/interactive-artifacts-v6.md"),
     // From before the card's command went into the site's folder (it said "from the site's folder").
     include_str!("legacy/interactive-artifacts-v7.md"),
+    // From before the card came before the check, so a failing check never held it back (it said "Check before
+    // the card").
+    include_str!("legacy/interactive-artifacts-v8.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),
     include_str!("legacy/research-team-v2.md"),
+    // From before the card came before the reconcile with `Expect:` ("Reconcile with `Expect:` before the card").
+    include_str!("legacy/research-team-v3.md"),
 ];
 const LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES: &[&str] = &[
     // From before a lane read with the research skill and compared a product by its "Comparing items".
