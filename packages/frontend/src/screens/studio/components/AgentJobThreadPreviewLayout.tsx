@@ -519,6 +519,11 @@ export function AgentJobThreadPreviewLayout({
     isCompleted && hasPreview && !["", "completed", "thinking", "reasoning"].includes(normalizeThreadPlaceholderText(previewText));
   const showSummaryBody = isCompleted && (hasUsefulFinalSummary || hasUsefulPreview || terminalStatusMarker !== null);
   const showReplyBody = showSummaryBody && (runFailurePresentation === null || showFailureBlock);
+  // The reply as the model writes it, until it lands. A failed turn whose
+  // resend writes its reply before it shows anything else keeps its "Trying
+  // again…" line (it holds focus after a press on Try again, until the turn
+  // that replaced it takes it), and the reply grows under it, in this row.
+  const showReplyDraft = replyDraft !== null && (!showReplyBody || autoRetryPending);
   // Opening Details never changes this: the line must stay under the pointer
   // that opened it, so the turn keeps its chrome either way.
   const canUseTightCompletedLayoutBase =
@@ -947,7 +952,7 @@ export function AgentJobThreadPreviewLayout({
           </div>
         ) : null}
 
-        {replyDraft !== null && !showReplyBody ? (
+        {showReplyDraft ? (
           // The reply as the model writes it, where the reply lands: the
           // turn's progress from now on, in this one row.
           <div className={`relative ${showActivityLine ? "pt-1" : "pt-2"} pb-0`} data-testid="chat-reply-draft">

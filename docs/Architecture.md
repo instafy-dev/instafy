@@ -149,7 +149,9 @@ assistant speech, preserving the participation and billing decision.
 
 Studio shows a draft inside its turn's row, in the place the turn's reply takes, under the turn's
 activity line and above its cards, so a turn stays one row while its reply is written and the
-reply lands where its draft grew. A draft whose turn shows no row yet is a row of its own.
+reply lands where its draft grew. A turn sent again that shows nothing yet is the row of the turn
+it tries again ("Trying again…"), so its draft grows there, under that line. A draft whose turn
+shows no row yet is a row of its own.
 
 The runtime coalesces snapshots at 200 ms and caps their display text at 128 KiB. These are
 presentation limits: they do not limit model execution or truncate the durable final reply.

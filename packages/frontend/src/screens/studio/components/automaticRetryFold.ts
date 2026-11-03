@@ -63,6 +63,11 @@ export type AutomaticRetryFold = {
   earlierAttemptByJobId: ReadonlyMap<string, EarlierAttempt>;
   /** Failed jobs whose resend went out but whose retry has shown nothing yet. */
   pendingJobIds: ReadonlySet<string>;
+  /**
+   * Those failed jobs, to the run their resend started: the failed turn's row
+   * stands for that run until it shows something, its reply's draft included.
+   */
+  pendingRetryRunIdByJobId: ReadonlyMap<string, string>;
 };
 
 /**
@@ -74,6 +79,7 @@ export function resolveAutomaticRetryFold(messages: readonly ChatMessage[]): Aut
   const hiddenPromptIds = new Set<string>();
   const earlierAttemptByJobId = new Map<string, EarlierAttempt>();
   const pendingJobIds = new Set<string>();
+  const pendingRetryRunIdByJobId = new Map<string, string>();
   const failures = new Map<string, ChatMessage>();
   const jobByRunId = new Map<string, string>();
   // Runs that failed before any job ran them (the controller refused them).
@@ -121,9 +127,10 @@ export function resolveAutomaticRetryFold(messages: readonly ChatMessage[]): Aut
       // The controller took the resend and started its run, which has
       // written nothing yet.
       pendingJobIds.add(failedJobId);
+      pendingRetryRunIdByJobId.set(failedJobId, retryRunId);
     }
   }
-  return { hiddenPromptIds, earlierAttemptByJobId, pendingJobIds };
+  return { hiddenPromptIds, earlierAttemptByJobId, pendingJobIds, pendingRetryRunIdByJobId };
 }
 
 /**
@@ -171,4 +178,18 @@ export function readEarlierAttempts(message: ChatMessage): ChatMessage[][] {
 /** True for a failed turn whose resend went out and has not shown anything yet. */
 export function isAutomaticRetryPending(message: ChatMessage): boolean {
   return metadataOf(message)?.autoRetryPending === true;
+}
+
+/**
+ * The run, and the job when known, of the resend a failed turn's row stands
+ * for while that resend has shown nothing ({@link isAutomaticRetryPending}).
+ */
+export function readPendingRetry(message: ChatMessage): { runId: string | null; jobId: string | null } | null {
+  const metadata = metadataOf(message);
+  if (metadata?.autoRetryPending !== true) {
+    return null;
+  }
+  const runId = stringField(metadata, ["autoRetryRunId"]) || null;
+  const jobId = stringField(metadata, ["autoRetryJobId"]) || null;
+  return runId || jobId ? { runId, jobId } : null;
 }

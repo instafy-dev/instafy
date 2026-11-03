@@ -937,15 +937,23 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
   // follows the selected chat, one commit later: until then the previous
   // chat's tab, and with it that chat's transcript, Browser view, prompts and
   // sign-in row, stayed on screen under the newly selected chat. The tab that
-  // effect activates is the active one from the render the selection changes.
+  // effect activates is the active one from the render the selection changes;
+  // for a chat with no open tab yet (Back after another chat took its preview
+  // tab, a search result, the phone's Chats sheet), the tab that effect opens
+  // for it, under the same id, so its area mounts once.
   const activeTab = useMemo(() => {
     const selected = activeTabId ? visibleTabs.find((tab) => tab.id === activeTabId) ?? null : null;
     if (!activeConversationId || activePanel !== "chat" || selected?.kind !== "conversation" ||
         selected.conversationId === activeConversationId) {
       return selected;
     }
-    return visibleTabs.find((tab) => tab.kind === "conversation" && tab.conversationId === activeConversationId) ?? selected;
-  }, [activeConversationId, activePanel, visibleTabs, activeTabId]);
+    const own = visibleTabs.find((tab) => tab.kind === "conversation" && tab.conversationId === activeConversationId);
+    if (own) return own;
+    const conversation = conversations.find((entry) => entry.localId === activeConversationId);
+    return conversation && conversation.lifecycleStatus !== "deleted"
+      ? prepareConversationTabOpen(visibleTabs, conversation, conversations, true).tab
+      : selected;
+  }, [activeConversationId, activePanel, conversations, visibleTabs, activeTabId]);
 
   useEffect(() => {
     if (locationSearch === undefined || activeTab?.kind !== "panel") return;

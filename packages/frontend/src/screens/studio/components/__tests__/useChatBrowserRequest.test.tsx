@@ -664,11 +664,11 @@ describe("Studio starting a request_browser card by itself", () => {
   // A message Octo sent straight to the browser: Studio opens its card the
   // same way, with the person's own words as the browser turn's task. The
   // continuation keeps Octo's one line, as any card's does, never those words
-  // a second time: kept as they were, the person's message was stored twice
-  // (a local test, Nov 3: 05:44:57.288 and 05:45:03.736), both copies reached
-  // every later turn's history, and the chat merged the person's bubble into
-  // the copy for 0.2 to 0.3 s. The chat leaves that line out, since the
-  // person's own message is right above it (routedBrowserFold.ts).
+  // as what it shows: shown as them (a local test, Nov 3: 05:44:57.288 and
+  // 05:45:03.736), the copy waiting to be stored was taken for the person's
+  // own message, whose bubble left the chat for 0.2 to 0.3 s. The chat leaves
+  // that line out, since the person's own message is right above it
+  // (routedBrowserFold.ts).
   it("opens a card the routing step sent with the person's own words as its task, kept as Octo's one line", async () => {
     await render();
     await advance(5_000);

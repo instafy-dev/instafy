@@ -55,7 +55,9 @@ const OCTO = { id: "786d5f34-547e-4ca7-8a85-4e1dedec2401", handle: "octo", avata
 const REPLY = "Livraria Lello’s official site lists its opening hours as daily, 9:00 AM–7:30 PM.";
 const at = (time: string) => `2026-11-03T${time}Z`;
 
-function stored(row: { id: string; role: "user" | "assistant"; time: string; content: string; metadata: Record<string, unknown> }): ChatMessage {
+function stored(row: {
+  id: string; role: "user" | "assistant"; time: string; content: string; metadata: Record<string, unknown>; runId?: string;
+}): ChatMessage {
   const message: ControllerConversationMessage = {
     id: row.id,
     conversationId: CONVERSATION,
@@ -63,7 +65,7 @@ function stored(row: { id: string; role: "user" | "assistant"; time: string; con
     sessionId: null,
     createdBy: row.role === "user" ? PERSON : null,
     promptId: null,
-    runId: RUN,
+    runId: row.runId ?? RUN,
     role: row.role,
     content: row.content,
     metadata: row.metadata,
@@ -171,9 +173,48 @@ const RUN_RECORD: RunRecord = {
   createdAt: null, updatedAt: null, metadata: { jobId: JOB, agent: OCTO, browserTransport: "shared" },
 };
 
-function draft(text: string, time: string): ReplyDraft {
+// A turn that failed and was sent again (Try again, or Instafy by itself),
+// whose retry writes its reply before it shows any step: the failed turn's
+// row stands for the retry ("Trying again…") until the retry shows something.
+const RETRY_RUN = "5c0e2b1a-7d1e-4f55-9a43-1f2a3b4c5d6e";
+const RETRY_JOB = "6d1f3c2b-8e2f-4a66-8b54-2a3b4c5d6e7f";
+const FAILURE = "7e2a4d3c-9f3a-4b77-9c65-3b4c5d6e7f80";
+const QUESTION = "What time does Livraria Lello open on Sunday?";
+const RETRY_REPLY = "Livraria Lello opens at 9:00 AM on Sundays.";
+const RETRY_CHAT: ChatMessage[] = [
+  stored({
+    id: "7e2a4d3c-9f3a-4b77-9c65-3b4c5d6e7f81", role: "user", time: "06:00:00.000", content: QUESTION,
+    metadata: { prompt_metadata: { client: { userId: PERSON, sessionId: "session-1" }, clientMessageId: "send-1" } },
+  }),
+  stored({
+    id: FAILURE, role: "assistant", time: "06:00:05.000", content: "Octo couldn't reach the AI service.",
+    metadata: { agent: OCTO, jobId: JOB, source: "agent", outcome: "failed", messageType: "error" },
+  }),
+  stored({
+    id: "7e2a4d3c-9f3a-4b77-9c65-3b4c5d6e7f83", role: "user", time: "06:00:10.000", content: QUESTION, runId: RETRY_RUN,
+    metadata: { prompt_metadata: { client: { userId: PERSON, sessionId: "session-1" }, clientMessageId: "send-2", retryOfMessageId: FAILURE } },
+  }),
+  stored({
+    id: "7e2a4d3c-9f3a-4b77-9c65-3b4c5d6e7f84", role: "assistant", time: "06:00:14.000", content: RETRY_REPLY, runId: RETRY_RUN,
+    metadata: { agent: OCTO, jobId: RETRY_JOB, source: "agent", outcome: "succeeded", details: { kind: "runtime_selection" } },
+  }),
+];
+// The same, with the retry's usage already stored: the chat knows the retry's
+// job, which still shows nothing.
+const RETRY_CHAT_WITH_USAGE: ChatMessage[] = [
+  ...RETRY_CHAT.slice(0, 3),
+  stored({
+    id: "7e2a4d3c-9f3a-4b77-9c65-3b4c5d6e7f85", role: "assistant", time: "06:00:11.500", content: "Token usage — input: 9120",
+    runId: RETRY_RUN,
+    metadata: { agent: OCTO, jobId: RETRY_JOB, source: "agent", kind: "update", outcome: "in_progress", messageType: "token_usage" },
+  }),
+  ...RETRY_CHAT.slice(3),
+];
+const RETRY_RUN_RECORD: RunRecord = { ...RUN_RECORD, id: RETRY_RUN, metadata: { jobId: RETRY_JOB, agent: OCTO } };
+
+function draft(text: string, time: string, run: { runId: string; jobId: string } = { runId: RUN, jobId: JOB }): ReplyDraft {
   const now = Date.parse(at(time));
-  return { conversationId: CONVERSATION, jobId: JOB, runId: RUN, attempt: 0, segment: 1, seq: text.length, text, startedAt: now, updatedAt: now };
+  return { conversationId: CONVERSATION, ...run, attempt: 0, segment: 1, seq: text.length, text, startedAt: now, updatedAt: now };
 }
 
 /**
@@ -224,14 +265,15 @@ describe("a turn's reply while the model writes it", () => {
   });
 
   /** The transcript ChatPanel shows at `time`: the stored rows, their turns, and the turn's draft, placed as ChatPanel places it. */
-  async function show(time: string, drafts: ReplyDraft[], chat: ChatMessage[] = CHAT) {
+  async function show(time: string, drafts: ReplyDraft[], chat: ChatMessage[] = CHAT, runs: RunRecord[] = [RUN_RECORD]) {
     const now = Date.parse(at(time));
     vi.setSystemTime(now);
-    mocks.runs = { [RUN]: RUN_RECORD };
+    mocks.runs = Object.fromEntries(runs.map((run) => [run.id, run]));
     const messages = chat.filter((message) => message.timestamp <= now);
     const collapsed = collapseLifecycleMessages(messages);
     const displayed = synthesizeAgentJobThreadMessages(collapsed, collapsed.filter(shouldDisplayChatMessage));
-    const visible = selectVisibleReplyDrafts(drafts, messages, new Set([RUN]), now).map(replyDraftChatMessage);
+    const visible = selectVisibleReplyDrafts(drafts, messages, new Set(runs.map((run) => run.id)), now)
+      .map(replyDraftChatMessage);
     await act(async () => {
       root.render(
         <ConversationMessageRows
@@ -244,8 +286,8 @@ describe("a turn's reply while the model writes it", () => {
           conversationControllerId={CONVERSATION}
           firstPlanMessageId={null}
           humanLabelByUserId={new Map()}
-          runAgentIdentityByRunId={new Map([[RUN, OCTO]])}
-          runAgentHandleByRunId={new Map([[RUN, OCTO.handle]])}
+          runAgentIdentityByRunId={new Map([[RUN, OCTO], [RETRY_RUN, OCTO]])}
+          runAgentHandleByRunId={new Map([[RUN, OCTO.handle], [RETRY_RUN, OCTO.handle]])}
           renderAssistantAvatar={() => <span data-testid="octo-face" />}
           assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
           onRequestActions={vi.fn()}
@@ -264,6 +306,7 @@ describe("a turn's reply while the model writes it", () => {
       draftRows: container.querySelectorAll('[data-testid="chat-reply-draft"]').length,
       busy: Boolean(turn?.querySelector('[data-testid="chat-reply-draft"] [aria-busy="true"]')),
       replyInTurn: turn?.textContent?.includes(REPLY) ?? false,
+      text: container.textContent ?? "",
       /** What the turn's row shows, top to bottom: its reply (or its draft) and its cards. */
       order: Array.from(turn?.querySelectorAll<HTMLElement>('[data-testid="chat-reply-draft"], [data-testid="turn-card"], p') ?? [])
         .flatMap((element) => element.dataset.testid === "chat-reply-draft" ? ["draft"]
@@ -290,6 +333,33 @@ describe("a turn's reply while the model writes it", () => {
       octoRows: 1, faces: { desktop: 1, phone: 1 }, draftInTurn: null, draftRows: 0, busy: false, replyInTurn: true,
     });
   });
+
+  // A Try again whose retry wrote its reply before any step drew it as a row
+  // of its own under the failed turn's "Trying again…", with a second face.
+  it.each([
+    ["has stored nothing yet", RETRY_CHAT],
+    ["has stored only what the chat does not show", RETRY_CHAT_WITH_USAGE],
+  ])("grows a retry's reply in the row of the turn it tries again, under its Trying again line, while the retry %s",
+    async (_case, chat) => {
+      const retry = { runId: RETRY_RUN, jobId: RETRY_JOB };
+      const sent = await show("06:00:11.900", [], chat, [RETRY_RUN_RECORD]);
+      expect(sent).toMatchObject({ octoRows: 1, faces: { desktop: 1, phone: 1 }, draftRows: 0 });
+      expect(sent.text).toContain("Trying again");
+
+      const growing = await show("06:00:12.000", [draft("Livraria Lello opens", "06:00:12.000", retry)], chat,
+        [RETRY_RUN_RECORD]);
+      expect(growing).toMatchObject({
+        octoRows: 1, faces: { desktop: 1, phone: 1 }, draftInTurn: "Livraria Lello opens", draftRows: 1, busy: true,
+      });
+      // The line stays, as a turn's line stays above its growing reply.
+      expect(growing.text.indexOf("Trying again")).toBeGreaterThan(-1);
+      expect(growing.text.indexOf("Trying again")).toBeLessThan(growing.text.indexOf("Livraria Lello opens"));
+
+      const landed = await show("06:00:14.000", [draft("Livraria Lello opens at 9:00", "06:00:13.000", retry)],
+        chat, [RETRY_RUN_RECORD]);
+      expect(landed).toMatchObject({ octoRows: 1, faces: { desktop: 1, phone: 1 }, draftRows: 0 });
+      expect(landed.text).toContain(RETRY_REPLY);
+    });
 
   it("puts the reply, and the draft before it, above the turn's card: the card follows what the turn says", async () => {
     // While the turn works, its card shows under its line.

@@ -56,6 +56,8 @@ describe("switching chats", () => {
   let api: ReturnType<typeof useWorkspaceTabs>;
   /** What each commit drew, in order. */
   let frames: string[];
+  /** The chats a chat area was mounted for, in order: each mount reconnects what it holds. */
+  let mounts: string[];
 
   /**
    * The chat area as StudioLayout draws it: keyed by the active tab, holding
@@ -64,6 +66,9 @@ describe("switching chats", () => {
    */
   function ChatArea({ chat }: { chat: string | null }) {
     const [held] = useState(chat);
+    useLayoutEffect(() => {
+      mounts.push(`${held}`);
+    }, [held]);
     return <p>{held === "github" ? "github.com/login · Let Octo continue" : `Chat ${held}`}</p>;
   }
   function Probe() {
@@ -90,7 +95,8 @@ describe("switching chats", () => {
     vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
     window.localStorage.clear();
     window.sessionStorage.clear();
-    fixture.conversations = ["seville", "github"].map(conversation);
+    // The Porto chat has no open tab.
+    fixture.conversations = ["seville", "github", "porto"].map(conversation);
     fixture.activeConversationId = "github";
     fixture.activePanel = "chat";
     vi.clearAllMocks();
@@ -100,10 +106,12 @@ describe("switching chats", () => {
     document.body.appendChild(container);
     root = createRoot(container);
     frames = [];
+    mounts = [];
     await render();
     expect(api.activeTab).toMatchObject({ kind: "conversation", conversationId: "github" });
     expect(container.textContent).toBe("github.com/login · Let Octo continue");
     frames = [];
+    mounts = [];
   });
 
   afterEach(async () => {
@@ -121,6 +129,21 @@ describe("switching chats", () => {
     expect(frames.length).toBeGreaterThan(0);
     expect(frames.filter((frame) => frame !== "Chat seville")).toEqual([]);
     expect(api.activeTab).toMatchObject({ kind: "conversation", conversationId: "seville" });
+    expect(mounts).toEqual(["seville"]);
+  });
+
+  // Back to a chat whose preview tab another chat took, a search result or the
+  // phone's Chats sheet selects a chat with no open tab: its tab opens one
+  // commit later, and until then the chat area was the previous chat's.
+  it("draws a chat without an open tab from the render it is selected in, and keeps it when its tab opens", async () => {
+    fixture.activeConversationId = "porto";
+    await render();
+    expect(frames.length).toBeGreaterThan(0);
+    expect(frames.filter((frame) => frame !== "Chat porto")).toEqual([]);
+    expect(api.activeTab).toMatchObject({ kind: "conversation", conversationId: "porto" });
+    expect(api.tabs.some((tab) => tab.kind === "conversation" && tab.conversationId === "porto")).toBe(true);
+    // Its area mounted once: the tab that opened is the one it was drawn under.
+    expect(mounts).toEqual(["porto"]);
   });
 
   it("opens a chat of this space in the press on its tab: the next frame is that chat", async () => {
@@ -138,6 +161,7 @@ describe("switching chats", () => {
     expect(navigate).not.toHaveBeenCalled();
     expect(frames.length).toBeGreaterThan(0);
     expect(frames.filter((frame) => frame !== "Chat seville")).toEqual([]);
+    expect(mounts).toEqual(["seville"]);
     expect(api.consumeUrlPush()).toBe(true);
   });
 

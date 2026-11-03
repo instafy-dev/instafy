@@ -48,9 +48,9 @@ import type { SharedBrowserHostRefresh } from "./useSharedBrowserHostSnapshot";
 /** How a continuation is shown and recorded. */
 export type BrowserTaskExtras = {
   /**
-   * What the chat shows in place of the task: a one-line notice. None for a
-   * message Octo sent straight to the browser that Studio opened by itself:
-   * the chat folds that continuation away (routedBrowserFold.ts).
+   * What the chat shows in place of the task: a one-line notice. A message
+   * Octo sent straight to the browser, opened by Studio itself, keeps one too,
+   * though the chat folds that continuation away (routedBrowserFold.ts).
    */
   display?: string;
   /** Prompt metadata naming the card, and whether Studio sent it by itself. */
@@ -571,14 +571,15 @@ export function useChatBrowserRequest(options: Options) {
           const followUp = browserFollowUpOf(sending, request, transport, routedJobId);
           if (goesOn && !followUp) throw new BrowserAutoStartDropped();
           const sent = await sending.continueTask(transport, browserRequestContinuation(request), {
-            // The chat keeps the continuation as this one line, never as the
-            // task's words. A message Octo sent straight to the browser has
-            // the person's own words as its task: kept as they are, they were
-            // the person's message a second time, in every later turn's
-            // history, and the chat merged the person's own bubble into it for
-            // a moment. Opened by Studio, its line does not show either: the
-            // person's message is right above, and the turn reads as one
-            // (routedBrowserFold.ts).
+            // The chat keeps the continuation as this one line; what it sends
+            // is the task. A message Octo sent straight to the browser has the
+            // person's own words as its task: shown as those words, the
+            // continuation waiting to be stored was taken for the person's own
+            // message, whose bubble left the chat for a moment. Routing and a
+            // new building thread read those words once, from the person's
+            // message (the runtime's conversation_context.rs). Opened by
+            // Studio, its line does not show either: the person's message is
+            // right above, and the turn reads as one (routedBrowserFold.ts).
             display: browserRequestNotice(sending.agentName ?? "Octo", request.task, { automatic: autoStarted }),
             metadata: {
               ...(extraMetadata ?? {}),

@@ -127,7 +127,9 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   "Try again" there folds the same way: the turn that answers lists every try before it, oldest
   first ("First try", "Second try", …). A resend the controller refused before any job ran it ends
   "Trying again…", and both failures show. Focus on the failed turn (after "Try again", or Cancel
-  on a countdown) moves to its "Trying again…" line, and then to the turn that replaced it.
+  on a countdown) moves to its "Trying again…" line, and then to the turn that replaced it. A
+  resend that writes its reply before it shows anything else grows that reply under the line, in
+  the failed turn's row, until the turn that replaced it shows.
 - Details (`TurnActivityDetails.tsx`) lists the turn in order: each command with its label, the
   command without its shell wrapper (the full line is its title), its state and its output behind
   a chevron, collapsed until opened; tool calls, web searches and file edits; Octo's notes,

@@ -207,21 +207,31 @@ export function readTurnReplyDraft(metadata: Record<string, unknown> | null | un
  * The transcript with each draft in its turn: a turn that shows a row (its
  * activity line) carries the draft in that row, in the place its reply takes,
  * so the turn stays one Octo row and the reply lands where its draft grew. A
- * draft whose turn has no row yet is a row of its own, after the transcript.
+ * retry that has shown nothing yet is shown by the row of the turn it tries
+ * again ("Trying again…"), so its draft grows there. A draft whose turn has
+ * no row yet is a row of its own, after the transcript.
  */
 export function placeReplyDrafts(messages: ChatMessage[], drafts: readonly ChatMessage[]): ChatMessage[] {
   if (drafts.length === 0) return messages;
   const turnRowByJobId = new Map<string, number>();
+  const retryRowByRunId = new Map<string, number>();
   messages.forEach((message, index) => {
     if ((getMessageType(message) ?? "").trim().toLowerCase() !== "agent_job_thread") return;
     const jobId = readString(message.metadata?.jobId);
     if (jobId) turnRowByJobId.set(jobId, index);
+    if (message.metadata?.autoRetryPending !== true) return;
+    const retryJobId = readString(message.metadata?.autoRetryJobId);
+    const retryRunId = readString(message.metadata?.autoRetryRunId);
+    if (retryJobId && !turnRowByJobId.has(retryJobId)) turnRowByJobId.set(retryJobId, index);
+    if (retryRunId) retryRowByRunId.set(retryRunId, index);
   });
   const placed = [...messages];
   const ownRows: ChatMessage[] = [];
   for (const draft of drafts) {
     const jobId = readString(draft.metadata?.jobId);
-    const index = jobId === null ? undefined : turnRowByJobId.get(jobId);
+    const runId = readString(draft.metadata?.runId);
+    const index = (jobId === null ? undefined : turnRowByJobId.get(jobId)) ??
+      (runId === null ? undefined : retryRowByRunId.get(runId));
     if (index === undefined) {
       ownRows.push(draft);
       continue;
