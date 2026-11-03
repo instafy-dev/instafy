@@ -3266,9 +3266,11 @@ async fn insert_granted_lease(
 
 /// Whether `lease` is a job's (its metadata names the job, as a job's lease
 /// acquire must: `ensure_job_lease_metadata`) and that job no longer runs on
-/// the lease's machine: it was stopped, finished or failed, or its own lease
-/// on the job ran out. A lease that names no job, or a job this project does
-/// not have on that machine, is nobody's to end early.
+/// the lease's machine: it was stopped, finished or failed, or went back to
+/// the queue. A job still leased counts as running even past its lease's
+/// expiry, which a late heartbeat renews and only the expired-job sweep ends.
+/// A lease that names no job, or a job this project does not have on that
+/// machine, is nobody's to end early.
 async fn lease_job_has_ended(
     transaction: &tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
@@ -3282,8 +3284,7 @@ async fn lease_job_has_ended(
     };
     let row = transaction
         .query_opt(
-            "select j.status = 'leased'
-                    and coalesce(j.lease_expires_at > now(), false) as running
+            "select j.status = 'leased' as running
                from agent_jobs j
               where j.id = $1
                 and j.project_id = $2
