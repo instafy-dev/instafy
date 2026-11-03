@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../types";
-import { conversationLaterChanges } from "../chatLaterChanges";
+import { conversationLaterChanges, readChangeUndone } from "../chatLaterChanges";
 
 function filesMessage(id: string, timestamp: number, jobId: string, paths: string[]): ChatMessage {
   return {
@@ -26,6 +26,24 @@ describe("conversationLaterChanges", () => {
     expect(changed("stopped", ["sites/a/style.css"])).toBe(false);
     expect(changed("later", ["sites/a/app.js"])).toBe(false);
     expect(changed("unknown", ["sites/a/app.js"])).toBe(false);
+  });
+
+  // The line an Undo leaves in the chat (hidden) marks that change undone, for
+  // the row after a reload.
+  it("says which changes the person undid", () => {
+    const undoLine: ChatMessage = {
+      id: "undo-line",
+      role: "assistant",
+      content: "The person undid the change from “Add a section.”",
+      timestamp: 3_000,
+      metadata: { source: "controller", kind: "change_undone", presentation: { hidden: true }, undoneMessageId: "stopped", undoneRunId: "run-1" },
+    };
+    expect(readChangeUndone(undoLine)).toEqual({ messageId: "stopped", runId: "run-1" });
+    expect(readChangeUndone(stopped)).toBeNull();
+    const chat = conversationLaterChanges([stopped, undoLine]);
+    expect(chat.undone?.("stopped")).toBe(true);
+    expect(chat.undone?.("later")).toBe(false);
+    expect(conversationLaterChanges([stopped]).undone?.("stopped")).toBe(false);
   });
 
   it("counts a turn's own later rows as its own, inside a job thread too", () => {

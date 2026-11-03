@@ -6,6 +6,7 @@ import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { useStatus } from "../../../status/useStatus";
 import { controllerClient } from "../../../sdk/instafy";
 import { WORKSPACE_SAVE_LEASE_RETRY_DELAY_MS } from "../../../services/runtimeController/workspaceSave";
+import { recordChangeUndone } from "../../../services/runtimeController/changeUndone";
 import type { RevertWorkspaceGitCommitResult } from "../../../services/runtimeController/workspaceGit";
 import { useRuntime } from "../../../runtime/useRuntime";
 import { useOptionalProjectAccess } from "../../../projects/ProjectAccessProvider";
@@ -489,9 +490,22 @@ export function ChatFileChangeList({
     });
   }, [uniquePaths, uniquePathsKey]);
 
+  // The person undid this change already (the chat holds the line an Undo
+  // leaves): every file reads as undone, with nothing left to review or undo,
+  // after a reload or a switch back to the chat too.
+  const undoneInChat = Boolean(messageId && laterChanges?.undone?.(messageId));
+  const shownUndoStatusByPath = useMemo(() => {
+    if (!undoneInChat) return undoStatusByPath;
+    const undone: Record<string, ChatFileUndoStatus> = {};
+    for (const { file, workspacePath } of resolvedFiles) {
+      undone[workspacePath] = file.changeType === "created" ? "removed" : "reverted";
+    }
+    return { ...undone, ...undoStatusByPath };
+  }, [resolvedFiles, undoStatusByPath, undoneInChat]);
+
   const pendingEntries = useMemo(
-    () => resolvedFiles.filter(({ workspacePath }) => !undoStatusByPath[workspacePath]),
-    [resolvedFiles, undoStatusByPath],
+    () => resolvedFiles.filter(({ workspacePath }) => !shownUndoStatusByPath[workspacePath]),
+    [resolvedFiles, shownUndoStatusByPath],
   );
 
   const pendingPaths = useMemo(
@@ -1199,6 +1213,9 @@ export function ChatFileChangeList({
         if (typeof window !== "undefined") {
           window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId } }));
         }
+        // One line in the chat's history says so, for the next turn and its
+        // routing, and for this row after a reload.
+        if (projectId && messageId) void recordChangeUndone({ projectId, messageId });
       }
       const askAgent = outcome.offerAgentUndo && messageId ? handleUndoRequest : null;
       showStatus(
@@ -1239,6 +1256,7 @@ export function ChatFileChangeList({
         if (undone.length === pendingPaths.length && totalCount > 1) {
           setRailExpanded(false);
         }
+        if (projectId && messageId && undone.length > 0) void recordChangeUndone({ projectId, messageId });
       }
       const askAgent = outcome.offerAgentUndo && messageId ? handleUndoRequest : null;
       showStatus(
@@ -1248,7 +1266,7 @@ export function ChatFileChangeList({
         askAgent ? { actionLabel: "Ask the agent to undo it", onAction: askAgent } : undefined,
       );
     },
-    [handleUndoRequest, messageId, pendingPaths, showStatus, totalCount],
+    [handleUndoRequest, messageId, pendingPaths, projectId, showStatus, totalCount],
   );
 
   const applyUnsavedRevertOutcomeRef = useRef(applyUnsavedRevertOutcome);
@@ -1315,6 +1333,34 @@ export function ChatFileChangeList({
     waitForRevert,
   ]);
 
+  // Undo of a saved change saves a version that undoes it, but the machine's
+  // folder, which serves the page the person sees, still holds the change
+  // until its next turn. So the folder follows that version at once, as a
+  // refresh does (`/git/revert` with `saved` on the folder's own origin): it
+  // keeps every local edit, moves only when nothing is in the way, and its
+  // origin pictures the page again. A Desktop folder is where the version was
+  // saved, so it holds it already.
+  const savedFolderRuntimeId = effectiveRuntimeId ?? null;
+  const savedFolderOriginId =
+    versioning.mode === "desktop" ? null : runtimeFolderOriginId(runtimeStatuses, savedFolderRuntimeId);
+  const followSavedRevertInFolder = useCallback(
+    async (saved: string | null | undefined, paths: readonly string[]) => {
+      if (!projectId || !saved || !savedFolderOriginId || savedFolderOriginId === versioning.originId) {
+        return;
+      }
+      await revertWorkspaceGitPathsFromController({
+        projectId,
+        paths: [...paths],
+        runtimeId: savedFolderRuntimeId,
+        originId: savedFolderOriginId,
+        routing: "default",
+        leaseConflictRetryDelayMs: WORKSPACE_SAVE_LEASE_RETRY_DELAY_MS,
+        saved,
+      }).catch(() => null);
+    },
+    [projectId, savedFolderOriginId, savedFolderRuntimeId, versioning.originId],
+  );
+
   // "Revert this change": a new version that undoes the saved version the
   // dialog checked (`{commit: head}`, no base, so the origin reverts exactly
   // that commit's own change), on the origin the versioning probe described.
@@ -1359,6 +1405,9 @@ export function ChatFileChangeList({
           await new Promise((resolve) => setTimeout(resolve, retryDelay));
           result = await revert();
         }
+        if (result?.ok) {
+          await followSavedRevertInFolder(result.rev, [...revertedVersionPaths]);
+        }
         return { result, retriedAfter };
       } catch {
         return { result: null, retriedAfter: null };
@@ -1374,6 +1423,7 @@ export function ChatFileChangeList({
   }, [
     canRevertChange,
     closeRevertDialog,
+    followSavedRevertInFolder,
     projectId,
     revertRange,
     revertScope,
@@ -1510,7 +1560,7 @@ export function ChatFileChangeList({
           <span id={`${cardIdBase}-files`} className="contents">
           {visibleChipEntries.map(({ file, workspacePath }, index) => {
             const stat = statsByPath[workspacePath];
-            const isReverted = Boolean(undoStatusByPath[workspacePath]);
+            const isReverted = Boolean(shownUndoStatusByPath[workspacePath]);
             const cardOpen = Boolean(expandedDiffByPath[workspacePath]);
             const isDeleted = file.changeType === "deleted";
             const chipLabel = middleTruncateLabel(chipLabels.get(workspacePath) ?? workspacePath);
@@ -1681,7 +1731,7 @@ export function ChatFileChangeList({
       ) : null}
 
       {visibleChipEntries.map(({ file, workspacePath }, index) => {
-        if (!file.notSaved || undoStatusByPath[workspacePath]) {
+        if (!file.notSaved || shownUndoStatusByPath[workspacePath]) {
           return null;
         }
         return (
@@ -1709,7 +1759,7 @@ export function ChatFileChangeList({
         const primaryRange = file.lineRanges[0] ?? null;
         const openDiff = () => handleOpenDiff(workspacePath);
         const openFile = () => handleNavigate(workspacePath, primaryRange);
-        const undoStatus = undoStatusByPath[workspacePath] ?? null;
+        const undoStatus = shownUndoStatusByPath[workspacePath] ?? null;
         const isReverted = Boolean(undoStatus);
         const previewMode = stat?.kind === "ready" ? stat.previewMode ?? "diff" : "diff";
         const canOpenExternalDiff =

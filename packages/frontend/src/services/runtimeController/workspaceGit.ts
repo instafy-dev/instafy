@@ -1053,6 +1053,12 @@ export interface RevertWorkspaceGitResult {
   ok: boolean;
   reverted?: string[] | null;
   removed?: string[] | null;
+  /**
+   * With `saved`: the folder now holds that saved version. False when it
+   * kept unpublished work or a local edit was in the way; the next turn's
+   * refresh brings it there then.
+   */
+  moved?: boolean;
   conflict?: boolean;
   error?: string;
   errorInfo?: OriginError;
@@ -1090,6 +1096,7 @@ function buildRevertPathsResult(
     ok: true,
     reverted,
     removed,
+    ...(typeof payload?.moved === "boolean" ? { moved: payload.moved } : {}),
     conflict: false,
     leaseId: meta.leaseId,
     originMode: meta.originMode,
@@ -1122,6 +1129,13 @@ export async function revertWorkspaceGitPathsFromController(params: {
    * the revert (409 `head_moved`), and nothing is put back.
    */
   expected?: Record<string, string | null>;
+  /**
+   * Undo of a saved change: the new saved version that undid it. The
+   * folder's origin then brings its checkout to that version as a refresh
+   * does, keeping every local edit, instead of putting `paths` back as its
+   * own last version has them. Not with `keep` or `expected`.
+   */
+  saved?: string | null;
 }): Promise<RevertWorkspaceGitResult | null> {
   if (!runtimeControllerEnabled) {
     return null;
@@ -1135,10 +1149,12 @@ export async function revertWorkspaceGitPathsFromController(params: {
   const paths = Array.isArray(params.paths)
     ? params.paths.map((path) => String(path)).filter((path) => path.trim().length > 0)
     : [];
+  const saved = params.saved?.trim() || null;
   const body = {
     paths,
     ...(params.keep ? { keep: true } : {}),
     ...(params.expected ? { expected: params.expected } : {}),
+    ...(saved ? { saved } : {}),
   };
 
   if (params.routing === "default") {

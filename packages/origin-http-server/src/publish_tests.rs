@@ -2623,6 +2623,133 @@ async fn a_revert_puts_back_only_what_the_turn_left() {
     server.abort();
 }
 
+/// Undo of a saved change: the saved revert lands on canonical `main` from
+/// another origin, and `/git/revert {saved}` brings this checkout to it, so
+/// the page this machine serves loses the change at once. The checkout
+/// moves as a read-only refresh moves it: every local edit stays, a local
+/// edit in the way of the move keeps the checkout where it is, and nothing
+/// is pushed. The files the move changed are told to the process hosting
+/// the origin, which pictures their sites again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_saved_undo_brings_the_folder_to_the_new_saved_version() {
+    let sc = Scenario::new(Options::default());
+    let told = std::sync::Arc::new(std::sync::Mutex::new(
+        Vec::<crate::routes::FilesReverted>::new(),
+    ));
+    let client = reqwest::Client::new();
+    let config = std::sync::Arc::new(sc.config.clone());
+    let validator = crate::auth::TokenValidator::new(client.clone(), config.jwks_url.clone());
+    let mut state =
+        crate::routes::AppState::new(config, validator, client.clone(), sc.ws.clone(), None)
+            .expect("app state");
+    let sink = told.clone();
+    state.files_reverted = Some(std::sync::Arc::new(move |reverted| {
+        sink.lock().unwrap().push(reverted);
+    }));
+    let app = crate::routes::router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let revert = |body: serde_json::Value| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let response = client
+                .post(format!("{base}/git/revert"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            (status, response.json::<serde_json::Value>().await.unwrap())
+        }
+    };
+
+    // A turn's change is saved from this folder.
+    sc.write("README.md", b"one\ntwo\nBEFORE YOU GO\nthree\nfour\nfive\n");
+    sc.write("site/new.md", b"a page the turn made\n");
+    let change = sc
+        .publish_paths(&["README.md", "site/new.md"])
+        .rev
+        .expect("saved");
+    // Another chat's turn is still editing another file here.
+    sc.write("notes.md", b"a running turn's edit\n");
+    // The saved Undo lands on canonical from another origin.
+    let undone = sc.push_other(
+        &[
+            ("README.md", Some(README.as_bytes())),
+            ("site/new.md", None),
+        ],
+        "Revert",
+    );
+    assert_eq!(sc.head(), change);
+
+    // `saved` goes with neither `keep` nor `expected`.
+    let (status, _) = revert(serde_json::json!({
+        "paths": ["README.md"], "saved": undone, "keep": true,
+    }))
+    .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+
+    let (status, body) = revert(serde_json::json!({
+        "paths": ["README.md", "site/new.md"],
+        "saved": undone,
+    }))
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["moved"], true, "{body}");
+    assert_eq!(body["reverted"], serde_json::json!(["README.md"]), "{body}");
+    assert_eq!(
+        body["removed"],
+        serde_json::json!(["site/new.md"]),
+        "{body}"
+    );
+    assert_eq!(sc.head(), undone);
+    assert_eq!(sc.disk("README.md").as_deref(), Some(README));
+    assert_eq!(sc.disk("site/new.md"), None);
+    // The running turn's edit stays, and nothing was pushed.
+    assert_eq!(
+        sc.disk("notes.md").as_deref(),
+        Some("a running turn's edit\n")
+    );
+    assert_eq!(sc.main(), undone);
+    assert_eq!(
+        *told.lock().unwrap(),
+        vec![crate::routes::FilesReverted {
+            project_id: sc.config.project_id,
+            workspace_root: sc.ws.clone(),
+            paths: vec!["README.md".to_string(), "site/new.md".to_string()],
+        }]
+    );
+
+    // A local edit in the way of the move: the checkout stays where it is
+    // and the edit is kept.
+    sc.write("README.md", b"one\ntwo\nAGAIN\nthree\nfour\nfive\n");
+    let again = sc.publish_paths(&["README.md"]).rev.expect("saved again");
+    sc.write(
+        "README.md",
+        b"one\ntwo\nAGAIN\nthree\nfour\nfive\nsomeone's edit\n",
+    );
+    let undone_again = sc.push_other(&[("README.md", Some(README.as_bytes()))], "Revert again");
+    let (status, body) = revert(serde_json::json!({
+        "paths": ["README.md"],
+        "saved": undone_again,
+    }))
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["moved"], false, "{body}");
+    assert_eq!(body["reverted"], serde_json::json!([]), "{body}");
+    assert_eq!(sc.head(), again);
+    assert_eq!(
+        sc.disk("README.md").as_deref(),
+        Some("one\ntwo\nAGAIN\nthree\nfour\nfive\nsomeone's edit\n")
+    );
+    assert_eq!(told.lock().unwrap().len(), 1);
+    server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_route_reports_conflicts_refusals_and_refresh() {
     let sc = Scenario::new(Options::default());
