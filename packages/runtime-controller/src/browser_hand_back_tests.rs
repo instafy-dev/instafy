@@ -1547,10 +1547,22 @@ async fn a_building_lease_lists_the_browser_turns_since_its_lanes_last_saved_tur
 impl Chain {
     /// A message the runtime sent straight to Instafy's browser: its job posts
     /// only the routed card, with the person's own words as its task, and ends
-    /// with no reply.
+    /// with no reply. It is sent as Studio sends every message, saying the turn
+    /// may write the space's files (`writeIntent`).
     async fn routed_message(&self, words: &str, continue_building: bool) -> anyhow::Result<Uuid> {
+        self.routed_message_sent_with(words, continue_building, json!({ "writeIntent": true }))
+            .await
+    }
+
+    /// The same, sent with `metadata`.
+    async fn routed_message_sent_with(
+        &self,
+        words: &str,
+        continue_building: bool,
+        metadata: serde_json::Value,
+    ) -> anyhow::Result<Uuid> {
         let turn = self
-            .send(&self.owner, words, json!({}))
+            .send(&self.owner, words, metadata)
             .await
             .map_err(|error| controller_error("routed message", error))?;
         let job = self.job_of(&turn).await?;
@@ -2002,6 +2014,497 @@ async fn a_routed_message_whose_card_never_ran_is_listed() -> anyhow::Result<()>
             let mut newest = vec![later.to_string()];
             newest.extend(more.iter().map(Uuid::to_string));
             assert_eq!(kept, newest);
+            Ok(())
+        })
+    })
+    .await
+}
+
+impl Chain {
+    /// Leases `job_id` as the machine that keeps the space's folder does: a
+    /// private machine of the owner's with its lease, which takes the
+    /// workspace token it saves with apart from the model's. The job as the
+    /// lease handed it out, and the machine.
+    async fn lease_as_the_spaces_machine(
+        &self,
+        job_id: &Uuid,
+    ) -> anyhow::Result<(serde_json::Value, Uuid)> {
+        let runtime_id = Uuid::new_v4();
+        let runtime_lease_id = Uuid::new_v4();
+        let connection = self.pool.get().await?;
+        connection
+            .execute(
+                "insert into runtimes (
+                     id, project_id, provider, status, capabilities,
+                     idle_ttl_seconds, last_seen_at
+                 ) values ($1, $2, 'self-hosted', 'ready', $3, 600, now())",
+                &[
+                    &runtime_id,
+                    &self.project_id,
+                    &PgJson(json!({
+                        "agent": true,
+                        "origin": true,
+                        "_instafySelfHostedAccess": {
+                            "mode": "private",
+                            "ownerUserId": self.owner.to_string(),
+                        }
+                    })),
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtime_leases (
+                     id, project_id, runtime_id, status, requested_at, launched_at
+                 ) values ($1, $2, $3, 'active', now(), now())",
+                &[&runtime_lease_id, &self.project_id, &runtime_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update runtimes set active_lease_id = $2 where id = $1",
+                &[&runtime_id, &runtime_lease_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update agent_jobs set target_runtime_id = $2 where id = $1",
+                &[job_id, &runtime_id],
+            )
+            .await?;
+        drop(connection);
+        let token = crate::auth::issue_agent_token(
+            &self.config,
+            &self.project_id,
+            &runtime_id,
+            Some(&runtime_lease_id),
+            None,
+        )
+        .map_err(|error| controller_error("the machine's agent token", error))?
+        .token;
+        let response = agent::router()
+            .with_state(self.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/agent/lease")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(
+                        json!({
+                            "max": 1,
+                            "lease_seconds": 120,
+                            "runtime_id": runtime_id,
+                            "supports_workspace_token": true,
+                        })
+                        .to_string(),
+                    ))?,
+            )
+            .await?;
+        let status = response.status();
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        anyhow::ensure!(status == StatusCode::OK, "lease returned {status}: {body}");
+        let job = body["jobs"]
+            .as_array()
+            .and_then(|jobs| jobs.iter().find(|job| job["id"] == json!(job_id)))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("the lease did not hand out {job_id}: {body}"))?;
+        Ok((job, runtime_id))
+    }
+
+    /// What the machine's save of a job's folder begins with: the workspace
+    /// lease, asked for with `token` as the runtime asks for it
+    /// (runtime-agent `workspace_commit::acquire_workspace_lease_once`).
+    async fn acquire_workspace_lease(
+        &self,
+        token: &str,
+        runtime_id: &Uuid,
+        job: &serde_json::Value,
+    ) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+        let response = crate::origins::router()
+            .with_state(self.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/lease/acquire")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(
+                        json!({
+                            "projectId": self.project_id,
+                            "runtimeId": runtime_id,
+                            "leaseSeconds": 120,
+                            "metadata": {
+                                "source": "runtime-agent",
+                                "jobId": job["id"],
+                                "runId": job["run_id"],
+                                "runtimeId": runtime_id,
+                            },
+                        })
+                        .to_string(),
+                    ))?,
+            )
+            .await?;
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+        Ok((
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        ))
+    }
+
+    /// The message a turn's failure left in the chat, as the runtime's
+    /// failed completion posts it.
+    async fn failure_message_of(&self, job_id: &Uuid) -> anyhow::Result<Uuid> {
+        Ok(self
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select id from conversation_messages
+                  where conversation_id = $1 and role = 'assistant'
+                    and metadata #>> '{jobId}' = $2
+                  order by created_at desc
+                  limit 1",
+                &[&self.conversation_id, &job_id.to_string()],
+            )
+            .await?
+            .get(0))
+    }
+}
+
+/// The hand-back the controller sends for a message the browser turn could
+/// not make builds what the message asks, so its job may write the space's
+/// files, as a turn Studio sends may: it is leased with the workspace token
+/// the runtime saves with, and that token takes the workspace lease a save
+/// begins with. Without `writeIntent` its job had no such token, its folder
+/// was refreshed read-only, and the save of the page it made was refused
+/// ("legacy job token is not allowed to mutate this workspace scope").
+#[tokio::test]
+async fn the_controllers_hand_back_may_write_and_save_the_spaces_files() -> anyhow::Result<()> {
+    with_chain("routed-build-request-saves", |chain| {
+        Box::pin(async move {
+            let words = "Put the opening hours on a small page I can share.";
+            let routed = chain.routed_message(words, false).await?;
+            let browser = chain.routed_browser_turn(&routed, words).await?;
+            chain.post_build_request(&browser).await?;
+            chain.finish(&browser, Some(""), "succeeded").await?;
+            let hand_backs = chain.hand_backs_of(&browser).await?;
+            assert_eq!(hand_backs.len(), 1, "{hand_backs:?}");
+            let hand_back = hand_backs[0];
+            let (job, runtime_id) = chain.lease_as_the_spaces_machine(&hand_back).await?;
+            let token = job["workspace_token"]
+                .as_str()
+                .filter(|token| !token.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("the hand-back {hand_back} was leased with no workspace token")
+                })?;
+            assert_eq!(
+                job["workspace_token_scopes"],
+                json!([
+                    crate::origins::JOB_WORKSPACE_LEASE_WRITE_SCOPE,
+                    crate::origins::JOB_ORIGIN_TOKEN_MINT_SCOPE,
+                ])
+            );
+            let (status, body) = chain
+                .acquire_workspace_lease(token, &runtime_id, &job)
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let payload: serde_json::Value = sql_one::<PgJson<serde_json::Value>>(
+                &chain.pool,
+                "select payload from agent_jobs where id = $1",
+                &[&hand_back],
+            )
+            .await?
+            .0;
+            assert_eq!(payload["metadata"]["writeIntent"], json!(true), "{payload}");
+            assert!(crate::origins::job_allows_workspace_mutation(&payload));
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Try again on a hand-back that failed (here its save was refused) sends
+/// that hand-back again, as Studio's Try again does: the claim on the browser
+/// turn and Studio's words, never the notice it showed in the person's place
+/// ("Octo continued in the chat", which reached Octo as their request with
+/// no record, so no skill was chosen from their words). The failed hand-back
+/// is not someone writing after the browser turn, as it is not Octo having
+/// continued from it, so the new one is refused as neither, and it carries
+/// the person's request again. A message of the person's after the failure
+/// still comes first.
+#[tokio::test]
+async fn try_again_on_a_failed_hand_back_sends_the_hand_back_again() -> anyhow::Result<()> {
+    with_chain("routed-build-request-try-again", |chain| {
+        Box::pin(async move {
+            let words = "Put the opening hours on a small page I can share.";
+            let routed = chain.routed_message(words, false).await?;
+            let browser = chain.routed_browser_turn(&routed, words).await?;
+            chain.post_build_request(&browser).await?;
+            chain.finish(&browser, Some(""), "succeeded").await?;
+            let failed = chain.hand_backs_of(&browser).await?;
+            assert_eq!(failed.len(), 1, "{failed:?}");
+            chain
+                .finish(
+                    &failed[0],
+                    Some("Workspace sync failed: workspace lease acquire failed (403 Forbidden)"),
+                    "failed",
+                )
+                .await?;
+            let failure = chain.failure_message_of(&failed[0]).await?;
+
+            let retry = chain
+                .hand_back(
+                    &chain.owner,
+                    &browser,
+                    json!({
+                        "retryOfMessageId": failure.to_string(),
+                        "displayContent": "Octo continued in the chat",
+                    }),
+                )
+                .await
+                .map_err(|error| controller_error("Try again on the failed hand-back", error))?;
+            let retry = chain.job_of(&retry).await?;
+            let metadata = chain.payload_metadata(&retry).await?;
+            let record = &metadata[HAND_BACK_KEY];
+            assert_eq!(
+                record["browserJobId"],
+                json!(browser.to_string()),
+                "{record}"
+            );
+            assert_eq!(record[BUILD_REQUEST_RECORD_KEY], json!(true), "{record}");
+            assert_eq!(record["personRequest"], json!(words), "{record}");
+            let prompt_text: Option<String> = sql_one(
+                &chain.pool,
+                "select payload ->> 'prompt_text' from agent_jobs where id = $1",
+                &[&retry],
+            )
+            .await?;
+            assert_eq!(prompt_text.as_deref(), Some(HAND_BACK_PROMPT));
+            assert_eq!(chain.hand_backs_of(&browser).await?, vec![failed[0], retry]);
+            // While it runs, Octo has continued: a second press is refused.
+            let (status, body) = refused(chain.hand_back(&chain.owner, &browser, json!({})).await);
+            assert_eq!(status, StatusCode::CONFLICT, "{}", body.message);
+            assert_eq!(body.code.as_deref(), Some(HAND_BACK_USED_CODE));
+
+            // It fails too, and the person writes: their message comes first.
+            chain
+                .finish(&retry, Some("Workspace sync failed"), "failed")
+                .await?;
+            chain
+                .send(&chain.owner, "Make the page dark.", json!({}))
+                .await
+                .map_err(|error| controller_error("the person's next message", error))?;
+            let (status, body) = refused(chain.hand_back(&chain.owner, &browser, json!({})).await);
+            assert_eq!(status, StatusCode::CONFLICT, "{}", body.message);
+            assert_eq!(body.code.as_deref(), Some(HAND_BACK_SUPERSEDED_CODE));
+            Ok(())
+        })
+    })
+    .await
+}
+
+impl Chain {
+    /// A hand-back of `browser_job` from the person, sent naming `selection`
+    /// as the agents it goes to, as Studio's send names the chat's agents.
+    async fn hand_back_naming(
+        &self,
+        browser_job: &Uuid,
+        selection: serde_json::Value,
+        extra: serde_json::Value,
+    ) -> Result<dispatch::DispatchPromptResponse, (StatusCode, axum::Json<ApiError>)> {
+        let mut metadata = extra;
+        metadata[HAND_BACK_CLAIM_KEY] = json!(browser_job.to_string());
+        metadata["clientMessageId"] = json!(Uuid::new_v4().to_string());
+        metadata["agentSelection"] = selection;
+        let request = dispatch::normalize_dispatch_request(DispatchPromptRequest {
+            project_id: Some(self.project_id.to_string()),
+            session_id: None,
+            prompt_text: Some(HAND_BACK_PROMPT.to_string()),
+            intent: Some("feature".to_string()),
+            plan_seed: None,
+            metadata: Some(metadata),
+            conversation_metadata: Some(json!({ "visibility": "public" })),
+            parent_conversation_id: None,
+            thread_kind: None,
+            tool_limits: None,
+            repo: None,
+            ui: None,
+            priority: None,
+            runtime_type: None,
+            idle_ttl_seconds: None,
+            conversation_id: Some(self.conversation_id.to_string()),
+            runtime_id: None,
+            runtime_display_name: None,
+            prefer_runtime: None,
+        })?;
+        dispatch::process_dispatch_prompt(&self.state, &self.context(&self.owner), request).await
+    }
+
+    /// The agent each job of a dispatched prompt went to.
+    async fn agents_of(
+        &self,
+        response: &dispatch::DispatchPromptResponse,
+    ) -> anyhow::Result<Vec<String>> {
+        let prompt_id = response.prompt_id.context("prompt id")?;
+        Ok(self
+            .pool
+            .get()
+            .await?
+            .query(
+                "select coalesce(payload #>> '{metadata,agent,handle}', '') from agent_jobs
+                  where prompt_id = $1
+                  order by created_at",
+                &[&prompt_id],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect())
+    }
+
+    /// A turn of the person's, sent with `metadata`, that ends with a card
+    /// that continues building, and its browser turn, finished on the
+    /// fixtures' reply: the card's job and the browser job.
+    async fn card_sent_with(&self, metadata: serde_json::Value) -> anyhow::Result<(Uuid, Uuid)> {
+        let card_turn = self
+            .send(&self.owner, "Plan a day on the coast.", metadata)
+            .await
+            .map_err(|error| controller_error("card turn", error))?;
+        let card_job = self.job_of(&card_turn).await?;
+        self.post_card(&card_job, true).await?;
+        self.finish(
+            &card_job,
+            Some("Continue this task in Instafy's browser."),
+            "succeeded",
+        )
+        .await?;
+        let browser_turn = self
+            .send(
+                &self.owner,
+                "Continue this browser task using the browser attached to this turn.",
+                json!({ "browserRequestOf": format!("job:{card_job}") }),
+            )
+            .await
+            .map_err(|error| controller_error("browser turn", error))?;
+        let browser_job = self.job_of(&browser_turn).await?;
+        self.make_browser_turn(&browser_job).await?;
+        let reply = fixtures()["browserReply"].as_str().unwrap().to_string();
+        self.finish(&browser_job, Some(&reply), "succeeded").await?;
+        Ok((card_job, browser_job))
+    }
+}
+
+/// A hand-back carries on the turn whose card its browser turn continued, so
+/// it goes to that turn's agent alone, whichever agents its send names. Studio
+/// names the chat's agents, and a chat with two and no @-mention sent the
+/// hand-back to both: two building turns on one browser turn's findings, each
+/// in a lane that may not write while the other does.
+#[tokio::test]
+async fn a_hand_back_goes_to_the_agent_of_the_turn_it_carries_on() -> anyhow::Result<()> {
+    with_chain("hand-back-one-agent", |chain| {
+        Box::pin(async move {
+            let (_, browser_job) = chain.card_sent_with(json!({ "writeIntent": true })).await?;
+            let response = chain
+                .hand_back_naming(
+                    &browser_job,
+                    json!({ "active": ["octo", "mapper"], "mentions": [] }),
+                    json!({ "writeIntent": true }),
+                )
+                .await
+                .map_err(|error| controller_error("hand-back naming two agents", error))?;
+            assert_eq!(chain.agents_of(&response).await?, vec!["octo".to_string()]);
+            let hand_back = chain.job_of(&response).await?;
+            let metadata = chain.payload_metadata(&hand_back).await?;
+            assert_eq!(
+                metadata["agentSelection"],
+                json!({ "active": ["octo"], "mentions": ["octo"] }),
+                "{metadata}"
+            );
+            // It is one building turn, alone in its lane: it may write.
+            assert!(
+                crate::origins::job_allows_workspace_mutation(&json!({ "metadata": metadata })),
+                "{metadata}"
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A hand-back writes no more than the turn it carries on. A message sent
+/// read-only (a sender that asks Octo not to edit the space) can still be
+/// routed to the browser, and its browser turn can ask for a build: the
+/// controller's hand-back for it, and a hand-back sent saying it may write,
+/// get no write token, while a turn that could write passes its permission
+/// and its write scope on.
+#[tokio::test]
+async fn a_hand_back_writes_no_more_than_the_turn_it_carries_on() -> anyhow::Result<()> {
+    with_chain("hand-back-write-permission", |chain| {
+        Box::pin(async move {
+            // The controller's own hand-back of a message sent read-only.
+            let words = "Put the opening hours on a small page I can share.";
+            let routed = chain
+                .routed_message_sent_with(words, false, json!({ "writeIntent": false }))
+                .await?;
+            let browser = chain.routed_browser_turn(&routed, words).await?;
+            chain.post_build_request(&browser).await?;
+            chain.finish(&browser, Some(""), "succeeded").await?;
+            let hand_backs = chain.hand_backs_of(&browser).await?;
+            assert_eq!(hand_backs.len(), 1, "{hand_backs:?}");
+            let metadata = chain.payload_metadata(&hand_backs[0]).await?;
+            assert_eq!(metadata["writeIntent"], json!(false), "{metadata}");
+            let (job, _) = chain.lease_as_the_spaces_machine(&hand_backs[0]).await?;
+            assert!(
+                job["workspace_token"]
+                    .as_str()
+                    .is_none_or(|token| token.trim().is_empty()),
+                "a hand-back of a read-only message was leased a workspace token: {job}"
+            );
+            chain
+                .finish(&hand_backs[0], Some("Done."), "succeeded")
+                .await?;
+
+            // Studio's hand-back of a card from a read-only turn, sent saying it may write.
+            let (_, browser_job) = chain
+                .card_sent_with(json!({ "writeIntent": false }))
+                .await?;
+            let response = chain
+                .hand_back(&chain.owner, &browser_job, json!({ "writeIntent": true }))
+                .await
+                .map_err(|error| controller_error("hand-back of a read-only card", error))?;
+            let metadata = chain
+                .payload_metadata(&chain.job_of(&response).await?)
+                .await?;
+            assert_eq!(metadata["writeIntent"], json!(false), "{metadata}");
+            chain
+                .finish(&chain.job_of(&response).await?, Some("Done."), "succeeded")
+                .await?;
+
+            // A card from a turn that could write only some paths: the hand-back,
+            // sent as Studio sends it, with no scope of its own, keeps those
+            // paths rather than writing anywhere in the space.
+            let scope = json!({ "mode": "owned", "ownedPaths": ["sites/hours"] });
+            let (card_job, browser_job) = chain
+                .card_sent_with(json!({ "writeIntent": true, "writeScope": scope }))
+                .await?;
+            let card_scope = chain.payload_metadata(&card_job).await?["writeScope"].clone();
+            assert_eq!(card_scope["mode"], json!("owned"), "{card_scope}");
+            let response = chain
+                .hand_back(&chain.owner, &browser_job, json!({ "writeIntent": true }))
+                .await
+                .map_err(|error| controller_error("hand-back of a scoped card", error))?;
+            let metadata = chain
+                .payload_metadata(&chain.job_of(&response).await?)
+                .await?;
+            assert_eq!(metadata["writeIntent"], json!(true), "{metadata}");
+            assert_eq!(metadata["writeScope"]["mode"], json!("owned"), "{metadata}");
+            assert_eq!(
+                metadata["writeScope"]["ownedPaths"], card_scope["ownedPaths"],
+                "{metadata}"
+            );
             Ok(())
         })
     })

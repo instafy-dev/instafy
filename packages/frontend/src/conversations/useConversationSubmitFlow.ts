@@ -363,7 +363,11 @@ export function useConversationSubmitFlow({
       const dispatch = async (...args: Parameters<typeof sendPromptToController>) => {
         const result = receipt ? await sendPromptToController(
           args[0], args[1], args[2], args[3], args[4], args[5], args[6],
-          { requireRun: true, assertCurrent: options?.assertDispatchCurrent },
+          {
+            requireRun: true,
+            assertCurrent: options?.assertDispatchCurrent,
+            callerReportsErrors: options?.callerReportsDispatchErrors === true,
+          },
         ) : await sendPromptToController(...args);
         if (receipt) {
           if (result.ok) receipt.accepted = true;

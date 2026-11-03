@@ -27,4 +27,19 @@ describe("ChatPanel's Try again for a browser turn", () => {
     expect(retry).toContain("return browserRequestState.retryContinuation(promptMessage, retryMetadata);");
     expect(retry).toContain("browserHandoff.retryContinue(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT, retryMetadata)");
   });
+
+  // Octo's own hand-back shows "Octo continued in the chat" in the person's
+  // place; resent as what the chat shows, those words reached Octo as their
+  // request, with nothing the browser turn found.
+  it("sends a failed hand-back again as the hand-back, as the hand-back itself is sent", () => {
+    const start = chatPanel.indexOf("browserRequestRetryRef.current = async (promptMessage, retryMetadata) => {");
+    const end = chatPanel.indexOf("\n  };\n", start);
+    const retry = chatPanel.slice(start, end);
+    expect(retry).toContain("const handBack = browserHandBackRetry(promptMessage, retryMetadata);");
+    expect(retry).toContain("return sendBrowserHandBack(handBack.message, handBack.extras);");
+    expect(retry.indexOf("browserHandBackRetry")).toBeLessThan(retry.indexOf("isLetOctoContinuePrompt"));
+    // The hand-back's own send, whose behaviour useBrowserHandBack.test.tsx covers.
+    expect(chatPanel).toMatch(/const sendBrowserHandBack = browserHandBackSender\(\{\s*submit: onSubmit,\s*conversationId: activeConversationId,\s*agentHandle: typingAgentHandle,\s*\}\);/);
+    expect(chatPanel).toContain("send: sendBrowserHandBack,");
+  });
 });

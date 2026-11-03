@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef } from "react";
+import type { SubmitConversationOptions } from "../../../conversations/conversationSubmitTypes";
 import { findPromptSentFromThisPageForRun } from "../../../conversations/sentPromptRegistry";
 import type { RunStatus } from "../../../types";
 import type { ChatMessage } from "../types";
@@ -8,6 +9,7 @@ import {
   browserHandBackCandidate,
   browserHandBackNotice,
   claimBrowserHandBack,
+  readBrowserHandBackOf,
 } from "./browserHandBack";
 
 /** How a hand-back is shown and recorded. */
@@ -17,6 +19,66 @@ export type BrowserHandBackExtras = {
   /** Prompt metadata naming the browser job (the controller checks it). */
   metadata: Record<string, unknown>;
 };
+
+/**
+ * Try again on a hand-back whose turn failed: the same hand-back, sent again.
+ * Its claim on the browser turn and Studio's words go out, never the notice
+ * the chat shows for it ("Octo continued in the chat"), which alone would
+ * reach Octo as the person's request, with nothing of what the browser turn
+ * found or what they asked. It carries the retry's metadata, and goes, as any
+ * hand-back does, to the agent whose card the browser turn carried on (the
+ * controller's choice, runtime-controller `browser_hand_back::ContinuedTurn`).
+ * Null for any other prompt.
+ */
+export function browserHandBackRetry(
+  promptMessage: Pick<ChatMessage, "role" | "content" | "metadata">,
+  retryMetadata: Record<string, unknown>,
+): { message: string; extras: BrowserHandBackExtras } | null {
+  const jobId = readBrowserHandBackOf(promptMessage);
+  if (!jobId) return null;
+  return {
+    message: BROWSER_HAND_BACK_PROMPT,
+    extras: {
+      display: promptMessage.content.trim() || browserHandBackNotice("Octo"),
+      metadata: { ...retryMetadata, [BROWSER_HAND_BACK_CLAIM_KEY]: jobId },
+    },
+  };
+}
+
+/**
+ * The panel's send of a hand-back, given its submit: an ordinary turn of the
+ * building lane, shown as its one-line notice, that resumes an idle lane or
+ * is refused. A refusal adds no row of its own to the chat (the browser turn
+ * stays the last word); the send resolves to whether it went out.
+ */
+export function browserHandBackSender({
+  submit,
+  conversationId,
+  agentHandle,
+}: {
+  submit: (conversationId: string | null, input: string, options?: SubmitConversationOptions) => Promise<void>;
+  conversationId: string | null;
+  /** The chat's agent, as every send of the panel names it. */
+  agentHandle: string;
+}): (message: string, extras: BrowserHandBackExtras) => Promise<boolean> {
+  return async (message, extras) => {
+    try {
+      await submit(conversationId, extras.display, {
+        agentHandles: [agentHandle],
+        imageFiles: [],
+        editorState: null,
+        expectedLaneIdle: true,
+        requireDispatch: true,
+        dispatchInput: message,
+        metadata: extras.metadata,
+        callerReportsDispatchErrors: true,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+}
 
 type Options = {
   /** Changes with the conversation: a new one starts with no history to hand back. */

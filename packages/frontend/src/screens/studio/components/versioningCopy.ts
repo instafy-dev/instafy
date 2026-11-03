@@ -847,12 +847,18 @@ export function describeUnsavedChanges(reason: ChatMessageUnsavedReason, placeme
     // these a save.
     return `Stopped before these changes were saved. They're ${keptAs(placement)}.`;
   }
+  if (reason === "save_not_started") {
+    // The save never reached the space, so no saved work waits for the next
+    // turn to publish it: nothing promises these a save either.
+    return `These changes weren't saved to the space. They're ${keptAs(placement)}.`;
+  }
   if (reason === "auto_save_off") {
     // No later turn is promised to save these, and nothing says they were
     // kept as unsaved work.
     return placement.saveVersionInChanges ? LEGACY_SAVE_DID_NOT_RUN_MESSAGE : SAVE_DID_NOT_RUN_MESSAGE;
   }
-  // Every turn saves, so the next turn picks up what this one left behind.
+  // The space took the files and only publishing them failed: every turn's
+  // refresh publishes what a save left behind.
   return `These changes weren't saved to the space yet. The agent saves them at its next turn, and anything left over is ${keptAs(placement)}.`;
 }
 

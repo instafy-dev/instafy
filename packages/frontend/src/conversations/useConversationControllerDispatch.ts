@@ -294,7 +294,12 @@ export function useConversationControllerDispatch({
       conversationOverride?: ConversationState | null,
       intent?: string,
       expectedLaneIdle = false,
-      requirements?: { requireRun?: boolean; assertCurrent?: () => void },
+      requirements?: {
+        requireRun?: boolean;
+        assertCurrent?: () => void;
+        /** The caller says what became of a refused send: no error row. */
+        callerReportsErrors?: boolean;
+      },
     ) => {
       const projectId = resolveProjectId();
       if (!projectId) {
@@ -434,7 +439,7 @@ export function useConversationControllerDispatch({
           latestMessage.content === message &&
           Date.now() - latestMessage.timestamp < 15_000;
 
-        if (!duplicateRecentError) {
+        if (!duplicateRecentError && !requirements?.callerReportsErrors) {
           appendMessages(conversationId, [
             {
               ...createConversationMessage("assistant", message, null, {

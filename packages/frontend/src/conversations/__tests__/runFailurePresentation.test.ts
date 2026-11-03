@@ -1055,6 +1055,39 @@ describe("resolveRunFailurePresentation", () => {
     });
   });
 
+  // A turn made a page and its save was refused, and the person read
+  // "Something went wrong, so this turn stopped." beside the files it made.
+  // It says what failed: the changes are there, not saved.
+  it("says the changes were made but not saved when their save failed", () => {
+    const refused =
+      'Workspace sync failed: workspace lease acquire failed (403 Forbidden): {"message":"legacy job token is not allowed to mutate this workspace scope"}';
+    const failed = { source: "agent", outcome: "failed", messageType: "error", jobId: "job-1" };
+    expect(classifyRunFailureText(refused)).toBe("changes_not_saved");
+    expect(resolveRunFailurePresentation({ metadata: failed, content: refused })).toEqual({
+      kind: "changes_not_saved",
+      friendlyText: "Octo made the changes but couldn't save them.",
+      rawText: refused,
+    });
+    expect(
+      resolveRunFailurePresentation({
+        metadata: { ...failed, agent: { handle: "mapper", displayName: "Mapper" } },
+        content: refused,
+      })?.friendlyText,
+    ).toBe("Mapper made the changes but couldn't save them.");
+    // The error the runtime records under the message's own words too.
+    expect(
+      resolveRunFailurePresentation({
+        metadata: { ...failed, errorMessage: "Workspace sync failed: origin unreachable" },
+        content: "",
+      })?.friendlyText,
+    ).toBe("Octo made the changes but couldn't save them.");
+    expect(
+      resolveRunFailurePresentation({ metadata: failed, content: refused })?.friendlyText,
+    ).not.toMatch(/this turn stopped/i);
+    // A resend would make the changes again: Try again is the person's to press.
+    expect(isAutoRetryEligibleFailureKind("changes_not_saved")).toBe(false);
+  });
+
   it("maps missing command/MCP observations to the verification sentence", () => {
     expect(
       resolveRunFailurePresentation({ content: MISSING_COMMAND_OBSERVATION, assumeFailed: true })
@@ -1101,7 +1134,6 @@ describe("resolveRunFailurePresentation", () => {
       "Codex run timed out",
       // What a failed routing preflight said before it passed on its cause.
       "agent routing preflight failed",
-      "Workspace sync failed: origin apply rejected",
       "The request to the provider failed.",
       "Codex did not execute the dedicated Shared Browser tools after retry.",
       'backend responded with 500: {"error":"boom"}',

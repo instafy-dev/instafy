@@ -315,6 +315,112 @@ describe("useRunFailureRetryActions", () => {
     });
   });
 
+  // Octo's own hand-back shows a one-line notice in the person's place
+  // ("Octo continued in the chat"); what it sent was Studio's words with its
+  // claim on the browser turn. Sent again as an ordinary message, the notice
+  // reached Octo as the person's request, with nothing the browser turn found
+  // and no skill chosen from what they asked.
+  describe("a failed run of a hand-back", () => {
+    const HAND_BACK = createMessage({
+      id: "hand-back-1",
+      role: "user",
+      authorId: CURRENT_USER_ID,
+      content: "Octo continued in the chat",
+      timestamp: 1,
+      metadata: {
+        runId: "run-hand-back",
+        prompt_metadata: {
+          clientMessageId: "browser-build-request:job-browser-turn",
+          displayContent: "Octo continued in the chat",
+          agentSelection: { active: ["octo"], mentions: ["octo"] },
+          browserHandBack: { version: 1, browserJobId: "job-browser-turn", cardJobId: "job-routed", findingCount: 0 },
+        },
+      },
+    });
+    const SAVE_REFUSED =
+      'Workspace sync failed: workspace lease acquire failed (403 Forbidden): {"message":"legacy job token is not allowed to mutate this workspace scope"}';
+
+    it("sends the hand-back again, never the notice as the person's message", async () => {
+      const failed = failure("failure-h", SAVE_REFUSED, 2, { jobId: "job-hand-back", runId: "run-hand-back" });
+      const submit = vi.fn<Submit>(async () => true);
+      const resendBrowserRequest = vi.fn(async (_prompt: ChatMessage, metadata: Record<string, unknown>) => {
+        const sent = { id: "resend-h", metadata: { ...metadata, clientMessageId: "client-resend-h" } };
+        rememberPromptSentFromThisPage(sent);
+        recordRunsStartedByPromptSentFromThisPage(sent, ["job-resend-h"]);
+        return true;
+      });
+      await render({ messages: [HAND_BACK, failed], submit, resendBrowserRequest });
+      await act(async () => {
+        await latest?.requestRetry(failed);
+      });
+      expect(submit).not.toHaveBeenCalled();
+      expect(resendBrowserRequest).toHaveBeenCalledExactlyOnceWith(HAND_BACK, { retryOfMessageId: "failure-h" });
+      expect(latest?.isRetrySuperseded?.(failed)).toBe(true);
+    });
+
+    // The controller refuses a hand-back once someone wrote after its browser
+    // turn, once that turn is over half an hour old, or to anyone but the
+    // person who ran it, and nothing Try again sends changes that. One plain
+    // line says what to do instead, and Try again goes; it never reads
+    // Retried, since nothing was sent.
+    it("says plainly what to do instead, and withdraws Try again, when the hand-back did not go out", async () => {
+      const failed = failure("failure-h", SAVE_REFUSED, 2, { jobId: "job-hand-back", runId: "run-hand-back" });
+      const submit = vi.fn<Submit>(async () => true);
+      const showStatus = vi.fn();
+      await render({ messages: [HAND_BACK, failed], submit, showStatus, resendBrowserRequest: vi.fn(async () => false) });
+      expect(latest?.isRetryWithdrawn?.(failed)).toBe(false);
+      await act(async () => {
+        await latest?.requestRetry(failed);
+      });
+      expect(submit).not.toHaveBeenCalled();
+      expect(showStatus).toHaveBeenCalledExactlyOnceWith(
+        "Octo can't try this again from here. Ask Octo to continue instead.",
+        "info",
+        6000,
+      );
+      expect(latest?.isRetrySuperseded?.(failed)).toBe(false);
+      expect(latest?.isRetryWithdrawn?.(failed)).toBe(true);
+    });
+
+    // A browser card's task or a press of Let Octo continue that did not go
+    // out keeps its Try again, as before: the card shows its own reason.
+    it("keeps Try again for a card's task that did not go out", async () => {
+      const failed = failure("failure-c", SAVE_REFUSED, 2, { jobId: "job-card-turn", runId: "run-card-turn" });
+      const card = createMessage({
+        id: "card-1",
+        role: "user",
+        authorId: CURRENT_USER_ID,
+        content: "Octo opened Instafy's browser",
+        timestamp: 1,
+        metadata: { runId: "run-card-turn", prompt_metadata: { browserRequestOf: "job:job-1" } },
+      });
+      const showStatus = vi.fn();
+      await render({ messages: [card, failed], submit: vi.fn<Submit>(async () => true), showStatus,
+        resendBrowserRequest: vi.fn(async () => false) });
+      await act(async () => {
+        await latest?.requestRetry(failed);
+      });
+      expect(showStatus).not.toHaveBeenCalled();
+      expect(latest?.isRetryWithdrawn?.(failed)).toBe(false);
+    });
+
+    it("never resends the notice where the panel cannot send a hand-back", async () => {
+      const failed = failure("failure-h", SAVE_REFUSED, 2, { jobId: "job-hand-back", runId: "run-hand-back" });
+      const submit = vi.fn<Submit>(async () => true);
+      const showStatus = vi.fn();
+      await render({ messages: [HAND_BACK, failed], submit, showStatus });
+      await act(async () => {
+        await latest?.requestRetry(failed);
+      });
+      expect(submit).not.toHaveBeenCalled();
+      expect(showStatus).toHaveBeenCalledWith(
+        "Octo can't try this again from here. Ask Octo to continue instead.",
+        "info",
+        6000,
+      );
+    });
+  });
+
   // The chat shows a press of Let Octo continue as the button's words; the
   // turn got the whole continuation prompt, aimed at the chat's page. Sent
   // again as an ordinary message, those words reached Octo alone, as a chat
