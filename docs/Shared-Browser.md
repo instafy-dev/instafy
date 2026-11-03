@@ -1366,7 +1366,11 @@ supports tool search, and in a code-mode turn they were then left out of the
 `ALL_TOOLS` to find them. The bounded browser servers opt out of that
 (`omit_tools_from = ["deferred"]`), as the device broker of a granted turn does,
 and the run text names the tools as a turn calls them
-(`tools.mcp__instafy_shared_browser__snapshot({})` in a code cell).
+(`text(await tools.mcp__instafy_shared_browser__snapshot({}))` in a code cell).
+That example prints the step's whole result, and the run text says to: a failed
+step's result has only its message (no page, so no `title` or `visibleText`), and
+a turn that printed only those two fields read an address with no page and a site
+it couldn't reach as "undefined undefined".
 
 In a Shared or Personal Browser turn, a code-mode cell that waits on a browser
 step yields to the model only after the browser server's tool timeout (180

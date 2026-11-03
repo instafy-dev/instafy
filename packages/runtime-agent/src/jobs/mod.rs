@@ -16224,7 +16224,7 @@ fn build_agent_routing_preflight_prompt_with_browser_routes(
         Prefer current-conversation evidence for follow-ups. Apply the collaboration skill to choose the execution lane; mentioning another chat alone does not require retrieving evidence already supplied.\n\
         Set `requiresContextLookup = true` only when required prior conversation/context evidence is absent from the latest request and supplied current-conversation evidence and must be retrieved. Referring to prior work or supplying links alone neither requires nor satisfies retrieval; use the actual supplied evidence. This flag independently requires a read-only Instafy context/conversation lookup, regardless of `requiresCommandExecution`.\n\
         Set `requiresCommandExecution = true` when a correct final answer needs a separate fresh observation of current filesystem, Git, process, repo, runtime, server, or tool state. Prior-conversation retrieval belongs only in `requiresContextLookup`; the fact that its transport uses a CLI does not set this flag. Leave it false when supplied current evidence is enough. Both flags may be true when both kinds of evidence are needed.\n\
-        Set `workspaceFileChangeRequirement` from the success condition, independently of write permission: `required` when success necessarily requires creating, editing, moving, deleting, committing, or syncing workspace files; `conditional` when inspection or validation decides whether changes are warranted, and a justified unchanged result can satisfy the request; `none` when no workspace mutation is requested. Conditional work still permits warranted edits under the existing write scope. Do not turn permission to improve or repair into a requirement to produce a patch. Preserve the requested observations and tests even when no change is warranted.\n\
+        Set `workspaceFileChangeRequirement` from the success condition, independently of write permission: `required` when success necessarily requires creating, editing, moving, deleting, committing, or syncing workspace files (a map, page or site the person asks for is files); `conditional` when inspection or validation decides whether changes are warranted, and a justified unchanged result can satisfy the request; `none` when no workspace mutation is requested. Conditional work still permits warranted edits under the existing write scope. Do not turn permission to improve or repair into a requirement to produce a patch. Preserve the requested observations and tests even when no change is warranted.\n\
         {browser_change_line}\
         Always include `observationCommands`; use an empty array when no current-state observation is needed. When `requiresCommandExecution` is true, propose up to 3 concrete safe commands for that observation. These are proposals, not permission grants: the host executes only its existing allowlist, and the main agent must obtain any remaining observation under its normal tool permissions. Do not place conversation/context retrieval commands here. Do not set `requiresCommandExecution = true` merely because the main task includes workspace writes, patches, commits, pushes, or syncs. Do not put file-writing, patching, commit, push, or sync commands in `observationCommands`; classify `workspaceFileChangeRequirement` instead and let the main run make the requested changes under its existing permissions. Explicit non-file Instafy CLI actions such as `instafy automations create` or `instafy automations update` are allowed only when the user asked for that exact action. Propose independent read-only commands, not shell pipelines or command lists whose final status can hide a failed read. If no supported proposal fits, leave `observationCommands` empty and keep the observation requirement for the main agent.\n\
         {plan_group_guidance}\
@@ -25568,6 +25568,51 @@ mod tests {
             None,
         );
         assert!(!without.contains("instafy agents status"));
+    }
+
+    /// A map, a page or a site the person asks for is files, so the routing step reads it as a
+    /// change that must write them, and the build runs in the lane that writes files, whose turn
+    /// can't hand the work to Instafy's browser. A local test (Nov 2): routing read "Plan 3 days
+    /// in Seville … on a map" as needing no file change, though its own reason said no site or
+    /// browser was needed first. The build ran in the lane that offers the browser card, asked
+    /// for the browser when the map's check failed, and the map took three turns. A request that
+    /// needs the browser before a change still needs none.
+    #[test]
+    fn routing_reads_a_map_page_or_site_the_person_asks_for_as_files() {
+        let tmp = tempdir().expect("temp dir");
+        learn::ensure_project_memory_scaffold(tmp.path());
+        let request = "Plan 3 days in Seville for a first visit, on a map.";
+        let routes = "\nFocused browser routing skill snapshot:\n";
+        for prompt in [
+            build_agent_routing_preflight_prompt(tmp.path(), request, None, None),
+            build_agent_routing_preflight_prompt_with_browser_routes(
+                tmp.path(),
+                request,
+                None,
+                None,
+                Some(routes),
+            ),
+        ] {
+            let line = prompt
+                .lines()
+                .find(|line| line.starts_with("Set `workspaceFileChangeRequirement` from"))
+                .expect("the line that sets the requirement");
+            assert!(
+                line.contains(
+                    "`required` when success necessarily requires creating, editing, moving, \
+                     deleting, committing, or syncing workspace files (a map, page or site the \
+                     person asks for is files);"
+                ),
+                "{line}"
+            );
+            assert!(
+                prompt.contains(
+                    "A request that needs Instafy's browser to find something before a change has \
+                     `workspaceFileChangeRequirement: none`"
+                ),
+                "{prompt}"
+            );
+        }
     }
 
     /// The routing step may send a message straight to Instafy's browser only where the browser

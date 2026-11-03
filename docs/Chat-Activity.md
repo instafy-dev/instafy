@@ -345,6 +345,16 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   the done line never counts it (Studio counts no failed step at all). "Opened google.com · you said no to opening google.com" cannot
   happen; a turn whose only step was refused reads "You said no to opening google.com".
 
+  A look at the page a failed open left (the site's not-found page, or what a site sent before it
+  closed the connection) is part of that failure: Details reads "Tried opening
+  alcazarsevilla.org", then "Tried reading alcazarsevilla.org", both with a cross, never "Read a
+  page on alcazarsevilla.org" with a tick, and the line never counts it (`turnActivity.ts`).
+  Studio reads it from the steps alone: a `snapshot` (or a `status`, for a page still busy) on
+  the site the failed `navigate` or `open_tab` asked for (or a part of it, such as `en.`), after
+  no step that worked took the tab elsewhere, at a page the turn had not opened or read before.
+  A step the browser refused before it loaded anything left the tab where it was, so a look at
+  another site, or at a page the turn already had, counts as any look.
+
 - **Studio** groups browser steps by key and host. Pages opened and read count by distinct
   `pageKey`, so reading a page twice is "read a page"; searches count each time. After a group on
   the same site, a group's trailing " on {host}" goes: "Searched visitlisboa.com, read 2 pages".

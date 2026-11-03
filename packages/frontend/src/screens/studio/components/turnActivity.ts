@@ -969,6 +969,62 @@ function endedStep(step: TurnStep): TurnStep {
     : step;
 }
 
+// Browser steps that open an address, and those that only look at the tab's page.
+const OPEN_STEPS = new Set(["navigate", "open_tab"]);
+const LOOK_STEPS = new Set(["snapshot", "status"]);
+
+/** One site and its parts: an address that redirected to a part of its site, such as `en.`, is still that site. */
+function sameSite(host: string, other: string): boolean {
+  return host === other || host.endsWith(`.${other}`) || other.endsWith(`.${host}`);
+}
+
+/**
+ * A look at the page a failed open left (the site's not-found page, or what a
+ * site sent before it closed the connection) found nothing the turn was after
+ * there: it is part of that failure, "Tried reading alcazarsevilla.org" with a
+ * cross, never "Read a page on alcazarsevilla.org" with a tick, and the line
+ * never counts it. It is a look (a snapshot, or one that found the page still
+ * busy) on the site the open asked for, after no step that worked took the tab
+ * elsewhere, at a page the turn had not opened or read before. A step the
+ * browser refused before it loaded anything left the tab where it was, so a
+ * look at another site, or at a page the turn already had, is a look like any
+ * other. `steps` are in the order they last changed.
+ */
+function withLooksAfterFailedOpens(steps: readonly TurnStep[]): TurnStep[] {
+  let failedOpenHost: string | null = null;
+  const pagesBefore = new Set<string>();
+  return steps.map((step) => {
+    const entry = step.activity;
+    if (step.kind !== "tool" || !entry?.key.startsWith("browser/") || entry.step === undefined) {
+      return step;
+    }
+    const declined = entry.approval === "denied" || entry.approval === "expired";
+    if (step.state === "failed" && OPEN_STEPS.has(entry.step) && !declined) {
+      failedOpenHost = entry.host ?? null;
+      return step;
+    }
+    if (step.state !== "done") {
+      return step;
+    }
+    if (
+      LOOK_STEPS.has(entry.step) &&
+      failedOpenHost !== null &&
+      entry.host !== undefined &&
+      sameSite(entry.host, failedOpenHost) &&
+      !(entry.pageKey !== undefined && pagesBefore.has(entry.pageKey))
+    ) {
+      return { ...step, state: "failed", label: stepLabel(step.kind, step.message, entry, "failed") };
+    }
+    if (entry.pageKey !== undefined) {
+      pagesBefore.add(entry.pageKey);
+    }
+    if (PAGE_MOVING_STEPS.has(entry.step) || entry.step === "tabs") {
+      failedOpenHost = null;
+    }
+    return step;
+  });
+}
+
 function isRuntimeStatus(message: ChatMessage): boolean {
   return (getMessageType(message) ?? "").trim().toLowerCase() === "status";
 }
@@ -1173,6 +1229,14 @@ export function summarizeTurnActivity(
       steps[index] = endedStep(step);
     });
   }
+  // In the order the steps last changed: a step that started before another
+  // and ended after it is the later one. Studio's thread keeps a command
+  // where its newest message is, and the turn's stored steps are in the same
+  // order, so the line reads the same before and after its reply lands.
+  const byLastChange = [...steps.keys()].sort((a, b) => stepMessageIndex[a] - stepMessageIndex[b]);
+  withLooksAfterFailedOpens(byLastChange.map((index) => steps[index])).forEach((step, position) => {
+    steps[byLastChange[position]] = step;
+  });
 
   const answered: AnsweredApproval[] = [];
   const details: DetailItem[] = order.flatMap((item): DetailItem[] => {
@@ -1240,13 +1304,7 @@ export function summarizeTurnActivity(
       live = THINKING_LINE;
     }
   } else {
-    // In the order the steps last changed: a step that started before another
-    // and ended after it is the later one. Studio's thread keeps a command
-    // where its newest message is, and the turn's stored steps are in the same
-    // order, so the line reads the same before and after its reply lands.
-    const groups = summarizeGroups(
-      [...steps.keys()].sort((a, b) => stepMessageIndex[a] - stepMessageIndex[b]).map((index) => steps[index]),
-    );
+    const groups = summarizeGroups(byLastChange.map((index) => steps[index]));
     const clause = approvalsClause(answered, groups.firstHost);
     const done = [groups.text ?? neutralCounts(steps), clause].filter((part): part is string => Boolean(part)).join(" · ");
     if (phase === "cancelled") {
