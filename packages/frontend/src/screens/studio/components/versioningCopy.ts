@@ -1132,32 +1132,36 @@ export function describeChangeRevertOutcome(
 }
 
 // ---------------------------------------------------------------------------
-// Chat: Undo of a change no save took
+// Chat: Undo of a change a Stop left unsaved
 // ---------------------------------------------------------------------------
 
-// A turn's edits a Stop (or a failed save) left unsaved have no version to
-// revert. Undo puts the files back in the folder the turn ran in, as the
-// saved version has them: no message, no turn of Octo's.
+// A turn's edits a Stop left unsaved have no version to revert. Undo puts
+// the files back in the folder the turn ran in, as the saved version has
+// them: no message, no turn of Octo's. It does so only while they hold
+// nothing but this turn's change, so they go back as they were before it.
 export const UNSAVED_REVERT_CONFIRM_MESSAGE = "This puts the files back as they were before this turn.";
 
-// A later turn of the chat changed one of the files: putting it back would
-// take that work back too.
-export function describeUnsavedRevertChangedLater(paths: readonly string[], canAskAgent: boolean): string {
+// Other work is in one of the files, which putting it back would take back
+// too: a later turn of the chat changed it ("later"), it changed after the
+// turn in another way ("since": a turn in another chat, the person's own
+// edit), or the turn found it already changed ("before").
+export function describeUnsavedRevertOtherWork(
+  when: "later" | "since" | "before",
+  paths: readonly string[],
+  canAskAgent: boolean,
+): string {
   const list = formatPathList(paths);
-  const lead = list
-    ? `A later turn changed ${list}, so Undo here would take that back too. Nothing was undone.`
-    : "A later turn changed these files, so Undo here would take that back too. Nothing was undone.";
-  return canAskAgent ? `${lead} Ask the agent to undo just this change.` : lead;
+  const lead =
+    when === "later"
+      ? `A later turn changed ${list || "these files"}`
+      : when === "since"
+        ? `${list || "These files"} changed after this turn`
+        : `${list || "These files"} also ${paths.length === 1 ? "holds" : "hold"} an earlier change that wasn't saved`;
+  const text = `${lead}, so Undo here would take that back too. Nothing was undone.`;
+  return canAskAgent ? `${text} Ask the agent to undo just this change.` : text;
 }
 
-// The files read as the saved version has them, or changed in another way:
-// a later save took the change in, or it was undone already.
-export function describeUnsavedRevertNotInFiles(canAskAgent: boolean): string {
-  const lead = "The files don't hold this change any more, so there's nothing to undo here.";
-  return canAskAgent ? `${lead} Ask the agent if something still needs undoing.` : lead;
-}
-
-// No machine of the space is running, so nothing can reach the folder.
+// No machine that serves the folder is running, so nothing can reach it.
 export const UNSAVED_REVERT_MACHINE_OFF_MESSAGE =
   "The space's machine isn't running, so Undo can't reach these files right now. Try again once it has started.";
 
@@ -1170,28 +1174,33 @@ export interface UnsavedRevertOutcome {
 
 const UNSAVED_REVERT_FALLBACK_MESSAGE = "Couldn't undo this change. Try again, or ask the agent to undo it.";
 
-// What Undo of a change no save took did, as one toast (`/git/revert` on the
-// folder's own origin). What it undid is kept when the origin says so.
+// What Undo of a change a Stop left unsaved did, as one toast (`/git/revert`
+// on the folder's own origin, with what the turn left in each file). The
+// toast offers to ask the agent wherever Undo could not do it.
 export function describeUnsavedRevertOutcome(result: RevertWorkspaceGitResult | null): UnsavedRevertOutcome {
-  if (result?.ok) {
-    return {
-      intent: "success",
-      message: result.kept ? `${REVERT_UNDONE_COPY} They're ${KEPT_IN_UNSAVED_WORK}.` : REVERT_UNDONE_COPY,
-      reverted: true,
-      offerAgentUndo: false,
-    };
-  }
-  const info = result?.errorInfo;
-  const code = info?.code ?? null;
-  const status = info?.status ?? 0;
   const failed = (intent: UnsavedRevertOutcome["intent"], message: string, offerAgentUndo = false) => ({
     intent,
     message,
     reverted: false,
     offerAgentUndo,
   });
+  if (result?.ok) {
+    if ((result.reverted?.length ?? 0) + (result.removed?.length ?? 0) > 0) {
+      return { intent: "success", message: REVERT_UNDONE_COPY, reverted: true, offerAgentUndo: false };
+    }
+    // Every file reads as the saved version has it: a save took the change
+    // in, or it was put back already.
+    return failed("warning", "The files don't hold this change any more, so there's nothing to undo here.", true);
+  }
+  const info = result?.errorInfo;
+  const code = info?.code ?? null;
+  const status = info?.status ?? 0;
   if (code === "lease_conflict") {
     return failed("warning", LEASE_CONFLICT_COPY);
+  }
+  // A file no longer holds what the turn left: nothing was put back.
+  if (code === "head_moved") {
+    return failed("warning", describeUnsavedRevertOtherWork("since", info?.paths ?? [], false), true);
   }
   // The folder is being written (a turn, or a save, holds it).
   if (status === 409) {

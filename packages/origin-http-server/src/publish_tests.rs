@@ -2506,6 +2506,123 @@ async fn a_revert_keeps_what_it_undoes_when_asked() {
     server.abort();
 }
 
+/// Undo of a stopped turn's unsaved change sends what the turn left in each
+/// file (`expected`, its report's blob ids). The revert puts back only work
+/// the files still hold as the turn left it: a file changed since (a later
+/// turn, a person's own edit) refuses the whole revert, and nothing moves;
+/// a file that reads as `HEAD` has it is left alone. With `keep`, a file a
+/// save never keeps is refused, not put back unkept.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revert_puts_back_only_what_the_turn_left() {
+    let sc = Scenario::new(Options::default());
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+    let blob = crate::workspace_git::blob_oid;
+    let turn_readme = b"one\nBEFORE YOU GO\ntwo\n".as_slice();
+    let turn_plan = b"made by the stopped turn\n".as_slice();
+    let left = serde_json::json!({
+        "README.md": blob(turn_readme),
+        "notes/plan.md": blob(turn_plan),
+    });
+    let revert = |body: serde_json::Value| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let response = client
+                .post(format!("{base}/git/revert"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            (status, response.json::<serde_json::Value>().await.unwrap())
+        }
+    };
+
+    // A later turn changed README.md after the stopped one: nothing moves.
+    sc.write("README.md", b"one\nBEFORE YOU GO\ntwo\nA LATER TURN\n");
+    sc.write("notes/plan.md", turn_plan);
+    let (status, body) = revert(serde_json::json!({
+        "paths": ["README.md", "notes/plan.md"],
+        "keep": true,
+        "expected": left,
+    }))
+    .await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "head_moved", "{body}");
+    assert_eq!(body["paths"], serde_json::json!(["README.md"]), "{body}");
+    assert_eq!(
+        sc.disk("README.md").as_deref(),
+        Some("one\nBEFORE YOU GO\ntwo\nA LATER TURN\n")
+    );
+    assert_eq!(
+        sc.disk("notes/plan.md").as_deref(),
+        Some("made by the stopped turn\n")
+    );
+    assert_eq!(sc.local_refs(&format!("{LOCAL_RECOVERY_ROOT}/")).len(), 0);
+
+    // As the turn left them: both go back, and what they held is kept.
+    sc.write("README.md", turn_readme);
+    let (status, body) = revert(serde_json::json!({
+        "paths": ["README.md", "notes/plan.md"],
+        "keep": true,
+        "expected": left,
+    }))
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["reverted"], serde_json::json!(["README.md"]), "{body}");
+    assert_eq!(
+        body["removed"],
+        serde_json::json!(["notes/plan.md"]),
+        "{body}"
+    );
+    assert!(body["kept"]["ref"].as_str().is_some(), "{body}");
+    assert_eq!(sc.disk("README.md").as_deref(), Some(README));
+    assert_eq!(sc.disk("notes/plan.md"), None);
+
+    // Asked again, the files read as `HEAD` has them: nothing is left of
+    // the change, so nothing is put back or kept.
+    let (status, body) = revert(serde_json::json!({
+        "paths": ["README.md", "notes/plan.md"],
+        "keep": true,
+        "expected": left,
+    }))
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["reverted"], serde_json::json!([]), "{body}");
+    assert_eq!(body["removed"], serde_json::json!([]), "{body}");
+    assert!(body["kept"].is_null(), "{body}");
+
+    // A secret file is never put back unkept.
+    sc.write("site/.env", b"TOKEN=from-the-turn\n");
+    let (status, body) = revert(serde_json::json!({
+        "paths": ["site/.env"],
+        "keep": true,
+        "expected": { "site/.env": blob(b"TOKEN=from-the-turn\n") },
+    }))
+    .await;
+    assert_eq!(status, reqwest::StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "excluded_path", "{body}");
+    assert_eq!(
+        sc.disk("site/.env").as_deref(),
+        Some("TOKEN=from-the-turn\n")
+    );
+
+    // `expected` names every path of the revert.
+    sc.write("README.md", turn_readme);
+    let (status, _) = revert(serde_json::json!({
+        "paths": ["README.md", "doc.md"],
+        "expected": { "README.md": blob(turn_readme) },
+    }))
+    .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        sc.disk("README.md").as_deref(),
+        Some("one\nBEFORE YOU GO\ntwo\n")
+    );
+    server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_route_reports_conflicts_refusals_and_refresh() {
     let sc = Scenario::new(Options::default());

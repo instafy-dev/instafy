@@ -5,6 +5,7 @@ import type {
   ChatMessageFileChangeType,
   ChatMessageFileLineRange,
   ChatMessageFileNotSaved,
+  ChatMessageFolderUndo,
   ChatMessageNotSavedReason,
   ChatMessageUnsavedReason,
 } from "../screens/studio/types";
@@ -564,10 +565,42 @@ export function extractFileChangesFromMetadata(
   if (!Array.isArray(filesValue)) {
     return [];
   }
+  const folderUndoOf = readFolderUndo(filesArtifact["metadata"]);
   return filesValue
     .filter((entry) => !(isPlainObject(entry) && isReadFileReference(entry)))
     .map((entry) => parseFileChange(entry))
-    .filter((entry): entry is ChatMessageFileChange => entry !== null);
+    .filter((entry): entry is ChatMessageFileChange => entry !== null)
+    .map((entry) => {
+      const folderUndo = folderUndoOf(entry.workspacePath || entry.path);
+      return folderUndo ? { ...entry, folderUndo } : entry;
+    });
+}
+
+// What a stopped turn left in each file, from its report's `undo` (on the
+// `apply/files` artifact's metadata): the files Undo can put back with no
+// turn. A file it does not name has none.
+function readFolderUndo(metadata: unknown): (path: string) => ChatMessageFolderUndo | null {
+  const undo = isPlainObject(metadata) && isPlainObject(metadata["undo"]) ? metadata["undo"] : null;
+  const leftAs = undo && isPlainObject(undo["leftAs"]) ? undo["leftAs"] : null;
+  if (!undo || !leftAs) {
+    return () => null;
+  }
+  const runtimeId = typeof undo["runtimeId"] === "string" && undo["runtimeId"].trim() ? undo["runtimeId"].trim() : null;
+  const changedBefore = new Set(
+    (Array.isArray(undo["changedBefore"]) ? undo["changedBefore"] : []).filter(
+      (path): path is string => typeof path === "string",
+    ),
+  );
+  return (path) => {
+    if (!Object.prototype.hasOwnProperty.call(leftAs, path)) {
+      return null;
+    }
+    const blob = leftAs[path];
+    if (blob !== null && (typeof blob !== "string" || !/^[0-9a-f]{40,64}$/i.test(blob))) {
+      return null;
+    }
+    return { leftAs: blob, changedBefore: changedBefore.has(path), runtimeId };
+  };
 }
 
 // The paths a checkpoint's save selected, as the runtime recorded them.

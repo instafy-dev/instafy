@@ -1473,6 +1473,25 @@ pub fn workspace_file_blob_oid(
     Ok(Some(blob_oid(&content)))
 }
 
+/// What a workspace path holds, as a blob id: `Some` for a regular file,
+/// `None` when nothing is there. A folder, a link or anything else is an
+/// error: no blob id stands for it. A turn that is stopped records this for
+/// each file it changed, and Undo puts a file back only while it still
+/// reads the same (`/git/revert` with `expected`).
+pub fn workspace_path_blob(
+    workspace: &crate::workspace_fs::WorkspaceDir,
+    relative: &str,
+) -> std::io::Result<Option<String>> {
+    match workspace.entry_kind(relative) {
+        Ok(WorkspaceEntryKind::File) => workspace_file_blob_oid(workspace, relative, u64::MAX)?
+            .map(Some)
+            .ok_or_else(|| std::io::Error::other("the file changed while it was read")),
+        Ok(WorkspaceEntryKind::Directory) => Err(std::io::Error::other("a folder, not a file")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod blob_tests {
     #[test]
