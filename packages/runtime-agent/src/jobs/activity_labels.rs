@@ -1032,10 +1032,11 @@ impl<'a> Matcher<'a> {
 
     /// Labels every simple command under `node`. `last` says whether the step's exit status is
     /// the result of what `node` runs: the script's last statement, and in it what its exit
-    /// status follows (the end of a pipeline, a group's last statement, a loop's body when the
-    /// loop surely runs), and both sides of `&&`, since the right side runs only once the left
+    /// status follows (the end of a pipeline, a group's last statement, the body of a loop that
+    /// surely runs once), and both sides of `&&`, since the right side runs only once the left
     /// one exited 0. Either side of `||`, a negation, a condition, a statement sent to the
-    /// background with `&` and a loop that may not run at all are never the step's result.
+    /// background with `&` and a loop that may run many times, or not at all, are never the
+    /// step's result.
     fn visit(
         &self,
         node: Node<'_>,
@@ -1060,30 +1061,34 @@ impl<'a> Matcher<'a> {
                 // Output sent to a file writes it, and a here-document can run a substitution:
                 // neither is a look.
                 let body = node.child_by_field_name("body");
-                let mut cursor = node.walk();
-                let redirects: Vec<Node<'_>> = node
-                    .named_children(&mut cursor)
-                    .filter(|child| Some(*child) != body)
-                    .collect();
+                let redirects = redirects_of(node, body);
                 if redirects
                     .iter()
                     .any(|redirect| writes_a_file(*redirect, src) || has_substitution(*redirect))
                 {
                     scan.other = true;
                 }
-                // `cmd <<'JSON' && next`: the statement after the here-document's start runs
-                // after the body, as the right side of a list does.
-                let chained = redirects.iter().find_map(|redirect| {
-                    let right = redirect.child_by_field_name("right")?;
-                    let operator = redirect.child_by_field_name("operator")?;
-                    Some((right, node_text(operator, src) == "&&"))
-                });
-                let body_last = last && chained.is_none_or(|(_, and)| and);
-                if let Some(body) = body {
-                    self.visit(body, src, in_loop, body_last, depth, scan);
-                }
-                if let Some((right, and)) = chained {
-                    self.visit(right, src, in_loop, last && and, depth, scan);
+                match heredoc_rest(&redirects, src) {
+                    // `cmd <<'JSON' | tail -3`: the command starts the pipeline, whose status is
+                    // its end's.
+                    Some(HeredocRest::Pipe(pipeline)) => {
+                        if let Some(body) = body {
+                            self.visit(body, src, in_loop, false, depth, scan);
+                        }
+                        self.visit(pipeline, src, in_loop, last, depth, scan);
+                    }
+                    // `cmd <<'JSON' && next || other` runs as `(cmd && next) || other`.
+                    Some(HeredocRest::Chain(and, right)) => {
+                        let mut links: Vec<(Node<'_>, Option<bool>)> =
+                            body.into_iter().map(|body| (body, None)).collect();
+                        and_or_links(right, Some(and), &mut links);
+                        self.visit_links(&links, src, in_loop, last, depth, scan);
+                    }
+                    None => {
+                        if let Some(body) = body {
+                            self.visit(body, src, in_loop, last, depth, scan);
+                        }
+                    }
                 }
             }
             "for_statement" | "c_style_for_statement" => {
@@ -1091,18 +1096,17 @@ impl<'a> Matcher<'a> {
                 if has_substitution(node) {
                     scan.other = true;
                 }
-                // A loop's status is its last round's, and a loop over words written out runs at
-                // least once; any other may not run at all, and then exits 0.
+                // One entry stands for every round, and the loop's status is its last round's
+                // alone: the body takes the step's result only when the loop surely runs once,
+                // `for` over one word written out. Any other may run many times, or not at all.
                 let mut cursor = node.walk();
                 let values: Vec<Node<'_>> =
                     node.children_by_field_name("value", &mut cursor).collect();
-                let runs = node.kind() == "for_statement"
-                    && !values.is_empty()
-                    && values
-                        .iter()
-                        .all(|value| shell_word(*value, src).exact().is_some());
+                let once = node.kind() == "for_statement"
+                    && node.child(0).is_some_and(|keyword| keyword.kind() == "for")
+                    && matches!(values.as_slice(), [value] if shell_word(*value, src).exact().is_some());
                 if let Some(body) = node.child_by_field_name("body") {
-                    self.visit(body, src, true, last && runs, depth, scan);
+                    self.visit(body, src, true, last && once, depth, scan);
                 }
             }
             "while_statement" => {
@@ -1119,18 +1123,10 @@ impl<'a> Matcher<'a> {
             "program" | "compound_statement" | "subshell" | "do_group" => {
                 self.visit_statements(node, src, in_loop, last, depth, scan);
             }
-            // `a && b`: b runs only once a exited 0, so the list's status is the result of both;
-            // after `a || b`, a's result is not known and b may not have run.
             "list" => {
-                let mut cursor = node.walk();
-                let and = node
-                    .children(&mut cursor)
-                    .any(|child| !child.is_named() && child.kind() == "&&");
-                let mut cursor = node.walk();
-                let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
-                for child in children {
-                    self.visit(child, src, in_loop, last && and, depth, scan);
-                }
+                let mut links = Vec::new();
+                and_or_links(node, None, &mut links);
+                self.visit_links(&links, src, in_loop, last, depth, scan);
             }
             // A pipeline's status is its last command's.
             "pipeline" => {
@@ -1170,7 +1166,11 @@ impl<'a> Matcher<'a> {
     }
 
     /// The statements of a script, a group or a loop's body: only the last of them, unless it is
-    /// sent to the background with `&`, is the group's status.
+    /// sent to the background with `&`, is the group's status. Once a script's own `set` turned
+    /// errexit on (`set -e`), a command on its own that fails ends it, so each one after the
+    /// `set` exited 0 when the script did, as with `&&`. A group, a loop or a subshell may run
+    /// where the shell ignores errexit (`{ set -e; a; b; } && c` goes on after `a` failed), so
+    /// only a script's own statements read it.
     fn visit_statements(
         &self,
         node: Node<'_>,
@@ -1183,14 +1183,160 @@ impl<'a> Matcher<'a> {
         let mut cursor = node.walk();
         let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
         let end = children.iter().rposition(|child| child.kind() != "comment");
+        let mut errexit = false;
         for (index, child) in children.into_iter().enumerate() {
             let in_background = child
                 .next_sibling()
                 .is_some_and(|next| !next.is_named() && next.kind() == "&");
-            let is_last = last && Some(index) == end && !in_background;
+            let ends = Some(index) == end || (errexit && ends_the_script_when_it_fails(child, src));
+            let is_last = last && ends && !in_background;
             self.visit(child, src, in_loop, is_last, depth, scan);
+            if node.kind() == "program"
+                && !in_background
+                && let Some(on) = errexit_change(child, src)
+            {
+                errexit = on;
+            }
         }
     }
+
+    /// The statements of an `&&`/`||` list (see [`and_or_links`]). One takes the list's result
+    /// when `&&` joins it, and every statement after it, to the one before (every statement
+    /// after the first, for the first): `a && b` exits 0 only once both did, `a || b` when
+    /// either did, and `a || b && c` runs as `(a || b) && c`, so only c's result is known.
+    fn visit_links(
+        &self,
+        links: &[(Node<'_>, Option<bool>)],
+        src: &str,
+        in_loop: bool,
+        last: bool,
+        depth: usize,
+        scan: &mut Scan,
+    ) {
+        let after_or = links.iter().rposition(|(_, joined)| *joined == Some(false));
+        for (index, (statement, _)) in links.iter().enumerate() {
+            let known = last && after_or.is_none_or(|or| index > or);
+            self.visit(*statement, src, in_loop, known, depth, scan);
+        }
+    }
+}
+
+/// The statements of an `&&`/`||` list in the order they run, each with whether `&&` (`true`) or
+/// `||` (`false`) joins it to the one before; `joined` is the first one's. The parser reads a
+/// list from the left (`a && b || c` is `(a && b) || c`), as the shell runs it.
+fn and_or_links<'t>(
+    node: Node<'t>,
+    joined: Option<bool>,
+    links: &mut Vec<(Node<'t>, Option<bool>)>,
+) {
+    if node.kind() != "list" {
+        links.push((node, joined));
+        return;
+    }
+    let mut cursor = node.walk();
+    let and = node
+        .children(&mut cursor)
+        .any(|child| !child.is_named() && child.kind() == "&&");
+    let mut cursor = node.walk();
+    let statements: Vec<Node<'t>> = node
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() != "comment")
+        .collect();
+    for (index, statement) in statements.into_iter().enumerate() {
+        let joined = if index == 0 { joined } else { Some(and) };
+        and_or_links(statement, joined, links);
+    }
+}
+
+/// A redirected statement's redirections: everything but its body.
+fn redirects_of<'t>(node: Node<'t>, body: Option<Node<'t>>) -> Vec<Node<'t>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .filter(|child| Some(*child) != body)
+        .collect()
+}
+
+/// What follows a here-document's start on its line, which the parser keeps inside the
+/// here-document.
+enum HeredocRest<'t> {
+    /// `cmd <<'JSON' | tail -3`: the pipeline after the command, holding what follows `|`.
+    Pipe(Node<'t>),
+    /// `cmd <<'JSON' && next`: whether the operator is `&&`, and the statement after it.
+    Chain(bool, Node<'t>),
+}
+
+fn heredoc_rest<'t>(redirects: &[Node<'t>], src: &str) -> Option<HeredocRest<'t>> {
+    redirects
+        .iter()
+        .filter(|redirect| redirect.kind() == "heredoc_redirect")
+        .find_map(|redirect| {
+            if let (Some(operator), Some(right)) = (
+                redirect.child_by_field_name("operator"),
+                redirect.child_by_field_name("right"),
+            ) {
+                return Some(HeredocRest::Chain(node_text(operator, src) == "&&", right));
+            }
+            let mut cursor = redirect.walk();
+            let pipe = redirect
+                .named_children(&mut cursor)
+                .find(|child| child.kind() == "pipeline");
+            pipe.map(HeredocRest::Pipe)
+        })
+}
+
+/// A command on its own, maybe with its input or output redirected: with errexit on, its failure
+/// ends the script. A list, a pipeline, a negation, a condition, a loop or a group can fail
+/// without ending it (`a && b` that fails at `a` goes on), so they keep their own rule.
+fn ends_the_script_when_it_fails(statement: Node<'_>, src: &str) -> bool {
+    match statement.kind() {
+        "command" => true,
+        "redirected_statement" => {
+            let body = statement.child_by_field_name("body");
+            body.is_some_and(|body| body.kind() == "command")
+                && heredoc_rest(&redirects_of(statement, body), src).is_none()
+        }
+        _ => false,
+    }
+}
+
+/// Whether a statement is a `set` that turns errexit on (`set -e`, `set -euo pipefail`, `set -o
+/// errexit`) or off (`set +e`); `None` when it leaves errexit as it was. A `set` whose options
+/// are only known when the shell runs it may turn it off.
+fn errexit_change(statement: Node<'_>, src: &str) -> Option<bool> {
+    if statement.kind() != "command" {
+        return None;
+    }
+    let words = command_words(statement, src)?;
+    let (program, args) = words.split_first()?;
+    if program.exact() != Some("set") {
+        return None;
+    }
+    let mut change = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let Some(arg) = arg.exact() else {
+            return Some(false);
+        };
+        let on = match arg.as_bytes() {
+            // `set --` and `set -` end the options; anything else sets the arguments.
+            [b'-', b'-', ..] | [b'-'] => break,
+            [b'-', ..] => true,
+            [b'+', ..] => false,
+            _ => break,
+        };
+        for flag in arg[1..].chars() {
+            match flag {
+                'e' => change = Some(on),
+                'o' => match args.next().map(Word::exact) {
+                    Some(Some("errexit")) => change = Some(on),
+                    Some(Some(_)) | None => {}
+                    Some(None) => return Some(false),
+                },
+                _ => {}
+            }
+        }
+    }
+    change
 }
 
 /// Whether a command or process substitution (`$(…)`, `` `…` ``, `<(…)`) is anywhere inside.
@@ -1204,8 +1350,16 @@ fn has_substitution(node: Node<'_>) -> bool {
 }
 
 /// Whether a redirection writes a file: output sent anywhere but `/dev/null` or another
-/// descriptor (`2>&1`). Input (`<`, a here-document) writes nothing.
+/// descriptor (`2>&1`). Input (`<`, a here-document) writes nothing, but the parser keeps what
+/// follows a here-document's start inside it: `cat <<'EOF' > index.html` writes one.
 fn writes_a_file(redirect: Node<'_>, src: &str) -> bool {
+    if redirect.kind() == "heredoc_redirect" {
+        let mut cursor = redirect.walk();
+        let inner: Vec<Node<'_>> = redirect
+            .children_by_field_name("redirect", &mut cursor)
+            .collect();
+        return inner.into_iter().any(|inner| writes_a_file(inner, src));
+    }
     if redirect.kind() != "file_redirect" {
         return false;
     }
@@ -1737,11 +1891,60 @@ mod tests {
                     entry("validate", Some(1), true),
                 ],
             ),
-            // A loop over words written out runs, and exits as its last round did; any other
-            // loop may not run at all.
+            // The rest of a here-document's line runs as it would anywhere: a pipe after its
+            // start ends the pipeline, and `&&` and `||` after it make a list read from the left.
+            (
+                "uw add-point a --props-file - <<'JSON' | tail -3\n{\"x\":1}\nJSON",
+                vec![entry("add-point", Some(1), false)],
+            ),
+            (
+                "uw add-point a --props-file - <<'JSON' | uw validate s\n{\"x\":1}\nJSON",
+                vec![
+                    entry("add-point", Some(1), false),
+                    entry("validate", Some(1), true),
+                ],
+            ),
+            (
+                "uw add-point a --props-file - <<'JSON' && uw validate s || echo failed\n{\"x\":1}\nJSON",
+                vec![
+                    entry("add-point", Some(1), false),
+                    entry("validate", Some(1), false),
+                ],
+            ),
+            (
+                "uw add-point a --props-file - <<'JSON' || uw cite b && uw validate s\n{\"x\":1}\nJSON",
+                vec![
+                    entry("add-point", Some(1), false),
+                    entry("cite", Some(1), false),
+                    entry("validate", Some(1), true),
+                ],
+            ),
+            (
+                "uw cite x && uw add-point a --props-file - <<'JSON' || uw validate s\n{\"x\":1}\nJSON",
+                vec![
+                    entry("cite", Some(1), false),
+                    entry("add-point", Some(1), false),
+                    entry("validate", Some(1), false),
+                ],
+            ),
+            // One entry stands for every round of a loop, and its status is its last round's: only
+            // a loop that surely runs once, `for` over one word written out, takes the step's
+            // result. Any other may run many times, or not at all.
+            (
+                "for q in 'b c'; do uw add-point \"$q\"; done",
+                vec![entry("add-point", None, true)],
+            ),
             (
                 "for q in a 'b c'; do uw add-point \"$q\"; done",
-                vec![entry("add-point", None, true)],
+                vec![entry("add-point", None, false)],
+            ),
+            (
+                "for f in sites/*.json; do uw validate \"$f\"; done",
+                vec![entry("validate", None, false)],
+            ),
+            (
+                "select q in a; do uw add-point \"$q\"; done",
+                vec![entry("add-point", None, false)],
             ),
             (
                 "for q in \"$@\"; do uw add-point \"$q\"; done",
@@ -1758,6 +1961,94 @@ mod tests {
                     entry("*", Some(2), false),
                     entry("validate", Some(1), false),
                     entry("instafy/preview-check", Some(1), true),
+                ],
+            ),
+            // With errexit on, a command on its own that fails ends the script, so each one after
+            // the `set` exited 0 when the script did, as with `&&`. A list, a pipeline or a group
+            // can fail without ending it (`a && b` that fails at `a` goes on), and keeps its rule.
+            (
+                "set -e; uw cite a --grep x; uw add-point b",
+                vec![
+                    entry("cite", Some(1), true),
+                    entry("add-point", Some(1), true),
+                ],
+            ),
+            (
+                "set -euo pipefail\nuw cite a --grep x > /dev/null\nuw add-point b --props-file - <<'JSON'\n{}\nJSON\nuw validate s",
+                vec![
+                    entry("cite", Some(1), true),
+                    entry("add-point", Some(1), true),
+                    entry("validate", Some(1), true),
+                ],
+            ),
+            (
+                "cd sites && bash -lc 'set -o errexit; uw cite a; uw add-point b'",
+                vec![
+                    entry("cite", Some(1), true),
+                    entry("add-point", Some(1), true),
+                ],
+            ),
+            (
+                "uw cite a; set -e; uw cite b; uw add-point c",
+                vec![
+                    entry("cite", Some(1), false),
+                    entry("cite", Some(1), true),
+                    entry("add-point", Some(1), true),
+                ],
+            ),
+            (
+                "set -e; uw cite a && uw add-point b; uw cite c | tail -1; { uw fit; }; uw validate",
+                vec![
+                    entry("cite", Some(2), false),
+                    entry("add-point", Some(1), false),
+                    entry("fit", Some(1), false),
+                    entry("validate", Some(1), true),
+                ],
+            ),
+            (
+                "set -e; uw cite a & uw add-point b",
+                vec![
+                    entry("cite", Some(1), false),
+                    entry("add-point", Some(1), true),
+                ],
+            ),
+            // A group on the left of `&&` ignores errexit, whatever it sets: only a script's own
+            // statements read it.
+            (
+                "{ set -e; uw cite a; uw add-point b; } && uw validate s",
+                vec![
+                    entry("cite", Some(1), false),
+                    entry("add-point", Some(1), true),
+                    entry("validate", Some(1), true),
+                ],
+            ),
+            // Turned off again, set in a subshell or not set at all.
+            (
+                "set -e; set +e; uw cite a; uw add-point b",
+                vec![
+                    entry("cite", Some(1), false),
+                    entry("add-point", Some(1), true),
+                ],
+            ),
+            (
+                "(set -e); uw cite a; uw add-point b",
+                vec![
+                    entry("cite", Some(1), false),
+                    entry("add-point", Some(1), true),
+                ],
+            ),
+            (
+                "set -- -e; uw cite a; uw add-point b",
+                vec![
+                    entry("cite", Some(1), false),
+                    entry("add-point", Some(1), true),
+                ],
+            ),
+            (
+                "set -e; set $FLAGS; uw cite a; uw add-point b",
+                vec![
+                    entry("cite", Some(1), false),
+                    entry("add-point", Some(1), true),
                 ],
             ),
         ];
@@ -1963,6 +2254,9 @@ mod tests {
             "echo hi > index.html",
             "printf x >> notes.txt",
             "cat > index.html <<'EOF'\nhi\nEOF",
+            // The parser keeps what follows a here-document's start inside it.
+            "cat <<'EOF' > index.html\nhi\nEOF",
+            "cat <<'EOF' | tee index.html\nhi\nEOF",
             "find . -name '*.tmp' -delete",
             "find . -name x -exec rm {} +",
             "rg --pre ./decode.sh hours",

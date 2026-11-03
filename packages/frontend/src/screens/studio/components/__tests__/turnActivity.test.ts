@@ -371,14 +371,19 @@ describe("summarizeTurnActivity", () => {
       const worked = summarize([command(chain)]);
       expect(rows(worked)).toEqual([["done", "Read a source"]]);
       expect(worked.summary).toBe("Read a source, looked up a place");
-      // Which of them failed is not known: the chain reads as what it tried
-      // first, the one command sure to have run, and nothing in it counts.
+      // Which of them failed is not known: the chain reads as what it set out
+      // to do, as its line said while it ran (the first command in it that
+      // says what it does), and nothing in it counts.
       const failed = summarize([command(chain, { exitCode: 1 }), command(WEB_READ)]);
       expect(rows(failed)).toEqual([
         ["failed", "Tried reading a source"],
         ["done", "Read 6 pages"],
       ]);
       expect(failed.summary).toBe("Read 6 pages");
+      // uw set … && uw validate …: the quiet setup before it never names it.
+      const setThenCheck = stepOf(entryOf(SET), entryOf(VALIDATE));
+      expect(summarize([command(setThenCheck, { status: "in_progress" })], "running").live).toBe("Checking the map…");
+      expect(rows(summarize([command(setThenCheck, { exitCode: 1 })]))).toEqual([["failed", "Tried checking the map"]]);
     });
 
     it("never says the map was built over a check that ran before the step's last command", () => {

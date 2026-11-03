@@ -304,9 +304,9 @@ from trusted data only, in this order:
    `realpath`, `dirname` and `basename`, a command asked for its own help (`uw cite --help`), or
    the runtime's own memory script on its own (`python AGENTS.py`, which only prints the space's
    memory at the start of a turn).
-   Anything that writes a file (`echo hi > a.html`), deletes or runs something of its own
-   (`find -delete`, `find -exec`, `rg --pre`, a substitution, a function the script defines under
-   one of those names) is not a look. Studio leaves looks off the line.
+   Anything that writes a file (`echo hi > a.html`, `cat <<'EOF' > a.html`), deletes or runs
+   something of its own (`find -delete`, `find -exec`, `rg --pre`, a substitution, a function the
+   script defines under one of those names) is not a look. Studio leaves looks off the line.
 5. **Anything else gets no label.** Studio counts those steps instead ("Ran 3 commands").
 
 A label is never built from command output, page text, a page title or text the model wrote. The
@@ -345,17 +345,24 @@ to it with `&&` (`b` runs only once `a` exited 0, so `a && b` exiting 0 means bo
 turn's `uw set …; uw validate …; uw reload …; instafy preview check …` exited 0 with validate's
 error standing, and Details said "Built the map". So only those commands take the step's result,
 and every other labelled command's entry carries `result: "unknown"`: one that ran before the last
-command (`uw cite a; uw add-point b`), either side of `||`, all but the end of a pipeline, a
-negation, an `if` and its branches, a statement sent to the background with `&`, and a loop that
-may not run at all (`while`, or `for` over anything but words written out; a `for` over written
-words exits as its last round did). A here-document's `cmd <<'EOF' && next` is a `&&` like any
-other. A label is two entries when some of its commands take the step's result and others do not
+command (`uw cite a; uw add-point b`), either side of `||` (`a && b || c` runs as
+`(a && b) || c`), all but the end of a pipeline, a negation, an `if` and its branches, a statement
+sent to the background with `&`, and a loop that may run many times or not at all: one entry
+stands for every round, and the loop exits as its last round did, so only a `for` over one word
+written out takes the step's result. What follows a here-document's start on its line runs as
+anywhere else: `cmd <<'EOF' | tail -3` is a pipeline, and `cmd <<'EOF' && next || other` a list.
+Once the script's own `set -e` (or `set -euo pipefail`, `set -o errexit`) turned errexit on, a
+command on its own that fails ends the script, so each one after it takes the step's result too,
+as with `&&`; a list, a pipeline or a group keeps its rule, since `a && b` that fails at `a` goes
+on. A label is two entries when some of its commands take the step's result and others do not
 (`uw cite a; uw cite b`), and when a step has more labels than fit, those that take its result
 stay.
 
 Which command of a failed `&&` chain failed is not known: the ones before it worked and the ones
-after it never ran. The chain reads as what it tried first, the one command sure to have run
-("Tried reading a source" for `uw cite … && uw add-point …`), and nothing in it counts.
+after it never ran. The chain reads as what it set out to do, as its line said while it ran: the
+first command in it that says what it does ("Tried reading a source" for
+`uw cite … && uw add-point …`, "Tried checking the map" for `uw set … && uw validate …`). Nothing
+in it counts.
 
 ## The `activity` object
 
