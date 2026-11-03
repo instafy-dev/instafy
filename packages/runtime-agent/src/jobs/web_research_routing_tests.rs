@@ -1299,7 +1299,7 @@ fn a_bare_keep_going_carries_on_what_the_chat_left_open() {
         .expect("the browser line");
     assert!(
         line.ends_with(
-            "or it carries on browser work this chat started, whether or not that found the answer: a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked); when a page here shows it, or the chat asked for one that isn't made yet, that is `browser_then_build`."
+            "or it carries on browser work this chat started, whether or not that found the answer: a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked); when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`."
         ),
         "{line}"
     );
@@ -2184,7 +2184,7 @@ fn research_that_ends_in_a_page_reaches_its_build_and_keep_going_never_undoes_an
     assert!(rules[1].starts_with("- `browser`:"), "{}", rules[1]);
     assert!(
         rules[1].ends_with(
-            "when a page here shows it, or the chat asked for one that isn't made yet, that is `browser_then_build`."
+            "when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`."
         ),
         "{}",
         rules[1]

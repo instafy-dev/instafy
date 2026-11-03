@@ -1745,7 +1745,7 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "a bare \"keep going\" never carries on a change the person stopped or undid",
             ),
             (
-                "a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked); when a page here shows it, or the chat asked for one that isn't made yet, that is `browser_then_build`.",
+                "a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked); when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`.",
                 "a bare \"keep going\" carries on what the chat left open",
             ),
             (

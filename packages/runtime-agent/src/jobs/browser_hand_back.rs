@@ -438,6 +438,42 @@ pub(super) fn needs_finding_lines(metadata: Option<&JsonValue>, summary: &str) -
     metadata.is_some_and(hands_back) && split_findings(summary).is_none()
 }
 
+/// Whether a browser turn stopped on a step that is the person's, as Studio
+/// judges it (`browserTurnStoppedForPerson`, frontend `browserHandBack.ts`):
+/// it asked for their input on the page (a completed `request_human_input`),
+/// or a step's approval ended it (a blocked `terminalConsent`), in either
+/// browser; or a page it opened showed a secret (`secret_screen`), where it
+/// stops and tells the person which control shows it. Its reply is the
+/// person's next step, so the runtime leaves it as the turn wrote it: no
+/// wrap-up pass and no page lines move it out of the chat. Else a sign-in
+/// pause in the browser on the person's device would post no words, its
+/// pages taken for its findings, and Studio never hands back a paused turn:
+/// the person would read nothing at all.
+pub(super) fn stopped_for_the_person(messages: &[JobMessage], secret_screen: bool) -> bool {
+    secret_screen
+        || messages.iter().any(|message| {
+            if message
+                .message_type
+                .as_deref()
+                .is_none_or(|kind| !kind.eq_ignore_ascii_case("mcp_tool_call"))
+            {
+                return false;
+            }
+            let Some(metadata) = message.metadata.as_ref() else {
+                return false;
+            };
+            let field = |key: &str| metadata.get(key).and_then(JsonValue::as_str);
+            let blocked = metadata
+                .get("terminalConsent")
+                .and_then(|consent| consent.get("state"))
+                .and_then(JsonValue::as_str)
+                == Some("blocked");
+            let asked = field("tool") == Some("request_human_input")
+                && field("status") == Some("completed");
+            blocked || asked
+        })
+}
+
 /// The finding lines of the wrap-up pass's answer ([`FINDING_LINES_PASS_PROMPT`]),
 /// and nothing else of it; None when it wrote none.
 pub(super) fn finding_lines_of(answer: &str) -> Option<String> {
@@ -1435,6 +1471,73 @@ mod tests {
             );
         }
         assert!(!needs_finding_lines(None, PROMISED_BUILD));
+    }
+
+    /// A browser step's message as the runtime keeps it (`extract_codex_messages`).
+    fn step(server: &str, tool: &str, status: &str, terminal_consent: JsonValue) -> JobMessage {
+        JobMessage {
+            content: format!("{server}/{tool}"),
+            message_type: Some("mcp_tool_call".to_string()),
+            metadata: Some(json!({
+                "kind": "codex_mcp_tool_call",
+                "status": status,
+                "server": server,
+                "tool": tool,
+                "terminalConsent": terminal_consent,
+            })),
+        }
+    }
+
+    /// A turn stopped for the person when it paused for their input on the page or a step's
+    /// approval ended it, in either browser, as Studio judges it, or when a page it opened
+    /// showed a secret. A pause that was only asked for, a refused step that did not end the
+    /// turn, or any other step is no stop.
+    #[test]
+    fn a_turn_stopped_for_the_person_when_it_paused_for_them_or_met_a_secret() {
+        let blocked = json!({
+            "state": "blocked", "terminal": true, "retryable": false, "code": "approval_denied",
+        });
+        for server in ["instafy_personal_browser", "instafy_shared_browser"] {
+            let opened = step(server, "navigate", "completed", JsonValue::Null);
+            let paused = step(server, "request_human_input", "completed", JsonValue::Null);
+            assert!(
+                stopped_for_the_person(&[opened.clone(), paused], false),
+                "{server}"
+            );
+            let asked = step(
+                server,
+                "request_human_input",
+                "in_progress",
+                JsonValue::Null,
+            );
+            assert!(
+                !stopped_for_the_person(&[opened.clone(), asked], false),
+                "{server}"
+            );
+            assert!(
+                stopped_for_the_person(
+                    &[
+                        opened.clone(),
+                        step(server, "click", "completed", blocked.clone())
+                    ],
+                    false
+                ),
+                "{server}"
+            );
+            let refused = step(server, "navigate", "failed", JsonValue::Null);
+            assert!(
+                !stopped_for_the_person(&[opened.clone(), refused], false),
+                "{server}"
+            );
+            assert!(stopped_for_the_person(&[opened], true), "{server}");
+        }
+        assert!(!stopped_for_the_person(&[], false));
+        let words = JobMessage {
+            content: "request_human_input".to_string(),
+            message_type: Some("agent_message".to_string()),
+            metadata: Some(json!({ "tool": "request_human_input", "status": "completed" })),
+        };
+        assert!(!stopped_for_the_person(&[words], false));
     }
 
     /// The wrap-up pass asks the turn, on its own thread, for its finding lines alone, in the

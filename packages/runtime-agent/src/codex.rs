@@ -900,6 +900,11 @@ pub struct CodexRunOutput {
     /// no message carries them: only a browser turn that hands back with no finding lines reads
     /// them (`jobs::browser_hand_back`).
     pub browser_pages: Vec<String>,
+    /// Whether one of the run's own browser steps answered with a page that shows a secret
+    /// (`secretScreen`): the turn stops there and tells the person which control shows it, so
+    /// its reply stays theirs (`jobs::browser_hand_back::stopped_for_the_person`). Kept out of
+    /// `events`, as `browser_pages` is.
+    pub browser_secret_screen: bool,
 }
 
 /// A failed turn keeps the protocol classification as well as its diagnostic message.
@@ -2805,6 +2810,7 @@ impl CodexClient {
                 provider_conversation_state,
                 native_image_inputs: input_images.len(),
                 browser_pages: aggregator.browser_pages().to_vec(),
+                browser_secret_screen: aggregator.browser_secret_screen(),
             })
         }
         .await;
@@ -4964,6 +4970,9 @@ pub(crate) struct CodexEventStreamAdapter {
     /// The pages the run's browser steps opened (`CodexRunOutput::browser_pages`); never
     /// projected.
     browser_pages: Vec<String>,
+    /// A browser step answered with a page that shows a secret
+    /// (`CodexRunOutput::browser_secret_screen`); never projected.
+    browser_secret_screen: bool,
 }
 
 /// For tests that do not look at usage. Nothing feeds this baseline store, so no turn reports
@@ -4992,12 +5001,18 @@ impl CodexEventStreamAdapter {
             job_id: None,
             last_browser_host: None,
             browser_pages: Vec::new(),
+            browser_secret_screen: false,
         }
     }
 
     /// The pages the run's browser steps opened so far, once each and in order.
     pub(crate) fn browser_pages(&self) -> &[String] {
         &self.browser_pages
+    }
+
+    /// Whether a browser step so far answered with a page that shows a secret.
+    pub(crate) fn browser_secret_screen(&self) -> bool {
+        self.browser_secret_screen
     }
 
     fn with_usage_attempt(mut self, usage_attempt: Option<UsageAttempt>, turn_id: &str) -> Self {
@@ -5232,6 +5247,15 @@ impl CodexEventStreamAdapter {
                         && !self.browser_pages.contains(&page)
                     {
                         self.browser_pages.push(page);
+                    }
+                    // A page whose text the browser withheld because it shows a secret: the turn
+                    // stops there for the person, whatever it then answers.
+                    if payload
+                        .and_then(|payload| payload.get("secretScreen"))
+                        .and_then(JsonValue::as_bool)
+                        == Some(true)
+                    {
+                        self.browser_secret_screen = true;
                     }
                 }
                 if let Some(terminal_consent) = terminal_consent {
@@ -11039,6 +11063,65 @@ required = true
                 "https://reviews.example/laptop-13".to_string(),
             ]
         );
+        assert!(!adapter.browser_secret_screen());
+    }
+
+    /// A browser step that answered with a page that shows a secret marks the run, which then
+    /// stopped for the person (`jobs::browser_hand_back::stopped_for_the_person`), in either
+    /// browser and whatever the step was; the mark is never projected. A page with no secret, or
+    /// a step outside the browser, leaves it unmarked.
+    #[test]
+    fn the_adapter_marks_a_run_whose_browser_step_showed_a_secret() {
+        let end = |server: &str, tool: &str, structured: JsonValue| Event {
+            id: "evt_mcp_end".to_string(),
+            msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+                call_id: format!("call_{server}_{tool}"),
+                invocation: McpInvocation {
+                    server: server.to_string(),
+                    tool: tool.to_string(),
+                    arguments: None,
+                },
+                connector_id: None,
+                mcp_app_resource_uri: None,
+                link_id: None,
+                app_name: None,
+                action_name: None,
+                plugin_id: None,
+                duration: Duration::from_millis(1),
+                result: Ok(CallToolResult {
+                    content: vec![json!({"type": "text", "text": "page"})],
+                    structured_content: Some(structured),
+                    is_error: Some(false),
+                    meta: None,
+                }),
+                mcp_app_ui: None,
+                read_only_hint: None,
+                turn_id: "turn-1".to_string(),
+            }),
+        };
+        let page = |secret: bool| {
+            json!({
+                "secretScreen": secret,
+                "activity": {"step": "navigate", "url": "https://console.example/keys"},
+            })
+        };
+        for server in ["instafy_shared_browser", "instafy_personal_browser"] {
+            for tool in ["navigate", "click", "snapshot"] {
+                let mut adapter = CodexEventStreamAdapter::default();
+                adapter.collect(&end(server, tool, page(false)));
+                assert!(!adapter.browser_secret_screen(), "{server} {tool}");
+                for projected in adapter.collect(&end(server, tool, page(true))) {
+                    assert!(
+                        !projected.to_string().contains("secretScreen"),
+                        "{projected}"
+                    );
+                }
+                assert!(adapter.browser_secret_screen(), "{server} {tool}");
+            }
+        }
+        let mut adapter = CodexEventStreamAdapter::default();
+        adapter.collect(&end("other_server", "navigate", page(true)));
+        assert!(!adapter.browser_secret_screen());
     }
 
     #[test]

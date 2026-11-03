@@ -2471,10 +2471,19 @@ unless the policy is `"covered"`.
   and wrote no finding line would hand nothing back, however many pages it
   read: it gets the runtime's wrap-up pass on its own thread, which holds those
   pages, asked for the finding lines alone, and not billed, as a recovery retry
-  is not (docs/Credits-Billing.md). With still none, its note holds its reply
-  and one line per page its own steps opened, by the address the browser
-  reported (the turn's activity messages still name only a page's host), so
-  the hand-back still goes and the turn posts no words of its own. The
+  is not (docs/Credits-Billing.md). The pass keeps the turn's browser tools,
+  approvals and Stop, a message the person sends meanwhile never steers it,
+  and its answer is not used if it took a step. With still none, or for a turn
+  in the browser on the person's device, which keeps no thread and so gets no
+  pass, its note holds its reply and one line per page its own steps opened,
+  by the address the browser reported (the turn's activity messages still
+  name only a page's host), so the hand-back still goes and the turn posts no
+  words of its own; those lines list no fact, so the building turn reads a
+  page itself or leaves the claim out. A turn that stopped on a step that is
+  the person's (it paused for their input on the page, a step's approval ended
+  it, or a page it opened showed a secret) gets neither: its reply says what
+  they do next, so it stays in the chat as the turn wrote it, and Studio sends
+  no hand-back for it. The
   fixtures in
   `packages/runtime-controller/src/browser_hand_back_fixtures.json` pin the
   three halves together.

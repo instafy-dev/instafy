@@ -9355,6 +9355,13 @@ impl JobProcessor {
                         .or_else(|| output_provider_conversation_state.clone()),
                     used_the_browser: !retry_shared_browser_execution_missing
                         && !retry_personal_browser_execution_missing,
+                    stopped_for_the_person: browser_hand_back::stopped_for_the_person(
+                        &retry_messages,
+                        retry_output.browser_secret_screen,
+                    ) || browser_hand_back::stopped_for_the_person(
+                        &interim_messages,
+                        output.browser_secret_screen,
+                    ),
                     pages,
                     final_json: &retry_output.final_json,
                 };
@@ -9409,6 +9416,10 @@ impl JobProcessor {
                 thread: output_provider_conversation_state.clone(),
                 used_the_browser: !shared_browser_execution_missing
                     && !personal_browser_execution_missing,
+                stopped_for_the_person: browser_hand_back::stopped_for_the_person(
+                    &interim_messages,
+                    output.browser_secret_screen,
+                ),
                 pages: output.browser_pages.clone(),
                 final_json: &output.final_json,
             };
@@ -15374,7 +15385,10 @@ fn finalization_codex_run_options(first_attempt: &CodexRunOptions) -> CodexRunOp
 /// ([`browser_hand_back::FINDING_LINES_PASS_PROMPT`]): the turn's own run, resumed on its own
 /// thread, which holds the pages it read, at low effort, with no tool required first and no
 /// images sent again. Its browser stays as the turn had it, so the thread resumes with the same
-/// instructions and tools, and its cached start.
+/// instructions and the browser's tools alone, its approvals and its Stop, and its cached start;
+/// the pass is told to use no tool, and its answer is dropped if it took a step anyway
+/// ([`pass_took_a_step`]). A message the person sends meanwhile never steers it: the pass keeps
+/// only finding lines, so the message would be taken and lost.
 fn finding_lines_pass_options(
     first_attempt: &CodexRunOptions,
     thread: Option<JsonValue>,
@@ -15388,7 +15402,20 @@ fn finding_lines_pass_options(
     options.turn_wrap_up = None;
     // the note is the turn's own: the pass neither clears it nor hands the turn off
     options.turn_continue_note = None;
+    options.active_turn_input = None;
     options
+}
+
+/// Whether a run's events show a step it took: a browser or other tool call, a command or a
+/// file change. The finding-lines pass is told to use no tool; one that took a step anyway
+/// answered from more than the pages the turn read, so its answer is not used.
+fn pass_took_a_step(events: &[JsonValue]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event.pointer("/item/type").and_then(JsonValue::as_str),
+            Some("mcp_tool_call" | "command_execution" | "file_change" | "web_search")
+        )
+    })
 }
 
 /// A browser turn's answer as the runtime ends it, for its hand-back (`browser_hand_back`).
@@ -15399,6 +15426,9 @@ pub struct BrowserTurnAnswer<'a> {
     pub thread: Option<JsonValue>,
     /// Whether the turn used the browser at all: a step the browser answered, or a look at a page.
     pub used_the_browser: bool,
+    /// Whether it stopped on a step that is the person's
+    /// (`browser_hand_back::stopped_for_the_person`): its reply is theirs, and stays as it is.
+    pub stopped_for_the_person: bool,
     /// The pages its own steps opened (`CodexRunOutput::browser_pages`).
     pub pages: Vec<String>,
     /// Its answer as the model wrote it.
@@ -15410,11 +15440,13 @@ pub struct BrowserTurnAnswer<'a> {
 /// to the building turn, that used the browser and wrote no finding lines, gets the runtime's
 /// wrap-up pass on its own thread, asked for those lines only; with still none, its note holds
 /// its reply and the pages its own steps opened, so the hand-back still goes, and the turn posts
-/// no words of its own (`browser_hand_back::move_findings_into_details`). A build request that
-/// nothing then acts on is said in the reply, never dropped without a word
-/// (`browser_hand_back::BUILD_NOT_MADE_LINE`). Returns the pass's run log and answer, which go
-/// after the turn's own: a turn is billed from its first run's log, and like a recovery retry or
-/// the wrap-up after a missing answer, the pass is not billed (docs/Credits-Billing.md).
+/// no words of its own (`browser_hand_back::move_findings_into_details`). A turn on the browser
+/// on the person's device keeps no thread, so it gets no pass: the pages it opened, by address.
+/// A build request that nothing then acts on is said in the reply, never dropped without a word
+/// (`browser_hand_back::BUILD_NOT_MADE_LINE`). A turn that stopped for the person is left as it
+/// is: its reply says what they do next. Returns the pass's run log and answer, which go after
+/// the turn's own: a turn is billed from its first run's log, and like a recovery retry or the
+/// wrap-up after a missing answer, the pass is not billed (docs/Credits-Billing.md).
 pub async fn end_browser_turn_answer(
     codex: &CodexClient,
     job: &LeaseJob,
@@ -15424,6 +15456,9 @@ pub async fn end_browser_turn_answer(
 ) -> Vec<JsonValue> {
     let metadata = job.payload.get("metadata");
     let mut artifacts = Vec::new();
+    if answer.stopped_for_the_person {
+        return artifacts;
+    }
     let canceled = answer
         .options
         .cancel_signal
@@ -15454,11 +15489,18 @@ pub async fn end_browser_turn_answer(
                         "metadata": purpose,
                         "payload": sanitize_codex_final_json(&output.final_json),
                     }));
-                    lines = output
-                        .final_json
-                        .get("summary")
-                        .and_then(JsonValue::as_str)
-                        .and_then(browser_hand_back::finding_lines_of);
+                    if pass_took_a_step(&output.events) {
+                        warn!(
+                            job_id = %job.id,
+                            "the browser turn's finding-lines wrap-up pass took a step: its answer is not used"
+                        );
+                    } else {
+                        lines = output
+                            .final_json
+                            .get("summary")
+                            .and_then(JsonValue::as_str)
+                            .and_then(browser_hand_back::finding_lines_of);
+                    }
                 }
                 Err(error) => warn!(
                     job_id = %job.id,
@@ -21521,6 +21563,54 @@ mod tests {
         assert!(finalization.provider_conversation_state.is_none());
     }
 
+    /// The pass that asks a browser turn for its finding lines resumes the turn's own thread
+    /// with the turn's browser, so its tools are the browser's alone, under the run's approvals
+    /// and Stop; it requires no tool first, sends no image again and is never steered by a
+    /// message the person sends meanwhile, which it would take and drop with everything but
+    /// its lines. A pass that took a step anyway is not used.
+    #[test]
+    fn the_finding_lines_pass_resumes_the_turns_thread_and_is_never_steered() {
+        let (_sender, receiver, _cancellation) =
+            crate::active_turn_input::active_turn_input_channel(1);
+        let thread = json!({ "browserThreadId": "thread_browser" });
+        let turn = CodexRunOptions {
+            shared_browser: true,
+            expect_browser_session: true,
+            require_first_tool_call: true,
+            persist_conversation_thread: true,
+            provider_conversation_state: Some(json!({ "browserThreadId": "thread_old" })),
+            input_images: vec![PathBuf::from("/attachments/photo.png")],
+            active_turn_input: Some(receiver),
+            cancel_signal: Some(JobCancelSignal::new()),
+            ..Default::default()
+        };
+        let pass = finding_lines_pass_options(&turn, Some(thread.clone()));
+        assert!(pass.active_turn_input.is_none());
+        assert!(turn.active_turn_input.is_some());
+        assert!(pass.shared_browser && pass.expect_browser_session);
+        assert!(pass.cancel_signal.is_some(), "a Stop still ends the pass");
+        assert!(!pass.require_first_tool_call);
+        assert!(pass.input_images.is_empty());
+        assert!(pass.persist_conversation_thread);
+        assert_eq!(pass.provider_conversation_state, Some(thread));
+        assert_eq!(pass.reasoning_effort, Some(ReasoningEffort::Low));
+
+        let item = |kind: &str| json!({ "type": "item.completed", "item": { "type": kind } });
+        for kind in [
+            "mcp_tool_call",
+            "command_execution",
+            "file_change",
+            "web_search",
+        ] {
+            assert!(pass_took_a_step(&[item("reasoning"), item(kind)]), "{kind}");
+        }
+        assert!(!pass_took_a_step(&[
+            item("reasoning"),
+            item("agent_message"),
+            json!({ "type": "turn.completed" }),
+        ]));
+    }
+
     /// A leased batch is one conversation's jobs, which may run one after
     /// another. Its hold keeps their attachments folder between them, so a
     /// later job reuses an earlier job's download even when its own signed URL
@@ -23726,6 +23816,7 @@ mod tests {
             provider_conversation_state: Some(state),
             native_image_inputs: 0,
             browser_pages: Vec::new(),
+            browser_secret_screen: false,
         }
     }
 
@@ -32281,6 +32372,7 @@ mod tests {
             provider_conversation_state: None,
             native_image_inputs: 0,
             browser_pages: Vec::new(),
+            browser_secret_screen: false,
         };
         let outcome = CodexOutcome {
             summary: "ok".to_string(),
