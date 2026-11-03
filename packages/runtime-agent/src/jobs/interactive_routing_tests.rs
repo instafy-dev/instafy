@@ -302,6 +302,69 @@ fn a_pages_card_starts_inside_the_sites_own_folder() {
     assert_eq!(fs::read_to_string(&path).unwrap(), edited);
 }
 
+/// A blank page's turn chained `instafy bind check … && instafy preview open …`, as the hub said
+/// ("Check before the card"). The check could not read the page's words in its app.js and failed,
+/// so the card's command never ran and the page had no card. The card comes first, in the hub and
+/// in the research team's last step, and a failing check never holds it back. Unedited earlier
+/// copies of both are upgraded; edited ones are kept.
+#[test]
+fn a_pages_card_comes_before_its_check() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hub =
+        include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
+    let team = include_str!("../../assets/instafy/.agents/skills/instafy-research-team/SKILL.md");
+    assert!(
+        flat(hub).contains(
+            "Post the card first (step 3), then check with the builder skill's own check, else `instafy bind check <dir> --expect \"<item>,<item>\"`"
+        ),
+        "{hub}"
+    );
+    assert!(
+        flat(team).contains(
+            "Serve, open the preview card and check it (hub step 3). Then reconcile with `Expect:`"
+        ),
+        "{team}"
+    );
+    for skill in [hub, team] {
+        assert!(
+            flat(skill).contains("A failing check never holds the card back."),
+            "{skill}"
+        );
+        assert!(!skill.contains("before the card"), "{skill}");
+        assert!(
+            skill.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+            "{} bytes",
+            skill.len()
+        );
+    }
+
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    learn::ensure_project_memory_scaffold(root);
+    for (relative, previous, current) in [
+        (
+            learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
+            include_str!("legacy/interactive-artifacts-v8.md"),
+            hub,
+        ),
+        (
+            learn::RESEARCH_TEAM_RELATIVE_PATH,
+            include_str!("legacy/research-team-v3.md"),
+            team,
+        ),
+    ] {
+        assert!(previous.contains("before the card"), "{relative}");
+        let path = root.join(relative);
+        fs::write(&path, previous).unwrap();
+        learn::ensure_project_memory_scaffold(root);
+        assert_eq!(fs::read_to_string(&path).unwrap(), current, "{relative}");
+        let edited = format!("{previous}\nLocal page preference.\n");
+        fs::write(&path, &edited).unwrap();
+        learn::ensure_project_memory_scaffold(root);
+        assert_eq!(fs::read_to_string(&path).unwrap(), edited, "{relative}");
+    }
+}
+
 /// A hand-back's own words are always the controller's one line, which names no page. Research
 /// that ends in a page goes to the browser first, so the hand-back is often its chat's first
 /// building turn: its skills were picked from that line, the browser skill and no page builder,

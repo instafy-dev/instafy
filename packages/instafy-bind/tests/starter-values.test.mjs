@@ -495,3 +495,54 @@ test("site.within: only a value the page shows is within a limit; everything unk
   // the generic check reads a seed fact the way the page draws it
   for (const [what, value] of cases) if (!value || !value.prov) assert.equal(knownNumber(value), site.known(value), `check and page agree: ${what}`);
 });
+
+// A blank page wrote its cards as site.h("article", { className: "card" }, …) and its links as site.h("a", { href,
+// target: "_blank", rel: "noopener" }, "Official site"). site.h read only class, id, text, attrs and on, so the cards
+// were unstyled and the links plain text, while the reply said the page links to both sites.
+test("site.h takes className and plain attributes, so a link is a link, and never sets what could run script", async () => {
+  const { site } = await draw("blank", null);
+  const errors = [];
+  const listeners = [];
+  const saved = { error: console.error, listen: Element.prototype.addEventListener };
+  console.error = (...args) => errors.push(args.join(" "));
+  Element.prototype.addEventListener = function (type, fn) { listeners.push([this.tagName, type, typeof fn]); };
+  try {
+    const card = site.h("article", { className: "card", "data-ref": "visit:hours" },
+      site.h("a", { href: "https://shop.example/en/", target: "_blank", rel: "noopener" }, "Official site"));
+    assert.equal(card.className, "card");
+    assert.equal(card.getAttribute("data-ref"), "visit:hours");
+    const link = card.children[0];
+    assert.deepEqual([link.tagName, link.attrs.href, link.attrs.target, link.attrs.rel, link.textContent],
+      ["A", "https://shop.example/en/", "_blank", "noopener", "Official site"]);
+    // an address on the page itself, mail and phone; class and className together; a second argument that is a child
+    assert.equal(site.h("a", { href: "#hours" }).attrs.href, "#hours");
+    assert.equal(site.h("a", { href: "mailto:hello@shop.example" }).attrs.href, "mailto:hello@shop.example");
+    assert.equal(site.h("a", { href: "tel:+15550100" }).attrs.href, "tel:+15550100");
+    assert.equal(site.h("p", { "class": "cap", className: "trust" }).className, "cap trust");
+    assert.equal(site.h("p", "Every day, 9:00–19:30").textContent, "Every day, 9:00–19:30");
+    assert.deepEqual(errors, []);
+
+    // what could run script is left out, through attrs too, and said in the console (`instafy preview check` lists it)
+    const refused = [
+      { href: "javascript:alert(1)" },
+      { href: " JaVaScRiPt:alert(1)" },
+      { attrs: { href: "javascript:alert(1)" } },
+      { src: "data:text/html,<script>alert(1)</script>" },
+      { onclick: "alert(1)" },
+      { attrs: { onmouseover: "alert(1)" } },
+      { srcdoc: "<script>alert(1)</script>" },
+    ];
+    for (const props of refused) {
+      const el = site.h("a", props, "x");
+      assert.deepEqual(Object.keys(el.attrs), [], JSON.stringify(props));
+      assert.equal(el.textContent, "x");
+    }
+    assert.equal(errors.length, refused.length, errors.join("\n"));
+    // an event takes a function: onClick works as on: {click} does
+    site.h("button", { onClick: () => {}, on: { focus: () => {} } }, "Show");
+    assert.deepEqual(listeners, [["BUTTON", "click", "function"], ["BUTTON", "focus", "function"]]);
+  } finally {
+    console.error = saved.error;
+    Element.prototype.addEventListener = saved.listen;
+  }
+});

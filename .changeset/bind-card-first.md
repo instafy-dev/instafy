@@ -1,0 +1,5 @@
+---
+"@instafy/cli": patch
+---
+
+A page ends with its card, its links work, and a page that answers 404 gets no card. `instafy bind check` reads the words a page's own scripts pass to `site.h` and `site.head` (a blank starter page keeps its words in `app.js`), so such a page's items count as shown; a page that draws its text some other way, with no data file to read, exits 2 and says the check cannot tell, never "MISSING" for text it cannot see. In a space, while no preview shows the site, every check ends with the command that posts its card, and `instafy bind init` names that command before the check: a failing check never holds the card back. The starters' `site.h` takes `className` and plain attributes (`href`, `target`, `rel`, `data-*`…), so `site.h("a", { href, target, rel }, "Site")` is a link, and a second argument that is not an object is its first child; it never sets an `on…` attribute from text, nor an address that is not http(s), mailto, tel or relative, and says so in the console. `instafy preview open` posts no card for a page that answers 404 (or 410), says so, and stops the site its `--start` started for it.

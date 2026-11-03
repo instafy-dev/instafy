@@ -1,15 +1,18 @@
 // `instafy-bind check <dir> --expect "<item>,<item>"`: does the site show every item the request named?
 // A builder that loses an item to a lookup that timed out, or trims a list to what fits, must not ship a page that
-// quietly leaves it out. The check reads what the page can show without a browser: the text of its HTML pages and
-// every string in its data files (data.json, data/**/*.json, records included, and GeoJSON layers: a map's places are
-// in data/<layer>.geojson). Items come from --expect and from
+// quietly leaves it out. The check reads what the page can show without a browser: the text of its HTML pages, every
+// string in its data files (data.json, data/**/*.json, records included, and GeoJSON layers: a map's places are
+// in data/<layer>.geojson), and the text its own scripts pass to site.js's helpers (site.h, site.head…: a blank
+// starter page keeps its words in app.js; script-text.mjs). Items come from --expect and from
 // an "expect" array in data.json. Text that only says an item is unavailable ("Not found yet: Tokyo", a data file's
 // "missing" list) does not count as showing it: builders are told to say on the page what they could not add, and
-// that line must not pass the check. On a page of options it also checks the values and where each row comes from
-// (below). Pure helpers are exported for the tests.
+// that line must not pass the check. A page whose scripts draw its text in a way the check cannot read, with no data
+// file to read instead, is never reported as missing what the check cannot see. On a page of options it also checks
+// the values and where each row comes from (below). Pure helpers are exported for the tests.
 // SPDX-License-Identifier: AGPL-3.0-only
 import fs from "node:fs";
 import path from "node:path";
+import { scriptText } from "./script-text.mjs";
 
 const SKIP_DIRS = new Set([".bind", "node_modules", "handlers", ".git", ".uwcache", "test", "tests"]);
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
@@ -107,7 +110,7 @@ function siteFiles(root) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith(".") && depth < 4) walk(full, depth + 1);
-      } else if (entry.isFile() && /\.(html?|json|geojson)$/i.test(entry.name) && entry.name !== "bound.json" && entry.name !== "package.json") {
+      } else if (entry.isFile() && /\.(html?|json|geojson|m?js)$/i.test(entry.name) && entry.name !== "bound.json" && entry.name !== "package.json") {
         files.push(full);
       }
     }
@@ -116,11 +119,24 @@ function siteFiles(root) {
   return files;
 }
 
-/** What the site can show: [{ file, text }] for its HTML pages and data files, and the "expect" list of data.json. */
+/** The starters' shared helpers (site.js) define `site`: their own words are no page's text. */
+const DEFINES_SITE = /\bwindow\.site\s*=\s*\{/;
+/** A script that may draw text on the page itself. */
+const DRAWS = /\b(?:createElement|createTextNode|innerHTML|outerHTML|insertAdjacent(?:HTML|Text|Element)|textContent|innerText|replaceChildren|appendChild|append|prepend|replaceWith)\b|\bdocument\.write\b|\bsite\.(?:start|h)\b/;
+/** The scripts an HTML page carries in itself. */
+const INLINE_SCRIPTS = /<script\b(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)<\/script\s*>/gi;
+
+/** What a script shows through site.js's helpers, without lines that only say an item is unavailable. */
+const helperText = (source) => scriptText(source).filter((text) => !UNAVAILABLE_RE.test(text)).join("\n");
+
+/** What the site can show: [{ file, kind, text }] for its HTML pages, data files and scripts ("html", "data",
+ *  "script"), the "expect" list of data.json, and its own scripts ([{ file, read, draws }]: a script file, or the
+ *  scripts an HTML page carries; read when the check found text in it, draws when it may draw text itself). */
 export function readSite(dir) {
   const root = path.resolve(dir);
   if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) throw new Error(`no site folder at ${dir}`);
   const parts = [];
+  const scripts = [];
   let declared = [];
   for (const file of siteFiles(root)) {
     let raw;
@@ -139,13 +155,25 @@ export function readSite(dir) {
         continue;
       }
       if (rel === "data.json" && Array.isArray(value?.expect)) declared = parseExpect(value.expect);
-      parts.push({ file: rel, text: jsonStrings(value).join("\n") });
-    } else parts.push({ file: rel, text: htmlLines(raw).join("\n") });
+      parts.push({ file: rel, kind: "data", text: jsonStrings(value).join("\n") });
+    } else if (/\.m?js$/i.test(file)) {
+      if (DEFINES_SITE.test(raw)) continue;
+      const text = helperText(raw);
+      parts.push({ file: rel, kind: "script", text });
+      scripts.push({ file: rel, read: Boolean(text), draws: DRAWS.test(raw) });
+    } else {
+      const inline = [...raw.matchAll(INLINE_SCRIPTS)].map((m) => m[1]).filter((source) => source.trim() && !DEFINES_SITE.test(source));
+      const text = inline.map(helperText).filter(Boolean).join("\n");
+      parts.push({ file: rel, kind: "html", text: [...htmlLines(raw), ...(text ? [text] : [])].join("\n") });
+      if (inline.length) scripts.push({ file: rel, read: Boolean(text), draws: inline.some((source) => DRAWS.test(source)) });
+    }
   }
-  return { root, parts, declared };
+  return { root, parts, declared, scripts };
 }
 
-/** Which expected items the site shows, and where; which it leaves out. */
+/** Which expected items the site shows, and where; which it leaves out. `unread`: the scripts that may draw the page's
+ *  text when the check could read none of it (no data file has any, and no script passes any to site.js's helpers):
+ *  an item it does not find may then be on the page all the same, so it is never reported as missing. */
 export function checkSite(dir, expect = []) {
   const site = readSite(dir);
   const items = parseExpect([...site.declared, ...parseExpect(expect)]);
@@ -156,7 +184,9 @@ export function checkSite(dir, expect = []) {
     if (where.length) shown.push({ item, files: where.slice(0, 3) });
     else missing.push(item);
   }
-  return { items, shown, missing, files: site.parts.map((p) => p.file) };
+  const readNone = !site.parts.some((p) => p.kind === "data" && p.text) && !site.scripts.some((s) => s.read);
+  const unread = readNone ? site.scripts.filter((s) => s.draws).map((s) => s.file) : [];
+  return { items, shown, missing, files: site.parts.map((p) => p.file), unread };
 }
 
 // ---------- the values of a page of options (the compare and ranked starters' data.json) ----------
@@ -368,22 +398,34 @@ export function checkValues(dir) {
 }
 
 /** The CLI's lines and exit code: 0 every item shown and every value fine, 1 an item missing or a value to fix, 2
- *  nothing to check. `card`: the command that serves the site and posts its card, while no preview shows it; a check
- *  that passes ends with it. */
+ *  nothing to check, or items the check cannot tell about because the page draws its text in a way it cannot read.
+ *  `card`: the command that serves the site and posts its card, while no preview shows it: every answer ends with it,
+ *  since a check never holds the card back. */
 export function checkReport(dir, expect, { json = false, card = null } = {}) {
   const result = checkSite(dir, expect);
   const values = checkValues(dir);
-  const bad = result.missing.length > 0 || values.problems.length > 0;
+  const next = card ? `post its card: ${card}` : null;
+  const nextLines = next ? [`next: ${next}`] : [];
   if (!result.items.length && !values.problems.length) {
     const message = 'nothing to check: pass --expect "<item>,<item>" (each item the request named) or put "expect": [...] in data.json';
-    return { exit: 2, lines: [json ? JSON.stringify({ ok: false, error: message, values }) : message, ...(json ? [] : values.notes.map((n) => `NOTE: ${n}`))] };
+    if (json) return { exit: 2, lines: [JSON.stringify({ ok: false, error: message, values, ...(next ? { next } : {}) })] };
+    return { exit: 2, lines: [message, ...values.notes.map((n) => `NOTE: ${n}`), ...nextLines] };
   }
-  const next = !bad && card ? `post its card: ${card}` : null;
-  if (json) return { exit: bad ? 1 : 0, lines: [JSON.stringify({ ok: !bad, ...result, values, ...(next ? { next } : {}) })] };
+  // An item the check did not find on a page whose text it cannot read is unknown, never missing.
+  const unknown = result.unread.length ? result.missing : [];
+  const missing = result.unread.length ? [] : result.missing;
+  const exit = missing.length || values.problems.length ? 1 : unknown.length ? 2 : 0;
+  if (json) {
+    return { exit, lines: [JSON.stringify({ ok: exit === 0, ...result, missing, ...(unknown.length ? { unknown } : {}), values, ...(next ? { next } : {}) })] };
+  }
   const lines = [];
-  if (result.missing.length) {
-    lines.push(`MISSING: the request named ${result.missing.length} item(s) the site does not show: ${result.missing.join(", ")}.`);
-    lines.push("Add each one to the page (its data file), or say plainly in the reply which are missing and why.");
+  if (missing.length) {
+    lines.push(`MISSING: the request named ${missing.length} item(s) the site does not show: ${missing.join(", ")}.`);
+    lines.push("Add each one to the page, or say plainly in the reply which are missing and why.");
+  }
+  if (unknown.length) {
+    lines.push(`UNREAD: ${result.unread.join(", ")} ${result.unread.length === 1 ? "draws" : "draw"} the page's text in a way the check cannot read (it reads what a script passes to site.h and site.head), so it cannot tell whether the page shows: ${unknown.join(", ")}.`);
+    lines.push("Look at the page itself instead: `instafy preview check --port <its port>` loads it as Studio does.");
   }
   if (values.problems.length) {
     lines.push(`VALUES: ${values.problems.length} value(s) to fix in data.json:`);
@@ -392,10 +434,9 @@ export function checkReport(dir, expect, { json = false, card = null } = {}) {
   for (const note of values.notes) lines.push(`NOTE: ${note}`);
   if (result.items.length) {
     lines.push(`${result.shown.length} of ${result.items.length} expected item(s) shown${result.shown.length ? `: ${result.shown.map((s) => s.item).join(", ")}` : ""}.`);
-    lines.push(`Read ${result.files.length} file(s): the HTML text and the data files (what a script renders from elsewhere is not seen).`);
+    lines.push(`Read ${result.files.length} file(s): the HTML text, the data files and the text the page's scripts pass to site.h and site.head (text a script builds any other way is not seen).`);
   } else {
     lines.push('No items to check: pass --expect "<item>,<item>" (each item the request named) or put "expect": [...] in data.json.');
   }
-  if (next) lines.push(`next: ${next}`);
-  return { exit: bad ? 1 : 0, lines };
+  return { exit, lines: [...lines, ...nextLines] };
 }

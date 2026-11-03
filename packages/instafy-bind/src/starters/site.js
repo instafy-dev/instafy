@@ -29,7 +29,8 @@
  *   would check is fresh, or is left only with failed rows (each has its own "Try again").
  * - Links: a source in a caption is a quiet citation (muted, a faint underline); an action ("Open Amazon ↗",
  *   "where to check ↗", "Try again") is in the link colour.
- * - Safety: every text goes through textContent; site.link() only links https: URLs.
+ * - Safety: every text goes through textContent; site.link() only links https: URLs; site.h() never sets an "on…"
+ *   attribute from text, nor an address (href, src…) that is not http(s), mailto, tel or relative.
  * SPDX-License-Identifier: AGPL-3.0-only */
 (function () {
   "use strict";
@@ -48,23 +49,49 @@
   function bind() { return window.instafyBind || null; }
 
   // ---------- DOM ----------
-  /** h("li", {class, id, text, attrs: {...}, on: {click}}, ...children). Strings become text nodes; null is skipped. */
+  /** h("li", {class, id, text, attrs: {...}, on: {click}}, ...children). Strings become text nodes; null is skipped.
+   * className is class, and any other key is an attribute: h("a", {href, target: "_blank", rel: "noopener"}, "Site")
+   * is a link. A second argument that is not an object (a string, a node, a list) is the first child. Never set, and
+   * said in the console: an "on…" attribute that is not a function (onClick: fn, or on: {click: fn}), an address
+   * (href, src, action…) that is not http(s), mailto, tel or relative (javascript: included), and srcdoc. */
   function h(tag, props) {
     var el = document.createElement(tag);
+    var children = Array.prototype.slice.call(arguments, 2);
+    if (props != null && (typeof props !== "object" || Array.isArray(props) || props.nodeType)) { children.unshift(props); props = null; }
     props = props || {};
-    if (props["class"]) el.className = props["class"];
+    var cls = [props["class"], props.className].filter(Boolean).join(" ");
+    if (cls) el.className = cls;
     if (props.id) el.id = props.id;
     if (props.text != null) el.textContent = String(props.text);
+    Object.keys(props).forEach(function (k) { if (!OWN_PROPS[k]) attr(el, k, props[k]); });
     var attrs = props.attrs || {};
-    Object.keys(attrs).forEach(function (k) {
-      var v = attrs[k];
-      if (v === false || v == null) return;
-      el.setAttribute(k, v === true ? "" : String(v));
-    });
+    Object.keys(attrs).forEach(function (k) { attr(el, k, attrs[k]); });
     var on = props.on || {};
     Object.keys(on).forEach(function (k) { el.addEventListener(k, on[k]); });
-    for (var i = 2; i < arguments.length; i++) append(el, arguments[i]);
+    children.forEach(function (child) { append(el, child); });
     return el;
+  }
+  var OWN_PROPS = { "class": 1, className: 1, id: 1, text: 1, attrs: 1, on: 1 };
+  // attributes the browser loads or follows as an address
+  var ADDRESS_ATTRS = { href: 1, src: 1, action: 1, formaction: 1, poster: 1, cite: 1, data: 1, background: 1, ping: 1, "xlink:href": 1 };
+  /** One attribute of h(): false and null leave it out, true sets it empty; what could run script is refused. */
+  function attr(el, key, v) {
+    var name = String(key === "htmlFor" ? "for" : key);
+    var lower = name.toLowerCase();
+    if (v === false || v == null) return;
+    if (lower.slice(0, 2) === "on") {
+      if (typeof v === "function") el.addEventListener(lower.slice(2), v);
+      else console.error("[site] h(): " + name + " needs a function (on: {" + lower.slice(2) + ": fn}); text is never run");
+      return;
+    }
+    if (typeof v === "object" || typeof v === "function") { console.error("[site] h(): " + name + " needs text, a number or true"); return; }
+    var text = v === true ? "" : String(v);
+    if (lower === "srcdoc" || (ADDRESS_ATTRS[lower] && !safeAddress(text))) { console.error("[site] h(): left out " + name + ": not a web address"); return; }
+    try { el.setAttribute(name, text); } catch (e) { console.error("[site] h(): " + name + " is not an attribute name"); }
+  }
+  /** An address a link or source may hold: relative to the page, or http(s), mailto or tel (never javascript: or data:). */
+  function safeAddress(url) {
+    try { return /^(https?|mailto|tel):$/.test(new URL(url, location.href).protocol); } catch (e) { return false; }
   }
   /** Append children to el, skipping null and false (site.rowAction returns null when a row has no action). */
   function append(el, child) {
@@ -990,7 +1017,7 @@
   }
 
   window.site = {
-    version: "1.6.1",
+    version: "1.7.0",
     h: h, append: append, icon: icon, link: link, slug: slug, rowAttrs: rowAttrs, safeUrl: safeUrl,
     date: date, dayDate: dayDate, ago: ago, money: money, num: num, valueText: valueText, host: host, seen: seenText,
     cite: cite, shown: shown, known: known, within: within, byFilter: byFilter, old: isOld, expired: expired,

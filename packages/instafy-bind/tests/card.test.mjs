@@ -1,7 +1,7 @@
 // A page someone asked for ends with its card. In a space, `init` names the command that serves the page and posts
-// its card as its next step, and a check that passes ends with it until a preview shows the site. A next step that
-// named only `instafy-bind serve` (which posts no card) and a check that named none left a finished page nobody could
-// open.
+// its card as its next step, before the check, and every check ends with it until a preview shows the site. A next
+// step that named only `instafy-bind serve` (which posts no card) and a check that named none left a finished page
+// nobody could open; so did a failing check chained before the card's command (`check && preview open`).
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -52,21 +52,21 @@ function space() {
 
 const lastLine = (text) => text.trimEnd().split("\n").at(-1);
 
-test("in a space, init's next step ends with the command that posts the page's card", () => {
+test("in a space, init's next step names the command that posts the page's card, before the check", () => {
   const s = space();
   try {
     const compare = s.run(["init", "sites/laptops", "--starter", "compare"]);
     assert.equal(compare.status, 0, compare.stderr);
     assert.equal(lastLine(compare.stdout),
-      `next: put the real content in sites/laptops/data.json, check it (\`instafy bind check sites/laptops --expect "<item>,<item>"\`), then post its card: (cd sites/laptops && ${OPEN})`);
-    // a blank page's content is its app.js, which the check cannot read
+      `next: put the real content in sites/laptops/data.json, post its card: (cd sites/laptops && ${OPEN}), then check it (\`instafy bind check sites/laptops --expect "<item>,<item>"\`)`);
+    // a blank page's content is its app.js, whose words the check reads too
     assert.equal(lastLine(s.run(["init", "sites/visit", "--starter", "blank"]).stdout),
-      `next: put the real content in sites/visit/app.js, then post its card: (cd sites/visit && ${OPEN})`);
+      `next: put the real content in sites/visit/app.js, post its card: (cd sites/visit && ${OPEN}), then check it (\`instafy bind check sites/visit --expect "<item>,<item>"\`)`);
     assert.equal(lastLine(s.run(["init", "sites/hello"]).stdout), `next: post its card: (cd sites/hello && ${OPEN})`);
     // run from inside its folder, the command needs no cd
     fs.mkdirSync(path.join(s.project, "sites", "plan"));
     assert.equal(lastLine(s.run(["init", ".", "--starter", "timeline"], { cwd: path.join(s.project, "sites", "plan") }).stdout),
-      `next: put the real content in data.json, check it (\`instafy bind check . --expect "<item>,<item>"\`), then post its card: ${OPEN}`);
+      `next: put the real content in data.json, post its card: ${OPEN}, then check it (\`instafy bind check . --expect "<item>,<item>"\`)`);
     // outside a space the binder runs on its own: there is no card to post, and serving the site is the next step
     const away = s.run(["init", "sites/away", "--starter", "compare"], { environment: { PATH: process.env.PATH, HOME: s.env.HOME } });
     assert.equal(lastLine(away.stdout), "next: put the real content in sites/away/data.json, then instafy-bind serve sites/away");
@@ -75,7 +75,7 @@ test("in a space, init's next step ends with the command that posts the page's c
   }
 });
 
-test("a check that passes ends with the card's command, until a preview shows the site", () => {
+test("every check ends with the card's command until a preview shows the site: a failing one never holds the card back", () => {
   const s = space();
   try {
     s.run(["init", "sites/laptops", "--starter", "compare"]);
@@ -87,11 +87,16 @@ test("a check that passes ends with the card's command, until a preview shows th
     assert.equal(json.ok, true);
     assert.equal(json.next, `post its card: (cd sites/laptops && ${OPEN})`);
 
-    // a check that fails says what to fix first
+    // a check that fails says what to fix, and still ends with the card's command
     const failed = s.run(["check", "sites/laptops", "--expect", "Option D"]);
     assert.equal(failed.status, 1);
-    assert.doesNotMatch(failed.stdout, /preview open/);
-    assert.equal(JSON.parse(s.run(["check", "sites/laptops", "--expect", "Option D", "--json"]).stdout).next, undefined);
+    assert.match(failed.stdout, /^MISSING: .*Option D\./m);
+    assert.equal(lastLine(failed.stdout), `next: post its card: (cd sites/laptops && ${OPEN})`);
+    assert.equal(JSON.parse(s.run(["check", "sites/laptops", "--expect", "Option D", "--json"]).stdout).next, `post its card: (cd sites/laptops && ${OPEN})`);
+    // so does a check with nothing to check
+    const nothing = s.run(["check", "sites/laptops"]);
+    assert.equal(nothing.status, 2);
+    assert.equal(lastLine(nothing.stdout), `next: post its card: (cd sites/laptops && ${OPEN})`);
 
     // `instafy preview open --start`, run in the site's folder, records the preview with that folder: the card is up
     s.open("sites/laptops");
@@ -105,6 +110,23 @@ test("a check that passes ends with the card's command, until a preview shows th
     // a preview of another folder is not this site's card
     s.open("sites/other");
     assert.equal(lastLine(s.run(["check", "sites/laptops", ...expect]).stdout), `next: post its card: (cd sites/laptops && ${OPEN})`);
+  } finally {
+    s.done();
+  }
+});
+
+test("a page whose text the check cannot read gets the card's command, never MISSING (exit 2)", () => {
+  const s = space();
+  try {
+    s.run(["init", "sites/visit", "--starter", "blank"]);
+    fs.writeFileSync(path.join(s.project, "sites", "visit", "app.js"), 'document.getElementById("list").innerHTML = "<h2>Opening hours</h2>";\n');
+    const out = s.run(["check", "sites/visit", "--expect", "Opening hours"]);
+    assert.equal(out.status, 2, out.stdout + out.stderr);
+    assert.doesNotMatch(out.stdout, /MISSING/);
+    assert.match(out.stdout, /^UNREAD: app\.js draws the page's text in a way the check cannot read/m);
+    assert.equal(lastLine(out.stdout), `next: post its card: (cd sites/visit && ${OPEN})`);
+    const json = JSON.parse(s.run(["check", "sites/visit", "--expect", "Opening hours", "--json"]).stdout);
+    assert.deepEqual([json.unknown, json.next], [["Opening hours"], `post its card: (cd sites/visit && ${OPEN})`]);
   } finally {
     s.done();
   }
@@ -180,7 +202,7 @@ test("another space's preview is not this site's card, though their folders have
 test("init names the card only while no preview shows the folder: a page shown before needs no new card", () => {
   const s = space();
   try {
-    assert.match(lastLine(s.run(["init", "sites/laptops", "--starter", "compare"]).stdout), /then post its card: /);
+    assert.match(lastLine(s.run(["init", "sites/laptops", "--starter", "compare"]).stdout), /, post its card: .*, then check it /);
     s.open("sites/laptops");
     const again = s.run(["init", "sites/laptops", "--starter", "compare"]);
     assert.equal(again.status, 0, again.stderr);
@@ -190,14 +212,14 @@ test("init names the card only while no preview shows the folder: a page shown b
     assert.doesNotMatch(again.stdout, /preview open|instafy-bind serve/);
     s.open("sites/visit");
     const blank = s.run(["init", "sites/visit", "--starter", "blank"]);
-    assert.equal(lastLine(blank.stdout), "next: put the real content in sites/visit/app.js");
+    assert.equal(lastLine(blank.stdout), 'next: put the real content in sites/visit/app.js, then check it (`instafy bind check sites/visit --expect "<item>,<item>"`)');
     s.open("sites/hello");
     const plain = s.run(["init", "sites/hello"]);
     assert.equal(plain.status, 0, plain.stderr);
     assert.doesNotMatch(plain.stdout, /^next:|preview open|instafy-bind serve/m);
     // a preview of another folder, or another space's of a folder with the same name, is not this page's card
     s.record(s.preview("sites/laptops"), s.preview("sites/plan", { projectId: OTHER_SPACE }));
-    assert.match(lastLine(s.run(["init", "sites/plan", "--starter", "timeline"]).stdout), /, then post its card: \(cd sites\/plan && /);
+    assert.match(lastLine(s.run(["init", "sites/plan", "--starter", "timeline"]).stdout), /, post its card: \(cd sites\/plan && .*\), then check it /);
   } finally {
     s.done();
   }

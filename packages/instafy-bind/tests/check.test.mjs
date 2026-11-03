@@ -9,6 +9,7 @@ import path from "node:path";
 import { spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { checkSite, checkValues, htmlLines, htmlText, jsonStrings, names, parseExpect, uncitedRows } from "../src/check.mjs";
+import { scriptText } from "../src/script-text.mjs";
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "instafy-bind.mjs");
 const cleanEnv = { PATH: process.env.PATH, HOME: os.tmpdir() };
@@ -110,6 +111,88 @@ test("a map's places count as shown: its layers are GeoJSON data files", () => {
     assert.match(out.stdout, /^MISSING: the request named 1 item\(s\) the site does not show: Pastéis de Belém\./m);
     assert.match(out.stdout, /2 of 3 expected item\(s\) shown: A Brasileira, Café Nicola\./);
     assert.deepEqual(checkSite(dir, "A Brasileira").shown, [{ item: "A Brasileira", files: ["data/cafes.geojson"] }]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A blank starter page keeps its words in app.js. The check read only the HTML and data files, so it reported every
+// item such a page showed as missing ("MISSING: the request named 7 item(s)…", "Add each one to the page (its data
+// file)"), and a turn that chained the check before the card's command never posted the card.
+test("a blank page's words count: the text its app.js passes to site.h and site.head", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-check-blank-"));
+  try {
+    execFileSync(process.execPath, [BIN, "init", dir, "--starter", "blank"], { env: cleanEnv });
+    fs.writeFileSync(path.join(dir, "app.js"), `(function () {
+  "use strict";
+  var h = site.h;
+  site.start({ data: null, render: function () {
+    site.head({ title: "Corner Bookshop", lede: "A short visit guide" });
+    var hours = site.h("article", { className: "card" }, [
+      site.h("h2", {}, "Opening hours"),
+      h("p", { text: \`Every day, 9:00 AM–7:30 PM\` }),
+      // a comment is not on the page: site.h("p", {}, "Rooftop garden")
+      site.h("a", { href: "https://bookshop.example/en/", className: "Harbour view" }, "Official site"),
+    ]);
+    var route = h("article", "From Central Station by tram", site.link("https://transit.example/", "Tram timetable"),
+      h("p", {}, "Not found yet: Night bus"));
+    document.getElementById("list").replaceChildren(hours, route);
+  } });
+})();
+`);
+    const all = "Corner Bookshop, Opening hours, Every day, 9:00 AM–7:30 PM, From Central Station by tram, Tram timetable, Official site";
+    const ok = run("check", dir, "--expect", all);
+    assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+    assert.match(ok.stdout, /7 of 7 expected item\(s\) shown/);
+    assert.deepEqual(checkSite(dir, "Opening hours").shown, [{ item: "Opening hours", files: ["app.js"] }]);
+    // a comment, an attribute and a line that says an item is not there are not the page's words
+    const out = run("check", dir, "--expect", `${all}, Rooftop garden, Harbour view, Night bus`);
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    assert.match(out.stdout, /^MISSING: the request named 3 item\(s\) the site does not show: Rooftop garden, Harbour view, Night bus\.$/m);
+    assert.match(out.stdout, /^Add each one to the page, or say plainly in the reply which are missing and why\.$/m);
+    assert.doesNotMatch(out.stdout, /its data file/);
+    assert.equal(JSON.parse(run("check", dir, "--expect", "Night bus", "--json").stdout).unread.length, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("site.js helpers' text is read from the source, through any name the script gives them, never by running it", () => {
+  assert.deepEqual(scriptText(`
+    const { h: el, head } = window.site;
+    var re = /"[^"]*"/g, half = total / 2 / 1;
+    head({ title: \`Trip to \${city}\`, lede: 'It\\'s \\u00e9t\\u00e9', map: "https://map.example" });
+    el("p", { "aria-label": "Label", onClick: function () { go("Nowhere"); }, text: ok ? "Open" : "Closed" });
+    site.notes(["Still to confirm: the ferry"], [{ name: "Harbour office", url: "https://harbour.example" }]);
+    function h(x) { return x; } h("Not a helper"); other.h("Not one either");
+    /* site.h("p", {}, "In a comment") */`),
+  ["Trip to  ", "It's été", "Open", "Closed", "Still to confirm: the ferry", "Harbour office"]);
+});
+
+// The check says an item is missing only when it could have seen it.
+test("a page whose script draws its text in a way the check cannot read is never reported missing what it cannot see (exit 2)", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-check-unread-"));
+  try {
+    execFileSync(process.execPath, [BIN, "init", dir, "--starter", "blank"], { env: cleanEnv });
+    fs.writeFileSync(path.join(dir, "app.js"), `var card = document.createElement("article");
+card.innerHTML = "<h2>" + title + "</h2><p>" + hours + "</p>";
+document.getElementById("list").appendChild(card);
+`);
+    const out = run("check", dir, "--expect", "New page, Opening hours");
+    assert.equal(out.status, 2, out.stdout + out.stderr);
+    assert.doesNotMatch(out.stdout, /MISSING/);
+    assert.match(out.stdout, /^UNREAD: app\.js draws the page's text in a way the check cannot read .*cannot tell whether the page shows: Opening hours\.$/m);
+    assert.match(out.stdout, /1 of 2 expected item\(s\) shown: New page\./);
+    const json = JSON.parse(run("check", dir, "--expect", "Opening hours", "--json").stdout);
+    assert.deepEqual([json.ok, json.missing, json.unknown, json.unread], [false, [], ["Opening hours"], ["app.js"]]);
+    // every item it can see: a pass
+    assert.equal(run("check", dir, "--expect", "New page").status, 0);
+    // a data file to read, or a script that draws nothing itself: an item it does not find is missing again
+    fs.writeFileSync(path.join(dir, "data.json"), JSON.stringify({ items: [{ name: "Opening hours" }] }));
+    assert.equal(run("check", dir, "--expect", "Opening hours, Closing day").status, 1);
+    fs.rmSync(path.join(dir, "data.json"));
+    fs.writeFileSync(path.join(dir, "app.js"), 'window.dataLayer = []; console.log("visit");\n');
+    assert.equal(run("check", dir, "--expect", "Opening hours").status, 1);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

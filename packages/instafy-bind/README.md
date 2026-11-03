@@ -196,8 +196,11 @@ kit.done("Read 1 price");
 handler can answer with `kit.uncertain`. `instafy bind try <dir> <intent> '<params>' --save` runs a script intent as
 a click would and keeps its accepted records in the site (same checks, provenance and version bump), so a new page
 opens with its values. `instafy bind check <dir> --expect "<item>,<item>"` then says whether the page shows every
-item the request named (from its HTML text and data files; an `"expect"` array in `data.json` is checked too) and
-exits 1 when one is missing. On a page of options (the compare and ranked starters' `data.json`) it also exits 1 for a
+item the request named (from its HTML text, its data files and the text its own scripts pass to `site.h` and
+`site.head`, as a blank page's `app.js` does; an `"expect"` array in `data.json` is checked too) and exits 1 when one
+is missing. A page whose scripts draw its text some other way, with no data file to read, is never reported as missing
+what the check cannot see: it exits 2 and says to look at the page itself. On a page of options (the compare and
+ranked starters' `data.json`) it also exits 1 for a
 value that only says nothing (`"—"`, `"n/a"`: leave out `v` and say why in `note`), a value without the page and day
 it was read (`src`, `url`, `date`), and a filter applied without `site.byFilter`; and it notes the rows the filter
 lists apart because their value is unknown (`site.within` never counts an unknown value as within a limit). A row of a
@@ -206,8 +209,9 @@ page that was read, or, when only a search result names it, `found` names that r
 the compare starter then marks the row "Not checked"). A row with neither, a guess or a placeholder such as "Model 1",
 fails the check, also when `--expect` or `"expect"` names it: that list only says what the page must show. In a
 space's workspace, until the CLI has recorded a preview of that space opened from the site's folder, `init`'s next
-step and a check that passes end with the command that serves the page and posts its card in Studio (`instafy preview
-open … --serve-cmd 'instafy bind serve . --port {port} --preview' --start`, run in the site's folder).
+step names the command that serves the page and posts its card in Studio (`instafy preview open … --serve-cmd
+'instafy bind serve . --port {port} --preview' --start`, run in the site's folder) before the check, and every check
+ends with it: a failing check never holds the card back.
 
 On timeout the binder sends SIGTERM, then SIGKILL after 3 s, and reports `error timeout`.
 
