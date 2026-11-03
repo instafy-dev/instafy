@@ -681,6 +681,88 @@ describe("Studio starting a request_browser card by itself", () => {
     });
   });
 
+  // A local test, Nov 2: a message sent straight to the browser
+  // showed its card's "Open browser and continue" for the 0.4 s the routing
+  // step's run took to end, then "Opening Instafy's browser…".
+  describe("a card the routing step sent", () => {
+    function routedCard(jobId = "job-1"): ChatMessage {
+      return { ...card(jobId), metadata: { messageType: "action_request", jobId,
+        details: { browserRequest: { task: TASK, location: "auto", routed: true } } } };
+    }
+    async function routedCardLands() {
+      await render();
+      await advance(5_000);
+      const prompt = sendPrompt({}, "job-1", TASK);
+      value.messages = [...value.messages, prompt, routedCard()];
+      await render();
+      await advance(10);
+    }
+
+    it("reads as opening from the moment it lands, and opens once its run has ended", async () => {
+      auto.activeRunIds = new Set(["run-job-1", "job-1"]);
+      await routedCardLands();
+      expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "opening", note: null });
+      // Nothing opens or is sent before that run ends.
+      expect(value.activate).not.toHaveBeenCalled();
+      auto.activeRunIds = new Set();
+      await render();
+      expect(value.activate).toHaveBeenCalledExactlyOnceWith("personal", PERSONAL);
+      expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "opening", note: null });
+      await becomeReady();
+      expect(value.continueTask).toHaveBeenCalledTimes(1);
+      expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "opened" });
+    });
+
+    it("reads as opening while Studio reads Instafy's browser before it opens", async () => {
+      const host = coveredHost();
+      auto.activeRunIds = new Set(["run-job-1", "job-1"]);
+      await routedCardLands();
+      expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "opening", note: null });
+      expect(host.refreshHost).not.toHaveBeenCalled();
+      auto.activeRunIds = new Set();
+      await render();
+      // The run has ended: Studio reads the browser first, and the card still
+      // reads as opening.
+      expect(host.refreshHost).toHaveBeenCalled();
+      expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "opening", note: null });
+      await settleReading();
+      expect(value.activate).toHaveBeenCalledTimes(1);
+      expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "opening", note: null });
+    });
+
+    it.each([
+      ["a draft in the composer", () => { auto.blocked = { reason: null }; }],
+      ["someone else in the browser", () => { auto.heldByOther = true; }],
+      ["a browser that does not open by itself here", () => { plan.mockReturnValue({ kind: "button", reason: "Not here." }); }],
+    ] as const)("keeps its button while its run ends, with %s", async (_name, arrange) => {
+      arrange();
+      auto.activeRunIds = new Set(["run-job-1", "job-1"]);
+      await routedCardLands();
+      expect(lastState?.cardStates.get("job:job-1")).toBeUndefined();
+      expect(value.activate).not.toHaveBeenCalled();
+    });
+
+    it("goes back to its button when someone writes before its run has ended", async () => {
+      auto.activeRunIds = new Set(["run-job-1", "job-1"]);
+      await routedCardLands();
+      expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "opening", note: null });
+      value.messages = [...value.messages, { id: "reply", role: "user", content: "Never mind", timestamp: Date.now() }];
+      await render();
+      expect(lastState?.cardStates.get("job:job-1")).toBeUndefined();
+      auto.activeRunIds = new Set();
+      await render(); await advance(1_000);
+      expect(value.activate).not.toHaveBeenCalled();
+    });
+
+    it("is never opening for another tab's prompt", async () => {
+      auto.activeRunIds = new Set(["job-1"]);
+      await render(); await advance(5_000);
+      value.messages = [routedCard()];
+      await render(); await advance(10);
+      expect(lastState?.cardStates.get("job:job-1")).toBeUndefined();
+    });
+  });
+
   it("waits while the conversation is still busy", async () => {
     value.busy = true;
     await cardArrives();

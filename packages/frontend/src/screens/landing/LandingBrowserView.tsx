@@ -345,7 +345,7 @@ export function LandingBrowserView({ stage, script, playing }: { stage: BrowserS
       data-browser-page={stage.page ? "true" : "false"}
       className="flex min-h-0 flex-1 flex-col"
     >
-      <BrowserChromeShell compact label="Shared browser controls" leading={location} navigation={null} address={address} actions={actions} />
+      <BrowserChromeShell compact clearsToasts={false} label="Shared browser controls" leading={location} navigation={null} address={address} actions={actions} />
       <div
         ref={viewportRef}
         data-testid="landing-browser-stage"

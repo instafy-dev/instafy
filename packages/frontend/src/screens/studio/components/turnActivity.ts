@@ -15,6 +15,7 @@ import { resolveRetryingStatusPresentation } from "../../../conversations/runFai
 import type { ChatMessage } from "../types";
 import { displayActivityHost } from "./activityHost";
 import { BROWSER_BUILD_REQUEST_NOTE_KEY } from "./browserHandBack";
+import { isEmptyCommandExecution } from "./chatContentHelpers";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 
 export type ActivityRole = "content" | "outcome" | "quiet";
@@ -942,9 +943,18 @@ const PLUMBING_KEY = "builtin/plumbing";
 // The runtime's status for the save at the end of a turn (activity_labels.rs).
 const SAVE_KEY = "runtime/save";
 
+/** The kind of step a message is, or null when it is none: a command that ran nothing is none. */
+function stepKindOf(message: ChatMessage): StepKind | null {
+  const kind = STEP_TYPES[(getMessageType(message) ?? "").trim().toLowerCase()];
+  if (!kind || (kind === "command" && isEmptyCommandExecution(message))) {
+    return null;
+  }
+  return kind;
+}
+
 /** One step as Details shows it, or null when the message is not a step. */
 export function turnStepFromMessage(message: ChatMessage, jobId: string | null): TurnStep | null {
-  const kind = STEP_TYPES[(getMessageType(message) ?? "").trim().toLowerCase()];
+  const kind = stepKindOf(message);
   if (!kind) {
     return null;
   }
@@ -1214,7 +1224,12 @@ export function summarizeTurnActivity(
 
   threadMessages.forEach((message, index) => {
     const type = (getMessageType(message) ?? "").trim().toLowerCase();
-    const kind = STEP_TYPES[type];
+    // A command that ran nothing ("/bin/bash -lc") is neither a step nor a
+    // note: Details has no row for it, and the line never counts it.
+    if (STEP_TYPES[type] === "command" && isEmptyCommandExecution(message)) {
+      return;
+    }
+    const kind = stepKindOf(message);
     if (kind) {
       newestOtherIndex = index;
       const key = stepKey(message, kind);

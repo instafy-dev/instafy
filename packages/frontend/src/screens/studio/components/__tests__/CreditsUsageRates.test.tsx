@@ -47,7 +47,8 @@ describe("CreditsUsageRates", () => {
 
   // Credits → Usage said "1 credits/prompt", and "The reserve prompt debit is
   // reconciled against the final token-based cost on the ledger." A
-  // first-time person reads neither.
+  // first-time person reads neither. Then "1 credit a message", which reads
+  // as a price, while messages cost 1 to 30: it is where a message starts.
   it("says what a message costs in plain words", () => {
     const rates = (creditsPerPrompt: number) => renderToStaticMarkup(
       <CreditsUsageRates
@@ -58,10 +59,10 @@ describe("CreditsUsageRates", () => {
       />,
     ).replace(/\s+/g, " ");
 
-    expect(rates(1)).toContain("1 credit a message");
+    expect(rates(1)).toContain("From 1 credit a message");
     expect(rates(1)).toContain("Each message holds 1 credit, then costs what it used.");
     expect(rates(1)).not.toMatch(/\/prompt|1 credits|reserve prompt debit|reconciled|ledger|token-based/i);
-    expect(rates(2)).toContain("2 credits a message");
+    expect(rates(2)).toContain("From 2 credits a message");
     expect(rates(2)).toContain("Each message holds 2 credits, then costs what it used.");
   });
 });

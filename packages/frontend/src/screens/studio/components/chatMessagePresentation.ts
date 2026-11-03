@@ -4,6 +4,7 @@ import type { ChatMessage } from "../types";
 import { isUUID } from "../../../utils/uuid";
 import { isRecoverableRuntimeStartAlert as runtimeStartAlertIsRecoverable } from "./runtimeAlertPresentation";
 import { normalizeAssistantStatusText } from "./assistantStatusHeuristics";
+import { isEmptyCommandExecution } from "./chatContentHelpers";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { isGenericProgressLabel, THREAD_ACTION_CARD_TYPES } from "./threadPreviewHelpers";
 import { readEarlierAttempts, resolveAutomaticRetryFold } from "./automaticRetryFold";
@@ -274,6 +275,10 @@ export function shouldDisplayChatMessage(message: ChatMessage): boolean {
     }
   }
   if (messageType === "reasoning") {
+    return false;
+  }
+  // A command that ran nothing ("/bin/bash -lc") has no row.
+  if (messageType === "command_execution" && isEmptyCommandExecution(message)) {
     return false;
   }
   if (
