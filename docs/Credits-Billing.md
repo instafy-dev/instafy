@@ -468,7 +468,8 @@ it is charged as a turn they sent.
 
 A turn is billed once, from the tokens of its first attempt: the `turn.completed` usage at the end
 of its first Codex run log (`extract_turn_usage_from_artifacts`). When the runtime tries again
-inside the same turn (a recovery retry, or a final wrap-up pass after a missing answer), that
+inside the same turn (a recovery retry, a final wrap-up pass after a missing answer, or the
+wrap-up pass that asks a browser turn for the finding lines its hand-back needs), that
 attempt is not billed, and neither is the routing check the
 runtime makes with the model before a building turn. An automatic retry that Studio sends is a turn
 of its own (above).

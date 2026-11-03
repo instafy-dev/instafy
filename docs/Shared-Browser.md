@@ -2475,7 +2475,24 @@ unless the policy is `"covered"`.
   each item's own page and, for reviews, the review pages a page it read links
   to, else a reviewer's own site. The building turn cites a page only for a
   fact listed under it; a place or claim the reply names with no page under it
-  is read on its own page or left out. The fixtures in
+  is read on its own page or left out. Such a browser turn that used the browser
+  and wrote no finding line would hand nothing back, however many pages it
+  read: it gets the runtime's wrap-up pass on its own thread, which holds those
+  pages, asked for the finding lines alone, and not billed, as a recovery retry
+  is not (docs/Credits-Billing.md). The pass keeps the turn's browser tools,
+  approvals and Stop, a message the person sends meanwhile never steers it,
+  and its answer is not used if it took a step. With still none, or for a turn
+  in the browser on the person's device, which keeps no thread and so gets no
+  pass, its note holds its reply and one line per page its own steps opened,
+  by the address the browser reported (the turn's activity messages still
+  name only a page's host), so the hand-back still goes and the turn posts no
+  words of its own; those lines list no fact, so the building turn reads a
+  page itself or leaves the claim out. A turn that stopped on a step that is
+  the person's (it paused for their input on the page, a step's approval ended
+  it, or a page it opened showed a secret) gets neither: its reply says what
+  they do next, so it stays in the chat as the turn wrote it, and Studio sends
+  no hand-back for it. The
+  fixtures in
   `packages/runtime-controller/src/browser_hand_back_fixtures.json` pin the
   three halves together.
   One browser turn hands back without a building card or a page read: one that
@@ -2483,9 +2500,15 @@ unless the policy is `"covered"`.
   send stamped `browserCardTurn.routed`), opened no page, and answered that the
   message asks Octo to make or change something with no website to use first
   (the `request_build` action its write-scope line offers, or a team plan,
-  which a browser turn cannot start either). The write-scope line has it decide
+  which a browser turn cannot start either). Only such a turn whose card does
+  not continue building is offered it: one whose findings go back to the
+  building turn already has a build after it, and told both, a comparison's
+  turn read its pages and asked for a build in place of its findings. The
+  write-scope line has it decide
   that before any browser step, and the run text's blank-page rule leaves it
-  that answer. A browser turn cannot make it, so the runtime does not try it
+  that answer. A build request nothing acts on (from a turn that opened a page
+  and has no hand-back after it) is never dropped without a word: the reply
+  ends "I haven't made it yet: ask me to, and I'll use what I found." A browser turn cannot make it, so the runtime does not try it
   again in the browser: the turn posts no reply and nothing of its answer, and
   ends with a Details note (`browserBuildRequest`) that Studio leaves out of
   Details. One that answered in words alone is tried again once, as any browser

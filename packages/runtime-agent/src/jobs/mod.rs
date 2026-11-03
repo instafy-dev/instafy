@@ -145,7 +145,7 @@ const AGENT_CONTEXT_CARD_MAX_CHARS: usize = 1_200;
 const COLLABORATION_SKILL_PLANNING_MAX_CHARS: usize = 3_200;
 const COLLABORATION_SKILL_ROUTING_MAX_CHARS: usize = 1_400;
 /// How much of the browser skill's "Routing preflight" section the routing step reads: all of it.
-const BROWSER_SKILL_ROUTING_MAX_CHARS: usize = 1_800;
+const BROWSER_SKILL_ROUTING_MAX_CHARS: usize = 2_000;
 /// The longest message a routed card carries as its task, as a card's own task is bounded
 /// (`BrowserRequest::parse`).
 const ROUTED_BROWSER_TASK_MAX_UTF16_UNITS: usize = 8_000;
@@ -339,6 +339,9 @@ fn with_runtime_metadata_vec(messages: Vec<JobMessage>, runtime_id: &Uuid) -> Ve
 }
 
 pub type JobMessageSender = UnboundedSender<JobMessage>;
+/// How a browser turn's finding lines leave its reply for a Details note, as the runtime ends
+/// each turn (`agent::complete_job`); public for the stub-provider tests.
+pub use browser_hand_back::move_findings_into_details;
 pub use reply_draft::{ReplyDraft, ReplyDraftSender};
 
 #[derive(Clone)]
@@ -9347,6 +9350,47 @@ impl JobProcessor {
                 streaming_active,
                 retry_messages,
             );
+            // As after a first attempt with no retry: the browser turn's finding lines, and a word
+            // for a build request nothing acts on.
+            if (explicit_shared_browser_execution || explicit_personal_browser_execution)
+                && retry_shared_browser_terminal_consent_failure.is_none()
+                && !retry_hands_the_message_to_the_building_turn
+            {
+                let mut pages = output.browser_pages.clone();
+                for page in &retry_output.browser_pages {
+                    if !pages.contains(page) {
+                        pages.push(page.clone());
+                    }
+                }
+                let answer = BrowserTurnAnswer {
+                    options: &codex_run_options,
+                    // An ephemeral retry keeps no thread: the first attempt's holds its pages.
+                    thread: retry_provider_conversation_state
+                        .clone()
+                        .or_else(|| output_provider_conversation_state.clone()),
+                    used_the_browser: !retry_shared_browser_execution_missing
+                        && !retry_personal_browser_execution_missing,
+                    stopped_for_the_person: browser_hand_back::stopped_for_the_person(
+                        &retry_messages,
+                        retry_output.browser_secret_screen,
+                    ) || browser_hand_back::stopped_for_the_person(
+                        &interim_messages,
+                        output.browser_secret_screen,
+                    ),
+                    pages,
+                    final_json: &retry_output.final_json,
+                };
+                retry_artifacts.extend(
+                    end_browser_turn_answer(
+                        &codex,
+                        job,
+                        answer,
+                        &mut retry_outcome.summary,
+                        task_usage,
+                    )
+                    .await,
+                );
+            }
             post_only_the_card(job, &mut retry_outcome);
             if retry_hands_the_message_to_the_building_turn {
                 // An empty reply is no reply: the building turn answers.
@@ -9374,6 +9418,31 @@ impl JobProcessor {
             has_mcp_tool_call_message(&interim_messages),
             &mut artifacts,
         )?;
+
+        // A browser turn's answer as its hand-back reads it: its finding lines, from the wrap-up
+        // pass or the pages it opened when it wrote none, and a word for a build request nothing
+        // acts on.
+        if (explicit_shared_browser_execution || explicit_personal_browser_execution)
+            && first_shared_browser_terminal_consent_failure.is_none()
+            && !hands_the_message_to_the_building_turn
+        {
+            let answer = BrowserTurnAnswer {
+                options: &codex_run_options,
+                thread: output_provider_conversation_state.clone(),
+                used_the_browser: !shared_browser_execution_missing
+                    && !personal_browser_execution_missing,
+                stopped_for_the_person: browser_hand_back::stopped_for_the_person(
+                    &interim_messages,
+                    output.browser_secret_screen,
+                ),
+                pages: output.browser_pages.clone(),
+                final_json: &output.final_json,
+            };
+            artifacts.extend(
+                end_browser_turn_answer(&codex, job, answer, &mut outcome.summary, task_usage)
+                    .await,
+            );
+        }
 
         // No retry: the turn's result is settled, so its cards go out now,
         // right behind its answer, not after the workspace sync and the
@@ -15357,6 +15426,160 @@ fn finalization_codex_run_options(first_attempt: &CodexRunOptions) -> CodexRunOp
     options
 }
 
+/// The options of the wrap-up pass that asks a browser turn for its finding lines
+/// ([`browser_hand_back::FINDING_LINES_PASS_PROMPT`]): the turn's own run, resumed on its own
+/// thread, which holds the pages it read, at low effort, with no tool required first and no
+/// images sent again. Its browser stays as the turn had it, so the thread resumes with the same
+/// instructions and the browser's tools alone, its approvals and its Stop, and its cached start;
+/// the pass is told to use no tool, and its answer is dropped if it took a step anyway
+/// ([`pass_took_a_step`]). A message the person sends meanwhile never steers it: the pass keeps
+/// only finding lines, so the message would be taken and lost.
+fn finding_lines_pass_options(
+    first_attempt: &CodexRunOptions,
+    thread: Option<JsonValue>,
+) -> CodexRunOptions {
+    let mut options = first_attempt.clone();
+    options.require_first_tool_call = false;
+    options.reasoning_effort = Some(ReasoningEffort::Low);
+    options.persist_conversation_thread = true;
+    options.provider_conversation_state = thread;
+    options.input_images.clear();
+    options.turn_wrap_up = None;
+    // the note is the turn's own: the pass neither clears it nor hands the turn off
+    options.turn_continue_note = None;
+    options.active_turn_input = None;
+    options
+}
+
+/// Whether a run's events show a step it took: a browser or other tool call, a command or a
+/// file change. The finding-lines pass is told to use no tool; one that took a step anyway
+/// answered from more than the pages the turn read, so its answer is not used.
+fn pass_took_a_step(events: &[JsonValue]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event.pointer("/item/type").and_then(JsonValue::as_str),
+            Some("mcp_tool_call" | "command_execution" | "file_change" | "web_search")
+        )
+    })
+}
+
+/// A browser turn's answer as the runtime ends it, for its hand-back (`browser_hand_back`).
+pub struct BrowserTurnAnswer<'a> {
+    /// The options of the run that answered.
+    pub options: &'a CodexRunOptions,
+    /// That run's thread, which holds the pages the turn read.
+    pub thread: Option<JsonValue>,
+    /// Whether the turn used the browser at all: a step the browser answered, or a look at a page.
+    pub used_the_browser: bool,
+    /// Whether it stopped on a step that is the person's
+    /// (`browser_hand_back::stopped_for_the_person`): its reply is theirs, and stays as it is.
+    pub stopped_for_the_person: bool,
+    /// The pages its own steps opened (`CodexRunOutput::browser_pages`).
+    pub pages: Vec<String>,
+    /// Its answer as the model wrote it.
+    pub final_json: &'a JsonValue,
+}
+
+/// Ends the reply `summary` of a browser turn that is not handed to the building turn
+/// (`browser_hand_back::hands_the_message_to_the_building_turn`). A turn whose findings go back
+/// to the building turn, that used the browser and wrote no finding lines, gets the runtime's
+/// wrap-up pass on its own thread, asked for those lines only; with still none, its note holds
+/// its reply and the pages its own steps opened, so the hand-back still goes, and the turn posts
+/// no words of its own (`browser_hand_back::move_findings_into_details`). A turn on the browser
+/// on the person's device keeps no thread, so it gets no pass: the pages it opened, by address.
+/// A build request that nothing then acts on is said in the reply, never dropped without a word
+/// (`browser_hand_back::BUILD_NOT_MADE_LINE`). A turn that stopped for the person is left as it
+/// is: its reply says what they do next. Returns the pass's run log and answer, which go after
+/// the turn's own: a turn is billed from its first run's log, and like a recovery retry or the
+/// wrap-up after a missing answer, the pass is not billed (docs/Credits-Billing.md).
+pub async fn end_browser_turn_answer(
+    codex: &CodexClient,
+    job: &LeaseJob,
+    answer: BrowserTurnAnswer<'_>,
+    summary: &mut String,
+    task_usage: &TaskUsage,
+) -> Vec<JsonValue> {
+    let metadata = job.payload.get("metadata");
+    let mut artifacts = Vec::new();
+    if answer.stopped_for_the_person {
+        return artifacts;
+    }
+    let canceled = answer
+        .options
+        .cancel_signal
+        .as_ref()
+        .is_some_and(JobCancelSignal::is_canceled);
+    if answer.used_the_browser
+        && !canceled
+        && browser_hand_back::needs_finding_lines(metadata, summary)
+    {
+        let mut lines = None;
+        if answer.thread.is_some() {
+            let mut options = finding_lines_pass_options(answer.options, answer.thread.clone());
+            options.usage_observer = Some(task_usage.call(UsagePhase::Finalization));
+            let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
+            let pass = codex
+                .execute_with_options(browser_hand_back::FINDING_LINES_PASS_PROMPT, None, options)
+                .await;
+            drop(codex_guard);
+            match pass {
+                Ok(output) => {
+                    let purpose = json!({ "purpose": "finding-lines-wrap-up" });
+                    artifacts.push(build_codex_run_log_artifact(
+                        &output.events,
+                        Some(purpose.clone()),
+                    ));
+                    artifacts.push(json!({
+                        "kind": "codex/final-json",
+                        "metadata": purpose,
+                        "payload": sanitize_codex_final_json(&output.final_json),
+                    }));
+                    if pass_took_a_step(&output.events) {
+                        warn!(
+                            job_id = %job.id,
+                            "the browser turn's finding-lines wrap-up pass took a step: its answer is not used"
+                        );
+                    } else {
+                        lines = output
+                            .final_json
+                            .get("summary")
+                            .and_then(JsonValue::as_str)
+                            .and_then(browser_hand_back::finding_lines_of);
+                    }
+                }
+                Err(error) => warn!(
+                    job_id = %job.id,
+                    error = %format!("{error:#}"),
+                    "the browser turn's finding-lines wrap-up pass failed"
+                ),
+            }
+        }
+        let from_the_pass = lines.is_some();
+        match lines.or_else(|| browser_hand_back::finding_lines_from_pages(&answer.pages)) {
+            Some(lines) => {
+                browser_hand_back::add_finding_lines(summary, &lines);
+                tracing::info!(
+                    job_id = %job.id,
+                    from_the_pass,
+                    "a browser turn that hands back wrote no finding lines: they come from the wrap-up pass or the pages it opened"
+                );
+            }
+            None => tracing::info!(
+                job_id = %job.id,
+                "a browser turn that hands back wrote no finding lines and opened no page: nothing goes back"
+            ),
+        }
+    }
+    if browser_hand_back::say_a_build_request_nothing_acts_on(metadata, answer.final_json, summary)
+    {
+        tracing::info!(
+            job_id = %job.id,
+            "a browser turn asked for a build that nothing acts on: its reply says it is not made yet"
+        );
+    }
+    artifacts
+}
+
 /// How many attached images a run's turn input carried as image input.
 fn annotate_prompt_context_native_image_inputs(prompt_context: &mut JsonValue, count: usize) {
     let JsonValue::Object(map) = prompt_context else {
@@ -18824,9 +19047,9 @@ fn resolve_exact_owned_write_scope_path(workspace_dir: &Path, raw: &str) -> Opti
 /// turn asked for a page told the person "in this run: it's read-only" (local
 /// tests, Oct 31). A browser turn that hands back is told which turn makes the
 /// page; any other read-only job is told it is read-only. A browser turn that
-/// carries on the person's own message is also told how to hand a message
-/// that asks Octo to make something to the building turn
-/// ([`browser_hand_back::BUILD_REQUEST_LINE`]).
+/// carries on the person's own message and hands nothing back is also told how
+/// to hand a message that asks Octo to make something to the building turn
+/// ([`browser_hand_back::offers_the_build_request`]).
 fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> String {
     let browser = metadata
         .and_then(|metadata| {
@@ -18845,7 +19068,7 @@ fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> String {
     } else {
         "- This job is read-only. Do not create, edit, move, delete, or return workspace file changes.\n"
     };
-    if metadata.is_some_and(browser_hand_back::carries_on_a_routed_card) {
+    if metadata.is_some_and(browser_hand_back::offers_the_build_request) {
         format!("{line}{}", browser_hand_back::BUILD_REQUEST_LINE)
     } else {
         line.to_string()
@@ -21385,6 +21608,54 @@ mod tests {
         assert!(finalization.provider_conversation_state.is_none());
     }
 
+    /// The pass that asks a browser turn for its finding lines resumes the turn's own thread
+    /// with the turn's browser, so its tools are the browser's alone, under the run's approvals
+    /// and Stop; it requires no tool first, sends no image again and is never steered by a
+    /// message the person sends meanwhile, which it would take and drop with everything but
+    /// its lines. A pass that took a step anyway is not used.
+    #[test]
+    fn the_finding_lines_pass_resumes_the_turns_thread_and_is_never_steered() {
+        let (_sender, receiver, _cancellation) =
+            crate::active_turn_input::active_turn_input_channel(1);
+        let thread = json!({ "browserThreadId": "thread_browser" });
+        let turn = CodexRunOptions {
+            shared_browser: true,
+            expect_browser_session: true,
+            require_first_tool_call: true,
+            persist_conversation_thread: true,
+            provider_conversation_state: Some(json!({ "browserThreadId": "thread_old" })),
+            input_images: vec![PathBuf::from("/attachments/photo.png")],
+            active_turn_input: Some(receiver),
+            cancel_signal: Some(JobCancelSignal::new()),
+            ..Default::default()
+        };
+        let pass = finding_lines_pass_options(&turn, Some(thread.clone()));
+        assert!(pass.active_turn_input.is_none());
+        assert!(turn.active_turn_input.is_some());
+        assert!(pass.shared_browser && pass.expect_browser_session);
+        assert!(pass.cancel_signal.is_some(), "a Stop still ends the pass");
+        assert!(!pass.require_first_tool_call);
+        assert!(pass.input_images.is_empty());
+        assert!(pass.persist_conversation_thread);
+        assert_eq!(pass.provider_conversation_state, Some(thread));
+        assert_eq!(pass.reasoning_effort, Some(ReasoningEffort::Low));
+
+        let item = |kind: &str| json!({ "type": "item.completed", "item": { "type": kind } });
+        for kind in [
+            "mcp_tool_call",
+            "command_execution",
+            "file_change",
+            "web_search",
+        ] {
+            assert!(pass_took_a_step(&[item("reasoning"), item(kind)]), "{kind}");
+        }
+        assert!(!pass_took_a_step(&[
+            item("reasoning"),
+            item("agent_message"),
+            json!({ "type": "turn.completed" }),
+        ]));
+    }
+
     /// A leased batch is one conversation's jobs, which may run one after
     /// another. Its hold keeps their attachments folder between them, so a
     /// later job reuses an earlier job's download even when its own signed URL
@@ -23667,6 +23938,8 @@ mod tests {
             events: Vec::new(),
             provider_conversation_state: Some(state),
             native_image_inputs: 0,
+            browser_pages: Vec::new(),
+            browser_secret_screen: false,
         }
     }
 
@@ -32221,6 +32494,8 @@ mod tests {
             events,
             provider_conversation_state: None,
             native_image_inputs: 0,
+            browser_pages: Vec::new(),
+            browser_secret_screen: false,
         };
         let outcome = CodexOutcome {
             summary: "ok".to_string(),
@@ -33298,11 +33573,14 @@ mod tests {
     }
 
     /// A browser turn that carries on the person's own message (a card the routing step
-    /// posted, as the controller stamped its send) is told how to hand a message that asks
-    /// Octo to make something with no website to use first back to the building turn: a
-    /// browser turn sent a request for a map said it could not make one, and the retry for a
-    /// turn that opened no page made it browse instead (a local test, Nov 1). Any other turn
-    /// is not: its build request would hand nothing back.
+    /// posted, as the controller stamped its send) and hands nothing back is told how to hand a
+    /// message that asks Octo to make something with no website to use first back to the
+    /// building turn: a browser turn sent a request for a map said it could not make one, and the
+    /// retry for a turn that opened no page made it browse instead (a local test, Nov 1). One
+    /// whose findings go back to the building turn is not: a build comes after it already, and
+    /// told both, a comparison's browser turn read seven pages and answered with a build request
+    /// and no finding lines, which nothing acted on, twice (a local test, Nov 3). Nor is any other
+    /// turn: its build request would hand nothing back.
     #[test]
     fn a_routed_browser_turn_is_told_to_hand_a_build_back() {
         let routed = |transport: &str, hands_back: bool, routed: JsonValue| {
@@ -33317,32 +33595,43 @@ mod tests {
         let section = |metadata: &JsonValue| {
             format_write_scope_guardrail_section(Some(metadata)).expect("write scope section")
         };
-        for (transport, hands_back, line) in [
+        for (transport, line) in [
             (
                 "shared",
-                false,
                 "- This turn reads pages in Instafy's browser; Octo builds in the chat.\n",
             ),
             (
-                "shared",
-                true,
-                "- This turn reads pages; the building turn after it makes the page.\n",
-            ),
-            (
                 "desktop-personal",
-                false,
                 "- This turn reads pages in the browser on this device; Octo builds in the chat.\n",
             ),
         ] {
-            let told = section(&routed(transport, hands_back, json!(true)));
+            let told = section(&routed(transport, false, json!(true)));
             assert!(
                 told.contains(&format!("{line}{}", browser_hand_back::BUILD_REQUEST_LINE)),
                 "{told}"
             );
             for stamp in [json!(false), json!("true"), JsonValue::Null] {
-                let section = section(&routed(transport, hands_back, stamp));
+                let section = section(&routed(transport, false, stamp));
                 assert!(section.contains(line), "{section}");
                 assert!(!section.contains("request_build"), "{section}");
+            }
+        }
+        // A routed turn whose findings go back to the building turn: told which turn makes the
+        // page, and never offered a build request.
+        for transport in ["shared", "desktop-personal"] {
+            for stamp in [json!(true), json!(false)] {
+                let section = section(&routed(transport, true, stamp));
+                assert!(
+                    section.contains(
+                        "- This turn reads pages; the building turn after it makes the page.\n"
+                    ),
+                    "{section}"
+                );
+                assert!(!section.contains("request_build"), "{section}");
+                assert!(
+                    !section.contains(browser_hand_back::BUILD_REQUEST_LINE),
+                    "{section}"
+                );
             }
         }
         assert!(
@@ -33365,7 +33654,8 @@ mod tests {
     /// first answer that said in words alone it could not make the map (as one did in a local
     /// test, Oct 31) gets one more chance to hand the message back, where the retry's
     /// requirement alone would send it to a website. A retry of any other turn reads nothing of
-    /// it: its build request would hand nothing back.
+    /// it: its build request would hand nothing back, or, for a turn whose findings go back to
+    /// the building turn, a build comes after it already.
     #[test]
     fn the_browser_retry_of_a_routed_turn_reads_the_build_request_first() {
         let job = |routed: JsonValue| {
@@ -33380,6 +33670,21 @@ mod tests {
                 }),
             )
         };
+        let handing_back = test_lease_job(
+            Some("feature"),
+            json!({
+                "metadata": {
+                    "browserTransport": "shared",
+                    "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                    "browserHandsBack": true,
+                    "browserCardTurn": {"version": 1, "routed": true},
+                }
+            }),
+        );
+        assert_eq!(
+            browser_hand_back::build_request_retry_line(&handing_back),
+            ""
+        );
         let line = browser_hand_back::build_request_retry_line(&job(json!(true)));
         assert_eq!(line, browser_hand_back::BUILD_REQUEST_RETRY_LINE);
         let retry = shared_browser_execution_retry_prompt("Plan three days, on a map.", line);
