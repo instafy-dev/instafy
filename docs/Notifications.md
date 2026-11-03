@@ -131,7 +131,9 @@ center marks it seen instead. The conversation counts as on screen while its Cha
 view or its Browser view is in front (the reply belongs to the turn the person is
 watching there), not while one of its files or previews is. An in-app toast starts
 under the chat's view bar (Chat | Browser) when that bar is at the top of the
-screen, so it never covers it (`toastClearance.ts`).
+screen, and under the address bar of the Browser view, a preview or the browser in
+the desktop app while one is on screen, so it never covers either
+(`toastClearance.ts`, `BrowserChromeShell.tsx`).
 
 The worker's `NotificationTransport` interface accepts an account-bound, static
 envelope and returns a classified delivery result. Its registered implementation

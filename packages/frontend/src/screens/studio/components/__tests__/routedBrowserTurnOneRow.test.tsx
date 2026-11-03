@@ -461,11 +461,12 @@ describe("a message Octo sends straight to Instafy's browser", () => {
     // Sent: the routing step is on its way.
     seen.push(await show({ time: "13:07:55.960", runs: [], awaitingLease: true }));
     // Its card lands; that run's record says it ended 20 ms later. The card
-    // is all that turn says, so "Starting…" hands over to it.
-    seen.push(await show({ time: "13:07:59.673", runs: [routingRun("in_progress")] }));
-    // Studio decides once that run ended: the card shows as a card meanwhile.
-    seen.push(await show({ time: "13:07:59.693", runs: [] }));
-    // Studio opens the card by itself: it reads as the browser turn's line.
+    // is all that turn says, so "Starting…" hands over to it. Studio opens it
+    // once that run has ended, and it reads as the browser turn's line from
+    // the moment it lands (useChatBrowserRequest), never as a button.
+    seen.push(await show({ time: "13:07:59.673", runs: [routingRun("in_progress")], card: { kind: "opening", note: null } }));
+    seen.push(await show({ time: "13:07:59.693", runs: [], card: { kind: "opening", note: null } }));
+    // Studio opens the card by itself.
     seen.push(await show({ time: "13:08:00.084", runs: [], card: { kind: "opening", note: null } }));
     // The person's words go on to the browser turn, queued and then leased.
     seen.push(await show({ time: "13:08:00.463", runs: [browserRun("queued")], card: { kind: "opening", note: null } }));
@@ -484,8 +485,8 @@ describe("a message Octo sends straight to Instafy's browser", () => {
       ({ time, octoRows: 1, faces: { desktop: 1, phone: phoneFaces }, says, typingAnnounces });
     expect(seen).toEqual([
       one("13:07:55.960", ["Starting…"], "Octo is starting", 0),
-      one("13:07:59.673", ["card"]),
-      one("13:07:59.693", ["card"]),
+      one("13:07:59.673", ["Opening Instafy's browser…"]),
+      one("13:07:59.693", ["Opening Instafy's browser…"]),
       one("13:08:00.084", ["Opening Instafy's browser…"]),
       one("13:08:00.463", ["Opening Instafy's browser…"]),
       one("13:08:00.572", ["Opening Instafy's browser…"]),

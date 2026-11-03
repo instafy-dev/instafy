@@ -747,6 +747,36 @@ describe("a look around the workspace", () => {
   });
 });
 
+// A local test, Nov 2: a turn ran `exec_command({cmd: ""})`, and Details
+// listed "Ran a command /bin/bash -lc" for it.
+describe("a command that ran nothing", () => {
+  it.each(["/bin/bash -lc", "/bin/bash -lc ''", "bash -lc \"\"", "sh -c"])(
+    "has no row in Details and is never counted: %s",
+    (empty) => {
+      const nothing = command(null, { command: empty });
+      const started = command(null, { command: empty, status: "in_progress", exitCode: null });
+      const edit = step(
+        "file_change",
+        { v: 1, key: "builtin/edit", role: "content", live: "Editing files", done: { one: "edited a file", other: "edited {n} files", some: "edited files" }, count: 1, also: [] },
+        { paths: ["sites/framework-laptops/data.json"] },
+      );
+      const done = summarize([started, nothing, edit]);
+      expect(done.details.map((item) => item.kind === "step" ? item.step.label : item.kind)).toEqual(["Edited a file"]);
+      expect(done.summary).toBe("Edited a file");
+      expect(done.stepCount).toBe(1);
+      // Alone, it leaves the turn with no line, and while it runs the turn
+      // is still starting.
+      expect(summarize([nothing]).summary).toBeNull();
+      expect(summarize([started], "running").live).toBe("Starting…");
+    },
+  );
+
+  it("is not a command with a script", () => {
+    const ran = summarize([command(null, { command: "/bin/bash -lc 'instafy bind check sites/a'" })]);
+    expect(ran.details.map((item) => item.kind === "step" ? item.step.label : item.kind)).toEqual(["Ran a command"]);
+  });
+});
+
 // Browser steps, from the runtime's browser table (activity_labels.rs).
 // Opening, reading and searching count only for a step that succeeded.
 const BROWSER_OPEN = {
