@@ -109,13 +109,24 @@ const selectOptionsFor = (arg) => {
     enabled: entries.filter((entry) => !entry.disabled).length,
   };
 };
-// The fields a form step sends something from, by name, as the page's
-// sent-fields helper reports them.
-const sentFieldsFor = (arg) => mode === "submit-order"
+// The fields a form step sends something from, by name, and how many it
+// sends in all, as the page's sent-fields helper reports them.
+const sentFieldNamesFor = () => mode === "submit-order"
   ? ["Customer name", "Telephone", "E-mail address", "Pizza Size", "Delivery instructions"]
   : mode === "submit-order-many"
     ? ["Customer name", "Telephone", "E-mail address", "Pizza Size", "Pizza Toppings", "Preferred delivery time", "Delivery instructions"]
-    : [];
+    // As many fields as the page names (24), each of the longest name it
+    // reports (40 characters): more than a prompt's label holds.
+    : mode === "submit-order-huge"
+      ? Array.from({ length: 24 }, (_, index) => `Field ${String(index + 1).padStart(2, "0")} of a long job application form`)
+      // A form of 30 short fields: the page names the first 24.
+      : mode === "submit-order-long-form"
+        ? Array.from({ length: 24 }, (_, index) => `Q${index + 1}`)
+        : [];
+const sentFieldsFor = () => {
+  const names = sentFieldNamesFor();
+  return { names, count: mode === "submit-order-long-form" ? 30 : names.length };
+};
 // A journey planner's station list and a bulk-actions list, as the page
 // describer reports a select: its text is every option run together, and it
 // shows the option it holds.
@@ -410,6 +421,8 @@ const special = {
   },
 };
 special["submit-order-many"] = special["submit-order"];
+special["submit-order-huge"] = special["submit-order"];
+special["submit-order-long-form"] = special["submit-order"];
 // "<mode>-typeless": the same button with no type attribute, which the
 // browser reports as type "submit" even outside a form.
 const typeless = mode.endsWith("-typeless");
@@ -686,6 +699,10 @@ const makePage = (targetId, opened = null) => {
               : targetId === "decoy-target" && !decoyLooksIdentical
                 ? "https://decoy.example.test/"
                 : "https://example.test/";
+  // The page's own event listeners and main frame, which a step follows its
+  // loads through (guardStepDocuments).
+  const pageListeners = {};
+  const mainFrame = { url: () => currentUrl };
   const handle = {
     isVisible: async () => true,
     boundingBox: async () => ({ x: 10, y: 20, width: 120, height: 32 }),
@@ -812,10 +829,15 @@ const makePage = (targetId, opened = null) => {
     targetId,
     context: () => context,
     isClosed: () => closedPages.has(targetId),
-    // A step follows the tab's own loads (guardStepDocuments); this
-    // fixture's pages have none that wait for a site.
-    on: () => {},
-    off: () => {},
+    // A step follows the tab's own loads (guardStepDocuments); only a
+    // "silent-site" page has one that waits for a site.
+    on: (event, listener) => {
+      (pageListeners[event] ||= new Set()).add(listener);
+    },
+    off: (event, listener) => {
+      pageListeners[event]?.delete(listener);
+    },
+    mainFrame: () => mainFrame,
     // Page-side helpers identify themselves by their argument. Every control
     // described in one call (DESCRIBE_ALL_IN_PAGE) answers as each control's
     // own handle answers the describer.
@@ -850,6 +872,46 @@ const makePage = (targetId, opened = null) => {
     setDefaultTimeout: () => {},
     close: async () => closePage(targetId),
     goto: async (url) => {
+      // "silent-site": the site never answers. The tab's document request
+      // leaves the browser (it is logged), no answer comes, and the load
+      // gives up as Playwright's own wait does, the tab still on its page,
+      // its request sent a step's time (20 s) before. "late-silent-site":
+      // the same for a load that began late in the step, 2 s before.
+      // "late-redirect-site": the site answers with a redirect only late in
+      // the step (its request sent 16 s before), to an address whose own
+      // request, sent 2 s before, has no answer yet. Each request reaches
+      // the step's listeners with the clock as it read when it left.
+      const silentFor = { "silent-site": 20_000, "late-silent-site": 2_000 }[mode];
+      if (silentFor !== undefined || mode === "late-redirect-site") {
+        if (clickLogPath) fs.appendFileSync(clickLogPath, `goto ${url}\n`);
+        const documentRequest = (address, redirectedFrom = null) => ({
+          isNavigationRequest: () => true,
+          frame: () => mainFrame,
+          method: () => "GET",
+          redirectedFrom: () => redirectedFrom,
+          url: () => String(address),
+        });
+        const sentAgo = (ms, request) => {
+          const now = Date.now;
+          Date.now = () => now() - ms;
+          try {
+            for (const listener of pageListeners.request || []) listener(request);
+          } finally {
+            Date.now = now;
+          }
+        };
+        if (mode === "late-redirect-site") {
+          const first = documentRequest(url);
+          sentAgo(16_000, first);
+          for (const listener of pageListeners.response || []) listener({ request: () => first, status: () => 302 });
+          sentAgo(2_000, documentRequest(new URL("/after-redirect", String(url)).toString(), first));
+        } else {
+          sentAgo(silentFor, documentRequest(url));
+        }
+        const timeout = new Error(`page.goto: Timeout 30000ms exceeded.\nCall log:\n  - navigating to "${url}", waiting until "commit"`);
+        timeout.name = "TimeoutError";
+        throw timeout;
+      }
       currentUrl = String(url);
       if (opened) {
         saveOpenedTabs(openedTabs().map((tab) => tab.targetId === targetId ? { ...tab, url: currentUrl } : tab));
@@ -3208,8 +3270,9 @@ async fn the_call_that_ends_the_run_names_its_step_in_its_answer() {
 /// The answer of a step whose site did not answer in time says not to open that address again
 /// in this turn, then where to go next, whatever page the tab still shows: a turn told "Open the
 /// place's own site now (the venue's or the operator's)" opened the address that had just failed
-/// a second time, 20 seconds each (a local test, Nov 2). Only the words ask it; nothing refuses
-/// a second visit.
+/// a second time, 20 seconds each (a local test, Nov 2). navigate and open_tab then refuse that
+/// address for a while with the same hint (see
+/// `an_address_that_did_not_answer_is_not_opened_again_in_that_chat_for_ten_minutes`).
 #[test]
 fn a_site_that_did_not_answer_says_not_to_open_it_again() {
     let next = "Don't open this address again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
@@ -3231,6 +3294,276 @@ fn a_site_that_did_not_answer_says_not_to_open_it_again() {
         );
     }
     assert!(!SHARED_BROWSER_SCRIPT.contains("Open the place's own site now"));
+}
+
+/// The chat's browser turns, one run each, as runtime-agent holds them: the
+/// run's marker and approval state (routine browsing, as on the space's own
+/// machine) at the fixture's paths, started with what `chat` left.
+fn chat_browser_run(
+    fixture: &EmbeddedControllerFixture,
+    chat: Uuid,
+    now_ms: u64,
+) -> (SharedBrowserAgentControlGuard, JobCancelSignal) {
+    let cancel_signal = JobCancelSignal::new();
+    let mut guard = SharedBrowserAgentControlGuard::acquire_with_path(
+        fixture.authority_path.clone(),
+        fixture.approval_dir.clone(),
+        ApprovalStart::Routine,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        "page-target",
+        "Octo",
+        cancel_signal.clone(),
+        Duration::from_secs(60),
+    )
+    .expect("a chat's browser run");
+    guard.carry_unanswered_addresses(Some(chat), now_ms);
+    (guard, cancel_signal)
+}
+
+/// Ends a run the way a confirmed shutdown does.
+fn end_chat_browser_run(run: (SharedBrowserAgentControlGuard, JobCancelSignal)) {
+    let (guard, cancel_signal) = run;
+    cancel_signal.confirm_shared_browser_shutdown();
+    drop(guard);
+}
+
+/// An address whose site did not answer is not opened again in that chat's
+/// browser turns for 10 minutes: navigate and open_tab refuse it at once,
+/// before anything asks or loads, so nothing is sent to its site, with the
+/// hint the step that found it gave. In the same turn and in the chat's next
+/// one. Another chat's turns still try it, and so does the chat once 10
+/// minutes have passed. A local test, Nov 2: a tourism site that never
+/// answered was opened three times in one chat (20.6, 21.4 and 20.7 s), the
+/// second in the chat's next turn, the third by open_tab 64 s after the step's
+/// own "Don't open this address again in this turn".
+#[tokio::test]
+async fn an_address_that_did_not_answer_is_not_opened_again_in_that_chat_for_ten_minutes() {
+    let fixture = EmbeddedControllerFixture::new();
+    let chat = Uuid::new_v4();
+    let other_chat = Uuid::new_v4();
+    let step = |path: &str, body: JsonValue| {
+        fixture
+            .command_for(
+                "silent-site",
+                "page-target",
+                "POST",
+                path,
+                Some(&body.to_string()),
+            )
+            .output()
+            .expect("run the controller")
+    };
+    let navigate = |url: &str| step("/v1/navigate", json!({ "url": url }));
+    let open_tab = |url: &str| step("/v1/tabs/open", json!({ "url": url }));
+    // The loads that left the browser for the site.
+    let tries = || {
+        std::fs::read_to_string(&fixture.click_log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.starts_with("goto "))
+            .count()
+    };
+    let opened_tabs = || std::fs::read_to_string(&fixture.opened_tabs).unwrap_or_default();
+    let did_not_answer = "The site did not answer in time, so nothing was opened and the tab still shows the page it showed before. Don't open this address again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
+    let refused = "This address did not answer in Instafy's browser in the last 10 minutes, so it was not opened again. Don't open this address again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
+    let failure = |output: &Output| {
+        assert!(!output.status.success());
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+
+    // The chat's turn: the site does not answer, so the step opened nothing.
+    let run = chat_browser_run(&fixture, chat, unix_time_millis());
+    assert!(failure(&navigate("https://down.example/")).contains(did_not_answer));
+    assert_eq!(tries(), 1);
+    // The run keeps the address by its fingerprint, never the address itself.
+    let record = std::fs::read_to_string(fixture.approval_dir.join(UNANSWERED_ADDRESSES_FILE))
+        .expect("the run's record of addresses that did not answer");
+    assert!(!record.contains("down.example"), "{record}");
+    let fingerprint = approval_test_sha256("https://down.example/");
+    assert!(record.contains(&fingerprint), "{record}");
+    // The same address again, as written or with a fragment, in the same
+    // turn: refused at once, and nothing goes to the site.
+    for again in [
+        navigate("https://down.example"),
+        open_tab("https://down.example/#hours"),
+    ] {
+        let words = failure(&again);
+        assert!(words.contains(refused), "{words}");
+        assert!(!words.contains("did not answer in time"), "{words}");
+    }
+    assert_eq!(tries(), 1);
+    assert!(!opened_tabs().contains("octo-tab"), "{}", opened_tabs());
+    assert!(!fixture.approval_dir.join("request.json").exists());
+    end_chat_browser_run(run);
+
+    // The chat's next turn: still refused at once.
+    let run = chat_browser_run(&fixture, chat, unix_time_millis());
+    assert!(failure(&navigate("https://down.example/")).contains(refused));
+    assert_eq!(tries(), 1);
+    // Another address on the same site is its own.
+    assert!(failure(&navigate("https://down.example/en/")).contains(did_not_answer));
+    assert_eq!(tries(), 2);
+    end_chat_browser_run(run);
+
+    // Another chat's turn on this browser tries it.
+    let run = chat_browser_run(&fixture, other_chat, unix_time_millis());
+    assert!(failure(&navigate("https://down.example/")).contains(did_not_answer));
+    assert_eq!(tries(), 3);
+    end_chat_browser_run(run);
+
+    // The chat, 10 minutes on: tried again.
+    let ten_minutes_on = unix_time_millis() + UNANSWERED_ADDRESS_TTL.as_millis() as u64 + 1_000;
+    let run = chat_browser_run(&fixture, chat, ten_minutes_on);
+    assert!(
+        !fixture
+            .approval_dir
+            .join(UNANSWERED_ADDRESSES_FILE)
+            .exists()
+    );
+    assert!(failure(&navigate("https://down.example/")).contains(did_not_answer));
+    assert_eq!(tries(), 4);
+    end_chat_browser_run(run);
+}
+
+/// Only an address that waited for nothing for a while is refused later: a
+/// load a step began late in its time, and the address a redirect sent late
+/// in the step led to, had barely waited when the step stopped them. Both
+/// fail their step as a site that did not answer, and both are tried again;
+/// the address the step asked for, whose load waited through the late
+/// redirect, is refused. A page's own server picks where a redirect leads and
+/// when it sends it, so refusing its target would let it close any address it
+/// names (a real browser showed it: an address that answers in 3 s was refused
+/// for 10 minutes).
+#[tokio::test]
+async fn only_an_address_that_waited_is_refused_again() {
+    let fixture = EmbeddedControllerFixture::new();
+    let chat = Uuid::new_v4();
+    let navigate = |mode: &str, url: &str| {
+        fixture
+            .command_for(
+                mode,
+                "page-target",
+                "POST",
+                "/v1/navigate",
+                Some(&json!({ "url": url }).to_string()),
+            )
+            .output()
+            .expect("run the controller")
+    };
+    let tries = || {
+        std::fs::read_to_string(&fixture.click_log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.starts_with("goto "))
+            .count()
+    };
+    let did_not_answer = "The site did not answer in time, so nothing was opened";
+    let refused = "so it was not opened again";
+    let failure = |output: &Output| {
+        assert!(!output.status.success());
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+
+    let run = chat_browser_run(&fixture, chat, unix_time_millis());
+    // A load that began late in the step: it fails as one that did not
+    // answer, and is tried again.
+    for attempt in 1..=2 {
+        let words = failure(&navigate("late-silent-site", "https://slow.example/"));
+        assert!(
+            words.contains(did_not_answer) && !words.contains(refused),
+            "{attempt}: {words}"
+        );
+        assert_eq!(tries(), attempt);
+    }
+    // A redirect sent late in the step, to an address that had barely
+    // waited when the step stopped it.
+    let words = failure(&navigate(
+        "late-redirect-site",
+        "https://news.example/story",
+    ));
+    assert!(words.contains(did_not_answer), "{words}");
+    assert_eq!(tries(), 3);
+    end_chat_browser_run(run);
+
+    // The chat's next turn: the redirect's target is tried, and the address
+    // the step asked for is refused.
+    let run = chat_browser_run(&fixture, chat, unix_time_millis());
+    let words = failure(&navigate(
+        "silent-site",
+        "https://news.example/after-redirect",
+    ));
+    assert!(
+        words.contains(did_not_answer) && !words.contains(refused),
+        "{words}"
+    );
+    assert_eq!(tries(), 4);
+    let words = failure(&navigate("silent-site", "https://news.example/story"));
+    assert!(words.contains(refused), "{words}");
+    assert_eq!(tries(), 4);
+    end_chat_browser_run(run);
+}
+
+/// The script refuses only an address its run's record names within the last
+/// 10 minutes, and reads a record of another run, or one it cannot read, as
+/// naming none: the record only ever refuses, so a bad one costs one more try.
+#[test]
+fn only_the_runs_own_recent_record_refuses_an_address() {
+    let fixture = EmbeddedControllerFixture::new();
+    let path = fixture.approval_dir.join(UNANSWERED_ADDRESSES_FILE);
+    let record = |run_id: Uuid, at_ms: u64| {
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "ownerId": fixture.owner_id,
+            "runId": run_id,
+            "initiatorUserId": fixture.initiator_user_id,
+            "browserPageId": "page-target",
+            "addresses": [{ "address": approval_test_sha256("https://down.example/"), "atMs": at_ms }],
+        }))
+        .expect("record JSON")
+    };
+    // The run's files are cleared first, then the record is written, the way
+    // the guard starts a run with one.
+    let navigate_with = |record: Option<Vec<u8>>| {
+        fixture.prepare_authority("page-target", &["https://down.example"]);
+        if let Some(record) = record {
+            std::fs::write(&path, record).expect("write the record");
+            #[cfg(unix)]
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("protect the record");
+        }
+        let output = fixture
+            .command_for(
+                "silent-site",
+                "page-target",
+                "POST",
+                "/v1/navigate",
+                Some(&json!({ "url": "https://down.example/" }).to_string()),
+            )
+            .output()
+            .expect("run the controller");
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    let refused = "so it was not opened again";
+    let tried = "did not answer in time";
+    let now = unix_time_millis();
+    let ttl_ms = UNANSWERED_ADDRESS_TTL.as_millis() as u64;
+    assert!(navigate_with(Some(record(fixture.run_id, now - 60_000))).contains(refused));
+    for (case, record) in [
+        (
+            "older than 10 minutes",
+            record(fixture.run_id, now - ttl_ms - 1_000),
+        ),
+        ("another run's", record(Uuid::new_v4(), now - 60_000)),
+        ("unreadable", b"{not json".to_vec()),
+    ] {
+        let words = navigate_with(Some(record));
+        assert!(
+            words.contains(tried) && !words.contains(refused),
+            "{case}: {words}"
+        );
+    }
+    assert!(navigate_with(None).contains(tried));
 }
 
 /// A browser turn goes on past a step that failed on the page rather than on
@@ -3460,9 +3793,13 @@ async fn a_page_that_keeps_changing_ends_that_page_not_the_run() {
         second_words.contains("This page keeps changing"),
         "{second_words}"
     );
+    // It sends the turn to the site's own page for the task, one link away,
+    // before the next source: a turn told only "the next source" went back to
+    // a site that had not answered, while the planner's own page held still.
     assert!(
-        second_words
-            .contains("That ends this page, not the task: go on to the next source in this turn."),
+        second_words.contains(
+            "That ends this page, not the task: open this site's own page for it from a link here (its menu: a planner, a search page), else the next source in this turn."
+        ),
         "{second_words}"
     );
     assert!(
@@ -11323,7 +11660,9 @@ fn a_cookie_banners_accept_of_only_the_necessary_cookies_asks_once() {
 /// A prompt says what the step does in the words on the page: the text a
 /// control shows comes first and each of its names is cut on its own (before,
 /// the hidden name led and the pair was cut as one, so the shown text was
-/// lost), and a form step lists the fields it sends, never their values.
+/// lost), and a form step lists the fields it sends, never their values:
+/// every one of them while the label holds them (a seven-field form read
+/// "Pizza Toppings and 2 more", a local test, Nov 2), then "and 3 more".
 #[test]
 fn a_prompt_leads_with_the_shown_text_and_lists_the_fields_a_form_sends() {
     let fixture = EmbeddedControllerFixture::new();
@@ -11359,7 +11698,7 @@ fn a_prompt_leads_with_the_shown_text_and_lists_the_fields_a_form_sends() {
         ),
         (
             "submit-order-many",
-            "Customer name, Telephone, E-mail address, Pizza Size, Pizza Toppings and 2 more",
+            "Customer name, Telephone, E-mail address, Pizza Size, Pizza Toppings, Preferred delivery time, Delivery instructions",
         ),
     ] {
         let fixture = EmbeddedControllerFixture::new();
@@ -11382,6 +11721,72 @@ fn a_prompt_leads_with_the_shown_text_and_lists_the_fields_a_form_sends() {
             "{mode}"
         );
     }
+
+    // More fields than the label holds: as many whole names as fit, then how
+    // many more, within the approval's label bound.
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot_id = fixture.snapshot_id("submit-order-huge");
+    let body = json!({ "index": 0, "snapshotId": snapshot_id }).to_string();
+    let (output, requests) = fixture.run_with_decisions(
+        "submit-order-huge",
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&body),
+        &["https://example.test"],
+        &["deny"],
+    );
+    assert!(!output.status.success(), "ran although denied");
+    assert_eq!(requests.len(), 1);
+    let label = requests[0]["display"]["label"]
+        .as_str()
+        .expect("the prompt's label");
+    assert!(label.len() <= 240, "{label}");
+    assert!(
+        label.starts_with(
+            "Change something: Submit order \u{b7} Sends: Field 01 of a long job application form, Field 02 of a long job application form, "
+        ),
+        "{label}"
+    );
+    let (listed, more) = label.rsplit_once(" and ").expect("ends with how many more");
+    let named = listed
+        .rsplit_once("Sends: ")
+        .expect("the fields it sends")
+        .1
+        .split(", ")
+        .count();
+    let counted = more
+        .strip_suffix(" more")
+        .and_then(|count| count.parse::<usize>().ok())
+        .expect("how many more");
+    // The ones named and the ones counted are the form's 24.
+    assert_eq!(named + counted, 24, "{label}");
+
+    // A form that sends more fields than the page names (it names the first
+    // 24): every name it gave fits, and the prompt still says how many more
+    // the form sends, so it never reads as the whole form.
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot_id = fixture.snapshot_id("submit-order-long-form");
+    let body = json!({ "index": 0, "snapshotId": snapshot_id }).to_string();
+    let (output, requests) = fixture.run_with_decisions(
+        "submit-order-long-form",
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&body),
+        &["https://example.test"],
+        &["deny"],
+    );
+    assert!(!output.status.success(), "ran although denied");
+    assert_eq!(requests.len(), 1);
+    let named = (1..=24)
+        .map(|field| format!("Q{field}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert_eq!(
+        requests[0]["display"]["label"],
+        format!("Change something: Submit order \u{b7} Sends: {named} and 6 more")
+    );
 }
 
 /// The refusal that never asks may not send a form anywhere, not even to

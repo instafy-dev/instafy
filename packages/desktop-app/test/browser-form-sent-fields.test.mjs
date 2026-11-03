@@ -5,10 +5,11 @@ import test from "node:test";
 import { JSDOM, VirtualConsole } from "jsdom";
 
 // What a prompt says a form step sends (@instafy/browser-action-policy's
-// sentFieldNames, which the Shared Browser runs in the page before it asks):
-// the fields the submission sends something from, by the names the page
-// gives them, and never a value. A submit prompt that only named its button
-// left the person to guess what would leave the page.
+// sentFields, which the Shared Browser runs in the page before it asks): the
+// fields the submission sends something from, by the names the page gives
+// them, and never a value, with how many it sends in all. A submit prompt
+// that only named its button left the person to guess what would leave the
+// page.
 const require = createRequire(import.meta.url);
 const formSubmission = require("@instafy/browser-action-policy/formSubmission");
 
@@ -22,10 +23,15 @@ function page(body) {
   return dom.window;
 }
 
-function sentFieldNames(window, id, typed = false) {
+function sentFields(window, id, typed = false) {
   const rules = window.eval(`(${formSubmission.formSubmissionRulesInPage.toString()})()`);
-  // An array of the page's realm, copied into this one.
-  return [...rules.sentFieldNames(window.document.getElementById(id), typed)];
+  const sent = rules.sentFields(window.document.getElementById(id), typed);
+  // An answer of the page's realm, copied into this one.
+  return { names: [...sent.names], count: sent.count };
+}
+
+function sentFieldNames(window, id, typed = false) {
+  return sentFields(window, id, typed).names;
 }
 
 // A pizza order form, filled the way a person (or Octo) leaves it before the
@@ -61,7 +67,8 @@ const ORDER_FORM = `
 
 test("a submit names the fields it sends something from, never their values", () => {
   const window = page(ORDER_FORM);
-  const names = sentFieldNames(window, "submit");
+  const { names, count } = sentFields(window, "submit");
+  assert.equal(count, names.length, "Every field it sends is named");
   assert.deepEqual(names, [
     "Customer name",
     "Telephone",
@@ -141,6 +148,20 @@ test("a dialog form sends nothing, and an element with no form has no fields", (
   const window = page(`
     <dialog open><form method="dialog"><input name="n" value="v"><button id="close">Close</button></form></dialog>
     <button id="loose">Loose</button>`);
-  assert.deepEqual(sentFieldNames(window, "close"), []);
-  assert.deepEqual(sentFieldNames(window, "loose"), []);
+  assert.deepEqual(sentFields(window, "close"), { names: [], count: 0 });
+  assert.deepEqual(sentFields(window, "loose"), { names: [], count: 0 });
+});
+
+test("a form that sends more than 24 fields names the first 24 and says how many it sends in all", () => {
+  // A prompt that listed only the names would read the longer form as
+  // complete.
+  const window = page(`
+    <form method="post" action="/apply">
+      ${Array.from({ length: 30 }, (_, n) => `<label>Q${n + 1} <input name="q${n + 1}" value="answer ${n + 1}"></label>`).join("")}
+      <button id="apply">Apply</button>
+    </form>`);
+  const { names, count } = sentFields(window, "apply");
+  assert.deepEqual(names, Array.from({ length: 24 }, (_, n) => `Q${n + 1}`));
+  assert.equal(count, 30);
+  assert.ok(!names.join(" ").includes("answer"), names.join(" "));
 });

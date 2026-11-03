@@ -481,7 +481,13 @@ about. A control whose name says more than the text it shows is named by that
 text first ("Agree and close" (also called "Agree and close: Agree to our data
 processing and close")), each name cut on its own. A step that sends a form
 lists the fields it sends, by the names the page gives them and never their
-values ("Sends: Customer name, Telephone, E-mail address"). The sentence
+values ("Sends: Customer name, Telephone, E-mail address"): every one of them
+while the prompt's label holds them (its 240 bytes, after the step's category,
+the tab's name and the control's), whole, since the prompt wraps. The page
+names a form's first 24 fields and counts the rest, so a form that sends more
+fields than that, or whose names are longer than the label holds, ends with
+how many more it sends ("and 3 more"), never as a list that looks whole. The
+sentence
 names the other site a step is bound to, as the chat's prompt row does: a
 step that sends a form there says it goes there ("It goes to
 pay.example."), and any other says it may ("It may go to carris.pt."): a
@@ -853,8 +859,9 @@ error page such as a 504) sends the turn to the place's own site at once, in the
 same turn, and then to another official source; facts from a place's
 own page, and a route from the operator's journey planner with its stations
 chosen, for the day and time the person travels (a daytime hour when they gave
-none) and saying which, not a listing or a kiosk page; "not checked" on
-anything not read this turn; a comparison's models, those a page's menu names
+none) and saying which, not a listing or a kiosk page; "not checked", or
+nothing, for anything not read this turn (how far, how to get there, what is
+best included); a comparison's models, those a page's menu names
 included, each read on
 its own page; and a cookie banner's refusal, so the banner does not cover the
 page. A sign-in, a bot check, a paywall or a refused read ends that page, never
@@ -1201,7 +1208,11 @@ answer ends in a page (a comparison, prices, a route) is `browser_then_build`
 from the first message too, while research answered in a reply (facts, a
 price, opening hours, reviews) stays with Octo, whose turn reads public pages
 itself. A request to make something with no site to use first ("on a map",
-"put this on a page") stays with Octo: a browser turn cannot make it. A message that names the browser still stays with Octo
+"put this on a page") stays with Octo: a browser turn cannot make it. A
+message that carries on the chat's browser work goes on there, whether or not
+that work found its answer, and a bare "keep going" carries on what the chat
+left open (what its replies or a page here mark not checked), never a change
+the person stopped or undid. A message that names the browser still stays with Octo
 when the browser turn could not do it alone: it sees only the person's words
 and the chat's earlier browser turns, so a message that needs what this space
 or another chat holds, a site that runs in this space, or a message that says
@@ -1289,7 +1300,27 @@ same site again, nor "Open the place's own site now", which a turn read as the
 site that had just failed and opened again, nor the page the tab still shows,
 which was read as that step's page, nor the click's
 own timeout. Its line reads as the step it tried ("Tried opening <site>" for a
-navigation). Whether the site answered is judged by the load's own request,
+navigation). The address the load asked for (and the one a redirect led it to,
+when it was one) is then not opened again in that chat's browser turns for 10
+minutes: `navigate` and `open_tab` refuse it at once, before any prompt or
+load, so nothing is sent to its site, with "This address did not answer in
+Instafy's browser in the last 10 minutes, so it was not opened again." and the
+same hint. A turn had opened such an address again in the chat's next turn,
+and once more after the hint, 20 seconds each. Only an address that waited at
+least 10 seconds for nothing is kept: the address the load asked for by the
+whole load's wait, its redirects included, and the one its last redirect led
+to by that address's own. A load a step began late in its time, or a
+redirect's target that a redirect sent late in the step led to, had barely
+waited, so its site may well answer: the step fails the same way, and the
+address is tried again. A page's own server picks both where a redirect leads
+and when it sends it, so it could otherwise close any address it names. Only
+these two steps are refused: a link or form on a page, and the person's own
+navigation, never. The
+run's approval directory keeps these addresses as fingerprints
+(`unanswered.json`, the SHA-256 of each address without its fragment, at most
+32, with when), and runtime-agent carries them, in memory, into the chat's
+next runs on the same browser and into no other chat's: a runtime that starts
+again carries none. Whether the site answered is judged by the load's own request,
 never by the tab's address, which a page's script may change while the load
 waits. A site that answered as the step stopped waiting has its page, which is
 read as it is, and a load the browser does not confirm stopped fails as a busy
@@ -1311,7 +1342,10 @@ hand-off on a page too busy to highlight in time leaves no prompt, and a load
 of a site that does not answer is stopped (a navigation, from a blank tab or
 from a page that had loaded, after about 20 seconds; a link clicked on a page
 once the click stops waiting, after about 15): the next step reaches the
-browser at once, and the site's late answer never loads. A navigation the site
+browser at once, the site's late answer never loads, and the same address by
+`navigate` or `open_tab` is then refused in well under a second without
+asking the site again, while the target of a redirect the site sent late in
+the step still opens. A navigation the site
 answers 404 or 410 for fails within a second or two, even when the rest of its
 not-found page would come later than a step's time (see below).
 
@@ -1520,7 +1554,11 @@ steps until a step on a fresh snapshot's control, or one that moves to another
 page or tab, goes through (a look at the page or a scroll between them does
 not count). The second answers that the page keeps changing, which ends that
 page, not the run, so a page that never holds still (a live count, a ticker in
-a link) sends the turn on to the next source instead of a loop of snapshots.
+a link) sends the turn on instead of a loop of snapshots: to the site's own
+page for the task, from a link on the page (its menu: a planner, a search
+page), else to the next source. A home page's planner form that kept changing
+had sent a turn back to a site that had not answered, while the planner's own
+page, linked from that home page, held still.
 Once the person has answered the step's prompt, the page
 elsewhere may have changed by itself while they read it (a carousel's slide, a
 clock, a live count), so the step checks the control they were asked about
@@ -2399,12 +2437,26 @@ unless the policy is `"covered"`.
   posts them as one note of the turn
   (`details.browserFindings: {pages, pagesRead}`), where the controller reads
   them back after the reply for the record. Studio's Details leaves that note
-  out. Unless a finding says a page stopped it, the person reads "Finished
-  in the browser." in place of the browser turn's own words: the building turn
-  says what it made a moment later, and the browser turn's account of what it
-  could not build ("this turn is read-only") is no answer. Those words go into
-  the note ahead of the findings, so the record still gives the building turn
-  what the browser turn did not read. The fixtures in
+  out. Unless a finding says a page stopped it, the browser turn posts no
+  words of its own, only its line and Details, and shows none while it writes
+  them either (no reply draft): the building turn says what it made a moment
+  later, and the browser turn's account of what it could not build ("this
+  turn is read-only") is no answer. Those words go into the note ahead of the
+  findings, and a turn that posted none has that note as its reply in the
+  record, so the record still gives the building turn what the browser turn
+  did not read. A controller that reads the note so says so on every lease
+  (`browser_hand_back_reads_note: true`). An older controller refuses the
+  hand-back of a turn that posted no reply, so a runtime leased by one, such
+  as a desktop app's own runtime ahead of its controller, posts "Finished in
+  the browser." in place of the words, as earlier runtimes did. So does a turn
+  whose every page stopped it and that wrote no words of its own: no hand-back
+  follows a turn that read no page. The browser turn is told that the
+  building turn cannot open the browser, so it reads what the request needs
+  before it ends:
+  each item's own page and, for reviews, the review pages a page it read links
+  to, else a reviewer's own site. The building turn cites a page only for a
+  fact listed under it; a place or claim the reply names with no page under it
+  is read on its own page or left out. The fixtures in
   `packages/runtime-controller/src/browser_hand_back_fixtures.json` pin the
   three halves together.
   One browser turn hands back without a building card or a page read: one that

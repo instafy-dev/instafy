@@ -46,8 +46,8 @@ type Options = {
  * finishes, so Octo keeps building with what the browser found (see
  * browserHandBackCandidate for exactly when). The prompt is fixed; the
  * findings reach Octo from the controller as quoted page data. A hand-back
- * the controller refuses shows nothing: the browser turn's reply stays the
- * last word, and the person can write as usual.
+ * the controller refuses shows nothing: the browser turn stays the last word,
+ * and the person can write as usual.
  */
 export function useBrowserHandBack(options: Options) {
   const latest = useRef(options);

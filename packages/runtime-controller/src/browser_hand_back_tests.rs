@@ -961,6 +961,93 @@ async fn finding_lines_in_the_details_note_reach_the_building_turn() -> anyhow::
     .await
 }
 
+/// A browser turn whose findings go back to the building turn posts no words
+/// of its own (runtime-agent `move_findings_into_details`): its reply is
+/// blank, which Studio leaves out, and its Details note holds its words ahead
+/// of its findings. The hand-back still goes, with that note as the record's
+/// whole reply, never a message the turn streamed on its way, and a building
+/// job's lease lists the turn the same way.
+#[tokio::test]
+async fn a_browser_turn_that_posted_no_words_hands_back_its_note() -> anyhow::Result<()> {
+    with_chain("browser-hand-back-no-words", |chain| {
+        Box::pin(async move {
+            let words = "I read the coastal timetable. The ferry's reviews are not checked: its page links to two, which I did not open.";
+            let lines = r#"{"url": "https://rail.example.org/timetable", "title": "Coastal line timetable", "facts": ["The 08:05 express arrives at 10:16."]}"#;
+            let note = format!("{words}\n\n{lines}");
+            let (_, browser_job) = chain.card_and_running_browser_turn().await?;
+            chain
+                .stream(&browser_job, "Opening the timetable first.")
+                .await?;
+            chain
+                .post(
+                    &browser_job,
+                    &note,
+                    "status",
+                    json!({
+                        "kind": "agent_message",
+                        "browserFindings": { "pages": 1, "pagesRead": 1 },
+                    }),
+                )
+                .await?;
+            chain.finish(&browser_job, Some(""), "succeeded").await?;
+
+            let shown: String = chain
+                .pool
+                .get()
+                .await?
+                .query_one(
+                    "select content from conversation_messages
+                      where conversation_id = $1 and metadata #>> '{jobId}' = $2
+                        and role = 'assistant' and metadata #>> '{outcome}' = 'succeeded'",
+                    &[&chain.conversation_id, &browser_job.to_string()],
+                )
+                .await?
+                .get(0);
+            assert_eq!(shown, "");
+
+            // A building job's lease lists it with its note as its reply.
+            let agent = chain.payload_metadata(&browser_job).await?["agent"].clone();
+            let agent_id = agent["id"].as_str().and_then(|id| Uuid::parse_str(id).ok());
+            let agent_handle = agent["handle"].as_str().map(str::to_string);
+            let mut client = chain.pool.get().await?;
+            let transaction = client.transaction().await?;
+            let listed = crate::browser_hand_back::browser_turns_since(
+                &transaction,
+                &chain.conversation_id,
+                &Uuid::new_v4(),
+                &json!({ "metadata": {} }),
+                None,
+                agent_id.as_ref(),
+                agent_handle.as_deref(),
+            )
+            .await
+            .map_err(|error| controller_error("browser turns since", error))?;
+            transaction.commit().await?;
+            drop(client);
+            let turn = listed
+                .turns
+                .iter()
+                .find(|turn| turn["browserJobId"] == json!(browser_job.to_string()))
+                .context("the browser turn is listed")?;
+            assert_eq!(turn["reply"], json!(note), "{turn}");
+
+            let response = chain
+                .hand_back(&chain.owner, &browser_job, json!({}))
+                .await
+                .map_err(|error| controller_error("hand-back", error))?;
+            let hand_back_job = chain.job_of(&response).await?;
+            let record = &chain.payload_metadata(&hand_back_job).await?[HAND_BACK_KEY];
+            assert_eq!(record["reply"], json!(note), "{record}");
+            assert_eq!(
+                record["findings"][0]["url"],
+                "https://rail.example.org/timetable"
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
 /// A hand-back asks what Studio asks, and only that: the controller's own
 /// words, with no attachments. A hand-back costs nothing unless it ends with
 /// a reply (crate::system_turns), so a request of the person's own must not

@@ -82,7 +82,7 @@ export function isBrowserNoticePrompt(message: Pick<ChatMessage, "role" | "metad
 /**
  * Such a prompt whose dispatch failed: the controller never took it, so it
  * shows nothing. A card keeps its button with the error; a refused hand-back
- * leaves the browser turn's reply as the last word.
+ * leaves the browser turn as the last word.
  */
 export function isUnsentBrowserNoticePrompt(message: Pick<ChatMessage, "id" | "role" | "metadata">): boolean {
   return isUnsentBrowserRequestNotice(message) ||
