@@ -25,6 +25,17 @@
 //   `frame-ancestors 'self' <studio origin>` and the bind client trusts no other parent. The label is a bearer that
 //   also leaks in Origin headers, so without this any page that framed the preview URL could act as its host. A
 //   preview without a recorded Studio origin is still shown, but its page takes no host messages at all.
+//
+// The card. A page someone asked for ends with its card: run in the site's folder, `instafy preview open --start`
+// serves the site with `serve --preview`, keeps it serving after the turn and posts the card. So in a space `init`
+// names that command as its next step and a check that passes ends with it, until a preview of the space shows the
+// site. The command serves a site only from inside the space's workspace (the CLI's resolveWorkspaceRoot:
+// WORKSPACE_PROJECT_DIR, else WORKSPACE_DIR/<space>); anywhere else the binder runs on its own and names no card.
+// Whether a preview shows a folder is read from the same state file: `instafy preview open` records with each preview
+// its space and the folder its site is served from (`siteDir`, relative to the space's workspace), which the runtime
+// also reads to take a card's picture again after a turn changes that folder. That folder is the one the CLI runs in
+// when it is given --serve-cmd, else the one the process on the port runs in, so in a space the command `serve
+// --preview` prints for its card runs in the folder it serves, with --serve-cmd.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -111,4 +122,75 @@ export function previewTunnelReader(file = defaultPreviewStateFile()) {
     }
     return previews;
   };
+}
+
+const OPEN_CARD = "instafy preview open --title '<short title>' --serve-cmd 'instafy bind serve . --port {port} --preview' --start --json";
+
+const clean = (value) => (typeof value === "string" && value.trim() ? value.trim() : null);
+
+/** The folder's real path, or the path itself when it cannot be resolved. */
+function realOr(dir) {
+  try {
+    return fs.realpathSync(path.resolve(String(dir)));
+  } catch {
+    return path.resolve(String(dir));
+  }
+}
+
+/** A word the shell reads as it is: the text, or the text in single quotes. */
+export function shellWord(text) {
+  const word = String(text);
+  return /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`;
+}
+
+/** `command` said from where the binder ran, for the site in `dir`: in a subshell that runs it in that folder, so a
+ *  command chained after it still runs here. */
+export function inFolder(dir, command) {
+  const where = String(dir || ".");
+  return path.resolve(where) === path.resolve(".") ? command : `(cd ${shellWord(where)} && ${command})`;
+}
+
+/** The card's command for the site in `dir`, said from where `init` or `check` ran. The turn writes the title. */
+export function cardCommand(dir) {
+  return inFolder(dir, OPEN_CARD);
+}
+
+/** Whether `dir` is in the space's workspace, where the card's command serves a site from. */
+export function inSpace(dir, env = process.env) {
+  const root = clean(env.WORKSPACE_PROJECT_DIR) ?? clean(env.WORKSPACE_DIR);
+  if (root === null) return false;
+  const rel = path.relative(realOr(root), realOr(dir));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+
+/** The workspace a preview of `space` has its folder in, as the CLI resolves it (resolveWorkspaceRoot), or null when it
+ *  is not this space's. One machine can run several spaces as one user (a desktop runtime): they share the CLI's
+ *  record, and another space's preview is never this site's, whatever its folder is called. This space is the one the
+ *  CLI reads from the environment (resolveProject: SPACE_ID, else CONTROLLER_SPACE_ID). WORKSPACE_PROJECT_DIR is the
+ *  space's own folder, so without its id no preview is placed there; WORKSPACE_DIR/<space> places each in its own. */
+function workspaceOf(env, space) {
+  const own = clean(env.SPACE_ID) ?? clean(env.CONTROLLER_SPACE_ID);
+  if (typeof space !== "string" || (own !== null && space !== own)) return null;
+  const project = clean(env.WORKSPACE_PROJECT_DIR);
+  if (project) return space === own ? project : null;
+  const base = clean(env.WORKSPACE_DIR);
+  return base && /^[\w-]+$/.test(space) ? path.join(base, space) : null;
+}
+
+/** Whether a preview the CLI opened for this space shows the site in `dir`: one it recorded with that folder as the
+ *  folder its site is served from. */
+export function previewShows(dir, { env = process.env, file = defaultPreviewStateFile() } = {}) {
+  let previews;
+  try {
+    previews = JSON.parse(fs.readFileSync(file, "utf8"))?.previews;
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(previews)) return false;
+  const folder = realOr(dir);
+  return previews.some((entry) => {
+    if (!entry || typeof entry !== "object" || typeof entry.siteDir !== "string") return false;
+    const root = workspaceOf(env, entry.projectId);
+    return root !== null && realOr(path.resolve(root, entry.siteDir)) === folder;
+  });
 }

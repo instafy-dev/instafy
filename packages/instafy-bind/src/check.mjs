@@ -368,8 +368,9 @@ export function checkValues(dir) {
 }
 
 /** The CLI's lines and exit code: 0 every item shown and every value fine, 1 an item missing or a value to fix, 2
- *  nothing to check. */
-export function checkReport(dir, expect, { json = false } = {}) {
+ *  nothing to check. `card`: the command that serves the site and posts its card, while no preview shows it; a check
+ *  that passes ends with it. */
+export function checkReport(dir, expect, { json = false, card = null } = {}) {
   const result = checkSite(dir, expect);
   const values = checkValues(dir);
   const bad = result.missing.length > 0 || values.problems.length > 0;
@@ -377,7 +378,8 @@ export function checkReport(dir, expect, { json = false } = {}) {
     const message = 'nothing to check: pass --expect "<item>,<item>" (each item the request named) or put "expect": [...] in data.json';
     return { exit: 2, lines: [json ? JSON.stringify({ ok: false, error: message, values }) : message, ...(json ? [] : values.notes.map((n) => `NOTE: ${n}`))] };
   }
-  if (json) return { exit: bad ? 1 : 0, lines: [JSON.stringify({ ok: !bad, ...result, values })] };
+  const next = !bad && card ? `post its card: ${card}` : null;
+  if (json) return { exit: bad ? 1 : 0, lines: [JSON.stringify({ ok: !bad, ...result, values, ...(next ? { next } : {}) })] };
   const lines = [];
   if (result.missing.length) {
     lines.push(`MISSING: the request named ${result.missing.length} item(s) the site does not show: ${result.missing.join(", ")}.`);
@@ -394,5 +396,6 @@ export function checkReport(dir, expect, { json = false } = {}) {
   } else {
     lines.push('No items to check: pass --expect "<item>,<item>" (each item the request named) or put "expect": [...] in data.json.');
   }
+  if (next) lines.push(`next: ${next}`);
   return { exit: bad ? 1 : 0, lines };
 }
