@@ -461,19 +461,22 @@ describe("StudioSidebar organization navigation", () => {
 
   it.each([false, true])("uses a shell-owned context header without rendering duplicate breadcrumb controls (collapsed=%s)", async (collapsed) => {
     await render({ navigationHeaderExternal: true, collapsed });
-    const header = container.querySelector('[data-testid="sidebar-team-header"]')!;
-    expect(header.classList.contains("h-12")).toBe(true);
-    expect(header.querySelector('[data-testid="sidebar-drawer-toggle"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-team-header"]')).toBeNull();
+    const footer = container.querySelector('[data-testid="sidebar-navigation-footer"]')!;
+    expect(footer.querySelector('[data-testid="sidebar-drawer-toggle"]')).not.toBeNull();
+    expect(footer.closest('[data-testid="sidebar-context-scroll"]')).toBeNull();
     expect(document.querySelector('[data-testid="sidebar-navigation-path"]')).toBeNull();
     expect(document.querySelector('[data-testid="sidebar-team-menu-trigger"]')).toBeNull();
     expect(document.querySelector('[data-testid="sidebar-space-button"]')).toBeNull();
     expect(headerPortal.children).toHaveLength(0);
     const newChat = container.querySelector<HTMLButtonElement>('[data-testid="sidebar-new-chat"]')!;
+    expect(container.querySelectorAll('[data-testid="sidebar-new-chat"]')).toHaveLength(1);
     expect(newChat.getAttribute("aria-label")).toBe("New chat");
-    expect(newChat.closest('[data-testid="sidebar-team-header"]')).toBe(collapsed ? null : header);
+    expect(newChat.closest('[data-testid="sidebar-context-scroll"]')).not.toBeNull();
     // One press makes the chat, as the tab bar's + does: no Public or Private menu.
     await click("sidebar-new-chat");
     expect(fixture.onStartNewConversation).toHaveBeenCalledTimes(1);
+    expect(onSelect).not.toHaveBeenCalled();
     expect(document.body.textContent).not.toContain("Private chat");
   });
 
@@ -481,26 +484,86 @@ describe("StudioSidebar organization navigation", () => {
     ["chat", false], ["chat", true],
     ["settings", false], ["settings", true],
     ["code", false], ["automations", true],
-  ] as const)("creates a chat from the external-header sidebar on %s while keeping its fixed toggle (collapsed=%s)", async (activePanel, collapsed) => {
+  ] as const)("groups New chat with Chats and keeps the footer toggle on %s (collapsed=%s)", async (activePanel, collapsed) => {
     fixture.navigationPage = activePanel === "settings" ? "account" : "workspace";
     await render({ navigationHeaderPortalTarget: headerPortal, collapsed, activePanel,
       hideContext: usesGlobalNavigationContext(fixture.navigationPage, fixture.activeProjectId),
     });
-    const header = container.querySelector('[data-testid="sidebar-team-header"]')!;
-    const toggle = header.querySelector('[data-testid="sidebar-drawer-toggle"]')!;
+    expect(container.querySelector('[data-testid="sidebar-team-header"]')).toBeNull();
+    const footer = container.querySelector('[data-testid="sidebar-navigation-footer"]')!;
+    expect(footer.querySelector('[data-testid="sidebar-drawer-toggle"]')).not.toBeNull();
+    const chatRow = container.querySelector('[data-testid="sidebar-chat-row"]')!;
+    const chats = chatRow.querySelector('[data-testid="sidebar-nav-chat"]')!;
     const newChat = container.querySelector<HTMLButtonElement>('[data-testid="sidebar-new-chat"]')!;
-    expect(toggle.parentElement?.classList.contains("w-[calc(4rem-1px)]")).toBe(true);
+    expect(container.querySelectorAll('[data-testid="sidebar-new-chat"]')).toHaveLength(1);
     expect(newChat.getAttribute("aria-label")).toBe("New chat");
-    expect(newChat.classList.contains("!min-h-11")).toBe(true);
-    expect(newChat.textContent).toBe(collapsed ? "" : "New chat");
-    expect(newChat.closest('[data-testid="sidebar-team-header"]')).toBe(collapsed ? null : header);
+    expect(newChat.textContent).toBe("");
+    expect(newChat.closest('[data-testid="sidebar-context-scroll"]')).not.toBeNull();
     if (collapsed) {
-      expect(newChat.parentElement?.previousElementSibling).toBe(header);
-      expect(newChat.closest('[data-testid="sidebar-context-scroll"]')).toBeNull();
+      expect(newChat.closest("li")?.previousElementSibling).toBe(chatRow);
+      expect(chatRow.contains(newChat)).toBe(false);
+    } else {
+      expect(newChat.parentElement).toBe(chatRow);
+      expect(chats.parentElement).toBe(chatRow);
     }
+    expect(chats.contains(newChat)).toBe(false);
+    expect(newChat.contains(chats)).toBe(false);
     await click("sidebar-new-chat");
     expect(fixture.onStartNewConversation).toHaveBeenCalledTimes(1);
     expect(fixture.onToggleSidebar).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("keeps browsing Chats and creating a chat separate (collapsed=%s)", async (collapsed) => {
+    const onBrowseAll = vi.fn();
+    await render({ navigationHeaderExternal: true, collapsed, onOpenConversationHistory: onBrowseAll });
+    await click("sidebar-nav-history");
+    expect(onBrowseAll).toHaveBeenCalledOnce();
+    expect(fixture.onStartNewConversation).not.toHaveBeenCalled();
+    await click("sidebar-new-chat");
+    expect(fixture.onStartNewConversation).toHaveBeenCalledOnce();
+    expect(onBrowseAll).toHaveBeenCalledOnce();
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(container.querySelector("button button")).toBeNull();
+  });
+
+  it("keeps the external-header footer toggle mounted and focused across both widths", async () => {
+    const props = { navigationHeaderExternal: true };
+    await render(props);
+    const nav = container.querySelector('[data-testid="sidebar-context-navigation"]')!;
+    const footer = container.querySelector('[data-testid="sidebar-navigation-footer"]')!;
+    const toggle = footer.querySelector<HTMLButtonElement>('[data-testid="sidebar-drawer-toggle"]')!;
+    expect(footer.parentElement).toBe(nav);
+    expect(footer.closest('[data-testid="sidebar-context-scroll"]')).toBeNull();
+    expect(toggle.getAttribute("aria-label")).toBe("Collapse sidebar");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    await act(async () => toggle.focus());
+    await click("sidebar-drawer-toggle");
+    expect(fixture.onToggleSidebar).toHaveBeenCalledOnce();
+    await render({ ...props, collapsed: true });
+    expect(container.querySelector('[data-testid="sidebar-context-navigation"]')).toBe(nav);
+    expect(container.querySelector('[data-testid="sidebar-navigation-footer"]')).toBe(footer);
+    expect(container.querySelectorAll('[data-testid="sidebar-drawer-toggle"]')).toHaveLength(1);
+    expect(container.querySelector('[data-testid="sidebar-drawer-toggle"]')).toBe(toggle);
+    expect(document.activeElement).toBe(toggle);
+    expect(toggle.getAttribute("aria-label")).toBe("Expand sidebar");
+    expect(toggle.getAttribute("title")).toBe("Expand sidebar");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await render(props);
+    expect(container.querySelector('[data-testid="sidebar-drawer-toggle"]')).toBe(toggle);
+    expect(document.activeElement).toBe(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it.each([false, true])("keeps New chat available when the navigation has no Chats item (collapsed=%s)", async (collapsed) => {
+    await render({ navigationHeaderExternal: true, collapsed, items: [] });
+    expect(container.querySelector('[data-testid="sidebar-chat-row"]')).toBeNull();
+    const scroll = container.querySelector('[data-testid="sidebar-context-scroll"]')!;
+    const newChat = container.querySelector('[data-testid="sidebar-new-chat"]')!;
+    expect(container.querySelectorAll('[data-testid="sidebar-new-chat"]')).toHaveLength(1);
+    expect(newChat.closest("li")).toBe(scroll.firstElementChild);
+    await click("sidebar-new-chat");
+    expect(fixture.onStartNewConversation).toHaveBeenCalledOnce();
     expect(onSelect).not.toHaveBeenCalled();
   });
 

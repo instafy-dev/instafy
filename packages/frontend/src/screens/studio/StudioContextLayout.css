@@ -33,6 +33,20 @@
 /* Subtract the header's leading inset and 8px gap, including Electron's inset.
    Keep this column even when navigation collapses so the pickers remain usable. */
 .studio-desktop-context-column { width: calc(var(--studio-context-column-width) - var(--studio-context-inset) - 8px); min-width: 0; flex: none; display: flex; align-items: center; gap: 4px; }
+/* Keep the space picker and Search together, with a quiet boundary before
+   pane headings or tabs. This is inset so it does not cut through the curve. */
+.studio-context-header:not([data-home-overview="true"]):not([data-search-open="true"]) .studio-desktop-context-column { position: relative; }
+.studio-context-header:not([data-home-overview="true"]):not([data-search-open="true"]) .studio-desktop-context-column::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  right: -8px;
+  top: 50%;
+  height: 24px;
+  width: 1px;
+  transform: translateY(-50%);
+  background: var(--studio-navigation-divider);
+}
 .studio-context-slot { min-width: 0; flex: 0 1 auto; }
 .studio-desktop-context { display: flex; align-items: center; gap: 4px; min-width: 0; }
 /* Keep spare column width outside the control; long names can still shrink. */
@@ -100,9 +114,15 @@
    Organization context adds tonal separation and the selected team's bridge;
    Home, account and search keep a single neutral navigation surface. */
 .studio-context-layout[data-wide="true"] {
+  /* Wider names must not force a second header row. Grow navigation and its
+     matching context column together, preserving content at medium widths. */
+  --studio-context-column-width: 15rem;
   --studio-navigation-divider: var(--color-slate-200);
   --studio-navigation-surface: var(--color-slate-50);
   --studio-organization-surface: var(--color-slate-50);
+}
+@media (min-width: 1280px) {
+  .studio-context-layout[data-wide="true"] { --studio-context-column-width: 17rem; }
 }
 .dark .studio-context-layout[data-wide="true"] {
   --studio-navigation-divider: var(--color-studio-dark-divider);

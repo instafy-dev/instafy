@@ -1455,6 +1455,17 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
       if (!probe.listening) {
         throw await notListeningError(port, sitePath, probe);
       }
+      // A page that is not there gets no card: the card would open a "not found" page, and a server started for it
+      // would keep serving its folder under a card nobody uses.
+      if (probe.status === 404 || probe.status === 410) {
+        const stopped = site?.started ? await stopSite(site.started.pid, site.started.command ?? readProcessCommandLine(site.started.pid)) : false;
+        throw new PreviewCommandError(
+          `The page at http://127.0.0.1:${port}${sitePath} answered HTTP ${probe.status}: there is no page there, so no card was posted` +
+            `${stopped ? ", and the server this command started was stopped" : ""}. ` +
+            "Run the command inside the site's own folder (the one with its page), or pass --path with a page the site has.",
+          PREVIEW_EXIT_NOT_LISTENING,
+        );
+      }
       // Read before anything else changes on the port: the process listening now is the one to restart later.
       const { serve, note } = resolvePreviewServe({
         port,

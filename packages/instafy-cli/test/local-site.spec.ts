@@ -1,9 +1,14 @@
 // The port rules and the loopback probe every `instafy preview` command shares.
+import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
+import os from "node:os";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { afterAll, describe, expect, it } from "vitest";
 import { PREVIEW_EXIT_PORT_NOT_ALLOWED, PreviewCommandError, noAnswerMessage, parsePreviewPort, probeLocalSite, reservedPreviewPorts } from "../src/local-site.js";
+import { previewOpen } from "../src/preview.js";
 
 const closers: Array<() => void> = [];
 afterAll(() => {
@@ -139,5 +144,56 @@ describe("probeLocalSite", () => {
       "::1",
     );
     expect(await probeLocalSite(port, "/")).toMatchObject({ listening: true, status: 200, host: "[::1]" });
+  });
+});
+
+// A card's command run in a folder with no page (a space's top-level folder) posted a card whose page answered 404,
+// and the server it started kept serving that folder under a card nobody used. `open` reads the probe's answer too:
+// a page that is not there gets no card, and the server is never asked for a preview.
+describe("a page that answers 404", () => {
+  it("gets no card: open says so before it asks the server for anything", async () => {
+    const requests: string[] = [];
+    const controllerPort = await listen(
+      http.createServer((req, res) => {
+        requests.push(`${req.method} ${req.url}`);
+        res.writeHead(500);
+        res.end();
+      }),
+      "127.0.0.1",
+    );
+    const sitePort = await listen(
+      http.createServer((_req, res) => {
+        res.writeHead(404);
+        res.end("Not found");
+      }),
+      "127.0.0.1",
+    );
+    // the CLI's record of its previews lives under HOME: a home of the test's own
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-home-"));
+    const saved = process.env.HOME;
+    process.env.HOME = home;
+    let failure: unknown = null;
+    try {
+      await previewOpen({
+        project: randomUUID(),
+        controllerUrl: `http://127.0.0.1:${controllerPort}`,
+        controllerToken: "test-token",
+        port: sitePort,
+        title: "A page",
+        thumbnail: false,
+      });
+    } catch (error) {
+      failure = error;
+    } finally {
+      process.env.HOME = saved;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+    expect(failure).toBeInstanceOf(PreviewCommandError);
+    expect((failure as PreviewCommandError).exitCode).toBe(2);
+    expect((failure as Error).message).toBe(
+      `The page at http://127.0.0.1:${sitePort}/ answered HTTP 404: there is no page there, so no card was posted. ` +
+        "Run the command inside the site's own folder (the one with its page), or pass --path with a page the site has.",
+    );
+    expect(requests).toEqual([]);
   });
 });

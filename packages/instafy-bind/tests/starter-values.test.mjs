@@ -495,3 +495,121 @@ test("site.within: only a value the page shows is within a limit; everything unk
   // the generic check reads a seed fact the way the page draws it
   for (const [what, value] of cases) if (!value || !value.prov) assert.equal(knownNumber(value), site.known(value), `check and page agree: ${what}`);
 });
+
+// A blank page wrote its cards as site.h("article", { className: "card" }, …) and its links as site.h("a", { href,
+// target: "_blank", rel: "noopener" }, "Official site"). site.h read only class, id, text, attrs and on, so the cards
+// were unstyled and the links plain text, while the reply said the page links to both sites.
+test("site.h takes className and plain attributes, so a link is a link, and never sets what could run script", async () => {
+  const { site } = await draw("blank", null);
+  const errors = [];
+  const listeners = [];
+  const saved = { error: console.error, listen: Element.prototype.addEventListener };
+  console.error = (...args) => errors.push(args.join(" "));
+  Element.prototype.addEventListener = function (type, fn) { listeners.push([this.tagName, type, typeof fn]); };
+  try {
+    const card = site.h("article", { className: "card", "data-ref": "visit:hours" },
+      site.h("a", { href: "https://shop.example/en/", target: "_blank", rel: "noopener" }, "Official site"));
+    assert.equal(card.className, "card");
+    assert.equal(card.getAttribute("data-ref"), "visit:hours");
+    const link = card.children[0];
+    assert.deepEqual([link.tagName, link.attrs.href, link.attrs.target, link.attrs.rel, link.textContent],
+      ["A", "https://shop.example/en/", "_blank", "noopener", "Official site"]);
+    // an address on the page itself, mail and phone; class and className together; a second argument that is a child
+    assert.equal(site.h("a", { href: "#hours" }).attrs.href, "#hours");
+    assert.equal(site.h("a", { href: "mailto:hello@shop.example" }).attrs.href, "mailto:hello@shop.example");
+    assert.equal(site.h("a", { href: "tel:+15550100" }).attrs.href, "tel:+15550100");
+    assert.equal(site.h("p", { "class": "cap", className: "trust" }).className, "cap trust");
+    assert.equal(site.h("p", "Every day, 9:00–19:30").textContent, "Every day, 9:00–19:30");
+    assert.deepEqual(errors, []);
+
+    // what could run script is left out, through attrs too, and said in the console (`instafy preview check` lists it)
+    const refused = [
+      { href: "javascript:alert(1)" },
+      { href: " JaVaScRiPt:alert(1)" },
+      { attrs: { href: "javascript:alert(1)" } },
+      { src: "data:text/html,<script>alert(1)</script>" },
+      { onclick: "alert(1)" },
+      { attrs: { onmouseover: "alert(1)" } },
+      { srcdoc: "<script>alert(1)</script>" },
+    ];
+    for (const props of refused) {
+      const el = site.h("a", props, "x");
+      assert.deepEqual(Object.keys(el.attrs), [], JSON.stringify(props));
+      assert.equal(el.textContent, "x");
+    }
+    assert.equal(errors.length, refused.length, errors.join("\n"));
+    // an event takes a function: onClick works as on: {click} does
+    site.h("button", { onClick: () => {}, on: { focus: () => {} } }, "Show");
+    assert.deepEqual(listeners, [["BUTTON", "click", "function"], ["BUTTON", "focus", "function"]]);
+  } finally {
+    console.error = saved.error;
+    Element.prototype.addEventListener = saved.listen;
+  }
+});
+
+// site.h refused every address that was not http(s), mailto, tel or relative, through attrs too, which site.js 1.6.1
+// had set: a QR code drawn from a canvas (data:image/…), a photo the person picked (blob:), a "text this plan" link
+// (sms:) and an "Add to calendar" file the page made (blob: with download) lost their address.
+test("site.h takes a picture or a file the page made itself and a text-message link, and still nothing that could run script", async () => {
+  const { site } = await draw("blank", null);
+  const errors = [];
+  const saved = console.error;
+  console.error = (...args) => errors.push(args.join(" "));
+  try {
+    const picture = "data:image/png;base64,iVBORw0KGgo=";
+    const file = "blob:https://site.example/5f0c8f2e";
+    assert.equal(site.h("img", { src: picture, alt: "QR code" }).attrs.src, picture);
+    assert.equal(site.h("img", { attrs: { src: file } }).attrs.src, file);
+    assert.equal(site.h("video", { src: file, poster: picture }).attrs.poster, picture);
+    assert.equal(site.h("a", { href: "sms:+15550100?body=Plan" }, "Text it").attrs.href, "sms:+15550100?body=Plan");
+    assert.equal(site.h("a", { href: file, download: "trip.ics" }, "Add to calendar").attrs.href, file);
+    assert.equal(site.h("a", { attrs: { download: "trip.ics", href: file } }, "Add to calendar").attrs.href, file);
+    assert.deepEqual(errors, []);
+    // a page or a script by address is still left out: data: and blob: only as a picture, a video or a download
+    const refused = [
+      ["iframe", { src: picture }],
+      ["iframe", { src: file }],
+      ["object", { data: picture }],
+      ["embed", { src: picture }],
+      ["a", { href: "data:text/html,<script>alert(1)</script>", download: "page.html" }],
+      ["a", { href: file }],
+      ["img", { src: "data:text/html,<script>alert(1)</script>" }],
+      ["img", { src: "javascript:alert(1)" }],
+      ["a", { href: "vbscript:msgbox(1)" }],
+    ];
+    for (const [tag, props] of refused) {
+      const el = site.h(tag, props);
+      assert.equal(el.getAttribute(Object.keys(props)[0]), null, `${tag} ${JSON.stringify(props)}`);
+    }
+    assert.equal(errors.length, refused.length, errors.join("\n"));
+  } finally {
+    console.error = saved;
+  }
+});
+
+// A blank page wrote site.start({ data: {}, render }): site.start took the object for the address of a data file, asked
+// the site for "[object Object]", and the page showed "This page couldn't load its data" in place of what it drew.
+test("site.start takes a page's data itself, as well as the address of its data file", async () => {
+  APP.inline = `site.start({ data: { stops: ["Livraria Lello"] }, render: function (data) {
+    document.getElementById("list").replaceChildren(site.h("h2", {}, data.stops[0]));
+  } });`;
+  APP.empty = `site.start({ data: {}, render: function () {
+    site.head({ title: "Livraria Lello" });
+    document.getElementById("list").replaceChildren(site.h("p", {}, "Every day, 9:00 AM–7:30 PM"));
+  } });`;
+  const errors = [];
+  const saved = console.error;
+  console.error = (...args) => errors.push(args.join(" "));
+  try {
+    const inline = await draw("inline", null);
+    assert.equal(inline.document.getElementById("list").textContent, "Livraria Lello");
+    const empty = await draw("empty", null);
+    assert.equal(empty.document.getElementById("list").textContent, "Every day, 9:00 AM–7:30 PM");
+    assert.doesNotMatch(empty.document.body.textContent, /couldn't load its data/);
+    assert.deepEqual(errors, []);
+  } finally {
+    console.error = saved;
+    delete APP.inline;
+    delete APP.empty;
+  }
+});
