@@ -222,8 +222,8 @@ sends a message in the person's name that names the change by its time, never by
 Undo under a saved change saves a new version that reverses it, on the space's own origin. The
 machine's folder, which serves the page the person sees, then follows that version at once
 (`POST /git/revert {paths, saved}` on the folder's own origin), as the refresh before a turn would:
-it moves only when it holds nothing unsaved in the way, keeps every local edit, and pushes nothing,
-and the machine pictures the open previews of the files' sites again. A Desktop folder is where the
+it moves only when it holds no unpublished work and no local edit is in the way, keeps every local
+edit, and pushes nothing, and the machine pictures the open previews of the files' sites again. A Desktop folder is where the
 version was saved, so it holds it already.
 
 An Undo that worked leaves one line in the chat's history, in the controller's words: "The person
