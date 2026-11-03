@@ -272,9 +272,12 @@ type DraftHold = { key: string; reason: string | null };
 
 /**
  * What deciding the newest card left: whether it waits on a reading of
- * Instafy's browser, and the card a draft holds.
+ * Instafy's browser, the card a draft holds, and a card for a message Octo
+ * sent straight to the browser that Studio is about to open by itself
+ * (`opensSoon`): it reads "Opening Instafy's browser…" from the moment it
+ * lands, while the run that routed it ends or that reading comes.
  */
-type CardDecision = { waiting: boolean; draftHold: DraftHold | null };
+type CardDecision = { waiting: boolean; draftHold: DraftHold | null; opensSoon?: string | null };
 const DECIDED: CardDecision = { waiting: false, draftHold: null };
 const WAITING: CardDecision = { waiting: true, draftHold: null };
 
@@ -402,6 +405,10 @@ export function useChatBrowserRequest(options: Options) {
   // Kept out of cardStates, so the draft's reason goes away with the hold:
   // once the draft is sent or cleared, or a newer card arrives.
   const [draftHold, setDraftHold] = useState<DraftHold | null>(null);
+  // A routed card Studio is about to open by itself (CardDecision.opensSoon).
+  // Kept out of cardStates too: if it stops applying (someone wrote after the
+  // card), the card shows what it would have shown.
+  const [opensSoon, setOpensSoon] = useState<string | null>(null);
   const [visible, setVisible] = useState(isDocumentVisible);
 
   const setCardState = useCallback((key: string, state: BrowserRequestCardState) => {
@@ -773,11 +780,20 @@ export function useChatBrowserRequest(options: Options) {
     // Nor for a card a hand-back turn sent: one automatic hop only, so the
     // card stays a button for the person to press.
     if (browserHandBackOfPromptMetadata(sent.metadata)) return DECIDED;
-    // Wait for that run to finish and for the person to see this tab.
-    if (current.busy || auto.activeRunIds.has(jobId) || !visible) return DECIDED;
+    // Wait for the person to see this tab.
+    if (!visible) return DECIDED;
+    // And for that run to finish. A message Octo sent straight to the browser
+    // is decided now all the same, with nothing done yet: when Studio would
+    // open it, it reads as the turn's line from the moment it lands, not as
+    // a button for the moment the routing step's record takes to end. Any
+    // other outcome waits for that run, and the button shows meanwhile.
+    const runEnding = current.busy || auto.activeRunIds.has(jobId);
+    if (runEnding && !request.routed) return DECIDED;
+    const openingSoon: CardDecision = { waiting: false, draftHold: null, opensSoon: key };
 
     // Settled for good: the card is left to the person on this page.
     const leave = (reason: string | null) => {
+      if (runEnding) return;
       claimBrowserAutoStart(key);
       setCardState(key, { kind: "button", reason });
     };
@@ -818,7 +834,7 @@ export function useChatBrowserRequest(options: Options) {
     // Held for now: the button shows why, and the card is looked at again
     // once that changes.
     if (auto.heldByOther) {
-      setCardState(key, { kind: "button", reason: BROWSER_AUTO_START_COPY.inUse });
+      if (!runEnding) setCardState(key, { kind: "button", reason: BROWSER_AUTO_START_COPY.inUse });
       return DECIDED;
     }
     // On the conversation's own machine it goes as any card there: after a
@@ -830,17 +846,22 @@ export function useChatBrowserRequest(options: Options) {
       : auto.plan(request, transport);
     // Instafy's browser on the space's machine needs a fresh reading first:
     // the reading changes the revision, and the card is decided again. A
-    // draft that holds this card keeps saying so meanwhile.
+    // draft that holds this card keeps saying so meanwhile; a routed card
+    // with no draft reads as opening.
     if (plan.kind === "pending") {
+      if (runEnding) return auto.blocked ? DECIDED : openingSoon;
       void auto.refreshHost?.();
+      const held = auto.blocked && draftHold?.key === key ? { key, reason: auto.blocked.reason } : null;
       return {
         waiting: true,
-        draftHold: auto.blocked && draftHold?.key === key ? { key, reason: auto.blocked.reason } : null,
+        draftHold: held,
+        opensSoon: request.routed && !auto.blocked ? key : null,
       };
     }
     // Studio does not open this card by itself: the button says why, also
     // over a draft.
     if (plan.kind === "button") {
+      if (runEnding) return DECIDED;
       setCardState(key, { kind: "button", reason: plan.reason });
       // In use for now: read the browser again until it is free.
       return plan.reason === BROWSER_AUTO_START_COPY.hostInUse ? WAITING : DECIDED;
@@ -854,9 +875,12 @@ export function useChatBrowserRequest(options: Options) {
     // It would open by itself now, but the person is writing: it waits, and
     // says why only while the draft holds it.
     if (auto.blocked) {
+      if (runEnding) return DECIDED;
       setCardState(key, { kind: "button", reason: null });
       return { waiting: false, draftHold: { key, reason: auto.blocked.reason } };
     }
+    // Studio opens it once the run that routed it has ended.
+    if (runEnding) return openingSoon;
     if (!claimBrowserAutoStart(key)) return DECIDED;
     recordBrowserAutoStart(conversation);
     setCardState(key, { kind: "opening", note: null });
@@ -881,6 +905,7 @@ export function useChatBrowserRequest(options: Options) {
     // Whether the newest card waits on Instafy's browser (see autoWaiting).
     setAutoWaiting(decision.waiting);
     setDraftHold((current) => sameDraftHold(current, decision.draftHold) ? current : decision.draftHold);
+    setOpensSoon(decision.opensSoon ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     activeRunIdsKey,
@@ -900,12 +925,17 @@ export function useChatBrowserRequest(options: Options) {
   ]);
 
   // The draft's reason shows on the card it holds, over what the card said
-  // before the hold.
+  // before the hold. A routed card Studio is about to open reads as opening
+  // until Studio has decided it.
   const shownCardStates = useMemo(() => {
-    if (!draftHold) return cardStates;
+    let shown = cardStates;
+    if (opensSoon && !cardStates.has(opensSoon)) {
+      shown = new Map(shown).set(opensSoon, { kind: "opening", note: null });
+    }
+    if (!draftHold) return shown;
     const held: BrowserRequestCardState = { kind: "button", reason: draftHold.reason };
-    return sameCardState(cardStates.get(draftHold.key), held) ? cardStates : new Map(cardStates).set(draftHold.key, held);
-  }, [cardStates, draftHold]);
+    return sameCardState(shown.get(draftHold.key), held) ? shown : new Map(shown).set(draftHold.key, held);
+  }, [cardStates, draftHold, opensSoon]);
 
   return { cardStates: shownCardStates, retryContinuation, autoWaiting };
 }

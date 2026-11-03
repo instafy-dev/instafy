@@ -177,7 +177,7 @@ export function CreditsUsageRates({
               <div className="min-w-0">
                 <dt className="text-xs font-medium text-slate-500 dark:text-slate-400">Reserve</dt>
                 <dd className="mt-0.5 break-words text-slate-700 dark:text-slate-200">
-                  {formatUnits(managedAiUsage.creditsPerPrompt, unitLabel)} a message
+                  From {formatUnits(managedAiUsage.creditsPerPrompt, unitLabel)} a message
                 </dd>
               </div>
               <div className="min-w-0">
@@ -229,7 +229,7 @@ export function CreditsUsageRates({
                   {managedAiUsage.modelLabel}
                 </span>
               </span>
-              <span>{formatUnits(managedAiUsage.creditsPerPrompt, unitLabel)} a message</span>
+              <span>From {formatUnits(managedAiUsage.creditsPerPrompt, unitLabel)} a message</span>
               <span className="text-xs leading-5 text-slate-500 dark:text-slate-400">
                 In {formatUsdMicros(managedAiUsage.inputUsdMicrosPer1k * 1000, displayCurrency)}/1M
                 <br />

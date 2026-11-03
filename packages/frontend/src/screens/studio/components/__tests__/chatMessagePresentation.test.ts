@@ -74,6 +74,20 @@ describe("chatMessagePresentation", () => {
     expect(shouldDisplayChatMessage(message)).toBe(true);
   });
 
+  // A command that ran nothing ("/bin/bash -lc", from `exec_command({cmd: ""})`)
+  // showed as a row of its own; one with a script still does.
+  it("shows no row for a command that ran nothing", () => {
+    const commandMessage = (command: string) => createMessage({
+      content: command,
+      messageType: "command_execution",
+      metadata: { jobId: "job-1", messageType: "command_execution", details: { itemId: "item-1", command, status: "completed" } },
+    });
+    expect(shouldDisplayChatMessage(commandMessage("/bin/bash -lc"))).toBe(false);
+    expect(shouldDisplayChatMessage(commandMessage("/bin/bash -lc ''"))).toBe(false);
+    expect(shouldDisplayChatMessage(commandMessage("/bin/bash -lc 'instafy bind check sites/a'"))).toBe(true);
+    expect(shouldDisplayChatMessage(commandMessage("ls"))).toBe(true);
+  });
+
   it("keeps hidden early job updates inside the synthesized run thread", () => {
     const messages: ChatMessage[] = [
       createMessage({

@@ -2,6 +2,7 @@ import { createContext, useLayoutEffect, useRef, useState, type ReactNode, type 
 import { Pause, Play, Xmark } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
+import { useToastClearanceRef } from "../../../status/toastClearance";
 
 /** `off` is neutral: Instafy's browser is not running. `unavailable` is for the Personal Browser and the site preview. */
 export type BrowserChromeState = "ready" | "starting" | "paused" | "off" | "unavailable";
@@ -115,6 +116,7 @@ export function BrowserChromeShell({
   onDismissFeedback,
   busy = false,
   compact = false,
+  clearsToasts = true,
   testId,
 }: {
   label: string;
@@ -130,8 +132,15 @@ export function BrowserChromeShell({
   onDismissFeedback?: (() => void) | null;
   busy?: boolean;
   compact?: boolean;
+  /**
+   * Toasts start below this bar and its message while it is on screen, as
+   * they do below Chat | Browser, so a toast never covers the address. Off
+   * for a bar that is not a view's top bar.
+   */
+  clearsToasts?: boolean;
   testId?: string;
 }) {
+  const toastClearance = useToastClearanceRef<HTMLDivElement>(clearsToasts);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const [toolbarWidth, setToolbarWidth] = useState(0);
   useLayoutEffect(() => {
@@ -150,7 +159,7 @@ export function BrowserChromeShell({
 
   return (
     <BrowserAddressMenuAnchorContext.Provider value={compact ? { ref: toolbarRef, width: toolbarWidth } : null}>
-    <div className="w-full min-w-0 shrink-0" data-browser-session-safe-zone="true">
+    <div ref={toastClearance} className="w-full min-w-0 shrink-0" data-browser-session-safe-zone="true">
       <div
         ref={toolbarRef}
         aria-busy={busy || undefined}

@@ -128,6 +128,20 @@ export function parseCommandExecutionOutput(
   };
 }
 
+// A shell started with nothing to run: the runtime's wrapper (`/bin/bash -lc`,
+// `sh -c`, as stripShellWrapperFromCommand reads it) and an empty script.
+const EMPTY_SHELL_COMMAND = /^(?:\/[\w./-]+\/)?(?:bash|zsh|sh)\s+-(?:l?c|cl)(?:\s+(?:''|""))?$/i;
+
+/**
+ * A command step that ran nothing: a shell given an empty script
+ * ("/bin/bash -lc"). It did nothing the person could see, so the chat and
+ * Details leave it out.
+ */
+export function isEmptyCommandExecution(message: ChatMessage): boolean {
+  const { command } = parseCommandExecutionOutput(message);
+  return command !== null && EMPTY_SHELL_COMMAND.test(command);
+}
+
 export function parseTodoItems(details: Record<string, unknown> | null): Array<{ text: string; completed: boolean }> {
   if (!details) {
     return [];
