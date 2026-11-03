@@ -519,6 +519,25 @@ fn final_output_schema_for_job(job: &LeaseJob, granted_execution: bool) -> Codex
     }
 }
 
+/// Whether the person sees the turn's reply grow while the model writes it ([`reply_draft`]).
+/// Planning and worker output belongs to their internal protocol. A lead's natural summary is
+/// eligible, while its actions/plan JSON stays hidden. A browser turn whose findings go back to
+/// the building turn posts no words of its own unless a page stopped it
+/// ([`browser_hand_back::move_findings_into_details`]): drafted, its words and its finding lines
+/// grew in the chat and went when it ended, with nothing in their place.
+fn drafts_reply_for_job(job: &LeaseJob, final_output_schema: CodexFinalOutputSchema) -> bool {
+    !is_multi_agent_worker_job(job)
+        && !is_explicit_team_planning_job(job)
+        && matches!(
+            final_output_schema,
+            CodexFinalOutputSchema::Default | CodexFinalOutputSchema::SharedBrowser
+        )
+        && !job
+            .payload
+            .get("metadata")
+            .is_some_and(browser_hand_back::hands_back)
+}
+
 /// A chat's turns used to share one provider thread: a Shared Browser turn found no browser
 /// thread of its own, resumed the default thread through the legacy keys and saved that
 /// thread's id and rollout as `browserThreadId` and `browserRolloutPath`. Such a thread holds
@@ -7679,14 +7698,7 @@ impl JobProcessor {
             active: bool,
         }
 
-        // Planning and worker output belongs to their internal protocol. A lead's
-        // natural summary is eligible, while its actions/plan JSON stays hidden.
-        let drafts_reply = !is_multi_agent_worker_job(job)
-            && !is_explicit_team_planning_job(job)
-            && matches!(
-                final_output_schema,
-                CodexFinalOutputSchema::Default | CodexFinalOutputSchema::SharedBrowser
-            );
+        let drafts_reply = drafts_reply_for_job(job, final_output_schema);
         let mut reply_draft = progress_sender
             .as_ref()
             .and_then(|progress| progress.reply_draft.clone())
@@ -26451,6 +26463,50 @@ mod tests {
                 expected,
                 "{metadata}"
             );
+        }
+    }
+
+    /// A browser turn whose findings go back to the building turn posts no words of its own
+    /// (`browser_hand_back::move_findings_into_details`), so nothing of them shows while it
+    /// writes: drafted, its words and its raw finding lines grew in the chat and went when it
+    /// ended, with nothing in their place. A question's browser turn, whose words are its
+    /// answer, and any other chat turn still draft their reply, in either browser.
+    #[test]
+    fn a_browser_turn_whose_findings_go_back_drafts_no_reply() {
+        let hands_back = |transport: &str| {
+            json!({
+                "browserTransport": transport,
+                "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                "browserHandsBack": true,
+            })
+        };
+        for (metadata, expected) in [
+            (hands_back("shared"), false),
+            (hands_back("desktop-personal"), false),
+            (
+                json!({
+                    "browserTransport": "shared",
+                    "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                }),
+                true,
+            ),
+            (
+                json!({
+                    "browserTransport": "desktop-personal",
+                    "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                }),
+                true,
+            ),
+            (json!({"browserTransport": "shared"}), true),
+            (json!({}), true),
+            (
+                json!({"agentCollaboration": {"mode": "team_plan", "requested": true}}),
+                false,
+            ),
+        ] {
+            let job = test_lease_job(Some("feature"), json!({ "metadata": metadata.clone() }));
+            let schema = final_output_schema_for_job(&job, false);
+            assert_eq!(drafts_reply_for_job(&job, schema), expected, "{metadata}");
         }
     }
 

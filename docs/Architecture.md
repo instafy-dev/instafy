@@ -143,7 +143,8 @@ Only the top-level `summary` of a structured reply is exposed. Plain-text report
 and eligible lead replies can stream natural prose when the provider marks it `final_answer`.
 Providers that omit the phase still deliver their durable plain-text reply normally. Planning
 turns, worker/internal conversations, commentary, raw JSON fields and runtime sentinels are not
-shown. Ambient evaluation/declined turns withhold drafts until that run has durable visible
+shown, nor is a browser turn whose findings go back to the building turn, which posts no words
+of its own. Ambient evaluation/declined turns withhold drafts until that run has durable visible
 assistant speech, preserving the participation and billing decision.
 
 The runtime coalesces snapshots at 200 ms and caps their display text at 128 KiB. These are

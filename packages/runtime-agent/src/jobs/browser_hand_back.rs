@@ -11,7 +11,8 @@
 //! ([`move_findings_into_details`]). The turn posts no words of its own, unless
 //! a page stopped it: the building turn says what it made with them a moment
 //! later, and the words go into the note ahead of the findings, where the
-//! controller reads them for the record. When the turn ends, Studio sends one
+//! controller reads them for the record. Nor does it draft them while it writes
+//! (`drafts_reply_for_job`). When the turn ends, Studio sends one
 //! hand-back turn, and the controller checks it (it read at least one page,
 //! and its card continues building) and stamps `metadata.browserHandBack` with
 //! the reply and the findings (runtime-controller `browser_hand_back.rs`).
@@ -53,6 +54,10 @@ const TURNS_SINCE_MAX_CHARS: usize = 24_000;
 /// The payload key the controller stamps with whether it listed only the
 /// newest browser turns since (runtime-controller `TURNS_SINCE_LEFT_OUT_KEY`).
 const TURNS_SINCE_LEFT_OUT_KEY: &str = "browser_turns_since_earlier_left_out";
+/// The payload key with which a controller says, on every lease, that it reads the note of a
+/// browser turn that posted no words as that turn's reply (runtime-controller `READS_NOTE_KEY`).
+/// An older controller refuses the hand-back of such a turn as empty.
+const READS_NOTE_KEY: &str = "browser_hand_back_reads_note";
 
 /// What a browser turn whose findings go back to the building turn is told ([`hands_back`]). Its
 /// task is often the person's own message, which the routing step sent here. The turn that builds
@@ -308,11 +313,13 @@ fn split_findings(reply: &str) -> Option<(String, Vec<String>)> {
     Some((posted.trim().to_string(), findings))
 }
 
-/// What the person reads when the reply of a browser turn whose findings stay
-/// with it (a question's) was only its findings. It points nowhere else: Studio
-/// leaves the findings note out of Details. Earlier runtimes also posted it for
-/// a browser turn whose findings go back to the building turn, so a chat's
-/// history can still hold it there.
+/// What the person reads when a browser turn's reply was only its findings and
+/// no hand-back says what came of them: a question's turn, whose findings stay
+/// with it, or one whose every page stopped it. It points nowhere else: Studio
+/// leaves the findings note out of Details. Under a controller that does not
+/// read a silent turn's note ([`READS_NOTE_KEY`]), a turn whose findings go
+/// back to the building turn posts it in place of its words, as earlier
+/// runtimes always did, so a chat's history can hold it there too.
 pub(super) const FINDINGS_ONLY_REPLY: &str = "Finished in the browser.";
 
 /// Moves the finding lines out of a browser turn's reply. The person reads
@@ -324,8 +331,11 @@ pub(super) const FINDINGS_ONLY_REPLY: &str = "Finished in the browser.";
 /// and the browser turn's own account of what it could not build is no answer
 /// to the person. Its line and Details stay. Those words go into the note
 /// ahead of the findings, so the controller's record still gives them to the
-/// building turn (what the browser did not read). Any other turn is left as it
-/// is.
+/// building turn (what the browser did not read). It posts
+/// [`FINDINGS_ONLY_REPLY`] in place of no words where no hand-back would
+/// follow: when it read no page, or under a controller that does not say on
+/// the lease that it reads the note ([`READS_NOTE_KEY`]) and so would refuse
+/// a hand-back from a turn that posted none. Any other turn is left as it is.
 pub(crate) fn move_findings_into_details(job: &LeaseJob, execution: &mut JobExecution) {
     let Some(metadata) = job.payload.get("metadata") else {
         return;
@@ -342,16 +352,29 @@ pub(crate) fn move_findings_into_details(job: &LeaseJob, execution: &mut JobExec
         .count();
     let lines = findings.join("\n");
     let hands_back = hands_back(metadata);
-    // An empty reply shows nothing: Studio leaves a blank reply out.
+    // A hand-back follows only a turn that read a page, and only a controller that reads this
+    // turn's note as its reply takes one from a turn that posted no words. Then the turn posts
+    // none (Studio leaves a blank reply out); else, with no words of its own, it posts that it
+    // finished.
+    let silent = hands_back
+        && pages_read > 0
+        && job.payload.get(READS_NOTE_KEY) == Some(&JsonValue::Bool(true));
+    let without_words = || {
+        if silent {
+            String::new()
+        } else {
+            FINDINGS_ONLY_REPLY.to_string()
+        }
+    };
     let (summary, note) = if hands_back && pages_read == findings.len() {
         let note = if reply.is_empty() {
             lines
         } else {
             format!("{reply}\n\n{lines}")
         };
-        (String::new(), note)
-    } else if reply.is_empty() && !hands_back {
-        (FINDINGS_ONLY_REPLY.to_string(), lines)
+        (without_words(), note)
+    } else if reply.is_empty() {
+        (without_words(), lines)
     } else {
         (reply, lines)
     };
@@ -852,6 +875,13 @@ mod tests {
         .expect("lease job")
     }
 
+    /// The job as a controller leases it that reads the note of a browser turn that posted no
+    /// words as its reply (runtime-controller `browser_hand_back::READS_NOTE_KEY`).
+    fn reading_the_note(mut job: LeaseJob) -> LeaseJob {
+        job.payload[READS_NOTE_KEY] = json!(true);
+        job
+    }
+
     fn execution(summary: &str) -> JobExecution {
         JobExecution {
             summary: summary.to_string(),
@@ -950,11 +980,11 @@ mod tests {
         assert_eq!(turn.final_messages.len(), 1);
         assert_eq!(turn.final_messages[0].content, only);
         // Unless its findings go back to the building turn, which says what it made with them.
-        let hands_back = browser_job(json!({
+        let hands_back = reading_the_note(browser_job(json!({
             "browserTransport": "desktop-personal",
             "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
             "browserHandsBack": true,
-        }));
+        })));
         let mut turn = execution(only);
         move_findings_into_details(&hands_back, &mut turn);
         assert_eq!(turn.summary, "");
@@ -970,14 +1000,18 @@ mod tests {
     /// stay. Its words still reach the building turn, ahead of the findings in its note, which the
     /// controller reads for its record: they say what it did not read ("the reviews it links, not
     /// opened"). A page that stopped it keeps its words, which say which and why, and a question's
-    /// browser turn answers in its own words.
+    /// browser turn answers in its own words. A turn that read no page hands nothing back, so
+    /// with no words of its own it still posts that it finished: its chat would otherwise end on
+    /// its line alone.
     #[test]
     fn a_browser_turn_that_hands_back_posts_no_words_unless_a_page_stopped_it() {
-        let hands_back = json!({
-            "browserTransport": "shared",
-            "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
-            "browserHandsBack": true,
-        });
+        let hands_back = || {
+            reading_the_note(browser_job(json!({
+                "browserTransport": "shared",
+                "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                "browserHandsBack": true,
+            })))
+        };
         let read = [
             r#"{"url": "https://maker.example/laptop-13", "title": "Laptop 13", "facts": ["Battery: 74 Wh"]}"#,
             r#"{"url": "https://maker.example/laptop-12", "title": "Laptop 12", "facts": ["Battery: 50 Wh"]}"#,
@@ -985,7 +1019,7 @@ mod tests {
         .join("\n");
         let own = "I read the maker's pages for two laptops. Their reviews are not checked: the Laptop 13 page links to two, which I did not open.";
         let mut turn = execution(&format!("{own}\n\n{read}"));
-        move_findings_into_details(&browser_job(hands_back.clone()), &mut turn);
+        move_findings_into_details(&hands_back(), &mut turn);
         assert_eq!(turn.summary, "");
         assert_eq!(turn.final_messages.len(), 1);
         assert_eq!(turn.final_messages[0].content, format!("{own}\n\n{read}"));
@@ -995,7 +1029,7 @@ mod tests {
         );
         // A reply that was only its findings: the note holds them alone.
         let mut turn = execution(&read);
-        move_findings_into_details(&browser_job(hands_back.clone()), &mut turn);
+        move_findings_into_details(&hands_back(), &mut turn);
         assert_eq!(turn.summary, "");
         assert_eq!(turn.final_messages[0].content, read);
 
@@ -1003,14 +1037,29 @@ mod tests {
         let words = "The review page asked for a subscription, so I read only the maker's pages.";
         let stopped = r#"{"url": "https://reviews.example/laptop-13", "stopped": "paywall"}"#;
         let mut turn = execution(&format!("{words}\n\n{read}\n{stopped}"));
-        move_findings_into_details(&browser_job(hands_back.clone()), &mut turn);
+        move_findings_into_details(&hands_back(), &mut turn);
         assert_eq!(turn.summary, words);
         assert_eq!(turn.final_messages[0].content, format!("{read}\n{stopped}"));
         // With no words of its own, it posts none: the building turn says which page stopped it.
         let mut turn = execution(&format!("{read}\n{stopped}"));
-        move_findings_into_details(&browser_job(hands_back), &mut turn);
+        move_findings_into_details(&hands_back(), &mut turn);
         assert_eq!(turn.summary, "");
         assert_eq!(turn.final_messages[0].content, format!("{read}\n{stopped}"));
+
+        // Every page stopped it: no hand-back follows (Studio and the controller send none for a
+        // turn that read no page), so its words, or with none that it finished, are what the
+        // person reads.
+        let mut turn = execution(&format!("{words}\n\n{stopped}"));
+        move_findings_into_details(&hands_back(), &mut turn);
+        assert_eq!(turn.summary, words);
+        let mut turn = execution(stopped);
+        move_findings_into_details(&hands_back(), &mut turn);
+        assert_eq!(turn.summary, "Finished in the browser.");
+        assert_eq!(turn.final_messages[0].content, stopped);
+        assert_eq!(
+            turn.final_messages[0].metadata.as_ref().unwrap()["browserFindings"],
+            json!({ "pages": 1, "pagesRead": 0 })
+        );
 
         // A question's browser turn: its reply is the answer.
         let mut turn = execution(&format!("Laptop 13 has a 74 Wh battery.\n\n{read}"));
@@ -1022,6 +1071,46 @@ mod tests {
             &mut turn,
         );
         assert_eq!(turn.summary, "Laptop 13 has a 74 Wh battery.");
+    }
+
+    /// A controller that does not say it reads the note of a browser turn that posted no words
+    /// refuses the hand-back of such a turn ("That browser turn returned nothing to hand
+    /// back."), so the page the person asked for would never be built. A newer runtime can meet
+    /// one: a desktop app that carries its own runtime, or a controller rolled back. Under it,
+    /// the turn posts that it finished in place of its words, as it did before, and its words
+    /// still go into the note ahead of its findings, where that controller reads them after the
+    /// reply.
+    #[test]
+    fn under_a_controller_that_does_not_read_the_note_a_turn_that_hands_back_posts_that_it_finished()
+     {
+        let hands_back = || {
+            browser_job(json!({
+                "browserTransport": "shared",
+                "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                "browserHandsBack": true,
+            }))
+        };
+        let read = r#"{"url": "https://maker.example/laptop-13", "title": "Laptop 13", "facts": ["Battery: 74 Wh"]}"#;
+        let stopped = r#"{"url": "https://reviews.example/laptop-13", "stopped": "paywall"}"#;
+        let own = "I read the maker's page. Its reviews are not checked.";
+        let mut turn = execution(&format!("{own}\n\n{read}"));
+        move_findings_into_details(&hands_back(), &mut turn);
+        assert_eq!(turn.summary, "Finished in the browser.");
+        assert_eq!(turn.final_messages[0].content, format!("{own}\n\n{read}"));
+        let mut turn = execution(&format!("{read}\n{stopped}"));
+        move_findings_into_details(&hands_back(), &mut turn);
+        assert_eq!(turn.summary, "Finished in the browser.");
+        assert_eq!(turn.final_messages[0].content, format!("{read}\n{stopped}"));
+        // Only the controller's own word counts.
+        for value in [json!(false), json!("true"), json!(1)] {
+            let mut job = hands_back();
+            job.payload[READS_NOTE_KEY] = value.clone();
+            let mut turn = execution(read);
+            move_findings_into_details(&job, &mut turn);
+            assert_eq!(turn.summary, "Finished in the browser.", "{value}");
+        }
+        // The key is the one the controller sets (browser_hand_back_fixtures.json).
+        assert_eq!(fixtures()["readsNoteKey"], READS_NOTE_KEY);
     }
 
     #[test]
