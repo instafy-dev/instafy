@@ -164,6 +164,11 @@ places" once the turn is done. It names its commands in `bin` and labels their s
 - `role` is `content` (the default), `outcome` (what the turn made; it leads the line) or `quiet`
   (shown while it runs and in Details; a quiet label's `done`, when it has one, is its row's past
   tense there); `when: "success"` counts the step only when the command exits 0.
+- A step's exit status is its last command's, so a label counts, and ticks in Details, only for
+  the last command of a step and those joined to it with `&&`. A command that ran before them
+  (`uw cite a; uw add-point b`) counts for nothing, whatever it did; a command that exits non-zero
+  when it did not do what its words say ("read a source" over a page that did not say it) lets a
+  step that ends with it read "Tried reading a source".
 
 A pack whose `activity` breaks a rule still loads; the runtime drops its labels with a warning, and
 the installer warns too. Only packs installed with the runtime supply labels: a pack a space

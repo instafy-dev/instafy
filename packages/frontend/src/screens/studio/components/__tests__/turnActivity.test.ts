@@ -322,6 +322,98 @@ describe("summarizeTurnActivity", () => {
     expect(summarize([failedSearch], "cancelled").summary).toBe("Stopped · tried searching the web");
   });
 
+  // A map turn's Details read "Read 2 sources ✓" over two reads that both
+  // failed, because the step's last command (an add-point) worked; "Tried
+  // reading a source ×" over a step that read two sources before its last read
+  // failed; and its line said "Built the map, …, read 4 sources" over a
+  // validate that failed before the step's last command, a preview check,
+  // passed. A step's result is its last command's, and that of the commands
+  // joined to it with `&&`: the runtime marks every other command
+  // `result: "unknown"`.
+  describe("a step of several commands", () => {
+    const CITE = {
+      v: 1,
+      key: "pack/interactive-map/uw/cite",
+      role: "content",
+      live: "Reading a source",
+      done: { one: "read a source", other: "read {n} sources", some: "read sources" },
+      count: 1,
+      also: [],
+    };
+    const SET = { v: 1, key: "pack/interactive-map/uw/set", role: "quiet", live: "Working on the map", done: "worked on the map", count: 1, also: [] };
+    const RELOAD = { ...SET, key: "pack/interactive-map/uw/reload" };
+    const CHECK = { ...PREVIEW_CHECK, done: "checked the page" };
+    // An entry of a command that ran before the step's last one.
+    const before = (activity: Record<string, unknown>, count = 1) => ({ ...entryOf(activity), count, result: "unknown" });
+    // A step's activity: its first command's entry, then the others'.
+    const stepOf = (first: Record<string, unknown>, ...also: Record<string, unknown>[]) => ({ v: 1, ...first, also });
+    const rows = (activity: ReturnType<typeof summarize>) =>
+      activity.details.map((item) => (item.kind === "step" ? [item.step.state, item.step.label] : null));
+
+    it("names a step by its last command, and counts none that ran before it (`a; b; c`)", () => {
+      // uw cite A; uw cite B; uw add-point C
+      const reads = stepOf(before(CITE, 2), entryOf(ADD_POINT));
+      const worked = summarize([command(reads)]);
+      expect(rows(worked)).toEqual([["done", "Looked up a place"]]);
+      expect(worked.summary).toBe("Looked up a place");
+      const failed = summarize([command(reads, { exitCode: 1 })]);
+      expect(rows(failed)).toEqual([["failed", "Tried looking up places"]]);
+      expect(failed.summary).toBe("Tried looking up places");
+      // uw cite A; uw cite B: only the last read is known, worked or not.
+      const twoReads = stepOf(before(CITE), entryOf(CITE));
+      expect(summarize([command(twoReads)]).summary).toBe("Read a source");
+      expect(rows(summarize([command(twoReads, { exitCode: 1 })]))).toEqual([["failed", "Tried reading a source"]]);
+    });
+
+    it("counts a chain joined with && when it worked, and nothing in it when it failed (`a && b`)", () => {
+      // uw cite A && uw add-point B
+      const chain = stepOf(entryOf(CITE), entryOf(ADD_POINT));
+      const worked = summarize([command(chain)]);
+      expect(rows(worked)).toEqual([["done", "Read a source"]]);
+      expect(worked.summary).toBe("Read a source, looked up a place");
+      // Which of them failed is not known: the chain reads as what it set out
+      // to do, as its line said while it ran (the first command in it that
+      // says what it does), and nothing in it counts.
+      const failed = summarize([command(chain, { exitCode: 1 }), command(WEB_READ)]);
+      expect(rows(failed)).toEqual([
+        ["failed", "Tried reading a source"],
+        ["done", "Read 6 pages"],
+      ]);
+      expect(failed.summary).toBe("Read 6 pages");
+      // uw set … && uw validate …: the quiet setup before it never names it.
+      const setThenCheck = stepOf(entryOf(SET), entryOf(VALIDATE));
+      expect(summarize([command(setThenCheck, { status: "in_progress" })], "running").live).toBe("Checking the map…");
+      expect(rows(summarize([command(setThenCheck, { exitCode: 1 })]))).toEqual([["failed", "Tried checking the map"]]);
+    });
+
+    it("never says the map was built over a check that ran before the step's last command", () => {
+      // uw set …; uw validate …; uw reload …; instafy preview check …
+      const last = stepOf(before(SET), before(VALIDATE), before(RELOAD), entryOf(CHECK));
+      const activity = summarize([command(ADD_POINT), command(last)]);
+      expect(rows(activity)).toEqual([
+        ["done", "Looked up a place"],
+        ["done", "Checked the page"],
+      ]);
+      expect(activity.summary).toBe("Looked up a place");
+      // uw validate … | tail -5: the step's result is tail's alone.
+      const piped = summarize([command(stepOf(before(VALIDATE)))]);
+      expect(rows(piped)).toEqual([["done", "Ran a command"]]);
+      expect(piped.summary).toBe("Ran a command");
+    });
+
+    it("counts only the reads that worked in the done line", () => {
+      const activity = summarize([
+        command(CITE),
+        command(CITE, { exitCode: 1 }),
+        command(stepOf(before(CITE, 2), entryOf(ADD_POINT))),
+      ]);
+      expect(activity.summary).toBe("Looked up a place, read a source");
+      // While it runs, a step still says what it is doing.
+      const running = summarize([command(stepOf(before(CITE, 2), entryOf(ADD_POINT)), { status: "in_progress" })], "running");
+      expect(running.live).toBe("Reading a source…");
+    });
+  });
+
   // A local test: a map turn read "Opened a preview, planned the days,
   // looked up 3 places", and its preview card, in the same turn, already said so.
   it("names a preview the turn opened only when no other step finished", () => {

@@ -120,6 +120,34 @@
       }
     },
     {
+      "activity": {
+        "v": 1,
+        "key": "pack/interactive-map/uw/validate",
+        "role": "outcome",
+        "live": "Checking the map",
+        "done": "built the map",
+        "when": "success",
+        "result": "unknown",
+        "count": 1,
+        "also": [
+          { "key": "instafy/preview-check", "role": "quiet", "live": "Checking the page", "done": "checked the page", "count": 1 }
+        ]
+      },
+      "checked": {
+        "v": 1,
+        "key": "pack/interactive-map/uw/validate",
+        "role": "outcome",
+        "live": "Checking the map",
+        "done": "built the map",
+        "when": "success",
+        "result": "unknown",
+        "count": 1,
+        "also": [
+          { "key": "instafy/preview-check", "role": "quiet", "live": "Checking the page", "done": "checked the page", "count": 1 }
+        ]
+      }
+    },
+    {
       "activity": { "v": 1, "key": "builtin/web-search", "role": "content", "done": { "one": "searched the web" } },
       "checked": { "v": 1, "key": "builtin/web-search", "role": "content", "done": { "one": "searched the web" }, "count": 1, "also": [] }
     },
@@ -174,6 +202,7 @@
     { "why": "a count as text", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Working", "count": "3" } },
     { "why": "a count over the limit", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Working", "count": 100001 } },
     { "why": "an unknown when", "activity": { "v": 1, "key": "a", "role": "outcome", "done": "built the map", "when": "always" } },
+    { "why": "an unknown result", "activity": { "v": 1, "key": "a", "role": "outcome", "done": "built the map", "result": "failed" } },
     { "why": "four more labels", "activity": { "v": 1, "key": "a", "role": "quiet", "live": "Working", "also": [
       { "key": "b", "role": "quiet", "live": "Working" },
       { "key": "c", "role": "quiet", "live": "Working" },

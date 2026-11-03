@@ -185,6 +185,7 @@ fn check_entry(object: &Map<String, Value>, top_level: bool) -> Option<Map<Strin
                 | "done"
                 | "count"
                 | "when"
+                | "result"
                 | "host"
                 | "pageKey"
                 | "step"
@@ -234,6 +235,14 @@ fn check_entry(object: &Map<String, Value>, top_level: bool) -> Option<Map<Strin
             return None;
         }
         checked.insert("when".into(), when.clone());
+    }
+    // A command its step's result is not about: one that ran before the step's last command,
+    // and not joined to it with `&&`.
+    if let Some(result) = object.get("result") {
+        if result.as_str()? != "unknown" {
+            return None;
+        }
+        checked.insert("result".into(), result.clone());
     }
     if let Some(page_key) = object.get("pageKey") {
         let page_key = page_key.as_str()?;
