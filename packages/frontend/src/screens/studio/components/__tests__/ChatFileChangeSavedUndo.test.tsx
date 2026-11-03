@@ -289,10 +289,10 @@ describe("Undo of a saved change", () => {
     expect(chipTitles()).toEqual([`${APP} (reverted)`]);
   });
 
-  // A local test, Nov 3 (a review of this change): a row with a secret file
-  // the turn's save left out. Undo reverts the saved version, which never held
-  // that file, so the file still holds the turn's edit: after a reload it must
-  // still read Not saved, never undone, and the line names only what Undo did.
+  // A row with a secret file the turn's save left out. Undo reverts the saved
+  // version, which never held that file, so the file still holds the turn's
+  // edit: after a reload it must still read Not saved, never undone, and the
+  // line names only what Undo did.
   it("after a reload, marks undone only the files the Undo undid", async () => {
     const mixed: ChatMessage = {
       ...SAVED,
