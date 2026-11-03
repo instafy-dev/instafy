@@ -252,7 +252,7 @@ test("every rule the eval grades is a rule the skills state", () => {
     no_guessed_paths: ["Open an address the person, a skill or a search result gave, a link on a page you read (print a page's links with its text), or the home page of the official site the task is about.", "Never a search engine or a guessed path."],
     missing_page_searched: ["A page that says it is missing (\"not found\", \"are you lost?\"): use that site's own search box or menu."],
     no_search_engine: ["Never a search engine or a guessed path."],
-    facts_from_own_page: ["comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner, its stations chosen), not a listing or a kiosk page: those only lead to it."],
+    facts_from_own_page: ["comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: choose its stations, set the day and a daytime hour, press its button and read the route off the page it shows), not a listing or a kiosk page: those only lead to it."],
     unchecked_said: ["Anything not read on a page this turn (from memory or a search result: how far, how to get there, what is best) says \"not checked\", or stays out."],
   };
   for (const [id, needles] of Object.entries(finding)) for (const needle of needles) assert.ok(browser.includes(needle), `${id}: ${needle}`);

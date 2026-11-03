@@ -895,6 +895,11 @@ pub struct CodexRunOutput {
     /// How many of `CodexRunOptions::input_images` the run's turn input carried: none for a
     /// model without image input.
     pub native_image_inputs: usize,
+    /// The pages the run's own browser steps opened, once each and in order, by the address the
+    /// browser reported (`shared_browser_activity::step_page_address`). Kept out of `events`, so
+    /// no message carries them: only a browser turn that hands back with no finding lines reads
+    /// them (`jobs::browser_hand_back`).
+    pub browser_pages: Vec<String>,
 }
 
 /// A failed turn keeps the protocol classification as well as its diagnostic message.
@@ -2799,6 +2804,7 @@ impl CodexClient {
                 events,
                 provider_conversation_state,
                 native_image_inputs: input_images.len(),
+                browser_pages: aggregator.browser_pages().to_vec(),
             })
         }
         .await;
@@ -4955,6 +4961,9 @@ pub(crate) struct CodexEventStreamAdapter {
     job_id: Option<uuid::Uuid>,
     /// The last host a Shared Browser step named, for a later step that names none yet.
     last_browser_host: Option<String>,
+    /// The pages the run's browser steps opened (`CodexRunOutput::browser_pages`); never
+    /// projected.
+    browser_pages: Vec<String>,
 }
 
 /// For tests that do not look at usage. Nothing feeds this baseline store, so no turn reports
@@ -4982,7 +4991,13 @@ impl CodexEventStreamAdapter {
             pending_code_mode_cell_calls: HashSet::new(),
             job_id: None,
             last_browser_host: None,
+            browser_pages: Vec::new(),
         }
+    }
+
+    /// The pages the run's browser steps opened so far, once each and in order.
+    pub(crate) fn browser_pages(&self) -> &[String] {
+        &self.browser_pages
     }
 
     fn with_usage_attempt(mut self, usage_attempt: Option<UsageAttempt>, turn_id: &str) -> Self {
@@ -5205,6 +5220,18 @@ impl CodexEventStreamAdapter {
                         &mut self.last_browser_host,
                     ) {
                         item["browserStep"] = step;
+                    }
+                    // A step the browser answered that took a tab to a page.
+                    if tool_call.is_success()
+                        && terminal_code.is_none()
+                        && let Some(page) = crate::shared_browser_activity::step_page_address(
+                            &tool_call.invocation.tool,
+                            tool_call.invocation.arguments.as_ref(),
+                            payload,
+                        )
+                        && !self.browser_pages.contains(&page)
+                    {
+                        self.browser_pages.push(page);
                     }
                 }
                 if let Some(terminal_consent) = terminal_consent {
@@ -10913,6 +10940,75 @@ required = true
             json!({"terminalConsent": {"state": "blocked", "terminal": true, "retryable": false, "code": "approval_denied"}}),
         ));
         assert_eq!(form[0]["item"]["browserStep"]["step"], "submit");
+    }
+
+    /// The pages a turn's own browser steps opened, kept for a browser turn that hands back with
+    /// no finding lines (`jobs::browser_hand_back::finding_lines_from_pages`) and never projected:
+    /// a step the browser answered that took a tab to a page names it once, in order, without its
+    /// fragment; a look, a failed step, a step that ended the run or one outside the browser names
+    /// none.
+    #[test]
+    fn the_adapter_keeps_the_pages_the_browser_steps_opened_unprojected() {
+        let mut adapter = CodexEventStreamAdapter::default();
+        let end = |server: &str, tool: &str, is_error: bool, structured: JsonValue| Event {
+            id: "evt_mcp_end".to_string(),
+            msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+                call_id: format!("call_{tool}"),
+                invocation: McpInvocation {
+                    server: server.to_string(),
+                    tool: tool.to_string(),
+                    arguments: Some(json!({"url": "https://maker.example/"})),
+                },
+                connector_id: None,
+                mcp_app_resource_uri: None,
+                link_id: None,
+                app_name: None,
+                action_name: None,
+                plugin_id: None,
+                duration: Duration::from_millis(1),
+                result: Ok(CallToolResult {
+                    content: vec![json!({"type": "text", "text": "page"})],
+                    structured_content: Some(structured),
+                    is_error: Some(is_error),
+                    meta: None,
+                }),
+                mcp_app_ui: None,
+                read_only_hint: None,
+                turn_id: "turn-1".to_string(),
+            }),
+        };
+        let page = |step: &str, url: &str| json!({"activity": {"step": step, "url": url}});
+        let shared = "instafy_shared_browser";
+        for event in [
+            end(shared, "snapshot", false, page("snapshot", "https://start.example/")),
+            end(shared, "navigate", false, page("navigate", "https://maker.example/laptop-13#specs")),
+            end(shared, "navigate", true, page("navigate", "https://down.example/")),
+            end(
+                shared,
+                "click",
+                false,
+                json!({
+                    "terminalConsent": {"state": "blocked", "terminal": true, "retryable": false, "code": "approval_denied"},
+                    "activity": {"step": "click", "url": "https://refused.example/"},
+                }),
+            ),
+            end(shared, "open_tab", false, page("open_tab", "https://reviews.example/laptop-13")),
+            end(shared, "navigate", false, page("navigate", "https://maker.example/laptop-13")),
+            end("other_server", "navigate", false, page("navigate", "https://other.example/")),
+        ] {
+            for projected in adapter.collect(&event) {
+                for address in ["https://", "laptop-13"] {
+                    assert!(!projected.to_string().contains(address), "{projected}");
+                }
+            }
+        }
+        assert_eq!(
+            adapter.browser_pages(),
+            [
+                "https://maker.example/laptop-13".to_string(),
+                "https://reviews.example/laptop-13".to_string(),
+            ]
+        );
     }
 
     #[test]
