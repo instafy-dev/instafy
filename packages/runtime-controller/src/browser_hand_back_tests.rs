@@ -1547,10 +1547,22 @@ async fn a_building_lease_lists_the_browser_turns_since_its_lanes_last_saved_tur
 impl Chain {
     /// A message the runtime sent straight to Instafy's browser: its job posts
     /// only the routed card, with the person's own words as its task, and ends
-    /// with no reply.
+    /// with no reply. It is sent as Studio sends every message, saying the turn
+    /// may write the space's files (`writeIntent`).
     async fn routed_message(&self, words: &str, continue_building: bool) -> anyhow::Result<Uuid> {
+        self.routed_message_sent_with(words, continue_building, json!({ "writeIntent": true }))
+            .await
+    }
+
+    /// The same, sent with `metadata`.
+    async fn routed_message_sent_with(
+        &self,
+        words: &str,
+        continue_building: bool,
+        metadata: serde_json::Value,
+    ) -> anyhow::Result<Uuid> {
         let turn = self
-            .send(&self.owner, words, json!({}))
+            .send(&self.owner, words, metadata)
             .await
             .map_err(|error| controller_error("routed message", error))?;
         let job = self.job_of(&turn).await?;
@@ -2168,8 +2180,7 @@ impl Chain {
 /// the runtime saves with, and that token takes the workspace lease a save
 /// begins with. Without `writeIntent` its job had no such token, its folder
 /// was refreshed read-only, and the save of the page it made was refused
-/// (local drive, Nov 3: "legacy job token is not allowed to mutate this
-/// workspace scope").
+/// ("legacy job token is not allowed to mutate this workspace scope").
 #[tokio::test]
 async fn the_controllers_hand_back_may_write_and_save_the_spaces_files() -> anyhow::Result<()> {
     with_chain("routed-build-request-saves", |chain| {
@@ -2289,6 +2300,211 @@ async fn try_again_on_a_failed_hand_back_sends_the_hand_back_again() -> anyhow::
             let (status, body) = refused(chain.hand_back(&chain.owner, &browser, json!({})).await);
             assert_eq!(status, StatusCode::CONFLICT, "{}", body.message);
             assert_eq!(body.code.as_deref(), Some(HAND_BACK_SUPERSEDED_CODE));
+            Ok(())
+        })
+    })
+    .await
+}
+
+impl Chain {
+    /// A hand-back of `browser_job` from the person, sent naming `selection`
+    /// as the agents it goes to, as Studio's send names the chat's agents.
+    async fn hand_back_naming(
+        &self,
+        browser_job: &Uuid,
+        selection: serde_json::Value,
+        extra: serde_json::Value,
+    ) -> Result<dispatch::DispatchPromptResponse, (StatusCode, axum::Json<ApiError>)> {
+        let mut metadata = extra;
+        metadata[HAND_BACK_CLAIM_KEY] = json!(browser_job.to_string());
+        metadata["clientMessageId"] = json!(Uuid::new_v4().to_string());
+        metadata["agentSelection"] = selection;
+        let request = dispatch::normalize_dispatch_request(DispatchPromptRequest {
+            project_id: Some(self.project_id.to_string()),
+            session_id: None,
+            prompt_text: Some(HAND_BACK_PROMPT.to_string()),
+            intent: Some("feature".to_string()),
+            plan_seed: None,
+            metadata: Some(metadata),
+            conversation_metadata: Some(json!({ "visibility": "public" })),
+            parent_conversation_id: None,
+            thread_kind: None,
+            tool_limits: None,
+            repo: None,
+            ui: None,
+            priority: None,
+            runtime_type: None,
+            idle_ttl_seconds: None,
+            conversation_id: Some(self.conversation_id.to_string()),
+            runtime_id: None,
+            runtime_display_name: None,
+            prefer_runtime: None,
+        })?;
+        dispatch::process_dispatch_prompt(&self.state, &self.context(&self.owner), request).await
+    }
+
+    /// The agent each job of a dispatched prompt went to.
+    async fn agents_of(
+        &self,
+        response: &dispatch::DispatchPromptResponse,
+    ) -> anyhow::Result<Vec<String>> {
+        let prompt_id = response.prompt_id.context("prompt id")?;
+        Ok(self
+            .pool
+            .get()
+            .await?
+            .query(
+                "select coalesce(payload #>> '{metadata,agent,handle}', '') from agent_jobs
+                  where prompt_id = $1
+                  order by created_at",
+                &[&prompt_id],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect())
+    }
+
+    /// A turn of the person's, sent with `metadata`, that ends with a card
+    /// that continues building, and its browser turn, finished on the
+    /// fixtures' reply: the card's job and the browser job.
+    async fn card_sent_with(&self, metadata: serde_json::Value) -> anyhow::Result<(Uuid, Uuid)> {
+        let card_turn = self
+            .send(&self.owner, "Plan a day on the coast.", metadata)
+            .await
+            .map_err(|error| controller_error("card turn", error))?;
+        let card_job = self.job_of(&card_turn).await?;
+        self.post_card(&card_job, true).await?;
+        self.finish(
+            &card_job,
+            Some("Continue this task in Instafy's browser."),
+            "succeeded",
+        )
+        .await?;
+        let browser_turn = self
+            .send(
+                &self.owner,
+                "Continue this browser task using the browser attached to this turn.",
+                json!({ "browserRequestOf": format!("job:{card_job}") }),
+            )
+            .await
+            .map_err(|error| controller_error("browser turn", error))?;
+        let browser_job = self.job_of(&browser_turn).await?;
+        self.make_browser_turn(&browser_job).await?;
+        let reply = fixtures()["browserReply"].as_str().unwrap().to_string();
+        self.finish(&browser_job, Some(&reply), "succeeded").await?;
+        Ok((card_job, browser_job))
+    }
+}
+
+/// A hand-back carries on the turn whose card its browser turn continued, so
+/// it goes to that turn's agent alone, whichever agents its send names. Studio
+/// names the chat's agents, and a chat with two and no @-mention sent the
+/// hand-back to both: two building turns on one browser turn's findings, each
+/// in a lane that may not write while the other does.
+#[tokio::test]
+async fn a_hand_back_goes_to_the_agent_of_the_turn_it_carries_on() -> anyhow::Result<()> {
+    with_chain("hand-back-one-agent", |chain| {
+        Box::pin(async move {
+            let (_, browser_job) = chain.card_sent_with(json!({ "writeIntent": true })).await?;
+            let response = chain
+                .hand_back_naming(
+                    &browser_job,
+                    json!({ "active": ["octo", "mapper"], "mentions": [] }),
+                    json!({ "writeIntent": true }),
+                )
+                .await
+                .map_err(|error| controller_error("hand-back naming two agents", error))?;
+            assert_eq!(chain.agents_of(&response).await?, vec!["octo".to_string()]);
+            let hand_back = chain.job_of(&response).await?;
+            let metadata = chain.payload_metadata(&hand_back).await?;
+            assert_eq!(
+                metadata["agentSelection"],
+                json!({ "active": ["octo"], "mentions": ["octo"] }),
+                "{metadata}"
+            );
+            // It is one building turn, alone in its lane: it may write.
+            assert!(
+                crate::origins::job_allows_workspace_mutation(&json!({ "metadata": metadata })),
+                "{metadata}"
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A hand-back writes no more than the turn it carries on. A message sent
+/// read-only (a sender that asks Octo not to edit the space) can still be
+/// routed to the browser, and its browser turn can ask for a build: the
+/// controller's hand-back for it, and a hand-back sent saying it may write,
+/// get no write token, while a turn that could write passes its permission
+/// and its write scope on.
+#[tokio::test]
+async fn a_hand_back_writes_no_more_than_the_turn_it_carries_on() -> anyhow::Result<()> {
+    with_chain("hand-back-write-permission", |chain| {
+        Box::pin(async move {
+            // The controller's own hand-back of a message sent read-only.
+            let words = "Put the opening hours on a small page I can share.";
+            let routed = chain
+                .routed_message_sent_with(words, false, json!({ "writeIntent": false }))
+                .await?;
+            let browser = chain.routed_browser_turn(&routed, words).await?;
+            chain.post_build_request(&browser).await?;
+            chain.finish(&browser, Some(""), "succeeded").await?;
+            let hand_backs = chain.hand_backs_of(&browser).await?;
+            assert_eq!(hand_backs.len(), 1, "{hand_backs:?}");
+            let metadata = chain.payload_metadata(&hand_backs[0]).await?;
+            assert_eq!(metadata["writeIntent"], json!(false), "{metadata}");
+            let (job, _) = chain.lease_as_the_spaces_machine(&hand_backs[0]).await?;
+            assert!(
+                job["workspace_token"]
+                    .as_str()
+                    .is_none_or(|token| token.trim().is_empty()),
+                "a hand-back of a read-only message was leased a workspace token: {job}"
+            );
+            chain
+                .finish(&hand_backs[0], Some("Done."), "succeeded")
+                .await?;
+
+            // Studio's hand-back of a card from a read-only turn, sent saying it may write.
+            let (_, browser_job) = chain
+                .card_sent_with(json!({ "writeIntent": false }))
+                .await?;
+            let response = chain
+                .hand_back(&chain.owner, &browser_job, json!({ "writeIntent": true }))
+                .await
+                .map_err(|error| controller_error("hand-back of a read-only card", error))?;
+            let metadata = chain
+                .payload_metadata(&chain.job_of(&response).await?)
+                .await?;
+            assert_eq!(metadata["writeIntent"], json!(false), "{metadata}");
+            chain
+                .finish(&chain.job_of(&response).await?, Some("Done."), "succeeded")
+                .await?;
+
+            // A card from a turn that could write only some paths: the hand-back,
+            // sent as Studio sends it, with no scope of its own, keeps those
+            // paths rather than writing anywhere in the space.
+            let scope = json!({ "mode": "owned", "ownedPaths": ["sites/hours"] });
+            let (card_job, browser_job) = chain
+                .card_sent_with(json!({ "writeIntent": true, "writeScope": scope }))
+                .await?;
+            let card_scope = chain.payload_metadata(&card_job).await?["writeScope"].clone();
+            assert_eq!(card_scope["mode"], json!("owned"), "{card_scope}");
+            let response = chain
+                .hand_back(&chain.owner, &browser_job, json!({ "writeIntent": true }))
+                .await
+                .map_err(|error| controller_error("hand-back of a scoped card", error))?;
+            let metadata = chain
+                .payload_metadata(&chain.job_of(&response).await?)
+                .await?;
+            assert_eq!(metadata["writeIntent"], json!(true), "{metadata}");
+            assert_eq!(metadata["writeScope"]["mode"], json!("owned"), "{metadata}");
+            assert_eq!(
+                metadata["writeScope"]["ownedPaths"], card_scope["ownedPaths"],
+                "{metadata}"
+            );
             Ok(())
         })
     })

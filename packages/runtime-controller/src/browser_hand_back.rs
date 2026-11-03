@@ -27,6 +27,11 @@
 //!   a failed one sends the hand-back again, its claim and Studio's words,
 //!   never the notice it showed.
 //!
+//! A hand-back that passes resumes the building lane of the card's turn, so
+//! it goes to that turn's agent alone, whichever agents its send names, and
+//! writes no more than that turn could: without its write permission it has
+//! none, and it keeps that turn's owned paths ([`ContinuedTurn`]).
+//!
 //! One browser turn hands back without reading a page: one that carries on a
 //! card the routing step posted for the person's own message, opened no page
 //! and asked Octo to make what the message asks (the runtime's Details note,
@@ -67,7 +72,7 @@
 
 use axum::{http::StatusCode, Json};
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde_json::{json, Value as JsonValue};
+use serde_json::{json, Map as JsonMap, Value as JsonValue};
 use tokio_postgres::types::Json as PgJson;
 use uuid::Uuid;
 
@@ -580,17 +585,93 @@ fn not_a_card_browser_turn() -> (StatusCode, Json<ApiError>) {
     )
 }
 
+/// A hand-back [`require_hand_back`] let through: the record to stamp, and
+/// the turn it carries on.
+pub(crate) struct CheckedHandBack {
+    pub(crate) record: JsonValue,
+    pub(crate) continues: ContinuedTurn,
+}
+
+/// The turn a hand-back carries on: the one whose card its browser turn
+/// continued. The hand-back resumes that turn's building lane, so it goes to
+/// that turn's agent alone, and writes no more than that turn could.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ContinuedTurn {
+    /// The agent that answered the turn.
+    agent_handle: Option<String>,
+    /// The turn could write the space's files.
+    may_write: bool,
+    /// The paths it could write, when only some (`owned`).
+    owned_scope: Option<JsonValue>,
+}
+
+impl ContinuedTurn {
+    fn of(card_payload: &JsonValue) -> Self {
+        let metadata = card_payload.get("metadata");
+        let agent_handle = metadata
+            .and_then(|metadata| metadata.get("agent"))
+            .and_then(|agent| agent.get("handle"))
+            .and_then(JsonValue::as_str)
+            .map(|handle| handle.trim().trim_start_matches('@').to_ascii_lowercase())
+            .filter(|handle| !handle.is_empty());
+        let owned_scope = metadata
+            .and_then(|metadata| {
+                metadata
+                    .get("writeScope")
+                    .or_else(|| metadata.get("write_scope"))
+            })
+            .filter(|scope| {
+                scope.get("mode").and_then(JsonValue::as_str).map(str::trim) == Some("owned")
+            })
+            .cloned();
+        Self {
+            agent_handle,
+            may_write: crate::origins::job_allows_workspace_mutation(card_payload),
+            owned_scope,
+        }
+    }
+
+    /// Makes a hand-back's send `metadata` the continued turn's: it names that
+    /// turn's agent alone, has no write intent when that turn could not write,
+    /// and has no write scope of its own, only that turn's owned paths.
+    pub(crate) fn bind(&self, metadata: &mut JsonMap<String, JsonValue>) {
+        if let Some(handle) = self.agent_handle.as_deref() {
+            metadata.insert(
+                "agentSelection".to_string(),
+                json!({ "active": [handle], "mentions": [handle] }),
+            );
+        }
+        if !self.may_write {
+            metadata.insert("writeIntent".to_string(), JsonValue::Bool(false));
+            metadata.remove("write_intent");
+        }
+        for key in [
+            "writeScope",
+            "write_scope",
+            "agentWriteScopes",
+            "agent_write_scopes",
+            "writeScopes",
+            "write_scopes",
+        ] {
+            metadata.remove(key);
+        }
+        if let Some(scope) = self.owned_scope.as_ref() {
+            metadata.insert("writeScope".to_string(), scope.clone());
+        }
+    }
+}
+
 /// Checks a hand-back claim for a dispatch into `conversation_id` and returns
-/// the record to stamp. Runs inside the dispatch transaction, after the
-/// conversation's dispatch fence, so two hand-backs for one browser turn
-/// cannot both pass the once-only check.
+/// the record to stamp, with the turn the hand-back carries on. Runs inside the
+/// dispatch transaction, after the conversation's dispatch fence, so two
+/// hand-backs for one browser turn cannot both pass the once-only check.
 pub(crate) async fn require_hand_back(
     transaction: &tokio_postgres::Transaction<'_>,
     conversation_id: &Uuid,
     context: &RequestContext,
     claim: &JsonValue,
     request_metadata: &JsonValue,
-) -> Result<JsonValue, (StatusCode, Json<ApiError>)> {
+) -> Result<CheckedHandBack, (StatusCode, Json<ApiError>)> {
     let browser_job_id = parse_hand_back_claim(claim)
         .ok_or_else(|| bad_request("continuesFromBrowserJob must name one browser job"))?;
     if browser_transport_of(request_metadata).is_some() {
@@ -827,7 +908,10 @@ pub(crate) async fn require_hand_back(
             ));
         }
         record[BUILD_REQUEST_RECORD_KEY] = json!(true);
-        return Ok(record);
+        return Ok(CheckedHandBack {
+            record,
+            continues: ContinuedTurn::of(&card_payload),
+        });
     }
 
     let reply = browser_turn_reply(
@@ -873,7 +957,10 @@ pub(crate) async fn require_hand_back(
             "That browser turn read no page, so there is nothing to hand back.",
         ));
     }
-    Ok(record)
+    Ok(CheckedHandBack {
+        record,
+        continues: ContinuedTurn::of(&card_payload),
+    })
 }
 
 /// Whether the card a browser turn continued says Octo continues building
@@ -915,7 +1002,8 @@ async fn card_continues_building(
 /// own; dispatch checks it with [`require_hand_back`] and charges it as any
 /// hand-back. Like every send of Studio's, it says the turn may write the
 /// space's files (`writeIntent`), so its job is given the token that saves
-/// them. Every other completion returns at once.
+/// them when the message's own turn could write them ([`ContinuedTurn`]).
+/// Every other completion returns at once.
 ///
 /// A refusal for a conversation that moved on (someone wrote after the
 /// browser turn, or the building lane is busy) changes nothing: the newer
@@ -973,7 +1061,8 @@ pub(crate) async fn hand_back_build_request(
                 // It builds what the message asks, so it writes and saves the
                 // space's files, as Studio's own sends say they may: without
                 // this its job gets no write token, and its save is refused
-                // after the turn made the files.
+                // after the turn made the files. Dispatch gives it no more than
+                // the message's own turn had (`ContinuedTurn::bind`).
                 "writeIntent": true,
             })),
             conversation_metadata: None,
