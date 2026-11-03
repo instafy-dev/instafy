@@ -149,6 +149,10 @@ const special = {
   "bulk-actions": list("Bulk actions", BULK_ACTIONS, "Select all"),
   // A list with no label of its own, which a snapshot names by the option it holds.
   "line-list": list("", LINES, "All lines"),
+  // A form's checkbox, which a click checks.
+  "topping-checkbox": {
+    description: control("", { tag: "input", inputType: "checkbox", ariaLabel: "Extra Cheese", labels: "Extra Cheese" }),
+  },
   "invite-button": { description: control("Invite member") },
   "generate-key": { description: control("Generate API key") },
   "plain-button": { description: control("Show details") },
@@ -617,6 +621,10 @@ const shownTextFor = (currentUrl, targetId) =>
 let context;
 let browserConnected = true;
 const closedPages = new Set();
+// What the control holds: the text a step typed into it, and whether a click
+// checked it.
+let typedText = "";
+let checked = false;
 // The page CDP sessions that enabled Fetch, so a step's document requests
 // reach the controller's guard, and its answers, kept in a file.
 const fetchLogPath = process.env.INSTAFY_SHARED_BROWSER_FAKE_FETCH_LOG;
@@ -778,6 +786,9 @@ const makePage = (targetId, opened = null) => {
       if (mode === "page-quotes-closed-message") {
         throw new Error("element <button title=\"Target page, context or browser has been closed\"> is not visible");
       }
+      if (mode === "topping-checkbox") {
+        checked = !checked;
+      }
     },
     focus: async () => {
       // A field whose focus handler sends the page to another site.
@@ -785,7 +796,23 @@ const makePage = (targetId, opened = null) => {
         currentUrl = "https://other.example/";
       }
     },
-    fill: async () => {},
+    fill: async (text) => {
+      typedText = text;
+    },
+    // What the field holds once a step typed into it: "field-reformats" is a
+    // phone field that formats the digits typed, "field-empties" a page that
+    // clears what was typed, and "editable-area" an editable element that is
+    // no field, whose value Playwright cannot read.
+    inputValue: async () => {
+      if (mode === "editable-area") {
+        throw new Error("Error: Node is not an <input>, <textarea> or <select> element");
+      }
+      if (mode === "field-reformats") {
+        return typedText.replace(/^(\d{3})(\d{3})(\d{4})$/u, "($1) $2-$3");
+      }
+      return mode === "field-empties" ? "" : typedText;
+    },
+    isChecked: async () => checked,
     press: async (key) => {
       if (mode === "site-search-posts-own" && key === "Enter") {
         pauseDocument("main", "https://example.test/collect", { method: "POST" });
@@ -4269,6 +4296,101 @@ fn ordinary_type_and_every_non_activation_press_use_exact_one_shot_consent() {
                 .as_str()
                 .expect("press payload fingerprint")
         ));
+    }
+}
+
+// A type step's result says what it did: the field, how many characters went in and whether
+// the field holds them, never the text. A page's reading never shows typed text, so the
+// reading after typing matches the one before, and a turn that could not tell its text went
+// in gave up a form after its first field.
+#[test]
+fn a_type_step_names_the_field_and_how_many_characters_went_in_never_the_text() {
+    let after = " A page's reading never shows typed text.";
+    for (mode, text, submit, done) in [
+        (
+            "form-input",
+            "Alex Example",
+            false,
+            format!("Typed 12 characters into \"Search\", and the field holds them.{after}"),
+        ),
+        // A phone field that formats the digits typed.
+        (
+            "field-reformats",
+            "5550102048",
+            false,
+            format!("Typed 10 characters into \"Search\", and the field holds 14 characters now.{after}"),
+        ),
+        (
+            "field-empties",
+            "Alex Example",
+            false,
+            format!("Typed 12 characters into \"Search\", and the field is empty now.{after}"),
+        ),
+        // An editable element that is no field: there is no value to read.
+        (
+            "editable-area",
+            "Alex Example",
+            false,
+            format!("Typed 12 characters into \"Search\".{after}"),
+        ),
+        ("form-input", "", false, format!("Cleared \"Search\", and it is empty now.{after}")),
+        (
+            "site-search",
+            "Belém Tower",
+            true,
+            "Typed 11 characters into \"Search places\" and pressed Enter.".to_string(),
+        ),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        fixture.prepare_routine_start("page-target");
+        let before = payload_of(&fixture.call(mode, "GET", "/v1/snapshot", None));
+        let body = json!({
+            "index": 0,
+            "snapshotId": before["snapshotId"],
+            "text": text,
+            "submit": submit,
+        });
+        let output = fixture.call(mode, "POST", "/v1/type", Some(&body.to_string()));
+        let typed = payload_of(&output);
+        assert_eq!(typed["done"], done.as_str(), "{mode}");
+        if !submit {
+            // The reading itself is the one before: it never shows the text.
+            assert_eq!(
+                typed["interactiveElements"], before["interactiveElements"],
+                "{mode}"
+            );
+            assert_eq!(typed["snapshotId"], before["snapshotId"], "{mode}");
+        }
+        if !text.is_empty() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(!stdout.contains(text), "{mode} carried the text: {stdout}");
+        }
+    }
+}
+
+// A click on a checkbox says whether it is checked now: the reading never shows that either.
+// Any other click says nothing more than its reading.
+#[test]
+fn a_click_on_a_checkbox_says_whether_it_is_checked_now() {
+    for (mode, done) in [
+        (
+            "topping-checkbox",
+            Some(
+                "Clicked \"Extra Cheese\", and it is checked now. A page's reading never shows whether a box is checked.",
+            ),
+        ),
+        ("plain-button", None),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        fixture.prepare_routine_start("page-target");
+        let snapshot_id = fixture.snapshot_id_in(mode);
+        let clicked = payload_of(&fixture.call(
+            mode,
+            "POST",
+            "/v1/click",
+            Some(&json!({"index": 0, "snapshotId": snapshot_id}).to_string()),
+        ));
+        assert_eq!(clicked.get("done").and_then(JsonValue::as_str), done, "{mode}");
     }
 }
 

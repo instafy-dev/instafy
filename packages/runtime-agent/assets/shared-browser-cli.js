@@ -1761,6 +1761,60 @@ function quotedControlLabel(description) {
   return other ? `"${bounded(shown)}" (also called "${bounded(other)}")` : `"${bounded(shown)}"`;
 }
 
+// What a step that fills a field did, in its result's `done`. A page's
+// reading never shows what is typed into a field, or whether a box is checked,
+// so the reading after such a step matches the one before it, and a turn that
+// could not tell the text went in gave up a form after its first field. The
+// line names the field, and how many characters went in and whether the field
+// holds them, never the text: it may be private. A select needs none: its
+// reading names the option it holds (`chosen`).
+const FIELD_READ_MS = 1_000;
+
+function characterCount(count) {
+  return count === 1 ? "1 character" : `${count} characters`;
+}
+
+// What a field holds once a step typed into it, read here only to be counted
+// and compared with the text typed; null when it is not a field with a value
+// (an editable area) or could not be read.
+async function heldText(locator) {
+  return await within(FIELD_READ_MS, locator.inputValue().catch(() => null), null);
+}
+
+function typedLine(description, text, held, submitted) {
+  const field = quotedControlLabel(description);
+  const count = Array.from(text).length;
+  if (submitted) {
+    return `Typed ${characterCount(count)} into ${field} and pressed Enter.`;
+  }
+  const did = count === 0 ? `Cleared ${field}` : `Typed ${characterCount(count)} into ${field}`;
+  const holds = typeof held !== "string"
+    ? ""
+    : held === text
+      ? (count === 0 ? ", and it is empty now" : ", and the field holds them")
+      : held === ""
+        ? ", and the field is empty now"
+        : `, and the field holds ${characterCount(Array.from(held).length)} now`;
+  return `${did}${holds}. A page's reading never shows typed text.`;
+}
+
+function isCheckableDescription(description) {
+  const tag = String(description?.tag || "").toLowerCase();
+  const type = String(description?.inputType || "").toLowerCase();
+  const role = String(description?.role || "").toLowerCase();
+  return (tag === "input" && (type === "checkbox" || type === "radio")) ||
+    ["checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"].includes(role);
+}
+
+// A click on a checkbox, a radio button or a switch says whether it is checked
+// now; null for any other control, or when that cannot be read.
+async function checkedLine(description, locator) {
+  if (!isCheckableDescription(description)) return null;
+  const checked = await within(FIELD_READ_MS, locator.isChecked().catch(() => null), null);
+  if (typeof checked !== "boolean") return null;
+  return `Clicked ${quotedControlLabel(description)}, and it is ${checked ? "" : "not "}checked now. A page's reading never shows whether a box is checked.`;
+}
+
 // A prompt's label, with its category and tab, fits the approval's label
 // bound (240 bytes): each of the control's names is cut on its own, and the
 // fields a form step sends take the rest of it.
@@ -4529,10 +4583,15 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     await settleAfterAction(page);
     page = await resolveExpectedPage(browser);
     await page.bringToFront();
-    if (page.url() !== beforeUrl) {
+    const moved = page.url() !== beforeUrl;
+    if (moved) {
       await emitNavigationResult(page);
     }
-    return withActivity(await snapshotAfterStep(page, withholding), stepActivity(page, "click", stepApproval()));
+    const checked = moved ? null : await checkedLine(target.description, target.locator);
+    return withActivity(
+      { ...await snapshotAfterStep(page, withholding), ...(checked ? { done: checked } : {}) },
+      stepActivity(page, "click", stepApproval()),
+    );
   }
 
   if (method === "POST" && requestPath === "/v1/type") {
@@ -4645,6 +4704,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       : stepPostOrigins(readingStep, sourceOrigin, typeSubmission, destination));
     assertStepOnTime();
     await target.locator.fill(body.text);
+    const held = submitting ? null : await heldText(target.locator);
     if (submitting) {
       assertStepOnTime();
       await target.locator.press("Enter");
@@ -4657,7 +4717,10 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // into any other field it sends a form.
     const typeKind = submitting ? (step.category === "search" ? "search" : "submit") : "type";
     return withActivity(
-      await snapshotAfterStep(page, withholding),
+      {
+        ...await snapshotAfterStep(page, withholding),
+        done: typedLine(target.description, body.text, held, submitting),
+      },
       stepActivity(page, typeKind, freeSearch ? "free" : stepApproval()),
     );
   }
