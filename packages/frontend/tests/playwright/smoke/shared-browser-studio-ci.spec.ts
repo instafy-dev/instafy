@@ -227,24 +227,50 @@ async function expectBrowserReady(page: Page) {
   await expect(modal.getByTestId("shared-browser-address")).toBeEnabled();
 }
 
-async function expectPaintedFixture(surface: Locator) {
-  await expect.poll(async () => surface.evaluate(element => {
-    const canvas = element as HTMLCanvasElement;
-    if (canvas.width < 300 || canvas.height < 100) return false;
-    const pixels = canvas.getContext("2d")?.getImageData(0, 0, canvas.width, canvas.height).data;
-    if (!pixels) return false;
-    let light = 0;
-    let dark = 0;
-    for (let offset = 0; offset < pixels.length; offset += 4) {
-      if (pixels[offset + 3] < 250) continue;
-      if (pixels[offset] > 220 && pixels[offset + 1] > 220 && pixels[offset + 2] > 220) light++;
-      if (pixels[offset] < 150 || pixels[offset + 1] < 150 || pixels[offset + 2] < 150) dark++;
-    }
-    return light > 1_000 && dark > 100;
-  }), { timeout: 30_000 }).toBe(true);
+async function expectPaintedFixture(surface: Locator, reportSocketCounts: () => void) {
+  let diagnostic: Record<string, number | boolean> | null = null;
+  try {
+    await expect.poll(async () => {
+      const sample = await surface.evaluate(element => {
+        const canvas = element as HTMLCanvasElement;
+        const bounds = canvas.getBoundingClientRect();
+        const pixels = canvas.width > 0 && canvas.height > 0
+          ? canvas.getContext("2d")?.getImageData(0, 0, canvas.width, canvas.height).data
+          : undefined;
+        let light = 0;
+        let dark = 0;
+        let opaque = 0;
+        if (pixels) for (let offset = 0; offset < pixels.length; offset += 4) {
+          if (pixels[offset + 3] < 250) continue;
+          opaque++;
+          if (pixels[offset] > 220 && pixels[offset + 1] > 220 && pixels[offset + 2] > 220) light++;
+          if (pixels[offset] < 150 || pixels[offset + 1] < 150 || pixels[offset + 2] < 150) dark++;
+        }
+        const visibility = { checkOpacity: true, checkVisibilityCSS: true };
+        const frozen = canvas.closest('[data-testid="browser-session-modal"]')
+          ?.querySelector('[data-testid="browser-session-frozen-frame"]');
+        return {
+          width: canvas.width, height: canvas.height,
+          boundsWidth: Math.round(bounds.width), boundsHeight: Math.round(bounds.height),
+          hasPixels: Boolean(pixels), light, dark, opaque,
+          liveVisible: canvas.checkVisibility(visibility),
+          frozenPresent: Boolean(frozen), frozenVisible: frozen?.checkVisibility(visibility) ?? false,
+        };
+      });
+      diagnostic = sample;
+      return sample.width >= 300 && sample.height >= 100 && sample.hasPixels &&
+        sample.light > 1_000 && sample.dark > 100;
+    }, { timeout: 30_000 }).toBe(true);
+  } catch (cause) {
+    // Fixed numeric/boolean fields only: never retain pixels, DOM text, URLs,
+    // WebSocket payloads, grants, or the disposable session's values.
+    console.log(`[shared-studio-paint] ${JSON.stringify(diagnostic ?? { available: false })}`);
+    reportSocketCounts();
+    throw cause;
+  }
 }
 
-async function navigateAndObserve(page: Page, fixture: StudioFixture, expected: "empty" | "signed-in") {
+async function navigateAndObserve(page: Page, fixture: StudioFixture, expected: "empty" | "signed-in", reportSocketCounts: () => void) {
   const baseline = await state(fixture);
   const address = page.getByTestId("shared-browser-address");
   await address.fill(fixture.fixturePageURL);
@@ -259,7 +285,7 @@ async function navigateAndObserve(page: Page, fixture: StudioFixture, expected: 
   });
   expect(observed.storage).toBe(expected === "empty" ? null : PROOF_VALUE);
   expect(observed.httpOnlyVisible).toBe(false);
-  await expectPaintedFixture(page.getByTestId("shared-browser-cdp-screencast"));
+  await expectPaintedFixture(page.getByTestId("shared-browser-cdp-screencast"), reportSocketCounts);
   await expect(page.getByTestId("browser-session-frozen-frame")).toBeHidden();
   return observed;
 }
@@ -301,6 +327,12 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
     const fixture = readFixture();
     const grants: BrowserGrant[] = [];
     const reported = new Set<string>();
+    const socketCounts = {
+      screencast: { opened: 0, socketerror: 0, close: 0, framereceived: 0 },
+      input: { opened: 0, socketerror: 0, close: 0, framereceived: 0 },
+      collaboration: { opened: 0, socketerror: 0, close: 0, framereceived: 0 },
+    };
+    const reportSocketCounts = () => console.log(`[shared-studio-ws-counts] ${JSON.stringify(socketCounts)}`);
     const reportAPI = (url: string, status: number | "request-failed") => {
       const parsed = new URL(url);
       const browserOperation = parsed.protocol === "http:" && ["127.0.0.1", "localhost"].includes(parsed.hostname)
@@ -319,9 +351,14 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
       target.on("websocket", socket => {
         const url = new URL(socket.url());
         if (url.protocol !== "ws:" || !["127.0.0.1", "localhost"].includes(url.hostname)) return;
-        const kind = /\/browser\/(screencast|input|collaboration)$/.exec(url.pathname)?.[1];
+        const kind = /\/browser\/(screencast|input|collaboration)$/.exec(url.pathname)?.[1] as keyof typeof socketCounts | undefined;
         if (!kind) return;
+        const counts = socketCounts[kind];
+        counts.opened = Math.min(1_000_000, counts.opened + 1);
         const report = (event: "socketerror" | "close" | "framereceived") => {
+          // Count every event, even when its one-line category was already
+          // reported; repeated reconnects otherwise disappear from the log.
+          counts[event] = Math.min(1_000_000, counts[event] + 1);
           const category = `${kind}:${event}`;
           if (reported.has(category) || reported.size >= 32) return;
           reported.add(category);
@@ -329,7 +366,7 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
         };
         socket.once("socketerror", () => report("socketerror"));
         socket.once("close", () => report("close"));
-        socket.once("framereceived", () => report("framereceived"));
+        socket.on("framereceived", () => report("framereceived"));
       });
       target.on("requestfailed", request => reportAPI(request.url(), "request-failed"));
       target.on("response", async response => {
@@ -370,7 +407,7 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
     await openSharedBrowser(page);
     const initial = await latestGrant();
     const initialGeneration = await readyGeneration(fixture, initial);
-    await navigateAndObserve(page, fixture, "empty");
+    await navigateAndObserve(page, fixture, "empty", reportSocketCounts);
 
     await control(fixture, "/checkpoint", {});
     const beforeLogin = await state(fixture);
@@ -380,7 +417,7 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
     await expect.poll(async () => (await state(fixture)).submissions, { timeout: 30_000 })
       .toBe(beforeLogin.submissions + 1);
     await expectLoginObserved(fixture, beforeLogin);
-    await navigateAndObserve(page, fixture, "signed-in");
+    await navigateAndObserve(page, fixture, "signed-in", reportSocketCounts);
     await control(fixture, "/wait-snapshot", { runtimeId: initial.runtimeId });
 
     // Close the viewer first so its reconnect loop cannot race the explicit
@@ -403,7 +440,7 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
     expect(replacement.originId).not.toBe(initial.originId);
     const replacementGeneration = await readyGeneration(fixture, replacement);
     expect(replacementGeneration.leaseId).not.toBe(initialGeneration.leaseId);
-    const restored = await navigateAndObserve(page, fixture, "signed-in");
+    const restored = await navigateAndObserve(page, fixture, "signed-in", reportSocketCounts);
     expect(restored.submissions).toBe(beforeLogin.submissions + 1);
 
     const clearResponse = page.waitForResponse(response =>
@@ -424,7 +461,7 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
     const clearedGeneration = await readyGeneration(fixture, cleared);
     expect(clearedGeneration.leaseId).not.toBe(initialGeneration.leaseId);
     expect(clearedGeneration.leaseId).not.toBe(replacementGeneration.leaseId);
-    const empty = await navigateAndObserve(page, fixture, "empty");
+    const empty = await navigateAndObserve(page, fixture, "empty", reportSocketCounts);
     expect(empty.submissions).toBe(restored.submissions);
     await expectSignedIn(page, fixture);
     expect((await state(fixture)).modelJobs).toBe(0);
