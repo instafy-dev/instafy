@@ -546,3 +546,70 @@ test("site.h takes className and plain attributes, so a link is a link, and neve
     Element.prototype.addEventListener = saved.listen;
   }
 });
+
+// site.h refused every address that was not http(s), mailto, tel or relative, through attrs too, which site.js 1.6.1
+// had set: a QR code drawn from a canvas (data:image/…), a photo the person picked (blob:), a "text this plan" link
+// (sms:) and an "Add to calendar" file the page made (blob: with download) lost their address.
+test("site.h takes a picture or a file the page made itself and a text-message link, and still nothing that could run script", async () => {
+  const { site } = await draw("blank", null);
+  const errors = [];
+  const saved = console.error;
+  console.error = (...args) => errors.push(args.join(" "));
+  try {
+    const picture = "data:image/png;base64,iVBORw0KGgo=";
+    const file = "blob:https://site.example/5f0c8f2e";
+    assert.equal(site.h("img", { src: picture, alt: "QR code" }).attrs.src, picture);
+    assert.equal(site.h("img", { attrs: { src: file } }).attrs.src, file);
+    assert.equal(site.h("video", { src: file, poster: picture }).attrs.poster, picture);
+    assert.equal(site.h("a", { href: "sms:+15550100?body=Plan" }, "Text it").attrs.href, "sms:+15550100?body=Plan");
+    assert.equal(site.h("a", { href: file, download: "trip.ics" }, "Add to calendar").attrs.href, file);
+    assert.equal(site.h("a", { attrs: { download: "trip.ics", href: file } }, "Add to calendar").attrs.href, file);
+    assert.deepEqual(errors, []);
+    // a page or a script by address is still left out: data: and blob: only as a picture, a video or a download
+    const refused = [
+      ["iframe", { src: picture }],
+      ["iframe", { src: file }],
+      ["object", { data: picture }],
+      ["embed", { src: picture }],
+      ["a", { href: "data:text/html,<script>alert(1)</script>", download: "page.html" }],
+      ["a", { href: file }],
+      ["img", { src: "data:text/html,<script>alert(1)</script>" }],
+      ["img", { src: "javascript:alert(1)" }],
+      ["a", { href: "vbscript:msgbox(1)" }],
+    ];
+    for (const [tag, props] of refused) {
+      const el = site.h(tag, props);
+      assert.equal(el.getAttribute(Object.keys(props)[0]), null, `${tag} ${JSON.stringify(props)}`);
+    }
+    assert.equal(errors.length, refused.length, errors.join("\n"));
+  } finally {
+    console.error = saved;
+  }
+});
+
+// A blank page wrote site.start({ data: {}, render }): site.start took the object for the address of a data file, asked
+// the site for "[object Object]", and the page showed "This page couldn't load its data" in place of what it drew.
+test("site.start takes a page's data itself, as well as the address of its data file", async () => {
+  APP.inline = `site.start({ data: { stops: ["Livraria Lello"] }, render: function (data) {
+    document.getElementById("list").replaceChildren(site.h("h2", {}, data.stops[0]));
+  } });`;
+  APP.empty = `site.start({ data: {}, render: function () {
+    site.head({ title: "Livraria Lello" });
+    document.getElementById("list").replaceChildren(site.h("p", {}, "Every day, 9:00 AM–7:30 PM"));
+  } });`;
+  const errors = [];
+  const saved = console.error;
+  console.error = (...args) => errors.push(args.join(" "));
+  try {
+    const inline = await draw("inline", null);
+    assert.equal(inline.document.getElementById("list").textContent, "Livraria Lello");
+    const empty = await draw("empty", null);
+    assert.equal(empty.document.getElementById("list").textContent, "Every day, 9:00 AM–7:30 PM");
+    assert.doesNotMatch(empty.document.body.textContent, /couldn't load its data/);
+    assert.deepEqual(errors, []);
+  } finally {
+    console.error = saved;
+    delete APP.inline;
+    delete APP.empty;
+  }
+});

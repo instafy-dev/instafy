@@ -3,6 +3,7 @@
  *
  *   site.start({ data: "data.json", state: (data) => ({ sort: "price", open: "" }), render(data, state) {…},
  *                select(ref, data) { return { open: site.slug(ref) }; } });
+ *   (data: the data file's address, null for none, or the data itself: { stops: […] }.)
  *
  * - Query state: site.state(defaults), site.setState(patch) (history.replaceState, then render), site.onState(fn).
  *   Only the keys in `state` go in the query, so Studio's Present / Follow and shared links show the same view.
@@ -30,7 +31,8 @@
  * - Links: a source in a caption is a quiet citation (muted, a faint underline); an action ("Open Amazon ↗",
  *   "where to check ↗", "Try again") is in the link colour.
  * - Safety: every text goes through textContent; site.link() only links https: URLs; site.h() never sets an "on…"
- *   attribute from text, nor an address (href, src…) that is not http(s), mailto, tel or relative.
+ *   attribute from text, nor an address (href, src…) that could run script or load a page of its own: javascript:,
+ *   and data: or blob: anywhere but a picture's or a video's source and a link that downloads (blob:).
  * SPDX-License-Identifier: AGPL-3.0-only */
 (function () {
   "use strict";
@@ -52,8 +54,10 @@
   /** h("li", {class, id, text, attrs: {...}, on: {click}}, ...children). Strings become text nodes; null is skipped.
    * className is class, and any other key is an attribute: h("a", {href, target: "_blank", rel: "noopener"}, "Site")
    * is a link. A second argument that is not an object (a string, a node, a list) is the first child. Never set, and
-   * said in the console: an "on…" attribute that is not a function (onClick: fn, or on: {click: fn}), an address
-   * (href, src, action…) that is not http(s), mailto, tel or relative (javascript: included), and srcdoc. */
+   * said in the console: an "on…" attribute that is not a function (onClick: fn, or on: {click: fn}), srcdoc, and an
+   * address (href, src, action…) other than a relative one, http(s), mailto, tel or sms, except a picture the page
+   * holds (data:image/…) or a file it made (blob:) as an img's, video's, audio's or source's src or poster, and a file
+   * it made as the href of a link that downloads (download). */
   function h(tag, props) {
     var el = document.createElement(tag);
     var children = Array.prototype.slice.call(arguments, 2);
@@ -63,9 +67,10 @@
     if (cls) el.className = cls;
     if (props.id) el.id = props.id;
     if (props.text != null) el.textContent = String(props.text);
-    Object.keys(props).forEach(function (k) { if (!OWN_PROPS[k]) attr(el, k, props[k]); });
     var attrs = props.attrs || {};
-    Object.keys(attrs).forEach(function (k) { attr(el, k, attrs[k]); });
+    var downloads = [props.download, attrs.download].some(function (v) { return v != null && v !== false; });
+    Object.keys(props).forEach(function (k) { if (!OWN_PROPS[k]) attr(el, k, props[k], downloads); });
+    Object.keys(attrs).forEach(function (k) { attr(el, k, attrs[k], downloads); });
     var on = props.on || {};
     Object.keys(on).forEach(function (k) { el.addEventListener(k, on[k]); });
     children.forEach(function (child) { append(el, child); });
@@ -74,8 +79,10 @@
   var OWN_PROPS = { "class": 1, className: 1, id: 1, text: 1, attrs: 1, on: 1 };
   // attributes the browser loads or follows as an address
   var ADDRESS_ATTRS = { href: 1, src: 1, action: 1, formaction: 1, poster: 1, cite: 1, data: 1, background: 1, ping: 1, "xlink:href": 1 };
+  // elements whose src or poster is only ever shown or played: a picture or a file the page made may be one
+  var MEDIA = { IMG: 1, VIDEO: 1, AUDIO: 1, SOURCE: 1, TRACK: 1 };
   /** One attribute of h(): false and null leave it out, true sets it empty; what could run script is refused. */
-  function attr(el, key, v) {
+  function attr(el, key, v, downloads) {
     var name = String(key === "htmlFor" ? "for" : key);
     var lower = name.toLowerCase();
     if (v === false || v == null) return;
@@ -86,12 +93,22 @@
     }
     if (typeof v === "object" || typeof v === "function") { console.error("[site] h(): " + name + " needs text, a number or true"); return; }
     var text = v === true ? "" : String(v);
-    if (lower === "srcdoc" || (ADDRESS_ATTRS[lower] && !safeAddress(text))) { console.error("[site] h(): left out " + name + ": not a web address"); return; }
+    if (lower === "srcdoc" || (ADDRESS_ATTRS[lower] && !safeAddress(text, el.tagName, lower, downloads))) {
+      console.error("[site] h(): left out " + name + ": not an address this page may use");
+      return;
+    }
     try { el.setAttribute(name, text); } catch (e) { console.error("[site] h(): " + name + " is not an attribute name"); }
   }
-  /** An address a link or source may hold: relative to the page, or http(s), mailto or tel (never javascript: or data:). */
-  function safeAddress(url) {
-    try { return /^(https?|mailto|tel):$/.test(new URL(url, location.href).protocol); } catch (e) { return false; }
+  /** An address an attribute may hold: relative to the page, http(s), mailto, tel or sms; a picture the page holds
+   * (data:image/…) or a file it made (blob:) as a medium's src or poster; a file it made as a downloading link's href.
+   * Never javascript:, nor a page or a script by data: or blob:. */
+  function safeAddress(url, tag, name, downloads) {
+    var u;
+    try { u = new URL(url, location.href); } catch (e) { return false; }
+    if (/^(https?|mailto|tel|sms):$/.test(u.protocol)) return true;
+    var medium = MEDIA[String(tag).toUpperCase()] && (name === "src" || name === "poster");
+    if (u.protocol === "blob:") return !!(medium || (downloads && name === "href" && /^(A|AREA)$/i.test(tag)));
+    return u.protocol === "data:" && !!medium && /^data:image\//i.test(u.href);
   }
   /** Append children to el, skipping null and false (site.rowAction returns null when a row has no action). */
   function append(el, child) {
@@ -989,8 +1006,9 @@
     // The page draws after its data loads: Studio says it is opening the site until the first view is drawn.
     var b = bind();
     if (b && typeof b.drawsLater === "function") b.drawsLater();
+    // data: the address of the page's data file (data.json when left out), null for none, or the data itself
     var dataUrl = o.data === undefined ? "data.json" : o.data;
-    var got = dataUrl ? load(dataUrl) : Promise.resolve({});
+    var got = dataUrl && typeof dataUrl === "object" ? Promise.resolve(dataUrl) : dataUrl ? load(dataUrl) : Promise.resolve({});
     return got.then(function (data) {
       state(typeof o.state === "function" ? o.state(data) : (o.state || {}));
       if (o.select) hooks.select = function (ref) { return o.select(ref, data); };
