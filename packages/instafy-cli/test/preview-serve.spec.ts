@@ -817,6 +817,46 @@ describe("instafy preview open --start picks the site's port, and close stops th
     expect(byHand.message).toMatch(/without --port/);
   }, 60000);
 
+  // A map turn ran its card's command in the space's top-level folder: the server it started answered 404 there, the
+  // card opened a "not found" page, and that server went on serving the whole space under a card the chat no longer
+  // showed.
+  it("posts no card for a page that answers 404, says so, and stops the server it started for it", async () => {
+    const s = await space();
+    fs.writeFileSync(
+      path.join(s.ws.root, "site", "nothing.mjs"),
+      [
+        'import http from "node:http";',
+        "const [port] = process.argv.slice(2);",
+        'http.createServer((_req, res) => { res.statusCode = 404; res.end("Not found"); }).listen(Number(port), "127.0.0.1");',
+      ].join("\n"),
+    );
+    const { message, exitCode } = await failure(s.open({ serveCmd: `${node} nothing.mjs {port}`, title: "A page" }));
+    expect(exitCode).toBe(2);
+    expect(message).toMatch(
+      /^The page at http:\/\/127\.0\.0\.1:\d+\/ answered HTTP 404: there is no page there, so no card was posted, and the server this command started was stopped\. /,
+    );
+    // Nothing was asked of the server: no preview and no card.
+    expect(s.requests.filter((line) => line.startsWith("POST"))).toEqual([]);
+    const [log] = fs.readdirSync(path.join(s.ws.root, ".instafy", "agent", "logs"));
+    const port = Number(/^preview-(\d+)\.log$/.exec(log!)![1]);
+    expect(message).toContain(`127.0.0.1:${port}/`);
+    await until("the started site to stop", async () => !(await answers(port)));
+    expect(await portIsFree(port)).toBe(true);
+
+    // A server this command did not start is left running.
+    const running = await listenOn(
+      http.createServer((_req, res) => {
+        res.statusCode = 404;
+        res.end();
+      }),
+    );
+    const byHand = await failure(s.openOnly({ port: running, title: "A page" }));
+    expect(byHand.exitCode).toBe(2);
+    expect(byHand.message).toMatch(/answered HTTP 404: there is no page there, so no card was posted\. Run the command inside the site's own folder/);
+    expect(await answers(running)).toBe(true);
+    expect(s.requests.filter((line) => line.startsWith("POST"))).toEqual([]);
+  }, 60000);
+
   it("never takes another space's site on this machine for this one, even from the same command and folder name, and close never stops it", async () => {
     // Two spaces run on one machine as one user (a desktop runtime): one HOME, so one CLI state, and one set of ports.
     const WHO = [

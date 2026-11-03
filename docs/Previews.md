@@ -259,7 +259,8 @@ the Studio or API host: equal to it, under or above it, or under the same regist
 Where a part is older or unconfigured:
 
 - CLI: a 404 or 503 from the controller exits 5 with "Previews are not available on this server". Exit 2 means nothing
-  is listening on the port; exit 3 means the port is not allowed.
+  is listening on the port, or the site's page answers 404 there (no card is posted, and a site `--start` started for
+  it is stopped); exit 3 means the port is not allowed.
 - Skill: on exit 5, or with no `preview` command, Octo keeps the old flow: it gives the local URL, and makes a public
   tunnel only when asked.
 - Studio: no card means no tab. A pane whose preview the controller no longer serves says "Previews are not available

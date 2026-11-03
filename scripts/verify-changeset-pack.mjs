@@ -51,6 +51,7 @@ const PACKAGE_POLICIES = new Map([
         "package/dist/bind/src/records.mjs",
         "package/dist/bind/src/save-owner.mjs",
         "package/dist/bind/src/schema-lite.mjs",
+        "package/dist/bind/src/script-text.mjs",
         "package/dist/bind/src/server.mjs",
         "package/dist/bind/src/sse.mjs",
         "package/dist/bind/src/starters/blank/app.js",
