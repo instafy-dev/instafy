@@ -1022,6 +1022,182 @@ describe("the page a browser turn starts on", () => {
   });
 });
 
+describe("a look at the page a failed open left", () => {
+  const PAGE_C = "cccccccccccccccc";
+  const PAGE_D = "dddddddddddddddd";
+  // The runtime's browse label, with its past form for Details.
+  const BROWSE = { ...BROWSER_BROWSE, done: "browsed {host}" };
+  const rows = (messages: ChatMessage[]) =>
+    summarize(messages).details.map((item) => (item.kind === "step" ? [item.step.state, item.step.label] : null));
+  // A snapshot of a blank page names no site: a fresh browser turn starts there.
+  const blank = () => browserStep(BROWSER_USE, { step: "snapshot" });
+
+  // A local test: a research turn guessed two addresses. One had no page, the
+  // other's site closed the connection, and the turn looked at both pages the
+  // browser was left on: Details read "Browsed en.andalucia.org" and "Read a
+  // page on alcazarsevilla.org", both with a tick, and the line ended "read a
+  // page on alcazarsevilla.org", a not-found page.
+  it("is part of that failure, in Details and on the line", () => {
+    const messages = [
+      browserStep(BROWSER_OPEN, { host: "visitasevilla.es", pageKey: PAGE_A, step: "navigate" }),
+      browserStep(BROWSER_OPEN, { host: "visitasevilla.es", pageKey: PAGE_B, step: "navigate" }),
+      browserStep(BROWSER_OPEN, { host: "andalucia.org", step: "navigate" }, "failed"),
+      // The page was still busy: the look came back as a status.
+      browserStep(BROWSE, { host: "en.andalucia.org", pageKey: PAGE_C, step: "status" }),
+      browserStep(BROWSER_OPEN, { host: "alcazarsevilla.org", step: "navigate" }, "failed"),
+      browserStep(BROWSER_READ, { host: "alcazarsevilla.org", pageKey: PAGE_D, step: "snapshot" }),
+      // A second look at the same page is part of it too.
+      browserStep(BROWSER_READ, { host: "alcazarsevilla.org", pageKey: PAGE_D, step: "snapshot" }),
+    ];
+    expect(rows(messages)).toEqual([
+      ["done", "Opened visitasevilla.es"],
+      ["done", "Opened visitasevilla.es"],
+      ["failed", "Tried opening andalucia.org"],
+      ["failed", "Tried browsing en.andalucia.org"],
+      ["failed", "Tried opening alcazarsevilla.org"],
+      ["failed", "Tried reading alcazarsevilla.org"],
+      ["failed", "Tried reading alcazarsevilla.org"],
+    ]);
+    expect(summarize(messages).summary).toBe("Opened 2 pages on visitasevilla.es");
+    // A fresh turn that only did that, from a blank page, never says it read a page.
+    const fresh = [blank(), ...messages.slice(4)];
+    expect(rows(fresh)).toEqual([
+      ["done", "Used the browser"],
+      ["failed", "Tried opening alcazarsevilla.org"],
+      ["failed", "Tried reading alcazarsevilla.org"],
+      ["failed", "Tried reading alcazarsevilla.org"],
+    ]);
+    expect(summarize(fresh).summary).toBe("Used the browser");
+  });
+
+  // A turn whose tab still showed a not-found page when a second open failed
+  // (refused at once, or a site that did not answer) looked at it again, and
+  // so did a turn that listed its tabs in between: both still read "Read a
+  // page on en.andalucia.org", with a tick.
+  it("stays part of it after another failed open or a look at the tabs", () => {
+    const opened = () => browserStep(BROWSER_OPEN, { host: "visitasevilla.es", pageKey: PAGE_A, step: "navigate" });
+    const failed = (host: string) => browserStep(BROWSER_OPEN, { host, step: "navigate" }, "failed");
+    const look = () => browserStep(BROWSER_READ, { host: "en.andalucia.org", pageKey: PAGE_C, step: "snapshot" });
+    const tabs = () => browserStep(BROWSER_USE, { step: "tabs" });
+    // The rows of the looks at the not-found page, whichever way they read.
+    const lookLabels = new Set(["Tried reading en.andalucia.org", "Read a page on en.andalucia.org"]);
+    const looks = (messages: ChatMessage[]) =>
+      rows(messages).filter((row) => row !== null && lookLabels.has(String(row[1])));
+    const tried = ["failed", "Tried reading en.andalucia.org"];
+    // The second open failed while the tab still showed the first one's page.
+    const again = [opened(), failed("andalucia.org"), look(), failed("alcazarsevilla.org"), look()];
+    expect(looks(again)).toEqual([tried, tried]);
+    // Two opens failed before the look.
+    const twice = [opened(), failed("andalucia.org"), failed("alcazarsevilla.org"), look()];
+    expect(looks(twice)).toEqual([tried]);
+    // A look at the tabs in between.
+    const listed = [opened(), failed("andalucia.org"), look(), tabs(), look()];
+    expect(looks(listed)).toEqual([tried, tried]);
+    for (const messages of [again, twice, listed]) {
+      expect(summarize(messages).summary).toBe("Opened visitasevilla.es");
+    }
+  });
+
+  it("ends once a step that worked takes the tab elsewhere", () => {
+    const messages = [
+      blank(),
+      browserStep(BROWSER_OPEN, { host: "alcazarsevilla.org", step: "navigate" }, "failed"),
+      browserStep(BROWSER_READ, { host: "alcazarsevilla.org", pageKey: PAGE_A, step: "snapshot" }),
+      // A link on that page, to the site's own visit page.
+      browserStep(BROWSE, { host: "alcazarsevilla.org", step: "click" }),
+      browserStep(BROWSER_READ, { host: "alcazarsevilla.org", pageKey: PAGE_B, step: "snapshot" }),
+    ];
+    expect(rows(messages).slice(1)).toEqual([
+      ["failed", "Tried opening alcazarsevilla.org"],
+      ["failed", "Tried reading alcazarsevilla.org"],
+      ["done", "Browsed alcazarsevilla.org"],
+      ["done", "Read a page on alcazarsevilla.org"],
+    ]);
+    expect(summarize(messages).summary).toBe("Read a page on alcazarsevilla.org");
+  });
+
+  // A local test: two slow navigations of a comparison's research answered
+  // with the page as it was once their time ran out. The runtime keeps such a
+  // step's own kind, with the words of the look it answered with.
+  it("ends with a step whose time ran out, which may have moved the tab", () => {
+    const messages = [
+      browserStep(BROWSER_OPEN, { host: "frame.work", pageKey: PAGE_A, step: "navigate" }),
+      browserStep(BROWSER_OPEN, { host: "pcworld.com", step: "navigate" }, "failed"),
+      browserStep(BROWSER_READ, { host: "pcworld.com", pageKey: PAGE_B, step: "navigate" }),
+      browserStep(BROWSER_READ, { host: "pcworld.com", pageKey: PAGE_B, step: "snapshot" }),
+    ];
+    expect(rows(messages)).toEqual([
+      ["done", "Opened frame.work"],
+      ["failed", "Tried opening pcworld.com"],
+      ["done", "Read a page on pcworld.com"],
+      ["done", "Read a page on pcworld.com"],
+    ]);
+    expect(summarize(messages).summary).toBe("Read a page on pcworld.com, opened frame.work");
+  });
+
+  // A step the browser refused before it loaded anything (a link-only site, an
+  // address that did not answer a moment ago) left the tab on its page.
+  it("is never a look at the page the tab was already on", () => {
+    const sameSite = [
+      browserStep(BROWSER_OPEN, { host: "visitlisboa.com", pageKey: PAGE_A, step: "navigate" }),
+      browserStep(BROWSER_OPEN, { host: "visitlisboa.com", step: "navigate" }, "failed"),
+      browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_A, step: "snapshot" }),
+    ];
+    expect(rows(sameSite)).toEqual([
+      ["done", "Opened visitlisboa.com"],
+      ["failed", "Tried opening visitlisboa.com"],
+      ["done", "Read a page on visitlisboa.com"],
+    ]);
+    const otherSite = [
+      blank(),
+      browserStep(BROWSER_OPEN, { host: "google.com", step: "navigate" }, "failed"),
+      browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_B, step: "snapshot" }),
+    ];
+    expect(rows(otherSite).slice(1)).toEqual([
+      ["failed", "Tried opening google.com"],
+      ["done", "Read a page on visitlisboa.com"],
+    ]);
+    // A page the person said no to was never opened either.
+    const declined = [
+      blank(),
+      browserStep(BROWSER_OPEN, { host: "carris.pt", step: "navigate", approval: "denied" }, "failed"),
+      browserStep(BROWSER_READ, { host: "carris.pt", pageKey: PAGE_B, step: "snapshot" }),
+    ];
+    expect(rows(declined).slice(1)).toEqual([
+      ["failed", "Tried opening carris.pt"],
+      // The answer's own row.
+      null,
+      ["done", "Read a page on carris.pt"],
+    ]);
+  });
+
+  // An earlier turn left the tab on a page of visitporto.travel, where another
+  // of its addresses did not answer. The next turn's open of that address was
+  // refused at once, and its look at the tab found the earlier page: that page
+  // was read. Before the turn knows the tab's page, a failed open counts for
+  // nothing, and a look at the tabs, or a step that may have moved the tab and
+  // did not work, makes it unknown again.
+  it("is never a look at a page the turn did not know the tab was on", () => {
+    const refused = browserStep(BROWSER_OPEN, { host: "visitporto.travel", step: "navigate" }, "failed");
+    const earlier = browserStep(BROWSER_READ, { host: "visitporto.travel", pageKey: PAGE_A, step: "snapshot" });
+    expect(rows([refused, earlier])).toEqual([
+      ["failed", "Tried opening visitporto.travel"],
+      ["done", "Read a page on visitporto.travel"],
+    ]);
+    expect(summarize([refused, earlier]).summary).toBe("Read a page on visitporto.travel");
+    // A status of a page the run has not been allowed to read names no site.
+    const unnamed = browserStep(BROWSER_USE, { step: "status" });
+    expect(rows([unnamed, refused, earlier]).at(-1)).toEqual(["done", "Read a page on visitporto.travel"]);
+    const opened = browserStep(BROWSER_OPEN, { host: "metrodoporto.pt", pageKey: PAGE_B, step: "navigate" });
+    for (const between of [
+      browserStep(BROWSER_USE, { step: "tabs" }),
+      browserStep(BROWSE, { host: "metrodoporto.pt", step: "click" }, "failed"),
+    ]) {
+      expect(rows([opened, between, refused, earlier]).at(-1)).toEqual(["done", "Read a page on visitporto.travel"]);
+    }
+  });
+});
+
 describe("browser rows in Details", () => {
   it("say what a look at the tabs did, in words", () => {
     const label = (status: string) => {

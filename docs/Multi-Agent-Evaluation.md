@@ -426,7 +426,7 @@ Before a normal root turn enters detailed planning, the runtime asks for one sma
 - `route`: `direct`, `multi_agent_candidate`, `cross_chat_lookup`, or `write_coordination_required`.
 - `requiresContextLookup`: true when necessary prior conversation/thread/context evidence must be retrieved because it is absent from the supplied current conversation.
 - `requiresCommandExecution`: true when a separate fresh observation of workspace, process, Git, or other current tool-observed state is needed. The CLI transport for context retrieval does not itself set this flag.
-- `workspaceFileChangeRequirement`: `none` when no mutation is requested, `conditional` when inspection or validation determines whether edits are warranted, or `required` when success needs actual workspace changes. This is independent of either evidence requirement.
+- `workspaceFileChangeRequirement`: `none` when no mutation is requested, `conditional` when inspection or validation determines whether edits are warranted, or `required` when success needs actual workspace changes. A map, page or site the person asks for is files, so making one is `required`: that turn runs in the lane that writes files, which cannot hand the work to Instafy's browser. A request that needs Instafy's browser to find something before a change stays `none`. This is independent of either evidence requirement.
 - `observationCommands`: up to three proposed current-state observations; the host executes only its existing allowlist. Rejected or missing proposals leave the observation requirement for the main agent under its normal permissions.
 - `selectedSkills`, `reason`, and `confidence`: observability for why the route was chosen.
 

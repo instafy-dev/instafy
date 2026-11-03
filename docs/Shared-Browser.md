@@ -1284,7 +1284,10 @@ page was read), and the Shared Browser policy says to take a snapshot
 and go on from there: only an approval's own outcome is final. On the turn's
 line it reads as a page read when the page was read, and like `status`
 ("Browsed <site>") when only its address was, so it adds no new wording and
-never says a page was read when none was. A step that started a load (a
+never says a page was read when none was. A step that can take the tab to
+another page (a navigation, a link, a form) keeps its own kind in the turn's
+activity, so Studio knows the tab may be on another page now
+([Chat Activity](Chat-Activity.md#browser-steps)). A step that started a load (a
 `navigate`, an `open_tab`, or a link, form or key that opens a page) whose site
 (one that is down) had not answered when the step stopped waiting for it (its
 time up or, sooner, a click's or a key's own 15-second wait for the page it
@@ -1366,7 +1369,15 @@ supports tool search, and in a code-mode turn they were then left out of the
 `ALL_TOOLS` to find them. The bounded browser servers opt out of that
 (`omit_tools_from = ["deferred"]`), as the device broker of a granted turn does,
 and the run text names the tools as a turn calls them
-(`tools.mcp__instafy_shared_browser__snapshot({})` in a code cell).
+(`text(await tools.mcp__instafy_shared_browser__snapshot({}))` in a code cell).
+That example prints the step's whole result, and the run text says to print it,
+or only the part a turn needs of a page the step returned: a step that failed or
+returned no page has only its message (no page, so no `title` or `visibleText`),
+and a turn that printed only those two fields read an address with no page and a
+site it couldn't reach as "undefined undefined". A page is not printed whole by
+rule: a whole result carries the page twice (the text and `structuredContent`),
+and a cell that printed three whole pages passed code mode's output limit and
+lost the middle one.
 
 In a Shared or Personal Browser turn, a code-mode cell that waits on a browser
 step yields to the model only after the browser server's tool timeout (180

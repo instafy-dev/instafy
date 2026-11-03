@@ -330,7 +330,12 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   fragment, never the address; and `approval`, `once`, `routine` or `free` from the controller, or
   `denied` / `expired` / `once` from the step's terminal consent code (`once` for
   `approval_stale`: the person said yes, and the page then left its site or changed the control
-  a second time in the run). When the step starts, `navigate`
+  a second time in the run). A step whose time ran out answers with the page as it is, which
+  the controller names as a look (`snapshot`, or `status` for a page too busy to read): a step
+  that can take the tab to another page (`navigate`, `open_tab`, `click`, `choose`, `press`,
+  `search`, `submit`) keeps its own kind as its `step`, and the look chooses its words ("Read a
+  page on pcworld.com"), so Studio knows the tab may be on another page now; any other step is
+  the look. When the step starts, `navigate`
   and `open_tab` take the host from the address Octo asked for; any other step, and a step
   whose result names no page, uses the last host the turn's browser steps named. A step the
   person said no to, or left unanswered, never reaches the page, so its kind comes from the tool
@@ -365,6 +370,24 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   unanswered, or that failed (a link-only site, an error) opened, read and searched nothing, so
   the done line never counts it (Studio counts no failed step at all). "Opened google.com · you said no to opening google.com" cannot
   happen; a turn whose only step was refused reads "You said no to opening google.com".
+
+  A look at the page a failed open left (the site's not-found page, or what a site sent before it
+  closed the connection) is part of that failure: Details reads "Tried opening
+  alcazarsevilla.org", then "Tried reading alcazarsevilla.org", both with a cross, never "Read a
+  page on alcazarsevilla.org" with a tick, and the line never counts it (`turnActivity.ts`).
+  Studio reads it from the steps alone. A failed `navigate` or `open_tab` does not say whether it
+  left a page or none (the browser refused it before it loaded anything, or its site did not
+  answer, and the tab still shows what it showed), so it counts only once the turn knows the
+  page the tab showed: a step named it (its `pageKey`), or a `snapshot` named no site (a blank
+  page). From there, until a step that worked takes the tab elsewhere (one whose time ran out
+  included), the tab shows that page or a page one of those failed opens left: a `snapshot` (or a
+  `status`, for a page still busy) at a page the turn had not seen, on a site one of them asked
+  for (or a part of it, such as `en.`), is part of that failure, and so is any later look at that
+  page, after another failed open or a look at the tabs too. A look at the tabs, or another step
+  that may have moved the tab and did not work, leaves the tab's page unknown again, so a failed
+  open after it counts for nothing until a step names the page. A turn that knows no page yet
+  (an earlier turn left the tab on a page it has not looked at) counts a look after a failed open
+  as any look: that page may be the one the earlier turn left.
 
 - **Studio** groups browser steps by key and host. Pages opened and read count by distinct
   `pageKey`, so reading a page twice is "read a page"; searches count each time. After a group on

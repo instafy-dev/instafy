@@ -14,7 +14,11 @@
 //!   the step's terminal consent code;
 //! - `refused`: which of the person's own steps the browser refused to take, one of
 //!   [`REFUSED_STEPS`], so Details names it for what it was ("Tried accepting cookies on
-//!   metrodoporto.pt"), not as any click.
+//!   metrodoporto.pt"), not as any click;
+//! - `look`: for a step that can take the tab to another page and whose time ran out, the look
+//!   the controller answered with (`snapshot`, or `status` for a page too busy to read), which
+//!   the step's words say. Its `step` stays its own kind, so Studio knows the tab may be on
+//!   another page now.
 //!
 //! Nothing else of the result is read: never page text, a title or anything the model wrote.
 //! A step that started before its page is known takes the host from the address Octo asked
@@ -29,6 +33,13 @@ use sha2::{Digest, Sha256};
 const STEPS: &[&str] = &[
     "navigate", "open_tab", "snapshot", "search", "submit", "click", "type", "choose", "press",
     "scroll", "tabs", "status",
+];
+/// The controller's words for a look at the tab's page.
+const LOOK_STEPS: &[&str] = &["snapshot", "status"];
+/// The step kinds that can take the tab to another page, as Studio counts them
+/// (`PAGE_MOVING_STEPS` in the frontend's turnActivity.ts).
+const PAGE_MOVING_STEPS: &[&str] = &[
+    "navigate", "open_tab", "click", "choose", "search", "submit", "press",
 ];
 /// The ways the controller says a step was allowed.
 const CONTROLLER_APPROVALS: &[&str] = &["once", "routine", "free"];
@@ -122,7 +133,19 @@ pub(crate) fn browser_step_facts(
         .and_then(|activity| activity.get("step"))
         .and_then(JsonValue::as_str)
         .and_then(|step| STEPS.iter().copied().find(|known| *known == step));
-    let step = reported_step.or_else(|| step_of_tool(tool, arguments))?;
+    let own_step = step_of_tool(tool, arguments);
+    // A step whose time ran out answers with the page as it is, which the controller names as a
+    // look at it. One that can take the tab to another page (a navigation, a link, a form) keeps
+    // its own kind, with the look's words: Studio then knows the tab may be on another page,
+    // and the line still says only what is known of it, a page read or the page it is on.
+    let (step, look) = match (reported_step, own_step) {
+        (Some(look), Some(own))
+            if LOOK_STEPS.contains(&look) && PAGE_MOVING_STEPS.contains(&own) =>
+        {
+            (own, Some(look))
+        }
+        (reported, own) => (reported.or(own)?, None),
+    };
     // A step that ended the run (said no to, left unanswered) never reached
     // the page: its result names only what the step was, as runtime-agent's
     // own terminal answer says it, never a page or how it was allowed.
@@ -142,6 +165,9 @@ pub(crate) fn browser_step_facts(
         .flatten();
     let mut facts = Map::new();
     facts.insert("step".into(), JsonValue::from(step));
+    if let Some(look) = look {
+        facts.insert("look".into(), JsonValue::from(look));
+    }
     let host = match &reported_url {
         Some(url) => {
             let host = activity_host(url);
@@ -408,6 +434,76 @@ mod tests {
                 "{word}"
             );
         }
+    }
+
+    /// A step whose time ran out answers with the page as it is, and the controller names it as
+    /// a look (`snapshot`, or `status` for a page too busy to read). A local test: two slow
+    /// navigations of a comparison's research came back so, and Studio read them as looks at the
+    /// page the tab was on, never as steps that may have taken it elsewhere. A step that can take
+    /// the tab to another page keeps its own kind, and the look names its words; any other step
+    /// is the look it answered with.
+    #[test]
+    fn a_step_whose_time_ran_out_keeps_its_own_kind_and_the_looks_words() {
+        let page = "https://www.pcworld.com/article/2027543/framework-laptop-16-review.html";
+        let answered =
+            |look: &str| json!({"stepTimedOut": true, "activity": {"step": look, "url": page}});
+        let facts = |tool: &str, arguments: JsonValue, look: &str| {
+            browser_step_facts(
+                tool,
+                Some(&arguments),
+                Some(&answered(look)),
+                None,
+                &mut None,
+            )
+            .unwrap()
+        };
+        let key = facts("snapshot", json!({}), "snapshot")["pageKey"].clone();
+        for (tool, arguments, own) in [
+            ("navigate", json!({"url": page}), "navigate"),
+            ("open_tab", json!({"url": page}), "open_tab"),
+            ("click", json!({"index": 4}), "click"),
+            ("choose", json!({"index": 2, "option": "16-inch"}), "choose"),
+            ("press", json!({"key": "Enter"}), "press"),
+            (
+                "type",
+                json!({"index": 1, "text": "review", "submit": true}),
+                "submit",
+            ),
+        ] {
+            for look in ["snapshot", "status"] {
+                assert_eq!(
+                    facts(tool, arguments.clone(), look),
+                    json!({"step": own, "look": look, "host": "pcworld.com", "pageKey": key}),
+                    "{tool} {look}"
+                );
+            }
+        }
+        // A step that leaves the tab where it was, or a look itself, is the look it answered with.
+        for (tool, arguments) in [
+            ("type", json!({"index": 1, "text": "review"})),
+            ("scroll", json!({"direction": "down"})),
+            ("snapshot", json!({})),
+            ("status", json!({})),
+            ("select_tab", json!({"tabId": "A1"})),
+        ] {
+            for look in ["snapshot", "status"] {
+                assert_eq!(
+                    facts(tool, arguments.clone(), look),
+                    json!({"step": look, "host": "pcworld.com", "pageKey": key}),
+                    "{tool} {look}"
+                );
+            }
+        }
+        // A step that answered as itself names no look.
+        let navigated = browser_step_facts(
+            "navigate",
+            Some(&json!({"url": page})),
+            Some(&json!({"activity": {"step": "navigate", "url": page}})),
+            None,
+            &mut None,
+        )
+        .unwrap();
+        assert_eq!(navigated.get("look"), None);
     }
 
     #[test]

@@ -979,6 +979,89 @@ function endedStep(step: TurnStep): TurnStep {
     : step;
 }
 
+// Browser steps that open an address, and those that only look at the tab's page.
+const OPEN_STEPS = new Set(["navigate", "open_tab"]);
+const LOOK_STEPS = new Set(["snapshot", "status"]);
+
+/** One site and its parts: an address that redirected to a part of its site, such as `en.`, is still that site. */
+function sameSite(host: string, other: string): boolean {
+  return host === other || host.endsWith(`.${other}`) || other.endsWith(`.${host}`);
+}
+
+/**
+ * A look at the page a failed open left (the site's not-found page, or what a
+ * site sent before it closed the connection) found nothing the turn was after
+ * there: it is part of that failure, "Tried reading alcazarsevilla.org" with a
+ * cross, never "Read a page on alcazarsevilla.org" with a tick, and the line
+ * never counts it.
+ *
+ * A failed open does not say whether it left a page, or none: the browser
+ * refused it before it loaded anything, or its site did not answer, and the
+ * tab still shows what it showed. So a failed open counts only once the turn
+ * knows the page the tab showed: a step that named that page (its key), or a
+ * snapshot that named no site (a blank page). From there, until a step that
+ * worked takes the tab elsewhere (a navigation or a link, one whose time ran
+ * out included), the tab shows that page or a page one of those failed opens
+ * left. A look at a page the turn had not seen, on a site one of them asked
+ * for (or a part of it, such as `en.`), is then a look at what it left, and so
+ * is any later look at that page. Another step that may have moved the tab and
+ * did not work, or a look at the tabs, leaves the tab's page unknown again.
+ * `steps` are in the order they last changed.
+ */
+function withLooksAfterFailedOpens(steps: readonly TurnStep[]): TurnStep[] {
+  // The sites of the failed opens since a step that worked took the tab elsewhere.
+  const failedSites: string[] = [];
+  // The pages the turn's steps showed, and those a look found a failed open had left.
+  const pagesSeen = new Set<string>();
+  const pagesLeft = new Set<string>();
+  let tabPageKnown = false;
+  return steps.map((step) => {
+    const entry = step.activity;
+    if (step.kind !== "tool" || !entry?.key.startsWith("browser/") || entry.step === undefined) {
+      return step;
+    }
+    const { host, pageKey } = entry;
+    if (step.state === "failed") {
+      const declined = entry.approval === "denied" || entry.approval === "expired";
+      if (OPEN_STEPS.has(entry.step)) {
+        if (!declined && tabPageKnown && host !== undefined) {
+          failedSites.push(host);
+        }
+      } else if (PAGE_MOVING_STEPS.has(entry.step)) {
+        tabPageKnown = false;
+      }
+      return step;
+    }
+    if (step.state !== "done") {
+      return step;
+    }
+    if (
+      LOOK_STEPS.has(entry.step) &&
+      host !== undefined &&
+      ((pageKey !== undefined && pagesLeft.has(pageKey)) ||
+        (failedSites.some((site) => sameSite(host, site)) && !(pageKey !== undefined && pagesSeen.has(pageKey))))
+    ) {
+      if (pageKey !== undefined) {
+        pagesLeft.add(pageKey);
+      }
+      tabPageKnown = pageKey !== undefined;
+      return { ...step, state: "failed", label: stepLabel(step.kind, step.message, entry, "failed") };
+    }
+    if (entry.step === "tabs") {
+      tabPageKnown = false;
+    } else if (pageKey !== undefined) {
+      pagesSeen.add(pageKey);
+      tabPageKnown = true;
+    } else {
+      tabPageKnown = entry.step === "snapshot" && host === undefined;
+    }
+    if (PAGE_MOVING_STEPS.has(entry.step)) {
+      failedSites.length = 0;
+    }
+    return step;
+  });
+}
+
 function isRuntimeStatus(message: ChatMessage): boolean {
   return (getMessageType(message) ?? "").trim().toLowerCase() === "status";
 }
@@ -1188,6 +1271,14 @@ export function summarizeTurnActivity(
       steps[index] = endedStep(step);
     });
   }
+  // In the order the steps last changed: a step that started before another
+  // and ended after it is the later one. Studio's thread keeps a command
+  // where its newest message is, and the turn's stored steps are in the same
+  // order, so the line reads the same before and after its reply lands.
+  const byLastChange = [...steps.keys()].sort((a, b) => stepMessageIndex[a] - stepMessageIndex[b]);
+  withLooksAfterFailedOpens(byLastChange.map((index) => steps[index])).forEach((step, position) => {
+    steps[byLastChange[position]] = step;
+  });
 
   const answered: AnsweredApproval[] = [];
   const details: DetailItem[] = order.flatMap((item): DetailItem[] => {
@@ -1255,13 +1346,7 @@ export function summarizeTurnActivity(
       live = THINKING_LINE;
     }
   } else {
-    // In the order the steps last changed: a step that started before another
-    // and ended after it is the later one. Studio's thread keeps a command
-    // where its newest message is, and the turn's stored steps are in the same
-    // order, so the line reads the same before and after its reply lands.
-    const groups = summarizeGroups(
-      [...steps.keys()].sort((a, b) => stepMessageIndex[a] - stepMessageIndex[b]).map((index) => steps[index]),
-    );
+    const groups = summarizeGroups(byLastChange.map((index) => steps[index]));
     const clause = approvalsClause(answered, groups.firstHost);
     const done = [groups.text ?? neutralCounts(steps), clause].filter((part): part is string => Boolean(part)).join(" · ");
     if (phase === "cancelled") {

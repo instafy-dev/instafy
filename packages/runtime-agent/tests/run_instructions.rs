@@ -2816,7 +2816,10 @@ fn offers_tool(request: &Value, namespace: &str, name: &str) -> bool {
 /// requests, never deferred behind a tool search that a fresh browser turn's first step spent
 /// finding them on (a local test, Nov 2: four fresh browser turns of four), and its run text names
 /// them as the turn calls them: every tool the Shared Browser's run text lists is a tool its
-/// requests offer under that name, and the Personal Browser's `snapshot` too.
+/// requests offer under that name, and the Personal Browser's `snapshot` too. Its example prints
+/// the step's whole result, since a failed step has only its message (a local test, Nov 2: a turn
+/// that printed only a page's title and text read two failed steps as "undefined undefined"),
+/// and of a page a step returned the part the turn needs is enough.
 fn check_browser_turns_are_given_their_tools_by_name(harness: &Harness) -> Result<()> {
     let mut checked = 0;
     for turn in thread_turns(harness) {
@@ -2829,7 +2832,7 @@ fn check_browser_turns_are_given_their_tools_by_name(harness: &Harness) -> Resul
         for (index, request) in sampling_requests(turn) {
             let text = instructions_text(request);
             let named = format!(
-                "MCP server, named `{namespace}__<name>` (a code cell calls `tools.{namespace}__snapshot({{}})`): "
+                "MCP server, named `{namespace}__<name>` (a code cell calls `text(await tools.{namespace}__snapshot({{}}))`): "
             );
             let Some(listed) = text
                 .lines()
@@ -2840,6 +2843,14 @@ fn check_browser_turns_are_given_their_tools_by_name(harness: &Harness) -> Resul
                     turn.label
                 );
             };
+            ensure!(
+                listed.contains(
+                    "Print a step's whole result, or only the part you need of a page it \
+                     returned: a step that failed or returned no page has only its message."
+                ),
+                "{}#{index} is not told to print a step's whole result",
+                turn.label
+            );
             let tools: Vec<&str> = listed
                 .split('`')
                 .skip(1)

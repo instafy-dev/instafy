@@ -1142,7 +1142,7 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         );
         assert!(
             first.to_string().contains(&format!(
-                "a code cell calls `tools.{PERSONAL_BROWSER_SNAPSHOT_TOOL}({{}})`"
+                "a code cell calls `text(await tools.{PERSONAL_BROWSER_SNAPSHOT_TOOL}({{}}))`"
             )),
             "{scenario}: the run text does not name the tool as the turn calls it"
         );
