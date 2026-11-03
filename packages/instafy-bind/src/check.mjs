@@ -2,17 +2,18 @@
 // A builder that loses an item to a lookup that timed out, or trims a list to what fits, must not ship a page that
 // quietly leaves it out. The check reads what the page can show without a browser: the text of its HTML pages, every
 // string in its data files (data.json, data/**/*.json, records included, and GeoJSON layers: a map's places are
-// in data/<layer>.geojson), and the text its own scripts pass to site.js's helpers (site.h, site.head…: a blank
-// starter page keeps its words in app.js; script-text.mjs). Items come from --expect and from
-// an "expect" array in data.json. Text that only says an item is unavailable ("Not found yet: Tokyo", a data file's
-// "missing" list) does not count as showing it: builders are told to say on the page what they could not add, and
-// that line must not pass the check. A page whose scripts draw its text in a way the check cannot read, with no data
-// file to read instead, is never reported as missing what the check cannot see. On a page of options it also checks
-// the values and where each row comes from (below). Pure helpers are exported for the tests.
+// in data/<layer>.geojson), and in its own scripts the text they pass to site.js's helpers (site.h, site.head…: a
+// blank starter page keeps its words in app.js) and the strings of their lists and objects (script-text.mjs). Items
+// come from --expect and from an "expect" array in data.json. Text that only says an item is unavailable ("Not found
+// yet: Tokyo", a data file's "missing" list) does not count as showing it: builders are told to say on the page what
+// they could not add, and that line must not pass the check. An item is missing only when no file of the site names
+// it: one whose words a script holds where the check cannot place them, or that a script fetches from another site, is
+// one it cannot tell about, never one it reports missing. On a page of options it also checks the values and where each
+// row comes from (below). Pure helpers are exported for the tests.
 // SPDX-License-Identifier: AGPL-3.0-only
 import fs from "node:fs";
 import path from "node:path";
-import { scriptText } from "./script-text.mjs";
+import { readScript } from "./script-text.mjs";
 
 const SKIP_DIRS = new Set([".bind", "node_modules", "handlers", ".git", ".uwcache", "test", "tests"]);
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
@@ -67,8 +68,9 @@ export function htmlText(html) {
 
 /** A line or string that only says an item is unavailable (the eval grader reads pages the same way). */
 export const UNAVAILABLE_RE = /^\s*(not found( yet)?|missing|not on the (map|page)( yet)?|could ?n[o']t (find|add|place)|unavailable|not available)\b/i;
-/** Data keys that list what the page could not show ("missing": [...] in the map pack's data). */
-const UNAVAILABLE_KEYS = new Set(["expect", "missing", "notfound", "not_found", "unavailable", "unplaced"]);
+/** Data keys that list what the page could not show ("missing": [...] in the map pack's data); in a script, the keys
+ *  and names of its lists of that. */
+export const UNAVAILABLE_KEYS = new Set(["expect", "missing", "notfound", "not_found", "unavailable", "unplaced"]);
 
 /** The visible text of an HTML page as lines (block ends and <br> break them), without lines that only say an item is
  *  unavailable. */
@@ -110,7 +112,7 @@ function siteFiles(root) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith(".") && depth < 4) walk(full, depth + 1);
-      } else if (entry.isFile() && /\.(html?|json|geojson|js)$/i.test(entry.name) && entry.name !== "bound.json" && entry.name !== "package.json") {
+      } else if (entry.isFile() && (/\.(html?|json|geojson|m?js)$/i.test(entry.name) || SOURCE.test(entry.name)) && entry.name !== "bound.json" && entry.name !== "package.json") {
         files.push(full);
       }
     }
@@ -119,34 +121,51 @@ function siteFiles(root) {
   return files;
 }
 
+/** Page code the check does not read as a script (JSX, TypeScript, a framework's components): its words are only words
+ *  the page may show. */
+const SOURCE = /\.(?:jsx|tsx|m?ts|vue|svelte|astro)$/i;
+/** A source that fetches text from another site while the page runs (fetch, EventSource or WebSocket given its address). */
+const SOURCE_LOADS = /\b(?:fetch|EventSource|WebSocket)\s*\(\s*[`'"]\s*(?:(?:https?|wss?):)?\/\//i;
 /** The starters' shared helpers (site.js) define `site`: their own words are no page's text. */
 const DEFINES_SITE = /\bwindow\.site\s*=\s*\{/;
-/** A script that may draw text on the page itself. */
-const DRAWS = /\b(?:createElement|createTextNode|innerHTML|outerHTML|insertAdjacent(?:HTML|Text|Element)|textContent|innerText|replaceChildren|appendChild|append|prepend|replaceWith)\b|\bdocument\.write\b|\bsite\.(?:start|h)\b/;
-/** The scripts an HTML page carries in itself. */
-const INLINE_SCRIPTS = /<script\b(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)<\/script\s*>/gi;
+/** The scripts an HTML page carries in itself: [attributes, source]. */
+const INLINE_SCRIPTS = /<script\b(?![^>]*\bsrc\s*=)([^>]*)>([\s\S]*?)<\/script\s*>/gi;
+/** An inline script's type that is JavaScript (none is too); a JSON block or a template is not the page's script. */
+const SCRIPT_TYPE = /(?:^|\s)type\s*=\s*["']?\s*([^"'\s>]*)/i;
+const JS_TYPE = /^(?:module|(?:text|application)\/(?:java|ecma)script)?$/i;
 
-/** What a script shows through site.js's helpers, without lines that only say an item is unavailable. */
-const helperText = (source) => scriptText(source).filter((text) => !UNAVAILABLE_RE.test(text)).join("\n");
+/** site.js's version, [major, minor, patch], or null. */
+function siteVersion(source) {
+  const m = /\bversion\s*:\s*["'](\d+)\.(\d+)(?:\.(\d+))?["']/.exec(source);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)] : null;
+}
+const before = (version, [major, minor]) => !!version && (version[0] < major || (version[0] === major && version[1] < minor));
 
 /** What the site can show: [{ file, kind, text }] for its HTML pages, data files and scripts ("html", "data",
- *  "script"), the "expect" list of data.json, and its own scripts ([{ file, read, draws }]: a script file, or the
- *  scripts an HTML page carries; read when the check found text in it, draws when it may draw text itself). */
+ *  "script"), the "expect" list of data.json, and its own scripts ([{ file, other, loads }]: a script file, or the
+ *  scripts an HTML page carries; `other`, the words they hold where the check cannot place them, and `loads`, whether
+ *  they fetch text from another site). */
 export function readSite(dir) {
   const root = path.resolve(dir);
   if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) throw new Error(`no site folder at ${dir}`);
   const parts = [];
   const scripts = [];
   let declared = [];
+  const files = [];
   for (const file of siteFiles(root)) {
-    let raw;
     try {
       if (fs.statSync(file).size > MAX_FILE_BYTES) continue;
-      raw = fs.readFileSync(file, "utf8");
+      files.push({ file, rel: path.relative(root, file).split(path.sep).join("/"), raw: fs.readFileSync(file, "utf8") });
     } catch {
       continue;
     }
-    const rel = path.relative(root, file).split(path.sep).join("/");
+  }
+  // site.js before 1.7.0 draws nothing for a second argument to site.h that is not its props (h("p", "text"))
+  const childArg = !files.some(({ file, raw }) => /\.m?js$/i.test(file) && DEFINES_SITE.test(raw) && before(siteVersion(raw), [1, 7]));
+  const read = (source) => readScript(source, { childArg, lists: UNAVAILABLE_KEYS });
+  const shownText = (script) => [...script.lines, ...script.data].filter((text) => !UNAVAILABLE_RE.test(text));
+  const otherText = (script) => script.other.filter((text) => !UNAVAILABLE_RE.test(text));
+  for (const { file, rel, raw } of files) {
     if (/\.(geo)?json$/i.test(file)) {
       let value;
       try {
@@ -156,37 +175,48 @@ export function readSite(dir) {
       }
       if (rel === "data.json" && Array.isArray(value?.expect)) declared = parseExpect(value.expect);
       parts.push({ file: rel, kind: "data", text: jsonStrings(value).join("\n") });
-    } else if (/\.js$/i.test(file)) {
+    } else if (SOURCE.test(file)) {
+      scripts.push({ file: rel, other: raw, loads: SOURCE_LOADS.test(raw) });
+    } else if (/\.m?js$/i.test(file)) {
       if (DEFINES_SITE.test(raw)) continue;
-      const text = helperText(raw);
-      parts.push({ file: rel, kind: "script", text });
-      scripts.push({ file: rel, read: Boolean(text), draws: DRAWS.test(raw) });
+      const script = read(raw);
+      parts.push({ file: rel, kind: "script", text: shownText(script).join("\n") });
+      scripts.push({ file: rel, other: otherText(script).join("\n"), loads: script.loads });
     } else {
-      const inline = [...raw.matchAll(INLINE_SCRIPTS)].map((m) => m[1]).filter((source) => source.trim() && !DEFINES_SITE.test(source));
-      const text = inline.map(helperText).filter(Boolean).join("\n");
-      parts.push({ file: rel, kind: "html", text: [...htmlLines(raw), ...(text ? [text] : [])].join("\n") });
-      if (inline.length) scripts.push({ file: rel, read: Boolean(text), draws: inline.some((source) => DRAWS.test(source)) });
+      const inline = [...raw.matchAll(INLINE_SCRIPTS)]
+        .filter(([, attrs, source]) => JS_TYPE.test(SCRIPT_TYPE.exec(attrs)?.[1] ?? "") && source.trim() && !DEFINES_SITE.test(source))
+        .map(([, , source]) => read(source));
+      parts.push({ file: rel, kind: "html", text: [...htmlLines(raw), ...inline.flatMap(shownText)].join("\n") });
+      if (inline.length) scripts.push({ file: rel, other: inline.flatMap(otherText).join("\n"), loads: inline.some((s) => s.loads) });
     }
   }
   return { root, parts, declared, scripts };
 }
 
-/** Which expected items the site shows, and where; which it leaves out. `unread`: the scripts that may draw the page's
- *  text when the check could read none of it (no data file has any, and no script passes any to site.js's helpers):
- *  an item it does not find may then be on the page all the same, so it is never reported as missing. */
+/** Which expected items the site shows, and where; which it leaves out; and which it cannot tell about (`unknown`):
+ *  their words are in a script where the check cannot place them, or a script fetches text from another site, so the
+ *  page may show them all the same (`unread`: those scripts). An item no file of the site names is missing. */
 export function checkSite(dir, expect = []) {
   const site = readSite(dir);
   const items = parseExpect([...site.declared, ...parseExpect(expect)]);
   const shown = [];
   const missing = [];
+  const unknown = [];
+  const unread = new Set();
   for (const item of items) {
     const where = site.parts.filter((p) => names(p.text, item)).map((p) => p.file);
-    if (where.length) shown.push({ item, files: where.slice(0, 3) });
-    else missing.push(item);
+    if (where.length) {
+      shown.push({ item, files: where.slice(0, 3) });
+      continue;
+    }
+    const held = site.scripts.filter((s) => s.loads || names(s.other, item)).map((s) => s.file);
+    if (!held.length) missing.push(item);
+    else {
+      unknown.push(item);
+      for (const file of held) unread.add(file);
+    }
   }
-  const readNone = !site.parts.some((p) => p.kind === "data" && p.text) && !site.scripts.some((s) => s.read);
-  const unread = readNone ? site.scripts.filter((s) => s.draws).map((s) => s.file) : [];
-  return { items, shown, missing, files: site.parts.map((p) => p.file), unread };
+  return { items, shown, missing, unknown, unread: [...unread], files: site.parts.map((p) => p.file) };
 }
 
 // ---------- the values of a page of options (the compare and ranked starters' data.json) ----------
@@ -411,21 +441,17 @@ export function checkReport(dir, expect, { json = false, card = null } = {}) {
     if (json) return { exit: 2, lines: [JSON.stringify({ ok: false, error: message, values, ...(next ? { next } : {}) })] };
     return { exit: 2, lines: [message, ...values.notes.map((n) => `NOTE: ${n}`), ...nextLines] };
   }
-  // An item the check did not find on a page whose text it cannot read is unknown, never missing.
-  const unknown = result.unread.length ? result.missing : [];
-  const missing = result.unread.length ? [] : result.missing;
+  const { missing, unknown } = result;
   const exit = missing.length || values.problems.length ? 1 : unknown.length ? 2 : 0;
-  if (json) {
-    return { exit, lines: [JSON.stringify({ ok: exit === 0, ...result, missing, ...(unknown.length ? { unknown } : {}), values, ...(next ? { next } : {}) })] };
-  }
+  if (json) return { exit, lines: [JSON.stringify({ ok: exit === 0, ...result, values, ...(next ? { next } : {}) })] };
   const lines = [];
   if (missing.length) {
     lines.push(`MISSING: the request named ${missing.length} item(s) the site does not show: ${missing.join(", ")}.`);
     lines.push("Add each one to the page, or say plainly in the reply which are missing and why.");
   }
   if (unknown.length) {
-    lines.push(`UNREAD: ${result.unread.join(", ")} ${result.unread.length === 1 ? "draws" : "draw"} the page's text in a way the check cannot read (it reads what a script passes to site.h and site.head), so it cannot tell whether the page shows: ${unknown.join(", ")}.`);
-    lines.push("Look at the page itself instead: `instafy preview check --port <its port>` loads it as Studio does.");
+    lines.push(`UNREAD: ${result.unread.join(", ")} may draw the page's text in a way the check cannot read (it reads the text a script passes to site.h and site.head, and the strings of its lists and objects), so the check cannot tell whether the page shows: ${unknown.join(", ")}.`);
+    lines.push("Look at the page itself instead: `instafy preview check --port <its port>` loads it as Studio does and saves screenshots of it.");
   }
   if (values.problems.length) {
     lines.push(`VALUES: ${values.problems.length} value(s) to fix in data.json:`);
@@ -434,7 +460,7 @@ export function checkReport(dir, expect, { json = false, card = null } = {}) {
   for (const note of values.notes) lines.push(`NOTE: ${note}`);
   if (result.items.length) {
     lines.push(`${result.shown.length} of ${result.items.length} expected item(s) shown${result.shown.length ? `: ${result.shown.map((s) => s.item).join(", ")}` : ""}.`);
-    lines.push(`Read ${result.files.length} file(s): the HTML text, the data files and the text the page's scripts pass to site.h and site.head (text a script builds any other way is not seen).`);
+    lines.push(`Read ${result.files.length} file(s): the HTML text, the data files, and the text the page's scripts pass to site.h and site.head or hold in their lists and objects.`);
   } else {
     lines.push('No items to check: pass --expect "<item>,<item>" (each item the request named) or put "expect": [...] in data.json.');
   }

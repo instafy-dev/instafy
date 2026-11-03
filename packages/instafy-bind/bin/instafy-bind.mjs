@@ -61,15 +61,16 @@ init       Write a starter bound.json, index.html and handlers/hello.mjs. --star
            files are kept; --force overwrites them. In a space, while no preview shows the folder, its next step
            names the command that serves the page and posts its card in Studio, before the check.
 check      Does the site show every item the request named (each product, stop or entry)? Reads the text of its
-           HTML pages, every value in its data files (data.json, data/**/*.json) and the text its own scripts
-           pass to site.h and site.head (a blank page's app.js), and lists the items it does not show. On a page
-           of options (the compare and ranked starters' data.json) it also lists values that only say nothing
-           ("—", "n/a"), values without the page and day they were read, and a filter that would count a row
-           whose value is unknown; and it notes the rows a filter lists apart. Exit 1 when an item is missing or
-           a value needs fixing; 2 when there is nothing to check, or when the page's scripts draw its text in a
-           way the check cannot read, so it cannot tell. Items: --expect, plus an "expect" array in data.json. Run
-           it before telling anyone the page is done. In a space, while no preview shows the site, every answer
-           ends with the command that serves it and posts its card: a failing check never holds the card back.
+           HTML pages, every value in its data files (data.json, data/**/*.json), and in its own scripts the text
+           they pass to site.h and site.head (a blank page's app.js) and the strings of their lists and objects;
+           lists the items no file of the site names. On a page of options (the compare and ranked starters'
+           data.json) it also lists values that only say nothing ("—", "n/a"), values without the page and day
+           they were read, and a filter that would count a row whose value is unknown; and it notes the rows a
+           filter lists apart. Exit 1 when an item is missing or a value needs fixing; 2 when there is nothing to
+           check, or when a script holds an item's words where the check cannot place them (or fetches text from
+           another site), so it cannot tell. Items: --expect, plus an "expect" array in data.json. Run it before
+           telling anyone the page is done. In a space, while no preview shows the site, every answer ends with
+           the command that serves it and posts its card: a failing check never holds the card back.
 command    Push a command (select, highlight, toast, reload) to every open viewer. Uses the
            admin token in .bind/admin-token.
 confirm    Approve (or --no: decline) jobs waiting for confirmation.

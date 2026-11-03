@@ -1,8 +1,15 @@
-// What a page's own script shows through site.js's helpers, read from its source and never run: the text it passes to
-// site.h (its children, and its "text"), site.head (title, lede and basis), site.link (the link's words), site.notice,
-// site.empty and site.notes. Calls count as site.h(…), window.site.h(…) or through a name the script gives the helper
-// (`var h = site.h`, `const { h, head } = site`). A blank starter page keeps its words there, in app.js. Text a script
-// builds any other way (from a variable filled elsewhere, textContent, innerHTML, a framework) is not read.
+// What a page's own script shows, read from its source and never run (`instafy bind check`):
+// - lines: the text it passes to site.js's helpers, one line per element as the page draws it: site.h's children and
+//   "text" (an inline child, such as <strong> or a site.link, joins its parent's line), site.head's title, lede and
+//   basis, site.link's words, site.notice, site.empty and site.notes. Calls count as site.h(…), window.site.h(…) or
+//   through a name the script gives the helper (`var h = site.h`, `const { h, head } = site`). A blank starter page
+//   keeps its words there, in app.js.
+// - data: the strings of its own lists and objects ([…], {…}) outside those calls, read as a data file's are: not an
+//   object's keys, the values of keys that hold no text (class, href…), nor what a key or a name such as "missing"
+//   lists.
+// - other: every other string it holds (a variable's value, a function's argument, the HTML it gives innerHTML…): words
+//   the page may show that the check cannot place.
+// - loads: whether it fetches text from another site while the page runs.
 // SPDX-License-Identifier: AGPL-3.0-only
 
 const HELPERS = new Set(["h", "head", "link", "notice", "empty", "notes"]);
@@ -10,6 +17,18 @@ const HELPERS = new Set(["h", "head", "link", "notice", "empty", "notes"]);
 const GLOBALS = new Set(["window", "globalThis", "self"]);
 // Keys whose values are never text on the page (an address, a class, an attribute map, an event).
 const NO_TEXT_KEY = /^(?:class|className|id|href|src|url|target|rel|type|role|style|ref|key|attrs|on|for|htmlFor)$|^(?:data|aria)-|^on[A-Z]/;
+// The elements that start a line of their own on the page; any other (strong, a, span…) is on its parent's line, and a
+// br ends it, as check.mjs's htmlLines reads an HTML page.
+const BLOCK = new Set(["p", "div", "li", "dt", "dd", "tr", "td", "th", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article",
+  "header", "footer", "aside", "nav", "figcaption", "caption", "summary", "details", "blockquote", "pre", "ul", "ol", "dl", "table",
+  "main"]);
+// Words after which "{" starts an object and "[" a list (not a block, not an index).
+const BEFORE_VALUE = new Set(["return", "typeof", "case", "default", "in", "of", "new", "delete", "void", "throw", "instanceof", "yield",
+  "await"]);
+// Where a br ends its parent's line.
+const BREAK = "\u0000";
+// What fetches text while a page runs.
+const FETCHES = new Set(["fetch", "EventSource", "WebSocket"]);
 // After these a "/" starts a regular expression, not a division.
 const BEFORE_REGEX = new Set(["(", ",", "=", ":", "[", "!", "&", "|", "?", "{", "}", ";", "+", "-", "*", "%", "<", ">", "~", "^", "=>",
   "return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "instanceof", "yield", "await"]);
@@ -237,24 +256,6 @@ function objectEntries(toks, [s, e]) {
   return entries;
 }
 
-/** The strings in [s, e), but an object's keys and the values of keys that hold no text; a helper call inside is read
- *  on its own. */
-function textIn(toks, s, e, names, out) {
-  for (let k = s; k < e; k += 1) {
-    const call = helperCall(toks, k, names);
-    if (call) {
-      k = callArgs(toks, call.open).end - 1;
-      continue;
-    }
-    const t = toks[k];
-    if ((t.t === "id" || t.t === "str") && is(toks[k + 1], ":") && (is(toks[k - 1], "{") || is(toks[k - 1], ","))) {
-      k = NO_TEXT_KEY.test(t.v) ? itemEnd(toks, k + 2, e) - 1 : k + 1;
-      continue;
-    }
-    if (t.t === "str" && t.v.trim()) out.push(t.v);
-  }
-}
-
 /** A second argument site.h takes as its props: an object, or a name or property that may hold one (null too). */
 function propsLike(toks, [s, e]) {
   if (objectEntries(toks, [s, e])) return true;
@@ -262,32 +263,163 @@ function propsLike(toks, [s, e]) {
   return true;
 }
 
-/** The text one helper call shows. */
-function readCall(toks, { name, open }, names, out) {
-  const { list } = callArgs(toks, open);
-  const read = (range) => range && textIn(toks, range[0], range[1], names, out);
-  const keys = (range, wanted) => {
-    for (const entry of (range && objectEntries(toks, range)) || []) if (wanted.includes(entry.key)) textIn(toks, entry.s, entry.e, names, out);
-  };
-  if (name === "h") {
-    // h(tag, props, ...children): a second argument that is not props is its first child
-    if (list[1] && propsLike(toks, list[1])) keys(list[1], ["text"]);
-    else read(list[1]);
-    list.slice(2).forEach(read);
-  } else if (name === "head") keys(list[0], ["title", "lede", "basis"]);
-  else if (name === "link") read(list[1]);
-  else if (name === "notice") list.slice(1).forEach(read);
-  else list.forEach(read);
+/** The strings in [s, e) that the page shows, into `words`: not an object's keys, nor the values of keys that hold no
+ *  text. A helper call inside is read as the element it draws: an inline one's words join `words`, a block one is a
+ *  line of its own. */
+function collect(toks, [s, e], ctx, words) {
+  for (let k = s; k < e; k += 1) {
+    const call = helperCall(toks, k, ctx.names);
+    if (call) {
+      ctx.consumed.add(k);
+      const read = readCall(toks, call, ctx, true);
+      if (read.text) words.push(read.text);
+      k = read.end - 1;
+      continue;
+    }
+    const t = toks[k];
+    if ((t.t === "id" || t.t === "str") && is(toks[k + 1], ":") && (is(toks[k - 1], "{") || is(toks[k - 1], ","))) {
+      k = NO_TEXT_KEY.test(t.v) ? itemEnd(toks, k + 2, e) - 1 : k + 1;
+      continue;
+    }
+    if (t.t === "str" && t.v.trim()) words.push(t.v);
+  }
 }
 
-/** The text a script shows through site.js's helpers, as it reads in the source: one entry per string. */
-export function scriptText(source) {
-  const toks = tokens(String(source ?? ""));
-  const names = helperNames(toks);
-  const out = [];
-  for (let i = 0; i < toks.length; i += 1) {
-    const call = helperCall(toks, i, names);
-    if (call) readCall(toks, call, names, out);
+/** The helper calls in [s, e) of an argument that draws nothing: never read as the page's text. */
+function drop(toks, [s, e], ctx) {
+  for (let k = s; k < e; k += 1) if (helperCall(toks, k, ctx.names)) ctx.consumed.add(k);
+}
+
+/** An element's tag, when the call names it with a string ("p"); else "". */
+function tagOf(toks, range) {
+  return range && range[1] - range[0] === 1 && toks[range[0]].t === "str" ? toks[range[0]].v.trim().toLowerCase() : "";
+}
+
+/** One helper call: the lines it draws go to ctx.lines; inside another element's children (`nested`), an inline
+ *  element's words come back instead, for its parent's line. Also the index after its ")". */
+function readCall(toks, { name, open }, ctx, nested = false) {
+  const { list, end } = callArgs(toks, open);
+  const words = [];
+  const take = (range) => range && collect(toks, range, ctx, words);
+  const line = (parts) => {
+    for (const part of parts.join(" ").split(BREAK)) {
+      const text = part.replace(/\s+/g, " ").trim();
+      if (text) ctx.lines.push(text);
+    }
+  };
+  const entries = (range) => (range && objectEntries(toks, range)) || [];
+  if (name === "h" || name === "link") {
+    if (name === "link") take(list[1]);
+    else {
+      // h(tag, props, ...children): a second argument that is not props is its first child, from site.js 1.7.0 on
+      if (list[1] && propsLike(toks, list[1])) {
+        for (const entry of entries(list[1])) if (entry.key === "text") take([entry.s, entry.e]);
+      } else if (list[1] && ctx.childArg) take(list[1]);
+      else if (list[1]) drop(toks, list[1], ctx);
+      list.slice(2).forEach(take);
+    }
+    const tag = name === "link" ? "a" : tagOf(toks, list[0]);
+    if (tag === "br") return { end, text: nested ? BREAK : "" };
+    if (nested && !BLOCK.has(tag)) return { end, text: words.join(" ") };
+    line(words);
+  } else if (name === "head") {
+    for (const entry of entries(list[0])) {
+      if (!["title", "lede", "basis"].includes(entry.key)) continue;
+      const parts = [];
+      collect(toks, [entry.s, entry.e], ctx, parts);
+      line(parts);
+    }
+  } else if (name === "notes") {
+    // a line per thing still to confirm, and per source
+    for (const range of list) {
+      const parts = [];
+      collect(toks, range, ctx, parts);
+      for (const part of parts) line([part]);
+    }
+  } else {
+    // notice(tone, text, action) and empty(text, action, hint): one block, its action on its line
+    (name === "notice" ? list.slice(1) : list).forEach(take);
+    line(words);
   }
-  return out;
+  return { end, text: "" };
+}
+
+/** A "[" after this token is an index (a[0], f()[0]), not a list. */
+function indexes(prev) {
+  return !!prev && (prev.t === "str" || prev.t === "num" || (prev.t === "id" && !BEFORE_VALUE.has(prev.v)) || is(prev, ")") || is(prev, "]"));
+}
+
+/** A "{" after this token starts an object, not a block. */
+function startsObject(prev) {
+  if (!prev) return false;
+  if (prev.t === "id") return BEFORE_VALUE.has(prev.v);
+  return prev.t === "p" && ![")", "]", "}", "{", ";", "=>"].includes(prev.v);
+}
+
+/** The strings outside the helper calls (`skip`: where each starts → where it ends): `data`, a value in the script's
+ *  own lists and objects, read as a data file's are; `other`, the rest. `lists`: the keys and names whose values list
+ *  what the page could not show ("missing"), which are no text it shows. */
+function readRest(toks, skip, lists) {
+  const data = [];
+  const other = [];
+  const listsNothing = (name) => typeof name === "string" && lists.has(name.toLowerCase());
+  const noText = (frame) => frame.kind === "object" && frame.key != null && (NO_TEXT_KEY.test(frame.key) || listsNothing(frame.key));
+  const stack = [{ kind: "block", key: null, skip: false }];
+  for (let k = 0; k < toks.length; k += 1) {
+    if (skip.has(k)) {
+      k = skip.get(k) - 1;
+      continue;
+    }
+    const t = toks[k];
+    const prev = toks[k - 1];
+    const top = stack.at(-1);
+    if (t.t === "str") {
+      if (top.skip || !t.v.trim()) continue;
+      if (top.kind === "object" && is(toks[k + 1], ":") && (is(prev, "{") || is(prev, ","))) other.push(t.v);
+      else if (!noText(top)) (top.kind === "list" || top.kind === "object" ? data : other).push(t.v);
+    } else if (is(t, "(") || is(t, "[") || is(t, "{")) {
+      const kind = t.v === "(" ? "call" : t.v === "[" ? (indexes(prev) ? "index" : "list") : startsObject(prev) ? "object" : "block";
+      const named = is(prev, "=") && isId(toks[k - 2]) && listsNothing(toks[k - 2].v);
+      stack.push({ kind, key: null, skip: top.skip || noText(top) || named });
+    } else if (is(t, ")") || is(t, "]") || is(t, "}")) {
+      if (stack.length > 1) stack.pop();
+    } else if (is(t, ",") && top.kind === "object") top.key = null;
+    else if (is(t, ":") && top.kind === "object" && (prev?.t === "id" || prev?.t === "str") && (is(toks[k - 2], "{") || is(toks[k - 2], ","))) {
+      top.key = prev.v;
+    }
+  }
+  return { data, other };
+}
+
+/** Whether the script fetches text from another site while the page runs: fetch, EventSource or WebSocket given that
+ *  site's address (https://…, //…). */
+function loadsElsewhere(toks) {
+  for (let i = 0; i < toks.length; i += 1) {
+    if (!isId(toks[i]) || !FETCHES.has(toks[i].v) || !is(toks[i + 1], "(")) continue;
+    if (is(toks[i - 1], ".") && !(isId(toks[i - 2]) && GLOBALS.has(toks[i - 2].v))) continue;
+    if (toks[i + 2]?.t === "str" && /^\s*(?:(?:https?|wss?):)?\/\//i.test(toks[i + 2].v)) return true;
+  }
+  return false;
+}
+
+/** What a script shows: { lines, data, other, loads } (the top of this file). `childArg`: site.h takes a second
+ *  argument that is not its props as its first child (site.js 1.7.0 and later; an older copy draws nothing for it).
+ *  `lists`: the keys and names whose values list what the page could not show. */
+export function readScript(source, { childArg = true, lists = new Set() } = {}) {
+  const toks = tokens(String(source ?? ""));
+  const ctx = { names: helperNames(toks), childArg, lines: [], consumed: new Set() };
+  // the calls read on their own (not as another element's child), outermost first: what the rest of the script is
+  const skip = new Map();
+  let outer = 0;
+  for (let i = 0; i < toks.length; i += 1) {
+    if (ctx.consumed.has(i)) continue;
+    const call = helperCall(toks, i, ctx.names);
+    if (!call) continue;
+    const { end } = readCall(toks, call, ctx);
+    if (i >= outer) {
+      skip.set(i, end);
+      outer = end;
+    }
+  }
+  return { lines: ctx.lines, ...readRest(toks, skip, lists), loads: loadsElsewhere(toks) };
 }

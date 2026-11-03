@@ -123,7 +123,7 @@ test("a page whose text the check cannot read gets the card's command, never MIS
     const out = s.run(["check", "sites/visit", "--expect", "Opening hours"]);
     assert.equal(out.status, 2, out.stdout + out.stderr);
     assert.doesNotMatch(out.stdout, /MISSING/);
-    assert.match(out.stdout, /^UNREAD: app\.js draws the page's text in a way the check cannot read/m);
+    assert.match(out.stdout, /^UNREAD: app\.js may draw .*, so the check cannot tell whether the page shows: Opening hours\.$/m);
     assert.equal(lastLine(out.stdout), `next: post its card: (cd sites/visit && ${OPEN})`);
     const json = JSON.parse(s.run(["check", "sites/visit", "--expect", "Opening hours", "--json"]).stdout);
     assert.deepEqual([json.unknown, json.next], [["Opening hours"], `post its card: (cd sites/visit && ${OPEN})`]);

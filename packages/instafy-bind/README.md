@@ -196,11 +196,12 @@ kit.done("Read 1 price");
 handler can answer with `kit.uncertain`. `instafy bind try <dir> <intent> '<params>' --save` runs a script intent as
 a click would and keeps its accepted records in the site (same checks, provenance and version bump), so a new page
 opens with its values. `instafy bind check <dir> --expect "<item>,<item>"` then says whether the page shows every
-item the request named (from its HTML text, its data files and the text its own scripts pass to `site.h` and
-`site.head`, as a blank page's `app.js` does; an `"expect"` array in `data.json` is checked too) and exits 1 when one
-is missing. A page whose scripts draw its text some other way, with no data file to read, is never reported as missing
-what the check cannot see: it exits 2 and says to look at the page itself. On a page of options (the compare and
-ranked starters' `data.json`) it also exits 1 for a
+item the request named (from its HTML text, its data files, and in its own scripts the text they pass to `site.h` and
+`site.head`, as a blank page's `app.js` does, and the strings of their lists and objects; an `"expect"` array in
+`data.json` is checked too) and exits 1 when one is missing: when no file of the site names it. An item whose words a
+script holds where the check cannot place them (a variable, the HTML given to `innerHTML`), or on a page whose script
+fetches text from another site, is never reported as missing what the check cannot see: it exits 2 and says to look at
+the page itself. On a page of options (the compare and ranked starters' `data.json`) it also exits 1 for a
 value that only says nothing (`"—"`, `"n/a"`: leave out `v` and say why in `note`), a value without the page and day
 it was read (`src`, `url`, `date`), and a filter applied without `site.byFilter`; and it notes the rows the filter
 lists apart because their value is unknown (`site.within` never counts an unknown value as within a limit). A row of a
