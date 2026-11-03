@@ -1,5 +1,0 @@
----
-"@instafy/cli": patch
----
-
-`instafy bind init` and `instafy bind check` end with the step that shows the page. In a space, until the CLI has recorded a preview of that space opened from the site's folder, init's next step names the one command that serves the page and posts its card in Studio, `(cd <dir> && instafy preview open --title '<short title>' --serve-cmd 'instafy bind serve . --port {port} --preview' --start --json)`, after putting the content in `data.json` and checking it with `instafy bind check` (for the blank starter, after writing `app.js`), and a check that passes ends with the same command (`next` with `--json`). Another space's preview on the same machine never counts, whatever its folder is called. Before, init's next step was `instafy-bind serve <dir>`, which posts no card and is not a command in a space, and a passing check named no next step, so a finished page could end with nothing to open. Outside a space the binder still says to serve the site itself. In a space, the card command that `instafy bind serve --preview` prints now runs in the folder it serves, with `--serve-cmd`, so its preview records that folder.
