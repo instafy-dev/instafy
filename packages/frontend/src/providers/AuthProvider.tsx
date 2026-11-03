@@ -110,55 +110,6 @@ function isLocalDevHost(): boolean {
   return hostname === "127.0.0.1" || hostname === "localhost";
 }
 
-function parseNumericValue(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value === "string" && value.trim().length > 0) {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
-  return null;
-}
-
-function extractExpiresAtFromStoredSession(value: unknown): number | null {
-  if (!value) {
-    return null;
-  }
-  if (Array.isArray(value)) {
-    for (const entry of value) {
-      const nested = extractExpiresAtFromStoredSession(entry);
-      if (nested !== null) {
-        return nested;
-      }
-    }
-    return null;
-  }
-  if (typeof value !== "object") {
-    return null;
-  }
-  const record = value as Record<string, unknown>;
-  const direct = parseNumericValue(record.expires_at);
-  if (direct !== null) {
-    return direct;
-  }
-  if ("currentSession" in record) {
-    const nested = extractExpiresAtFromStoredSession(record.currentSession);
-    if (nested !== null) {
-      return nested;
-    }
-  }
-  if ("session" in record) {
-    const nested = extractExpiresAtFromStoredSession(record.session);
-    if (nested !== null) {
-      return nested;
-    }
-  }
-  return null;
-}
-
 function listSupabaseAuthStorageKeys(): string[] {
   if (typeof window === "undefined") {
     return [];
@@ -178,32 +129,6 @@ function listSupabaseAuthStorageKeys(): string[] {
     return [];
   }
   return keys;
-}
-
-function clearExpiredLocalDevSupabaseSessions() {
-  if (!isLocalDevHost()) {
-    return;
-  }
-  const nowSeconds = Math.floor(Date.now() / 1000);
-  for (const key of listSupabaseAuthStorageKeys()) {
-    try {
-      const raw = window.localStorage.getItem(key);
-      if (!raw) {
-        continue;
-      }
-      const parsed = JSON.parse(raw) as unknown;
-      const expiresAt = extractExpiresAtFromStoredSession(parsed);
-      if (expiresAt === null) {
-        continue;
-      }
-      // If this access token already expired, skip refresh attempts and drop it up front.
-      if (expiresAt <= nowSeconds - 30) {
-        window.localStorage.removeItem(key);
-      }
-    } catch {
-      // ignore malformed storage rows
-    }
-  }
 }
 
 function clearSupabaseAuthStorage() {
@@ -627,7 +552,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     async function bootstrap() {
       try {
-        clearExpiredLocalDevSupabaseSessions();
         const { data: listener } = supabase.auth.onAuthStateChange(
           (_event: AuthChangeEvent, nextSession: Session | null) => {
             if (cancelled) {
