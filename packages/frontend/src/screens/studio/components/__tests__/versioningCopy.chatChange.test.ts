@@ -376,6 +376,22 @@ describe("describeUnsavedChanges", () => {
     }
   });
 
+  // A save that never reached the space (the controller refused its lease,
+  // or someone else held it) left the files on the machine alone: the next
+  // turn saves only what it changes itself, and its refresh publishes nothing
+  // dirty, so nothing promises these a save.
+  it("says changes whose save never reached the space were not saved, without promising a later save", () => {
+    expect(describeUnsavedChanges("save_not_started", { unsavedWorkInHistory: false })).toBe(
+      "These changes weren't saved to the space. They're kept as unsaved work.",
+    );
+    expect(describeUnsavedChanges("save_not_started", { unsavedWorkInHistory: true })).toBe(
+      "These changes weren't saved to the space. They're kept under History, in Unsaved work.",
+    );
+    for (const placement of [{ unsavedWorkInHistory: false }, { unsavedWorkInHistory: true }]) {
+      expect(describeUnsavedChanges("save_not_started", placement)).not.toMatch(/next turn|saves them/i);
+    }
+  });
+
   it("says a stopped turn's changes were never saved, without promising a later save", () => {
     expect(describeUnsavedChanges("stopped_before_save", { unsavedWorkInHistory: false })).toBe(
       "Stopped before these changes were saved. They're kept as unsaved work.",

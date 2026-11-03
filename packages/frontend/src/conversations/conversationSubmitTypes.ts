@@ -39,6 +39,12 @@ export interface SubmitConversationOptions {
    * for the prompt or put it in the conversation's send queue.
    */
   requireDispatch?: boolean;
+  /**
+   * The caller says in its own words what became of a send the controller
+   * refused (a hand-back), so the refusal adds no error row to the chat.
+   * Only with `requireDispatch`, which rejects with the refusal.
+   */
+  callerReportsDispatchErrors?: boolean;
   /** Local-only scope fence, rechecked after preflight immediately before send. */
   assertDispatchCurrent?: () => void;
 }

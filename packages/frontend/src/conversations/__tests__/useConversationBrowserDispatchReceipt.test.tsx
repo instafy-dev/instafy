@@ -110,6 +110,30 @@ describe("browser continuation through real submit flow and controller dispatch"
     expect(resolveParticipation).not.toHaveBeenCalled();
   });
 
+  // A hand-back the controller refuses (its browser turn is too old, or
+  // someone wrote after it) is reported by the hand-back's own caller, in
+  // plain words: the controller's refusal never lands in the chat as a row
+  // of its own, while any other send's refusal still does.
+  it("leaves a refusal to a caller that reports its own, adding no error row", async () => {
+    const refusal = "That browser turn finished too long ago to hand back. Ask Octo to continue instead.";
+    sendMessage.mockRejectedValue(new Error(refusal));
+    const handBack: SubmitConversationOptions = {
+      requireDispatch: true, expectedLaneIdle: true, agentHandles: ["octo"], imageFiles: [], editorState: null,
+      dispatchInput: "Continue building with what the browser turn found.",
+      metadata: { continuesFromBrowserJob: "job-browser" },
+    };
+    const errorRows = () => appendMessages.mock.calls
+      .flatMap(([, rows]) => rows as ChatMessage[])
+      .filter((row) => row.messageType === "error");
+    await expect(flow.handleSubmit("conversation-local", "Octo continued in the chat", {
+      ...handBack, callerReportsDispatchErrors: true,
+    })).rejects.toThrow(refusal);
+    expect(errorRows()).toEqual([]);
+    await expect(flow.handleSubmit("conversation-local", "Octo continued in the chat", handBack))
+      .rejects.toThrow(refusal);
+    expect(errorRows().map((row) => row.content)).toEqual([refusal]);
+  });
+
   it("preserves ordinary caller error reporting without changing its void return", async () => {
     sendMessage.mockRejectedValue(new Error("controller unavailable"));
     await expect(flow.handleSubmit("conversation-local", prompt, { ...browserOptions, requireDispatch: false })).resolves.toBeUndefined();

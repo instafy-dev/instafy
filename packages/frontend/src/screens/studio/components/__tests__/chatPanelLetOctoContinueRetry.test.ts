@@ -38,6 +38,8 @@ describe("ChatPanel's Try again for a browser turn", () => {
     expect(retry).toContain("const handBack = browserHandBackRetry(promptMessage, retryMetadata);");
     expect(retry).toContain("return sendBrowserHandBack(handBack.message, handBack.extras);");
     expect(retry.indexOf("browserHandBackRetry")).toBeLessThan(retry.indexOf("isLetOctoContinuePrompt"));
+    // The hand-back's own send, whose behaviour useBrowserHandBack.test.tsx covers.
+    expect(chatPanel).toMatch(/const sendBrowserHandBack = browserHandBackSender\(\{\s*submit: onSubmit,\s*conversationId: activeConversationId,\s*agentHandle: typingAgentHandle,\s*\}\);/);
     expect(chatPanel).toContain("send: sendBrowserHandBack,");
   });
 });

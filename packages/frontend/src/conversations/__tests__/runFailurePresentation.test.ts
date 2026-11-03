@@ -1055,9 +1055,9 @@ describe("resolveRunFailurePresentation", () => {
     });
   });
 
-  // Local drive, Nov 3: a turn made a page and its save was refused, and the
-  // person read "Something went wrong, so this turn stopped." beside the
-  // files it made. It says what failed: the changes are there, not saved.
+  // A turn made a page and its save was refused, and the person read
+  // "Something went wrong, so this turn stopped." beside the files it made.
+  // It says what failed: the changes are there, not saved.
   it("says the changes were made but not saved when their save failed", () => {
     const refused =
       'Workspace sync failed: workspace lease acquire failed (403 Forbidden): {"message":"legacy job token is not allowed to mutate this workspace scope"}';

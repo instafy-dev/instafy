@@ -21,6 +21,14 @@ import { useRunFailureAutoRetry } from "./useRunFailureAutoRetry";
 
 const NO_QUEUED_SENDS: ReadonlyArray<{ metadata?: Record<string, unknown> | null }> = [];
 
+/**
+ * What Try again on a hand-back says when it cannot send the hand-back again:
+ * the controller refused it (someone wrote after its browser turn, that turn
+ * is over half an hour old, or it was someone else's), or this panel cannot
+ * send one.
+ */
+const HAND_BACK_NOT_SENT_AGAIN = "Octo can't try this again from here. Ask Octo to continue instead.";
+
 /** How a resend asks the panel's submit to behave. */
 export type RunFailureResendOptions = {
   /**
@@ -86,7 +94,9 @@ export function useRunFailureRetryActions({
    * sends a hand-back again for a failed hand-back (its claim on the browser
    * turn and Studio's words), with the given retry metadata. Resolves to
    * whether it went out. Without it, none is resent here: its shown text is
-   * only a notice or the button's words.
+   * only a notice or the button's words. A hand-back that did not go out
+   * withdraws the card's Try again, with one plain line: the controller
+   * refuses it again for the same reason.
    */
   resendBrowserRequest?: (promptMessage: ChatMessage, retryMetadata: Record<string, unknown>) => Promise<boolean>;
   showStatus: (message: string, intent?: StatusIntent, durationMs?: number) => void;
@@ -102,6 +112,20 @@ export function useRunFailureRetryActions({
       current.has(failureMessageId) ? current : new Set(current).add(failureMessageId),
     );
   }, []);
+  // Failures whose Try again cannot send their prompt again (a hand-back the
+  // controller refused): the card offers neither Try again nor Retried.
+  const [withdrawnFailureIds, setWithdrawnFailureIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const withdrawRetry = useCallback((failureMessageId: string) => {
+    setWithdrawnFailureIds((current) =>
+      current.has(failureMessageId) ? current : new Set(current).add(failureMessageId),
+    );
+  }, []);
+  const isRetryWithdrawn = useCallback(
+    (failureMessage: ChatMessage) => withdrawnFailureIds.has(failureMessage.id),
+    [withdrawnFailureIds],
+  );
   // The failed send is recorded in the registry, which React does not watch:
   // a new set makes the cards ask isRetrySuperseded again.
   const markNotRetried = useCallback((failureMessageId: string) => {
@@ -197,15 +221,15 @@ export function useRunFailureRetryActions({
       const handBack = readBrowserHandBackOf(promptMessage) !== null;
       const browserContinuation = browserCard || handBack || isLetOctoContinuePrompt(promptMessage);
       if (browserContinuation && !resendBrowserRequest) {
-        showStatus(
-          handBack
-            ? "Ask Octo to continue instead."
-            : browserCard
-              ? "Open the browser from Octo's message to try again."
-              : "Open the browser to try again.",
-          "info",
-          4000,
-        );
+        if (handBack) {
+          showStatus(HAND_BACK_NOT_SENT_AGAIN, "info", 6000);
+        } else {
+          showStatus(
+            browserCard ? "Open the browser from Octo's message to try again." : "Open the browser to try again.",
+            "info",
+            4000,
+          );
+        }
         return;
       }
       // Retried by hand, so never also automatically: this uses up the
@@ -220,6 +244,11 @@ export function useRunFailureRetryActions({
           if (sent) {
             if (readRetrySentFromThisPage(failureMessage.id) === "failed") markNotRetried(failureMessage.id);
             else markRetried(failureMessage.id);
+          } else if (handBack) {
+            // The controller said no, in its own words, which the chat does
+            // not show (browserHandBackSender): pressed again, it says no again.
+            showStatus(HAND_BACK_NOT_SENT_AGAIN, "info", 6000);
+            withdrawRetry(failureMessage.id);
           }
         } else {
           await resend(failureMessage, promptMessage.content);
@@ -229,7 +258,7 @@ export function useRunFailureRetryActions({
         setPendingRetryKey(null);
       }
     },
-    [isRetrySuperseded, markNotRetried, markRetried, messages, resend, resendBrowserRequest, showStatus],
+    [isRetrySuperseded, markNotRetried, markRetried, messages, resend, resendBrowserRequest, showStatus, withdrawRetry],
   );
 
   // The automatic re-dispatch shares the resend but deliberately does NOT touch
@@ -261,12 +290,14 @@ export function useRunFailureRetryActions({
       scheduledAutoRetry,
       cancelAutoRetry: cancelScheduledAutoRetry,
       isRetrySuperseded,
+      isRetryWithdrawn,
       onConnectAi,
     }),
     [
       autoRetryingKey,
       cancelScheduledAutoRetry,
       isRetrySuperseded,
+      isRetryWithdrawn,
       onConnectAi,
       pendingRetryKey,
       requestRetry,

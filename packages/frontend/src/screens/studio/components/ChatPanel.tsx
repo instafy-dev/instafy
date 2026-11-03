@@ -426,7 +426,7 @@ import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
 import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
 import { BROWSER_HUMAN_INPUT_CONTINUE_PROMPT, isLetOctoContinuePrompt } from "./useBrowserHumanInput";
-import { browserHandBackRetry, useBrowserHandBack, type BrowserHandBackExtras } from "./useBrowserHandBack";
+import { browserHandBackRetry, browserHandBackSender, useBrowserHandBack } from "./useBrowserHandBack";
 import {
   useChatBrowserRequest,
   type BrowserAutoStartOptions,
@@ -4982,22 +4982,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
   // A hand-back goes to the building lane as an ordinary turn, shown as its
   // one-line notice (useBrowserHandBack).
-  const sendBrowserHandBack = async (message: string, extras: BrowserHandBackExtras) => {
-    try {
-      await onSubmit(activeConversationId, extras.display, {
-        agentHandles: extras.agentHandles ?? [typingAgentHandle],
-        imageFiles: [],
-        editorState: null,
-        expectedLaneIdle: true,
-        requireDispatch: true,
-        dispatchInput: message,
-        metadata: extras.metadata,
-      });
-      return true;
-    } catch {
-      return false;
-    }
-  };
+  const sendBrowserHandBack = browserHandBackSender({
+    submit: onSubmit,
+    conversationId: activeConversationId,
+    agentHandle: typingAgentHandle,
+  });
   // Try again on a turn a press of Let Octo continue started presses it
   // again, in this chat's browser; on a card's turn it sends the card's task
   // again; on a hand-back's turn it sends the hand-back again.

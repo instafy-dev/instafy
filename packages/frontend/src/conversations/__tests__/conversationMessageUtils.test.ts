@@ -1074,10 +1074,11 @@ describe("extractUnsavedReasonFromMetadata", () => {
     expect(extractUnsavedReasonFromMetadata({ artifacts: [originApply("failed")] })).toBe("save_failed");
   });
 
-  // A save the controller refused (local drive, Nov 3: the hand-back's save,
-  // "legacy job token is not allowed to mutate this workspace scope") failed
-  // before it reached the origin: the runtime records only its error, and the
-  // turn's files read Not saved, never as saved.
+  // A save the controller refused (a hand-back's save, "legacy job token is
+  // not allowed to mutate this workspace scope") failed before it reached the
+  // origin: the runtime records only its error, and the turn's files read Not
+  // saved, never as saved. Unlike a save that failed after the origin took
+  // the files, no later turn saves them: it has a reason of its own.
   it("reports a save that failed before it reached the space", () => {
     const refused = {
       kind: "origin/apply-error",
@@ -1086,7 +1087,7 @@ describe("extractUnsavedReasonFromMetadata", () => {
           'workspace lease acquire failed (403 Forbidden): {"message":"legacy job token is not allowed to mutate this workspace scope"}',
       },
     };
-    expect(extractUnsavedReasonFromMetadata({ artifacts: [refused] })).toBe("save_failed");
+    expect(extractUnsavedReasonFromMetadata({ artifacts: [refused] })).toBe("save_not_started");
     // The newest save wins, as for a retried run.
     expect(extractUnsavedReasonFromMetadata({ artifacts: [refused, originApply("synced")] })).toBeNull();
     const mapped = mapControllerMessageToChat({
@@ -1117,7 +1118,7 @@ describe("extractUnsavedReasonFromMetadata", () => {
       createdAt: "2026-11-03T05:55:23.055Z",
     });
     expect(mapped.files?.map((file) => file.path)).toEqual(["sites/hours/app.js", "sites/hours/index.html"]);
-    expect(mapped.unsavedReason).toBe("save_failed");
+    expect(mapped.unsavedReason).toBe("save_not_started");
   });
 
   it("reports auto-save being off, the runtime's manual_required outcome", () => {
