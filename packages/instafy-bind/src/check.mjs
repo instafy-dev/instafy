@@ -48,10 +48,14 @@ const norm = (text) => String(text ?? "").normalize("NFKC").toLowerCase().replac
 /** Does the text name the item, as whole words ("Gel-Kayano 31" in "ASICS Gel Kayano 31 review"; not "Arahi 7" in
  *  "Arahi 75")? Scripts written without spaces (日本語, 中文) match as a substring. */
 export function names(text, item) {
+  return named(hay(text), item);
+}
+/** A text made ready for `named`, once for every item looked for in it. */
+const hay = (text) => ` ${norm(text)} `;
+function named(text, item) {
   const want = norm(item);
   if (!want) return false;
-  const hay = ` ${norm(text)} `;
-  return CJK.test(want) ? hay.includes(want) : hay.includes(` ${want} `);
+  return CJK.test(want) ? text.includes(want) : text.includes(` ${want} `);
 }
 
 /** The visible text of an HTML page: no scripts, styles, comments or tags. */
@@ -199,17 +203,19 @@ export function readSite(dir) {
 export function checkSite(dir, expect = []) {
   const site = readSite(dir);
   const items = parseExpect([...site.declared, ...parseExpect(expect)]);
+  const parts = site.parts.map((p) => ({ file: p.file, text: hay(p.text) }));
+  const scripts = site.scripts.map((s) => ({ file: s.file, loads: s.loads, text: hay(s.other) }));
   const shown = [];
   const missing = [];
   const unknown = [];
   const unread = new Set();
   for (const item of items) {
-    const where = site.parts.filter((p) => names(p.text, item)).map((p) => p.file);
+    const where = parts.filter((p) => named(p.text, item)).map((p) => p.file);
     if (where.length) {
       shown.push({ item, files: where.slice(0, 3) });
       continue;
     }
-    const held = site.scripts.filter((s) => s.loads || names(s.other, item)).map((s) => s.file);
+    const held = scripts.filter((s) => s.loads || named(s.text, item)).map((s) => s.file);
     if (!held.length) missing.push(item);
     else {
       unknown.push(item);
