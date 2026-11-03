@@ -5,6 +5,7 @@ import { shouldDisplayChatMessage } from "../../screens/studio/components/chatMe
 import { resolveThreadRunStatusFromMessages } from "../../screens/studio/components/threadPreviewHelpers";
 import {
   attachUnsavedPathsToFileChanges,
+  extractFileChangesFromMetadata,
   extractUnsavedPathsFromMetadata,
   extractUnsavedReasonFromMetadata,
   extractWorkspaceCommitRangeFromMetadata,
@@ -1129,6 +1130,46 @@ describe("extractUnsavedReasonFromMetadata", () => {
         artifacts: [{ ...stoppedFiles, metadata: { stoppedBeforeSave: "yes" } }],
       }),
     ).toBeNull();
+  });
+
+  // The report also says what the turn left in each file, on the machine
+  // that ran it: Undo puts back with no turn only a file it names.
+  it("reads what a stopped turn left in each file", () => {
+    const blob = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
+    const files = extractFileChangesFromMetadata({
+      artifacts: [
+        {
+          kind: "apply/files",
+          files: [
+            { path: "sites/porto/app.js", workspacePath: "sites/porto/app.js", changeType: "changed" },
+            { path: "sites/porto/old.html", workspacePath: "sites/porto/old.html", changeType: "deleted" },
+            { path: "notes.md", workspacePath: "notes.md", changeType: "changed" },
+            { path: "sites/porto/logo.svg", workspacePath: "sites/porto/logo.svg", changeType: "created" },
+          ],
+          metadata: {
+            stoppedBeforeSave: true,
+            undo: {
+              runtimeId: "runtime-1",
+              leftAs: { "sites/porto/app.js": blob, "sites/porto/old.html": null, "notes.md": blob, "sites/porto/logo.svg": "not a blob" },
+              changedBefore: ["notes.md"],
+            },
+          },
+        },
+      ],
+    });
+    expect(files.map((file) => [file.workspacePath, file.folderUndo ?? null])).toEqual([
+      ["sites/porto/app.js", { leftAs: blob, changedBefore: false, runtimeId: "runtime-1" }],
+      ["sites/porto/old.html", { leftAs: null, changedBefore: false, runtimeId: "runtime-1" }],
+      ["notes.md", { leftAs: blob, changedBefore: true, runtimeId: "runtime-1" }],
+      ["sites/porto/logo.svg", null],
+    ]);
+    // A report without it (an older runtime's, or a turn whose Stop came once
+    // it was done) names none.
+    expect(
+      extractFileChangesFromMetadata({
+        artifacts: [{ kind: "apply/files", files: [{ path: "a.md" }], metadata: { stoppedBeforeSave: true } }],
+      })[0]?.folderUndo,
+    ).toBeUndefined();
   });
 
   it("reports a skipped save as failed when real files rode in the refused request", () => {

@@ -79,6 +79,7 @@ const RECOVERY = "refs/instafy/recovery/11111111-2222-3333-4444-555555555555/run
 const CONFLICT = "refs/instafy/recovery/11111111-2222-3333-4444-555555555555/run-2";
 /** Unsaved edits a restore keeps: part of them can never be saved here. */
 const KEPT = "refs/instafy/recovery/11111111-2222-3333-4444-555555555555/run-3";
+const UNDONE = "refs/instafy/recovery/11111111-2222-3333-4444-555555555555/20261102T131809Z-undone-0123456789ab";
 
 function recoveryEntry(ref: string, extra: Record<string, unknown> = {}) {
   return {
@@ -310,11 +311,14 @@ describe("HistoryDrawer: Unsaved work", () => {
         recoveryEntry(RECOVERY),
         recoveryEntry(CONFLICT, { kind: "conflict", paths: ["src/a.ts"] }),
         recoveryEntry(KEPT, { kind: "unsaved", restoredRev: NEW_HEAD }),
+        // Edits a person undid from the chat before anything saved them.
+        recoveryEntry(UNDONE, { kind: "undone", paths: ["sites/a/app.js"] }),
       ]),
     );
     await render();
     const entries = Array.from(container.querySelectorAll<HTMLElement>('[data-testid="unsaved-work-entry"]'));
-    expect(entries.map((entry) => entry.getAttribute("data-kind"))).toEqual(["unpublished", "conflict", "unsaved"]);
+    expect(entries.map((entry) => entry.getAttribute("data-kind"))).toEqual(["unpublished", "conflict", "unsaved", "undone"]);
+    expect(entries[3]?.textContent).toContain("Edits undone from the chat");
     expect(entries[0]?.textContent).toContain("Agent work that couldn't be saved");
     expect(entries[0]?.textContent).toContain("2 files");
     expect(entries[1]?.textContent).toContain("Agent work that conflicted with newer changes");

@@ -17,6 +17,7 @@ import {
 import { shouldAssistantMessagesShareVisualGroup } from "./assistantMessageGrouping";
 import { ChatBubbleRow } from "./ChatBubbleRow";
 import { ChatSiteContext, conversationSite } from "./chatSiteContext";
+import { ChatLaterChangesContext, conversationLaterChanges } from "./chatLaterChanges";
 import type { ChatSpeakerMarker } from "./chatSpeakerMarker";
 import {
   AssistantMessageEntry,
@@ -257,6 +258,11 @@ export function ConversationMessageRows({
   // A site's card anywhere in the chat makes the changes under its replies the site's.
   const site = useMemo(
     () => conversationSite(allConversationMessages ?? messages),
+    [allConversationMessages, messages],
+  );
+  // What later turns changed, for an Undo that puts a turn's files back.
+  const laterChanges = useMemo(
+    () => conversationLaterChanges(allConversationMessages ?? messages),
     [allConversationMessages, messages],
   );
 
@@ -634,7 +640,9 @@ export function ConversationMessageRows({
 
   return (
     <ChatSiteContext.Provider value={site}>
-      <DeferredChatRows key={conversationLocalId} messageCount={messages.length}>{rows}</DeferredChatRows>
+      <ChatLaterChangesContext.Provider value={laterChanges}>
+        <DeferredChatRows key={conversationLocalId} messageCount={messages.length}>{rows}</DeferredChatRows>
+      </ChatLaterChangesContext.Provider>
     </ChatSiteContext.Provider>
   );
 }

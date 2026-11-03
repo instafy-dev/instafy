@@ -713,6 +713,13 @@ impl RuntimeAgent {
         // A turn that changed an open preview's site sends its new picture
         // with this runtime's own credential, after the turn's reply.
         executor.send_card_pictures_with(client.clone());
+        // So does a person's Undo that put back files of such a site through
+        // this machine's own origin (set up before that origin starts).
+        let pictures_config = config.clone();
+        crate::jobs::preview_pictures::picture_sites_people_revert(
+            move |project_id| pictures_config.project_workspace_dir(project_id),
+            client.clone(),
+        );
         // A lazy browser host lives as long as this process, across
         // registration renewals; it is published only on an attested lease.
         crate::browser_host::install(client.clone());

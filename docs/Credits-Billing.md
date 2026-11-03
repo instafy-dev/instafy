@@ -358,6 +358,21 @@ card (1 credit, "Turns Instafy starts by itself" below), so stopping its browser
 credits in all. A turn Instafy started by itself follows its own rule below:
 stopped, it costs nothing unless it had already done what that rule charges for.
 
+### Undo
+
+**Undo** under a turn's files is no message, so it costs nothing and uses no daily prompt slot:
+
+- a change the turn's save took is undone by a new saved version that reverses it
+  (`POST /git/revert-commit` on the space's origin);
+- a change a turn the person stopped left unsaved is undone by putting its files back in the folder
+  the turn ran in, as the saved version has them (`POST /git/revert` on that folder's own origin,
+  which keeps what it undoes under Unsaved work).
+
+When neither can undo it (other work is in the files: a later turn's, the person's own, or the
+saved version holds more than this change; or a save that failed), the card offers **Ask the agent
+to undo it**. That sends a message in the person's name, which runs a turn as any message does: it
+holds its reserve, uses a daily prompt slot, and costs what its turn used.
+
 ### Turns Instafy starts by itself
 
 A turn Instafy starts by itself, not the person, costs nothing unless it does what it is

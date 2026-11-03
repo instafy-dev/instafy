@@ -397,6 +397,37 @@ describe("default-routed sync and path revert use the shared write lease", () =>
     }
   });
 
+  // Undo of a change a Stop left unsaved asks the folder's own origin to keep
+  // what it undoes, and to put back only what each file still holds as the
+  // turn left it.
+  it("path revert sends keep and what each file is expected to hold", async () => {
+    mocks.token.mockResolvedValue(token({ originId: "runtime-origin", endpoint: "https://controller.test/origin/rt" }));
+    fetchMock().mockResolvedValue(json(200, { ok: true, reverted: ["sites/a/app.js"], removed: ["sites/a/new.html"] }));
+    const result = await revertWorkspaceGitPathsFromController({
+      projectId: "p",
+      paths: ["sites/a/app.js", "sites/a/new.html"],
+      originId: "runtime-origin",
+      routing: "default",
+      keep: true,
+      expected: { "sites/a/app.js": "a".repeat(40), "sites/a/new.html": "b".repeat(40) },
+    });
+    expect(lastRequest().url).toBe("https://controller.test/origin/rt/git/revert");
+    expect(JSON.parse(String(lastRequest().init.body))).toEqual({
+      paths: ["sites/a/app.js", "sites/a/new.html"],
+      keep: true,
+      expected: { "sites/a/app.js": "a".repeat(40), "sites/a/new.html": "b".repeat(40) },
+    });
+    expect(mocks.token.mock.calls[0][0]).toMatchObject({ originId: "runtime-origin", leaseId: "lease-1" });
+    expect(result).toMatchObject({ ok: true, reverted: ["sites/a/app.js"], removed: ["sites/a/new.html"] });
+    // A file changed since: the origin put nothing back, and names it.
+    fetchMock().mockResolvedValue(json(409, { error: "files changed since the turn left them", code: "head_moved", paths: ["sites/a/app.js"] }));
+    const refused = await revertWorkspaceGitPathsFromController({
+      projectId: "p", paths: ["sites/a/app.js"], originId: "runtime-origin", routing: "default", keep: true,
+      expected: { "sites/a/app.js": "a".repeat(40) },
+    });
+    expect(refused).toMatchObject({ ok: false, errorInfo: { status: 409, code: "head_moved", paths: ["sites/a/app.js"] } });
+  });
+
   it("maps an aborted first mint to timeout", async () => {
     const abort = new Error("aborted");
     abort.name = "AbortError";

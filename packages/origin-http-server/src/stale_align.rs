@@ -36,7 +36,7 @@ use tracing::{info, warn};
 
 use crate::config::ServerConfig;
 use crate::publish_policy::{is_unpublishable, is_unsafe_path, MAX_PUBLISH_BLOB_BYTES};
-use crate::recovery::{self, RecoveryKind, RecoveryRefReport, RecoverySpec};
+use crate::recovery::{self, RecoveryKind, RecoveryRefReport};
 use crate::tree_merge::changed_paths;
 use crate::workspace_fs::WorkspaceDir;
 use crate::workspace_git::{
@@ -530,43 +530,13 @@ fn park_paths(
     head: &str,
     paths: &[String],
 ) -> Result<Option<RecoveryRefReport>> {
-    let scratch = temp_index_dir(git)?;
-    let index = scratch.path().join("index");
-    let opts = RunOpts {
-        index_file: Some(&index),
-        ..RunOpts::default()
-    };
-    git.ok_opts(&["read-tree", head], &opts)?;
-    let list = nul_list(paths);
-    git.ok_opts(
-        &[
-            "add",
-            "-A",
-            "--ignore-errors",
-            "--pathspec-from-file=-",
-            "--pathspec-file-nul",
-        ],
-        &RunOpts {
-            index_file: Some(&index),
-            stdin: Some(&list),
-            literal_pathspecs: true,
-            ..RunOpts::default()
-        },
-    )?;
-    let tree = git.stdout_opts(&["write-tree"], &opts)?;
-    let stored = recovery::store(
+    let stored = recovery::park_worktree_paths(
         git,
-        RecoverySpec {
-            kind: RecoveryKind::Stale,
-            tree,
-            parent: Some(head.to_string()),
-            source: None,
-            date: None,
-            paths: paths.to_vec(),
-            commits: Vec::new(),
-            identity: GitIdentity::new(&config.git_author_name, &config.git_author_email),
-            origin_id: config.origin_id,
-        },
+        head,
+        paths,
+        RecoveryKind::Stale,
+        GitIdentity::new(&config.git_author_name, &config.git_author_email),
+        config.origin_id,
     )?;
     if stored.is_none() {
         warn!("stale copies matched work already set aside; restoring them");

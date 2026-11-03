@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildUndoRequestSubmission,
   createMessageUndoRequestHandler,
-  formatUndoTargetShortId,
   parseMessageUndoRequestDetail,
 } from "../messageUndoRequest";
 
@@ -45,10 +44,13 @@ describe("buildUndoRequestSubmission", () => {
       messageTimestamp: Date.UTC(2026, 7, 31, 14, 32),
     });
 
-    // The text carries a compact human-readable reference...
+    // The text is the person's own message: it names the change by its time,
+    // never by an id (it read "… at 2:16 PM (id 0abaf85f)." in the person's
+    // own bubble)...
     expect(submission.message).toContain("undo the change");
-    expect(submission.message).toContain("(id 2ee0ad74)");
     expect(submission.message).toContain(" at ");
+    expect(submission.message).not.toMatch(/\bid\b|2ee0ad74/);
+    expect(submission.message.endsWith(".")).toBe(true);
     // ...and the metadata carries the structured reference the backend
     // passes through with the created message.
     expect(submission.metadata).toEqual({
@@ -58,14 +60,7 @@ describe("buildUndoRequestSubmission", () => {
 
   it("omits the time reference when no timestamp is known", () => {
     const submission = buildUndoRequestSubmission({ messageId: "abc123", messageTimestamp: null });
-    expect(submission.message).toBe("Please undo the change from your message (id abc123).");
-  });
-});
-
-describe("formatUndoTargetShortId", () => {
-  it("compacts separators and truncates to eight characters", () => {
-    expect(formatUndoTargetShortId("2ee0-ad74-99")).toBe("2ee0ad74");
-    expect(formatUndoTargetShortId("abc")).toBe("abc");
+    expect(submission.message).toBe("Please undo the change from your message.");
   });
 });
 
@@ -87,7 +82,7 @@ describe("createMessageUndoRequestHandler", () => {
 
     expect(submit).toHaveBeenCalledTimes(1);
     expect(submit).toHaveBeenCalledWith({
-      message: "Please undo the change from your message (id msg9).",
+      message: "Please undo the change from your message.",
       metadata: { undoTargetMessageId: "msg-9" },
     });
   });

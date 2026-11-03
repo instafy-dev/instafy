@@ -198,9 +198,29 @@ these changes were saved"), and a later turn saves only what it changes itself. 
 while it saved shows what that save left, with its version.
 
 The step stays in the history later turns read, so a turn that goes on, or undoes it, knows what
-the stopped turn left. A preview whose site the turn changed is pictured again. A job a stop of
-its machine put back in the queue is not cancelled: the controller turns its report down, and the
-job's next lease takes the work up.
+the stopped turn left. A preview whose site the turn changed is pictured again.
+
+Undo under a stopped turn's unsaved files puts them back as the saved version has them, in the
+folder the turn ran in, with no message and no turn, behind Studio's own "Undo this change?"
+dialog. The report of a turn that lost its lease says what the turn left in each file (its blob id,
+or null for a file it removed) and which of them the folder already held changed when the turn
+began (`undo` on its `apply/files` artifact, with the machine that ran it). Studio puts nothing back
+and says why, with the agent's Undo offered instead, when a later turn of the chat changed one of
+the files, or when the turn found one already changed (the person's own edit, an earlier turn's
+unsaved work): putting it back as saved would take that back too. Otherwise it asks that folder's
+own origin (`POST /git/revert {paths, keep: true, expected}`, on the machine that ran the turn, else
+the space's machine now, or the Desktop folder's), which checks each file under its locks: one that
+no longer holds what the turn left (a turn still running, a turn in another chat, the person's own
+edit) refuses the whole Undo, and one that reads as saved is left alone. The origin keeps what it
+undoes on an `undone` recovery ref, which the next save, refresh or stop pushes, so History then
+lists it under Unsaved work, as a saved change's Undo keeps the version it undid. The machine
+pictures the open previews of those files' sites again, as after a turn. A failed save, and a turn
+whose Stop came after its model was done, keep the Undo that asks the agent, as does a file the
+space's history leaves out (tmp, dependencies), which stays as it is. "Ask the agent to undo it"
+sends a message in the person's name that names the change by its time, never by an id.
+
+A job a stop of its machine put back in the queue is not cancelled: the controller turns its report
+down, and the job's next lease takes the work up.
 
 ## Where labels come from
 

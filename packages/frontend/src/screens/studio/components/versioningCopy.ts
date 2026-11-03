@@ -2,6 +2,7 @@ import type {
   OriginError,
   OriginRejectedPath,
   RevertWorkspaceGitCommitResult,
+  RevertWorkspaceGitResult,
   VersioningMode,
   WorkspaceGitHistoryEntry,
 } from "../../../sdk/instafy";
@@ -423,6 +424,7 @@ const UNSAVED_WORK_TITLES: Record<string, string> = {
   unpublished: "Agent work that couldn't be saved",
   unsaved: "Unsaved edits from a stopped workspace",
   stale: "Older copies found in a workspace",
+  undone: "Edits undone from the chat",
 };
 
 export function unsavedWorkTitle(kind: string): string {
@@ -1127,6 +1129,87 @@ export function describeChangeRevertOutcome(
     return outcome("error", STATELESS_UNREACHABLE_COPY);
   }
   return outcome("error", CHANGE_REVERT_FALLBACK_MESSAGE, { offerAgentUndo: true });
+}
+
+// ---------------------------------------------------------------------------
+// Chat: Undo of a change a Stop left unsaved
+// ---------------------------------------------------------------------------
+
+// A turn's edits a Stop left unsaved have no version to revert. Undo puts
+// the files back in the folder the turn ran in, as the saved version has
+// them: no message, no turn of Octo's. It does so only while they hold
+// nothing but this turn's change, so they go back as they were before it.
+export const UNSAVED_REVERT_CONFIRM_MESSAGE = "This puts the files back as they were before this turn.";
+
+// Other work is in one of the files, which putting it back would take back
+// too: a later turn of the chat changed it ("later"), it changed after the
+// turn in another way ("since": a turn in another chat, the person's own
+// edit), or the turn found it already changed ("before").
+export function describeUnsavedRevertOtherWork(
+  when: "later" | "since" | "before",
+  paths: readonly string[],
+  canAskAgent: boolean,
+): string {
+  const list = formatPathList(paths);
+  const lead =
+    when === "later"
+      ? `A later turn changed ${list || "these files"}`
+      : when === "since"
+        ? `${list || "These files"} changed after this turn`
+        : `${list || "These files"} also ${paths.length === 1 ? "holds" : "hold"} an earlier change that wasn't saved`;
+  const text = `${lead}, so Undo here would take that back too. Nothing was undone.`;
+  return canAskAgent ? `${text} Ask the agent to undo just this change.` : text;
+}
+
+// No machine that serves the folder is running, so nothing can reach it.
+export const UNSAVED_REVERT_MACHINE_OFF_MESSAGE =
+  "The space's machine isn't running, so Undo can't reach these files right now. Try again once it has started.";
+
+export interface UnsavedRevertOutcome {
+  intent: "success" | "warning" | "error";
+  message: string;
+  reverted: boolean;
+  offerAgentUndo: boolean;
+}
+
+const UNSAVED_REVERT_FALLBACK_MESSAGE = "Couldn't undo this change. Try again, or ask the agent to undo it.";
+
+// What Undo of a change a Stop left unsaved did, as one toast (`/git/revert`
+// on the folder's own origin, with what the turn left in each file). The
+// toast offers to ask the agent wherever Undo could not do it.
+export function describeUnsavedRevertOutcome(result: RevertWorkspaceGitResult | null): UnsavedRevertOutcome {
+  const failed = (intent: UnsavedRevertOutcome["intent"], message: string, offerAgentUndo = false) => ({
+    intent,
+    message,
+    reverted: false,
+    offerAgentUndo,
+  });
+  if (result?.ok) {
+    if ((result.reverted?.length ?? 0) + (result.removed?.length ?? 0) > 0) {
+      return { intent: "success", message: REVERT_UNDONE_COPY, reverted: true, offerAgentUndo: false };
+    }
+    // Every file reads as the saved version has it: a save took the change
+    // in, or it was put back already.
+    return failed("warning", "The files don't hold this change any more, so there's nothing to undo here.", true);
+  }
+  const info = result?.errorInfo;
+  const code = info?.code ?? null;
+  const status = info?.status ?? 0;
+  if (code === "lease_conflict") {
+    return failed("warning", LEASE_CONFLICT_COPY);
+  }
+  // A file no longer holds what the turn left: nothing was put back.
+  if (code === "head_moved") {
+    return failed("warning", describeUnsavedRevertOtherWork("since", info?.paths ?? [], false), true);
+  }
+  // The folder is being written (a turn, or a save, holds it).
+  if (status === 409) {
+    return failed("warning", "The agent is working on these files right now. Try again in a moment.");
+  }
+  if (isUnreachableCode(code) || isUnreachableStatus(status)) {
+    return failed("error", "Couldn't reach the space's machine. Try again in a moment.");
+  }
+  return failed("error", UNSAVED_REVERT_FALLBACK_MESSAGE, true);
 }
 
 // ---------------------------------------------------------------------------

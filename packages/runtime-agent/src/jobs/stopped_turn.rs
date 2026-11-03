@@ -32,8 +32,15 @@
 //! A job whose lease was lost to a stop of this runtime is back in the queue,
 //! not cancelled: the controller turns its report down, and the job's next
 //! lease takes the work up as before (`turn_baseline`).
+//!
+//! Such a turn's report also says what the turn left in each file
+//! ([`FolderUndo`]): Undo under its files puts them back as the saved version
+//! has them, with no turn, but only while each still holds what the turn left
+//! (`/git/revert` with `expected`, on this machine's own origin) and only
+//! for files the turn found as saved; otherwise it would also take back work
+//! that is not the turn's.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -78,11 +85,88 @@ impl TurnStart {
         if files.is_empty() {
             return Err(error);
         }
+        let undo = FolderUndo::read(&workspace_dir, &files, &before).await;
         Err(error.context(StoppedTurnChanges {
             workspace_dir,
             files,
             save: None,
+            undo,
         }))
+    }
+}
+
+/// What a stopped turn left in each file it changed, read as it stopped:
+/// the file's blob id, or `None` when it left nothing there. And which of
+/// those files the folder already held changed when the turn began (the
+/// person's own edits, an earlier turn's unsaved work): putting one of them
+/// back as saved would take that back too.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct FolderUndo {
+    left_as: BTreeMap<String, Option<String>>,
+    changed_before: HashSet<String>,
+}
+
+impl FolderUndo {
+    /// Reads `files` in `workspace_dir`, which began the turn as `before`
+    /// says. A file no blob id stands for (a folder, a link) has no entry,
+    /// and Undo leaves the card's files to the agent.
+    async fn read(
+        workspace_dir: &Path,
+        files: &[CodexFileDescriptor],
+        before: &HashMap<String, GitStatusEntry>,
+    ) -> Option<Self> {
+        let workspace_dir = workspace_dir.to_path_buf();
+        let paths: Vec<String> = files
+            .iter()
+            .map(|file| file.workspace_path.clone())
+            .collect();
+        let changed_before = paths
+            .iter()
+            .filter(|path| before.contains_key(*path))
+            .cloned()
+            .collect();
+        let left_as = tokio::task::spawn_blocking(move || {
+            let workspace =
+                origin_http_server::workspace_fs::WorkspaceDir::open(&workspace_dir).ok()?;
+            Some(
+                paths
+                    .into_iter()
+                    .filter_map(|path| {
+                        origin_http_server::workspace_git::workspace_path_blob(&workspace, &path)
+                            .ok()
+                            .map(|blob| (path, blob))
+                    })
+                    .collect::<BTreeMap<_, _>>(),
+            )
+        })
+        .await
+        .ok()
+        .flatten()?;
+        Some(Self {
+            left_as,
+            changed_before,
+        })
+    }
+
+    /// The report's `undo`, for the files it lists and the runtime that ran
+    /// the turn, whose origin serves the folder.
+    fn to_json(&self, listed: &[CodexFileDescriptor], runtime_id: &uuid::Uuid) -> JsonValue {
+        let mut left_as = serde_json::Map::new();
+        let mut changed_before = Vec::new();
+        for file in listed {
+            let path = &file.workspace_path;
+            if let Some(blob) = self.left_as.get(path) {
+                left_as.insert(path.clone(), json!(blob));
+            }
+            if self.changed_before.contains(path) {
+                changed_before.push(path.clone());
+            }
+        }
+        json!({
+            "runtimeId": runtime_id.to_string(),
+            "leftAs": left_as,
+            "changedBefore": changed_before,
+        })
     }
 }
 
@@ -98,6 +182,9 @@ pub(crate) struct StoppedTurnChanges {
     /// ran before the Stop reached the turn. A turn that lost its lease never
     /// saved: its changes are unsaved work in the folder.
     save: Option<JsonValue>,
+    /// What the turn left in its files, for Undo with no turn: known for a
+    /// turn that lost its lease, whose start the folder's record holds.
+    undo: Option<FolderUndo>,
 }
 
 impl std::fmt::Display for StoppedTurnChanges {
@@ -154,6 +241,7 @@ impl StoppedTurnChanges {
             workspace_dir,
             files,
             save: of_kind("origin/apply").cloned(),
+            undo: None,
         })
     }
 
@@ -200,6 +288,11 @@ impl StoppedTurnChanges {
         if self.save.is_none() {
             // No save took these: Studio marks them Not saved.
             artifact_metadata["stoppedBeforeSave"] = json!(true);
+            // And Undo puts them back with no turn while they hold what the
+            // turn left.
+            if let Some(undo) = self.undo.as_ref() {
+                artifact_metadata["undo"] = undo.to_json(files, runtime_id);
+            }
         }
         let mut artifacts = vec![json!({
             "kind": "apply/files",

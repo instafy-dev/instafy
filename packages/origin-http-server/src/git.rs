@@ -2578,6 +2578,101 @@ pub struct GitRevertSummary {
     pub removed: Vec<String>,
 }
 
+/// The paths of `expected` a revert may put back: each must still hold the
+/// blob it names (`None`: nothing there), as a turn left it before it was
+/// stopped. A path that reads as `HEAD` has it holds nothing of that change
+/// any more (a save took it in, or it was put back already) and is left
+/// out. Any other path changed since then, so the revert would take back
+/// work that is not the turn's: the whole revert is refused (409
+/// `head_moved`) and nothing is put back.
+pub fn paths_still_as_expected(
+    workspace_root: &Path,
+    expected: &BTreeMap<String, Option<String>>,
+) -> Result<Vec<String>, OriginError> {
+    let internal = |error: anyhow::Error| OriginError::internal(format!("{error:#}"));
+    let workspace = WorkspaceDir::open(workspace_root)
+        .map_err(|error| OriginError::internal(format!("failed to open workspace: {error}")))?;
+    let git = crate::workspace_git::WorkspaceGit::new(workspace_root, None);
+    let paths: Vec<String> = expected.keys().cloned().collect();
+    let saved = match git.commit_id("HEAD").map_err(internal)? {
+        Some(head) => git.entries_by_path(&head, &paths).map_err(internal)?,
+        None => BTreeMap::new(),
+    };
+    let mut still = Vec::new();
+    let mut changed = Vec::new();
+    for (path, wanted) in expected {
+        // `None` when the path holds what no blob id stands for (a folder,
+        // a link): it never matches.
+        let current = crate::workspace_git::workspace_path_blob(&workspace, path).ok();
+        let as_saved = match saved.get(path) {
+            None => Some(None),
+            Some(entry)
+                if entry.kind == "blob" && matches!(entry.mode.as_str(), "100644" | "100755") =>
+            {
+                Some(Some(entry.oid.clone()))
+            }
+            Some(_) => None,
+        };
+        if current.is_some() && current == as_saved {
+            continue;
+        }
+        if current.as_ref() == Some(wanted) {
+            still.push(path.clone());
+        } else {
+            changed.push(path.clone());
+        }
+    }
+    if !changed.is_empty() {
+        return Err(OriginError::conflict_paths(
+            "head_moved",
+            "files changed since the turn left them",
+            changed,
+        ));
+    }
+    Ok(still)
+}
+
+/// Before a revert that keeps what it undoes: the work-tree copies of
+/// `paths` that differ from `HEAD`, kept on an `undone` recovery ref (local
+/// until the next publish, refresh or stop pushes it). Paths a save never
+/// publishes stay out, as a save leaves them out. `None` when nothing
+/// differs from `HEAD`, or the checkout has no commit yet.
+pub fn keep_worktree_copies(
+    config: &ServerConfig,
+    workspace_root: &Path,
+    paths: &[String],
+) -> Result<Option<crate::recovery::RecoveryRefReport>, OriginError> {
+    let mut kept: Vec<String> = paths
+        .iter()
+        .map(|path| path.trim().trim_end_matches('/').to_string())
+        .filter(|path| {
+            !path.is_empty()
+                && !is_sync_reserved_path(path)
+                && !crate::publish_policy::is_unpublishable(path)
+                && !crate::publish_policy::is_unsafe_path(path)
+        })
+        .collect();
+    kept.sort();
+    kept.dedup();
+    if kept.is_empty() {
+        return Ok(None);
+    }
+    let git = crate::workspace_git::WorkspaceGit::new(workspace_root, None);
+    let internal = |error: anyhow::Error| OriginError::internal(format!("{error:#}"));
+    let Some(head) = git.commit_id("HEAD").map_err(internal)? else {
+        return Ok(None);
+    };
+    crate::recovery::park_worktree_paths(
+        &git,
+        &head,
+        &kept,
+        crate::recovery::RecoveryKind::Undone,
+        crate::workspace_git::GitIdentity::new(&config.git_author_name, &config.git_author_email),
+        config.origin_id,
+    )
+    .map_err(internal)
+}
+
 /// Put each of `paths` back as `HEAD` has it, or remove it when `HEAD`
 /// lacks it. Local git only, so no credential goes with it, and every path
 /// reaches git on stdin as a name ([`git_literal_path`]): a request's

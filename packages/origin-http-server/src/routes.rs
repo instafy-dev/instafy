@@ -90,7 +90,24 @@ pub struct AppState {
     /// What reads a page a person sends to the chat (see
     /// [`crate::browser_page_capture`]). `None` answers that route with 404.
     pub browser_page_capture_script: Option<crate::browser_page_capture::BrowserPageCaptureScript>,
+    /// Told what a person's `/git/revert` put back or removed, once it did,
+    /// when the process hosting the origin wants to act on it (see
+    /// [`FilesReverted`]). `None` tells nobody.
+    pub files_reverted: Option<FilesRevertedHook>,
 }
+
+/// The files a person's revert put back as `HEAD` has them, or removed, in
+/// this origin's checkout. The process hosting the origin may act on them:
+/// a runtime pictures the open previews of the sites they belong to again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FilesReverted {
+    pub project_id: Uuid,
+    pub workspace_root: PathBuf,
+    pub paths: Vec<String>,
+}
+
+/// See [`AppState::files_reverted`].
+pub type FilesRevertedHook = Arc<dyn Fn(FilesReverted) + Send + Sync>;
 
 /// How long the fence a pre-stop flush raises holds without a refresh or a
 /// resume: longer than the controller's flush and provider release, so it
@@ -174,6 +191,7 @@ impl AppState {
             browser_host: None,
             boot_browser: None,
             browser_page_capture_script: None,
+            files_reverted: None,
         })
     }
 
@@ -2394,6 +2412,22 @@ struct WorkspacePersistRequest {
 #[serde(rename_all = "camelCase")]
 struct GitRevertRequest {
     paths: Vec<String>,
+    /// Keep what the revert undoes: the paths' work-tree copies that differ
+    /// from `HEAD` go to an `undone` recovery ref first, which the next
+    /// publish, refresh or stop pushes, so History lists it under Unsaved
+    /// work to restore. Studio sends it when Undo puts back a change no
+    /// save took (a turn's edits a Stop left unsaved). A path a save never
+    /// keeps (a secret file, build output) is refused (422 `excluded_path`),
+    /// never put back unkept.
+    #[serde(default)]
+    keep: bool,
+    /// Put back only work these paths still hold as a stopped turn left it:
+    /// each path's blob id, or null for nothing there, as the turn's report
+    /// recorded it. It names every path of `paths`. A path changed since
+    /// refuses the revert (409 `head_moved`); one that reads as `HEAD` has
+    /// it is left alone.
+    #[serde(default)]
+    expected: Option<std::collections::BTreeMap<String, Option<String>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2540,6 +2574,36 @@ async fn handle_git_revert_commit(
     publish_response(&state, &claims, project_id, origin_id, report, false)
 }
 
+/// A revert's `expected`, by the same normalized paths as its `paths`: it
+/// names each of them, and only them, with a blob id or null.
+fn revert_expectations(
+    paths: &[String],
+    expected: std::collections::BTreeMap<String, Option<String>>,
+) -> Result<std::collections::BTreeMap<String, Option<String>>, OriginError> {
+    let mut normalized = std::collections::BTreeMap::new();
+    for (path, oid) in expected {
+        let path = normalize_relative_path(&path)
+            .ok_or_else(|| OriginError::bad_request("invalid path in expected"))?;
+        let oid = match oid.map(|oid| oid.trim().to_ascii_lowercase()) {
+            Some(oid) if git::is_safe_git_rev(&oid) => Some(oid),
+            Some(_) => {
+                return Err(OriginError::bad_request(
+                    "expected blob ids must be hexadecimal",
+                ))
+            }
+            None => None,
+        };
+        normalized.insert(path, oid);
+    }
+    let named: std::collections::BTreeSet<&String> = paths.iter().collect();
+    if normalized.len() != named.len() || !normalized.keys().all(|path| named.contains(path)) {
+        return Err(OriginError::bad_request(
+            "expected names each path of the revert, and only those",
+        ));
+    }
+    Ok(normalized)
+}
+
 async fn handle_git_revert(
     State(state): State<AppState>,
     Extension(claims): Extension<OriginClaims>,
@@ -2565,6 +2629,30 @@ async fn handle_git_revert(
             return Err(OriginError::not_found("path not found"));
         }
         paths.push(normalized_path);
+    }
+    let expected = payload
+        .expected
+        .map(|expected| revert_expectations(&paths, expected))
+        .transpose()?;
+    if payload.keep {
+        // What a save never keeps is never put back here either: it would
+        // be gone for good.
+        let refused: Vec<String> = paths
+            .iter()
+            .filter(|path| {
+                crate::publish_policy::is_unpublishable(path)
+                    || crate::publish_policy::is_unsafe_path(path)
+            })
+            .cloned()
+            .collect();
+        if !refused.is_empty() {
+            return Err(OriginError::with_report(
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                "excluded_path",
+                "these files are never saved, so Undo cannot keep what it would take back",
+                serde_json::json!({ "paths": refused }),
+            ));
+        }
     }
 
     let apply_lock = project_apply_lock(&state, project_id).await;
@@ -2592,24 +2680,58 @@ async fn handle_git_revert(
     config_clone.git_remote_url = Some(remote_url);
 
     let canonical_root = Arc::new(workspace_root);
+    let revert_root = canonical_root.clone();
     let revert_paths = paths.clone();
+    let keep = payload.keep;
     let revert_result = tokio::task::spawn_blocking(move || {
         let _apply_guard = apply_guard;
         let _workspace_apply_guard = workspace_apply_guard;
         git::ensure_git_checkout(&config_clone, token.as_deref())?;
-        git::revert_paths(canonical_root.as_path(), &revert_paths)
+        // Checked here, under the locks, right before anything moves.
+        let revert_paths = match expected.as_ref() {
+            Some(expected) => git::paths_still_as_expected(revert_root.as_path(), expected)?,
+            None => revert_paths,
+        };
+        if revert_paths.is_empty() {
+            let nothing = git::GitRevertSummary {
+                reverted: Vec::new(),
+                removed: Vec::new(),
+            };
+            return Ok::<_, OriginError>((nothing, None));
+        }
+        let kept = if keep {
+            git::keep_worktree_copies(&config_clone, revert_root.as_path(), &revert_paths)?
+        } else {
+            None
+        };
+        let summary = git::revert_paths(revert_root.as_path(), &revert_paths)?;
+        Ok::<_, OriginError>((summary, kept))
     })
     .await
     .map_err(|error| OriginError::internal(format!("git revert task failed: {error}")))?;
 
-    match revert_result {
-        Ok(summary) => Ok(Json(serde_json::json!({
-            "ok": true,
-            "reverted": summary.reverted,
-            "removed": summary.removed,
-        }))),
-        Err(error) => Err(error),
+    let (summary, kept) = revert_result?;
+    if let Some(hook) = state.files_reverted.as_ref() {
+        let mut changed = summary.reverted.clone();
+        changed.extend(summary.removed.iter().cloned());
+        if !changed.is_empty() {
+            hook(FilesReverted {
+                project_id,
+                workspace_root: canonical_root.as_ref().clone(),
+                paths: changed,
+            });
+        }
     }
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "reverted": summary.reverted,
+        "removed": summary.removed,
+        "kept": kept.map(|report| serde_json::json!({
+            "ref": report.reference,
+            "rev": report.rev,
+            "paths": report.paths,
+        })),
+    })))
 }
 
 /// The code of a save refused because a stop has already kept the

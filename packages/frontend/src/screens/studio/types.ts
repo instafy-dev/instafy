@@ -58,6 +58,20 @@ export interface ChatMessageFileChange {
   rawChange?: unknown;
   // Set when the run's save left this file out of the saved history.
   notSaved?: ChatMessageFileNotSaved | null;
+  // A stopped turn's file no save took: what the turn left in it, for an
+  // Undo that puts it back with no turn (see ChatMessageFolderUndo).
+  folderUndo?: ChatMessageFolderUndo | null;
+}
+
+// What a turn the person stopped before its save left in one file, from its
+// report (`apply/files` metadata `undo`): Undo puts the file back as the
+// saved version has it, in the folder of the machine that ran the turn, only
+// while it still holds what the turn left (`leftAs`: its blob id, or null for
+// a file the turn removed), and only when the turn found it as saved.
+export interface ChatMessageFolderUndo {
+  leftAs: string | null;
+  changedBefore: boolean;
+  runtimeId: string | null;
 }
 
 // Where a commit range came from: "git" is the canonical pair the save

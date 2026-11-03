@@ -52,22 +52,15 @@ export function parseMessageUndoRequestDetail(value: unknown): MessageUndoReques
   return { messageId, messageTimestamp, onSettled };
 }
 
-export function formatUndoTargetShortId(messageId: string): string {
-  const compact = messageId.replace(/[^a-zA-Z0-9]/g, "");
-  return (compact || messageId).slice(0, 8);
-}
-
 /**
  * The structured reference is the metadata (the message-create path passes
- * metadata through to the controller verbatim, like replyContext does); the
- * text also carries a compact readable reference so the thread record — and
- * any consumer that only sees the text — stays unambiguous about which
- * message is being undone.
+ * metadata through to the controller verbatim, like replyContext does). The
+ * text is the person's own message in the chat, so it names the change in
+ * their words, by its time, never by an id.
  */
 export function buildUndoRequestSubmission(
   detail: MessageUndoRequestDetail,
 ): MessageUndoRequestSubmission {
-  const shortId = formatUndoTargetShortId(detail.messageId);
   const timestamp =
     typeof detail.messageTimestamp === "number" &&
     Number.isFinite(detail.messageTimestamp) &&
@@ -78,7 +71,7 @@ export function buildUndoRequestSubmission(
     ? ` at ${timestamp.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`
     : "";
   return {
-    message: `Please undo the change from your message${timeReference} (id ${shortId}).`,
+    message: `Please undo the change from your message${timeReference}.`,
     metadata: { undoTargetMessageId: detail.messageId },
   };
 }

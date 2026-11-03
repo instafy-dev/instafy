@@ -103,6 +103,87 @@ async fn a_turn_that_lost_its_lease_carries_what_it_changed() {
     );
 }
 
+/// The report says what the turn left in each file it changed, read as it
+/// stopped (the file's blob id, or null for one it removed), and which of
+/// them the folder already held changed when the turn began, on the machine
+/// that ran it: Undo puts back with no turn only files that still hold what
+/// the turn left and that it found as saved.
+#[tokio::test]
+async fn a_stopped_turns_report_says_what_it_left_in_each_file() {
+    let workspace = tempfile::tempdir().unwrap();
+    checkout(workspace.path());
+    fs::write(
+        workspace.path().join("sites/porto/old.html"),
+        "<p>Old</p>\n",
+    )
+    .unwrap();
+    git(workspace.path(), &["add", "-A"]);
+    git(
+        workspace.path(),
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "--quiet",
+            "-m",
+            "saved",
+        ],
+    );
+    // The person's own edit, unsaved, before the turn began.
+    fs::write(workspace.path().join("notes.md"), "the person's own\n").unwrap();
+    let start = TurnStart::default();
+    let before = super::super::collect_git_status_porcelain(workspace.path())
+        .await
+        .unwrap();
+    start.record(workspace.path(), &before);
+    fs::write(
+        workspace.path().join("sites/porto/app.js"),
+        "hours: \"Hours not found\"\n",
+    )
+    .unwrap();
+    fs::remove_file(workspace.path().join("sites/porto/old.html")).unwrap();
+    fs::write(
+        workspace.path().join("notes.md"),
+        "the person's own\nand the turn's\n",
+    )
+    .unwrap();
+
+    let error = start
+        .attach_to_lost_lease(Err(anyhow!("lease lost")))
+        .await
+        .expect_err("the turn lost its lease");
+    let changes = StoppedTurnChanges::of_lost_lease(&error).expect("the turn's changes");
+    let runtime_id = Uuid::new_v4();
+    let (_, artifacts) = changes.report(&runtime_id);
+    let blob = origin_http_server::workspace_git::blob_oid;
+    assert_eq!(
+        artifacts[0]["metadata"]["undo"],
+        json!({
+            "runtimeId": runtime_id.to_string(),
+            "leftAs": {
+                "notes.md": blob(b"the person's own\nand the turn's\n"),
+                "sites/porto/app.js": blob(b"hours: \"Hours not found\"\n"),
+                "sites/porto/old.html": null,
+            },
+            "changedBefore": ["notes.md"],
+        })
+    );
+
+    // A turn whose Stop came once its model was done, whose start is not
+    // known here, leaves its files to the agent's Undo.
+    let execution = finished_execution(vec![json!({
+        "kind": "apply/files",
+        "files": [{ "path": "sites/porto/app.js", "workspacePath": "sites/porto/app.js", "changeType": "changed", "change": { "type": "changed" } }],
+    })]);
+    let finished = StoppedTurnChanges::of_finished_turn(workspace.path().to_path_buf(), &execution)
+        .expect("the turn changed a file");
+    let (_, artifacts) = finished.report(&runtime_id);
+    assert_eq!(artifacts[0]["metadata"]["stoppedBeforeSave"], true);
+    assert!(artifacts[0]["metadata"].get("undo").is_none());
+}
+
 /// A turn that ended any other way, or lost its lease having changed nothing,
 /// carries no changes.
 #[tokio::test]
@@ -183,6 +264,7 @@ fn the_report_is_the_edit_step_and_the_files_it_changed() {
             change: super::super::FileChangeDescriptor::parse(json!({ "type": "changed" })),
         }],
         save: None,
+        undo: None,
     };
     let runtime_id = Uuid::new_v4();
     let (step, artifacts) = changes.report(&runtime_id);
