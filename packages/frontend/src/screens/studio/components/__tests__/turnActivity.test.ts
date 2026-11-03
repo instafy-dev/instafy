@@ -1079,8 +1079,10 @@ describe("a look at the page a failed open left", () => {
     const failed = (host: string) => browserStep(BROWSER_OPEN, { host, step: "navigate" }, "failed");
     const look = () => browserStep(BROWSER_READ, { host: "en.andalucia.org", pageKey: PAGE_C, step: "snapshot" });
     const tabs = () => browserStep(BROWSER_USE, { step: "tabs" });
+    // The rows of the looks at the not-found page, whichever way they read.
+    const lookLabels = new Set(["Tried reading en.andalucia.org", "Read a page on en.andalucia.org"]);
     const looks = (messages: ChatMessage[]) =>
-      rows(messages).filter((row) => row !== null && String(row[1]).endsWith("en.andalucia.org"));
+      rows(messages).filter((row) => row !== null && lookLabels.has(String(row[1])));
     const tried = ["failed", "Tried reading en.andalucia.org"];
     // The second open failed while the tab still showed the first one's page.
     const again = [opened(), failed("andalucia.org"), look(), failed("alcazarsevilla.org"), look()];
