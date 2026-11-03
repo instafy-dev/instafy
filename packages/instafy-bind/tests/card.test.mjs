@@ -7,16 +7,17 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { cardCommand, inSpace, previewShows } from "../src/preview-host.mjs";
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "instafy-bind.mjs");
 const SPACE = "33a2c783-570e-49dd-bd51-17d088e21387";
+const OTHER_SPACE = "b0f6a1de-2c4e-4d8a-9a51-6f0e3c7d2b19";
 const OPEN = "instafy preview open --title '<short title>' --serve-cmd 'instafy bind serve . --port {port} --preview' --start --json";
 
-/** A space as a runtime has it: its workspace (WORKSPACE_DIR/<space>), where turns run, and a home for the CLI's
- *  record of the previews it opened. */
+/** A space as a runtime has it: its workspace (WORKSPACE_DIR/<space>), where turns run, the space's id, and a home for
+ *  the CLI's record of the previews it opened. */
 function space() {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "bind-card-"));
   const workspace = path.join(base, "workspace");
@@ -24,23 +25,27 @@ function space() {
   const home = path.join(base, "home");
   fs.mkdirSync(project, { recursive: true });
   fs.mkdirSync(home);
-  const env = { PATH: process.env.PATH, HOME: home, WORKSPACE_DIR: workspace };
+  const env = { PATH: process.env.PATH, HOME: home, WORKSPACE_DIR: workspace, SPACE_ID: SPACE };
   const stateFile = path.join(home, ".instafy", "cli-preview-state.json");
+  // what `instafy preview open --start`, run in a site's folder, records for its preview
+  const preview = (siteDir, extra = {}) => ({
+    previewId: "7b48c75d-3374-4b37-a261-9e9fdaf288a8", projectId: SPACE, title: "A page", localPort: 24087, path: "/",
+    controllerUrl: "http://127.0.0.1:8788", pid: 4510, startedAt: "2026-11-02T13:14:07.000Z", hostSuffix: "preview.example.test",
+    start: { argv: ["instafy", "bind", "serve", ".", "--port", "{port}", "--preview"], cwd: siteDir }, siteDir, ...extra,
+  });
+  const record = (...previews) => {
+    fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+    fs.writeFileSync(stateFile, JSON.stringify({ version: 1, previews }, null, 2));
+  };
   return {
+    base,
     project,
     env,
     stateFile,
     run: (args, { cwd = project, environment = env } = {}) => spawnSync(process.execPath, [BIN, ...args], { cwd, env: environment, encoding: "utf8" }),
-    // what `instafy preview open --start`, run in a site's folder, records for its preview
-    open(siteDir, extra = {}) {
-      fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-      const entry = {
-        previewId: "7b48c75d-3374-4b37-a261-9e9fdaf288a8", projectId: SPACE, title: "A page", localPort: 24087, path: "/",
-        controllerUrl: "http://127.0.0.1:8788", pid: 4510, startedAt: "2026-11-02T13:14:07.000Z", hostSuffix: "preview.example.test",
-        start: { argv: ["instafy", "bind", "serve", ".", "--port", "{port}", "--preview"], cwd: siteDir }, siteDir, ...extra,
-      };
-      fs.writeFileSync(stateFile, JSON.stringify({ version: 1, previews: [entry] }, null, 2));
-    },
+    preview,
+    record,
+    open: (siteDir, extra = {}) => record(preview(siteDir, extra)),
     done: () => fs.rmSync(base, { recursive: true, force: true }),
   };
 }
@@ -125,9 +130,129 @@ test("a preview shows a folder when the CLI recorded it as the folder its site i
     s.open(".");
     assert.equal(shows(), false, "a site served from the workspace itself");
     assert.equal(previewShows(s.project, { env: s.env, file: s.stateFile }), true);
-    // with the workspace pinned to one folder (WORKSPACE_PROJECT_DIR), the CLI places every preview's folder in it
+    // without the space's id, each preview's folder is placed in its own space's workspace (WORKSPACE_DIR/<space>)
+    const { SPACE_ID, ...unnamed } = s.env;
+    s.open("sites/laptops");
+    assert.equal(shows(unnamed), true);
     s.open("sites/laptops", { projectId: "another-space" });
-    assert.equal(shows({ ...s.env, WORKSPACE_PROJECT_DIR: s.project }), true);
+    assert.equal(shows(unnamed), false);
+
+    // a space with a folder of its own (WORKSPACE_PROJECT_DIR): only its own previews are placed in it
+    const pinned = { ...s.env, WORKSPACE_PROJECT_DIR: s.project };
+    s.open("sites/laptops", { projectId: OTHER_SPACE });
+    assert.equal(shows(pinned), false, "another space's preview of a folder with the same name");
+    s.record(s.preview("sites/laptops", { projectId: OTHER_SPACE }), s.preview("sites/laptops"));
+    assert.equal(shows(pinned), true, "its own preview of the folder");
+    assert.equal(shows({ ...unnamed, WORKSPACE_PROJECT_DIR: s.project }), false, "without its id, no preview is known to be its own");
+    assert.equal(shows({ ...unnamed, WORKSPACE_PROJECT_DIR: s.project, CONTROLLER_SPACE_ID: SPACE }), true, "the id as the CLI also reads it");
+  } finally {
+    s.done();
+  }
+});
+
+test("another space's preview is not this site's card, though their folders have the same name", () => {
+  // One machine runs several spaces as one user (a desktop runtime, each space with a folder of its own): they share the
+  // CLI's record of the previews it opened.
+  const s = space();
+  try {
+    const folder = path.join(s.base, "folder-b");
+    fs.mkdirSync(folder);
+    const b = { PATH: process.env.PATH, HOME: s.env.HOME, WORKSPACE_PROJECT_DIR: folder, SPACE_ID: OTHER_SPACE };
+    const run = (args) => s.run(args, { cwd: folder, environment: b });
+    assert.equal(run(["init", "sites/laptops", "--starter", "compare"]).status, 0);
+    const expect = ["--expect", "Option A, Option B, Option C"];
+    // the other space's page of the same name has its card
+    s.open("sites/laptops");
+    const passed = run(["check", "sites/laptops", ...expect]);
+    assert.equal(passed.status, 0, passed.stdout + passed.stderr);
+    assert.equal(lastLine(passed.stdout), `next: post its card: (cd sites/laptops && ${OPEN})`);
+    assert.equal(JSON.parse(run(["check", "sites/laptops", ...expect, "--json"]).stdout).next, `post its card: (cd sites/laptops && ${OPEN})`);
+    // its own preview of the folder is its card
+    s.record(s.preview("sites/laptops"), s.preview("sites/laptops", { projectId: OTHER_SPACE, localPort: 24088 }));
+    const shown = run(["check", "sites/laptops", ...expect]);
+    assert.equal(shown.status, 0, shown.stdout + shown.stderr);
+    assert.doesNotMatch(shown.stdout, /preview open/);
+  } finally {
+    s.done();
+  }
+});
+
+test("init names the card only while no preview shows the folder: a page shown before needs no new card", () => {
+  const s = space();
+  try {
+    assert.match(lastLine(s.run(["init", "sites/laptops", "--starter", "compare"]).stdout), /then post its card: /);
+    s.open("sites/laptops");
+    const again = s.run(["init", "sites/laptops", "--starter", "compare"]);
+    assert.equal(again.status, 0, again.stderr);
+    assert.match(again.stdout, /^kept {2}sites\/laptops\/data\.json/m);
+    assert.equal(lastLine(again.stdout),
+      'next: put the real content in sites/laptops/data.json, then check it (`instafy bind check sites/laptops --expect "<item>,<item>"`)');
+    assert.doesNotMatch(again.stdout, /preview open|instafy-bind serve/);
+    s.open("sites/visit");
+    const blank = s.run(["init", "sites/visit", "--starter", "blank"]);
+    assert.equal(lastLine(blank.stdout), "next: put the real content in sites/visit/app.js");
+    s.open("sites/hello");
+    const plain = s.run(["init", "sites/hello"]);
+    assert.equal(plain.status, 0, plain.stderr);
+    assert.doesNotMatch(plain.stdout, /^next:|preview open|instafy-bind serve/m);
+    // a preview of another folder, or another space's of a folder with the same name, is not this page's card
+    s.record(s.preview("sites/laptops"), s.preview("sites/plan", { projectId: OTHER_SPACE }));
+    assert.match(lastLine(s.run(["init", "sites/plan", "--starter", "timeline"]).stdout), /, then post its card: \(cd sites\/plan && /);
+  } finally {
+    s.done();
+  }
+});
+
+test("in a space, serve --preview names its card from the folder it serves, so the preview records that folder", async () => {
+  const s = space();
+  const serve = (args, cwd = s.project) => {
+    const child = spawn(process.execPath, [BIN, "serve", ...args, "--port", "0", "--preview", "--json"], { cwd, env: s.env });
+    let out = "";
+    const listening = new Promise((resolve, reject) => {
+      child.stdout.on("data", (chunk) => {
+        out += chunk;
+        const line = out.split("\n").find((l) => l.includes('"listening"'));
+        if (line) resolve(JSON.parse(line));
+      });
+      child.on("exit", (code) => reject(new Error(`serve exited ${code}: ${out}`)));
+      setTimeout(() => reject(new Error(`serve printed no listening event: ${out}`)), 10_000).unref();
+    });
+    const stop = () => {
+      child.kill("SIGTERM");
+      return new Promise((resolve) => (child.exitCode !== null ? resolve() : child.on("exit", resolve)));
+    };
+    return { listening, stop };
+  };
+  try {
+    s.run(["init", "sites/laptops", "--starter", "compare"]);
+    s.run(["init", "gallery/a"]);
+    s.run(["init", "gallery/b"]);
+    for (const [args, cwd, dir, at] of [
+      // a binder started by hand from the workspace: the card's command runs where the site is
+      [["sites/laptops"], s.project, "(cd sites/laptops && ", ""],
+      // the binder `instafy preview open --start` runs in the site's folder
+      [["."], path.join(s.project, "sites", "laptops"), "", ""],
+      // a folder of sites is served, and started again, from that folder
+      [["gallery"], s.project, "(cd gallery && ", " --path /a/"],
+    ]) {
+      const binder = serve(args, cwd);
+      try {
+        const listening = await binder.listening;
+        const port = new URL(listening.url).port;
+        const title = at ? "Bound site starter" : "Compare three options";
+        assert.equal(listening.sites[0].preview_command,
+          `${dir}instafy preview open --port ${port}${at} --title "${title}" --serve-cmd 'instafy bind serve . --port ${port} --preview'${dir ? ")" : ""}`);
+      } finally {
+        await binder.stop();
+      }
+    }
+    // Run there, with --serve-cmd, the CLI records the folder it runs in as the site's: the check then names no card.
+    // The line without them, run from the workspace, recorded the folder the binder runs in: the workspace itself.
+    const expect = ["--expect", "Option A, Option B, Option C"];
+    s.open(".");
+    assert.match(lastLine(s.run(["check", "sites/laptops", ...expect]).stdout), /^next: post its card: /);
+    s.open("sites/laptops", { start: undefined });
+    assert.doesNotMatch(s.run(["check", "sites/laptops", ...expect]).stdout, /preview open/);
   } finally {
     s.done();
   }

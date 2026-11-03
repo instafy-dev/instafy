@@ -205,9 +205,9 @@ comparison must say where it comes from, by its data, never its words: a value o
 page that was read, or, when only a search result names it, `found` names that result's site (`"reviews.example.net"`;
 the compare starter then marks the row "Not checked"). A row with neither, a guess or a placeholder such as "Model 1",
 fails the check, also when `--expect` or `"expect"` names it: that list only says what the page must show. In a
-space's workspace, `init`'s next step ends with the command that serves the page and posts its card in Studio
-(`instafy preview open … --serve-cmd 'instafy bind serve . --port {port} --preview' --start`, run in the site's
-folder), and a check that passes ends with it too, until the CLI has recorded a preview opened from that folder.
+space's workspace, until the CLI has recorded a preview of that space opened from the site's folder, `init`'s next
+step and a check that passes end with the command that serves the page and posts its card in Studio (`instafy preview
+open … --serve-cmd 'instafy bind serve . --port {port} --preview' --start`, run in the site's folder).
 
 On timeout the binder sends SIGTERM, then SIGKILL after 3 s, and reports `error timeout`.
 
