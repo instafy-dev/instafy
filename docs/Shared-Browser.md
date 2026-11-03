@@ -1635,7 +1635,15 @@ sits in (`header`, `nav`, `menu`, `dialog`, `tabs`, `search`, `footer` or
 takes that path too and resolves it against the current page's site; a path
 that names another host is refused, and a blank page needs a full address. The
 text reads a closed select's chosen option as a word of its own, and the select
-says which option it holds in `chosen` (none on a secret screen). The control's
+says which option it holds in `chosen` (none on a secret screen). A snapshot
+never shows what is typed into a field or whether a box is checked, so the
+reading after such a step matches the one before it, and a turn that could not
+tell its text went in gave up a form after its first field. A `type` step's
+result says what it did in `done` instead: the field, how many characters went
+in, and whether the field holds them, read only to be counted ("Typed 12
+characters into "Customer name:", and the field holds them."), never the text,
+which may be private. A click on a checkbox, a radio button or a switch says
+whether it is checked now. The control's
 box stays inside the controller for the visible cursor, and the MCP text result
 is compact JSON beside the same structured content.
 On the page the person chose, a page with sign-in fields (a password or
