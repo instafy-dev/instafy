@@ -76,8 +76,11 @@ describe("persisted run stop notice", () => {
     await render({ messages: [notice, undone] });
     expect(controls!.canContinue(notice)).toBe(false);
     expect(container.querySelector('[data-testid="chat-run-stop-continue"]')).toBeNull();
-    // Another run's Undo leaves this one's Continue.
+    // Another run's Undo leaves this one's Continue, and so does a message
+    // that only calls itself an Undo's line (no controller source).
     await render({ messages: [notice, { ...undone, metadata: { ...undone.metadata, undoneRunId: "run-9" } }] });
+    expect(controls!.canContinue(notice)).toBe(true);
+    await render({ messages: [notice, { ...undone, metadata: { ...undone.metadata, source: "client" } }] });
     expect(controls!.canContinue(notice)).toBe(true);
   });
   it("allows retry after failed submission but considers queued continuation accepted", async () => {

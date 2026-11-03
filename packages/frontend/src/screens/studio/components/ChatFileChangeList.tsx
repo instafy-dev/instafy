@@ -44,7 +44,7 @@ import {
 } from "./versioningCopy";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
 import { useChatSite } from "./chatSiteContext";
-import { useChatLaterChanges } from "./chatLaterChanges";
+import { normalizeUndonePath, useChatLaterChanges } from "./chatLaterChanges";
 import { isFolderRevertablePath, runtimeFolderOriginId } from "./unsavedChangeRevert";
 
 const {
@@ -490,18 +490,20 @@ export function ChatFileChangeList({
     });
   }, [uniquePaths, uniquePathsKey]);
 
-  // The person undid this change already (the chat holds the line an Undo
-  // leaves): every file reads as undone, with nothing left to review or undo,
-  // after a reload or a switch back to the chat too.
-  const undoneInChat = Boolean(messageId && laterChanges?.undone?.(messageId));
+  // The files the person already undid (the chat holds the lines an Undo
+  // leaves, naming them) read as undone, with nothing left to review or undo,
+  // after a reload or a switch back to the chat too. A file that Undo left as
+  // it was (one the turn's save never took, say) keeps its state.
+  const undonePathsInChat = messageId ? laterChanges?.undone?.(messageId) ?? null : null;
   const shownUndoStatusByPath = useMemo(() => {
-    if (!undoneInChat) return undoStatusByPath;
+    if (!undonePathsInChat || undonePathsInChat.size === 0) return undoStatusByPath;
     const undone: Record<string, ChatFileUndoStatus> = {};
     for (const { file, workspacePath } of resolvedFiles) {
+      if (!undonePathsInChat.has(normalizeUndonePath(workspacePath))) continue;
       undone[workspacePath] = file.changeType === "created" ? "removed" : "reverted";
     }
     return { ...undone, ...undoStatusByPath };
-  }, [resolvedFiles, undoStatusByPath, undoneInChat]);
+  }, [resolvedFiles, undoStatusByPath, undonePathsInChat]);
 
   const pendingEntries = useMemo(
     () => resolvedFiles.filter(({ workspacePath }) => !shownUndoStatusByPath[workspacePath]),
@@ -1213,9 +1215,11 @@ export function ChatFileChangeList({
         if (typeof window !== "undefined") {
           window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId } }));
         }
-        // One line in the chat's history says so, for the next turn and its
-        // routing, and for this row after a reload.
-        if (projectId && messageId) void recordChangeUndone({ projectId, messageId });
+        // One line in the chat's history names the files it undid, for the
+        // next turn and its routing, and for this row after a reload.
+        if (projectId && messageId && targetPaths.length > 0) {
+          void recordChangeUndone({ projectId, messageId, paths: targetPaths });
+        }
       }
       const askAgent = outcome.offerAgentUndo && messageId ? handleUndoRequest : null;
       showStatus(
@@ -1256,7 +1260,7 @@ export function ChatFileChangeList({
         if (undone.length === pendingPaths.length && totalCount > 1) {
           setRailExpanded(false);
         }
-        if (projectId && messageId && undone.length > 0) void recordChangeUndone({ projectId, messageId });
+        if (projectId && messageId && undone.length > 0) void recordChangeUndone({ projectId, messageId, paths: undone });
       }
       const askAgent = outcome.offerAgentUndo && messageId ? handleUndoRequest : null;
       showStatus(
@@ -1405,9 +1409,6 @@ export function ChatFileChangeList({
           await new Promise((resolve) => setTimeout(resolve, retryDelay));
           result = await revert();
         }
-        if (result?.ok) {
-          await followSavedRevertInFolder(result.rev, [...revertedVersionPaths]);
-        }
         return { result, retriedAfter };
       } catch {
         return { result: null, retriedAfter: null };
@@ -1416,6 +1417,10 @@ export function ChatFileChangeList({
     const running = answer.then(({ result, retriedAfter }) => {
       runningRevertRef.current = null;
       applyRevertOutcomeRef.current(result, revertedVersionPaths, retriedAfter);
+      // Then the page the machine serves follows the new saved version. The
+      // card and the chat's history already say the change is undone; this
+      // never holds them back.
+      if (result?.ok) void followSavedRevertInFolder(result.rev, [...revertedVersionPaths]);
     });
     runningRevertRef.current = running;
     setRevertWaitingAgain(false);

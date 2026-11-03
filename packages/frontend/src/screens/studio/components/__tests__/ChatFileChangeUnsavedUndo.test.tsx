@@ -225,7 +225,7 @@ describe("Undo of a change a Stop left unsaved", () => {
     // No message: nothing reaches the composer, so no turn runs. One hidden
     // line in the chat's history tells the next turn and its routing.
     expect(undoRequests).toHaveLength(0);
-    expect(recordChangeUndone).toHaveBeenCalledWith({ projectId: "p1", messageId: STOPPED.id });
+    expect(recordChangeUndone).toHaveBeenCalledWith({ projectId: "p1", messageId: STOPPED.id, paths: [APP] });
     expect(revertWorkspaceGitCommit).not.toHaveBeenCalled();
     expect(showStatus).toHaveBeenCalledWith("Those changes are undone.", "success", 4000, undefined);
     // The card says the file is back, with nothing left to save or undo.

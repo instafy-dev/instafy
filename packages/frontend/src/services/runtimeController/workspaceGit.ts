@@ -1053,12 +1053,6 @@ export interface RevertWorkspaceGitResult {
   ok: boolean;
   reverted?: string[] | null;
   removed?: string[] | null;
-  /**
-   * With `saved`: the folder now holds that saved version. False when it
-   * kept unpublished work or a local edit was in the way; the next turn's
-   * refresh brings it there then.
-   */
-  moved?: boolean;
   conflict?: boolean;
   error?: string;
   errorInfo?: OriginError;
@@ -1096,7 +1090,6 @@ function buildRevertPathsResult(
     ok: true,
     reverted,
     removed,
-    ...(typeof payload?.moved === "boolean" ? { moved: payload.moved } : {}),
     conflict: false,
     leaseId: meta.leaseId,
     originMode: meta.originMode,

@@ -542,3 +542,139 @@ async fn a_save_or_an_undo_that_meets_an_ended_jobs_lock_goes_ahead_at_once() ->
     })
     .await
 }
+
+/// A running turn's save lock is that turn's alone. The person's own Studio
+/// on the same machine (an Undo bringing the machine's folder to the saved
+/// version, say) used to take it over as a renewal of "their" lease, and
+/// release it when done, under the save; another of their turns did the
+/// same. Now each waits for it, as anyone else does, and only that turn
+/// renews it.
+#[tokio::test]
+async fn a_running_turns_save_lock_is_never_taken_over_by_the_same_person() -> anyhow::Result<()> {
+    let label = "lease-no-takeover";
+    let pool = require_origin_test_pool(label).await?;
+    let space = Space::seed(&pool, label).await?;
+    let fixture = SharedDbFixture {
+        organizations: vec![space.org_id],
+        projects: vec![space.project_id],
+    };
+    let body_pool = pool.clone();
+    with_shared_db_fixture(fixture, async move {
+        let pool = body_pool;
+        let config = test_config(label);
+        let state = build_test_state(pool.clone(), config.clone());
+        let saving = space.running_turn(&pool).await?;
+        let saving_token = space.job_token(&config, &saving)?;
+        let (status, body) = post(
+            &state,
+            &saving_token,
+            "/lease/acquire",
+            space.job_lease_body(&saving, None),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let saving_lease = lease_id_of(&body)?;
+
+        // The person, on the same machine, waits.
+        let person = acquire_lease(
+            &pool,
+            &space.project_id,
+            Some(&space.owner_user_id),
+            Some(&space.runtime_id),
+            90,
+            None,
+        )
+        .await?;
+        match person {
+            LeaseAcquireOutcome::Conflict { holder } => {
+                assert_eq!(holder.id.to_string(), saving_lease)
+            }
+            other => anyhow::bail!("the person took over a running save's lock: {other:?}"),
+        }
+
+        // So does another of their turns on that machine.
+        let other = space.running_turn(&pool).await?;
+        let other_token = space.job_token(&config, &other)?;
+        let (status, body) = post(
+            &state,
+            &other_token,
+            "/lease/acquire",
+            space.job_lease_body(&other, None),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+        // The saving turn's own next save renews its lock, which is still its own.
+        let (status, body) = post(
+            &state,
+            &saving_token,
+            "/lease/acquire",
+            space.job_lease_body(&saving, None),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(lease_id_of(&body)?, saving_lease);
+        assert_eq!(lease_status(&pool, &saving_lease).await?, "active");
+        let metadata: JsonValue = pool
+            .get()
+            .await?
+            .query_one(
+                "select metadata from workspace_leases where id = $1",
+                &[&Uuid::parse_str(&saving_lease)?],
+            )
+            .await?
+            .get(0);
+        assert_eq!(metadata["jobId"], json!(saving.job_id));
+        let (status, body) = post(
+            &state,
+            &saving_token,
+            "/lease/release",
+            space.job_lease_body(&saving, Some(&saving_lease)),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // A person's own lease is still theirs to renew, and no turn of theirs
+        // takes it over either.
+        let person_lease = match acquire_lease(
+            &pool,
+            &space.project_id,
+            Some(&space.owner_user_id),
+            Some(&space.runtime_id),
+            90,
+            None,
+        )
+        .await?
+        {
+            LeaseAcquireOutcome::Granted(lease) => lease.id,
+            other => anyhow::bail!("expected the person's lease, got {other:?}"),
+        };
+        match acquire_lease(
+            &pool,
+            &space.project_id,
+            Some(&space.owner_user_id),
+            Some(&space.runtime_id),
+            90,
+            None,
+        )
+        .await?
+        {
+            LeaseAcquireOutcome::Renewed(lease) => assert_eq!(lease.id, person_lease),
+            other => anyhow::bail!("expected the person to renew their lease, got {other:?}"),
+        }
+        let (status, body) = post(
+            &state,
+            &other_token,
+            "/lease/acquire",
+            space.job_lease_body(&other, None),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(
+            lease_status(&pool, &person_lease.to_string()).await?,
+            "active"
+        );
+        Ok(())
+    })
+    .await
+}

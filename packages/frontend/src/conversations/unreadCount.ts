@@ -1,8 +1,11 @@
 import type { ChatMessage } from "../screens/studio/types";
+import { isHiddenByPresentation } from "../screens/studio/components/chatMessageMetadata";
 import { isTimelineMessage } from "./conversationMessageUtils";
 
+// A line kept out of the transcript (`presentation.hidden`, such as the one an
+// Undo leaves in the chat's history) is no reply anyone can read: never unread.
 export function isUnreadEligibleAssistantMessage(message: ChatMessage): boolean {
-  return message.role === "assistant" && !isTimelineMessage(message);
+  return message.role === "assistant" && !isTimelineMessage(message) && !isHiddenByPresentation(message);
 }
 
 export function isUnreadEligibleConversationMessage(
@@ -12,7 +15,7 @@ export function isUnreadEligibleConversationMessage(
   if (isUnreadEligibleAssistantMessage(message)) {
     return true;
   }
-  if (message.role !== "user") {
+  if (message.role !== "user" || isHiddenByPresentation(message)) {
     return false;
   }
 

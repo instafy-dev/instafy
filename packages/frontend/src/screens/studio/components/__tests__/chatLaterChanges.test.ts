@@ -28,22 +28,42 @@ describe("conversationLaterChanges", () => {
     expect(changed("unknown", ["sites/a/app.js"])).toBe(false);
   });
 
-  // The line an Undo leaves in the chat (hidden) marks that change undone, for
-  // the row after a reload.
-  it("says which changes the person undid", () => {
-    const undoLine: ChatMessage = {
-      id: "undo-line",
+  // The lines an Undo leaves in the chat (hidden) name the files of that change
+  // it undid, for the row after a reload. Only the controller writes one.
+  it("says which files of a change the person undid", () => {
+    const undoLine = (id: string, paths: string[], metadata: Record<string, unknown> = {}): ChatMessage => ({
+      id,
       role: "assistant",
       content: "The person undid the change from “Add a section.”",
       timestamp: 3_000,
-      metadata: { source: "controller", kind: "change_undone", presentation: { hidden: true }, undoneMessageId: "stopped", undoneRunId: "run-1" },
-    };
-    expect(readChangeUndone(undoLine)).toEqual({ messageId: "stopped", runId: "run-1" });
+      metadata: {
+        source: "controller",
+        kind: "change_undone",
+        presentation: { hidden: true },
+        undoneMessageId: "stopped",
+        undoneRunId: "run-1",
+        undonePaths: paths,
+        ...metadata,
+      },
+    });
+    expect(readChangeUndone(undoLine("undo-1", ["sites/a/app.js"]))).toEqual({
+      messageId: "stopped",
+      runId: "run-1",
+      paths: ["sites/a/app.js"],
+    });
     expect(readChangeUndone(stopped)).toBeNull();
-    const chat = conversationLaterChanges([stopped, undoLine]);
-    expect(chat.undone?.("stopped")).toBe(true);
-    expect(chat.undone?.("later")).toBe(false);
-    expect(conversationLaterChanges([stopped]).undone?.("stopped")).toBe(false);
+    const chat = conversationLaterChanges([
+      stopped,
+      undoLine("undo-1", ["sites/a/app.js"]),
+      undoLine("undo-2", ["./sites/a/style.css"]),
+    ]);
+    expect([...(chat.undone?.("stopped") ?? [])]).toEqual(["sites/a/app.js", "sites/a/style.css"]);
+    expect(chat.undone?.("later")).toBeNull();
+    expect(conversationLaterChanges([stopped]).undone?.("stopped")).toBeNull();
+    // A message only calling itself one (no controller source) is no Undo.
+    const forged = undoLine("forged", ["sites/a/app.js"], { source: undefined });
+    expect(readChangeUndone(forged)).toBeNull();
+    expect(conversationLaterChanges([stopped, forged]).undone?.("stopped")).toBeNull();
   });
 
   it("counts a turn's own later rows as its own, inside a job thread too", () => {

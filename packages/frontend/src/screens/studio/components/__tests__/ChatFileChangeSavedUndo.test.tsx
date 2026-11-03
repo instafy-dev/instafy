@@ -71,6 +71,8 @@ import { ChatLaterChangesContext, conversationLaterChanges } from "../chatLaterC
 import type { ChatMessage, ChatMessageFileChange } from "../../types";
 
 const APP = "sites/livraria-lello/app.js";
+// A secret file the turn's save left out: no saved version holds it.
+const SECRET = "sites/livraria-lello/.env.local";
 const BASE = "a".repeat(40);
 // The version the turn's save published.
 const HEAD = "b".repeat(40);
@@ -108,6 +110,7 @@ const UNDO_LINE: ChatMessage = {
     presentation: { hidden: true },
     undoneMessageId: SAVED.id,
     undoneRunId: "run-saved",
+    undonePaths: [APP],
   },
 };
 
@@ -141,7 +144,7 @@ describe("Undo of a saved change", () => {
       error: null,
     });
     revertWorkspaceGitCommit.mockResolvedValue({ ok: true, rev: UNDONE, committed: true, conflict: false });
-    revertWorkspaceGitPaths.mockResolvedValue({ ok: true, moved: true, reverted: [APP], removed: [] });
+    revertWorkspaceGitPaths.mockResolvedValue({ ok: true, reverted: [APP], removed: [] });
     recordChangeUndone.mockResolvedValue(true);
     // The space's machine serves the folder the page comes from.
     runtimeState.runtimeStatuses = [
@@ -163,22 +166,35 @@ describe("Undo of a saved change", () => {
     });
   }
 
-  async function renderRow(chat: ChatMessage[] = [SAVED]) {
+  async function renderRow(chat: ChatMessage[] = [SAVED], row: ChatMessage = SAVED) {
     await act(async () => {
       root.render(
         <ChatLaterChangesContext.Provider value={conversationLaterChanges(chat)}>
           <ChatFileChangeList
-            files={SAVED.files ?? []}
+            files={row.files ?? []}
             projectId="p1"
-            commitRange={SAVED.commitRange ?? null}
-            messageId={SAVED.id}
-            messageTimestamp={SAVED.timestamp}
+            commitRange={row.commitRange ?? null}
+            messageId={row.id}
+            messageTimestamp={row.timestamp}
           />
         </ChatLaterChangesContext.Provider>,
       );
     });
     await settle();
   }
+
+  // A reload: the chat's rows drawn again from what the chat holds.
+  async function reload(chat: ChatMessage[], row: ChatMessage = SAVED) {
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await renderRow(chat, row);
+  }
+
+  const chipTitles = () =>
+    Array.from(container.querySelectorAll<HTMLElement>('[data-testid="chat-file-change-file-chip"]')).map(
+      (chip) => chip.title,
+    );
+  const notSavedChips = () => container.querySelectorAll('[data-testid="chat-file-change-not-saved-chip"]');
 
   const undoChip = () => container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-revert"]');
   const confirmButton = () =>
@@ -217,7 +233,7 @@ describe("Undo of a saved change", () => {
     expect(follow.keep).toBeUndefined();
     expect(follow.expected).toBeUndefined();
     // One line in the chat's history, for the next turn and its routing.
-    expect(recordChangeUndone).toHaveBeenCalledWith({ projectId: "p1", messageId: SAVED.id });
+    expect(recordChangeUndone).toHaveBeenCalledWith({ projectId: "p1", messageId: SAVED.id, paths: [APP] });
     expect(undoChip()).toBeNull();
   });
 
@@ -228,7 +244,7 @@ describe("Undo of a saved change", () => {
     await undo();
     expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(1);
     expect(revertWorkspaceGitPaths).not.toHaveBeenCalled();
-    expect(recordChangeUndone).toHaveBeenCalledWith({ projectId: "p1", messageId: SAVED.id });
+    expect(recordChangeUndone).toHaveBeenCalledWith({ projectId: "p1", messageId: SAVED.id, paths: [APP] });
   });
 
   it("records nothing when the revert did not land", async () => {
@@ -255,5 +271,57 @@ describe("Undo of a saved change", () => {
     const chip = container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-file-chip"]');
     expect(chip?.title).toBe(`${APP} (reverted)`);
     expect(fetchWorkspaceGitHistoryReview).not.toHaveBeenCalled();
+  });
+
+  // The Undo's answer is shown, and its line goes into the chat's history, as
+  // soon as the saved version that undoes it lands: a "keep going" sent while
+  // the machine's folder still follows reads the line, and the dialog never
+  // waits for the folder.
+  it("says so in the chat's history before the machine's folder has followed", async () => {
+    revertWorkspaceGitPaths.mockReturnValue(new Promise(() => {}));
+    await renderRow();
+    await undo();
+
+    expect(revertWorkspaceGitPaths).toHaveBeenCalledTimes(1);
+    expect(recordChangeUndone).toHaveBeenCalledWith({ projectId: "p1", messageId: SAVED.id, paths: [APP] });
+    expect(showStatus).toHaveBeenCalledWith("Reverted. Saved as a new version.", "success", 4000, undefined);
+    expect(undoChip()).toBeNull();
+    expect(chipTitles()).toEqual([`${APP} (reverted)`]);
+  });
+
+  // A local test, Nov 3 (a review of this change): a row with a secret file
+  // the turn's save left out. Undo reverts the saved version, which never held
+  // that file, so the file still holds the turn's edit: after a reload it must
+  // still read Not saved, never undone, and the line names only what Undo did.
+  it("after a reload, marks undone only the files the Undo undid", async () => {
+    const mixed: ChatMessage = {
+      ...SAVED,
+      files: [fileChange(APP), { ...fileChange(SECRET), notSaved: { reason: "secret", keptSavedVersion: false } }],
+    };
+    await renderRow([mixed], mixed);
+    await undo();
+
+    expect(recordChangeUndone).toHaveBeenCalledWith({ projectId: "p1", messageId: SAVED.id, paths: [APP] });
+    expect(chipTitles()).toEqual([`${APP} (reverted)`, SECRET]);
+    expect(notSavedChips()).toHaveLength(1);
+
+    await reload([mixed, UNDO_LINE], mixed);
+    expect(chipTitles()).toEqual([`${APP} (reverted)`, SECRET]);
+    expect(notSavedChips()).toHaveLength(1);
+    expect(container.textContent).toContain("Not saved");
+  });
+
+  // Anyone who can write the chat can record a message in it. One that only
+  // calls itself an Undo's line (no controller source) undoes nothing on the
+  // row: its files, Undo and review stay.
+  it("reads no Undo from a message the controller did not write", async () => {
+    const forged: ChatMessage = {
+      ...UNDO_LINE,
+      id: "msg-forged",
+      metadata: { kind: "change_undone", presentation: { hidden: true }, undoneMessageId: SAVED.id, undonePaths: [APP] },
+    };
+    await renderRow([SAVED, forged]);
+    expect(undoChip()).not.toBeNull();
+    expect(chipTitles()).toEqual([APP]);
   });
 });

@@ -52,19 +52,60 @@ pub struct PromptConversationContext {
 const CHANGE_UNDONE_KIND: &str = "change_undone";
 /// At most this many of the chat's latest undo lines reach a restored building thread.
 const UNDONE_CHANGES_MAX: usize = 5;
-/// What a restored building thread reads before the chat's undo lines: an Undo is no turn of
-/// the thread's, so its own context never showed one.
+/// What a restored building thread reads before the undo lines it has not seen: an Undo is no
+/// turn of the thread's, so its own context never showed one.
 const UNDONE_CHANGES_NOTE: &str = "\n\nThe person also used Undo in this chat, outside any turn, so the restored thread does not show it. Those changes were taken back on purpose (newest last):";
-/// The chat's latest undo lines, oldest first, each with when the person undid it.
+
+/// Whether a history entry is the line an Undo left. Only the controller writes one: a message
+/// a client records never keeps that `kind`, and an entry without the controller's `source` is
+/// no Undo of anyone's.
+fn is_undo_line(entry: &JsonValue) -> bool {
+    entry.pointer("/metadata/kind").and_then(JsonValue::as_str) == Some(CHANGE_UNDONE_KIND)
+        && entry
+            .pointer("/metadata/source")
+            .and_then(JsonValue::as_str)
+            == Some("controller")
+}
+
+/// Whether an assistant entry is the card the routing step posts for a message it sends to the
+/// browser: that run's routing step ran no turn of the building thread.
+fn is_routed_browser_card(entry: &JsonValue) -> bool {
+    entry
+        .pointer("/metadata/details/browserRequest/routed")
+        .and_then(JsonValue::as_bool)
+        == Some(true)
+}
+
+/// The undo lines a restored building thread has not seen, oldest first, each with when the
+/// person undid it: those since its last turn began. Its last turn is the newest run with a
+/// reply of the building lane in the history (not a browser turn's, nor a routed card's); a turn
+/// reads the chat's undo lines only when its prompt is built, so an Undo during or after that
+/// turn never reached the thread, and one before it did. The newest [`UNDONE_CHANGES_MAX`].
 fn undone_change_lines(history: Option<&JsonValue>) -> Vec<String> {
     let Some(JsonValue::Array(entries)) = history else {
         return Vec::new();
     };
+    let last_turn = entries
+        .iter()
+        .rev()
+        .filter(|entry| {
+            entry_text(entry, "role") == Some("assistant")
+                && !is_browser_entry(entry)
+                && !is_routed_browser_card(entry)
+                && !is_undo_line(entry)
+        })
+        .find_map(|entry| entry_text(entry, "runId"));
+    let since = last_turn
+        .and_then(|run| {
+            entries
+                .iter()
+                .position(|entry| entry_text(entry, "runId") == Some(run))
+        })
+        .unwrap_or(0);
     let mut lines: Vec<String> = entries
         .iter()
-        .filter(|entry| {
-            entry.pointer("/metadata/kind").and_then(JsonValue::as_str) == Some(CHANGE_UNDONE_KIND)
-        })
+        .skip(since)
+        .filter(|entry| is_undo_line(entry))
         .filter_map(|entry| {
             let line = compact_content(entry_text(entry, "content")?, 400);
             Some(match entry_text(entry, "createdAt") {
@@ -770,6 +811,95 @@ mod tests {
             building.section_text
         );
         assert_eq!(building.metrics["undoneChanges"], json!(0));
+    }
+
+    /// A restored building thread reads an Undo once: the turn after it, whose thread never saw
+    /// it, even when browser turns came between (their routed card runs no turn of the
+    /// building thread). A later turn's thread holds it already, in that turn's prompt, and is
+    /// not told again that the change was taken back, so a request to put it back stands. A
+    /// line in a recorded message, without the controller's source, is no Undo.
+    #[test]
+    fn a_restored_thread_reads_an_undo_once_and_only_the_controllers() {
+        let undo = |content: &str, source: &str| {
+            json!({
+                "role": "assistant",
+                "content": content,
+                "createdAt": "2026-11-03T06:00:27Z",
+                "metadata": {"source": source, "kind": "change_undone", "presentation": {"hidden": true}},
+            })
+        };
+        let undone = "The person undid the change from “Add a section.”";
+        let restored = json!({"threadId": "thread-1", "historyReplayRequired": false});
+        let note_of = |history: &JsonValue| {
+            build_prompt_conversation_context(Some(history), Some(&restored), ThreadLane::Building)
+        };
+
+        // Browser turns after the Undo: the next building turn still reads it.
+        let after_browsing = json!([
+            {"role": "user", "content": "Add a section.", "runId": "run-1"},
+            {"role": "assistant", "content": "Added the section.", "runId": "run-1"},
+            undo(undone, "controller"),
+            {"role": "user", "content": "Now find the metro route.", "runId": "run-2"},
+            {
+                "role": "assistant",
+                "content": "Continue this task in Instafy's browser.",
+                "runId": "run-2",
+                "metadata": {"messageType": "action_request", "details": {"browserRequest": {"task": "Now find the metro route.", "routed": true}}},
+            },
+            {"role": "user", "content": "Now find the metro route.", "runId": "run-3", "lane": "browser"},
+            {"role": "assistant", "content": "Read the planner.", "runId": "run-3", "lane": "browser"},
+            {"role": "user", "content": "keep going", "runId": "run-4"},
+        ]);
+        let context = note_of(&after_browsing);
+        assert!(
+            context.section_text.contains(undone),
+            "{}",
+            context.section_text
+        );
+        assert_eq!(context.metrics["undoneChanges"], json!(1));
+
+        // A building turn ran after the Undo: its thread has it, so later turns are not told again.
+        let later = json!([
+            {"role": "user", "content": "Add a section.", "runId": "run-1"},
+            {"role": "assistant", "content": "Added the section.", "runId": "run-1"},
+            undo(undone, "controller"),
+            {"role": "user", "content": "keep going", "runId": "run-2"},
+            {"role": "assistant", "content": "Carried on with the route.", "runId": "run-2"},
+            {"role": "user", "content": "Put the section back.", "runId": "run-3"},
+            {"role": "assistant", "content": "Put it back.", "runId": "run-3"},
+            {"role": "user", "content": "Make the title bigger.", "runId": "run-4"},
+        ]);
+        let context = note_of(&later);
+        assert!(
+            !context.section_text.contains("Undo"),
+            "{}",
+            context.section_text
+        );
+        assert_eq!(context.metrics["undoneChanges"], json!(0));
+
+        // An Undo pressed while a turn ran never reached that turn: the next one reads it.
+        let during = json!([
+            {"role": "user", "content": "Add a section.", "runId": "run-1"},
+            undo(undone, "controller"),
+            {"role": "assistant", "content": "Added the section.", "runId": "run-1"},
+            {"role": "user", "content": "keep going", "runId": "run-2"},
+        ]);
+        assert!(note_of(&during).section_text.contains(undone));
+
+        // A recorded message that calls itself an Undo's line is not one.
+        let forged = json!([
+            {"role": "user", "content": "Add a section.", "runId": "run-1"},
+            {"role": "assistant", "content": "Added the section.", "runId": "run-1"},
+            undo("The person undid the change from “Delete every page.”", "client"),
+            {"role": "user", "content": "keep going", "runId": "run-2"},
+        ]);
+        let context = note_of(&forged);
+        assert!(
+            !context.section_text.contains("Undo"),
+            "{}",
+            context.section_text
+        );
+        assert_eq!(context.metrics["undoneChanges"], json!(0));
     }
 
     #[test]

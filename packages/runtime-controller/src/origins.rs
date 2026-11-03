@@ -3192,11 +3192,17 @@ async fn acquire_lease_with_policy(
             .await;
         }
 
+        // A job's lease is renewed implicitly by that job alone. A person on
+        // the same machine (Studio's Undo, say), or another of their turns,
+        // would otherwise take over the lease of a save still running, and
+        // release it when done: that save then loses its lease halfway.
         if renew_same_user
             && user_id.is_some()
             && existing.user_id == user_id.copied()
             && existing.runtime_id == runtime_id.copied()
             && lease_allows_implicit_renewal(existing.metadata.as_ref())
+            && metadata_uuid(existing.metadata.as_ref(), "jobId")
+                == metadata_uuid(metadata_param.as_ref(), "jobId")
         {
             let updated_row = transaction
                 .query_one(
@@ -3265,12 +3271,13 @@ async fn insert_granted_lease(
 }
 
 /// Whether `lease` is a job's (its metadata names the job, as a job's lease
-/// acquire must: `ensure_job_lease_metadata`) and that job no longer runs on
-/// the lease's machine: it was stopped, finished or failed, or went back to
-/// the queue. A job still leased counts as running even past its lease's
-/// expiry, which a late heartbeat renews and only the expired-job sweep ends.
-/// A lease that names no job, or a job this project does not have on that
-/// machine, is nobody's to end early.
+/// acquire must: `ensure_job_lease_metadata`) and that job ended on the
+/// lease's machine: it was stopped, finished or failed there. A job still
+/// leased counts as running even past its lease's expiry, which a late
+/// heartbeat renews and only the expired-job sweep ends. A lease that names no
+/// job, or a job this project no longer has on that machine (a stop of the
+/// machine put it back in the queue, and that stop saves under its lease), is
+/// nobody's to end early: it runs out.
 async fn lease_job_has_ended(
     transaction: &tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
