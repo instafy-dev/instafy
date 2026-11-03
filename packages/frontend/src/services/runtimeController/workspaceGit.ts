@@ -1053,6 +1053,13 @@ export interface RevertWorkspaceGitResult {
   ok: boolean;
   reverted?: string[] | null;
   removed?: string[] | null;
+  /**
+   * Asked to keep what it undoes (`keep`): the recovery ref that holds the
+   * work-tree copies the revert replaced, which History lists under Unsaved
+   * work once a save pushes it. Null when nothing differed, or an older
+   * origin that keeps nothing.
+   */
+  kept?: { ref: string; rev: string } | null;
   conflict?: boolean;
   error?: string;
   errorInfo?: OriginError;
@@ -1086,10 +1093,17 @@ function buildRevertPathsResult(
   const payload = parseJsonRecord(captured.text);
   const reverted = Array.isArray(payload?.reverted) ? (payload?.reverted as string[]) : null;
   const removed = Array.isArray(payload?.removed) ? (payload?.removed as string[]) : null;
+  const keptRecord = payload?.kept && typeof payload.kept === "object" && !Array.isArray(payload.kept)
+    ? (payload.kept as Record<string, unknown>)
+    : null;
+  const kept = typeof keptRecord?.ref === "string" && typeof keptRecord?.rev === "string"
+    ? { ref: keptRecord.ref, rev: keptRecord.rev }
+    : null;
   return {
     ok: true,
     reverted,
     removed,
+    kept,
     conflict: false,
     leaseId: meta.leaseId,
     originMode: meta.originMode,
@@ -1110,6 +1124,11 @@ export async function revertWorkspaceGitPathsFromController(params: {
   routing?: WorkspaceOriginRouting;
   /** Default routing only: retry a lease held by someone else once after this delay. */
   leaseConflictRetryDelayMs?: number | null;
+  /**
+   * Keep what the revert undoes on a recovery ref, which History lists under
+   * Unsaved work (single-tenant origins; an older origin keeps nothing).
+   */
+  keep?: boolean;
 }): Promise<RevertWorkspaceGitResult | null> {
   if (!runtimeControllerEnabled) {
     return null;
@@ -1123,7 +1142,7 @@ export async function revertWorkspaceGitPathsFromController(params: {
   const paths = Array.isArray(params.paths)
     ? params.paths.map((path) => String(path)).filter((path) => path.trim().length > 0)
     : [];
-  const body = { paths };
+  const body = params.keep ? { paths, keep: true } : { paths };
 
   if (params.routing === "default") {
     const posted = await postDefaultRoutedWrite({ ...params, projectId }, "git/revert", body);
@@ -1444,7 +1463,7 @@ export async function revertWorkspaceGitCommitFromController(params: {
 // Unsaved work (recovery refs)
 // ---------------------------------------------------------------------------
 
-export type WorkspaceRecoveryKind = "conflict" | "unpublished" | "unsaved" | "stale";
+export type WorkspaceRecoveryKind = "conflict" | "unpublished" | "unsaved" | "stale" | "undone";
 
 export interface WorkspaceRecoveryEntry {
   ref: string;

@@ -397,6 +397,33 @@ describe("default-routed sync and path revert use the shared write lease", () =>
     }
   });
 
+  // Undo of a change no save took asks the folder's own origin to keep what
+  // it undoes; History lists it under Unsaved work once a save pushes it.
+  it("path revert asks to keep what it undoes and reads what was kept", async () => {
+    mocks.token.mockResolvedValue(token({ originId: "runtime-origin", endpoint: "https://controller.test/origin/rt" }));
+    fetchMock().mockResolvedValue(json(200, {
+      ok: true,
+      reverted: ["sites/a/app.js"],
+      removed: [],
+      kept: { ref: "refs/instafy/local-recovery/20261102T131809Z-undone-0123456789ab", rev: "c".repeat(40), paths: ["sites/a/app.js"] },
+    }));
+    const result = await revertWorkspaceGitPathsFromController({
+      projectId: "p", paths: ["sites/a/app.js"], originId: "runtime-origin", routing: "default", keep: true,
+    });
+    expect(lastRequest().url).toBe("https://controller.test/origin/rt/git/revert");
+    expect(JSON.parse(String(lastRequest().init.body))).toEqual({ paths: ["sites/a/app.js"], keep: true });
+    expect(mocks.token.mock.calls[0][0]).toMatchObject({ originId: "runtime-origin", leaseId: "lease-1" });
+    expect(result).toMatchObject({
+      ok: true,
+      reverted: ["sites/a/app.js"],
+      kept: { ref: "refs/instafy/local-recovery/20261102T131809Z-undone-0123456789ab", rev: "c".repeat(40) },
+    });
+    // An origin that keeps nothing answers no `kept`.
+    fetchMock().mockResolvedValue(json(200, { ok: true, reverted: ["a"], removed: [] }));
+    const older = await revertWorkspaceGitPathsFromController({ projectId: "p", paths: ["a"], routing: "default", keep: true });
+    expect(older).toMatchObject({ ok: true, kept: null });
+  });
+
   it("maps an aborted first mint to timeout", async () => {
     const abort = new Error("aborted");
     abort.name = "AbortError";

@@ -90,7 +90,24 @@ pub struct AppState {
     /// What reads a page a person sends to the chat (see
     /// [`crate::browser_page_capture`]). `None` answers that route with 404.
     pub browser_page_capture_script: Option<crate::browser_page_capture::BrowserPageCaptureScript>,
+    /// Told what a person's `/git/revert` put back or removed, once it did,
+    /// when the process hosting the origin wants to act on it (see
+    /// [`FilesReverted`]). `None` tells nobody.
+    pub files_reverted: Option<FilesRevertedHook>,
 }
+
+/// The files a person's revert put back as `HEAD` has them, or removed, in
+/// this origin's checkout. The process hosting the origin may act on them:
+/// a runtime pictures the open previews of the sites they belong to again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FilesReverted {
+    pub project_id: Uuid,
+    pub workspace_root: PathBuf,
+    pub paths: Vec<String>,
+}
+
+/// See [`AppState::files_reverted`].
+pub type FilesRevertedHook = Arc<dyn Fn(FilesReverted) + Send + Sync>;
 
 /// How long the fence a pre-stop flush raises holds without a refresh or a
 /// resume: longer than the controller's flush and provider release, so it
@@ -174,6 +191,7 @@ impl AppState {
             browser_host: None,
             boot_browser: None,
             browser_page_capture_script: None,
+            files_reverted: None,
         })
     }
 
@@ -2394,6 +2412,13 @@ struct WorkspacePersistRequest {
 #[serde(rename_all = "camelCase")]
 struct GitRevertRequest {
     paths: Vec<String>,
+    /// Keep what the revert undoes: the paths' work-tree copies that differ
+    /// from `HEAD` go to an `undone` recovery ref first, which the next
+    /// publish, refresh or stop pushes, so History lists it under Unsaved
+    /// work to restore. Studio sends it when Undo puts back a change no
+    /// save took (a turn's edits a Stop left unsaved).
+    #[serde(default)]
+    keep: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2592,24 +2617,46 @@ async fn handle_git_revert(
     config_clone.git_remote_url = Some(remote_url);
 
     let canonical_root = Arc::new(workspace_root);
+    let revert_root = canonical_root.clone();
     let revert_paths = paths.clone();
+    let keep = payload.keep;
     let revert_result = tokio::task::spawn_blocking(move || {
         let _apply_guard = apply_guard;
         let _workspace_apply_guard = workspace_apply_guard;
         git::ensure_git_checkout(&config_clone, token.as_deref())?;
-        git::revert_paths(canonical_root.as_path(), &revert_paths)
+        let kept = if keep {
+            git::keep_worktree_copies(&config_clone, revert_root.as_path(), &revert_paths)?
+        } else {
+            None
+        };
+        let summary = git::revert_paths(revert_root.as_path(), &revert_paths)?;
+        Ok::<_, OriginError>((summary, kept))
     })
     .await
     .map_err(|error| OriginError::internal(format!("git revert task failed: {error}")))?;
 
-    match revert_result {
-        Ok(summary) => Ok(Json(serde_json::json!({
-            "ok": true,
-            "reverted": summary.reverted,
-            "removed": summary.removed,
-        }))),
-        Err(error) => Err(error),
+    let (summary, kept) = revert_result?;
+    if let Some(hook) = state.files_reverted.as_ref() {
+        let mut changed = summary.reverted.clone();
+        changed.extend(summary.removed.iter().cloned());
+        if !changed.is_empty() {
+            hook(FilesReverted {
+                project_id,
+                workspace_root: canonical_root.as_ref().clone(),
+                paths: changed,
+            });
+        }
     }
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "reverted": summary.reverted,
+        "removed": summary.removed,
+        "kept": kept.map(|report| serde_json::json!({
+            "ref": report.reference,
+            "rev": report.rev,
+            "paths": report.paths,
+        })),
+    })))
 }
 
 /// The code of a save refused because a stop has already kept the

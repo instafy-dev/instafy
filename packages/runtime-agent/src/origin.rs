@@ -222,6 +222,12 @@ impl OriginService {
         server.set_browser_page_capture_script(
             crate::shared_browser::sent_page_capture_script().into(),
         );
+        // A person's Undo of a change no save took puts files back here
+        // (`/git/revert`): the open previews of their sites are pictured
+        // again, as after a turn that changed them.
+        if let Some(hook) = crate::jobs::preview_pictures::files_reverted_hook() {
+            server.set_files_reverted_hook(hook);
+        }
         // The origin is registered below, after the server is up. A beat that
         // reached the controller first was refused with 401 and had this agent
         // renew its registration, which restarted the origin and its tunnel on

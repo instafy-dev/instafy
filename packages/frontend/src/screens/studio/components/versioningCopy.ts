@@ -2,6 +2,7 @@ import type {
   OriginError,
   OriginRejectedPath,
   RevertWorkspaceGitCommitResult,
+  RevertWorkspaceGitResult,
   VersioningMode,
   WorkspaceGitHistoryEntry,
 } from "../../../sdk/instafy";
@@ -423,6 +424,7 @@ const UNSAVED_WORK_TITLES: Record<string, string> = {
   unpublished: "Agent work that couldn't be saved",
   unsaved: "Unsaved edits from a stopped workspace",
   stale: "Older copies found in a workspace",
+  undone: "Edits undone from the chat",
 };
 
 export function unsavedWorkTitle(kind: string): string {
@@ -1127,6 +1129,78 @@ export function describeChangeRevertOutcome(
     return outcome("error", STATELESS_UNREACHABLE_COPY);
   }
   return outcome("error", CHANGE_REVERT_FALLBACK_MESSAGE, { offerAgentUndo: true });
+}
+
+// ---------------------------------------------------------------------------
+// Chat: Undo of a change no save took
+// ---------------------------------------------------------------------------
+
+// A turn's edits a Stop (or a failed save) left unsaved have no version to
+// revert. Undo puts the files back in the folder the turn ran in, as the
+// saved version has them: no message, no turn of Octo's.
+export const UNSAVED_REVERT_CONFIRM_MESSAGE = "This puts the files back as they were before this turn.";
+
+// A later turn of the chat changed one of the files: putting it back would
+// take that work back too.
+export function describeUnsavedRevertChangedLater(paths: readonly string[], canAskAgent: boolean): string {
+  const list = formatPathList(paths);
+  const lead = list
+    ? `A later turn changed ${list}, so Undo here would take that back too. Nothing was undone.`
+    : "A later turn changed these files, so Undo here would take that back too. Nothing was undone.";
+  return canAskAgent ? `${lead} Ask the agent to undo just this change.` : lead;
+}
+
+// The files read as the saved version has them, or changed in another way:
+// a later save took the change in, or it was undone already.
+export function describeUnsavedRevertNotInFiles(canAskAgent: boolean): string {
+  const lead = "The files don't hold this change any more, so there's nothing to undo here.";
+  return canAskAgent ? `${lead} Ask the agent if something still needs undoing.` : lead;
+}
+
+// No machine of the space is running, so nothing can reach the folder.
+export const UNSAVED_REVERT_MACHINE_OFF_MESSAGE =
+  "The space's machine isn't running, so Undo can't reach these files right now. Try again once it has started.";
+
+export interface UnsavedRevertOutcome {
+  intent: "success" | "warning" | "error";
+  message: string;
+  reverted: boolean;
+  offerAgentUndo: boolean;
+}
+
+const UNSAVED_REVERT_FALLBACK_MESSAGE = "Couldn't undo this change. Try again, or ask the agent to undo it.";
+
+// What Undo of a change no save took did, as one toast (`/git/revert` on the
+// folder's own origin). What it undid is kept when the origin says so.
+export function describeUnsavedRevertOutcome(result: RevertWorkspaceGitResult | null): UnsavedRevertOutcome {
+  if (result?.ok) {
+    return {
+      intent: "success",
+      message: result.kept ? `${REVERT_UNDONE_COPY} They're ${KEPT_IN_UNSAVED_WORK}.` : REVERT_UNDONE_COPY,
+      reverted: true,
+      offerAgentUndo: false,
+    };
+  }
+  const info = result?.errorInfo;
+  const code = info?.code ?? null;
+  const status = info?.status ?? 0;
+  const failed = (intent: UnsavedRevertOutcome["intent"], message: string, offerAgentUndo = false) => ({
+    intent,
+    message,
+    reverted: false,
+    offerAgentUndo,
+  });
+  if (code === "lease_conflict") {
+    return failed("warning", LEASE_CONFLICT_COPY);
+  }
+  // The folder is being written (a turn, or a save, holds it).
+  if (status === 409) {
+    return failed("warning", "The agent is working on these files right now. Try again in a moment.");
+  }
+  if (isUnreachableCode(code) || isUnreachableStatus(status)) {
+    return failed("error", "Couldn't reach the space's machine. Try again in a moment.");
+  }
+  return failed("error", UNSAVED_REVERT_FALLBACK_MESSAGE, true);
 }
 
 // ---------------------------------------------------------------------------

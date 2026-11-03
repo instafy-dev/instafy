@@ -196,7 +196,19 @@ these changes were saved"), and a later turn saves only what it changes itself. 
 while it saved shows what that save left, with its version.
 
 The step stays in the history later turns read, so a turn that goes on, or undoes it, knows what
-the stopped turn left. A preview whose site the turn changed is pictured again. A job a stop of
+the stopped turn left. A preview whose site the turn changed is pictured again.
+
+Undo under a stopped turn's unsaved files puts them back as the saved version has them, in the
+folder the turn ran in, with no message and no turn: Studio asks that folder's own origin
+(`POST /git/revert {paths, keep: true}`, the space's machine's origin, or the Desktop folder's),
+behind its own "Undo this change?" dialog. First it checks that the files still hold the change: no
+later turn of the chat changed one of them, and each still reads as a change of its kind in the
+folder (`git status`). Otherwise it puts nothing back and says why, and the dialog offers to ask the
+agent instead. The origin keeps what it undoes on an `undone` recovery ref, which the next save,
+refresh or stop pushes, so History lists it under Unsaved work, as a saved change's Undo keeps the
+version it undid. The machine pictures the open previews of those files' sites again, as after a
+turn. The same Undo serves a change whose save failed. "Ask the agent to undo it" sends a message
+in the person's name that names the change by its time, never by an id. A job a stop of
 its machine put back in the queue is not cancelled: the controller turns its report down, and the
 job's next lease takes the work up.
 

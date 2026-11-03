@@ -21,7 +21,7 @@ const OCTO_SELECTION: ResolvedPromptAgentSelection = {
 };
 
 const TYPED_DRAFT = "Rewrite the pricing paragraph once you are done";
-const UNDO_REQUEST = "Please undo the change from your message (id 2ee0ad74).";
+const UNDO_REQUEST = "Please undo the change from your message at 2:16 PM.";
 
 function Harness({
   options,

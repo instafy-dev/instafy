@@ -134,6 +134,8 @@ pub struct OriginHttpServer {
     boot_browser: Option<crate::boot_browser::BootBrowserHandle>,
     /// Set by [`OriginHttpServer::set_browser_page_capture_script`].
     browser_page_capture_script: Option<crate::browser_page_capture::BrowserPageCaptureScript>,
+    /// Set by [`OriginHttpServer::set_files_reverted_hook`].
+    files_reverted: Option<crate::routes::FilesRevertedHook>,
 }
 
 pub struct ServerStart {
@@ -241,6 +243,7 @@ impl OriginHttpServer {
             browser_host: None,
             boot_browser: None,
             browser_page_capture_script: None,
+            files_reverted: None,
         })
     }
 
@@ -307,6 +310,14 @@ impl OriginHttpServer {
         script: crate::browser_page_capture::BrowserPageCaptureScript,
     ) {
         self.browser_page_capture_script = Some(script);
+    }
+
+    /// Tells `hook` what a person's `/git/revert` put back or removed in this
+    /// checkout (see [`crate::routes::FilesReverted`]). Call it before
+    /// [`OriginHttpServer::start`]; the multi-tenant gateway, which keeps no
+    /// checkout, ignores it.
+    pub fn set_files_reverted_hook(&mut self, hook: crate::routes::FilesRevertedHook) {
+        self.files_reverted = Some(hook);
     }
 
     /// Starts the presence loop held back by
@@ -416,6 +427,7 @@ impl OriginHttpServer {
                 state.browser_host = self.browser_host.clone();
                 state.boot_browser = self.boot_browser.clone();
                 state.browser_page_capture_script = self.browser_page_capture_script.clone();
+                state.files_reverted = self.files_reverted.clone();
                 self.state = Some(state.clone());
                 routes::router(state)
             }

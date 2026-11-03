@@ -25,6 +25,8 @@ import {
   REVERT_RUNNING_MESSAGE,
   REVERT_STILL_RUNNING_MESSAGE,
   REVERT_WAITING_AGAIN_MESSAGE,
+  UNSAVED_REVERT_CONFIRM_MESSAGE,
+  UNSAVED_REVERT_MACHINE_OFF_MESSAGE,
   autoRetryDelayMs,
   describeChangeRevertOutcome,
   describeFileNotSaved,
@@ -32,6 +34,9 @@ import {
   describeRevertConfirm,
   describeRevertOtherWork,
   describeUnsavedChanges,
+  describeUnsavedRevertChangedLater,
+  describeUnsavedRevertNotInFiles,
+  describeUnsavedRevertOutcome,
   revertAnswerCode,
   revertCheckFailedCopy,
   revertRetryDelayMs,
@@ -39,6 +44,8 @@ import {
 } from "./versioningCopy";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
 import { useChatSite } from "./chatSiteContext";
+import { useChatLaterChanges } from "./chatLaterChanges";
+import { isFolderRevertablePath, runtimeFolderOriginId, unsavedChangeStillInFolder } from "./unsavedChangeRevert";
 
 const {
   fetchDiff: fetchWorkspaceGitDiffFromController,
@@ -106,6 +113,12 @@ type ChatChangeRevertScope =
   // The version lists no files of its own: a merge, which the card cannot
   // bound to this turn's commits.
   | { status: "combined" }
+  // A change no save took (see unsavedUndo): a later turn of the chat
+  // changed `paths`, the files no longer hold the change, or no machine of
+  // the space serves the folder.
+  | { status: "changed_later"; paths: string[] }
+  | { status: "not_in_files" }
+  | { status: "machine_off" }
   // `code`: the gateway's answer when it said to try again later: still
   // fetching the space's history or making its copy again (even after one
   // retry), or out of room (never retried).
@@ -383,7 +396,8 @@ export function ChatFileChangeList({
     messageTimestamp <= chatSite.firstChangeAt;
   const { openPanelTab, requestUrlPush, openGitDiffTab } = useWorkspaceTabs();
   const { showStatus } = useStatus();
-  const { effectiveRuntimeId, runtimeReady } = useRuntime();
+  const { effectiveRuntimeId, runtimeReady, runtimeStatuses } = useRuntime();
+  const laterChanges = useChatLaterChanges();
   const projectAccess = useOptionalProjectAccess();
   // How the space keeps versions. Instances share one probe and cache, and
   // the store's origin counts only when it belongs to this card's project.
@@ -415,6 +429,8 @@ export function ChatFileChangeList({
   const [revertingChange, setRevertingChange] = useState(false);
   // The files were undone by a saved revert version, not by a path discard.
   const [revertedByVersion, setRevertedByVersion] = useState(false);
+  // The files were put back in the folder by Undo of a change no save took.
+  const [revertedInFolder, setRevertedInFolder] = useState(false);
   const [revertScope, setRevertScope] = useState<ChatChangeRevertScope | null>(null);
   const revertScopeRequestRef = useRef(0);
   // The revert request this card has running, settled once its answer has
@@ -913,6 +929,25 @@ export function ChatFileChangeList({
   // saved) are not something a second revert can reach.
   const canRevertChange = Boolean(projectId && projectWriteEnabled && revertRange && !revertedByVersion);
 
+  // A change no save took (a Stop came before the turn's save, or the save
+  // failed) has no version to revert. Its Undo puts the files back in the
+  // folder the turn ran in, as the saved version has them, while they still
+  // hold that change: no message, no turn of Octo's, so no credit and no
+  // message of the day's. What it undoes is kept under History, in Unsaved
+  // work, as a saved change's Undo keeps the version it undid.
+  const unsavedUndo = Boolean(
+    projectId && projectWriteEnabled && savesAreVersions && unsavedReason && !revertRange && !revertedInFolder,
+  );
+  // That folder's origin: a Desktop space's folder, or the machine the
+  // space's turns run on.
+  const folderOriginId =
+    versioning.mode === "desktop" ? versioning.originId : runtimeFolderOriginId(runtimeStatuses, effectiveRuntimeId);
+  const unsavedRevertEntries = useMemo(
+    () => pendingEntries.filter(({ workspacePath }) => isFolderRevertablePath(workspacePath)),
+    [pendingEntries],
+  );
+  const canUndo = canRevertChange || unsavedUndo;
+
   // The canonical range's head is the version this turn's save published.
   // Its own change (against its first parent) is what the revert undoes, and
   // it can hold more than this card's files: a save that publishes work an
@@ -998,6 +1033,45 @@ export function ChatFileChangeList({
     });
   }, [changeTypeByPath, projectId, revertRange, uniquePaths, versioning.originId]);
 
+  // Undo of a change no save took checks first that the files still hold it:
+  // a later turn of the chat changed none of them, and each still reads as
+  // a change of its kind in the folder. Otherwise it puts nothing back.
+  const checkUnsavedRevertScope = useCallback(async () => {
+    const request = revertScopeRequestRef.current + 1;
+    revertScopeRequestRef.current = request;
+    const paths = unsavedRevertEntries.map(({ workspacePath }) => workspacePath);
+    const changedLater =
+      messageId && laterChanges ? paths.filter((path) => laterChanges(messageId, [path])) : [];
+    if (changedLater.length > 0) {
+      setRevertScope({ status: "changed_later", paths: changedLater });
+      return;
+    }
+    if (!projectId || !folderOriginId) {
+      setRevertScope({ status: "machine_off" });
+      return;
+    }
+    if (paths.length === 0) {
+      setRevertScope({ status: "not_in_files" });
+      return;
+    }
+    setRevertScope({ status: "checking" });
+    const held = await unsavedChangeStillInFolder({
+      projectId,
+      originId: folderOriginId,
+      files: unsavedRevertEntries.map(({ file, workspacePath }) => ({ path: workspacePath, changeType: file.changeType })),
+    });
+    if (revertScopeRequestRef.current !== request) {
+      return;
+    }
+    if (held === "failed") {
+      setRevertScope({ status: "failed" });
+    } else if (held === "gone") {
+      setRevertScope({ status: "not_in_files" });
+    } else {
+      setRevertScope({ status: "ready", paths, unlistedPaths: [], renameSources: [] });
+    }
+  }, [folderOriginId, laterChanges, messageId, projectId, unsavedRevertEntries]);
+
   // Waits for the running revert with the dialog busy and the chip
   // "Reverting…", but only for REVERT_WAIT_TIMEOUT_MS. Then the card stops
   // waiting: it says the revert may still finish and frees the chip. The
@@ -1036,8 +1110,8 @@ export function ChatFileChangeList({
       void waitForRevert(running);
       return;
     }
-    void checkRevertScope();
-  }, [checkRevertScope, revertingChange, waitForRevert]);
+    void (unsavedUndo ? checkUnsavedRevertScope() : checkRevertScope());
+  }, [checkRevertScope, checkUnsavedRevertScope, revertingChange, unsavedUndo, waitForRevert]);
 
   const closeRevertDialog = useCallback(() => {
     revertScopeRequestRef.current += 1;
@@ -1064,8 +1138,8 @@ export function ChatFileChangeList({
   // on a Revert the user did not move to.
   const retryRevertScopeCheck = useCallback(() => {
     revertCancelRef.current?.focus();
-    void checkRevertScope();
-  }, [checkRevertScope]);
+    void (unsavedUndo ? checkUnsavedRevertScope() : checkRevertScope());
+  }, [checkRevertScope, checkUnsavedRevertScope, unsavedUndo]);
 
   // What a revert answered: mark the files it undid and say so. Also runs
   // for an answer that arrives after the card stopped waiting for it.
@@ -1123,6 +1197,85 @@ export function ChatFileChangeList({
   useEffect(() => {
     applyRevertOutcomeRef.current = applyRevertOutcome;
   }, [applyRevertOutcome]);
+
+  // What Undo of a change no save took answered: mark the files it put back
+  // and say so. Also runs for an answer that arrives after the card stopped
+  // waiting for it.
+  const applyUnsavedRevertOutcome = useCallback(
+    (result: Awaited<ReturnType<typeof revertWorkspaceGitPathsFromController>>, targetPaths: readonly string[]) => {
+      const outcome = describeUnsavedRevertOutcome(result);
+      if (outcome.reverted) {
+        const removed = new Set((result?.removed ?? []).map((path) => normalizeWorkspacePath(path)));
+        setRevertedInFolder(true);
+        setUndoStatusByPath((prev) => {
+          const next = { ...prev };
+          for (const path of targetPaths) {
+            next[path] = removed.has(path) || changeTypeByPath[path] === "created" ? "removed" : "reverted";
+          }
+          return next;
+        });
+        if (targetPaths.length === pendingPaths.length && totalCount > 1) {
+          setRailExpanded(false);
+        }
+      }
+      const askAgent = outcome.offerAgentUndo && messageId ? handleUndoRequest : null;
+      showStatus(
+        outcome.message,
+        outcome.intent,
+        askAgent ? 9000 : outcome.intent === "success" ? 4000 : 6500,
+        askAgent ? { actionLabel: "Ask the agent to undo it", onAction: askAgent } : undefined,
+      );
+    },
+    [changeTypeByPath, handleUndoRequest, messageId, pendingPaths, showStatus, totalCount],
+  );
+
+  const applyUnsavedRevertOutcomeRef = useRef(applyUnsavedRevertOutcome);
+  useEffect(() => {
+    applyUnsavedRevertOutcomeRef.current = applyUnsavedRevertOutcome;
+  }, [applyUnsavedRevertOutcome]);
+
+  // Undo of a change no save took: the files go back in the folder as the
+  // saved version has them (`/git/revert` on the folder's own origin), and
+  // the origin keeps what it undoes on a recovery ref. Like "Revert this
+  // change", the dialog stays busy while it runs, and the answer is shown
+  // when it settles.
+  const handleRevertUnsaved = useCallback(async () => {
+    if (revertingChange || runningRevertRef.current || revertScope?.status !== "ready") {
+      return;
+    }
+    if (!unsavedUndo || !projectId || !folderOriginId) {
+      closeRevertDialog();
+      setReturnFocusAfterRevert(true);
+      return;
+    }
+    const targetPaths = revertScope.paths;
+    const answer = revertWorkspaceGitPathsFromController({
+      projectId,
+      paths: targetPaths,
+      runtimeId: effectiveRuntimeId ?? null,
+      originId: folderOriginId,
+      routing: "default",
+      // A turn's save holds the space's lease for a moment: retry once.
+      leaseConflictRetryDelayMs: WORKSPACE_SAVE_LEASE_RETRY_DELAY_MS,
+      keep: true,
+    }).catch(() => null);
+    const running = answer.then((result) => {
+      runningRevertRef.current = null;
+      applyUnsavedRevertOutcomeRef.current(result, targetPaths);
+    });
+    runningRevertRef.current = running;
+    setRevertWaitingAgain(false);
+    await waitForRevert(running);
+  }, [
+    closeRevertDialog,
+    effectiveRuntimeId,
+    folderOriginId,
+    projectId,
+    revertScope,
+    revertingChange,
+    unsavedUndo,
+    waitForRevert,
+  ]);
 
   // "Revert this change": a new version that undoes the saved version the
   // dialog checked (`{commit: head}`, no base, so the origin reverts exactly
@@ -1196,11 +1349,11 @@ export function ChatFileChangeList({
   // versions the old way, or write access is re-resolving), the chip behind
   // it is gone: close the dialog and return focus to the card.
   useEffect(() => {
-    if (revertConfirmOpen && !canRevertChange && !revertingChange) {
+    if (revertConfirmOpen && !canUndo && !revertingChange) {
       closeRevertDialog();
       setReturnFocusAfterRevert(true);
     }
-  }, [canRevertChange, closeRevertDialog, revertConfirmOpen, revertingChange]);
+  }, [canUndo, closeRevertDialog, revertConfirmOpen, revertingChange]);
 
   // After a revert the dialog's own button is gone and the Revert chip may be
   // too (every file reverted). Focus lands on the chip when it is still
@@ -1247,11 +1400,17 @@ export function ChatFileChangeList({
     }
     switch (revertScope?.status) {
       case "ready":
-        return describeRevertConfirm(revertScope.unlistedPaths);
+        return unsavedUndo ? UNSAVED_REVERT_CONFIRM_MESSAGE : describeRevertConfirm(revertScope.unlistedPaths);
       case "other_work":
         return describeRevertOtherWork(revertScope.otherPaths, Boolean(messageId));
       case "combined":
         return describeRevertCombined(Boolean(messageId));
+      case "changed_later":
+        return describeUnsavedRevertChangedLater(revertScope.paths, Boolean(messageId));
+      case "not_in_files":
+        return describeUnsavedRevertNotInFiles(Boolean(messageId));
+      case "machine_off":
+        return UNSAVED_REVERT_MACHINE_OFF_MESSAGE;
       case "failed":
         return revertCheckFailedCopy(revertScope.code);
       default:
@@ -1426,9 +1585,10 @@ export function ChatFileChangeList({
             </button>
             {projectWriteEnabled && savesAreVersions ? (
               // One Undo. Where the change's saved version can be undone, it
-              // saves a new version that does, with no turn of Octo's;
-              // otherwise it asks Octo to undo the change.
-              canRevertChange ? (
+              // saves a new version that does; where no save took the change,
+              // it puts the files back in the folder: either with no turn of
+              // Octo's. Otherwise it asks Octo to undo the change.
+              canUndo ? (
                 <button
                   ref={revertChipRef}
                   type="button"
@@ -1438,7 +1598,7 @@ export function ChatFileChangeList({
                   onClick={openRevertDialog}
                   aria-disabled={revertingChange || undefined}
                   aria-busy={revertingChange || undefined}
-                  title="Save a new version that undoes this change"
+                  title={unsavedUndo ? "Put the files back as they were before this turn" : "Save a new version that undoes this change"}
                   data-testid="chat-file-change-revert"
                 >
                   <Undo className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
@@ -1573,9 +1733,11 @@ export function ChatFileChangeList({
                     title={
                       revertedByVersion
                         ? "Undone by a new saved version"
-                        : undoStatus === "removed"
-                          ? "Removed from workspace"
-                          : "Reverted to git HEAD"
+                        : revertedInFolder
+                          ? "Put back as it was before this turn"
+                          : undoStatus === "removed"
+                            ? "Removed from workspace"
+                            : "Reverted to git HEAD"
                     }
                   >
                     {undoStatus === "removed" ? "Removed" : "Reverted"}
@@ -1731,7 +1893,11 @@ export function ChatFileChangeList({
               </Button>
               {/* Each action has its own key, so React never reuses one
                   button's node (and its focus) for another action. */}
-              {revertScope?.status === "other_work" || revertScope?.status === "combined" ? (
+              {revertScope?.status === "other_work" ||
+              revertScope?.status === "combined" ||
+              revertScope?.status === "changed_later" ||
+              revertScope?.status === "not_in_files" ||
+              revertScope?.status === "machine_off" ? (
                 messageId ? (
                   <Button
                     key="ask"
@@ -1750,7 +1916,7 @@ export function ChatFileChangeList({
                   key="revert"
                   isDisabled={revertScope?.status !== "ready"}
                   isPending={revertingChange}
-                  onPress={() => void handleRevertChange()}
+                  onPress={() => void (unsavedUndo ? handleRevertUnsaved() : handleRevertChange())}
                   data-testid="chat-file-change-revert-confirm"
                 >
                   Undo

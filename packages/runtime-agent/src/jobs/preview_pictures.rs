@@ -137,16 +137,24 @@ pub(crate) fn is_preview_id(value: &str) -> bool {
 /// The workspace paths a turn changed (created, changed or removed), not the
 /// files it only read.
 pub(super) fn changed_paths(files: &[CodexFileDescriptor]) -> Vec<String> {
-    let mut paths: Vec<String> = files
-        .iter()
-        .filter(|file| !file.is_read_reference())
-        .map(|file| {
-            if file.workspace_path.trim().is_empty() {
-                file.path.clone()
-            } else {
-                file.workspace_path.clone()
-            }
-        })
+    workspace_paths(
+        files
+            .iter()
+            .filter(|file| !file.is_read_reference())
+            .map(|file| {
+                if file.workspace_path.trim().is_empty() {
+                    file.path.clone()
+                } else {
+                    file.workspace_path.clone()
+                }
+            }),
+    )
+}
+
+/// `paths` as places in the workspace: relative, inside it, sorted, once each.
+fn workspace_paths(paths: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut paths: Vec<String> = paths
+        .into_iter()
         .map(|path| path.trim().trim_start_matches("./").to_string())
         .filter(|path| {
             !path.is_empty()
@@ -158,6 +166,52 @@ pub(super) fn changed_paths(files: &[CodexFileDescriptor]) -> Vec<String> {
     paths.sort();
     paths.dedup();
     paths
+}
+
+/// What this machine's own origin says a person's revert put back or removed
+/// in the checkout (Undo of a change no save took, `/git/revert`): the open
+/// previews of those sites are pictured again, as after a turn that changed
+/// them. Set once, by [`picture_sites_people_revert`].
+static PEOPLE_REVERTED: std::sync::OnceLock<
+    tokio::sync::mpsc::UnboundedSender<origin_http_server::routes::FilesReverted>,
+> = std::sync::OnceLock::new();
+
+/// The hook this machine's origin calls after a person's revert; `None`
+/// before [`picture_sites_people_revert`] ran.
+pub(crate) fn files_reverted_hook() -> Option<origin_http_server::routes::FilesRevertedHook> {
+    let sender = PEOPLE_REVERTED.get()?.clone();
+    Some(Arc::new(move |reverted| {
+        let _ = sender.send(reverted);
+    }))
+}
+
+/// Pictures again, with `sender` (this runtime's own credential), each open
+/// preview whose site a person's revert changed after it was last pictured,
+/// from the folder a turn of that space runs in (`workspace_dir_of`). Once
+/// per process; the checks are the ones a turn's end runs, within the same
+/// time.
+pub(crate) fn picture_sites_people_revert(
+    workspace_dir_of: impl Fn(&Uuid) -> std::path::PathBuf + Send + 'static,
+    sender: Arc<dyn PictureSender>,
+) {
+    let (reverted_tx, mut reverted_rx) = tokio::sync::mpsc::unbounded_channel();
+    if PEOPLE_REVERTED.set(reverted_tx).is_err() {
+        return;
+    }
+    tokio::spawn(async move {
+        while let Some(reverted) = reverted_rx.recv().await {
+            let reverted: origin_http_server::routes::FilesReverted = reverted;
+            let workspace_dir = workspace_dir_of(&reverted.project_id);
+            PictureRetake::start_for_paths(
+                &workspace_dir,
+                reverted.project_id,
+                workspace_paths(reverted.paths),
+                None,
+                Some(sender.clone()),
+            )
+            .detach();
+        }
+    });
 }
 
 /// The previews in `state` (the CLI's state file) that this machine has open
@@ -373,6 +427,18 @@ impl PictureRetake {
         } else {
             changed_paths(files)
         };
+        Self::start_for_paths(workspace_dir, project_id, changed, cancel, sender)
+    }
+
+    /// The same for `changed`, places in the workspace (see
+    /// [`changed_paths`]).
+    pub(super) fn start_for_paths(
+        workspace_dir: &Path,
+        project_id: Uuid,
+        changed: Vec<String>,
+        cancel: Option<JobCancelSignal>,
+        sender: Option<Arc<dyn PictureSender>>,
+    ) -> Self {
         let Some(sender) = sender.filter(|_| !changed.is_empty()) else {
             return Self { task: None };
         };
@@ -1526,5 +1592,45 @@ echo "sent-by-check=no" >> "$seen"
             .await;
         });
         assert_eq!(take_seen(), "");
+
+        // A person's Undo put the map's files back through this machine's
+        // own origin (`/git/revert`): the hook the origin calls pictures
+        // the site again, as a turn's end does, and the runtime sends it.
+        *sent.newer_while_sending.lock().unwrap() = None;
+        std::fs::write(home.join(PREVIEW_STATE_RELATIVE_PATH), state.to_string()).unwrap();
+        assert!(
+            files_reverted_hook().is_none(),
+            "no hook before the runtime sets it up"
+        );
+        let reverted_workspace = workspace.clone();
+        runtime.block_on(async {
+            picture_sites_people_revert(
+                move |_| reverted_workspace.clone(),
+                sent.clone() as Arc<dyn PictureSender>,
+            );
+        });
+        let hook = files_reverted_hook().expect("the hook the origin calls");
+        hook(origin_http_server::routes::FilesReverted {
+            project_id: project,
+            workspace_root: workspace.clone(),
+            paths: vec!["sites/seville/index.html".to_string()],
+        });
+        let until = Instant::now() + Duration::from_secs(10);
+        let mut pictured = Vec::new();
+        while pictured.is_empty() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(50));
+            pictured = sent.take();
+        }
+        assert_eq!(
+            pictured
+                .iter()
+                .map(|(space, id, _)| (*space, id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(project, "preview-1")]
+        );
+        assert!(
+            take_seen().contains("args=preview check --port 4173 --path /map"),
+            "the map's own preview was checked"
+        );
     }
 }

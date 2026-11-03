@@ -558,7 +558,9 @@ Studio picks its versioning UI per space from the project's default origin:
   the origin pages history. Each version can be reviewed or reverted; Revert saves a new version
   that undoes it (`POST /git/revert-commit {commit, base}`) and never rewrites history.
 - **Unsaved work** (History only): work kept on `refs/instafy/recovery/*`, listed with
-  `GET /git/recovery`. Restore commits it as a new version
+  `GET /git/recovery`. It includes what Undo of a change no save took put back (`undone`, from a
+  workspace runtime's or Desktop origin's `POST /git/revert {paths, keep: true}`), titled "Edits
+  undone from the chat". Restore commits it as a new version
   (`POST /git/recovery/restore`); when files changed since, Studio asks per file (use the kept
   version, keep the current one, or ask the agent) and finishes with a `keep` list, or Cancel,
   which closes the choices and restores nothing else. "Use this

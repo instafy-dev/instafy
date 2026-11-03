@@ -2395,6 +2395,117 @@ async fn serve_config(
     (format!("http://{address}"), handle)
 }
 
+/// Undo of a change no save took (a turn's edits a Stop left unsaved): the
+/// files go back as `HEAD` has them, and what the revert undoes is kept on
+/// an `undone` recovery ref the next publish pushes, so History lists it
+/// under Unsaved work. The process hosting the origin is told which files
+/// changed, so it can picture the site again. A revert that does not ask to
+/// keep keeps nothing, as before.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revert_keeps_what_it_undoes_when_asked() {
+    let sc = Scenario::new(Options::default());
+    let told = std::sync::Arc::new(std::sync::Mutex::new(
+        Vec::<crate::routes::FilesReverted>::new(),
+    ));
+    let client = reqwest::Client::new();
+    let config = std::sync::Arc::new(sc.config.clone());
+    let validator = crate::auth::TokenValidator::new(client.clone(), config.jwks_url.clone());
+    let mut state =
+        crate::routes::AppState::new(config, validator, client.clone(), sc.ws.clone(), None)
+            .expect("app state");
+    let sink = told.clone();
+    state.files_reverted = Some(std::sync::Arc::new(move |reverted| {
+        sink.lock().unwrap().push(reverted);
+    }));
+    let app = crate::routes::router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    sc.write("README.md", b"one\nBEFORE YOU GO\ntwo\n");
+    sc.write("notes/plan.md", b"made by the stopped turn\n");
+    let response = client
+        .post(format!("{base}/git/revert"))
+        .json(&serde_json::json!({ "paths": ["README.md", "notes/plan.md"], "keep": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["reverted"], serde_json::json!(["README.md"]), "{body}");
+    assert_eq!(
+        body["removed"],
+        serde_json::json!(["notes/plan.md"]),
+        "{body}"
+    );
+    // The files are as the saved version has them, and nothing is staged.
+    assert_eq!(sc.disk("README.md").as_deref(), Some(README));
+    assert_eq!(sc.disk("notes/plan.md"), None);
+    assert_eq!(sc.status(), "");
+    // What the revert undid is kept, locally until the next publish.
+    let kept = body["kept"]["ref"].as_str().expect("kept ref");
+    assert!(
+        kept.starts_with(&format!("{LOCAL_RECOVERY_ROOT}/")),
+        "{kept}"
+    );
+    assert!(kept.contains("-undone-"), "{kept}");
+    assert_eq!(
+        ig(&sc.ws, &["show", &format!("{kept}:README.md")]),
+        "one\nBEFORE YOU GO\ntwo"
+    );
+    assert_eq!(
+        ig(&sc.ws, &["show", &format!("{kept}:notes/plan.md")]),
+        "made by the stopped turn"
+    );
+    assert_eq!(
+        *told.lock().unwrap(),
+        vec![crate::routes::FilesReverted {
+            project_id: sc.config.project_id,
+            workspace_root: sc.ws.clone(),
+            paths: vec!["README.md".to_string(), "notes/plan.md".to_string()],
+        }]
+    );
+    // The next save pushes it, where History lists it.
+    sc.write("other.md", b"a later turn\n");
+    sc.publish_paths(&["other.md"]);
+    let pushed = sc.remote_refs("refs/instafy/recovery/");
+    assert_eq!(pushed.len(), 1, "{pushed:?}");
+    assert!(pushed[0].0.contains("-undone-"), "{pushed:?}");
+    assert_eq!(
+        sc.recovery_file(&pushed[0].0, "README.md").as_deref(),
+        Some("one\nBEFORE YOU GO\ntwo\n")
+    );
+    assert_eq!(sc.remote_file("README.md").as_deref(), Some(README));
+
+    // Without `keep`, nothing is kept.
+    sc.write("doc.md", b"an unsaved edit\n");
+    let response = client
+        .post(format!("{base}/git/revert"))
+        .json(&serde_json::json!({ "paths": ["doc.md"] }))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(body["kept"].is_null(), "{body}");
+    assert_eq!(
+        sc.disk("doc.md").as_deref(),
+        Some("alpha\nbeta\ngamma\ndelta\n")
+    );
+    assert_eq!(sc.local_refs(&format!("{LOCAL_RECOVERY_ROOT}/")).len(), 0);
+    // Nothing to keep when the files already read as `HEAD` has them.
+    let response = client
+        .post(format!("{base}/git/revert"))
+        .json(&serde_json::json!({ "paths": ["doc.md"], "keep": true }))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(body["kept"].is_null(), "{body}");
+    server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_route_reports_conflicts_refusals_and_refresh() {
     let sc = Scenario::new(Options::default());

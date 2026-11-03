@@ -44,7 +44,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::push::{push, PushClass};
-use crate::workspace_git::{GitIdentity, RunOpts, WorkspaceGit};
+use crate::workspace_git::{nul_list, temp_index_dir, GitIdentity, RunOpts, WorkspaceGit};
 
 pub const LOCAL_RECOVERY_ROOT: &str = "refs/instafy/local-recovery";
 pub const LOCAL_RECOVERY_PUSHED_ROOT: &str = "refs/instafy/local-recovery-pushed";
@@ -83,6 +83,9 @@ pub enum RecoveryKind {
     Unsaved,
     /// Copies an older sync left behind that differ from the saved files.
     Stale,
+    /// Changes a person undid from the chat before anything saved them (a
+    /// turn's edits a Stop left unsaved), kept so they can be restored.
+    Undone,
 }
 
 impl RecoveryKind {
@@ -92,6 +95,7 @@ impl RecoveryKind {
             Self::Unpublished => "unpublished",
             Self::Unsaved => "unsaved",
             Self::Stale => "stale",
+            Self::Undone => "undone",
         }
     }
 
@@ -101,9 +105,19 @@ impl RecoveryKind {
             Self::Unpublished => "Keep changes that could not be saved",
             Self::Unsaved => "Keep unsaved changes from a stopped workspace",
             Self::Stale => "Keep old copies left by an earlier sync",
+            Self::Undone => "Keep changes undone from the chat",
         }
     }
 }
+
+/// Every kind, in the order names are matched.
+const KINDS: [RecoveryKind; 5] = [
+    RecoveryKind::Conflict,
+    RecoveryKind::Unpublished,
+    RecoveryKind::Unsaved,
+    RecoveryKind::Stale,
+    RecoveryKind::Undone,
+];
 
 /// A local commit listed in a recovery commit's message.
 #[derive(Clone, Debug)]
@@ -162,6 +176,58 @@ fn pushed_ref(name: &str) -> String {
 
 fn dismissed_ref(name: &str) -> String {
     format!("{LOCAL_RECOVERY_DISMISSED_ROOT}/{name}")
+}
+
+/// Store the work-tree copies of `paths` as a recovery commit of `kind` on
+/// `head`: HEAD's tree with those copies, a path gone from the work tree
+/// kept as removed. HEAD, the index and the files are not touched. `None`
+/// when the copies are HEAD's (nothing to keep).
+pub(crate) fn park_worktree_paths(
+    git: &WorkspaceGit<'_>,
+    head: &str,
+    paths: &[String],
+    kind: RecoveryKind,
+    identity: GitIdentity,
+    origin_id: Uuid,
+) -> Result<Option<RecoveryRefReport>> {
+    let scratch = temp_index_dir(git)?;
+    let index = scratch.path().join("index");
+    let opts = RunOpts {
+        index_file: Some(&index),
+        ..RunOpts::default()
+    };
+    git.ok_opts(&["read-tree", head], &opts)?;
+    let list = nul_list(paths);
+    git.ok_opts(
+        &[
+            "add",
+            "-A",
+            "--ignore-errors",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ],
+        &RunOpts {
+            index_file: Some(&index),
+            stdin: Some(&list),
+            literal_pathspecs: true,
+            ..RunOpts::default()
+        },
+    )?;
+    let tree = git.stdout_opts(&["write-tree"], &opts)?;
+    store(
+        git,
+        RecoverySpec {
+            kind,
+            tree,
+            parent: Some(head.to_string()),
+            source: None,
+            date: None,
+            paths: paths.to_vec(),
+            commits: Vec::new(),
+            identity,
+            origin_id,
+        },
+    )
 }
 
 /// Store a recovery commit locally. Returns `None` when its tree equals its
@@ -494,6 +560,10 @@ fn message(spec: &RecoverySpec) -> String {
             "An older version of the sync left these copies behind. They differ from\n\
              the saved files, so they were set aside instead of being saved.\n",
         ),
+        RecoveryKind::Undone => body.push_str(
+            "These changes were undone from the chat before anything saved them. This\n\
+             commit keeps them so they can be restored.\n",
+        ),
     }
     if !spec.commits.is_empty() {
         body.push_str("\nLocal commits:\n");
@@ -571,14 +641,7 @@ pub(crate) fn is_recovery_name(name: &str) -> bool {
             .iter()
             .chain(&stamp[9..15])
             .all(u8::is_ascii_digit)
-        && [
-            RecoveryKind::Conflict,
-            RecoveryKind::Unpublished,
-            RecoveryKind::Unsaved,
-            RecoveryKind::Stale,
-        ]
-        .iter()
-        .any(|known| known.as_str() == kind)
+        && KINDS.iter().any(|known| known.as_str() == kind)
         && hash.len() == 12
         && hash
             .bytes()
@@ -1190,14 +1253,9 @@ pub(crate) fn origin_of(git: &WorkspaceGit<'_>, rev: &str, fallback: Uuid) -> Uu
 }
 
 pub(crate) fn kind_of_name(name: &str) -> Option<RecoveryKind> {
-    [
-        RecoveryKind::Conflict,
-        RecoveryKind::Unpublished,
-        RecoveryKind::Unsaved,
-        RecoveryKind::Stale,
-    ]
-    .into_iter()
-    .find(|kind| name.contains(&format!("-{}-", kind.as_str())))
+    KINDS
+        .into_iter()
+        .find(|kind| name.contains(&format!("-{}-", kind.as_str())))
 }
 
 /// Delete this checkout's `unpublished` refs whose source commits are now on
@@ -1274,12 +1332,7 @@ mod tests {
 
     #[test]
     fn kinds_round_trip_through_names() {
-        for kind in [
-            RecoveryKind::Conflict,
-            RecoveryKind::Unpublished,
-            RecoveryKind::Unsaved,
-            RecoveryKind::Stale,
-        ] {
+        for kind in KINDS {
             let name = format!("20261002T120000Z-{}-0123456789ab", kind.as_str());
             assert_eq!(kind_of_name(&name), Some(kind));
             assert!(is_recovery_name(&name), "{name}");
