@@ -216,10 +216,87 @@ pub(crate) fn browser_step_facts(
     Some(JsonValue::Object(facts))
 }
 
+/// The address of the page a step that can take the tab to another page left it on, as the
+/// browser's controller reported it (masked, without its fragment): the pages a turn's own steps
+/// opened. Only for a hand-back whose browser turn wrote no finding lines
+/// (`jobs::browser_hand_back::finding_lines_from_pages`), never projected into a message. None for
+/// a look at a page too busy to read, a step that cannot move the tab, or a page the controller
+/// named no address for.
+pub(crate) fn step_page_address(
+    tool: &str,
+    arguments: Option<&JsonValue>,
+    payload: Option<&JsonValue>,
+) -> Option<String> {
+    let own = step_of_tool(tool, arguments)?;
+    if !PAGE_MOVING_STEPS.contains(&own) {
+        return None;
+    }
+    let reported = payload?.get("activity")?;
+    if reported.get("step").and_then(JsonValue::as_str) == Some("status") {
+        return None;
+    }
+    let mut url = http_url(reported.get("url")?.as_str()?)?;
+    url.set_fragment(None);
+    Some(url.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A turn's own steps name the pages they left a tab on, a look at a page too busy to
+    /// read and a step that moves no tab name none.
+    #[test]
+    fn a_step_names_the_page_it_left_the_tab_on() {
+        let payload = |step: &str, url: &str| json!({ "activity": { "step": step, "url": url } });
+        for (tool, step) in [
+            ("navigate", "navigate"),
+            ("open_tab", "open_tab"),
+            ("click", "click"),
+            ("choose", "choose"),
+            ("navigate", "snapshot"),
+        ] {
+            assert_eq!(
+                step_page_address(
+                    tool,
+                    None,
+                    Some(&payload(step, "https://maker.example/laptop-13#specs"))
+                )
+                .as_deref(),
+                Some("https://maker.example/laptop-13"),
+                "{tool}"
+            );
+        }
+        assert_eq!(
+            step_page_address(
+                "navigate",
+                None,
+                Some(&payload("status", "https://maker.example/"))
+            ),
+            None
+        );
+        for tool in ["snapshot", "scroll", "list_tabs", "status"] {
+            assert_eq!(
+                step_page_address(
+                    tool,
+                    None,
+                    Some(&payload("snapshot", "https://maker.example/"))
+                ),
+                None,
+                "{tool}"
+            );
+        }
+        for url in ["about:blank", "", "file:///etc/passwd"] {
+            assert_eq!(
+                step_page_address("navigate", None, Some(&payload("navigate", url))),
+                None,
+                "{url}"
+            );
+        }
+        assert_eq!(step_page_address("navigate", None, Some(&json!({}))), None);
+        assert_eq!(step_page_address("navigate", None, None), None);
+    }
 
     #[test]
     fn keeps_only_the_step_host_page_key_and_approval() {

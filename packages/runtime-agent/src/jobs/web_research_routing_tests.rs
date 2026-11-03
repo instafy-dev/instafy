@@ -669,7 +669,7 @@ fn the_browser_skill_sets_a_list_with_choose_never_by_clicking_it() {
         .collect();
     assert_eq!(fields, ["option"]);
     let line = format!(
-        "Set a list (a select) with `choose` and `{}`, the option's label as the list shows it, never by clicking it. Choosing does not send the form, though some pages send it when a list changes; the form's own button sends it, and asks.",
+        "Set a list (a select) with `choose` and `{}`, the option's label as the list shows it, never by clicking it. Choosing does not send the form, though some pages send it when a list changes; the form's own button sends it (any prompt it raises is the person's to answer).",
         fields[0]
     );
     assert!(section.contains(&line), "{section}");
@@ -699,7 +699,7 @@ fn a_route_comes_from_the_operators_journey_planner() {
     let start = BROWSER_SKILL.find("## Finding a page").expect("section");
     let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
     let section = flat(&BROWSER_SKILL[start..end]);
-    let line = "- A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner, its stations chosen), not a listing or a kiosk page: those only lead to it.";
+    let line = "- A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: choose its stations, set the day and a daytime hour, press its button and read the route off the page it shows), not a listing or a kiosk page: those only lead to it.";
     assert!(section.contains(line), "{section}");
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(line));
@@ -952,8 +952,9 @@ fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() 
         line("browser_then_build"),
         "- `browser_then_build`: the same, and Octo then makes or changes something in this space \
          (a page, a map, a table). So is research whose answer ends in a page (a comparison, \
-         prices, a route), from the first message. A request to make one with no site to use \
-         first (\"on a map\", \"put this on a page\") is `direct`."
+         prices, a route), from the first message. A request to make one from what this chat \
+         already found, or with no site to use first (\"on a map\", \"put this on a page\"), is \
+         `direct`."
     );
     let reply = section
         .lines()
@@ -1011,7 +1012,7 @@ fn a_follow_up_on_the_chats_browser_work_browses_even_when_it_needs_a_page_here(
         "{stay}"
     );
     // Making a page from what the browser found, with no site to use first, is still a build.
-    assert!(section.contains("(\"on a map\", \"put this on a page\") is `direct`."));
+    assert!(section.contains("(\"on a map\", \"put this on a page\"), is `direct`."));
 
     // The routing prompt for such a follow-up carries the line, whole.
     let tmp = scaffolded_space();
@@ -1184,7 +1185,7 @@ fn a_route_is_planned_for_the_day_and_time_the_person_travels() {
     let start = BROWSER_SKILL.find("## Finding a page").expect("section");
     let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
     let section = flat(&BROWSER_SKILL[start..end]);
-    let line = "- A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner, its stations chosen), not a listing or a kiosk page: those only lead to it. Plan a route for the day and time the person travels (a daytime hour when they gave none); say which day and time it is for.";
+    let line = "- A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: choose its stations, set the day and a daytime hour, press its button and read the route off the page it shows), not a listing or a kiosk page: those only lead to it. Plan a route for the day and time the person travels (a daytime hour when they gave none); say which day and time it is for.";
     assert!(section.contains(line), "{section}");
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(line));
@@ -1298,9 +1299,19 @@ fn a_bare_keep_going_carries_on_what_the_chat_left_open() {
         .expect("the browser line");
     assert!(
         line.ends_with(
-            "or it carries on browser work this chat started, whether or not that found the answer: a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked), never a change the person stopped or undid; when a page here shows it, that is `browser_then_build`."
+            "or it carries on browser work this chat started, whether or not that found the answer: a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked); when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`."
         ),
         "{line}"
+    );
+    // Never a change the person stopped or undid, on any route: the first rule, ahead of the
+    // routes, where `direct` reads it too.
+    let first_rule = section
+        .lines()
+        .find(|line| line.starts_with("- "))
+        .expect("the first rule");
+    assert_eq!(
+        first_rule,
+        "- A bare \"keep going\" never carries on a change the person stopped or undid."
     );
     assert!(section.chars().count() <= BROWSER_SKILL_ROUTING_MAX_CHARS);
 
@@ -1712,10 +1723,10 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
         "Never a search engine or a guessed path.",
         "A page that says it is missing (\"not found\", \"are you lost?\"): use that site's own search box or menu.",
         "A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.",
-        "A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner, its stations chosen), not a listing or a kiosk page",
+        "A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: choose its stations, set the day and a daytime hour, press its button and read the route off the page it shows), not a listing or a kiosk page",
         "Anything not read on a page this turn (from memory or a search result: how far, how to get there, what is best) says \"not checked\", or stays out.",
         "Comparing: list the models a page you read names, its menu included, then open each one's own page; mark one only a search result names \"not checked\". Never names from memory, never placeholders such as \"candidate 1\".",
-        "A cookie banner with a reject button (\"Reject all\", \"Only necessary\"): press it so it does not cover the page the person watches.",
+        "A page whose reading lists a cookie banner's reject button (\"Reject all\", \"Reject\", \"Only necessary\"): press it before your next step, and nothing else on the banner; never accept.",
     ] {
         assert!(carried.contains(needle), "{needle}");
     }
@@ -2142,4 +2153,126 @@ fn the_research_skill_reads_finding_a_page_with_one_short_command() {
         "{command}"
     );
     assert!(printed.len() < 2_000, "{} bytes", printed.len());
+}
+
+/// Research that ends in a page reaches its build, a page made from what the chat already found
+/// goes straight to one, and a bare "keep going" never brings back what the person stopped or
+/// undid (local tests, Nov 3). "Fill in what's still missing." after a comparison's browser turn,
+/// with no page made yet, went to the browser alone, which hands nothing back: only a page here
+/// sent carried-on work to a build. "Put the hours and the metro route on a small page I can
+/// share." went through the browser, though its routing answer said the chat already had the
+/// facts. A bare "keep going" after a Stop and an Undo took a `direct` route and put the undone
+/// section back: the rule against it sat in the `browser` route's line. It is the first rule now,
+/// ahead of every route. Filling in a page that exists stays `browser_then_build`. The routing
+/// step reads the whole section for each of these messages, and an unedited earlier copy is
+/// upgraded.
+#[test]
+fn research_that_ends_in_a_page_reaches_its_build_and_keep_going_never_undoes_an_undo() {
+    let start = BROWSER_SKILL
+        .find("\n## Routing preflight\n")
+        .expect("routing section")
+        + 1;
+    let section = BROWSER_SKILL[start..].trim_end();
+    let rules: Vec<&str> = section
+        .lines()
+        .filter(|line| line.starts_with("- "))
+        .collect();
+    assert_eq!(
+        rules[0],
+        "- A bare \"keep going\" never carries on a change the person stopped or undid."
+    );
+    assert!(rules[1].starts_with("- `browser`:"), "{}", rules[1]);
+    assert!(
+        rules[1].ends_with(
+            "when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`."
+        ),
+        "{}",
+        rules[1]
+    );
+    assert!(!rules[1].contains("stopped or undid"), "{}", rules[1]);
+    assert!(
+        rules[2].ends_with(
+            "A request to make one from what this chat already found, or with no site to use first (\"on a map\", \"put this on a page\"), is `direct`."
+        ),
+        "{}",
+        rules[2]
+    );
+    assert!(
+        rules[3].ends_with(
+            "unless all it needs is what this chat's browser work found: filling in, checking again or going on with that work is `browser_then_build`."
+        ),
+        "{}",
+        rules[3]
+    );
+    assert_eq!(section.matches("stopped or undid").count(), 1, "{section}");
+    assert!(section.chars().count() <= BROWSER_SKILL_ROUTING_MAX_CHARS);
+
+    let tmp = scaffolded_space();
+    for request in [
+        "Compare the three latest laptops of one maker: processor, battery, weight and price, with two independent reviews each, as a comparison page.",
+        "Fill in what's still missing.",
+        "Put the hours and the metro route on a small page I can share.",
+        "keep going",
+    ] {
+        let job = test_lease_job(
+            Some("feature"),
+            json!({ "prompt_text": request, "metadata": {} }),
+        );
+        let routes = browser_routing_snapshot_for_job(&job, tmp.path(), request)
+            .expect("the message is offered the browser routes");
+        assert!(!routes.contains("(truncated)"), "{request}: {routes}");
+        assert!(routes.contains(section), "{request}: {routes}");
+    }
+
+    let previous = include_str!("legacy/browser-automation-v27.md");
+    assert!(previous.contains("never a change the person stopped or undid; when a page here"));
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+}
+
+/// A metro turn chose both stations in a planner form on the operator's home page, set no day or
+/// time, never pressed the form's button and replied with no route, the fifth time (a local test,
+/// Nov 3). The browser skill said a route comes from the planner "its stations chosen", and that a
+/// form's own button "sends it, and asks", which reads as a reason to stop. A route is planned to
+/// the end: its stations, a day and a daytime hour, its button, and the route read off the page it
+/// shows; any prompt the button raises is the person's to answer. The form-post approval itself is
+/// unchanged. Within the part a snapshot carries, without pushing the sign-in rules out of it.
+#[test]
+fn a_route_is_planned_to_the_end_and_a_forms_prompt_is_the_persons() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
+    for line in [
+        "a route from the operator's journey planner: choose its stations, set the day and a daytime hour, press its button and read the route off the page it shows)",
+        "the form's own button sends it (any prompt it raises is the person's to answer).",
+    ] {
+        assert!(carried.contains(line), "{line}");
+    }
+    for earlier in ["its stations chosen", "sends it, and asks."] {
+        assert!(!flat(BROWSER_SKILL).contains(earlier), "{earlier}");
+    }
+    assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
+    assert!(
+        BROWSER_SKILL.len() <= PINNED_SKILL_MAX_BYTES,
+        "{} bytes",
+        BROWSER_SKILL.len()
+    );
+}
+
+/// A banner's reject button was in the page's reading, and no turn pressed it: "Reject all" on a
+/// bookshop's page and "Reject" on a maker's product page, both listed as banner buttons, the
+/// second drive running (local tests, Nov 3). The line said to press one "so it does not cover
+/// the page the person watches", which a turn reading the page's text never sees, and named no
+/// moment. It says when (before the turn's next step), names a plain "Reject" too, and still
+/// never accepts or presses anything else on a banner. Within the part a snapshot carries.
+#[test]
+fn a_banners_reject_button_in_the_reading_is_pressed_before_the_next_step() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
+    assert!(carried.contains(
+        "- A page whose reading lists a cookie banner's reject button (\"Reject all\", \"Reject\", \"Only necessary\"): press it before your next step, and nothing else on the banner; never accept. With no reject button on the banner itself, leave it up and read on."
+    ));
+    assert!(!flat(BROWSER_SKILL).contains("so it does not cover the page the person watches"));
+    assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
 }

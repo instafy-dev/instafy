@@ -1,6 +1,7 @@
 import { useCallback, useRef } from "react";
 import type { ChatMessage } from "../types";
 import { readChatRunStopNotice } from "./ChatRunStopNotice";
+import { readChangeUndone } from "./chatLaterChanges";
 import type { QueuedChatSendItem } from "./chatSendQueueStorage";
 import type { SubmitMessageFn } from "./useChatSubmitFlow";
 
@@ -29,7 +30,13 @@ export function useChatRunStopContinuation(options: Options) {
       && state.messages.some((entry) => entry.id === message.id)
       && !submitted.current.has(key)
       && !state.messages.some((entry) => entry.metadata?.continuedStopMessageId === message.id)
-      && !state.queuedSends.some((entry) => entry.metadata?.continuedStopMessageId === message.id));
+      && !state.queuedSends.some((entry) => entry.metadata?.continuedStopMessageId === message.id)
+      // The person undid what the stopped turn changed: carrying it on would
+      // put back what they took back.
+      && !state.messages.some((entry) => {
+        const undone = readChangeUndone(entry);
+        return Boolean(undone?.runId && notice.runIds.includes(undone.runId));
+      }));
   }, []);
   const onContinue = useCallback(async (message: ChatMessage) => {
     if (!canContinue(message)) return false;
