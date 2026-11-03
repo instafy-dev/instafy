@@ -563,11 +563,16 @@ export function useAgentJobThreadPreviewState({
           ? "failed"
           : "completed";
   // The steps the controller stored with the turn's reply: all of them, also
-  // when this page of history starts in the middle of the turn.
-  const recordedSteps = useMemo(
-    () => (finalSummaryMessage ? readTurnStepsRecord(finalSummaryMessage, jobId || null) : null),
-    [finalSummaryMessage, jobId],
-  );
+  // when this page of history starts in the middle of the turn, and also when
+  // that reply has no words (a browser turn whose findings went back to a
+  // build), which the summary above passes over.
+  const recordedSteps = useMemo(() => {
+    for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
+      const steps = readTurnStepsRecord(threadMessages[index]!, jobId || null);
+      if (steps) return steps;
+    }
+    return null;
+  }, [jobId, threadMessages]);
   const activity = useMemo(() => {
     const options = {
       jobId: jobId || null,

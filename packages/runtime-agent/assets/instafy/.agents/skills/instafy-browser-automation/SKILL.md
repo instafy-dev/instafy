@@ -68,7 +68,7 @@ existing control boundary. Read-only public verification may still use
 
 One `request_browser` card may carry up to 6 related reads (`instafy-web-research`
 says which, and never a link-only site). In the browser turn, read each listed
-page once; a page never adds a read, and a read never signs in, submits or buys.
+page once (a read never signs in, submits or buys); a page never adds a read to the card's list.
 In the Shared Browser, read them one by one on the chat's own page (`navigate`);
 open your own tab (`open_tab`, 3 at most) only to hold two pages at once.
 A sign-in, CAPTCHA or bot check, paywall, HTTP 401/403/429, a download, a page
@@ -86,28 +86,13 @@ secrets), or `{"url", "stopped"}` (`login`, `captcha`, `paywall`, `blocked`,
 
 For every reader, browser or not:
 
-- Open an address the person, a skill or a search result gave, a link on a page
-  you read (print a page's links with its text), or the home page of the
-  official site the task is about. Never a search engine or a guessed path.
-- A page that says it is missing ("not found", "are you lost?"): use that
-  site's own search box or menu.
-- A page that fails (busy, blank, or an error page such as 504): open the
-  place's own site now, in this turn. After that, another official
-  source.
-- A sight, stop, opening hours, price or route comes from its own page (the
-  venue's, operator's or shop's; a route from the operator's journey planner,
-  its stations chosen), not a listing or a kiosk page: those only lead to it.
-  Plan a route for the day and time the person travels (a daytime hour when
-  they gave none); say which day and time it is for.
-- Anything not read on a page this turn (from memory or a search result) says
-  "not checked" next to it.
-- Comparing: list the models a page you read names, its menu included, then
-  open each one's own page; mark one only a search result names "not checked".
-  Never names from memory, never placeholders such as "candidate 1".
-- A cookie banner with a reject button ("Reject all", "Only necessary"): press
-  it so it does not cover the page the person watches. With no reject button on
-  the banner itself, leave it up and read on. Refuse through its settings only
-  when the person asks; saving those settings asks once.
+- Open an address the person, a skill or a search result gave, a link on a page you read (print a page's links with its text), or the home page of the official site the task is about. Never a search engine or a guessed path.
+- A page that says it is missing ("not found", "are you lost?"): use that site's own search box or menu.
+- A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.
+- A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner, its stations chosen), not a listing or a kiosk page: those only lead to it. Plan a route for the day and time the person travels (a daytime hour when they gave none); say which day and time it is for.
+- Anything not read on a page this turn (from memory or a search result: how far, how to get there, what is best) says "not checked", or stays out.
+- Comparing: list the models a page you read names, its menu included, then open each one's own page; mark one only a search result names "not checked". Never names from memory, never placeholders such as "candidate 1".
+- A cookie banner with a reject button ("Reject all", "Only necessary"): press it so it does not cover the page the person watches. With no reject button on the banner itself, leave it up and read on. Refuse through its settings only when the person asks; saving those settings asks once.
 
 ## Shared Browser command (only when Shared Browser is exposed)
 
@@ -136,14 +121,14 @@ the request, or end the turn and ask.
 - Use the browser capability actually exposed for this turn. Never fall through from an unavailable transport to a different one.
 - For Personal or Shared Browser, default to one browser-capable runtime per conversation.
 - Start with the exposed browser tool itself, not install checks (`node -v`, `npm i`), env or repo searches (`env | rg PLAYWRIGHT`) or runtime introspection (`instafy runtime status`); report the tool's concrete error if provisioning failed.
-- For requests like “open this page”, “read the title”, “click this button”, or “continue the current browser session”, the first executable step must target the page directly.
+- For requests like "open this page", "read the title", "click this button", or "continue the current browser session", the first executable step must target the page directly.
 - Do not reopen `INSTAFY.md`, `AGENTS.md`, or `.agents/skills/**` via shell before the first page action. Project memory and loaded learned blocks are already in context for this run.
 - If a learned block was loaded for this run, trust it first. Only reopen memory files after a concrete browser action failed and the missing cue is still unclear.
 - If the current prompt names exact controls, routes, labels, or query terms, those prompt-provided cues override older learned surface-specific cues. Use learned memory for durable invariants and retrieval guidance, not to overwrite the prompt with an older sibling-surface route.
 - Prefer exact stable cues you actually observed over broad guesses: selectors, ids, names, relative hrefs, routes, and exact visible control text. Never downgrade `button text "Apply filter"` or `link text "Epsilon account"` into a substring regex, a `contains` check or a vague phrase like `matching result`.
 - In Personal or Shared Browser, reuse the current tab when it already matches the task. If you must open or switch tabs, bring the controlled tab to the front so the user sees the same state.
 - For a recommendation, a results list is a starting point: open the strongest candidates' own pages and open map data until you can name concrete options with evidence (or the strongest observed shortlist), or a concrete blocker; never just links, unless asked. Never open a site on `instafy-web-research`'s link-only list.
-- In Personal or Shared Browser, “another window” or “another browser” usually means a new tab in this session: an isolated session only when they mention separate login or cookie state, a new runtime only when they ask for a fully separate browser.
+- In Personal or Shared Browser, "another window" or "another browser" usually means a new tab in this session: an isolated session only when they mention separate login or cookie state, a new runtime only when they ask for a fully separate browser.
 - Prefer a compact action path. Do not fall into inspect/retry loops unless a direct attempt produced a concrete blocker.
 - Treat sign-in, one-time codes, consent and payment as the person's steps: pause on them with `request_human_input`, and continue when they choose Let Octo continue.
 - Opening, reading and navigating a signed-in site needs no extra confirmation in chat, and the browser's own site and action prompts still apply; ask before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step unless the person's current message named it.
@@ -247,7 +232,7 @@ what comes next).
 
 A routing step before Octo's turn can send the person's message straight to Instafy's browser. That browser turn sees only those words and this chat's earlier browser turns.
 
-- `browser`: the person names Instafy's browser ("in your browser"), the work happens on a website (open a site to use it, sign in, fill in or send a form, press its buttons, walk through its screens), or it carries on browser work this chat started, whether or not that found the answer.
+- `browser`: the person names Instafy's browser ("in your browser"), the work happens on a website (open a site to use it, sign in, fill in or send a form, press its buttons, walk through its screens), or it carries on browser work this chat started, whether or not that found the answer: a bare "keep going" carries on what the chat left open (what its replies or page mark not checked), never a change the person stopped or undid; when a page here shows it, that is `browser_then_build`.
 - `browser_then_build`: the same, and Octo then makes or changes something in this space (a page, a map, a table). So is research whose answer ends in a page (a comparison, prices, a route), from the first message. A request to make one with no site to use first ("on a map", "put this on a page") is `direct`.
 - Stay `direct`, even when the message names Instafy's browser, when the site runs in this space (a preview card), the person says not to use the browser, or it has attachments. Also when the browser part needs what only this space or another chat holds (what a page, map or file here says, or "those" from a reply that was not the browser's): the building turn reads it and names it in a card, unless all it needs is what this chat's browser work found: filling in, checking again or going on with that work is `browser_then_build`.
 - Research whose answer is a reply (facts, a price, opening hours, reviews) stays `direct` when the message does not name the browser, unless it carries on this chat's browser work: the building turn reads first and opens the browser itself if a page needs it.

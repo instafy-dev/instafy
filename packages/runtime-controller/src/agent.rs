@@ -5212,7 +5212,8 @@ pub(crate) async fn lease_next_agent_job(
         // What the conversation's browser turns found since the building
         // thread's last turn: a building turn on a restored thread reads them
         // as quoted page data (runtime-agent `browser_hand_back.rs`). Every
-        // lease sets it, so no copy a client sent can survive.
+        // lease sets the hand-back's keys, so no copy a client sent can
+        // survive (`browser_hand_back::stamp_lease`).
         let job_id: Uuid = row.get("id");
         // A terminal command runs no model, and a granted turn reads no
         // thread of the chat's.
@@ -5234,15 +5235,7 @@ pub(crate) async fn lease_next_agent_job(
             crate::browser_hand_back::BrowserTurnsSince::default()
         };
         if let JsonValue::Object(ref mut map) = payload {
-            map.insert(
-                crate::browser_hand_back::TURNS_SINCE_KEY.to_string(),
-                JsonValue::Array(turns_since.turns),
-            );
-            // Whether older browser turns were left out to keep the newest.
-            map.insert(
-                crate::browser_hand_back::TURNS_SINCE_LEFT_OUT_KEY.to_string(),
-                JsonValue::Bool(turns_since.earlier_left_out),
-            );
+            crate::browser_hand_back::stamp_lease(map, turns_since);
         }
 
         // Anyone's `/skills` message opens a setup, so a granted turn reads

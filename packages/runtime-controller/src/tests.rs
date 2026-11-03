@@ -12788,6 +12788,12 @@ async fn agent_lease_requires_signed_runtime_identity_before_claiming_private_jo
             body["jobs"][0]["payload"]["browser_turns_since_earlier_left_out"] == json!(false),
             "{body}"
         );
+        // And that this controller reads the note of a browser turn that
+        // posted no words as its reply, so such a turn may post none.
+        anyhow::ensure!(
+            body["jobs"][0]["payload"]["browser_hand_back_reads_note"] == json!(true),
+            "{body}"
+        );
         let row = pool
             .get()
             .await?

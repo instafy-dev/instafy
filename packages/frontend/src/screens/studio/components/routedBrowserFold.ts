@@ -7,7 +7,7 @@
 // itself, or opening failed) shows with its site and its reason.
 //
 // A message Octo sent straight to Instafy's browser reads as one turn: the
-// person's message, then the browser turn's own line and reply. Its job ran
+// person's message, then the browser turn's own line and any reply. Its job ran
 // no model turn and posted only a routed card (`browserRequest.routed`),
 // which Studio opens by itself where it can, sending the person's own words
 // on as the browser turn's task. The chat leaves that continuation out (it
