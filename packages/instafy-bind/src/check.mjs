@@ -110,7 +110,7 @@ function siteFiles(root) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith(".") && depth < 4) walk(full, depth + 1);
-      } else if (entry.isFile() && /\.(html?|json|geojson|m?js)$/i.test(entry.name) && entry.name !== "bound.json" && entry.name !== "package.json") {
+      } else if (entry.isFile() && /\.(html?|json|geojson|js)$/i.test(entry.name) && entry.name !== "bound.json" && entry.name !== "package.json") {
         files.push(full);
       }
     }
@@ -156,7 +156,7 @@ export function readSite(dir) {
       }
       if (rel === "data.json" && Array.isArray(value?.expect)) declared = parseExpect(value.expect);
       parts.push({ file: rel, kind: "data", text: jsonStrings(value).join("\n") });
-    } else if (/\.m?js$/i.test(file)) {
+    } else if (/\.js$/i.test(file)) {
       if (DEFINES_SITE.test(raw)) continue;
       const text = helperText(raw);
       parts.push({ file: rel, kind: "script", text });
