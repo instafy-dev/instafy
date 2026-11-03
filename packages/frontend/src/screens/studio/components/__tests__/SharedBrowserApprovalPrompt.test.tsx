@@ -280,6 +280,19 @@ describe("SharedBrowserApprovalPrompt", () => {
     expect(container.textContent).not.toContain("https://");
     expect(container.textContent).not.toContain("Destination");
 
+    // Every field the runtime names shows, however long the list: the
+    // sentence wraps. A cut would hide part of what the form sends.
+    const nineFields = "Customer name, Telephone, E-mail address, Pizza Size, Pizza Toppings, Preferred delivery time, Delivery instructions, Billing address, Coupon code";
+    await act(async () => root.render(
+      <SharedBrowserApprovalPrompt
+        onDecision={vi.fn()}
+        request={action("click", `Change something: Submit order · Sends: ${nineFields}`, "https://httpbin.org")}
+        submitting={false}
+      />,
+    ));
+    expect(title()).toBe(`Octo wants to click “Submit order” on httpbin.org. Sends: ${nineFields}.`);
+    expect(title()).not.toContain("…");
+
     await act(async () => root.render(
       <SharedBrowserApprovalPrompt
         onDecision={vi.fn()}

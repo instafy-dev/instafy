@@ -36,13 +36,15 @@
  *   keyActivatedButton(element)
  *     The button that Enter or Space on `element` clicks: the element or a
  *     <button> around it. Null for any other element.
- *   sentFieldNames(element, typed)
+ *   sentFields(element, typed)
  *     The names a person knows the fields by that the submission through
  *     `element` sends something from (typed text, a chosen item, a ticked
  *     box), for a prompt to say what a step sends: a label, a group's legend
  *     or the name attribute, never a value, and no hidden field. Radios and
  *     a list of boxes go by their group, never by the ones chosen. `typed`
- *     counts `element` as filled.
+ *     counts `element` as filled. { names, count }: the first 24 names, and
+ *     how many it sends in all, so a prompt never reads a longer form as
+ *     complete.
  *
  * The rules, from the HTML form submission and implicit submission
  * algorithms, as Chromium runs them:
@@ -478,18 +480,20 @@
     };
 
     // What a person knows the fields by that the submission through
-    // `element` sends something from, in tree order, at most 24, never a
-    // value. `typed` counts `element` as filled: a step that types into it
-    // and submits fills it first. Empty for a dialog submission, which sends
+    // `element` sends something from, in tree order, never a value: the
+    // first 24 (`names`), and how many it sends in all (`count`, which may be
+    // more). `typed` counts `element` as filled: a step that types into it
+    // and submits fills it first. None for a dialog submission, which sends
     // nothing, and for an element with no form.
-    function sentFieldNames(element, typed) {
+    function sentFields(element, typed) {
+      const none = { names: [], count: 0 };
       let submission = null;
       try {
         submission = submissionOf(element, null);
       } catch (_) {
-        return [];
+        return none;
       }
-      if (!submission || !submission.form || submission.method === "dialog") return [];
+      if (!submission || !submission.form || submission.method === "dialog") return none;
       const controls = listedControlsOf(submission.form);
       const boxNames = new Set();
       const boxes = { sharedNames: new Set(), perGroup: new Map() };
@@ -508,13 +512,12 @@
         const name = fieldName(control, boxes);
         if (!name || seen.has(lower(name))) continue;
         seen.add(lower(name));
-        names.push(name);
-        if (names.length >= MAX_FIELD_NAMES) break;
+        if (names.length < MAX_FIELD_NAMES) names.push(name);
       }
-      return names;
+      return { names, count: seen.size };
     }
 
-    return { submissionOf, implicitSubmission, keyActivatedButton, sentFieldNames };
+    return { submissionOf, implicitSubmission, keyActivatedButton, sentFields };
   }
 
   const lower = (value) => String(value || "").toLowerCase();

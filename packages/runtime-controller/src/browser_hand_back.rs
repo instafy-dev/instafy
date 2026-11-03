@@ -42,9 +42,16 @@
 //! the reply's lines, `readAt` and `viewer` from the job itself. The runtime
 //! moves those lines out of the reply the person reads into a Details note of
 //! the browser turn (runtime-agent `move_findings_into_details`); the record's
-//! reply puts them back after it. The runtime
-//! shows it to the building turn as quoted page data, never as the person's
-//! words and never as their consent (runtime-agent `jobs/browser_hand_back.rs`).
+//! reply puts them back after it. A browser turn whose findings go back to
+//! the building turn posts no words of its own: its note holds them, ahead of
+//! its findings, and the record's reply is that note ([`browser_turn_reply`]).
+//! It does so only because every lease says this controller reads the note
+//! ([`READS_NOTE_KEY`]): under an older controller, which refuses a hand-back
+//! from a turn that posted no reply, the runtime posts "Finished in the
+//! browser." in its place.
+//! The runtime shows the record to the building turn as quoted page data,
+//! never as the person's words and never as their consent (runtime-agent
+//! `jobs/browser_hand_back.rs`).
 //! A hand-back is never queued or recorded without a dispatch: it resumes an
 //! idle lane or is refused.
 //!
@@ -97,6 +104,13 @@ pub(crate) const TURNS_SINCE_MAX: i64 = 6;
 /// The payload key a lease stamps with whether [`browser_turns_since`] left
 /// older turns out to keep the newest [`TURNS_SINCE_MAX`].
 pub(crate) const TURNS_SINCE_LEFT_OUT_KEY: &str = "browser_turns_since_earlier_left_out";
+/// The payload key with which every lease says that this controller reads the
+/// Details note of a browser turn that posted no words of its own as that
+/// turn's reply ([`browser_turn_reply`]). The runtime leaves a browser turn
+/// whose findings go back to the building turn without words only then: an
+/// older controller refuses the hand-back of such a turn as empty
+/// (runtime-agent `browser_hand_back::READS_NOTE_KEY`).
+pub(crate) const READS_NOTE_KEY: &str = "browser_hand_back_reads_note";
 /// What Studio sends when the person presses Let Octo continue
 /// (`BROWSER_HUMAN_INPUT_CONTINUE_PROMPT`; the fixture pins it).
 pub(crate) const LET_OCTO_CONTINUE_PROMPT: &str = "Continue the previous browser task on this same page. I may have used the browser while I had control. Take a fresh snapshot before acting; do not reuse old target indices or request, reveal, or repeat any values I may have entered.";
@@ -798,26 +812,22 @@ pub(crate) async fn require_hand_back(
         return Ok(record);
     }
 
-    // The turn's final answer is its completion summary; a turn that streamed
-    // its answer instead has it as its last streamed message.
-    let summary = browser_job
-        .get::<_, Option<String>>("summary")
-        .filter(|summary| !summary.trim().is_empty());
-    let reply = match (summary, run_id) {
-        (Some(summary), _) => Some(summary),
-        (None, Some(run_id)) => last_streamed_reply(transaction, conversation_id, &run_id).await?,
-        (None, None) => None,
-    }
-    .filter(|reply| !reply.trim().is_empty())
-    .ok_or_else(|| {
-        hand_back_refused(
+    let reply = browser_turn_reply(
+        transaction,
+        conversation_id,
+        &browser_job_id,
+        run_id,
+        browser_job.get::<_, Option<String>>("summary"),
+    )
+    .await?;
+    if reply.trim().is_empty() {
+        return Err(hand_back_refused(
             StatusCode::CONFLICT,
             "browser_hand_back_empty",
             "That browser turn returned nothing to hand back.",
-        )
-    })?;
+        ));
+    }
 
-    let finding_lines = finding_lines_note(transaction, conversation_id, &browser_job_id).await?;
     // A card the routing step posted for the person's own message: the
     // building thread never saw that message (its job ran no model turn), so
     // the record gives the build its words, from the message's own job, as the
@@ -834,7 +844,7 @@ pub(crate) async fn require_hand_back(
         completed_at,
         request,
         person_request,
-        &reply_with_finding_lines(&reply, finding_lines.as_deref()),
+        &reply,
     );
     // A browser turn that read no page leaves the building turn nothing to
     // continue with; its own reply already says what stopped it.
@@ -1213,6 +1223,39 @@ pub(crate) async fn job_posted_routed_browser_card(
         .map_err(|error| internal_error(format!("failed to read the routed card: {error}")))
 }
 
+/// A browser turn's reply as the building turn reads it, with the finding
+/// lines its runtime moved into its Details note put back after it
+/// ([`reply_with_finding_lines`]). The reply is the turn's completion summary,
+/// or, for a turn that streamed its answer instead, its last streamed message.
+/// A browser turn whose findings go back to the building turn posts no words
+/// of its own (runtime-agent `move_findings_into_details`): with a note and no
+/// summary, the note holds its words ahead of its findings and is the whole
+/// reply, never a message the turn streamed on its way. Empty when the turn
+/// left neither.
+async fn browser_turn_reply(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: &Uuid,
+    browser_job_id: &Uuid,
+    run_id: Option<Uuid>,
+    summary: Option<String>,
+) -> Result<String, (StatusCode, Json<ApiError>)> {
+    let finding_lines = finding_lines_note(transaction, conversation_id, browser_job_id)
+        .await?
+        .filter(|lines| !lines.trim().is_empty());
+    let reply = match (
+        summary.filter(|summary| !summary.trim().is_empty()),
+        finding_lines.is_some(),
+        run_id,
+    ) {
+        (Some(summary), _, _) => summary,
+        (None, true, _) | (None, false, None) => String::new(),
+        (None, false, Some(run_id)) => last_streamed_reply(transaction, conversation_id, &run_id)
+            .await?
+            .unwrap_or_default(),
+    };
+    Ok(reply_with_finding_lines(&reply, finding_lines.as_deref()))
+}
+
 /// The finding lines the runtime moved out of the browser turn's reply into
 /// its Details note, if any.
 async fn finding_lines_note(
@@ -1327,6 +1370,26 @@ pub(crate) struct BrowserTurnsSince {
     /// out to keep the newest; the building turn is told so
     /// ([`TURNS_SINCE_LEFT_OUT_KEY`]).
     pub(crate) earlier_left_out: bool,
+}
+
+/// The hand-back's keys on the lease of a conversation's job: the browser
+/// turns its building thread has not read yet ([`browser_turns_since`]),
+/// whether older ones were left out, and that this controller reads the note
+/// of a browser turn that posted no words as its reply ([`READS_NOTE_KEY`]).
+/// Every lease sets them, so no copy a client sent can survive.
+pub(crate) fn stamp_lease(
+    payload: &mut serde_json::Map<String, JsonValue>,
+    turns_since: BrowserTurnsSince,
+) {
+    payload.insert(
+        TURNS_SINCE_KEY.to_string(),
+        JsonValue::Array(turns_since.turns),
+    );
+    payload.insert(
+        TURNS_SINCE_LEFT_OUT_KEY.to_string(),
+        JsonValue::Bool(turns_since.earlier_left_out),
+    );
+    payload.insert(READS_NOTE_KEY.to_string(), JsonValue::Bool(true));
 }
 
 /// The browser turns of a conversation since its building thread's last
@@ -1548,21 +1611,15 @@ pub(crate) async fn browser_turns_since(
         };
         let completed_at: DateTime<Utc> = row.get("completed_at");
         let read_at = completed_at.to_rfc3339_opts(SecondsFormat::Secs, true);
-        let reply = match (
-            row.get::<_, Option<String>>("summary")
-                .filter(|summary| !summary.trim().is_empty()),
+        let reply = browser_turn_reply(
+            transaction,
+            conversation_id,
+            &browser_job_id,
             run_id,
-        ) {
-            (Some(summary), _) => summary,
-            (None, Some(run_id)) => last_streamed_reply(transaction, conversation_id, &run_id)
-                .await?
-                .unwrap_or_default(),
-            (None, None) => String::new(),
-        };
-        let finding_lines =
-            finding_lines_note(transaction, conversation_id, &browser_job_id).await?;
-        let (reply, truncated) =
-            bounded_reply(&reply_with_finding_lines(&reply, finding_lines.as_deref()));
+            row.get::<_, Option<String>>("summary"),
+        )
+        .await?;
+        let (reply, truncated) = bounded_reply(&reply);
         let request = browser_payload
             .get("prompt_text")
             .and_then(JsonValue::as_str)
@@ -1660,6 +1717,37 @@ mod tests {
         let fixtures = fixtures();
         assert_eq!(fixtures["buildRequestNoteKey"], BUILD_REQUEST_NOTE_KEY);
         assert_eq!(fixtures["buildRequestRecordKey"], BUILD_REQUEST_RECORD_KEY);
+    }
+
+    /// A browser turn whose findings go back to the building turn posts no
+    /// words of its own only under a controller that reads its note as its
+    /// reply: an older one refuses the hand-back of a turn that posted none,
+    /// and the page the person asked for is never built. Every lease says so,
+    /// by the name the runtime reads, over any copy a client sent, beside the
+    /// browser turns since the building thread's last turn.
+    #[test]
+    fn every_lease_says_this_controller_reads_the_note_of_a_turn_that_posted_no_words() {
+        let mut payload = json!({
+            "prompt_text": "Compare three laptops on a page.",
+            TURNS_SINCE_KEY: [{ "reply": "a client's copy" }],
+            TURNS_SINCE_LEFT_OUT_KEY: true,
+            READS_NOTE_KEY: false,
+        });
+        stamp_lease(
+            payload.as_object_mut().unwrap(),
+            BrowserTurnsSince {
+                turns: vec![json!({ "reply": "Read 2 pages on maker.example" })],
+                earlier_left_out: false,
+            },
+        );
+        assert_eq!(payload[READS_NOTE_KEY], json!(true), "{payload}");
+        assert_eq!(
+            payload[TURNS_SINCE_KEY],
+            json!([{ "reply": "Read 2 pages on maker.example" }])
+        );
+        assert_eq!(payload[TURNS_SINCE_LEFT_OUT_KEY], json!(false));
+        assert_eq!(payload["prompt_text"], "Compare three laptops on a page.");
+        assert_eq!(fixtures()["readsNoteKey"], READS_NOTE_KEY);
     }
 
     #[test]

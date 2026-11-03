@@ -216,6 +216,15 @@ ${body}<script>${script}</script></html>`;
   event.preventDefault(); event.currentTarget.dataset.sent = "1";
 });`);
   }
+  // A form of 30 short fields, all filled: more than the page names (24).
+  if (name === "application") {
+    return page("Application", "", `<h1>Application</h1><form id="application" method="post" action="/rules/applied">
+${Array.from({ length: 30 }, (_, index) => `<p><label>Q${index + 1} <input name="q${index + 1}" value="answer ${index + 1}"></label></p>`).join("\n")}
+<p><button>Send application</button></p></form>`,
+    `document.getElementById("application").addEventListener("submit", (event) => {
+  event.preventDefault(); event.currentTarget.dataset.sent = "1";
+});`);
+  }
   if (name === "transition") {
     return page("Menu", `#belege-sub{max-height:0;overflow:hidden;transition:max-height 900ms linear}#belege-sub[data-open]{max-height:336px}#belege-sub a{display:block;height:28px}`,
       `<button type="button" aria-expanded="false" aria-controls="belege-sub">Belege öffnen</button>
@@ -899,6 +908,17 @@ export async function runSharedBrowserCobrowsingFixture() {
     });
     assert.equal(ordered.code, 0, `Approved order submit failed: ${ordered.stderr}`);
     assert.equal(await page.locator("#order").getAttribute("data-sent"), "1");
+    // A form that sends more fields than the page names (its first 24) says
+    // how many more it sends, so its list never reads as the whole form, and
+    // still names no value.
+    rules = (await successfulTool("POST", "/v1/navigate", { url: "/rules/application" })).payload;
+    const firstFields = Array.from({ length: 24 }, (_, index) => `Q${index + 1}`).join(", ");
+    const applied = await runTool("POST", "/v1/click", target(rules, "Send application"), "allow_once", async (request) => {
+      assert.equal(request.display.label, `Send a message: Send application \u00b7 Sends: ${firstFields} and 6 more`);
+      assert.doesNotMatch(request.display.label, /answer/u);
+    });
+    assert.equal(applied.code, 0, `Approved application submit failed: ${applied.stderr}`);
+    assert.equal(await page.locator("#application").getAttribute("data-sent"), "1");
 
     const result = {
       status: "passed", fixtureVersion: 1, browserVersion: context.browser()?.version() ?? "unknown",
@@ -916,7 +936,7 @@ export async function runSharedBrowserCobrowsingFixture() {
         compactSnapshotWithinBudget: true, receiptsFillTheLimit: true, omittedControlsCounted: true,
         linkPathNavigation: true, ariaHiddenAndInertLeftOut: true, libraryDrawnCheckboxesListed: true,
         clipsFollowContainingBoxes: true, topLayerListed: true, transitionsSettleBeforeResult: true,
-        selectReadsAsAWord: true, controlsNamedByWhatTheyDraw: true,
+        selectReadsAsAWord: true, controlsNamedByWhatTheyDraw: true, longFormSaysHowManyMoreItSends: true,
       },
       measurements,
       erpSnapshotTokens,
