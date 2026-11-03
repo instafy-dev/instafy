@@ -2411,14 +2411,15 @@ unless the policy is `"covered"`.
   turn is read-only") is no answer. Those words go into the note ahead of the
   findings, and a turn that posted none has that note as its reply in the
   record, so the record still gives the building turn what the browser turn
-  did not read. A controller that reads it so says it on every lease
+  did not read. A controller that reads the note so says so on every lease
   (`browser_hand_back_reads_note: true`). An older controller refuses the
   hand-back of a turn that posted no reply, so a runtime leased by one, such
   as a desktop app's own runtime ahead of its controller, posts "Finished in
   the browser." in place of the words, as earlier runtimes did. So does a turn
   whose every page stopped it and that wrote no words of its own: no hand-back
-  follows a turn that read no page. The browser turn is told that the building turn
-  cannot open the browser, so it reads what the request needs before it ends:
+  follows a turn that read no page. The browser turn is told that the
+  building turn cannot open the browser, so it reads what the request needs
+  before it ends:
   each item's own page and, for reviews, the review pages a page it read links
   to, else a reviewer's own site. The building turn cites a page only for a
   fact listed under it; a place or claim the reply names with no page under it
