@@ -37,7 +37,9 @@ function promptAgentHandles(metadata: unknown): string[] {
     if (!isRecord(selection)) continue;
     const handles = (value: unknown) =>
       Array.isArray(value)
-        ? value.filter((handle): handle is string => typeof handle === "string" && handle.trim().length > 0)
+        ? value
+            .map((handle) => (typeof handle === "string" ? handle.trim().replace(/^@+/, "") : ""))
+            .filter((handle) => handle.length > 0)
         : [];
     const mentions = handles(selection.mentions);
     const chosen = mentions.length > 0 ? mentions : handles(selection.active);

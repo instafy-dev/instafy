@@ -282,7 +282,7 @@ describe("browser hand-back: Try again on one that failed", () => {
     const controllers: ChatMessage = { id: "stored", role: "user", content: "Octo continued in the chat", timestamp: 1,
       metadata: { prompt_metadata: {
         displayContent: "Octo continued in the chat",
-        agentSelection: { active: ["octo"], mentions: ["octo"] },
+        agentSelection: { active: ["octo", "mapper"], mentions: ["@octo"] },
         [BROWSER_HAND_BACK_RECORD_KEY]: { version: 1, browserJobId: BROWSER_JOB, cardJobId: CARD_JOB, findingCount: 0 },
       } } };
     expect(browserHandBackRetry(controllers, { retryOfMessageId: "failure-1" })).toEqual({
