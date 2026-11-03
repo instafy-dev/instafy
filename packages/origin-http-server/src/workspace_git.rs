@@ -1474,18 +1474,21 @@ pub fn workspace_file_blob_oid(
 }
 
 /// What a workspace path holds, as a blob id: `Some` for a regular file,
-/// `None` when nothing is there. A folder, a link or anything else is an
-/// error: no blob id stands for it. A turn that is stopped records this for
-/// each file it changed, and Undo puts a file back only while it still
-/// reads the same (`/git/revert` with `expected`).
+/// `None` when nothing is there. A folder, a link, a file larger than a save
+/// may hold ([`crate::publish_policy::MAX_PUBLISH_BLOB_BYTES`], never read
+/// whole into memory) or anything else is an error: no blob id stands for
+/// it. A turn that is stopped records this for each file it changed, and
+/// Undo puts a file back only while it still reads the same (`/git/revert`
+/// with `expected`).
 pub fn workspace_path_blob(
     workspace: &crate::workspace_fs::WorkspaceDir,
     relative: &str,
 ) -> std::io::Result<Option<String>> {
+    let max_bytes = crate::publish_policy::MAX_PUBLISH_BLOB_BYTES;
     match workspace.entry_kind(relative) {
-        Ok(WorkspaceEntryKind::File) => workspace_file_blob_oid(workspace, relative, u64::MAX)?
+        Ok(WorkspaceEntryKind::File) => workspace_file_blob_oid(workspace, relative, max_bytes)?
             .map(Some)
-            .ok_or_else(|| std::io::Error::other("the file changed while it was read")),
+            .ok_or_else(|| std::io::Error::other("larger than a save may hold")),
         Ok(WorkspaceEntryKind::Directory) => Err(std::io::Error::other("a folder, not a file")),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
@@ -1494,6 +1497,34 @@ pub fn workspace_path_blob(
 
 #[cfg(test)]
 mod blob_tests {
+    /// A file's blob id, nothing for a missing path, and no id at all for a
+    /// folder or a file larger than a save may hold, which is never read.
+    #[test]
+    fn a_path_reads_as_its_blob_or_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("site")).unwrap();
+        std::fs::write(dir.path().join("site/app.js"), b"hello\n").unwrap();
+        std::fs::File::create(dir.path().join("site/huge.bin"))
+            .unwrap()
+            .set_len(crate::publish_policy::MAX_PUBLISH_BLOB_BYTES + 1)
+            .unwrap();
+        let workspace = crate::workspace_fs::WorkspaceDir::open(dir.path()).unwrap();
+        assert_eq!(
+            super::workspace_path_blob(&workspace, "site/app.js").unwrap(),
+            Some(super::blob_oid(b"hello\n"))
+        );
+        assert_eq!(
+            super::workspace_path_blob(&workspace, "site/gone.js").unwrap(),
+            None
+        );
+        assert_eq!(
+            super::workspace_path_blob(&workspace, "nowhere/gone.js").unwrap(),
+            None
+        );
+        assert!(super::workspace_path_blob(&workspace, "site").is_err());
+        assert!(super::workspace_path_blob(&workspace, "site/huge.bin").is_err());
+    }
+
     #[test]
     fn blob_ids_match_git() {
         // `printf 'hello\n' | git hash-object --stdin`
