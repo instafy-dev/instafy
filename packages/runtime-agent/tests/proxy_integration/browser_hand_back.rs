@@ -37,7 +37,7 @@ const STARTER: &str = "instafy bind init sites/laptops --starter compare --json"
 const PREVIEW: &str = "cd sites/laptops && instafy preview open --title 'Three laptops' --serve-cmd 'instafy bind serve . --port {port} --preview' --start --json";
 const BUILT: &str =
     "Built the comparison page from the maker's pages and opened it. Reviews: not checked.";
-/// The browser turn's own words, which the person did not read: it posted only that it finished.
+/// The browser turn's own words, which the person did not read: it posted none.
 const BROWSER_WORDS: &str = "I read the maker's pages for three laptops. Their reviews are not checked: the Laptop 13 page links to two, which I did not open.";
 /// What a person asked in a message the routing step sent straight to the browser.
 const PERSON_REQUEST: &str = "Compare the three latest laptops from maker.example: processor, battery, weight and price, with two independent reviews each, as a comparison page.";
@@ -48,6 +48,8 @@ const PAGE_SKILL: &str =
 const BY_HAND: &str = "mkdir -p sites/laptops && printf '<!doctype html><title>Three laptops</title>\\n' > sites/laptops/index.html";
 const BUILT_BY_HAND: &str =
     "Built a responsive comparison page at `sites/laptops/index.html` with the maker's figures.";
+/// How a hand-back cites what the browser found (runtime-agent `jobs/browser_hand_back.rs`).
+const CITE_LINE: &str = "\n- Cite a page only for a fact listed under it. A place or claim the reply names with no page under it is not checked: read its own page (`instafy web read`, or the reader your skill names) or leave it out. ";
 /// What the lane of a routed build says (runtime-agent `jobs/mod.rs`).
 const WRITE_LANE: &str = "\nDirect workspace-change response contract:\n";
 const NO_ACTIONS: &str = "- Do not emit `multi_agent_plan`, goals, integrations, browser/location actions, or broad coordination metadata.";
@@ -318,9 +320,10 @@ fn hand_back_record() -> Value {
             .iter()
             .map(|(url, title, _)| json!({"url": url, "title": title, "readAt": read_at, "viewer": viewer}))
             .collect::<Vec<_>>(),
-        // The browser turn posted only that it finished; its own words come from its Details
-        // note, ahead of the finding lines (runtime-agent `move_findings_into_details`).
-        "reply": format!("Finished in the browser.\n\n{BROWSER_WORDS}\n\n{lines}"),
+        // The browser turn posted no words of its own: they come from its Details note, ahead of
+        // the finding lines (runtime-agent `move_findings_into_details`), and the note is the
+        // whole reply (runtime-controller `browser_turn_reply`).
+        "reply": format!("{BROWSER_WORDS}\n\n{lines}"),
         "replyTruncated": false,
     })
 }
@@ -614,6 +617,12 @@ async fn on_the_cards_thread(space: &Space<'_>) -> Result<()> {
     );
     assert!(prompt.contains("Battery: 74 Wh"), "{prompt}");
     assert!(prompt.contains("which I did not open"), "{prompt}");
+    // A page is cited only for a fact listed under it; a claim with no page under it is read on
+    // its own page or left out.
+    assert!(prompt.contains(CITE_LINE), "{prompt}");
+    for old in ["the reply is the source", "the list is its index"] {
+        assert!(!prompt.contains(old), "{old}: {prompt}");
+    }
     assert!(prompt.contains(WRITE_LANE), "{prompt}");
     assert!(prompt.contains(NO_ACTIONS), "{prompt}");
     assert!(!prompt.contains("Response contract reminder"), "{prompt}");
@@ -728,6 +737,7 @@ async fn as_the_chats_first_building_turn(space: &Space<'_>) -> Result<()> {
         "{prompt}"
     );
     assert!(!prompt.contains("cannot open the browser"), "{prompt}");
+    assert!(prompt.contains(CITE_LINE), "{prompt}");
     assert!(prompt.contains(WRITE_LANE), "{prompt}");
     assert!(prompt.contains(NO_ACTIONS), "{prompt}");
 

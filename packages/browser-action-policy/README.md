@@ -75,10 +75,10 @@ load `redaction.js` first.
   `formNewWindow`, `formSubmission` and `formSubmits`, which `actionPolicy.js`
   judges. `stepSubmission(facts, step, key)` says which steps submit and where
   to; a field inside a submit button (`nested`), which a click and Enter send
-  in different ways, is one both hosts refuse. The rules' `sentFieldNames`
+  in different ways, is one both hosts refuse. The rules' `sentFields`
   names the fields a submission sends something from, by their label, legend
-  or name attribute and never their values, for a prompt to say what a step
-  sends. Publishes `globalThis.__instafyBrowserFormSubmission`. `formSubmissionCases.json` is
+  or name attribute and never their values, with how many it sends in all,
+  for a prompt to say what a step sends. Publishes `globalThis.__instafyBrowserFormSubmission`. `formSubmissionCases.json` is
   the one table of form steps both browsers' tests run.
 - `pageCapture.js`: `pageSecretSignalsInPage(sources)` runs inside a page and
   answers the four yes/no secret checks that `redactPageObservation` takes.

@@ -429,6 +429,11 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // printed with its text, and a message that carries on the chat's browser work went to the
     // browser also when it needs what a page here says, if all it needs is what that work found.
     include_str!("legacy/browser-automation-v25.md"),
+    // From before a page never added a read only to the card's list, anything not read on a page
+    // this turn (how far, how to get there, what is best) said "not checked" or stayed out, and a
+    // bare "keep going" carried on what the chat left open, never a change the person stopped or
+    // undid.
+    include_str!("legacy/browser-automation-v26.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,

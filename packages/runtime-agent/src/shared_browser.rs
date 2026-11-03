@@ -105,6 +105,11 @@ const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 // controller script) and `kept-tabs.json` the ones the person kept (written by
 // the origin). The guard reads both when the run ends, to close the rest.
 //
+// `unanswered.json` names the addresses that did not answer in the chat's
+// browser turns, which navigate and open_tab refuse for a while. It is
+// run-scoped too: the guard starts it with what the chat's earlier runs left
+// and keeps what the run adds when the run ends (`UNANSWERED_ADDRESSES_FILE`).
+//
 // `leftover-tabs.json` and `chat-tabs.json` are the files that outlive a run.
 // The leftover record names Octo's tabs from an earlier run that could not be
 // closed yet (that run ended without a confirmed shutdown, or the browser did
@@ -113,7 +118,7 @@ const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 // tab record names the tab each run left open as its chat's page (see
 // `tab_kept_for_the_chat`), so every viewer of the chat finds that page, after
 // a reload or on another device too. Neither grants anything.
-const APPROVAL_FIXED_FILES: [&str; 9] = [
+const APPROVAL_FIXED_FILES: [&str; 10] = [
     "request.json",
     "decision.json",
     "state.json",
@@ -123,6 +128,7 @@ const APPROVAL_FIXED_FILES: [&str; 9] = [
     KEPT_AGENT_TABS_FILE,
     LEFTOVER_AGENT_TABS_FILE,
     CHAT_TABS_FILE,
+    UNANSWERED_ADDRESSES_FILE,
 ];
 const AGENT_TABS_FILE: &str = "tabs.json";
 const KEPT_AGENT_TABS_FILE: &str = "kept-tabs.json";
@@ -187,13 +193,17 @@ const CHANGED_AFTER_YES_CODE: &str = "approval_stale";
 /// say. Two, so a page still drawing after it loaded gets one more snapshot,
 /// while a page that never holds still (a live count, a ticker in a link) ends
 /// that page within seconds instead of a loop of snapshots until the run's
-/// time runs out. It does not end the run: the turn goes on to the next
-/// source. A step on a control of a fresh snapshot, or one that moves to
-/// another page or tab, starts the count again.
+/// time runs out. It does not end the run: the turn opens the site's own page
+/// for the task from a link on it, else goes on to the next source. A step on
+/// a control of a fresh snapshot, or one that moves to another page or tab,
+/// starts the count again.
 const PAGE_CHANGED_STREAK_LIMIT: u32 = 2;
 /// What a step answers at [`PAGE_CHANGED_STREAK_LIMIT`], in place of the
-/// controller's "take a fresh snapshot".
-const PAGE_KEEPS_CHANGING_MESSAGE: &str = "This page keeps changing while Octo reads it, so this step was not done, and another snapshot would not hold still either. That ends this page, not the task: go on to the next source in this turn. When nothing is left to try, tell the person in plain words what could not be done on this page.";
+/// controller's "take a fresh snapshot". A home page's form that keeps
+/// changing (a live widget) often has a page of its own on the same site, one
+/// link away in its menu: a turn told only "the next source" left the site
+/// for a source that had already failed, while that page held still.
+const PAGE_KEEPS_CHANGING_MESSAGE: &str = "This page keeps changing while Octo reads it, so this step was not done, and another snapshot would not hold still either. That ends this page, not the task: open this site's own page for it from a link here (its menu: a planner, a search page), else the next source in this turn. When nothing is left to try, tell the person in plain words what could not be done on this page.";
 /// How long a person has to answer the prompts of one Shared Browser tool
 /// call, as `assets/shared-browser-approval.js` reads it. The script's
 /// `DEFAULT_APPROVAL_WAIT_MS` and `MAX_APPROVAL_WAIT_MS`, and the origin's
@@ -285,6 +295,9 @@ pub struct SharedBrowserAgentControlGuard {
     /// Closes the windows pages in Octo's tabs open by themselves while the
     /// run holds the browser (see [`close_windows_opened_from_agent_tabs`]).
     window_watch: Option<JoinHandle<()>>,
+    /// The chat the run belongs to, whose addresses that did not answer the
+    /// run starts with and leaves (see [`Self::carry_unanswered_addresses`]).
+    chat: Option<Uuid>,
 }
 
 #[cfg(test)]
@@ -840,6 +853,167 @@ fn forget_ended_run_grants(approval_dir: &Path) {
     });
 }
 
+/// The run's record of the addresses that did not answer in its chat's
+/// browser turns: a load a step stopped because its site sent nothing back in
+/// time. The controller script adds the run's own, and navigate and open_tab
+/// refuse such an address at once for [`UNANSWERED_ADDRESS_TTL`]: a turn
+/// opened one again in the chat's next turn, and once more in that turn after
+/// the step's own "don't open this address again", 20 seconds each for
+/// nothing. runtime-agent carries a chat's addresses into its next runs on
+/// this browser ([`SharedBrowserAgentControlGuard::carry_unanswered_addresses`]),
+/// and no other chat's. `assets/shared-browser-approval.js` holds the same
+/// bounds.
+const UNANSWERED_ADDRESSES_FILE: &str = "unanswered.json";
+const UNANSWERED_ADDRESSES_MAX_BYTES: u64 = 8 * 1024;
+const MAX_UNANSWERED_ADDRESSES: usize = 32;
+const UNANSWERED_ADDRESS_TTL: Duration = Duration::from_secs(10 * 60);
+/// Chats whose addresses this process keeps; the one that ran last is kept
+/// longest.
+const MAX_UNANSWERED_CHATS: usize = 32;
+
+/// An address that did not answer: the SHA-256 the script keeps it by (the
+/// address without its fragment), and when, in Unix milliseconds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UnansweredAddress {
+    address: String,
+    at_ms: u64,
+}
+
+/// The addresses each chat's runs left, by approval directory (one per
+/// browser; a test has its own) and chat, the chat that ran last at the end.
+/// Kept in this process only: a runtime that starts again carries nothing.
+static UNANSWERED_ADDRESSES: Mutex<Vec<((PathBuf, Uuid), Vec<UnansweredAddress>)>> =
+    Mutex::new(Vec::new());
+
+/// The addresses of `addresses` still refused at `now_ms`, one entry each
+/// (its newest), oldest first, at most [`MAX_UNANSWERED_ADDRESSES`].
+fn fresh_unanswered_addresses(
+    addresses: impl IntoIterator<Item = UnansweredAddress>,
+    now_ms: u64,
+) -> Vec<UnansweredAddress> {
+    let ttl_ms = u64::try_from(UNANSWERED_ADDRESS_TTL.as_millis()).unwrap_or(u64::MAX);
+    let mut fresh: Vec<UnansweredAddress> = Vec::new();
+    for entry in addresses {
+        if entry.at_ms > now_ms.saturating_add(1_000)
+            || now_ms.saturating_sub(entry.at_ms) >= ttl_ms
+        {
+            continue;
+        }
+        if let Some(index) = fresh.iter().position(|seen| seen.address == entry.address) {
+            if fresh[index].at_ms > entry.at_ms {
+                continue;
+            }
+            fresh.remove(index);
+        }
+        fresh.push(entry);
+    }
+    fresh.sort_by_key(|entry| entry.at_ms);
+    let excess = fresh.len().saturating_sub(MAX_UNANSWERED_ADDRESSES);
+    fresh.drain(..excess);
+    fresh
+}
+
+/// The addresses `chat` left on this browser that are still refused.
+fn unanswered_addresses_of(approval_dir: &Path, chat: Uuid, now_ms: u64) -> Vec<UnansweredAddress> {
+    let chats = UNANSWERED_ADDRESSES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = (approval_dir.to_path_buf(), chat);
+    chats
+        .iter()
+        .find(|(chat_key, _)| *chat_key == key)
+        .map(|(_, addresses)| fresh_unanswered_addresses(addresses.iter().cloned(), now_ms))
+        .unwrap_or_default()
+}
+
+/// Keeps what a run of `chat` left with what the chat had, the chat last.
+fn remember_unanswered_addresses(
+    approval_dir: &Path,
+    chat: Uuid,
+    addresses: Vec<UnansweredAddress>,
+    now_ms: u64,
+) {
+    let mut chats = UNANSWERED_ADDRESSES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = (approval_dir.to_path_buf(), chat);
+    let earlier = chats
+        .iter()
+        .position(|(chat_key, _)| *chat_key == key)
+        .map(|index| chats.remove(index).1)
+        .unwrap_or_default();
+    let kept = fresh_unanswered_addresses(earlier.into_iter().chain(addresses), now_ms);
+    if !kept.is_empty() {
+        chats.push((key, kept));
+    }
+    let excess = chats.len().saturating_sub(MAX_UNANSWERED_CHATS);
+    chats.drain(..excess);
+}
+
+/// The run's record of the addresses that did not answer, as the approval
+/// script writes it. One that is missing, bound to another run or not well
+/// formed names none.
+fn read_unanswered_addresses(approval_dir: &Path, binding: &RunBinding) -> Vec<UnansweredAddress> {
+    let Some(record) = read_run_record_bounded(
+        approval_dir,
+        UNANSWERED_ADDRESSES_FILE,
+        &[1],
+        binding,
+        UNANSWERED_ADDRESSES_MAX_BYTES,
+    )
+    .ok()
+    .flatten() else {
+        return Vec::new();
+    };
+    let Some(entries) = record.get("addresses").and_then(JsonValue::as_array) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let address = entry.get("address")?.as_str()?;
+            let at_ms = entry.get("atMs")?.as_u64()?;
+            let well_formed = address.len() == 64
+                && address
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+            well_formed.then(|| UnansweredAddress {
+                address: address.to_string(),
+                at_ms,
+            })
+        })
+        .take(MAX_UNANSWERED_ADDRESSES)
+        .collect()
+}
+
+/// Starts the run's record with the addresses its chat left, bound to the
+/// exact authority the marker carries.
+fn write_unanswered_addresses(
+    approval_dir: &Path,
+    binding: &RunBinding,
+    addresses: &[UnansweredAddress],
+) -> Result<()> {
+    let payload = serde_json::to_vec(&json!({
+        "version": 1,
+        "ownerId": binding.owner_id,
+        "runId": binding.run_id,
+        "initiatorUserId": binding.initiator_user_id,
+        "browserPageId": binding.browser_page_id,
+        "addresses": addresses
+            .iter()
+            .map(|entry| json!({ "address": entry.address, "atMs": entry.at_ms }))
+            .collect::<Vec<_>>(),
+    }))?;
+    // The temporary name uses the prefix the approval directory cleanup
+    // accepts, so a write cut short is revoked with the rest of the run.
+    publish_private_file(
+        &approval_dir.join(format!(".instafy-approval-unanswered-{}", Uuid::new_v4())),
+        &approval_dir.join(UNANSWERED_ADDRESSES_FILE),
+        &payload,
+        "Shared Browser record of addresses that did not answer",
+    )
+}
+
 /// The run's own approval state, read the way the approval script writes it.
 /// A state that is missing, bound to another run or not well formed leaves
 /// nothing to carry.
@@ -1144,7 +1318,8 @@ impl SharedBrowserAgentControlGuard {
     /// browsing), never the job's or the model's, and its state is written
     /// before any Codex or MCP process starts. `continues_run_id` is the run
     /// Studio's Let Octo continue names: its grants carry over only as
-    /// [`take_continued_run_grants`] allows.
+    /// [`take_continued_run_grants`] allows. `chat` is the job's conversation,
+    /// whose addresses that did not answer the run starts with.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn acquire(
         run_id: Uuid,
@@ -1154,6 +1329,7 @@ impl SharedBrowserAgentControlGuard {
         continues_run_id: Option<Uuid>,
         card_site_origins: &[String],
         cancel_signal: JobCancelSignal,
+        chat: Option<Uuid>,
     ) -> Result<Self> {
         let mut guard = Self::acquire_at(
             agent_control_file_path(),
@@ -1167,7 +1343,33 @@ impl SharedBrowserAgentControlGuard {
             cancel_signal,
         )?;
         guard.start_window_watch();
+        guard.carry_unanswered_addresses(chat, unix_time_millis());
         Ok(guard)
+    }
+
+    /// Starts the run's record of the addresses that did not answer with
+    /// those `chat` left on this browser in the last
+    /// [`UNANSWERED_ADDRESS_TTL`], and keeps what the run adds for the chat's
+    /// next runs when it ends. Another chat's are never in it. A record that
+    /// cannot be written leaves the run without them: an address is then
+    /// tried once more.
+    fn carry_unanswered_addresses(&mut self, chat: Option<Uuid>, now_ms: u64) {
+        self.chat = chat;
+        let Some(chat) = chat else {
+            return;
+        };
+        let addresses = unanswered_addresses_of(&self.approval_dir, chat, now_ms);
+        if addresses.is_empty() {
+            return;
+        }
+        if let Err(error) =
+            write_unanswered_addresses(&self.approval_dir, &self.binding(), &addresses)
+        {
+            tracing::warn!(
+                ?error,
+                "Shared Browser could not carry the addresses that did not answer into this run"
+            );
+        }
     }
 
     /// [`Self::acquire`] at explicit paths, so a test reaches the same
@@ -1411,6 +1613,7 @@ impl SharedBrowserAgentControlGuard {
             shutdown_confirmation: cancel_signal,
             heartbeat,
             window_watch: None,
+            chat: None,
         })
     }
 
@@ -2437,6 +2640,14 @@ impl Drop for SharedBrowserAgentControlGuard {
                     ..grants
                 }
             });
+            // The addresses that did not answer stay with the chat, read
+            // before the run's records are revoked.
+            let unanswered = self.chat.map(|chat| {
+                (
+                    chat,
+                    read_unanswered_addresses(&self.approval_dir, &self.binding()),
+                )
+            });
             if let Err(error) = prepare_clean_approval_directory(&self.approval_dir) {
                 tracing::error!(
                     ?error,
@@ -2472,6 +2683,14 @@ impl Drop for SharedBrowserAgentControlGuard {
                 return;
             }
             store_ended_run_grants(&self.approval_dir, ended);
+            if let Some((chat, addresses)) = unanswered {
+                remember_unanswered_addresses(
+                    &self.approval_dir,
+                    chat,
+                    addresses,
+                    unix_time_millis(),
+                );
+            }
         } else {
             let reason = self
                 .shutdown_confirmation

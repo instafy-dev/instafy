@@ -37,9 +37,11 @@ export type FormSubmissionRules = {
   /**
    * What a person knows the fields by that the submission through `element`
    * sends something from (a label, a group's legend or the name attribute),
-   * never a value and no hidden field. `typed` counts `element` as filled.
+   * never a value and no hidden field: the first 24 names, and how many
+   * fields it sends in all (`count`, which may be more). `typed` counts
+   * `element` as filled.
    */
-  sentFieldNames(element: Element, typed?: boolean): string[];
+  sentFields(element: Element, typed?: boolean): { names: string[]; count: number };
 };
 
 /**
