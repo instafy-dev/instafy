@@ -25,8 +25,10 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // go next, never as a blank page to navigate again nor as the page the tab
 // still shows; the next step reaches the browser at once, and the site's late
 // answer never loads. That address is then refused at once by navigate and
-// open_tab, and the site is not asked again. A form sent to such a site has reached it, so its load
-// runs on and the step never says nothing was opened. An address the site
+// open_tab, and the site is not asked again; an address whose own load had
+// only just begun when the time ran out (a late redirect's target) is not. A
+// form sent to such a site has reached it, so its load runs on and the step
+// never says nothing was opened. An address the site
 // answers 404 or 410 for fails as soon as that answer comes, saying it has no
 // page, without waiting for the not-found page to load; a page that only reads
 // as not found is still the step's page. A page with a few
@@ -129,6 +131,11 @@ const NOT_FOUND_START = `<!doctype html><html lang="en"><head><meta charset="utf
 // How long a click waits for the page it opens (the controller's action
 // timeout), which may end before the step's time does.
 const CLICK_WAIT_MS = 15_000;
+// A redirect a site sends late in a step (after LATE_REDIRECT_MS), to an
+// address that answers within seconds (AFTER_REDIRECT_MS): the step's time
+// runs out while that address's own load has only just begun.
+const LATE_REDIRECT_MS = STEP_TIME_MS - 4_000;
+const AFTER_REDIRECT_MS = 6_000;
 // A form whose script does heavy work once one of its fields is highlighted.
 const FORM = `<form><label>Your name <input name="name"></label><label>Your city <input name="city"></label></form>`;
 // A transport operator's page: menus of links that open on hover, timetables
@@ -257,6 +264,17 @@ export async function runSharedBrowserStepTimeFixture() {
       requests.push(`${request.method} ${url.pathname}${url.search}`);
       if (url.pathname === "/slow") {
         unanswered.push(response);
+        return;
+      }
+      if (url.pathname === "/late-redirect") {
+        setTimeout(() => response.writeHead(302, { location: "/after-redirect", "cache-control": "no-store" }).end(), LATE_REDIRECT_MS);
+        return;
+      }
+      if (url.pathname === "/after-redirect") {
+        setTimeout(() => {
+          response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+          response.end(page("Opening hours", "<p>Open daily from 09:00 to 19:30.</p>"));
+        }, AFTER_REDIRECT_MS);
         return;
       }
       if (url.pathname === "/reviews/slow-not-found") {
@@ -527,6 +545,32 @@ export async function runSharedBrowserStepTimeFixture() {
     assert.equal(context.pages().length, tabsBeforeAgain, "No tab was opened");
     assert.equal(prompts.length, promptsBeforeAgain, "Nothing asked");
 
+    // 1c''. Only an address that waited is refused. Here the site sends a
+    // redirect late in the step, to an address that answers within seconds:
+    // the step's time runs out while that address's load has only just begun,
+    // so the step fails as 1c does. The address the step asked for waited the
+    // step's whole time and is refused as 1c' refuses its own; the redirect's
+    // target barely waited, and opens. Refusing it would close a site that
+    // answers, and a page's own server, which picks both where a redirect
+    // leads and when, could close any address it names.
+    await runPage.goto("about:blank");
+    requests.length = 0;
+    const redirected = await runTool("POST", "/v1/navigate", { url: `${origin}/late-redirect` });
+    assert.deepEqual(requests, ["GET /late-redirect", "GET /after-redirect"], "The site was asked once for each");
+    assert.equal(redirected.code, 1, `The step fails: ${redirected.stdout}`);
+    assert.ok(redirected.stderr.includes(UNANSWERED_MESSAGE), redirected.stderr);
+    requests.length = 0;
+    const target = await runTool("POST", "/v1/navigate", { url: `${origin}/after-redirect` });
+    assert.doesNotMatch(target.stderr, /not opened again/u, "The redirect's target is not refused");
+    assert.equal(target.code, 0, `The redirect's target opens: ${target.stderr}`);
+    assert.equal(target.payload.url, `${origin}/after-redirect`);
+    assert.deepEqual(requests, ["GET /after-redirect"], "The redirect's target was asked");
+    const startedAgain = await runTool("POST", "/v1/navigate", { url: `${origin}/late-redirect` });
+    assert.equal(startedAgain.code, 1, `The address the step asked for is refused: ${startedAgain.stdout}`);
+    assert.ok(startedAgain.stderr.includes(REFUSED_AGAIN_MESSAGE), startedAgain.stderr);
+    assert.deepEqual(requests, ["GET /after-redirect"], "The site was not asked again for it");
+    assert.equal(prompts.length, promptsBeforeAgain, "Nothing asked");
+
     // 1d. The same from a page that had loaded, one that keeps changing its own
     // address as many do: when the time is up the tab still shows that page,
     // and the load waits behind it as it did behind the blank page. The step
@@ -727,6 +771,7 @@ export async function runSharedBrowserStepTimeFixture() {
         "a loaded page that shows no text and no controls reads as still busy, not as an empty page, and its line says no page was read",
         "a navigation from a blank tab to a site that does not answer in time is stopped once the step's time is up and fails as one that opened nothing, naming where to go next, never as a blank page to navigate again; the next step reaches the browser at once, and the site's late answer never loads",
         "that address again, by navigate or open_tab, is refused at once with the same hint: the site is not asked again, nothing asks, and no tab opens",
+        "only an address that waited is refused: when a redirect sent late in the step leads to an address whose load has only just begun as the time runs out, the address the step asked for is refused and the redirect's target opens",
         "a navigation from a page that had loaded, and keeps changing its own address, to a site that does not answer in time is stopped and fails the same way, never naming the page the tab still shows; the next step reaches the browser at once and finds that page, and the site's late answer never lands",
         "a link clicked on a page that had loaded, to a site that does not answer, is stopped once the click stops waiting for it and fails the same way, never as the page the tab still shows nor as the click's own timeout; the next step reaches the browser at once, and the site's late answer never lands",
         "a form sent to a site that does not answer is not stopped and never reads as nothing opened: the step answers once its time is up and says to check what it did, and the form's late answer lands",
@@ -735,7 +780,7 @@ export async function runSharedBrowserStepTimeFixture() {
         "a hand-off whose fields the page is too busy to highlight in time answers with the page as it is and leaves no hand-off behind",
         "a search whose results page keeps the page busy answers once the step's time is up, with the page's address and a note that it is still busy, never waiting out the page; its line says no page was read",
       ],
-      timings: { slowAnswerMs: Math.round(slow.wallMs), manyControlsReadMs: Math.round(planner.wallMs), manyControlsChoiceMs: Math.round(chose.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), unansweredLoadMs: Math.round(loading.wallMs), refusedAgainMs: refusedAgain.map((again) => Math.round(again.wallMs)), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs), noPageMs },
+      timings: { slowAnswerMs: Math.round(slow.wallMs), manyControlsReadMs: Math.round(planner.wallMs), manyControlsChoiceMs: Math.round(chose.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), unansweredLoadMs: Math.round(loading.wallMs), refusedAgainMs: refusedAgain.map((again) => Math.round(again.wallMs)), lateRedirectMs: Math.round(redirected.wallMs), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs), noPageMs },
       limitations: ["No model, Studio UI, origin or runtime shutdown guard; those are unit-tested."],
     };
     fs.writeFileSync(resultFile, `${JSON.stringify(result, null, 2)}\n`);

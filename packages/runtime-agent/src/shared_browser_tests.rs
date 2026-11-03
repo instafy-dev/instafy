@@ -109,17 +109,24 @@ const selectOptionsFor = (arg) => {
     enabled: entries.filter((entry) => !entry.disabled).length,
   };
 };
-// The fields a form step sends something from, by name, as the page's
-// sent-fields helper reports them.
-const sentFieldsFor = (arg) => mode === "submit-order"
+// The fields a form step sends something from, by name, and how many it
+// sends in all, as the page's sent-fields helper reports them.
+const sentFieldNamesFor = () => mode === "submit-order"
   ? ["Customer name", "Telephone", "E-mail address", "Pizza Size", "Delivery instructions"]
   : mode === "submit-order-many"
     ? ["Customer name", "Telephone", "E-mail address", "Pizza Size", "Pizza Toppings", "Preferred delivery time", "Delivery instructions"]
-    // As many fields as the page reports (24), each of the longest name it
+    // As many fields as the page names (24), each of the longest name it
     // reports (40 characters): more than a prompt's label holds.
     : mode === "submit-order-huge"
       ? Array.from({ length: 24 }, (_, index) => `Field ${String(index + 1).padStart(2, "0")} of a long job application form`)
-      : [];
+      // A form of 30 short fields: the page names the first 24.
+      : mode === "submit-order-long-form"
+        ? Array.from({ length: 24 }, (_, index) => `Q${index + 1}`)
+        : [];
+const sentFieldsFor = () => {
+  const names = sentFieldNamesFor();
+  return { names, count: mode === "submit-order-long-form" ? 30 : names.length };
+};
 // A journey planner's station list and a bulk-actions list, as the page
 // describer reports a select: its text is every option run together, and it
 // shows the option it holds.
@@ -415,6 +422,7 @@ const special = {
 };
 special["submit-order-many"] = special["submit-order"];
 special["submit-order-huge"] = special["submit-order"];
+special["submit-order-long-form"] = special["submit-order"];
 // "<mode>-typeless": the same button with no type attribute, which the
 // browser reports as type "submit" even outside a form.
 const typeless = mode.endsWith("-typeless");
@@ -866,17 +874,40 @@ const makePage = (targetId, opened = null) => {
     goto: async (url) => {
       // "silent-site": the site never answers. The tab's document request
       // leaves the browser (it is logged), no answer comes, and the load
-      // gives up as Playwright's own wait does, the tab still on its page.
-      if (mode === "silent-site") {
+      // gives up as Playwright's own wait does, the tab still on its page,
+      // its request sent a step's time (20 s) before. "late-silent-site":
+      // the same for a load that began late in the step, 2 s before.
+      // "late-redirect-site": the site answers with a redirect only late in
+      // the step (its request sent 16 s before), to an address whose own
+      // request, sent 2 s before, has no answer yet. Each request reaches
+      // the step's listeners with the clock as it read when it left.
+      const silentFor = { "silent-site": 20_000, "late-silent-site": 2_000 }[mode];
+      if (silentFor !== undefined || mode === "late-redirect-site") {
         if (clickLogPath) fs.appendFileSync(clickLogPath, `goto ${url}\n`);
-        const request = {
+        const documentRequest = (address, redirectedFrom = null) => ({
           isNavigationRequest: () => true,
           frame: () => mainFrame,
           method: () => "GET",
-          redirectedFrom: () => null,
-          url: () => String(url),
+          redirectedFrom: () => redirectedFrom,
+          url: () => String(address),
+        });
+        const sentAgo = (ms, request) => {
+          const now = Date.now;
+          Date.now = () => now() - ms;
+          try {
+            for (const listener of pageListeners.request || []) listener(request);
+          } finally {
+            Date.now = now;
+          }
         };
-        for (const listener of pageListeners.request || []) listener(request);
+        if (mode === "late-redirect-site") {
+          const first = documentRequest(url);
+          sentAgo(16_000, first);
+          for (const listener of pageListeners.response || []) listener({ request: () => first, status: () => 302 });
+          sentAgo(2_000, documentRequest(new URL("/after-redirect", String(url)).toString(), first));
+        } else {
+          sentAgo(silentFor, documentRequest(url));
+        }
         const timeout = new Error(`page.goto: Timeout 30000ms exceeded.\nCall log:\n  - navigating to "${url}", waiting until "commit"`);
         timeout.name = "TimeoutError";
         throw timeout;
@@ -3391,6 +3422,84 @@ async fn an_address_that_did_not_answer_is_not_opened_again_in_that_chat_for_ten
             .exists()
     );
     assert!(failure(&navigate("https://down.example/")).contains(did_not_answer));
+    assert_eq!(tries(), 4);
+    end_chat_browser_run(run);
+}
+
+/// Only an address that waited for nothing for a while is refused later: a
+/// load a step began late in its time, and the address a redirect sent late
+/// in the step led to, had barely waited when the step stopped them. Both
+/// fail their step as a site that did not answer, and both are tried again;
+/// the address the step asked for, whose load waited through the late
+/// redirect, is refused. A page's own server picks where a redirect leads and
+/// when it sends it, so refusing its target would let it close any address it
+/// names (a real browser showed it: an address that answers in 3 s was refused
+/// for 10 minutes).
+#[tokio::test]
+async fn only_an_address_that_waited_is_refused_again() {
+    let fixture = EmbeddedControllerFixture::new();
+    let chat = Uuid::new_v4();
+    let navigate = |mode: &str, url: &str| {
+        fixture
+            .command_for(
+                mode,
+                "page-target",
+                "POST",
+                "/v1/navigate",
+                Some(&json!({ "url": url }).to_string()),
+            )
+            .output()
+            .expect("run the controller")
+    };
+    let tries = || {
+        std::fs::read_to_string(&fixture.click_log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.starts_with("goto "))
+            .count()
+    };
+    let did_not_answer = "The site did not answer in time, so nothing was opened";
+    let refused = "so it was not opened again";
+    let failure = |output: &Output| {
+        assert!(!output.status.success());
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+
+    let run = chat_browser_run(&fixture, chat, unix_time_millis());
+    // A load that began late in the step: it fails as one that did not
+    // answer, and is tried again.
+    for attempt in 1..=2 {
+        let words = failure(&navigate("late-silent-site", "https://slow.example/"));
+        assert!(
+            words.contains(did_not_answer) && !words.contains(refused),
+            "{attempt}: {words}"
+        );
+        assert_eq!(tries(), attempt);
+    }
+    // A redirect sent late in the step, to an address that had barely
+    // waited when the step stopped it.
+    let words = failure(&navigate(
+        "late-redirect-site",
+        "https://news.example/story",
+    ));
+    assert!(words.contains(did_not_answer), "{words}");
+    assert_eq!(tries(), 3);
+    end_chat_browser_run(run);
+
+    // The chat's next turn: the redirect's target is tried, and the address
+    // the step asked for is refused.
+    let run = chat_browser_run(&fixture, chat, unix_time_millis());
+    let words = failure(&navigate(
+        "silent-site",
+        "https://news.example/after-redirect",
+    ));
+    assert!(
+        words.contains(did_not_answer) && !words.contains(refused),
+        "{words}"
+    );
+    assert_eq!(tries(), 4);
+    let words = failure(&navigate("silent-site", "https://news.example/story"));
+    assert!(words.contains(refused), "{words}");
     assert_eq!(tries(), 4);
     end_chat_browser_run(run);
 }
@@ -11652,6 +11761,32 @@ fn a_prompt_leads_with_the_shown_text_and_lists_the_fields_a_form_sends() {
         .expect("how many more");
     // The ones named and the ones counted are the form's 24.
     assert_eq!(named + counted, 24, "{label}");
+
+    // A form that sends more fields than the page names (it names the first
+    // 24): every name it gave fits, and the prompt still says how many more
+    // the form sends, so it never reads as the whole form.
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot_id = fixture.snapshot_id("submit-order-long-form");
+    let body = json!({ "index": 0, "snapshotId": snapshot_id }).to_string();
+    let (output, requests) = fixture.run_with_decisions(
+        "submit-order-long-form",
+        "page-target",
+        "POST",
+        "/v1/click",
+        Some(&body),
+        &["https://example.test"],
+        &["deny"],
+    );
+    assert!(!output.status.success(), "ran although denied");
+    assert_eq!(requests.len(), 1);
+    let named = (1..=24)
+        .map(|field| format!("Q{field}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert_eq!(
+        requests[0]["display"]["label"],
+        format!("Change something: Submit order \u{b7} Sends: {named} and 6 more")
+    );
 }
 
 /// The refusal that never asks may not send a form anywhere, not even to

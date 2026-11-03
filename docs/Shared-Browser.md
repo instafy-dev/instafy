@@ -483,9 +483,11 @@ processing and close")), each name cut on its own. A step that sends a form
 lists the fields it sends, by the names the page gives them and never their
 values ("Sends: Customer name, Telephone, E-mail address"): every one of them
 while the prompt's label holds them (its 240 bytes, after the step's category,
-the tab's name and the control's), whole, since the prompt wraps. Only a form
-whose names are longer than that ends with how many more it sends ("and 3
-more"). The sentence
+the tab's name and the control's), whole, since the prompt wraps. The page
+names a form's first 24 fields and counts the rest, so a form that sends more
+fields than that, or whose names are longer than the label holds, ends with
+how many more it sends ("and 3 more"), never as a list that looks whole. The
+sentence
 names the other site a step is bound to, as the chat's prompt row does: a
 step that sends a form there says it goes there ("It goes to
 pay.example."), and any other says it may ("It may go to carris.pt."): a
@@ -1299,8 +1301,16 @@ minutes: `navigate` and `open_tab` refuse it at once, before any prompt or
 load, so nothing is sent to its site, with "This address did not answer in
 Instafy's browser in the last 10 minutes, so it was not opened again." and the
 same hint. A turn had opened such an address again in the chat's next turn,
-and once more after the hint, 20 seconds each. Only these two steps are
-refused: a link or form on a page, and the person's own navigation, never. The
+and once more after the hint, 20 seconds each. Only an address that waited at
+least 10 seconds for nothing is kept: the address the load asked for by the
+whole load's wait, its redirects included, and the one its last redirect led
+to by that address's own. A load a step began late in its time, or a
+redirect's target that a redirect sent late in the step led to, had barely
+waited, so its site may well answer: the step fails the same way, and the
+address is tried again. A page's own server picks both where a redirect leads
+and when it sends it, so it could otherwise close any address it names. Only
+these two steps are refused: a link or form on a page, and the person's own
+navigation, never. The
 run's approval directory keeps these addresses as fingerprints
 (`unanswered.json`, the SHA-256 of each address without its fragment, at most
 32, with when), and runtime-agent carries them, in memory, into the chat's
@@ -1329,7 +1339,8 @@ from a page that had loaded, after about 20 seconds; a link clicked on a page
 once the click stops waiting, after about 15): the next step reaches the
 browser at once, the site's late answer never loads, and the same address by
 `navigate` or `open_tab` is then refused in well under a second without
-asking the site again. A navigation the site
+asking the site again, while the target of a redirect the site sent late in
+the step still opens. A navigation the site
 answers 404 or 410 for fails within a second or two, even when the rest of its
 not-found page would come later than a step's time (see below).
 
