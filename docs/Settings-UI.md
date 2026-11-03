@@ -419,12 +419,20 @@ state, while chat-tab restoration continues to use its existing persistence.
 On desktop, `StudioDesktopHeader` keeps the team avatar, space picker, Search icon and
 workspace tabs on one 52px row (64px for coarse pointers). Search sits immediately after the
 space picker within the context column. Tabs overflow horizontally rather
-than wrapping or compressing their titles. New chat stays in the sidebar, and the profile
-menu stays in the organization rail. The header's left column shares the expanded navigation
+than wrapping or compressing their titles. New chat is a separate plus button at the right
+of the Chats row in expanded navigation, or directly below Chats in the collapsed rail.
+Collapse/Expand stays in the inner sidebar footer, outside the scrolling navigation, and
+retains keyboard focus when toggled. The profile menu stays in the organization rail.
+The header's left column shares the expanded navigation
 width, including at narrow desktop sizes, so tabs never extend over that sidebar. Keep the
 column when navigation collapses to preserve usable pickers; subtract native window-control
 insets within it rather than shifting the tabs. In conversation workspaces, mobile tools and
 Settings use one compact title/context header.
+The desktop context column uses 15rem below 1280px and 17rem at wider widths. An inset
+divider separates space/Search controls from pane headings or tabs; Home and Search omit
+that divider. Docked pane headings use secondary text tone. Narrow History panes prioritize
+the saved-version title on up to two lines with author/time metadata below; at 36rem of
+available content width, the row can place metadata alongside a single-line title.
 Navigation stays on the left; More actions retains Back, Forward, Home and Search. Settings
 keeps its category picker below that header.
 On wide browser and Desktop layouts, drag an organization icon up or down in the left
@@ -672,7 +680,8 @@ surface beneath them. The selection marker and keyboard focus remain separate cu
 Home, account and search omit the selected-team bridge and use one neutral navigation
 surface. They retain the same desktop content frame: a 1px divider and 14px top-left
 corner, with the vertical divider beginning below the curve. Its horizontal location
-follows the visible navigation width (224px expanded, 64px collapsed, 0px hidden) after
+follows the visible navigation width (15rem expanded, 17rem at viewports of at least 1280px;
+64px collapsed, 0px hidden) after
 the 64px organization rail. Mobile does not use this desktop frame.
 
 Content and toolbar boundaries have one owner:

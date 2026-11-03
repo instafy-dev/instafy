@@ -75,7 +75,7 @@ export function DrawerHeader({
             {...titleProps}
             as={titleAs}
             variant={touchDensity ? "title" : "bodyStrong"}
-            tone="primary"
+            tone={portalTarget && railFrame ? "secondary" : "primary"}
             className={["min-w-0 truncate", railFrame && "max-[899px]:!text-base max-[899px]:!font-semibold", titleClassName].filter(Boolean).join(" ")}
           >
             {title}

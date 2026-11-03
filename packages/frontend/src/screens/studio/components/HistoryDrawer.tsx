@@ -774,25 +774,28 @@ export function HistoryDrawer({
                             }}
                             type="button"
                             className={[
-                              "flex min-w-0 flex-1 items-center gap-2 rounded-lg px-1 text-left",
+                              "flex min-w-0 flex-1 flex-col items-start gap-1 rounded-lg px-1 text-left @min-[36rem]:flex-row @min-[36rem]:items-center @min-[36rem]:gap-3",
                               LIST_ROW_FOCUS_RING,
                             ].join(" ")}
                             onClick={() => openSavedVersion(entry)}
                             data-testid="source-control-history-review"
                           >
-                            <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-800 dark:text-slate-100">
+                            <Text
+                              as="span"
+                              variant="bodyStrong"
+                              tone="primary"
+                              className="line-clamp-2 min-w-0 w-full break-words @min-[36rem]:line-clamp-1 @min-[36rem]:w-auto @min-[36rem]:flex-1"
+                              data-testid="source-control-history-summary"
+                            >
                               {parsed.summary}
-                            </span>
-                            {entry.resolvedBy ? (
-                              <Badge
-                                tone="warning"
-                                title="The Assistant resolved a merge conflict in this version. Review it to confirm the result."
-                                data-testid="source-control-history-resolved-badge"
-                              >
-                                Assistant-resolved
-                              </Badge>
-                            ) : null}
-                            <span className="ml-auto flex shrink-0 items-center gap-2 pl-1 text-xxs text-slate-500 dark:text-slate-400">
+                            </Text>
+                            <Text
+                              as="span"
+                              variant="caption"
+                              tone="muted"
+                              className="flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-1 @min-[36rem]:max-w-[45%] @min-[36rem]:justify-end"
+                              data-testid="source-control-history-metadata"
+                            >
                               {author.kind === "service" ? (
                                 <Badge tone="neutral" data-testid="history-author-instafy">
                                   Instafy
@@ -805,7 +808,16 @@ export function HistoryDrawer({
                               <span className="shrink-0 whitespace-nowrap">
                                 {formatRelativeCommitTime(entry.committedAt)}
                               </span>
-                            </span>
+                              {entry.resolvedBy ? (
+                                <Badge
+                                  tone="warning"
+                                  title="The Assistant resolved a merge conflict in this version. Review it to confirm the result."
+                                  data-testid="source-control-history-resolved-badge"
+                                >
+                                  Assistant-resolved
+                                </Badge>
+                              ) : null}
+                            </Text>
                           </button>
                           <IconButton
                             variant="ghost"

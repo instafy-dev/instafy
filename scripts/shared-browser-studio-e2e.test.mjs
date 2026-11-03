@@ -194,7 +194,7 @@ test("Studio login barrier waits for the browser's complete cookie/storage repor
   assert.equal(reads, states.length);
   const submissionAssertion = spec.indexOf(".toBe(beforeLogin.submissions + 1)");
   const barrier = spec.indexOf("await expectLoginObserved(fixture, beforeLogin)");
-  const navigation = spec.indexOf('await navigateAndObserve(page, fixture, "signed-in")');
+  const navigation = spec.indexOf('await navigateAndObserve(page, fixture, "signed-in", reportSocketCounts)');
   assert.ok(submissionAssertion >= 0 && submissionAssertion < barrier && barrier < navigation);
 });
 

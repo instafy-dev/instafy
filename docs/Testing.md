@@ -1777,6 +1777,11 @@ Response observers accept the application's `127.0.0.1` → `localhost`
 controller normalization only at the exact fixture port, including grant and
 clear responses. Browser capability/status and WebSocket diagnostics retain
 only fixed operation/event names, never payloads or connection URLs.
+If the rendered-page pixel check fails, its console diagnostics include only
+canvas and layout dimensions, aggregate light/dark/opaque pixel counts,
+live/frozen visibility flags, and bounded counts of browser socket events.
+They never include pixel data, page text, URLs, grants or session values; the
+existing rendering assertion and timeout still determine the result.
 
 The fresh database must contain only its unchanged migration-seeded provider.
 The runner registers its additional disposable provider through the controller's
