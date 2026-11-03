@@ -43,7 +43,7 @@ fn a_hand_back_turn_with_no_finding_lines_gets_them_from_the_wrap_up_pass_via_pr
     if std::env::var(CHILD).as_deref() != Ok("1") {
         return run_isolated_fixture(
             CHILD,
-            "browser_finding_lines::a_hand_back_turn_with_no_finding_lines_gets_them_from_the_wrap_up_pass_via_proxy",
+            "browser_hand_back::finding_lines::a_hand_back_turn_with_no_finding_lines_gets_them_from_the_wrap_up_pass_via_proxy",
             "browser-finding-lines",
         );
     }
@@ -55,7 +55,7 @@ fn a_hand_back_turn_whose_wrap_up_pass_writes_none_hands_back_its_pages_via_prox
     if std::env::var(CHILD).as_deref() != Ok("1") {
         return run_isolated_fixture(
             CHILD,
-            "browser_finding_lines::a_hand_back_turn_whose_wrap_up_pass_writes_none_hands_back_its_pages_via_proxy",
+            "browser_hand_back::finding_lines::a_hand_back_turn_whose_wrap_up_pass_writes_none_hands_back_its_pages_via_proxy",
             "browser-finding-lines-none",
         );
     }
