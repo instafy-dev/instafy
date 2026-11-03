@@ -504,6 +504,13 @@ export function ChatFileChangeList({
     }
     return { ...undone, ...undoStatusByPath };
   }, [resolvedFiles, undoStatusByPath, undonePathsInChat]);
+  // How those files were undone, as the row knew it when its Undo answered:
+  // a saved change by a new saved version, a change no save took in the
+  // folder. Either way that Undo is spent, also after a reload; what it left
+  // (a file the save never took) keeps the Undo that asks the agent.
+  const undoneByLine = Boolean(undonePathsInChat && undonePathsInChat.size > 0);
+  const shownRevertedByVersion = revertedByVersion || (undoneByLine && commitRange?.source === "git");
+  const shownRevertedInFolder = revertedInFolder || (undoneByLine && commitRange?.source !== "git");
 
   const pendingEntries = useMemo(
     () => resolvedFiles.filter(({ workspacePath }) => !shownUndoStatusByPath[workspacePath]),
@@ -942,7 +949,7 @@ export function ChatFileChangeList({
 
   // One saved revert undoes the whole version; files it left alone (never
   // saved) are not something a second revert can reach.
-  const canRevertChange = Boolean(projectId && projectWriteEnabled && revertRange && !revertedByVersion);
+  const canRevertChange = Boolean(projectId && projectWriteEnabled && revertRange && !shownRevertedByVersion);
 
   // A change a Stop left unsaved (the turn's save never ran) has no version
   // to revert. Its Undo puts the files back in the folder the turn ran in,
@@ -967,7 +974,7 @@ export function ChatFileChangeList({
       savesAreVersions &&
       unsavedReason === "stopped_before_save" &&
       !revertRange &&
-      !revertedInFolder &&
+      !shownRevertedInFolder &&
       unsavedRevertEntries.length > 0 &&
       unsavedRevertEntries.every(({ file }) => file.folderUndo),
   );
@@ -1824,9 +1831,9 @@ export function ChatFileChangeList({
                         : "border-slate-300 bg-slate-100 text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200",
                     ].join(" ")}
                     title={
-                      revertedByVersion
+                      shownRevertedByVersion
                         ? "Undone by a new saved version"
-                        : revertedInFolder
+                        : shownRevertedInFolder
                           ? "Put back as it was before this turn"
                           : undoStatus === "removed"
                             ? "Removed from workspace"

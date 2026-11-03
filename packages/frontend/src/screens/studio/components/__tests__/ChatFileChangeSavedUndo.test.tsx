@@ -302,12 +302,20 @@ describe("Undo of a saved change", () => {
     await undo();
 
     expect(recordChangeUndone).toHaveBeenCalledWith({ projectId: "p1", messageId: SAVED.id, paths: [APP] });
-    expect(chipTitles()).toEqual([`${APP} (reverted)`, SECRET]);
-    expect(notSavedChips()).toHaveLength(1);
+    const askAgentUndo = () => container.querySelector('[data-testid="chat-file-change-undo"]');
+    const shown = () => ({
+      chips: chipTitles(),
+      notSaved: notSavedChips().length,
+      versionUndo: undoChip() !== null,
+      askAgentUndo: askAgentUndo() !== null,
+    });
+    // The saved version is undone; the secret file, which it never held, is
+    // left to the Undo that asks the agent.
+    const afterUndo = shown();
+    expect(afterUndo).toEqual({ chips: [`${APP} (reverted)`, SECRET], notSaved: 1, versionUndo: false, askAgentUndo: true });
 
     await reload([mixed, UNDO_LINE], mixed);
-    expect(chipTitles()).toEqual([`${APP} (reverted)`, SECRET]);
-    expect(notSavedChips()).toHaveLength(1);
+    expect(shown()).toEqual(afterUndo);
     expect(container.textContent).toContain("Not saved");
   });
 
