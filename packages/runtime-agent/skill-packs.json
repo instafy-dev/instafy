@@ -4,13 +4,13 @@
     {
       "name": "interactive-map",
       "repo": "instafy-dev/maps-skill-pack",
-      "version": "0.1.29",
-      "tag": "v0.1.29",
-      "commit": "2b5c3fc8c6ebc3232cd796fce25f4ea221afff94",
+      "version": "0.1.30",
+      "tag": "v0.1.30",
+      "commit": "233bc3b14b41bb8f619121287dd45cb38342d9cb",
       "path": "skills/interactive-map",
-      "url": "https://github.com/instafy-dev/maps-skill-pack/releases/download/v0.1.29/interactive-map-v0.1.29.tar.gz",
-      "sha256": "04a46073c8f4097b0b0cd86cd0a68bf5f9230fac7ca93ce83decfb7cc372a6ce",
-      "tree_sha256": "14477c17b2a279e30e513ee345577e22a9c65fef8973a7eb666696d068377662",
+      "url": "https://github.com/instafy-dev/maps-skill-pack/releases/download/v0.1.30/interactive-map-v0.1.30.tar.gz",
+      "sha256": "2c1d03aab1dc29b3171ebbe54eb21522e4a2e172a3dffa9177a2d9ea0b3b799c",
+      "tree_sha256": "300eff18d9f0e1b1db43c5993890b49654e14251b4e630a035fe67c9abf9e21d",
       "license": "AGPL-3.0-only"
     }
   ]
