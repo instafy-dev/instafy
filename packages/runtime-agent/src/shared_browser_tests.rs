@@ -4318,7 +4318,9 @@ fn a_type_step_names_the_field_and_how_many_characters_went_in_never_the_text() 
             "field-reformats",
             "5550102048",
             false,
-            format!("Typed 10 characters into \"Search\", and the field holds 14 characters now.{after}"),
+            format!(
+                "Typed 10 characters into \"Search\", and the field holds 14 characters now.{after}"
+            ),
         ),
         (
             "field-empties",
@@ -4333,7 +4335,12 @@ fn a_type_step_names_the_field_and_how_many_characters_went_in_never_the_text() 
             false,
             format!("Typed 12 characters into \"Search\".{after}"),
         ),
-        ("form-input", "", false, format!("Cleared \"Search\", and it is empty now.{after}")),
+        (
+            "form-input",
+            "",
+            false,
+            format!("Cleared \"Search\", and it is empty now.{after}"),
+        ),
         (
             "site-search",
             "Belém Tower",
@@ -4390,7 +4397,11 @@ fn a_click_on_a_checkbox_says_whether_it_is_checked_now() {
             "/v1/click",
             Some(&json!({"index": 0, "snapshotId": snapshot_id}).to_string()),
         ));
-        assert_eq!(clicked.get("done").and_then(JsonValue::as_str), done, "{mode}");
+        assert_eq!(
+            clicked.get("done").and_then(JsonValue::as_str),
+            done,
+            "{mode}"
+        );
     }
 }
 
