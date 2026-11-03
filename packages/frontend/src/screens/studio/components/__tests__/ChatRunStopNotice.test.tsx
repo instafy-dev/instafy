@@ -64,6 +64,25 @@ describe("persisted run stop notice", () => {
     await render({ messages: [notice, { ...notice, id: "follow-up", metadata: { continuedStopMessageId: notice.id } }] });
     expect(controls!.canContinue(notice)).toBe(false);
   });
+  // A local test, Nov 3: the person undid the stopped turn's edit, and the row still
+  // offered Continue, which would put the undone change back.
+  it("does not offer Continue once the person undid what the stopped turn changed", async () => {
+    const undone: ChatMessage = {
+      id: "undo-line", role: "assistant", authorId: null, timestamp: 2, files: null,
+      content: "The person undid the change from “Add a section.”",
+      metadata: { source: "controller", kind: "change_undone", presentation: { hidden: true },
+        undoneMessageId: "files-1", undoneRunId: "run-2" },
+    };
+    await render({ messages: [notice, undone] });
+    expect(controls!.canContinue(notice)).toBe(false);
+    expect(container.querySelector('[data-testid="chat-run-stop-continue"]')).toBeNull();
+    // Another run's Undo leaves this one's Continue, and so does a message
+    // that only calls itself an Undo's line (no controller source).
+    await render({ messages: [notice, { ...undone, metadata: { ...undone.metadata, undoneRunId: "run-9" } }] });
+    expect(controls!.canContinue(notice)).toBe(true);
+    await render({ messages: [notice, { ...undone, metadata: { ...undone.metadata, source: "client" } }] });
+    expect(controls!.canContinue(notice)).toBe(true);
+  });
   it("allows retry after failed submission but considers queued continuation accepted", async () => {
     submit.mockResolvedValueOnce(false).mockImplementationOnce(async (_override, options) => { options?.onQueued?.(); return false; });
     await render(); expect(await controls!.onContinue(notice)).toBe(false);

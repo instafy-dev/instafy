@@ -769,3 +769,8 @@ async fn as_the_chats_first_building_turn(space: &Space<'_>) -> Result<()> {
     );
     Ok(())
 }
+
+/// A browser turn that hands back with no finding lines, and its wrap-up pass: in a file of its
+/// own, run with these.
+#[path = "browser_finding_lines.rs"]
+mod finding_lines;

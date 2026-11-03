@@ -5,7 +5,7 @@ import { isUUID } from "../../../utils/uuid";
 import { isRecoverableRuntimeStartAlert as runtimeStartAlertIsRecoverable } from "./runtimeAlertPresentation";
 import { normalizeAssistantStatusText } from "./assistantStatusHeuristics";
 import { isEmptyCommandExecution } from "./chatContentHelpers";
-import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
+import { extractMessageDetails, getMessageType, isHiddenByPresentation } from "./chatMessageMetadata";
 import { isGenericProgressLabel, THREAD_ACTION_CARD_TYPES } from "./threadPreviewHelpers";
 import { readEarlierAttempts, resolveAutomaticRetryFold } from "./automaticRetryFold";
 import { resolveRoutedBrowserFold } from "./routedBrowserFold";
@@ -96,16 +96,7 @@ function isMultiAgentPlanMessage(message: ChatMessage): boolean {
 }
 
 function shouldHideByPresentationMetadata(message: ChatMessage): boolean {
-  const metadata = message.metadata && isRecord(message.metadata)
-    ? (message.metadata as Record<string, unknown>)
-    : null;
-  const presentation = metadata?.presentation;
-  if (isRecord(presentation) && presentation.hidden === true) {
-    return true;
-  }
-  const details = metadata?.details;
-  const nestedPresentation = isRecord(details) ? details.presentation : null;
-  return isRecord(nestedPresentation) && nestedPresentation.hidden === true;
+  return isHiddenByPresentation(message);
 }
 
 function shouldHideRedundantMultiAgentSetupSummary(

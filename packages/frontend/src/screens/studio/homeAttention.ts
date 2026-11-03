@@ -2,6 +2,7 @@ import { getOrgDisplayName } from "../../org/orgNaming";
 import { spaceDisplayName } from "../../projects/spaceName";
 import type { ConversationState } from "../../conversations/ConversationsProvider";
 import type { NotificationInboxItem } from "../../sdk/instafy";
+import { isHiddenByPresentation } from "./components/chatMessageMetadata";
 
 export type HomeAttentionKind = "running" | "queued" | "reply";
 export type HomeFailureStatusLabel = "Run failed" | "Runtime unavailable" | "Automation failed" | "Credits exhausted";
@@ -93,10 +94,12 @@ function formatRelativeTimestamp(raw: string | null | undefined): string | null 
   return `${diffDays}d ago`;
 }
 
+// The newest line the chat shows: a line kept out of the transcript (such as
+// the one an Undo leaves in the chat's history) is never its preview.
 function getConversationPreview(conversation: ConversationState): string | null {
   const candidate = [...conversation.messages]
     .reverse()
-    .find((message) => message.content.trim().length > 0);
+    .find((message) => message.content.trim().length > 0 && !isHiddenByPresentation(message));
   return candidate?.content.trim() ?? null;
 }
 
