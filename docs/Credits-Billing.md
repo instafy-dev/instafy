@@ -368,6 +368,9 @@ stopped, it costs nothing unless it had already done what that rule charges for.
   the turn ran in, as the saved version has them (`POST /git/revert` on that folder's own origin,
   which keeps what it undoes under Unsaved work).
 
+The one line an Undo leaves in the chat's history ("The person undid the change from “…”") is no
+message either: it is not shown, runs no turn and costs nothing.
+
 When neither can undo it (other work is in the files: a later turn's, the person's own, or the
 saved version holds more than this change; or a save that failed), the card offers **Ask the agent
 to undo it**. That sends a message in the person's name, which runs a turn as any message does: it

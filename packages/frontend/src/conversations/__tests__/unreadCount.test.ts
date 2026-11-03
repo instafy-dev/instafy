@@ -155,3 +155,31 @@ describe("countNewUnreadConversationMessages", () => {
     ).toBe(2);
   });
 });
+
+// A local test, Nov 3: the line an Undo leaves in a chat's history is kept out
+// of the transcript, so nobody can read it; in a chat not on screen it still
+// counted as an unread reply, and the chat's tab showed a badge for it.
+describe("a line kept out of the transcript", () => {
+  const undoLine = createMessage({
+    id: "undo-line",
+    role: "assistant",
+    content: "The person undid the change from “Add a short section to that page.”",
+    metadata: { source: "controller", kind: "change_undone", presentation: { hidden: true } },
+  });
+
+  it("is never unread", () => {
+    expect(isUnreadEligibleAssistantMessage(undoLine)).toBe(false);
+    expect(isUnreadEligibleConversationMessage(undoLine, "current-user")).toBe(false);
+    expect(countNewUnreadAssistantMessages([], [undoLine])).toBe(0);
+    expect(countNewUnreadConversationMessages([], [undoLine], "current-user")).toBe(0);
+    const hiddenUnderDetails = createMessage({
+      role: "user",
+      authorId: "teammate",
+      content: "Continue building with what the browser turn found.",
+      metadata: { details: { presentation: { hidden: true } } },
+    });
+    expect(isUnreadEligibleConversationMessage(hiddenUnderDetails, "current-user")).toBe(false);
+    // A reply the chat shows still counts.
+    expect(countNewUnreadConversationMessages([], [createMessage({ id: "reply", content: "Done." })], "current-user")).toBe(1);
+  });
+});

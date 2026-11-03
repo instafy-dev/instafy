@@ -232,6 +232,40 @@ whose Stop came after its model was done, keep the Undo that asks the agent, as 
 space's history leaves out (tmp, dependencies), which stays as it is. "Ask the agent to undo it"
 sends a message in the person's name that names the change by its time, never by an id.
 
+Undo under a saved change saves a new version that reverses it, on the space's own origin. Once
+that version is saved, the card says so and the chat's history gets its line (below); then the
+machine's folder, which serves the page the person sees, follows that version (`POST /git/revert
+{paths, saved}` on the folder's own origin), as the refresh before a turn would: it moves only when
+it holds no unpublished work and no local edit is in the way, keeps every local edit, and pushes
+nothing, and the machine pictures the open previews of the files' sites again. Neither the card nor
+the line waits for the folder. A Desktop folder is where the version was saved, so it holds it
+already.
+
+An Undo that worked leaves one line in the chat's history, in the controller's words: "The person
+undid the change from “…”", quoting the person's request that made the change (`POST
+/projects/:id/messages/:id/undone {paths}`, `change_undone.rs`). A change a hand-back made (Octo
+carrying on a browser turn, in the person's role) quotes the person's message that browser turn
+carried on, never the hand-back's own words. Studio names the files the Undo put back or removed,
+and the line keeps them (`undonePaths`); when the Undo left some of the change as it was (a file the
+turn's save never took, one the space's history leaves out), the line names the files it undid
+("… in sites/page/app.js only"). A line that is lost on the way is sent again a moment later. The
+line is kept out of the transcript: no bubble, no notification, never unread and never a chat's
+preview on Home, and no turn, so no credit and no daily message. Only the controller writes it: a
+message a member records never keeps that `kind`, and Studio and the runtime read a line only with
+the controller's `source`. The routing step and every later turn read it with the history, and the
+first building turn on a restored thread after the Undo, whose thread never saw it, reads it after
+its restore note; so "keep going" carries on what is still open, never the change the person took
+back. The files the line names read as undone in their row, which then offers no Undo for them and
+no stop's Continue, after a reload or a switch of chats too; a file it does not name keeps its state
+(Not saved, say).
+
+A turn's save takes the space's lease, and a Stop can end the job while that save holds it. The
+stopped job may still release its own lease (releasing grants nothing, and its token does nothing
+else), and a save or an Undo that meets a lease whose job has ended ends it instead of waiting for
+it to run out, so an Undo right after a Stop is never told the agent is saving. A lease a running
+turn holds is that turn's alone: the person's own Studio on the same machine, or another of their
+turns, waits for it like anyone else, and never takes it over as a renewal of its own.
+
 A job a stop of its machine put back in the queue is not cancelled: the controller turns its report
 down, and the job's next lease takes the work up.
 

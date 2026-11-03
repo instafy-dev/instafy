@@ -27,6 +27,7 @@ mod browser_profile;
 mod browser_shares;
 mod browser_turn;
 mod bug_reports;
+mod change_undone;
 mod chat_activity;
 mod chat_attachments;
 mod config;
@@ -104,6 +105,8 @@ mod tests_browser_host;
 #[cfg(test)]
 mod tests_browser_view_lane;
 #[cfg(test)]
+mod tests_change_undone;
+#[cfg(test)]
 mod tests_chat_attachment_lease;
 #[cfg(test)]
 mod tests_chat_attachment_policies;
@@ -137,6 +140,8 @@ mod tests_provider_space;
 mod tests_runtime_stop_fence;
 #[cfg(test)]
 mod tests_stopped_turn_report;
+#[cfg(test)]
+mod tests_workspace_lease_after_stop;
 mod tokens;
 mod tunnels;
 mod turn_rate_limit_retry;
@@ -568,6 +573,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(skills_discovery::router())
         .merge(device_auth::router())
         .merge(conversations::router())
+        .merge(change_undone::router())
         .merge(message_search::router())
         .merge(message_stashes::router())
         .merge(send_intents::router())

@@ -10,6 +10,7 @@ const {
   fetchWorkspaceGitStatus,
   revertWorkspaceGitPaths,
   revertWorkspaceGitCommit,
+  recordChangeUndone,
   showStatus,
   runtimeState,
 } = vi.hoisted(() => ({
@@ -18,6 +19,7 @@ const {
   fetchWorkspaceGitStatus: vi.fn(),
   revertWorkspaceGitPaths: vi.fn(),
   revertWorkspaceGitCommit: vi.fn(),
+  recordChangeUndone: vi.fn(),
   showStatus: vi.fn(),
   runtimeState: {
     runtimeStatuses: [] as Array<{ runtimeId: string; origin?: { originId: string; status: string; protocols: string[] } }>,
@@ -38,6 +40,8 @@ vi.mock("../../../../sdk/instafy", () => ({
     },
   },
 }));
+
+vi.mock("../../../../services/runtimeController/changeUndone", () => ({ recordChangeUndone }));
 
 vi.mock("../../../../runtime/useRuntime", () => ({
   useRuntime: () => ({
@@ -109,6 +113,7 @@ describe("Undo of a change a Stop left unsaved", () => {
       fetchWorkspaceGitStatus,
       revertWorkspaceGitPaths,
       revertWorkspaceGitCommit,
+      recordChangeUndone,
       showStatus,
     ]) {
       mock.mockReset();
@@ -217,8 +222,10 @@ describe("Undo of a change a Stop left unsaved", () => {
       }),
     );
     expect(fetchWorkspaceGitStatus).not.toHaveBeenCalled();
-    // No message: nothing reaches the composer, so no turn runs.
+    // No message: nothing reaches the composer, so no turn runs. One hidden
+    // line in the chat's history tells the next turn and its routing.
     expect(undoRequests).toHaveLength(0);
+    expect(recordChangeUndone).toHaveBeenCalledWith({ projectId: "p1", messageId: STOPPED.id, paths: [APP] });
     expect(revertWorkspaceGitCommit).not.toHaveBeenCalled();
     expect(showStatus).toHaveBeenCalledWith("Those changes are undone.", "success", 4000, undefined);
     // The card says the file is back, with nothing left to save or undo.
@@ -250,6 +257,7 @@ describe("Undo of a change a Stop left unsaved", () => {
     expect(container.textContent).toContain("Not saved");
     expect(undoChip()).not.toBeNull();
     expect(undoRequests).toHaveLength(0);
+    expect(recordChangeUndone).not.toHaveBeenCalled();
   });
 
   it("puts nothing back when a later turn of the chat changed the file since", async () => {

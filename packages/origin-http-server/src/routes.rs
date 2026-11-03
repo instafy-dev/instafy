@@ -2428,6 +2428,17 @@ struct GitRevertRequest {
     /// it is left alone.
     #[serde(default)]
     expected: Option<std::collections::BTreeMap<String, Option<String>>>,
+    /// Undo of a saved change: the new saved version that undid it on
+    /// canonical `main`. This checkout then follows `main` as a refresh
+    /// with read access does: it moves only when it holds nothing
+    /// unpublished and no local edit is in the way, so it never takes back
+    /// anyone's work, and pushes nothing. `paths` are the change's files;
+    /// the answer says which of them the move put back or removed, and
+    /// `moved` whether it moved. Studio sends it after the saved revert,
+    /// so the page this machine serves loses the change at once instead of
+    /// at the next turn. Not with `keep` or `expected`.
+    #[serde(default)]
+    saved: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2630,6 +2641,27 @@ async fn handle_git_revert(
         }
         paths.push(normalized_path);
     }
+    if let Some(saved) = payload.saved {
+        if payload.keep || payload.expected.is_some() {
+            return Err(OriginError::bad_request(
+                "saved cannot be combined with keep or expected",
+            ));
+        }
+        let saved = saved.trim().to_ascii_lowercase();
+        if !git::is_safe_git_rev(&saved) {
+            return Err(OriginError::bad_request("saved must be a version id"));
+        }
+        return follow_saved_revert(
+            &state,
+            project_id,
+            workspace_root,
+            remote_url,
+            &access_token,
+            paths,
+            saved,
+        )
+        .await;
+    }
     let expected = payload
         .expected
         .map(|expected| revert_expectations(&paths, expected))
@@ -2731,6 +2763,121 @@ async fn handle_git_revert(
             "rev": report.rev,
             "paths": report.paths,
         })),
+    })))
+}
+
+/// Undo of a saved change, on this checkout (`saved` in `/git/revert`): the
+/// new saved version undid the change on canonical `main`, and the checkout
+/// follows `main` as a refresh with read access does (`publish::refresh`
+/// without write access). It moves only when it holds nothing unpublished,
+/// and `reset --keep` keeps every local edit, refusing the move when one is
+/// in the way, so it never takes back anyone's work; nothing is pushed. The
+/// files the move changed go to the process hosting the origin, as a path
+/// revert's do, so the previews of their sites are pictured again.
+async fn follow_saved_revert(
+    state: &AppState,
+    project_id: Uuid,
+    workspace_root: PathBuf,
+    remote_url: String,
+    access_token: &OriginAccessToken,
+    paths: Vec<String>,
+    saved: String,
+) -> Result<Json<serde_json::Value>, OriginError> {
+    if state.stopping.is_up() {
+        // A stop has kept this checkout's work: it follows `main` when it
+        // starts again, with the refresh before its next turn.
+        return Err(OriginError::with_report(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            WORKSPACE_STOPPING_CODE,
+            "the workspace is stopping; it follows the saved version when it restarts",
+            serde_json::json!({ "retryable": true }),
+        ));
+    }
+    let apply_lock = project_apply_lock(state, project_id).await;
+    let apply_guard = apply_lock.lock_owned().await;
+    let lock_workspace = workspace_root.clone();
+    let workspace_apply_guard =
+        tokio::task::spawn_blocking(move || try_acquire_workspace_apply_lock(&lock_workspace))
+            .await
+            .map_err(|error| {
+                OriginError::internal(format!("workspace lock task failed: {error}"))
+            })??
+            .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
+    let token = git_tokens::mint_git_access_token(
+        &state.http_client,
+        state.config.as_ref(),
+        project_id,
+        &["git.read"],
+        (!access_token.token.trim().is_empty()).then_some(access_token.token.as_str()),
+    )
+    .await?
+    .map(|minted| minted.token);
+    let mut config = (*state.config).clone();
+    config.workspace_root = workspace_root.clone();
+    config.git_remote_url = Some(remote_url);
+
+    let root = workspace_root.clone();
+    let followed = tokio::task::spawn_blocking(move || {
+        let _apply_guard = apply_guard;
+        let _workspace_apply_guard = workspace_apply_guard;
+        let internal = |error: anyhow::Error| OriginError::internal(format!("{error:#}"));
+        let git = WorkspaceGit::new(&root, None);
+        // Before the checkout is made sure of, which already follows `main`
+        // when no tracked file is changed.
+        let before = git.commit_id("HEAD").ok().flatten();
+        ensure_checkout_for_publish(&config, token.as_deref())?;
+        publish::refresh(&PublishContext {
+            config: &config,
+            workspace_root: root.as_path(),
+            token: token.as_deref(),
+            can_write: false,
+        })?;
+        let after = git.commit_id("HEAD").map_err(internal)?;
+        let holds_saved = match after.as_deref() {
+            Some(head) => git
+                .run(&["merge-base", "--is-ancestor", &saved, head])
+                .map_err(internal)?
+                .status
+                .success(),
+            None => false,
+        };
+        let changed = match (before.as_deref(), after.as_deref()) {
+            (Some(before), Some(after)) if before != after => {
+                crate::tree_merge::changed_paths(&git, before, after).map_err(internal)?
+            }
+            _ => Vec::new(),
+        };
+        let undone: Vec<String> = paths
+            .into_iter()
+            .filter(|path| changed.contains(path))
+            .collect();
+        let present = match after.as_deref() {
+            Some(head) => git.tree_entries(head, &undone).map_err(internal)?,
+            None => Default::default(),
+        };
+        let (reverted, removed): (Vec<String>, Vec<String>) = undone
+            .into_iter()
+            .partition(|path| present.contains_key(path));
+        Ok::<_, OriginError>((holds_saved, changed, reverted, removed))
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("git revert task failed: {error}")))?;
+
+    let (moved, changed, reverted, removed) = followed?;
+    if let Some(hook) = state.files_reverted.as_ref() {
+        if !changed.is_empty() {
+            hook(FilesReverted {
+                project_id,
+                workspace_root,
+                paths: changed,
+            });
+        }
+    }
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "moved": moved,
+        "reverted": reverted,
+        "removed": removed,
     })))
 }
 
