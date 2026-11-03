@@ -983,24 +983,43 @@ function sameSite(host: string, other: string): boolean {
  * site sent before it closed the connection) found nothing the turn was after
  * there: it is part of that failure, "Tried reading alcazarsevilla.org" with a
  * cross, never "Read a page on alcazarsevilla.org" with a tick, and the line
- * never counts it. It is a look (a snapshot, or one that found the page still
- * busy) on the site the open asked for, after no step that worked took the tab
- * elsewhere, at a page the turn had not opened or read before. A step the
- * browser refused before it loaded anything left the tab where it was, so a
- * look at another site, or at a page the turn already had, is a look like any
- * other. `steps` are in the order they last changed.
+ * never counts it.
+ *
+ * A failed open does not say whether it left a page, or none: the browser
+ * refused it before it loaded anything, or its site did not answer, and the
+ * tab still shows what it showed. So a failed open counts only once the turn
+ * knows the page the tab showed: a step that named that page (its key), or a
+ * snapshot that named no site (a blank page). From there, until a step that
+ * worked takes the tab elsewhere (a navigation or a link, one whose time ran
+ * out included), the tab shows that page or a page one of those failed opens
+ * left. A look at a page the turn had not seen, on a site one of them asked
+ * for (or a part of it, such as `en.`), is then a look at what it left, and so
+ * is any later look at that page. Another step that may have moved the tab and
+ * did not work, or a look at the tabs, leaves the tab's page unknown again.
+ * `steps` are in the order they last changed.
  */
 function withLooksAfterFailedOpens(steps: readonly TurnStep[]): TurnStep[] {
-  let failedOpenHost: string | null = null;
-  const pagesBefore = new Set<string>();
+  // The sites of the failed opens since a step that worked took the tab elsewhere.
+  const failedSites: string[] = [];
+  // The pages the turn's steps showed, and those a look found a failed open had left.
+  const pagesSeen = new Set<string>();
+  const pagesLeft = new Set<string>();
+  let tabPageKnown = false;
   return steps.map((step) => {
     const entry = step.activity;
     if (step.kind !== "tool" || !entry?.key.startsWith("browser/") || entry.step === undefined) {
       return step;
     }
-    const declined = entry.approval === "denied" || entry.approval === "expired";
-    if (step.state === "failed" && OPEN_STEPS.has(entry.step) && !declined) {
-      failedOpenHost = entry.host ?? null;
+    const { host, pageKey } = entry;
+    if (step.state === "failed") {
+      const declined = entry.approval === "denied" || entry.approval === "expired";
+      if (OPEN_STEPS.has(entry.step)) {
+        if (!declined && tabPageKnown && host !== undefined) {
+          failedSites.push(host);
+        }
+      } else if (PAGE_MOVING_STEPS.has(entry.step)) {
+        tabPageKnown = false;
+      }
       return step;
     }
     if (step.state !== "done") {
@@ -1008,18 +1027,26 @@ function withLooksAfterFailedOpens(steps: readonly TurnStep[]): TurnStep[] {
     }
     if (
       LOOK_STEPS.has(entry.step) &&
-      failedOpenHost !== null &&
-      entry.host !== undefined &&
-      sameSite(entry.host, failedOpenHost) &&
-      !(entry.pageKey !== undefined && pagesBefore.has(entry.pageKey))
+      host !== undefined &&
+      ((pageKey !== undefined && pagesLeft.has(pageKey)) ||
+        (failedSites.some((site) => sameSite(host, site)) && !(pageKey !== undefined && pagesSeen.has(pageKey))))
     ) {
+      if (pageKey !== undefined) {
+        pagesLeft.add(pageKey);
+      }
+      tabPageKnown = pageKey !== undefined;
       return { ...step, state: "failed", label: stepLabel(step.kind, step.message, entry, "failed") };
     }
-    if (entry.pageKey !== undefined) {
-      pagesBefore.add(entry.pageKey);
+    if (entry.step === "tabs") {
+      tabPageKnown = false;
+    } else if (pageKey !== undefined) {
+      pagesSeen.add(pageKey);
+      tabPageKnown = true;
+    } else {
+      tabPageKnown = entry.step === "snapshot" && host === undefined;
     }
-    if (PAGE_MOVING_STEPS.has(entry.step) || entry.step === "tabs") {
-      failedOpenHost = null;
+    if (PAGE_MOVING_STEPS.has(entry.step)) {
+      failedSites.length = 0;
     }
     return step;
   });

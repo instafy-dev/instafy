@@ -1267,10 +1267,13 @@ fn browser_refused_label(refused: &str) -> Option<&'static BuiltinLabel> {
 /// A Shared Browser step, from the facts runtime-agent kept of the browser's own result
 /// (`shared_browser_activity::browser_step_facts`): its kind, the host it names, a key of the
 /// page, how it was allowed and, for a step the browser refused because it is the person's,
-/// which one it was. A step that names no host yet is "Using the browser".
+/// which one it was. A step that names no host yet is "Using the browser". A step whose time
+/// ran out and that answered with the page as it is (`look`) reads as that look ("Read a page
+/// on frame.work"), and keeps its own kind as its `step`.
 pub fn browser_step_activity(step: &JsonValue) -> Option<JsonValue> {
     let facts = step.as_object()?;
-    let kind = facts.get("step")?.as_str()?;
+    facts.get("step")?.as_str()?;
+    let kind = facts.get("look").or_else(|| facts.get("step"))?.as_str()?;
     let host = facts.get("host").and_then(JsonValue::as_str);
     let refused = facts
         .get("refused")
@@ -2033,6 +2036,41 @@ mod tests {
         assert!(click.get("when").is_none());
         let unnamed = browser_step_activity(&json!({"step": "navigate"})).unwrap();
         assert!(unnamed.get("when").is_none());
+    }
+
+    /// A step whose time ran out answered with the page as it is (`look`): its words are that
+    /// look's, a page read or the page it is on, and its `step` stays its own kind, so Studio
+    /// knows a navigation or a link may have taken the tab elsewhere.
+    #[test]
+    fn a_step_whose_time_ran_out_reads_as_its_look_and_keeps_its_own_kind() {
+        let page_key = "cccccccccccccccc";
+        for (kind, look, key) in [
+            ("navigate", "snapshot", "browser/read"),
+            ("click", "snapshot", "browser/read"),
+            ("navigate", "status", "browser/browse"),
+            ("submit", "status", "browser/browse"),
+        ] {
+            let activity = browser_step_activity(&json!({
+                "step": kind, "look": look, "host": "pcworld.com", "pageKey": page_key,
+            }))
+            .expect("labelled");
+            assert_eq!(activity["key"], json!(key), "{kind} {look}");
+            assert_eq!(activity["step"], json!(kind), "{kind} {look}");
+            assert_eq!(activity["pageKey"], json!(page_key), "{kind} {look}");
+            // The look chooses the words and is not itself part of the activity.
+            assert!(activity.get("look").is_none(), "{kind} {look}");
+        }
+        let read = browser_step_activity(&json!({
+            "step": "navigate", "look": "snapshot", "host": "pcworld.com", "pageKey": page_key,
+        }))
+        .unwrap();
+        assert_eq!(read["when"], json!("success"));
+        assert_eq!(read["done"]["one"], json!("read a page on {host}"));
+        // A step with no kind of its own is no step.
+        assert_eq!(
+            browser_step_activity(&json!({"look": "snapshot", "host": "pcworld.com"})),
+            None
+        );
     }
 
     #[test]
