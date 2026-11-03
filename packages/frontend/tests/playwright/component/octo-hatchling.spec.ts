@@ -123,6 +123,12 @@ async function readHatchlings(page: Page): Promise<HatchlingReading[]> {
       ...toScreen(svg, point),
       painted: shapes(svg).some((shape) => shape.isPointInFill(new DOMPoint(point.x, point.y))),
     });
+    // Each path's 401 points, keyed by the geometry the browser draws for it
+    // (its computed `d`, or its attribute in a browser without CSS `d`). A
+    // face draws the same paths at every size, and each getPointAtLength call
+    // walks the path from its start, so walking every tile's own paths would
+    // take most of this test's time.
+    const walks = new Map<string, DOMPoint[]>();
     return Array.from(document.querySelectorAll<HTMLElement>("[data-face]"), (host) => {
       const tile = host.firstElementChild as HTMLElement;
       const svg = tile.querySelector<SVGSVGElement>(':scope > svg[data-ai-face="hatchling"]')!;
@@ -153,8 +159,15 @@ async function readHatchlings(page: Page): Promise<HatchlingReading[]> {
             points.push({ x: x + r * Math.cos((i / 72) * 2 * Math.PI), y: y + r * Math.sin((i / 72) * 2 * Math.PI) });
           }
         } else {
-          const length = shape.getTotalLength();
-          for (let i = 0; i <= 400; i += 1) points.push(shape.getPointAtLength((length * i) / 400));
+          const d = getComputedStyle(shape).getPropertyValue("d") || (shape.getAttribute("d") ?? "");
+          let walk = walks.get(d);
+          if (!walk) {
+            const length = shape.getTotalLength();
+            walk = [];
+            for (let i = 0; i <= 400; i += 1) walk.push(shape.getPointAtLength((length * i) / 400));
+            walks.set(d, walk);
+          }
+          points.push(...walk);
         }
         for (const point of points) {
           const screen = toScreen(svg, { x: point.x ?? 0, y: point.y ?? 0 });
