@@ -1,5 +1,12 @@
 # @instafy/cli
 
+## 0.5.4
+
+### Patch Changes
+
+- f3e027c: `instafy bind init` and `instafy bind check` end with the step that shows the page. In a space, until the CLI has recorded a preview of that space opened from the site's folder, init's next step names the one command that serves the page and posts its card in Studio, `(cd <dir> && instafy preview open --title '<short title>' --serve-cmd 'instafy bind serve . --port {port} --preview' --start --json)`, after putting the content in `data.json` and checking it with `instafy bind check` (for the blank starter, after writing `app.js`), and a check that passes ends with the same command (`next` with `--json`). Another space's preview on the same machine never counts, whatever its folder is called. Before, init's next step was `instafy-bind serve <dir>`, which posts no card and is not a command in a space, and a passing check named no next step, so a finished page could end with nothing to open. Outside a space the binder still says to serve the site itself. In a space, the card command that `instafy bind serve --preview` prints now runs in the folder it serves, with `--serve-cmd`, so its preview records that folder.
+- 8d77664: `instafy web read --find` cuts a page to the passages that mention the terms only when the page is longer than the reader's 12,000-character ceiling. A shorter page comes back whole, past `--max-chars`, so a line that names no term, such as a place's opening hours under its name, is no longer cut away from the line that says whose hours they are. Its passages come first, in `find.text` (in the text output, under the `--find` line), ahead of the page, its links and its structured data, so a reader that keeps only the start and the end of the output still sees them; `find.whole: true` says the page's `text` is all of it, and is never set for a page whose HTML was too large to read whole. Each passage now keeps the two lines above its match, where the name or heading it belongs to usually is, and the one below.
+
 ## 0.5.3
 
 ### Patch Changes
