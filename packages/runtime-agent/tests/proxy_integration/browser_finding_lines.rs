@@ -83,9 +83,11 @@ fn a_wrap_up_pass_that_takes_a_step_is_not_used_via_proxy() -> Result<()> {
 }
 
 /// A hand-back turn in the browser on the person's device, run whole: it opened the maker's page
-/// and answered with a build request and no finding line. Its turn keeps no thread, so it gets
-/// no pass; its note holds its reply and the page that browser reported, so the hand-back goes,
-/// and it posts no words of its own.
+/// and answered with a build request and no finding line. It is offered no build request, since
+/// a build comes after it. Its turn keeps no thread, so it gets no pass; its note holds its reply
+/// and the page that browser reported, so the hand-back goes, and it posts no words of its own.
+/// A routed turn that hands nothing back is offered the build request, and its own, asked for
+/// after it opened a page, is said in its reply: nothing acts on it.
 #[test]
 fn a_device_browser_turn_with_no_finding_lines_hands_back_the_page_it_opened_via_proxy()
 -> Result<()> {
@@ -335,8 +337,12 @@ async fn provider_request(
     }
 }
 
-/// A browser turn's job as the controller leases it: it carries on a card the routing step
-/// posted for the person's own message, and its findings go back to the building turn when
+/// What a routed browser turn that hands nothing back is offered, and no other (runtime-agent
+/// `BUILD_REQUEST_LINE`).
+const BUILD_REQUEST_OFFER: &str = "answer with the action `{type: 'request_build'}` alone";
+
+/// A browser turn's job as the controller leases it: read-only, it carries on a card the routing
+/// step posted for the person's own message, and its findings go back to the building turn when
 /// `hands_back`.
 fn browser_job(project_id: Uuid, transport: &str, hands_back: bool) -> LeaseJob {
     LeaseJob {
@@ -359,6 +365,7 @@ fn browser_job(project_id: Uuid, transport: &str, hands_back: bool) -> LeaseJob 
                     "cardJobId": "00000000-0000-4000-8000-0000000000a1",
                     "routed": true,
                 },
+                "writeScope": { "mode": "read_only" },
             },
         }),
         proxy: None,
@@ -896,6 +903,14 @@ async fn a_whole_device_turn(
     );
     // Its turn keeps no thread, so it gets no pass.
     assert!(passes(state).is_empty(), "no pass on the person's device");
+    // A routed turn whose findings go back to the building turn is offered no build request:
+    // a build comes after it already.
+    for request in &requests {
+        assert!(
+            !input_text(request).contains(BUILD_REQUEST_OFFER),
+            "{request}"
+        );
+    }
     let calls = browser.calls.lock().unwrap().clone();
     assert_eq!(
         calls.first().map(String::as_str),
@@ -947,6 +962,43 @@ async fn a_whole_device_turn(
             assert_eq!(ended.summary, words, "the person reads it");
             assert!(notes.is_empty(), "{:?}", ended.final_messages);
         }
+    }
+
+    if device == Device::Reads {
+        // A routed turn that hands nothing back is offered the build request. Its own, asked for
+        // after it opened a page, is one nothing acts on: its reply says so, and it gets no pass.
+        let before = state.requests.lock().unwrap().len();
+        let routed = browser_job(project_id, "desktop-personal", false);
+        let mut answered = tokio::time::timeout(
+            Duration::from_secs(90),
+            processor.run_apply_job(
+                &registration_for_live(Uuid::new_v4()),
+                &routed,
+                true,
+                None,
+                None,
+                None,
+            ),
+        )
+        .await
+        .context("the routed browser turn timed out")?
+        .context("the routed browser turn failed")?;
+        let offered = state.requests.lock().unwrap()[before..].to_vec();
+        assert!(!offered.is_empty());
+        for request in &offered {
+            assert!(
+                input_text(request).contains(BUILD_REQUEST_OFFER),
+                "{request}"
+            );
+        }
+        assert!(
+            passes(state).is_empty(),
+            "no pass for a turn that hands nothing back"
+        );
+        let said = format!("{PROMISED_BUILD}\n\n{NOT_MADE}");
+        assert_eq!(answered.summary, said);
+        move_findings_into_details(&routed, &mut answered);
+        assert_eq!(answered.summary, said, "the person reads it");
     }
 
     drop(browser_guard);
