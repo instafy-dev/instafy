@@ -402,17 +402,6 @@ html.marketing-canvas body {
   background-color: rgb(148 163 184 / 0.55);
 }
 
-@keyframes toast-slide-in-top {
-  from {
-    opacity: 0;
-    transform: translateY(-10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
 @keyframes toast-fade-in {
   from {
     opacity: 0;
@@ -477,10 +466,6 @@ html.marketing-canvas body {
       0 14px 28px -16px color-mix(in oklch, var(--color-primary-500), transparent 12%);
     filter: saturate(1.08) brightness(1.08);
   }
-}
-
-.toast-slide-in-top {
-  animation: toast-slide-in-top 160ms ease-out both;
 }
 
 .toast-fade-in {

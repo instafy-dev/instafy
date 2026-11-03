@@ -38,6 +38,7 @@ import {
   type BrowserOriginSocketPath,
 } from "./browserOriginUrls";
 import type { StatusIntent } from "../../../status/useStatus";
+import { useToastClearanceRef } from "../../../status/toastClearance";
 import { useBrowserSessionActions } from "./useBrowserSessionActions";
 import { useExpandedBrowserViewport } from "./useExpandedBrowserViewport";
 import { BrowserCursorOverlay } from "./BrowserCursorOverlay";
@@ -1191,6 +1192,11 @@ export function BrowserSessionModal({
     transportActive,
   });
   const expandedViewportStyle = useExpandedBrowserViewport(isOpen && renderFullscreen);
+  // While the view's address bar waits for the browser's controls, the bar
+  // standing in its place keeps toasts below it, at its height: a toast on
+  // screen sits clear of it from the view's first frame and stays put when
+  // the address bar comes (before, it drew over this bar, then moved down).
+  const startingBarToastClearance = useToastClearanceRef<HTMLDivElement>(fillContainer);
   const isInlineDocked = presentation === "docked" && !renderFullscreen;
   const shouldViewportCollapseDocked =
     isInlineDocked && !fillContainer && (viewportHeight < 760 || smallViewport);
@@ -3561,9 +3567,11 @@ export function BrowserSessionModal({
     <div className={isInlineDocked && !fillContainer ? "flex flex-col" : "flex h-full min-h-0 flex-col"}>
       {!shouldCollapseDocked && !(fillContainer && sharedBrowserChrome) ? (
         <div
+          ref={fillContainer ? startingBarToastClearance : undefined}
+          data-testid="browser-session-toolbar"
           className={
             fillContainer
-              ? "flex items-center justify-between gap-2 border-b border-slate-200 bg-white px-2 py-0.5 dark:border-slate-800 dark:bg-slate-950 sm:px-3"
+              ? "flex min-h-11 items-center justify-between gap-2 border-b border-slate-200 bg-white px-2 py-0.5 dark:border-slate-800 dark:bg-slate-950 sm:px-3"
               : "flex items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2 dark:border-slate-800 dark:bg-slate-950 sm:px-4"
           }
           data-browser-session-safe-zone="true"

@@ -10,10 +10,15 @@ export function segmentedControlGroupClassName(tone: SegmentedControlTone = "def
   ].join(" ");
 }
 
-/** Consumers choose width and minimum height; selection and focus stay consistent. */
+/**
+ * Consumers choose width and minimum height; selection and focus stay
+ * consistent. The chosen segment's surface moves in the frame the choice
+ * changes: cross-faded, a look right after a press found the previous segment
+ * still looking chosen over what the new one shows.
+ */
 export function segmentedControlOptionClassName(selected: boolean, tone: SegmentedControlTone = "default"): string {
   return [
-    "group/segment relative inline-flex min-w-0 items-center justify-center gap-1 rounded-lg border font-medium outline-none touch-manipulation [-webkit-tap-highlight-color:transparent] transition-[color,background-color,border-color,box-shadow] data-[disabled]:pointer-events-none data-[disabled]:opacity-60 disabled:pointer-events-none disabled:opacity-60",
+    "group/segment relative inline-flex min-w-0 items-center justify-center gap-1 rounded-lg border font-medium outline-none touch-manipulation [-webkit-tap-highlight-color:transparent] transition-[color] data-[disabled]:pointer-events-none data-[disabled]:opacity-60 disabled:pointer-events-none disabled:opacity-60",
     selected
       ? tone === "inverse"
         ? "border-[rgba(255,255,255,0.12)] bg-[rgba(255,255,255,0.12)] text-slate-50 shadow-sm"

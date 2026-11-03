@@ -155,7 +155,10 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   since its output is behind it. It shows the newest 60 rows, with "Show earlier steps" above
   them; pressing that moves focus to the first row it reveals.
 - Cards (secrets, connections, action and preview cards, team plans) stay in the turn's default
-  view, and the file changes stay under the reply. Run traces keep their full view.
+  view, under the reply: what the turn says comes first, then what it made or asks for, also for a
+  card the turn posted before it was done with its site. While the reply is written, its draft
+  grows in the reply's place, above the cards, in the turn's own row. The file changes stay under
+  the reply and its cards. Run traces keep their full view.
 - Octo is not asked for replies the person could send next, and none is shown or sent for them:
   Enter in an empty composer sends nothing, and the composer's own completion, when the person
   turned it on, is its only ghost text. A thread started before this still holds the instruction

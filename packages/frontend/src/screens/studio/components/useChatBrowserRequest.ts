@@ -571,12 +571,15 @@ export function useChatBrowserRequest(options: Options) {
           const followUp = browserFollowUpOf(sending, request, transport, routedJobId);
           if (goesOn && !followUp) throw new BrowserAutoStartDropped();
           const sent = await sending.continueTask(transport, browserRequestContinuation(request), {
-            // A message Octo sent straight to the browser, opened by itself,
-            // leaves no notice: the person's own message is right above, and
-            // the turn reads as one (routedBrowserFold.ts).
-            ...(request.routed && autoStarted
-              ? {}
-              : { display: browserRequestNotice(sending.agentName ?? "Octo", request.task, { automatic: autoStarted }) }),
+            // The chat keeps the continuation as this one line, never as the
+            // task's words. A message Octo sent straight to the browser has
+            // the person's own words as its task: kept as they are, they were
+            // the person's message a second time, in every later turn's
+            // history, and the chat merged the person's own bubble into it for
+            // a moment. Opened by Studio, its line does not show either: the
+            // person's message is right above, and the turn reads as one
+            // (routedBrowserFold.ts).
+            display: browserRequestNotice(sending.agentName ?? "Octo", request.task, { automatic: autoStarted }),
             metadata: {
               ...(extraMetadata ?? {}),
               [BROWSER_REQUEST_OF_METADATA_KEY]: key,

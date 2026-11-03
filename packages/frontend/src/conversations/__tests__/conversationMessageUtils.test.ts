@@ -28,6 +28,32 @@ function createMessage(overrides: Partial<ChatMessage>): ChatMessage {
 }
 
 describe("mergeAndSortMessages", () => {
+  // A local test, Nov 3: as each message Octo sent straight to the browser
+  // went on to its browser turn, the person's own bubble left the chat for
+  // 0.2 to 0.3 s. Studio's send of the same words (the browser turn's task,
+  // marked as a card's continuation) waited to be stored, and its placeholder
+  // was merged into the person's message by their words, marks and all.
+  it("keeps the person's message as it is while another send of the same words waits to be stored", () => {
+    const words = "Compare the three latest Framework laptops, as a comparison page.";
+    const person = createMessage({
+      id: "40000000-0000-4000-8000-000000000001", role: "user", content: words, timestamp: 1,
+      metadata: { prompt_metadata: { clientMessageId: "send-1" } },
+    });
+    const pending = createMessage({
+      id: "local-send-2", role: "user", content: words, timestamp: 2,
+      metadata: { clientMessageId: "send-2", browserRequestOf: "job:card-1", browserAutoStarted: true },
+    });
+
+    const merged = mergeAndSortMessages([person, pending]);
+
+    expect(merged.map(({ id }) => id)).toEqual([person.id, pending.id]);
+    expect(merged[0]).toEqual(person);
+    // The server copy of the same send still replaces its placeholder.
+    const stored = createMessage({ ...pending, id: "40000000-0000-4000-8000-000000000002",
+      metadata: { prompt_metadata: { clientMessageId: "send-2", browserRequestOf: "job:card-1", browserAutoStarted: true } } });
+    expect(mergeAndSortMessages([person, pending, stored]).map(({ id }) => id)).toEqual([person.id, stored.id]);
+  });
+
   it("updates identity indexes when a controller copy changes role, client id, and server id", () => {
     const serverId = (value: number) => `10000000-0000-4000-8000-${String(value).padStart(12, "0")}`;
     const messages = [

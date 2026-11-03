@@ -1,4 +1,4 @@
-import { useReplyDraftMessages } from "../../../conversations/replyDrafts";
+import { placeReplyDrafts, useReplyDraftMessages } from "../../../conversations/replyDrafts";
 import {
   FormEvent,
   KeyboardEvent,
@@ -3196,9 +3196,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       ["queued", "in_progress", "awaiting_approval"].includes(run.status))
     .map((run) => run.id)), [runs, activeConversationEntry?.controllerId]);
   const replyDrafts = useReplyDraftMessages(activeConversationEntry?.controllerId ?? null, messages, activeReplyRunIds);
-  const transcriptMessages = useMemo(() => replyDrafts.messages.length
-    ? [...displayedMessages, ...replyDrafts.messages] : displayedMessages,
-  [displayedMessages, replyDrafts.messages]);
+  // Each draft grows in its turn's row, where its reply lands: one Octo row.
+  const transcriptMessages = useMemo(
+    () => placeReplyDrafts(displayedMessages, replyDrafts.messages),
+    [displayedMessages, replyDrafts.messages],
+  );
   const showOutOfCreditsNotice = outOfCredits && activeConversationRuns.length === 0;
   // Keep the complete active-handle set for existing busy/queue overlap
   // behavior. Steer discovery applies the narrower silent-evaluation guard

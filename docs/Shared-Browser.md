@@ -1226,7 +1226,10 @@ no model turn of its own: it posts one card marked `routed`, whose task is the
 person's own words, and no reply. Studio opens it as it opens any card, and
 the chat reads it as one turn: the turn's line says "Opening Instafy's
 browser…" until the browser turn shows something, and neither the card nor
-the continuation (which repeats the person's message) is shown. A routed card
+the continuation is shown. The continuation is kept as any card's is, as one
+line ("Octo opened Instafy's browser for …"), with the person's words only as
+the browser turn's task: kept as the words themselves, the person's message
+was stored a second time and every later turn's history held it twice. A routed card
 Studio cannot open by itself shows as any card does, with its reason; once the
 person presses it, or once its browser turn fails or is stopped before it
 shows anything, it leaves the chat as any opened card does, since nothing is

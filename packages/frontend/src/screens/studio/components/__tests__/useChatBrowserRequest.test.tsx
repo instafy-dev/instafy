@@ -662,9 +662,14 @@ describe("Studio starting a request_browser card by itself", () => {
   });
 
   // A message Octo sent straight to the browser: Studio opens its card the
-  // same way, and the continuation leaves no notice, since the person's own
-  // message is right above it (routedBrowserFold.ts).
-  it("opens a card the routing step sent with the person's own words, and leaves no notice", async () => {
+  // same way, with the person's own words as the browser turn's task. The
+  // continuation keeps Octo's one line, as any card's does, never those words
+  // a second time: kept as they were, the person's message was stored twice
+  // (a local test, Nov 3: 05:44:57.288 and 05:45:03.736), both copies reached
+  // every later turn's history, and the chat merged the person's bubble into
+  // the copy for 0.2 to 0.3 s. The chat leaves that line out, since the
+  // person's own message is right above it (routedBrowserFold.ts).
+  it("opens a card the routing step sent with the person's own words as its task, kept as Octo's one line", async () => {
     await render();
     await advance(5_000);
     const prompt = sendPrompt({}, "job-1", TASK);
@@ -676,6 +681,7 @@ describe("Studio starting a request_browser card by itself", () => {
     expect(value.activate).toHaveBeenCalledExactlyOnceWith("personal", PERSONAL);
     await becomeReady();
     expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("personal", TASK, {
+      display: "Octo opened Instafy's browser for app.example.test",
       metadata: { browserRequestOf: "job:job-1", browserAutoStarted: true },
       knownHosts: ["app.example.test"],
     });
@@ -1402,6 +1408,7 @@ describe("Studio starting a request_browser card by itself", () => {
       expect(value.activate).toHaveBeenCalledExactlyOnceWith("shared", { kind: "continue", runtimeId: SESSION });
       await advance();
       expect(value.continueTask).toHaveBeenCalledExactlyOnceWith("shared", "keep going", {
+        display: "Octo opened Instafy's browser",
         metadata: { browserRequestOf: "job:job-2", browserAutoStarted: true, browserContinuesRunId: RUN_ID },
         knownHosts: [],
         tab: TAB,
