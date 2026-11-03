@@ -7313,6 +7313,19 @@ impl JobProcessor {
             .flatten();
         let runtime_expectations =
             runtime_job_expectations_for_execution(&job.payload, bounded_execution);
+        if let Some(failure) = turn_that_cannot_save(
+            job,
+            commit_to_workspace,
+            read_only_workspace,
+            runtime_expectations,
+            pre_turn_refresh.as_ref(),
+        ) {
+            warn!(
+                job_id = %job.id,
+                "this turn must write files its job may not save; it ends before its model runs"
+            );
+            return Err(failure.into());
+        }
         let scoped_worker_has_precollected_observations = is_multi_agent_worker_job(job)
             && !scoped_worker_requires_tools(job)
             && scoped_worker_path_observation
@@ -13931,6 +13944,36 @@ fn codex_missing_final_inert_write_task_retry_prompt(prompt: &str) -> String {
         - Do not end the turn after reasoning alone, and do not send a progress/status update as the final assistant message.\n\n\
         Retry the latest user request now."
     )
+}
+
+/// What the person reads when a turn that must write files may not save them
+/// ([`turn_that_cannot_save`]): plain words, shown inline on the failed turn.
+/// It ended before its model ran, so nothing was made, and nothing was lost.
+const CANNOT_SAVE_BEFORE_TURN_FAILURE: &str =
+    "Octo can't save changes in this space right now, so it didn't start making them.";
+
+/// A turn that must write the space's files (a hand-back, which builds with
+/// what a browser turn found or what the person asked, or a turn whose route
+/// or caller requires file changes) in a folder its job may not save: the
+/// refresh before it was refused the workspace lease, so its save at the end
+/// would be refused too, after the model made the files. Such a turn ends
+/// before its model runs, with that refresh's record; any other turn goes on.
+fn turn_that_cannot_save(
+    job: &LeaseJob,
+    commit_to_workspace: bool,
+    read_only_workspace: bool,
+    runtime_expectations: RuntimeJobExpectations,
+    refresh: Option<&workspace_commit::PreTurnRefreshOutcome>,
+) -> Option<JobFailureWithArtifacts> {
+    let refresh = refresh.filter(|refresh| refresh.saves_refused)?;
+    let must_write_files = commit_to_workspace
+        && !read_only_workspace
+        && (runtime_expectations.workspace_file_changes
+            || browser_hand_back::is_hand_back_job(job));
+    must_write_files.then(|| JobFailureWithArtifacts {
+        message: CANNOT_SAVE_BEFORE_TURN_FAILURE.to_string(),
+        artifacts: vec![refresh.artifact()],
+    })
 }
 
 /// What the person reads when a browser turn ended, after its retry, without
@@ -22828,6 +22871,81 @@ mod tests {
         assert!(!prompt.contains("\nResponse contract reminder:\n"));
         assert!(!prompt.contains("\nCurrent Studio runtime invariants:\n"));
         assert!(!prompt.contains("request_browser"));
+    }
+
+    /// A turn that must write files, in a folder its job may not save (the
+    /// controller refused the refresh before it the workspace lease), ends
+    /// before its model runs, with a plain notice and the refresh's record:
+    /// a run that can't save made a page and lost it at the save (local
+    /// drive, Nov 3). A turn that need not write goes on, and so does one
+    /// whose lease someone else held for a moment, which may still save.
+    #[test]
+    fn a_turn_that_must_write_where_it_may_not_save_ends_before_its_model_runs() {
+        let refresh = |saves_refused| {
+            workspace_commit::PreTurnRefreshOutcome {
+            mode: "read_only",
+            lease_error: Some(
+                "workspace lease acquire failed (403 Forbidden): {\"message\":\"this job is not allowed to write the workspace\"}"
+                    .to_string(),
+            ),
+            saves_refused,
+            ..Default::default()
+        }
+        };
+        let refused = refresh(true);
+        let held = workspace_commit::PreTurnRefreshOutcome {
+            mode: "read_only",
+            lease_error: Some("workspace lease conflict: {\"message\":\"held\"}".to_string()),
+            ..Default::default()
+        };
+        let hand_back = test_lease_job(
+            Some("feature"),
+            json!({
+                "prompt_text": "Continue building with what the browser turn found.",
+                "metadata": { "browserHandBack": { "verified": true, "buildRequest": true, "reply": "" } },
+            }),
+        );
+        let required = test_lease_job(
+            Some("feature"),
+            json!({ "metadata": { "runtimeExpectations": { "workspaceFileChanges": true } } }),
+        );
+        let question = test_lease_job(Some("feature"), json!({ "metadata": {} }));
+        let expectations =
+            |job: &LeaseJob| runtime_job_expectations_for_execution(&job.payload, false);
+        let cannot_save =
+            |job: &LeaseJob,
+             commit: bool,
+             read_only: bool,
+             refresh: Option<&workspace_commit::PreTurnRefreshOutcome>| {
+                turn_that_cannot_save(job, commit, read_only, expectations(job), refresh)
+            };
+
+        for job in [&hand_back, &required] {
+            let failure = cannot_save(job, true, false, Some(&refused))
+                .expect("a turn that must write where it may not save ends");
+            assert_eq!(failure.message, CANNOT_SAVE_BEFORE_TURN_FAILURE);
+            assert_eq!(failure.artifacts.len(), 1);
+            assert_eq!(failure.artifacts[0]["kind"], "origin/refresh");
+            assert_eq!(failure.artifacts[0]["metadata"]["mode"], "read_only");
+            // It may save, or someone else held the lease a moment: it goes on.
+            assert!(cannot_save(job, true, false, Some(&refresh(false))).is_none());
+            assert!(cannot_save(job, true, false, Some(&held)).is_none());
+            assert!(cannot_save(job, true, false, None).is_none());
+            // A turn with no folder to save to, or one that writes nothing by design.
+            assert!(cannot_save(job, false, false, Some(&refused)).is_none());
+            assert!(cannot_save(job, true, true, Some(&refused)).is_none());
+        }
+        // A turn that need not write files may still answer.
+        assert!(cannot_save(&question, true, false, Some(&refused)).is_none());
+        // Plain words: what happened and that nothing was made.
+        for word in ["workspace", "request", "lease", "token", "403"] {
+            assert!(
+                !CANNOT_SAVE_BEFORE_TURN_FAILURE
+                    .to_lowercase()
+                    .contains(word),
+                "{word}"
+            );
+        }
     }
 
     /// A request that needs Instafy's browser before a change gets the card,

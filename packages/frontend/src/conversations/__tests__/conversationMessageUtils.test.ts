@@ -1074,6 +1074,52 @@ describe("extractUnsavedReasonFromMetadata", () => {
     expect(extractUnsavedReasonFromMetadata({ artifacts: [originApply("failed")] })).toBe("save_failed");
   });
 
+  // A save the controller refused (local drive, Nov 3: the hand-back's save,
+  // "legacy job token is not allowed to mutate this workspace scope") failed
+  // before it reached the origin: the runtime records only its error, and the
+  // turn's files read Not saved, never as saved.
+  it("reports a save that failed before it reached the space", () => {
+    const refused = {
+      kind: "origin/apply-error",
+      metadata: {
+        error:
+          'workspace lease acquire failed (403 Forbidden): {"message":"legacy job token is not allowed to mutate this workspace scope"}',
+      },
+    };
+    expect(extractUnsavedReasonFromMetadata({ artifacts: [refused] })).toBe("save_failed");
+    // The newest save wins, as for a retried run.
+    expect(extractUnsavedReasonFromMetadata({ artifacts: [refused, originApply("synced")] })).toBeNull();
+    const mapped = mapControllerMessageToChat({
+      id: "14141414-1414-1414-1414-141414141414",
+      conversationId: "44444444-4444-4444-4444-444444444444",
+      projectId: "55555555-5555-5555-5555-555555555555",
+      sessionId: null,
+      createdBy: null,
+      promptId: null,
+      runId: null,
+      role: "assistant",
+      content: `Workspace sync failed: ${refused.metadata.error}`,
+      metadata: {
+        source: "agent",
+        outcome: "failed",
+        messageType: "error",
+        artifacts: [
+          {
+            kind: "apply/files",
+            files: [
+              { path: "sites/hours/app.js", change: { type: "added" } },
+              { path: "sites/hours/index.html", change: { type: "added" } },
+            ],
+          },
+          refused,
+        ],
+      },
+      createdAt: "2026-11-03T05:55:23.055Z",
+    });
+    expect(mapped.files?.map((file) => file.path)).toEqual(["sites/hours/app.js", "sites/hours/index.html"]);
+    expect(mapped.unsavedReason).toBe("save_failed");
+  });
+
   it("reports auto-save being off, the runtime's manual_required outcome", () => {
     expect(extractUnsavedReasonFromMetadata({ artifacts: [originApply("disabled")] })).toBe("auto_save_off");
   });

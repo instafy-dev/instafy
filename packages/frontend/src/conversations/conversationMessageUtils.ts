@@ -851,7 +851,8 @@ function skippedSaveLeftPathsUnsaved(artifactMetadata: Record<string, unknown>):
 // that are kept out of history; that is only a failed save when the same
 // request also carried other paths, since the refusal saves none of them.
 // "synced" is saved and "partial" saved all but some files, which are marked
-// one by one (extractUnsavedPathsFromMetadata). No artifact means no save was
+// one by one (extractUnsavedPathsFromMetadata). An "origin/apply-error" is a
+// save that failed before it reached the origin, so nothing was saved. No artifact means no save was
 // attempted, and Desktop folders keep the files on the user's disk, so those
 // return null, unless the files are a stopped turn's that it never saved: its
 // report marks its apply/files artifact `stoppedBeforeSave`.
@@ -869,7 +870,16 @@ export function extractUnsavedReasonFromMetadata(
   // a fresh one.
   for (let index = artifacts.length - 1; index >= 0; index -= 1) {
     const artifact = artifacts[index];
-    if (!isPlainObject(artifact) || artifact.kind !== "origin/apply") {
+    if (!isPlainObject(artifact)) {
+      continue;
+    }
+    // The save failed before it reached the space (the controller refused
+    // it, say): the runtime records only its error, and the files are on the
+    // machine alone.
+    if (artifact.kind === "origin/apply-error") {
+      return "save_failed";
+    }
+    if (artifact.kind !== "origin/apply") {
       continue;
     }
     const artifactMetadata = isPlainObject(artifact["metadata"]) ? artifact["metadata"] : null;

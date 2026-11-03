@@ -28,7 +28,7 @@ import {
   type BrowserHandBackInput,
 } from "../browserHandBack";
 import { shouldDisplayChatMessage } from "../chatMessagePresentation";
-import { useBrowserHandBack } from "../useBrowserHandBack";
+import { browserHandBackRetry, useBrowserHandBack } from "../useBrowserHandBack";
 import { BROWSER_HUMAN_INPUT_CONTINUE_PROMPT } from "../useBrowserHumanInput";
 
 // The browser turn's reply and the hand-back's claim and prompt are the
@@ -269,6 +269,46 @@ describe("browser hand-back: how the chat shows it", () => {
     expect(isUnsentBrowserNoticePrompt(message)).toBe(false);
     recordSendFailedForPromptSentFromThisPage(message);
     expect(isUnsentBrowserNoticePrompt(message)).toBe(true);
+  });
+});
+
+// Try again on a hand-back whose turn failed (local drive, Nov 3: its save
+// was refused) sent the notice the chat shows, "Octo continued in the chat",
+// as the person's message: Octo read it as their request, with no record of
+// the browser turn, so it chose no skill from what they asked.
+describe("browser hand-back: Try again on one that failed", () => {
+  it("sends the hand-back again: its claim and Studio's words, to the agent it went to", () => {
+    // The controller's own hand-back, as the chat stores it.
+    const controllers: ChatMessage = { id: "stored", role: "user", content: "Octo continued in the chat", timestamp: 1,
+      metadata: { prompt_metadata: {
+        displayContent: "Octo continued in the chat",
+        agentSelection: { active: ["octo"], mentions: ["octo"] },
+        [BROWSER_HAND_BACK_RECORD_KEY]: { version: 1, browserJobId: BROWSER_JOB, cardJobId: CARD_JOB, findingCount: 0 },
+      } } };
+    expect(browserHandBackRetry(controllers, { retryOfMessageId: "failure-1" })).toEqual({
+      message: fixtures.handBackPrompt,
+      extras: {
+        display: "Octo continued in the chat",
+        metadata: { retryOfMessageId: "failure-1", [fixtures.claimKey]: BROWSER_JOB },
+        agentHandles: ["octo"],
+      },
+    });
+    // Studio's own, as this page sent it: the claim as sent, to the chat's agent.
+    const studios: ChatMessage = { id: "local", role: "user", content: browserHandBackNotice("Octo"), timestamp: 1,
+      metadata: { clientMessageId: "client-hb", [BROWSER_HAND_BACK_CLAIM_KEY]: BROWSER_JOB } };
+    expect(browserHandBackRetry(studios, { retryOfMessageId: "failure-2" })).toEqual({
+      message: BROWSER_HAND_BACK_PROMPT,
+      extras: {
+        display: "Octo continued with what it found in the browser",
+        metadata: { retryOfMessageId: "failure-2", [BROWSER_HAND_BACK_CLAIM_KEY]: BROWSER_JOB },
+      },
+    });
+    // The retry's metadata never names another browser turn.
+    expect(browserHandBackRetry(studios, { [BROWSER_HAND_BACK_CLAIM_KEY]: "job-other" })?.extras.metadata)
+      .toEqual({ [BROWSER_HAND_BACK_CLAIM_KEY]: BROWSER_JOB });
+    // Any other prompt, and Octo's own words, are not hand-backs.
+    expect(browserHandBackRetry({ role: "user", content: "Make the page dark.", metadata: {} }, {})).toBeNull();
+    expect(browserHandBackRetry({ ...controllers, role: "assistant" }, {})).toBeNull();
   });
 });
 

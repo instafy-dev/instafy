@@ -22,7 +22,10 @@
 //! - the browser turn read at least one page: a finding that only says where
 //!   it stopped gives the building turn nothing to continue with;
 //! - no other hand-back for that browser job is queued, running or done;
-//! - nobody sent a prompt in the conversation after the browser turn.
+//! - nobody sent a prompt in the conversation after the browser turn, other
+//!   than a hand-back of it that failed, was stopped or expired: Try again on
+//!   a failed one sends the hand-back again, its claim and Studio's words,
+//!   never the notice it showed.
 //!
 //! One browser turn hands back without reading a page: one that carries on a
 //! card the routing step posted for the person's own message, opened no page
@@ -759,18 +762,33 @@ pub(crate) async fn require_hand_back(
 
     // Nobody wrote after the browser turn: a prompt sent in this conversation
     // since (the person's own next message, a teammate's, or a turn queued
-    // behind it) comes first, and the findings never jump ahead of it.
+    // behind it) comes first, and the findings never jump ahead of it. An
+    // earlier hand-back of this browser turn that failed, was stopped or
+    // expired is not someone writing, as it does not count as Octo having
+    // continued above: Try again on it sends this hand-back again.
     let browser_prompt_id = browser_job.get::<_, Option<Uuid>>("prompt_id");
     let browser_sent_at = browser_job.get::<_, Option<DateTime<Utc>>>("sent_at");
     let written_after = transaction
         .query_one(
             "select exists (
-                 select 1 from prompts
-                  where conversation_id = $1
-                    and created_at > $2
-                    and id is distinct from $3
+                 select 1 from prompts prompt
+                  where prompt.conversation_id = $1
+                    and prompt.created_at > $2
+                    and prompt.id is distinct from $3
+                    and not exists (
+                        select 1 from agent_jobs hand_back
+                         where hand_back.conversation_id = $1
+                           and hand_back.prompt_id = prompt.id
+                           and hand_back.payload #>> '{metadata,browserHandBack,browserJobId}' = $4
+                           and hand_back.status in ('failed', 'canceled', 'expired')
+                    )
              )",
-            &[conversation_id, &browser_sent_at, &browser_prompt_id],
+            &[
+                conversation_id,
+                &browser_sent_at,
+                &browser_prompt_id,
+                &browser_job_id.to_string(),
+            ],
         )
         .await
         .map_err(|error| internal_error(format!("failed to check later messages: {error}")))?
@@ -895,7 +913,9 @@ async fn card_continues_building(
 /// answered their message, as Studio sends any other hand-back: Studio's
 /// words, the claim, and no attachments, browser or words of the person's
 /// own; dispatch checks it with [`require_hand_back`] and charges it as any
-/// hand-back. Every other completion returns at once.
+/// hand-back. Like every send of Studio's, it says the turn may write the
+/// space's files (`writeIntent`), so its job is given the token that saves
+/// them. Every other completion returns at once.
 ///
 /// A refusal for a conversation that moved on (someone wrote after the
 /// browser turn, or the building lane is busy) changes nothing: the newer
@@ -950,6 +970,11 @@ pub(crate) async fn hand_back_build_request(
                 "clientMessageId": format!("browser-build-request:{browser_job_id}"),
                 "displayContent": notice,
                 "agentSelection": { "active": [turn.agent_handle], "mentions": [turn.agent_handle] },
+                // It builds what the message asks, so it writes and saves the
+                // space's files, as Studio's own sends say they may: without
+                // this its job gets no write token, and its save is refused
+                // after the turn made the files.
+                "writeIntent": true,
             })),
             conversation_metadata: None,
             parent_conversation_id: None,

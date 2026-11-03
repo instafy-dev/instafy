@@ -426,7 +426,7 @@ import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
 import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
 import { BROWSER_HUMAN_INPUT_CONTINUE_PROMPT, isLetOctoContinuePrompt } from "./useBrowserHumanInput";
-import { useBrowserHandBack } from "./useBrowserHandBack";
+import { browserHandBackRetry, useBrowserHandBack, type BrowserHandBackExtras } from "./useBrowserHandBack";
 import {
   useChatBrowserRequest,
   type BrowserAutoStartOptions,
@@ -4980,10 +4980,32 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     onError: (message) => showStatus(message, "error", 6000),
     auto: browserAutoStart,
   });
+  // A hand-back goes to the building lane as an ordinary turn, shown as its
+  // one-line notice (useBrowserHandBack).
+  const sendBrowserHandBack = async (message: string, extras: BrowserHandBackExtras) => {
+    try {
+      await onSubmit(activeConversationId, extras.display, {
+        agentHandles: extras.agentHandles ?? [typingAgentHandle],
+        imageFiles: [],
+        editorState: null,
+        expectedLaneIdle: true,
+        requireDispatch: true,
+        dispatchInput: message,
+        metadata: extras.metadata,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
   // Try again on a turn a press of Let Octo continue started presses it
   // again, in this chat's browser; on a card's turn it sends the card's task
-  // again.
+  // again; on a hand-back's turn it sends the hand-back again.
   browserRequestRetryRef.current = async (promptMessage, retryMetadata) => {
+    const handBack = browserHandBackRetry(promptMessage, retryMetadata);
+    if (handBack) {
+      return sendBrowserHandBack(handBack.message, handBack.extras);
+    }
     if (!isLetOctoContinuePrompt(promptMessage)) {
       return browserRequestState.retryContinuation(promptMessage, retryMetadata);
     }
@@ -5017,22 +5039,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       Boolean(personalBrowser.status?.humanInputRequest) ||
       personalBrowser.pendingHandoff !== null,
     agentName: typingAgentDisplayName.replace(/^@/, ""),
-    send: async (message, extras) => {
-      try {
-        await onSubmit(activeConversationId, extras.display, {
-          agentHandles: [typingAgentHandle],
-          imageFiles: [],
-          editorState: null,
-          expectedLaneIdle: true,
-          requireDispatch: true,
-          dispatchInput: message,
-          metadata: extras.metadata,
-        });
-        return true;
-      } catch {
-        return false;
-      }
-    },
+    send: sendBrowserHandBack,
   });
   const browserRequestAutoWaiting = browserRequestState.autoWaiting;
   useEffect(() => {

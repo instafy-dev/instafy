@@ -8,6 +8,7 @@ import {
   browserHandBackCandidate,
   browserHandBackNotice,
   claimBrowserHandBack,
+  readBrowserHandBackOf,
 } from "./browserHandBack";
 
 /** How a hand-back is shown and recorded. */
@@ -16,7 +17,59 @@ export type BrowserHandBackExtras = {
   display: string;
   /** Prompt metadata naming the browser job (the controller checks it). */
   metadata: Record<string, unknown>;
+  /** The agents it goes to; the chat's own agent when absent. */
+  agentHandles?: string[];
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The agents a stored prompt went to: its selection's mentions, else its active agents. */
+function promptAgentHandles(metadata: unknown): string[] {
+  const records = isRecord(metadata) ? [metadata] : [];
+  for (const key of ["prompt_metadata", "promptMetadata"]) {
+    const nested = records[0]?.[key];
+    if (isRecord(nested)) records.push(nested);
+  }
+  for (const record of records) {
+    const selection = record.agentSelection;
+    if (!isRecord(selection)) continue;
+    const handles = (value: unknown) =>
+      Array.isArray(value)
+        ? value.filter((handle): handle is string => typeof handle === "string" && handle.trim().length > 0)
+        : [];
+    const mentions = handles(selection.mentions);
+    const chosen = mentions.length > 0 ? mentions : handles(selection.active);
+    if (chosen.length > 0) return chosen;
+  }
+  return [];
+}
+
+/**
+ * Try again on a hand-back whose turn failed: the same hand-back, sent again.
+ * Its claim on the browser turn and Studio's words go out, never the notice
+ * the chat shows for it ("Octo continued in the chat"), which alone would
+ * reach Octo as the person's request, with nothing of what the browser turn
+ * found or what they asked. It goes to the agent the hand-back went to, and
+ * carries the retry's metadata. Null for any other prompt.
+ */
+export function browserHandBackRetry(
+  promptMessage: Pick<ChatMessage, "role" | "content" | "metadata">,
+  retryMetadata: Record<string, unknown>,
+): { message: string; extras: BrowserHandBackExtras } | null {
+  const jobId = readBrowserHandBackOf(promptMessage);
+  if (!jobId) return null;
+  const agentHandles = promptAgentHandles(promptMessage.metadata);
+  return {
+    message: BROWSER_HAND_BACK_PROMPT,
+    extras: {
+      display: promptMessage.content.trim() || browserHandBackNotice("Octo"),
+      metadata: { ...retryMetadata, [BROWSER_HAND_BACK_CLAIM_KEY]: jobId },
+      ...(agentHandles.length > 0 ? { agentHandles } : {}),
+    },
+  };
+}
 
 type Options = {
   /** Changes with the conversation: a new one starts with no history to hand back. */
