@@ -290,6 +290,45 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(line?.textContent).toBe("Read 6 pages, looked up 3 places");
   });
 
+  // A browser turn whose findings go back to a build posts a reply with no
+  // words (runtime-agent `move_findings_into_details`): the chat shows only
+  // its line. The steps the controller stored with that reply still give the
+  // line after a reload whose page of history began in the middle of the
+  // turn, which a turn that reads many pages fills.
+  it("reads a finished turn's line from the steps stored with a reply that has no words", async () => {
+    const now = Date.now();
+    const turnSteps = {
+      v: 1,
+      activities: [ADD_POINT_ACTIVITY, WEB_READ_ACTIVITY],
+      steps: [
+        { type: "command_execution", status: "completed", exitCode: 0, activity: 0 },
+        { type: "command_execution", status: "completed", exitCode: 0, activity: 0 },
+        { type: "command_execution", status: "completed", exitCode: 0, activity: 0 },
+        { type: "command_execution", status: "completed", exitCode: 0, activity: 1 },
+      ],
+    };
+    // Only the turn's last step loaded.
+    const message = threadMessage([
+      commandStep("three", WEB_READ_ACTIVITY, { timestamp: now - 2_000 }),
+      {
+        id: "reply",
+        role: "assistant",
+        authorId: null,
+        content: "",
+        timestamp: now - 1_000,
+        files: null,
+        metadata: { jobId: JOB_ID, source: "agent", kind: "result", outcome: "succeeded", turnSteps },
+      },
+    ]);
+
+    await act(async () => {
+      root.render(<LiveAgentJobThreadPreview message={message} />);
+    });
+
+    const line = container.querySelector<HTMLButtonElement>('[data-testid="turn-activity-line"]');
+    expect(line?.textContent).toBe("Read 6 pages, looked up 3 places");
+  });
+
   it("shows the turn's plain-language line instead of the run rail, chips and command surface", async () => {
     const now = Date.now();
     const message = threadMessage([
