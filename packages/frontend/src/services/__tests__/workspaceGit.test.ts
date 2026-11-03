@@ -428,6 +428,23 @@ describe("default-routed sync and path revert use the shared write lease", () =>
     expect(refused).toMatchObject({ ok: false, errorInfo: { status: 409, code: "head_moved", paths: ["sites/a/app.js"] } });
   });
 
+  // Undo of a saved change: the folder's origin brings its checkout to the
+  // new saved version.
+  it("path revert sends the saved version an Undo made", async () => {
+    mocks.token.mockResolvedValue(token({ originId: "runtime-origin", endpoint: "https://controller.test/origin/rt" }));
+    fetchMock().mockResolvedValue(json(200, { ok: true, moved: true, reverted: ["sites/a/app.js"], removed: [] }));
+    const result = await revertWorkspaceGitPathsFromController({
+      projectId: "p",
+      paths: ["sites/a/app.js"],
+      originId: "runtime-origin",
+      routing: "default",
+      saved: "c".repeat(40),
+    });
+    expect(lastRequest().url).toBe("https://controller.test/origin/rt/git/revert");
+    expect(JSON.parse(String(lastRequest().init.body))).toEqual({ paths: ["sites/a/app.js"], saved: "c".repeat(40) });
+    expect(result).toMatchObject({ ok: true, reverted: ["sites/a/app.js"] });
+  });
+
   it("maps an aborted first mint to timeout", async () => {
     const abort = new Error("aborted");
     abort.name = "AbortError";

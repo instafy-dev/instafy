@@ -65,6 +65,23 @@ export function extractMessageDetails(
   return resolved;
 }
 
+/**
+ * Whether the message asks to be kept out of the transcript
+ * (`presentation.hidden`, at the top level or under `details`): a line
+ * nobody is shown, such as the one an Undo leaves in the chat's history. It
+ * is never a reply to read, so it is never unread and never a chat's preview.
+ */
+export function isHiddenByPresentation(message: ChatMessage): boolean {
+  const metadata = message.metadata && isRecord(message.metadata) ? message.metadata : null;
+  const presentation = metadata?.presentation;
+  if (isRecord(presentation) && presentation.hidden === true) {
+    return true;
+  }
+  const details = metadata?.details;
+  const nestedPresentation = isRecord(details) ? details.presentation : null;
+  return isRecord(nestedPresentation) && nestedPresentation.hidden === true;
+}
+
 export function getMessageType(message: ChatMessage): string | null {
   const directMessageType = normalizeMetadataMessageType(message.messageType);
   if (directMessageType) {

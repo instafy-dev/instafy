@@ -910,6 +910,29 @@ async fn authorize_active_job_capability(
     project_id: &Uuid,
     capability: &str,
 ) -> Result<JobCapabilityContext, (StatusCode, Json<ApiError>)> {
+    authorize_job_capability(state, context, project_id, capability, JobLiveness::Running).await
+}
+
+/// Whether a job token's job must still be running for a call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JobLiveness {
+    /// Every capability but one: the job is still leased.
+    Running,
+    /// Only for releasing a workspace lease the job took: a Stop ends the job
+    /// while its save may still hold the space's lease, and releasing it
+    /// grants nothing. The caller checks that the lease is that job's own
+    /// (`ensure_workspace_lease_matches_job`), so an ended job's token can
+    /// release its own lock and do nothing else.
+    EndedMayReleaseItsLease,
+}
+
+async fn authorize_job_capability(
+    state: &AppState,
+    context: &RequestContext,
+    project_id: &Uuid,
+    capability: &str,
+    liveness: JobLiveness,
+) -> Result<JobCapabilityContext, (StatusCode, Json<ApiError>)> {
     let claims = context
         .scoped_claims
         .as_ref()
@@ -980,12 +1003,16 @@ async fn authorize_active_job_capability(
              where j.project_id = $1
                and j.run_id = $2
                and j.leased_by_runtime_id = $3
-               and j.status = 'leased'
-               and j.lease_expires_at > now()
+               and ($4 or (j.status = 'leased' and j.lease_expires_at > now()))
                and r.status in ('ready', 'running', 'draining')
              order by j.leased_at desc nulls last
              limit 1",
-            &[project_id, &run_id, &runtime_id],
+            &[
+                project_id,
+                &run_id,
+                &runtime_id,
+                &(liveness == JobLiveness::EndedMayReleaseItsLease),
+            ],
         )
         .await
         .map_err(|error| internal_error(format!("failed to validate active job: {error}")))?;
@@ -3138,11 +3165,44 @@ async fn acquire_lease_with_policy(
     if let Some(row) = existing_row {
         let existing = lease_from_row(&row);
 
+        // A lease a job took for its save and never released (the job was
+        // stopped first, or its machine went away) ends here instead of
+        // refusing every other save and Undo until it runs out: nobody is
+        // left to finish that save.
+        if lease_job_has_ended(&transaction, project_id, &existing).await? {
+            transaction
+                .execute(
+                    "update workspace_leases
+                     set status = 'released',
+                         released_at = now(),
+                         updated_at = now()
+                     where id = $1",
+                    &[&existing.id],
+                )
+                .await
+                .context("failed to end the lease of a job that has ended")?;
+            return insert_granted_lease(
+                transaction,
+                project_id,
+                user_id,
+                runtime_id,
+                &expires_at,
+                &metadata_param,
+            )
+            .await;
+        }
+
+        // A job's lease is renewed implicitly by that job alone. A person on
+        // the same machine (Studio's Undo, say), or another of their turns,
+        // would otherwise take over the lease of a save still running, and
+        // release it when done: that save then loses its lease halfway.
         if renew_same_user
             && user_id.is_some()
             && existing.user_id == user_id.copied()
             && existing.runtime_id == runtime_id.copied()
             && lease_allows_implicit_renewal(existing.metadata.as_ref())
+            && metadata_uuid(existing.metadata.as_ref(), "jobId")
+                == metadata_uuid(metadata_param.as_ref(), "jobId")
         {
             let updated_row = transaction
                 .query_one(
@@ -3173,12 +3233,31 @@ async fn acquire_lease_with_policy(
         return Ok(LeaseAcquireOutcome::Conflict { holder: existing });
     }
 
+    insert_granted_lease(
+        transaction,
+        project_id,
+        user_id,
+        runtime_id,
+        &expires_at,
+        &metadata_param,
+    )
+    .await
+}
+
+async fn insert_granted_lease(
+    transaction: tokio_postgres::Transaction<'_>,
+    project_id: &Uuid,
+    user_id: Option<&Uuid>,
+    runtime_id: Option<&Uuid>,
+    expires_at: &DateTime<Utc>,
+    metadata: &Option<JsonValue>,
+) -> Result<LeaseAcquireOutcome> {
     let inserted_row = transaction
         .query_one(
             "insert into workspace_leases (project_id, user_id, runtime_id, status, acquired_at, expires_at, metadata)
              values ($1, $2, $3, 'active', now(), $4, $5)
              returning *",
-            &[project_id, &user_id, &runtime_id, &expires_at, &metadata_param],
+            &[project_id, &user_id, &runtime_id, expires_at, metadata],
         )
         .await
         .context("failed to insert new workspace lease")?;
@@ -3189,6 +3268,39 @@ async fn acquire_lease_with_policy(
         .context("failed to commit workspace lease acquisition")?;
 
     Ok(LeaseAcquireOutcome::Granted(lease_from_row(&inserted_row)))
+}
+
+/// Whether `lease` is a job's (its metadata names the job, as a job's lease
+/// acquire must: `ensure_job_lease_metadata`) and that job ended on the
+/// lease's machine: it was stopped, finished or failed there. A job still
+/// leased counts as running even past its lease's expiry, which a late
+/// heartbeat renews and only the expired-job sweep ends. A lease that names no
+/// job, or a job this project no longer has on that machine (a stop of the
+/// machine put it back in the queue, and that stop saves under its lease), is
+/// nobody's to end early: it runs out.
+async fn lease_job_has_ended(
+    transaction: &tokio_postgres::Transaction<'_>,
+    project_id: &Uuid,
+    lease: &WorkspaceLeaseRecord,
+) -> Result<bool> {
+    let Some(job_id) = metadata_uuid(lease.metadata.as_ref(), "jobId") else {
+        return Ok(false);
+    };
+    let Some(runtime_id) = lease.runtime_id else {
+        return Ok(false);
+    };
+    let row = transaction
+        .query_opt(
+            "select j.status = 'leased' as running
+               from agent_jobs j
+              where j.id = $1
+                and j.project_id = $2
+                and j.leased_by_runtime_id = $3",
+            &[&job_id, project_id, &runtime_id],
+        )
+        .await
+        .context("failed to check the job behind a workspace lease")?;
+    Ok(row.is_some_and(|row| !row.get::<_, bool>("running")))
 }
 
 #[instrument(skip(pool, metadata))]
@@ -7382,13 +7494,19 @@ async fn post_lease_release(
         .ok_or_else(|| bad_request("projectId is required"))?;
     let runtime_id = parse_optional_uuid_param(body.runtime_id.clone(), "runtimeId")?;
 
+    // A job may release the lease it took after it ended: a Stop cancels the
+    // job while its save holds the space's lease, and that lease would
+    // otherwise refuse every other save and Undo until it runs out.
+    // Releasing grants nothing, and the lease must be this job's own
+    // (`ensure_workspace_lease_matches_job` below).
     let job_capability = if context.scoped_claims.is_some() {
         Some(
-            authorize_active_job_capability(
+            authorize_job_capability(
                 &state,
                 &context,
                 &project_id,
                 JOB_WORKSPACE_LEASE_WRITE_SCOPE,
+                JobLiveness::EndedMayReleaseItsLease,
             )
             .await?,
         )

@@ -126,6 +126,34 @@ describe("homeAttention", () => {
     expect(entries[3]?.testId).toBe("home-attention-conversation-controller-inbox");
   });
 
+  // A local test, Nov 3: Home listed a chat with the line an Undo leaves in its
+  // history as the preview, a line the chat never shows.
+  it("never previews a line the chat keeps out of its transcript", () => {
+    const entries = buildHomeAttentionEntries({
+      currentSpaceName: "Alpha Space",
+      conversations: [
+        createConversation("undone", {
+          title: "Porto page",
+          controllerId: "controller-undone",
+          unreadCount: 1,
+          messages: [
+            createMessage("reply", "Added the section.", Date.parse("2026-03-16T11:56:00Z")),
+            {
+              ...createMessage(
+                "undo-line",
+                "The person undid the change from “Add a short section to that page.”",
+                Date.parse("2026-03-16T11:57:00Z"),
+              ),
+              metadata: { source: "controller", kind: "change_undone", presentation: { hidden: true } },
+            },
+          ],
+        }),
+      ],
+      inboxItems: [],
+    });
+    expect(entries.map((entry) => entry.preview)).toEqual(["Added the section."]);
+  });
+
   it("derives the visible inbox without consuming replies from the active chat", () => {
     const inboxItems = [
       createInboxItem("controller-a"),

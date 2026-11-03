@@ -439,6 +439,13 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // bare "keep going" carried on what the chat left open, never a change the person stopped or
     // undid.
     include_str!("legacy/browser-automation-v26.md"),
+    // From before a route from a journey planner set its day and hour and pressed its button, a
+    // form's own button left its prompt to the person, a page whose reading lists a cookie
+    // banner's reject button pressed it before its next step, a bare "keep going" never carried
+    // on a change the person stopped or undid on any route, carried-on work went to a build when
+    // the chat asked for a page not made yet, and a page made from what the chat already found
+    // stayed `direct`.
+    include_str!("legacy/browser-automation-v27.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,
