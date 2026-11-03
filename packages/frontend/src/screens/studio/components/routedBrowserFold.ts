@@ -11,7 +11,7 @@
 // no model turn and posted only a routed card (`browserRequest.routed`),
 // which Studio opens by itself where it can, sending the person's own words
 // on as the browser turn's task. The chat leaves that continuation out (it
-// repeats the person's message), and the card shows only the turn's one line,
+// sends the person's message again), and the card shows only the turn's one line,
 // "Opening Instafy's browser…", until the browser turn shows something; then
 // the card goes too. A routed card the person pressed leaves as any card does,
 // and its continuation's one line stays. So does one whose browser turn failed

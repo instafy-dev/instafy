@@ -1073,6 +1073,15 @@ export function mergeAndSortMessages(messages: ChatMessage[]): ChatMessage[] {
         store(message, entries.length, keys);
         return;
       }
+      // Two sends of the same words are two messages: each names the send it
+      // is (its client message id). Merged by their words, a later send's
+      // placeholder took over the earlier message, which left the chat until
+      // the later one was stored.
+      const existingClientId = entries[sameContentIndex]!.keys.clientId;
+      if (existingClientId !== null && keys.clientId !== null && existingClientId !== keys.clientId) {
+        store(message, entries.length, keys);
+        return;
+      }
       const incomingIsServer = isUuid(message.id);
       const existingIsServer = isUuid(existing.id);
 

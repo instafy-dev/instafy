@@ -1,6 +1,7 @@
 import { organizationChatId, useOrganizationChatTabs } from "../workspace/useOrganizationChatTabs";
 import { ConversationWorkspaceViews } from "../workspace/ConversationWorkspaceViews";
-import { chatListDestination } from "../navigation/studioNavigation";
+import { chatListDestination, type StudioDestination } from "../navigation/studioNavigation";
+import { openChat } from "../workspace/openChat";
 import { DEFAULT_HOME_LIST_STATE, StudioListNavigationProvider, useStudioListNavigation } from "../navigation/StudioListNavigation";
 import { StudioDraftsProvider, StudioDraftPanel } from "../workspace/StudioDrafts";
 import { StudioDraftNavigationGuard } from "../navigation/StudioDraftNavigationGuard";
@@ -701,25 +702,43 @@ function StudioLayoutInner() {
     });
   }, [consumeUrlNavigation, runAfterSidebarClose]);
   const navigateToDestination = useStudioNavigation(runStudioNavigation);
+  // A press on a chat of this space opens it in the press itself (openChat):
+  // nothing of the chat on screen stays drawn after it.
+  const openChatFromPress = useCallback((destination: Extract<StudioDestination, { kind: "conversation" }>,
+    options: { restoreWorkspace: boolean }) => openChat(destination, {
+    activeProjectId, conversationsProjectKey, conversations,
+    // Another space's chat: commit the destination before any following
+    // click builds on it. Mixing local tab mutation with routed cross-space
+    // selection loses rapid clicks.
+    navigate: navigateToDestination,
+    open: (conversationId, openOptions) => runStudioNavigation(() => {
+      requestHistoryPush();
+      openConversationTab(conversationId, openOptions);
+    }),
+  }, options), [activeProjectId, conversations, conversationsProjectKey, navigateToDestination, openConversationTab,
+    requestHistoryPush, runStudioNavigation]);
   // The chats where a prompt of the person's browser turn waits, off screen
   // (WaitingBrowserPrompts): their tabs say Approve.
   const [chatsAwaitingOk, setChatsAwaitingOk] = useState<ReadonlySet<string>>(() => new Set());
   const updateConversationSurfaces = conversationSurfaces.update;
   const viewChatAwaitingOk = useCallback((chat: { conversationId: string; localId: string | null }) => {
     if (!activeProjectId) return;
+    // Its prompt shows in its Chat or Browser view, never a file or a site.
     openChatAwaitingOk({ userId: currentUserId, projectId: activeProjectId, chat,
-      updateSurfaces: updateConversationSurfaces, navigate: navigateToDestination });
-  }, [activeProjectId, currentUserId, navigateToDestination, updateConversationSurfaces]);
+      updateSurfaces: updateConversationSurfaces,
+      navigate: (destination) => destination.kind === "conversation"
+        ? openChatFromPress(destination, { restoreWorkspace: false })
+        : navigateToDestination(destination) });
+  }, [activeProjectId, currentUserId, navigateToDestination, openChatFromPress, updateConversationSurfaces]);
   const organizationTabActions = {
     tabs: withChatsAwaitingOk(organizationTabs.tabs, chatsAwaitingOk),
     activeId: activeProjectId && activeConversationId ? organizationChatId(activeProjectId, activeConversationId) : null,
     onSelect: (id: string) => {
       const tab = organizationTabs.tabs.find(item => item.id === id);
       if (!tab) return;
-      // Commit the destination before any following click builds on it. Mixing
-      // local tab mutation with routed cross-space selection loses rapid clicks.
-      navigateToDestination({ kind: "conversation", projectId: tab.projectId,
-        conversationId: tab.conversationId, conversationControllerId: tab.controllerId, viewTabId: tab.viewTabId });
+      openChatFromPress({ kind: "conversation", projectId: tab.projectId,
+        conversationId: tab.conversationId, conversationControllerId: tab.controllerId, viewTabId: tab.viewTabId },
+      { restoreWorkspace: true });
     },
     // Every listed tab is the open space's.
     onClose: (id: string) => {

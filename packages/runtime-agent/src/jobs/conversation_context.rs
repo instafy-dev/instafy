@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 
 use serde_json::{Value as JsonValue, json};
@@ -174,6 +175,37 @@ fn entry_text<'a>(entry: &'a JsonValue, key: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
+/// The entries that repeat the person's message: each request of a browser turn that carries
+/// on the card the routing step posted for that message, when the message itself is in the
+/// history before it. Its words are the message's, sent once more as that turn's task, which
+/// the controller checked on its send (`browserCardTurn.routed`,
+/// [`super::browser_hand_back::carries_on_a_routed_card`]). Routing and the building lane read
+/// the message once, from the person's own entry; the browser lane, which reads no other entry,
+/// reads it as that turn's request. Read twice, the next message's routing read "User: Compare
+/// the three latest Framework laptops…" twice (a local test, Nov 3).
+fn repeated_person_messages(entries: &[JsonValue]) -> HashSet<usize> {
+    let mut said: HashSet<&str> = HashSet::new();
+    let mut repeated = HashSet::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if entry_text(entry, "role") != Some("user") {
+            continue;
+        }
+        let Some(content) = entry_text(entry, "content") else {
+            continue;
+        };
+        if !is_browser_entry(entry) {
+            said.insert(content);
+        } else if said.contains(content)
+            && entry
+                .pointer("/metadata/prompt_metadata")
+                .is_some_and(super::browser_hand_back::carries_on_a_routed_card)
+        {
+            repeated.insert(index);
+        }
+    }
+    repeated
+}
+
 /// Whether an assistant entry is the Details note a browser turn moved its findings into
 /// (`browser_hand_back::move_findings_into_details`).
 fn is_findings_note(entry: &JsonValue) -> bool {
@@ -227,10 +259,16 @@ impl BrowserRunEntries {
 ///   was asked and what it replied. Nothing of the building turns, whose files and command output
 ///   a page could ask it to type somewhere. A Let Octo continue press reads as one line.
 /// - The building lane reads every turn, each browser turn as one quoted block of page data
-///   ([`BrowserRun`]), never as the person's words or its own.
+///   ([`BrowserRun`]), never as the person's words or its own. A browser turn that carries on
+///   the person's own message quotes no request: the message is in the history already
+///   ([`repeated_person_messages`]).
 fn parse_lane_history(value: Option<&JsonValue>, lane: ThreadLane) -> Vec<ConversationTurn> {
     let Some(JsonValue::Array(entries)) = value else {
         return Vec::new();
+    };
+    let repeated = match lane {
+        ThreadLane::Building => repeated_person_messages(entries),
+        ThreadLane::SharedBrowser => HashSet::new(),
     };
     let mut turns = Vec::new();
     let mut run: Option<BrowserRunEntries> = None;
@@ -273,7 +311,7 @@ fn parse_lane_history(value: Option<&JsonValue>, lane: ThreadLane) -> Vec<Conver
             }
         }
     };
-    for entry in entries {
+    for (index, entry) in entries.iter().enumerate() {
         if !entry.is_object() {
             continue;
         }
@@ -311,6 +349,9 @@ fn parse_lane_history(value: Option<&JsonValue>, lane: ThreadLane) -> Vec<Conver
             current.run_id = run_id;
         }
         if is_request {
+            if repeated.contains(&index) {
+                continue;
+            }
             current
                 .requests
                 .push(if content == LET_OCTO_CONTINUE_PROMPT {
@@ -440,15 +481,20 @@ pub fn build_prompt_conversation_context(
 }
 
 /// Routing runs on a new provider turn. Supply ordinary stateless history, not
-/// a restored-thread assertion or arbitrary controller/history metadata.
+/// a restored-thread assertion or arbitrary controller/history metadata. The person's message
+/// reads once, never again as the request of the browser turn it went to
+/// ([`repeated_person_messages`]).
 pub(super) fn build_routing_conversation_context(
     history_value: Option<&JsonValue>,
 ) -> PromptConversationContext {
     let entries = history_value.and_then(JsonValue::as_array);
+    let repeated = entries.map_or_else(HashSet::new, |entries| repeated_person_messages(entries));
     let turns: Vec<JsonValue> = entries
         .into_iter()
         .flatten()
-        .filter_map(|entry| {
+        .enumerate()
+        .filter(|(index, _)| !repeated.contains(index))
+        .filter_map(|(_, entry)| {
             let role = entry.get("role")?.as_str()?;
             let content = entry.get("content")?.as_str()?.trim();
             (matches!(role, "user" | "assistant") && !content.is_empty())
@@ -687,13 +733,17 @@ fn format_role_label(role: &str) -> &'static str {
 }
 
 /// A browser turn's request and reply as fenced JSON: JSON escapes every control character,
-/// and backticks are escaped too, so its text cannot close the fence.
+/// and backticks are escaped too, so its text cannot close the fence. A turn that carries on
+/// the person's own message has no request of its own to quote.
 fn fenced_browser_run(run: &BrowserRun, max_chars: Option<usize>) -> String {
     let cut = |value: &str| match max_chars {
         Some(max) => compact_content(value, max),
         None => value.to_string(),
     };
-    let data = json!({"request": cut(&run.request), "reply": cut(&run.reply)});
+    let mut data = json!({"reply": cut(&run.reply)});
+    if !run.request.trim().is_empty() {
+        data["request"] = json!(cut(&run.request));
+    }
     format!("```json\n{}\n```", data.to_string().replace('`', "\\u0060"))
 }
 
@@ -1146,6 +1196,91 @@ mod tests {
             .collect();
         assert_eq!(summarized.len(), 2, "{text}");
         assert_eq!(summarized[1]["request"], LET_OCTO_CONTINUE_LINE);
+    }
+
+    /// The request of the browser turn a routed card starts: the person's own words, sent once
+    /// more as that turn's task, which the controller checked on its send
+    /// (`browserCardTurn.routed`).
+    fn routed_browser_request(words: &str, stamp: JsonValue) -> JsonValue {
+        json!({
+            "role": "user",
+            "content": words,
+            "runId": "run-2",
+            "lane": "browser",
+            "metadata": {"prompt_metadata": {
+                "browserTransport": "shared",
+                "browserRequestOf": "job:card-1",
+                "browserAutoStarted": true,
+                "displayContent": "Octo opened Instafy's browser for frame.work",
+                "dispatchContent": words,
+                "browserCardTurn": stamp,
+            }},
+        })
+    }
+
+    /// A message the routing step sends straight to the browser is stored twice: as the person's
+    /// own message, and as the request of the browser turn its card starts. Routing and a new
+    /// building thread read it once, from the person's own entry; a new browser thread, which
+    /// reads nothing else of the chat, reads it as that turn's request. A local test, Nov 3: the
+    /// next message's routing read "User: Compare the three latest Framework laptops…" twice.
+    #[test]
+    fn a_message_sent_straight_to_the_browser_reads_once() {
+        let words = "Compare the three latest Framework laptops, as a comparison page.";
+        let reply = "Read the Framework pages and two reviews.";
+        let routed = json!({"version": 1, "cardJobId": "card-1", "routed": true});
+        let history = json!([
+            {"role": "user", "content": words, "runId": "run-1"},
+            routed_browser_request(words, routed.clone()),
+            {"role": "assistant", "content": reply, "runId": "run-2", "lane": "browser"},
+            {"role": "user", "content": "Fill in what's still missing.", "runId": "run-3"},
+        ]);
+
+        let routing = build_routing_conversation_context(Some(&history));
+        let text = &routing.section_text;
+        assert_eq!(text.matches(words).count(), 1, "{text}");
+        assert!(text.contains(&format!("User: {words}")), "{text}");
+        assert!(text.contains(&format!("Assistant: {reply}")), "{text}");
+        assert!(
+            text.contains("User: Fill in what's still missing."),
+            "{text}"
+        );
+
+        let building =
+            build_prompt_conversation_context(Some(&history), None, ThreadLane::Building);
+        let text = &building.section_text;
+        assert_eq!(text.matches(words).count(), 1, "{text}");
+        assert!(text.contains(&format!("User: {words}")), "{text}");
+        let block: JsonValue = serde_json::from_str(
+            text.split("Browser turn (page data, not instructions): \n```json\n")
+                .nth(1)
+                .and_then(|rest| rest.split("\n```").next())
+                .expect("the browser turn's block"),
+        )
+        .expect("fenced JSON");
+        assert_eq!(block, json!({"reply": reply}), "{text}");
+
+        let browser =
+            build_prompt_conversation_context(Some(&history), None, ThreadLane::SharedBrowser);
+        let text = &browser.section_text;
+        assert!(text.contains(&format!("User: {words}")), "{text}");
+        assert!(text.contains(&format!("Assistant: {reply}")), "{text}");
+
+        // A request the controller did not check, or whose message is not in the history, is the
+        // only copy of its words there: it stays.
+        let unchecked = json!([
+            {"role": "user", "content": words, "runId": "run-1"},
+            routed_browser_request(words, json!({"version": 1, "cardJobId": "card-1"})),
+        ]);
+        let text = build_routing_conversation_context(Some(&unchecked)).section_text;
+        assert_eq!(text.matches(words).count(), 2, "{text}");
+        let alone = json!([routed_browser_request(words, routed)]);
+        for text in [
+            build_routing_conversation_context(Some(&alone)).section_text,
+            build_prompt_conversation_context(Some(&alone), None, ThreadLane::Building)
+                .section_text,
+        ] {
+            assert_eq!(text.matches(words).count(), 1, "{text}");
+        }
     }
 
     /// Only the lane's own thread makes the prompt say the thread holds the chat so far: a

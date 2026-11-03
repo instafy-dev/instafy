@@ -78,7 +78,6 @@ function StatusRegion({ queue }: { queue: UNSTABLE_ToastQueue<StatusToast> }) {
       <UNSTABLE_ToastList<StatusToast> className="m-0 flex list-none flex-col items-center gap-2 px-4 sm:px-6">
         {({ toast }) => {
           const content = toast.content;
-          const isErrorLike = content.intent === "error" || content.intent === "warning";
           const isConfirmation = content.presentation === "confirmation";
           const intentStyles = getIntentStyles(content.intent);
 
@@ -99,7 +98,7 @@ function StatusRegion({ queue }: { queue: UNSTABLE_ToastQueue<StatusToast> }) {
                 isConfirmation
                   ? "pointer-events-none flex min-h-8 max-w-[calc(100vw-2rem)] items-center rounded-full border px-3 py-1.5 text-xs font-medium shadow-md shadow-slate-900/10 sm:max-w-sm"
                   : "pointer-events-auto flex max-w-md items-start gap-3 rounded-2xl border px-4 py-3 text-sm shadow-lg shadow-slate-900/10"
-              } ${isErrorLike ? "toast-slide-in-top" : "toast-fade-in"} ${intentStyles}`}
+              } toast-fade-in ${intentStyles}`}
             >
               <UNSTABLE_ToastContent
                 className={isConfirmation ? "flex min-w-0 items-center" : "flex flex-1 items-start gap-3"}

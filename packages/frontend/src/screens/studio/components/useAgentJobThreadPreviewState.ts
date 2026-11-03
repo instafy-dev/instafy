@@ -37,6 +37,7 @@ import {
   hasFailedRunMetadata,
   resolveRunFailurePresentation,
 } from "../../../conversations/runFailurePresentation";
+import { readTurnReplyDraft } from "../../../conversations/replyDrafts";
 
 const CHAT_SPINE_GUTTER_PX = 26;
 // Steps are the activity line's and Details'; they are never update rows.
@@ -743,6 +744,8 @@ export function useAgentJobThreadPreviewState({
     cancelPending,
     expandedUpdateIds,
     finalSummaryMessage,
+    // The reply the model is writing, shown where the reply lands until it does.
+    replyDraft: readTurnReplyDraft(metadata),
     hasPreview: Boolean(preview),
     previewText: preview || (isCompleted ? (isStoppedRun && terminalProxyErrorMessage === null ? "Stopped." : "Completed.") : ""),
     isCompleted,

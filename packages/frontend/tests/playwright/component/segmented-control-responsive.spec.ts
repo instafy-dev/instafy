@@ -107,3 +107,61 @@ test.describe("touch pointer", () => {
     });
   }
 });
+
+// A local test, Nov 3: Credits showed its Usage section under Activity | Plans
+// | Usage with Activity still looking chosen. The chosen segment's surface
+// cross-faded over 150 ms, and a look right after the press found Activity a
+// quarter of the way out and Usage a quarter of the way in.
+test("a section's tab is chosen in the frame its section shows", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.emulateMedia({ colorScheme: "dark" });
+  const deps = await resolveViteReactDependencies(page);
+  const fixture = "/__settings-section-tabs__";
+  await page.route(`**${fixture}`, route => route.fulfill({
+    contentType: "text/html",
+    body: `<!doctype html><html class="dark"><head>
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      <script type="module">import R from '/@react-refresh';R.injectIntoGlobalHook(window);window.$RefreshReg$=()=>{};window.$RefreshSig$=()=>x=>x;window.__vite_plugin_react_preamble_installed__=true;</script>
+      <script type="module" src="${fixture}.js"></script>
+      </head><body><div id="root"></div></body></html>`,
+  }));
+  await page.route(`**${fixture}.js`, route => route.fulfill({
+    contentType: "application/javascript",
+    body: `import '/src/styles/tailwind.css';
+      import ReactNS from '${deps.react}';
+      import ReactDOMNS from '${deps.reactDomClient}';
+      import { SettingsShell } from '/src/screens/studio/components/SettingsShell.tsx';
+      const R=ReactNS.default??ReactNS,h=R.createElement,{createRoot}=ReactDOMNS.default??ReactDOMNS;
+      function Credits() {
+        const [section,setSection]=R.useState('activity');
+        return h(SettingsShell,{title:'Credits',navLabel:'Sections',activeCategoryId:section,onCategoryChange:setSection,categories:[
+          {id:'activity',label:'Activity',testId:'section-activity'},
+          {id:'plans',label:'Plans',testId:'section-plans'},
+          {id:'usage',label:'Usage',testId:'section-usage'}
+        ]},h('p',{'data-testid':'section-shown'},section));
+      }
+      createRoot(document.getElementById('root')).render(h('main',{className:'min-h-dvh bg-slate-950'},h(Credits)));`,
+  }));
+  await page.goto(fixture);
+  await expect(page.getByTestId("section-shown")).toHaveText("activity");
+  const chosen = await page.getByTestId("section-activity").evaluate((tab) => getComputedStyle(tab).backgroundColor);
+  // Every frame from the press: which section shows, and each tab's surface.
+  await page.evaluate(() => {
+    const frames: string[][] = [];
+    (window as unknown as { __frames: string[][] }).__frames = frames;
+    const sample = () => {
+      frames.push([
+        document.querySelector('[data-testid="section-shown"]')?.textContent ?? "",
+        ...["activity", "usage"].map((id) => getComputedStyle(document.querySelector(`[data-testid="section-${id}"]`)!).backgroundColor),
+      ]);
+      if (frames.length < 30) requestAnimationFrame(sample);
+    };
+    document.querySelector('[data-testid="section-usage"]')!.addEventListener("pointerdown", () => requestAnimationFrame(sample), { once: true });
+  });
+  await page.getByTestId("section-usage").click();
+  await expect(page.getByTestId("section-shown")).toHaveText("usage");
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __frames: string[][] }).__frames.length)).toBe(30);
+  const frames = await page.evaluate(() => (window as unknown as { __frames: string[][] }).__frames);
+  expect(frames.filter(([section]) => section === "usage")
+    .filter(([, activity, usage]) => usage !== chosen || activity === chosen)).toEqual([]);
+});

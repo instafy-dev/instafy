@@ -483,6 +483,11 @@ export function synthesizeAgentJobThreadMessages(
   const foldedJobIds = new Set<string>();
   const foldedFailureIds = new Set<string>();
   const pendingJobIds = new Set(retryFold.pendingJobIds);
+  // The resend each of those failed turns stands for: its reply's draft grows
+  // in that turn's row (placeReplyDrafts) until the resend shows a row.
+  const pendingRetryByJobId = new Map<string, { autoRetryRunId?: string; autoRetryJobId?: string }>(
+    Array.from(retryFold.pendingRetryRunIdByJobId, ([jobId, runId]) => [jobId, { autoRetryRunId: runId }]),
+  );
   for (const [retryJobId, earlier] of retryFold.earlierAttemptByJobId) {
     const firstMessageId = firstVisibleMessageIdByJobId.get(retryJobId);
     if (!firstMessageId) {
@@ -490,6 +495,7 @@ export function synthesizeAgentJobThreadMessages(
       // the failed turn keeps saying it is trying again.
       if (earlier.jobId) {
         pendingJobIds.add(earlier.jobId);
+        pendingRetryByJobId.set(earlier.jobId, { ...pendingRetryByJobId.get(earlier.jobId), autoRetryJobId: retryJobId });
       }
       continue;
     }
@@ -615,7 +621,7 @@ export function synthesizeAgentJobThreadMessages(
         jobId,
         threadMessages,
         ...(earlierAttempts.length > 0 ? { earlierAttempts } : {}),
-        ...(pendingJobIds.has(jobId) ? { autoRetryPending: true } : {}),
+        ...(pendingJobIds.has(jobId) ? { autoRetryPending: true, ...pendingRetryByJobId.get(jobId) } : {}),
       },
     });
   });

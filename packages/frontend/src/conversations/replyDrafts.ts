@@ -5,9 +5,10 @@ import { getMessageType } from "../screens/studio/components/chatMessageMetadata
 
 /**
  * The assistant's reply while the model writes it: the `run.reply_draft` events on
- * /events. Nothing here is stored or sent anywhere. The reply the job persists
- * replaces its draft in the transcript, in the same render that adds it, so
- * the text stays where it is.
+ * /events. Nothing here is stored or sent anywhere. A draft shows in its
+ * turn's row, in its reply's place ({@link placeReplyDrafts}), and the reply
+ * the job persists replaces it there, in the same render that adds it, so the
+ * text stays where it is.
  */
 export const REPLY_DRAFT_EVENT_KIND = "run.reply_draft";
 
@@ -193,8 +194,56 @@ export function isReplyDraftMessage(message: ChatMessage): boolean {
   return message.metadata?.replyDraft === true;
 }
 
+/** Metadata on a turn's row (`agent_job_thread`): the reply its model is writing. */
+export const TURN_REPLY_DRAFT_METADATA_KEY = "turnReplyDraft";
+
+/** The reply a turn's row carries while its model writes it ({@link placeReplyDrafts}). */
+export function readTurnReplyDraft(metadata: Record<string, unknown> | null | undefined): string | null {
+  const text = metadata?.[TURN_REPLY_DRAFT_METADATA_KEY];
+  return typeof text === "string" && text.trim().length > 0 ? text : null;
+}
+
 /**
- * The conversation's reply drafts to append to its transcript. A draft whose
+ * The transcript with each draft in its turn: a turn that shows a row (its
+ * activity line) carries the draft in that row, in the place its reply takes,
+ * so the turn stays one Octo row and the reply lands where its draft grew. A
+ * retry that has shown nothing yet is shown by the row of the turn it tries
+ * again ("Trying again…"), so its draft grows there. A draft whose turn has
+ * no row yet is a row of its own, after the transcript.
+ */
+export function placeReplyDrafts(messages: ChatMessage[], drafts: readonly ChatMessage[]): ChatMessage[] {
+  if (drafts.length === 0) return messages;
+  const turnRowByJobId = new Map<string, number>();
+  const retryRowByRunId = new Map<string, number>();
+  messages.forEach((message, index) => {
+    if ((getMessageType(message) ?? "").trim().toLowerCase() !== "agent_job_thread") return;
+    const jobId = readString(message.metadata?.jobId);
+    if (jobId) turnRowByJobId.set(jobId, index);
+    if (message.metadata?.autoRetryPending !== true) return;
+    const retryJobId = readString(message.metadata?.autoRetryJobId);
+    const retryRunId = readString(message.metadata?.autoRetryRunId);
+    if (retryJobId && !turnRowByJobId.has(retryJobId)) turnRowByJobId.set(retryJobId, index);
+    if (retryRunId) retryRowByRunId.set(retryRunId, index);
+  });
+  const placed = [...messages];
+  const ownRows: ChatMessage[] = [];
+  for (const draft of drafts) {
+    const jobId = readString(draft.metadata?.jobId);
+    const runId = readString(draft.metadata?.runId);
+    const index = (jobId === null ? undefined : turnRowByJobId.get(jobId)) ??
+      (runId === null ? undefined : retryRowByRunId.get(runId));
+    if (index === undefined) {
+      ownRows.push(draft);
+      continue;
+    }
+    const row = placed[index]!;
+    placed[index] = { ...row, metadata: { ...(row.metadata ?? {}), [TURN_REPLY_DRAFT_METADATA_KEY]: draft.content } };
+  }
+  return ownRows.length > 0 ? [...placed, ...ownRows] : placed;
+}
+
+/**
+ * The conversation's reply drafts, for {@link placeReplyDrafts}. A draft whose
  * run is missing/inactive gets a short grace period for snapshot ordering.
  * `draftingRunActive` stays true while a run that drafted is active, also once
  * its reply landed, so the typing row does not come back under that reply.

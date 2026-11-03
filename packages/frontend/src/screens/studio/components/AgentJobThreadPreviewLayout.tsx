@@ -270,6 +270,8 @@ export type AgentJobThreadPreviewLayoutProps = {
   cancelPending: boolean;
   expandedUpdateIds: Record<string, boolean>;
   finalSummaryMessage: ChatMessage | null;
+  /** The reply the model is writing: it grows in the reply's place until the reply lands. */
+  replyDraft?: string | null;
   hasPreview: boolean;
   previewText: string;
   isCompleted: boolean;
@@ -315,6 +317,7 @@ export function AgentJobThreadPreviewLayout({
   isThreadUnresolved,
   expandedUpdateIds,
   finalSummaryMessage,
+  replyDraft = null,
   hasPreview,
   previewText,
   isCompleted,
@@ -515,6 +518,12 @@ export function AgentJobThreadPreviewLayout({
   const hasUsefulPreview =
     isCompleted && hasPreview && !["", "completed", "thinking", "reasoning"].includes(normalizeThreadPlaceholderText(previewText));
   const showSummaryBody = isCompleted && (hasUsefulFinalSummary || hasUsefulPreview || terminalStatusMarker !== null);
+  const showReplyBody = showSummaryBody && (runFailurePresentation === null || showFailureBlock);
+  // The reply as the model writes it, until it lands. A failed turn whose
+  // resend writes its reply before it shows anything else keeps its "Trying
+  // again…" line (it holds focus after a press on Try again, until the turn
+  // that replaced it takes it), and the reply grows under it, in this row.
+  const showReplyDraft = replyDraft !== null && (!showReplyBody || autoRetryPending);
   // Opening Details never changes this: the line must stay under the pointer
   // that opened it, so the turn keeps its chrome either way.
   const canUseTightCompletedLayoutBase =
@@ -563,6 +572,7 @@ export function AgentJobThreadPreviewLayout({
     terminalStatusMarker === null &&
     !showActivityLine &&
     !showSummaryBody &&
+    replyDraft === null &&
     cards.length === 0 &&
     (!latestFiles || latestFiles.length === 0) &&
     branchThreads.length === 0;
@@ -890,16 +900,9 @@ export function AgentJobThreadPreviewLayout({
 
         {showDetailsPanel ? <div className="relative min-w-0">{stepsList}</div> : null}
 
-        {cards.map((card) => (
-          <div key={card.id} className="relative py-1">
-            {renderThreadPreviewNotch()}
-            <div className="min-w-0">{renderCard(card)}</div>
-          </div>
-        ))}
-
-        {showSummaryBody && (runFailurePresentation === null || showFailureBlock) ? (
+        {showReplyBody ? (
           <div
-            className={`relative ${showActivityLine || cards.length > 0 ? "pt-1" : "pt-2"} pb-0`}
+            className={`relative ${showActivityLine ? "pt-1" : "pt-2"} pb-0`}
             data-workflow-spine-notch-anchor={hideThreadSpine ? "true" : undefined}
           >
             {renderThreadPreviewNotch()}
@@ -948,6 +951,26 @@ export function AgentJobThreadPreviewLayout({
             </div>
           </div>
         ) : null}
+
+        {showReplyDraft ? (
+          // The reply as the model writes it, where the reply lands: the
+          // turn's progress from now on, in this one row.
+          <div className={`relative ${showActivityLine ? "pt-1" : "pt-2"} pb-0`} data-testid="chat-reply-draft">
+            {renderThreadPreviewNotch()}
+            <div className="min-w-0" aria-busy="true">
+              <MessageContent content={replyDraft} projectId={projectId ?? null} />
+            </div>
+          </div>
+        ) : null}
+
+        {/* A card follows the reply: what the turn says comes first, then what
+            it made or what it asks for. */}
+        {cards.map((card) => (
+          <div key={card.id} className="relative py-1">
+            {renderThreadPreviewNotch()}
+            <div className="min-w-0">{renderCard(card)}</div>
+          </div>
+        ))}
 
         {isCompleted && latestFiles ? (
           <div className="relative pt-1">

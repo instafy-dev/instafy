@@ -1226,7 +1226,15 @@ no model turn of its own: it posts one card marked `routed`, whose task is the
 person's own words, and no reply. Studio opens it as it opens any card, and
 the chat reads it as one turn: the turn's line says "Opening Instafy's
 browser…" until the browser turn shows something, and neither the card nor
-the continuation (which repeats the person's message) is shown. A routed card
+the continuation is shown. The chat keeps the continuation as any card's, as
+one line ("Octo opened Instafy's browser for …"); what it sends, and what is
+stored as its message, is still the person's words, as the browser turn's
+task. Routing and a building turn on a new thread read those words once,
+from the person's own message: they leave that copy out and quote the
+browser turn with its reply alone (only a continuation the controller
+checked as the routed card's own, `browserCardTurn.routed`, whose message is
+in the same history). A browser turn on a new thread reads that copy as the
+turn's request, since it reads nothing else of the chat. A routed card
 Studio cannot open by itself shows as any card does, with its reason; once the
 person presses it, or once its browser turn fails or is stopped before it
 shows anything, it leaves the chat as any opened card does, since nothing is
@@ -2437,7 +2445,9 @@ unless the policy is `"covered"`.
   whether older ones were left out), each with what it was asked and its reply
   with its finding lines put back, bounded and labelled like the record. A building turn on a restored thread reads them
   as one section of quoted page data; a new or lost building thread reads them
-  in its replay of the chat, each browser turn as one quoted block. A Let Octo
+  in its replay of the chat, each browser turn as one quoted block (one that
+  carries on the person's own message with its reply alone: the message is in
+  that replay already). A Let Octo
   continue press reads as one line there, not as Studio's instructions in the
   person's name. It takes no
   routing step: its route is decided (build in this chat), and the findings it

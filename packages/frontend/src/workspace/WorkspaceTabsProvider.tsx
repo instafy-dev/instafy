@@ -932,10 +932,28 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
   const visibleTabs = useMemo(() => tabs.filter(tab => !tab.workspaceOwner || (
     tab.workspaceOwner.userId === conversationWorkspaceUserId && tab.workspaceOwner.projectId === workspaceProjectId
   )), [tabs, conversationWorkspaceUserId, workspaceProjectId]);
-  const activeTab = useMemo(
-    () => (activeTabId ? visibleTabs.find((tab) => tab.id === activeTabId) ?? null : null),
-    [visibleTabs, activeTabId]
-  );
+  // The chat on screen and its tab change in one render. A chat selected
+  // without its tab (a link, Back, Home) gets its tab from the effect that
+  // follows the selected chat, one commit later: until then the previous
+  // chat's tab, and with it that chat's transcript, Browser view, prompts and
+  // sign-in row, stayed on screen under the newly selected chat. The tab that
+  // effect activates is the active one from the render the selection changes;
+  // for a chat with no open tab yet (Back after another chat took its preview
+  // tab, a search result, the phone's Chats sheet), the tab that effect opens
+  // for it, under the same id, so its area mounts once.
+  const activeTab = useMemo(() => {
+    const selected = activeTabId ? visibleTabs.find((tab) => tab.id === activeTabId) ?? null : null;
+    if (!activeConversationId || activePanel !== "chat" || selected?.kind !== "conversation" ||
+        selected.conversationId === activeConversationId) {
+      return selected;
+    }
+    const own = visibleTabs.find((tab) => tab.kind === "conversation" && tab.conversationId === activeConversationId);
+    if (own) return own;
+    const conversation = conversations.find((entry) => entry.localId === activeConversationId);
+    return conversation && conversation.lifecycleStatus !== "deleted"
+      ? prepareConversationTabOpen(visibleTabs, conversation, conversations, true).tab
+      : selected;
+  }, [activeConversationId, activePanel, conversations, visibleTabs, activeTabId]);
 
   useEffect(() => {
     if (locationSearch === undefined || activeTab?.kind !== "panel") return;
@@ -975,7 +993,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
       conversationSurfaces,
       tabs: visibleTabs,
       activeTab,
-      activeTabId,
+      activeTabId: activeTab?.id ?? activeTabId,
       conversationTabsReady,
       conversationTabsRestored,
       requestUrlNavigation,
