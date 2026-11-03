@@ -46,6 +46,8 @@ pub(crate) mod browser_hand_back;
 mod browser_request;
 #[cfg(test)]
 mod browser_turn_prompt_tests;
+#[cfg(test)]
+mod cannot_save_tests;
 mod card_text;
 mod chat_attachments;
 #[cfg(test)]
@@ -22039,7 +22041,9 @@ mod tests {
         assert!(files.is_empty());
     }
 
-    fn test_origin_settings(git_remote_url: Option<&str>) -> crate::config::OriginSettings {
+    pub(super) fn test_origin_settings(
+        git_remote_url: Option<&str>,
+    ) -> crate::config::OriginSettings {
         crate::config::OriginSettings {
             origin_id: Uuid::new_v4(),
             bind_host: "127.0.0.1".to_string(),
@@ -22876,9 +22880,10 @@ mod tests {
     /// A turn that must write files, in a folder its job may not save (the
     /// controller refused the refresh before it the workspace lease), ends
     /// before its model runs, with a plain notice and the refresh's record:
-    /// a run that can't save made a page and lost it at the save (local
-    /// drive, Nov 3). A turn that need not write goes on, and so does one
-    /// whose lease someone else held for a moment, which may still save.
+    /// a run that can't save made a page and lost it at the save. A turn
+    /// that need not write goes on, and so does one whose lease someone else
+    /// held for a moment, which may still save. `cannot_save_tests` runs a
+    /// whole job through it.
     #[test]
     fn a_turn_that_must_write_where_it_may_not_save_ends_before_its_model_runs() {
         let refresh = |saves_refused| {
