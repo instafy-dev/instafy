@@ -31,6 +31,7 @@ pub(crate) const KIND_CONVERSATION_CREATED: &str = "conversation.created";
 pub(crate) const KIND_RUN_STARTED: &str = "run.started";
 pub(crate) const KIND_RUN_FINISHED: &str = "run.finished";
 pub(crate) const KIND_RUN_FAILED: &str = "run.failed";
+pub(crate) const KIND_RUN_STOPPED: &str = "run.stopped";
 
 const VISIBILITY_PROJECT: &str = "project";
 const VISIBILITY_CONVERSATION: &str = "conversation";
@@ -616,6 +617,38 @@ pub(crate) async fn record_run_completed(
                 "promptId": prompt_id,
                 "outcome": if succeeded { "success" } else { "failed" },
             }),
+        },
+    )
+    .await
+}
+
+/// A run was stopped before it ended (a person's Stop, or the work it was
+/// part of was cancelled). Its started row stops showing once the run is
+/// over, so this row is its end on Home, which reads it as "Stopped".
+pub(crate) async fn record_run_stopped(
+    client: &impl GenericClient,
+    project_id: &Uuid,
+    run_id: &Uuid,
+    conversation_id: Option<Uuid>,
+    job_payload: &JsonValue,
+) -> Option<i64> {
+    let (conversation_id, visibility) = run_scope(client, conversation_id).await?;
+    append(
+        client,
+        &ActivityRow {
+            kind: KIND_RUN_STOPPED,
+            org_id: None,
+            project_id: Some(*project_id),
+            conversation_id,
+            run_id: Some(*run_id),
+            prompt_id: None,
+            visibility,
+            actor: run_actor(job_payload),
+            owner_user_id: None,
+            target_user_id: run_trigger_user(job_payload),
+            title: None,
+            preview: None,
+            data: json!({ "outcome": "stopped" }),
         },
     )
     .await

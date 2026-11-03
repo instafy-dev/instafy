@@ -648,7 +648,9 @@ and unread updates preserve the order of tabs across different kinds of content.
 
 Home separates **Unread** conversations from **Recent activity**, using flat rows on the
 shared panel surface. Failed runs retain a warning icon and a concise failure label while
-remaining markable as read. A completion or failure retires the matching running entry. A failed
+remaining markable as read. A run someone stopped reads **Stopped**, with no check mark: the
+controller records the stop (`run.stopped`), so the chat's row never shows an earlier run's
+**Run finished** in its place. A completion, failure or stop retires the matching running entry. A failed
 run is read with its chat: its notification names the row's status but never keeps the chat under
 **Unread** once the chat itself is read, and a failed run in no chat is not listed. Nor is a read
 update about a chat Home cannot name, unless it shares that chat's row. A row from a

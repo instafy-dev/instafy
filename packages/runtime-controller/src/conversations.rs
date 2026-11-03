@@ -2072,7 +2072,8 @@ pub(crate) async fn cancel_jobs_and_runs(
                  active_input_ready_turn_id = null,
                  heartbeat_at = now()
              where id = any($1)
-             returning id, project_id, run_id, payload, grant_ids is not null as holds_grants",
+             returning id, project_id, run_id, conversation_id, payload,
+                       grant_ids is not null as holds_grants",
             &[&job_ids, &summary_ref],
         )
         .await
@@ -2114,6 +2115,33 @@ pub(crate) async fn cancel_jobs_and_runs(
             .await
             .map_err(|error| internal_error(format!("failed to cancel runs: {error}")))?;
         persist_canceled_run_metadata(transaction, &run_ids, reason).await?;
+        // A stopped run's started row leaves Home once the run is over, and
+        // nothing else ends it there: this row does, so Home says Stopped,
+        // never what an earlier run of the chat said.
+        let mut recorded = std::collections::HashSet::new();
+        for row in &canceled_rows {
+            let Some(run_id) = row.get::<_, Option<Uuid>>("run_id") else {
+                continue;
+            };
+            if !recorded.insert(run_id) {
+                continue;
+            }
+            let payload = row.get::<_, PgJson<JsonValue>>("payload").0;
+            let conversation_id = row.get::<_, Option<Uuid>>("conversation_id").or_else(|| {
+                payload
+                    .get("conversation_id")
+                    .and_then(JsonValue::as_str)
+                    .and_then(|value| Uuid::parse_str(value.trim()).ok())
+            });
+            crate::activity::record_run_stopped(
+                transaction,
+                &row.get::<_, Uuid>("project_id"),
+                &run_id,
+                conversation_id,
+                &payload,
+            )
+            .await;
+        }
     }
 
     // A turn Instafy started by itself that is stopped never ends with a

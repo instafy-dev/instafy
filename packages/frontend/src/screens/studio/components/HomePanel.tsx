@@ -204,6 +204,8 @@ function statusSubtitle(event: HomeFeedEvent, viewerUserId: string | null): stri
       return "Waiting for a runtime";
     case "run_finished":
       return "Run finished";
+    case "run_stopped":
+      return "Stopped";
     case "support_reply":
     case "support_resolved":
       return null;

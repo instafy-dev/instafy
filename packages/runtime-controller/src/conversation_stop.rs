@@ -399,6 +399,30 @@ mod tests {
         assert_eq!(response.canceled_job_ids, vec![jobs[0]]);
         assert_eq!(response.canceled_run_ids, vec![runs[0]]);
         assert_eq!(response.already_finished_job_ids, vec![jobs[3]]);
+        // The stopped run's end on Home: one row that says it stopped.
+        async fn stopped_rows(
+            tx: &tokio_postgres::Transaction<'_>,
+            run: Uuid,
+        ) -> anyhow::Result<Vec<tokio_postgres::Row>> {
+            Ok(tx
+                .query(
+                    "select kind, conversation_id, data from activity_events where run_id = $1",
+                    &[&run],
+                )
+                .await?)
+        }
+        let rows = stopped_rows(&tx, runs[0]).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get::<_, String>("kind"), "run.stopped");
+        assert_eq!(
+            rows[0].get::<_, Option<Uuid>>("conversation_id"),
+            Some(conversation)
+        );
+        assert_eq!(
+            rows[0].get::<_, PgJson<Value>>("data").0,
+            json!({"outcome": "stopped"})
+        );
+        assert!(stopped_rows(&tx, runs[3]).await?.is_empty());
         let notice = cancellation.unwrap().1.notice;
         assert_eq!(notice.metadata["details"]["actorUserId"], json!(owner));
         assert_eq!(
@@ -424,6 +448,7 @@ mod tests {
         assert!(repeat.canceled_job_ids.is_empty());
         assert_eq!(repeat.already_finished_job_ids, vec![jobs[0]]);
         assert!(cancellation.is_none());
+        assert_eq!(stopped_rows(&tx, runs[0]).await?.len(), 1);
         assert_eq!(
             tx.query_one(
                 "select count(*) from conversation_messages where conversation_id=$1",
