@@ -1383,9 +1383,25 @@ or only the part a turn needs of a page the step returned: a step that failed or
 returned no page has only its message (no page, so no `title` or `visibleText`),
 and a turn that printed only those two fields read an address with no page and a
 site it couldn't reach as "undefined undefined". A page is not printed whole by
-rule: a whole result carries the page twice (the text and `structuredContent`),
-and a cell that printed three whole pages passed code mode's output limit and
+rule: a cell that printed three whole pages passed code mode's output limit and
 lost the middle one.
+
+A step's result holds its page once. The page, with everything else the step
+returned, is the result's `structuredContent`, and its text is one line that
+says what the step did: the controller's own words when it has them (a page
+that is blank, withheld, still busy or on a site not approved yet, a step that
+ran out of time, a typed field), else the step ("Opened the page."), then "Its
+result is in structuredContent." Codex hands a call made outside a code cell the
+structured content alone, and a cell's `text(r)` prints the whole result, so
+either way the model reads the page once. The text used to be the same result
+as JSON, so a cell printed every page twice: in a 22-page comparison turn, half
+of what its steps sent, with 7 pages cut at the cell's output limit; at the same
+cut, the same steps send about a third fewer tokens in, none of them cut. The
+Personal Browser and the owner-local observation answer the same way. A result
+that ends the run (the sign-in pause, a denial, a prompt left unanswered, the
+browser gone) keeps its words in its structured content too (`message`), beside
+the code the runtime reads, so a call made outside a cell is told to end the
+turn.
 
 In a Shared or Personal Browser turn, a code-mode cell that waits on a browser
 step yields to the model only after the browser server's tool timeout (180
@@ -1649,8 +1665,8 @@ in, and whether the field holds them, read only to be counted ("Typed 12
 characters into "Customer name:", and the field holds them."), never the text,
 which may be private. A click on a checkbox, a radio button or a switch says
 whether it is checked now. The control's
-box stays inside the controller for the visible cursor, and the MCP text result
-is compact JSON beside the same structured content.
+box stays inside the controller for the visible cursor, and the step's result
+is its structured content, with one line as its text (see above).
 On the page the person chose, a page with sign-in fields (a password or
 one-time code field, or the account identifier that typing into is refused as a
 sign-in, as the shared policy's `isSignInField` tells them) names them in its

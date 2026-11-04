@@ -8313,8 +8313,9 @@ mod tests {
     /// no page, so no `title` or `visibleText` (a local test, Nov 2: a turn printed only those two
     /// fields of every step, read "This address has no page…" and "couldn't reach that site" as
     /// "undefined undefined", and then took snapshots of both pages to see what happened). Of a
-    /// page a step returned, the part the turn needs is enough: a whole result carries the page
-    /// twice, and a cell that printed three whole pages passed its output limit and lost one.
+    /// page a step returned, the part the turn needs is enough: a cell that printed three whole
+    /// pages passed its output limit and lost one. A whole result holds its page once, as its
+    /// structured content (`shared_browser::successful_tool_result`).
     #[test]
     fn each_browser_policy_names_its_tools_as_a_turn_calls_them() {
         let transport = || McpServerTransportConfig::StreamableHttp {
