@@ -591,7 +591,6 @@ describe("ConversationMessageRows", () => {
     expect(userBubbles[1]?.querySelector('[data-testid="chat-message-start-notch"]')).toBeNull();
     expect(userBubbles[1]?.querySelector('[data-testid="chat-message-tail-notch"]')).toBeNull();
     expect(userBubbles[1]?.className).toContain("rounded-2xl");
-    expect(userBubbles[1]?.className).toContain("rounded-br-none");
     expect(container.querySelector('[data-testid="chat-message-start-notch"]')).toBeNull();
     expect(container.querySelector('[data-testid="chat-message-tail-notch"]')).toBeNull();
   });

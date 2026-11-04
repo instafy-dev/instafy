@@ -3,7 +3,9 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 
 const version = process.env.INSTAFY_REVIEW_VERSION === "before" ? "before" : "after";
-const base = `http://127.0.0.1:${version === "before" ? 5374 : 5372}/tests/fixtures/chat-pane-reading-space/index.html`;
+const fixtureOrigin = process.env.INSTAFY_CHAT_READING_REVIEW_ORIGIN
+  ?? `http://127.0.0.1:${version === "before" ? 5374 : 5372}`;
+const base = `${fixtureOrigin}/tests/fixtures/chat-pane-reading-space/index.html`;
 const artifactRoot = process.env.INSTAFY_REVIEW_ARTIFACT_DIR;
 const cases: {id:string;width:number;height:number;pane:number;layout:string;scrollbar?:string}[] = [
   {id:"split-420",width:1280,height:900,pane:420,layout:"split"},
@@ -82,6 +84,30 @@ for (const size of cases) test.describe(size.id, () => {
 });
 
 if (version === "after") {
+  test("widening a narrow desktop chat preserves writing room and both reading edges", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${base}?pane=383&state=completed`);
+    const input = page.getByTestId("chat-input");
+    await input.fill("Keep this unsent draft while widening the chat.");
+    const composer = page.getByTestId("chat-composer-surface");
+    const before = await composer.boundingBox();
+    const handle = await page.getByRole("separator").boundingBox();
+    if (!before || !handle) throw new Error("Expected the composer and browser divider");
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + 100);
+    await page.mouse.down();
+    await page.mouse.move(handle.x + handle.width / 2 + 8, handle.y + 100);
+    await page.mouse.up();
+    await expect.poll(async () => (await composer.boundingBox())!.width).toBeGreaterThan(before.width);
+    await expect(input).toHaveText("Keep this unsent draft while widening the chat.");
+    const edges = await page.getByTestId("chat-message-scroll").evaluate(scroller => {
+      const column = scroller.firstElementChild!.getBoundingClientRect();
+      const surface = document.querySelector('[data-testid="chat-composer-surface"]')!.getBoundingClientRect();
+      return { left: Math.abs(column.left - surface.left), right: Math.abs(column.right - surface.right) };
+    });
+    expect(edges.left).toBeLessThanOrEqual(1);
+    expect(edges.right).toBeLessThanOrEqual(1);
+  });
+
   for (const theme of ["light", "dark"]) test(`completed reply timestamp from keyboard ${theme}`, async ({page}) => {
     await page.setViewportSize({width:1280,height:900});
     await page.goto(`${base}?pane=420&theme=${theme}&state=completed`);

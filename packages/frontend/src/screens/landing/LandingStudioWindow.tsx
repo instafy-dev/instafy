@@ -1079,7 +1079,7 @@ export function MiniComposer({
     <div aria-hidden="true" data-landing-composer="" className={chrome.COMPOSER_WRAP}>
       {viewNavigation ? <div className={CHAT_COLUMN_CLASS_NAME}>{viewNavigation}</div> : null}
       <div className={CHAT_COLUMN_CLASS_NAME} data-cub-anchor="composer">
-        <Surface tone="default" radius="3xl" shadow="none" className={chrome.COMPOSER_SURFACE}>
+        <Surface preset="composer" radius="3xl" className={chrome.COMPOSER_SURFACE}>
           <div className={chrome.COMPOSER_ROW}>
             <div className={chrome.COMPOSER_LEADING}>
               {/* The phone composer's navigation button, without its Home unread badge. */}

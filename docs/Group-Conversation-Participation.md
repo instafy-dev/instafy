@@ -100,7 +100,7 @@ A terminal failure may offer actions such as **Try again** or **Open Runtime & A
 
 Chat spacing follows the chat pane's width, including when a browser is open
 beside it. The shared transcript, composer and presence header use 16px side
-insets below 384px and 24px at wider sizes, plus any native scrollbar reservation.
+insets below 640px and 24px at wider sizes, plus any native scrollbar reservation.
 Long messages and code stay inside the reading column.
 
 Below 640px, participant faces and clickable names sit above the message instead
