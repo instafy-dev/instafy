@@ -116,7 +116,7 @@ function Simulation({ scenario }: { scenario: Scenario }) {
   });
   const continuation = useChatRunStopContinuation({
     conversationId: CONVERSATION, viewerUserId: VIEWER, humanLabelByUserId: new Map(),
-    canWrite: scenario !== "viewer", busy: targets.length > 0, messages: history, queuedSends: [],
+    canWrite: scenario !== "viewer", busy: targets.length > 0, messages: history, hasNewer: false, queuedSends: [],
     submitMessage: async (override) => {
       const handles = override?.targetAgentHandles ?? [];
       setContinuations(current => [...current, [...handles]]);
