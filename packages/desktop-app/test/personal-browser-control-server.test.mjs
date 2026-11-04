@@ -382,6 +382,59 @@ test("binding rotation while a request body is streaming prevents operation disp
   }
 });
 
+// A step's page reaches the agent once: as the result's structured content, which Codex hands a
+// call made outside a code cell alone, while a cell's `text(r)` prints the whole result. Its text
+// is one line that says what the step did, in the browser's own words when it has them. The
+// text was the same result as JSON, so a cell printed every page twice.
+test("a Personal Browser step's result holds its page once, beside one line that says what it did", async () => {
+  const pageText = "Battery: up to 20 hours on one charge";
+  const withheld = "This page could not be checked for secrets, so it is withheld. Navigate to another page or ask the user to continue.";
+  const results = {
+    snapshot: {
+      snapshot: { url: "https://example.test/", title: "Example", text: pageText, interactive: [] },
+      activity: { step: "snapshot", url: "https://example.test/" },
+    },
+    click: {
+      snapshot: { url: "", title: "", text: "", secretScreen: true, message: withheld, interactive: [] },
+    },
+    navigate: { status: { state: "ready", url: "https://example.test/" } },
+  };
+  const server = new PersonalBrowserControlServer({ handle: async (operation) => results[operation] });
+  const credentials = await server.bindProject("page-once-project");
+  const target = new URL(credentials.controlUrl);
+  const headers = {
+    Authorization: `Bearer ${credentials.token}`,
+    Host: target.host,
+    "X-Instafy-Project-Id": "page-once-project",
+    "Content-Type": "application/json",
+  };
+  const call = async (name, args) =>
+    (await requestJson(`${credentials.controlUrl}/mcp`, {
+      method: "POST",
+      headers,
+      body: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
+    })).body.result;
+  try {
+    const snapshot = await call("snapshot", {});
+    assert.deepEqual(snapshot, {
+      content: [{ type: "text", text: "Read the page. Its result is in structuredContent." }],
+      structuredContent: results.snapshot,
+      isError: false,
+    });
+    assert.equal(JSON.stringify(snapshot).split(pageText).length - 1, 1);
+
+    const secret = await call("click", { index: 0 });
+    assert.equal(secret.content[0].text, `${withheld} Its result is in structuredContent.`);
+    assert.deepEqual(secret.structuredContent, results.click);
+
+    const navigate = await call("navigate", { url: "https://example.test/" });
+    assert.equal(navigate.content[0].text, "Opened the page. Its result is in structuredContent.");
+    assert.deepEqual(navigate.structuredContent, results.navigate);
+  } finally {
+    await server.stop();
+  }
+});
+
 test("human input acknowledges its own revocation and rejects every later old-token request", async () => {
   const calls = [];
   const server = new PersonalBrowserControlServer({ handle: async (operation) => {
