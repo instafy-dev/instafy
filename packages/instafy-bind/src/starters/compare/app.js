@@ -229,12 +229,15 @@
     bar.hidden = !bar.firstChild;
 
     var list = document.getElementById("list");
+    // the width is read before the list is emptied: measured with an empty list, the page would be as short as its
+    // header, and a reader scrolled down would land back at the top
+    var wide = isWide();
     list.replaceChildren();
     if (!items.length) {
       list.appendChild(site.empty("No options yet.", null, "Ask in chat to add some."));
     } else {
       var stores = hasPrice ? site.priceNotice(all) : null;
-      wideNow = isWide();
+      wideNow = wide;
       var wrap = h("div", { "class": "stack" });
       if (shown.length) wrap.appendChild(wideNow ? table(data, shown, st, shared) : cards(data, shown, st, shared));
       else wrap.appendChild(h("p", { "class": "cap", text: "None is known to be " + lowerFirst(data.filter.label || "within the limit") + "." }));
@@ -373,7 +376,7 @@
       var drawn = cols.map(function (c) {
         var el = cell(item, c, shared, c === sortCol ? c.label : undefined);
         if (!isGap(item, c, el)) return el;
-        gaps.push({ label: c.label, note: gapNote(valueOf(item, c), c) });
+        gaps.push({ label: String(c.label || c.key), note: gapNote(valueOf(item, c), c) });
         return null;
       });
       var top = sortCol ? drawn[cols.indexOf(sortCol)] : null;
@@ -391,11 +394,13 @@
     }));
   }
   /** A cell that says only "Unknown" (and why): no value, no page read for it ("Not listed · checked … ↗" cites one), no
-   * check running or failed, and nothing to press or open ("Check price", "Open store ↗", "where to check ↗"). */
+   * check running or failed, and nothing to press or open ("where to check ↗"). A price whose store can be opened or
+   * checked stays on its row: its "Open store ↗" or "Check price" comes once the binder has answered (the row keeps its
+   * shape), and a check that could not read the store says there why. */
   function isGap(item, col, drawn) {
     var f = valueOf(item, col);
     if (site.shown(f) || (f && (f.src || f.status === "not_found"))) return false;
-    if (isPrice(col) && site.anyPending([item])) return false;
+    if (isPrice(col) && (site.anyPending([item]) || (item.store && (item.store.readable || site.safeUrl(item.store.url))))) return false;
     return !drawn.querySelector("a, button, svg, .err");
   }
   /** Why a value is missing, from its note; "" when the note only says that it is ("Not checked", "Weight not

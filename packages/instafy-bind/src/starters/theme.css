@@ -272,6 +272,9 @@ html[data-host-title="shown"] .title {
    inside the cell when it is wider */
 .facts .trust .sp.is-act, .sortv .trust .sp.is-act { display: block; white-space: normal; }
 .facts .trust .sp.is-act > .dot, .sortv .trust .sp.is-act > .dot { display: none; }
+/* a phone row's sorted value is narrow, with no wider place to go: every part of its caption wraps inside it ("seen
+   27 Oct on target.com ↗"); a fact's grid takes one column instead (site.js) */
+.sortv .trust .sp.keep, .sortv .trust .age { white-space: normal; }
 .facts .trust .meta > wbr:has(+ .sp.is-act), .sortv .trust .meta > wbr:has(+ .sp.is-act) { display: none; }
 .table .trust .lead, .facts .trust .lead, .sortv .trust .lead { display: none; }
 /* a cell's value wraps between words (a long "J-Frame guidance for overpronation" never pushes the last columns out of

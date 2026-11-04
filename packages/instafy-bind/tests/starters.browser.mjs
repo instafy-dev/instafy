@@ -3,8 +3,9 @@
 //   PLAYWRIGHT_MODULE=/path/to/node_modules/playwright [SHOTS=/dir] node tests/starters.browser.mjs
 // For each starter, phone (390x844) and laptop (1280x800), light and dark: no sideways scroll, no console errors, at
 // most one primary button, ids and data-ref on every row, plain words only. Then: query state round trips, the
-// "select" command, a comparison on phones of 320, 375 and 414 px, 44 px touch targets, the five trust-line states, the
-// missing-data notice, a page with no binder, and checklist ticks shared between two pages.
+// "select" command, a comparison on phones of 320, 375 and 414 px (and a reader keeping their place as it redraws), 44 px
+// touch targets, the five trust-line states, the missing-data notice, a page with no binder, and checklist ticks shared
+// between two pages.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
@@ -111,6 +112,29 @@ const emptyLines = (page) => page.evaluate(() => {
   for (const t of document.querySelectorAll(".list.cards .trust, .table .trust")) {
     const boxes = [...t.querySelectorAll(".v, .meta > .part, .meta > .sp")].filter((el) => el.getClientRects().length).map((el) => ({ el, r: el.getBoundingClientRect() }));
     for (let i = 1; i < boxes.length; i++) if (boxes[i].r.top - boxes[i - 1].r.bottom > 4) out.push(`${t.closest("li, tr").id}: an empty line before "${boxes[i].el.innerText}"`);
+  }
+  return out;
+});
+
+/** A phone row's values and caption parts as drawn, read from their words (a link drawn as an inline-block, a 44 px
+ * target on touch, is one box however many lines it takes): `cut`, a fact's value or caption part over two lines;
+ * `past`, one whose words end past its cell (a fact's dd, the sorted value on the right). */
+const drawnParts = (page) => page.evaluate(() => {
+  const out = { cut: [], past: [] };
+  for (const el of document.querySelectorAll(".list.cards .facts .v, .list.cards .facts .part, .list.cards .sortv .v, .list.cards .sortv .part")) {
+    const tops = [];
+    let right = -Infinity;
+    const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+      const range = document.createRange();
+      range.selectNodeContents(n);
+      for (const r of range.getClientRects()) if (r.width) { tops.push(r.top); right = Math.max(right, r.right); }
+    }
+    if (!tops.length) continue;
+    const where = `${el.closest("li").id}: "${el.innerText.replace(/\s+/g, " ")}"`;
+    const edge = el.closest("dd, .sortv").getBoundingClientRect().right;
+    if (right > edge + 0.5) out.past.push(`${where} ends ${Math.round(right - edge)} px past its cell`);
+    if (el.closest(".facts") && Math.max(...tops) > Math.min(...tops) + 4) out.cut.push(where);
   }
   return out;
 });
@@ -592,17 +616,13 @@ try {
         const page = await open(`${site}/`, { width, height: 812, scheme, touch: true });
         const facts = await page.evaluate(() => {
           const wider = [...document.querySelectorAll("body *")].filter((el) => { const r = el.getBoundingClientRect(); return r.width && (r.right > innerWidth + 0.5 || r.left < -0.5); }).map((el) => el.className || el.tagName);
-          const cut = [...document.querySelectorAll(".list.cards .facts .v, .list.cards .facts .part")].filter((el) => {
-            const tops = [...el.getClientRects()].filter((r) => r.width || r.height).map((r) => r.top);
-            return tops.length && tops[tops.length - 1] > tops[0] + 4;
-          }).map((el) => el.textContent);
           const cards = [...document.querySelectorAll("ol.list.cards > li[data-ref]")].map((li) => ({
             id: li.id, ref: li.getAttribute("data-ref"),
             missing: [...li.querySelectorAll(".not-found")].map((p) => p.innerText),
             found: [...li.querySelectorAll("dl.facts > div")].map((d) => `${d.querySelector("dt").innerText}: ${d.querySelector("dd").innerText.replace(/\s+/g, " ")}`),
             details: li.querySelectorAll(".more-btn").length,
           }));
-          return { overflow: document.documentElement.scrollWidth - innerWidth, wider, cut, cards, list: document.getElementById("list").innerText, notes: document.getElementById("notes").innerText };
+          return { overflow: document.documentElement.scrollWidth - innerWidth, wider, cards, list: document.getElementById("list").innerText, notes: document.getElementById("notes").innerText };
         });
         eq(facts.overflow, 0, `${where}: no sideways scroll`);
         eq(facts.wider, [], `${where}: nothing is wider than the screen`);
@@ -613,7 +633,7 @@ try {
           "CPU: Chip Ultra Series 3 · checked 27 Oct on maker.example ↗",
           "Battery: Up to 20 hours, the maker says · checked 27 Oct on maker.example ↗",
         ], `${where}: what was found, each with its source line`);
-        eq(facts.cut, [], `${where}: no value or source line is cut over two lines`);
+        eq(await drawnParts(page), { cut: [], past: [] }, `${where}: no value or source line is cut over two lines, nor ends past its cell`);
         eq(facts.cards[0].details, 1, `${where}: Details stays`);
         ok(/Still to confirm\s+Battery, weight and price of the Air and the Max/.test(facts.notes), `${where}: Still to confirm stays`);
         eq(page.errors.filter((e) => !/404|Failed to load resource/.test(e)), [], `${where}: no script errors`);
@@ -668,15 +688,135 @@ try {
     }
   }
 
+  // ---------- 2j. a phone reader keeps their place, and every source line stays inside its row. Each redraw of a
+  // comparison (the binder's one-minute refresh, Details, a live price) sent a reader scrolled down back to the top; a
+  // row chat selected landed below the screen; a price jumped from "Not found yet" to the right of its row once the
+  // binder answered; and short source lines ("checked 27 Oct on asus.com ↗", a check's "amazon.com could not be read")
+  // were cut at the row's edge. ----------
+  {
+    const cols = ["cpu", "battery", "weight", "screen", "ports"];
+    const eight = (d) => ({ ...d, title: "Eight laptops", lede: "From the maker's pages.", sort: [], filter: undefined, unchecked: ["Reviews"],
+      columns: cols.map((k) => ({ key: k, label: k[0].toUpperCase() + k.slice(1), type: "text" })),
+      items: Array.from({ length: 8 }, (_, i) => ({ ref: `laptop:l${i}`, name: `Laptop ${i}`, why: "Listed by the maker",
+        sources: i === 5 ? [{ name: "Maker", url: "https://maker.example/l5" }] : undefined,
+        // the row chat selects opens its Details, whose own facts take one column too
+        more: i === 6 ? ["Colours", "Keyboard", "Webcam", "Charger"].map((label, j) => ({ label, fact: { v: `${label} detail`, src: "Maker", url: `https://maker${j}6.example/l6/more`, date: "2026-10-27" } })) : undefined,
+        facts: Object.fromEntries(cols.map((k, j) => [k, { v: `${k} value ${i}`, src: "Maker", url: `https://maker${j}${i}.example/l${i}/${k}`, date: "2026-10-27" }])) })) });
+    const binder = await serve(makeSite("compare-place", "compare", eight));
+    const view = (page) => page.evaluate(() => {
+      const row = [...document.querySelectorAll("ol.list.cards > li[data-ref]")].find((r) => r.getBoundingClientRect().bottom > 0);
+      return `scrolled ${Math.round(scrollY)}, ${row.id} at ${Math.round(row.getBoundingClientRect().top)}`;
+    });
+    // WebKit has no scroll anchoring: without it a page that grows shorter for a moment while it is measured clamps
+    // the scroll near its bottom
+    for (const anchoring of ["auto", "none"]) {
+      const page = await open(`${binder.url}/`, { width: 375, height: 700, touch: true });
+      if (anchoring === "none") await page.addStyleTag({ content: "* { overflow-anchor: none !important; }" });
+      for (const to of [1200, "the bottom"]) {
+        await page.evaluate((y) => window.scrollTo(0, typeof y === "number" ? y : document.documentElement.scrollHeight), to);
+        await page.waitForTimeout(100);
+        const before = await view(page);
+        await page.evaluate(() => window.site.render()); // what the one-minute refresh, a live price or Sort by does
+        await page.waitForTimeout(100);
+        eq(await view(page), before, `375 px, scroll anchoring ${anchoring}: a redraw keeps the reader's place (scrolled to ${to})`);
+      }
+      // a phone's browser bar hides and shows as the reader scrolls: the window gets taller or shorter, never wider,
+      // and the page scrolls up only as far as the window grew
+      for (const height of [760, 700]) {
+        const y = await page.evaluate(() => scrollY);
+        const was = page.viewportSize().height;
+        await page.setViewportSize({ width: 375, height });
+        await page.waitForTimeout(200);
+        const drop = Math.round(y - await page.evaluate(() => scrollY));
+        ok(drop <= Math.max(0, height - was) + 1, `375 px, scroll anchoring ${anchoring}: a window ${height > was ? "taller" : "shorter"} by the browser bar keeps the reader's place (up ${drop} px)`);
+      }
+      await page.evaluate(() => document.getElementById("row-l5").scrollIntoView({ block: "center" }));
+      await page.waitForTimeout(100);
+      const button = () => page.evaluate(() => Math.round(document.querySelector("#row-l5 .more-btn").getBoundingClientRect().top));
+      const at = await button();
+      await page.locator("#row-l5 .more-btn").tap();
+      await page.waitForFunction(() => document.querySelector("#row-l5 .more"));
+      await page.waitForTimeout(100);
+      eq(await button(), at, `375 px, scroll anchoring ${anchoring}: Details opens its row where it is`);
+      await page.context().close();
+    }
+    // the select command: the row lands centred, after the rows above have taken their final shape
+    for (const reducedMotion of ["no-preference", "reduce"]) {
+      const context = await browser.newContext({ viewport: { width: 375, height: 812 }, hasTouch: true, isMobile: true, deviceScaleFactor: 1, reducedMotion });
+      const page = await context.newPage();
+      await page.goto(`${binder.url}/`);
+      await page.waitForSelector("#row-l7");
+      await page.waitForTimeout(400);
+      await command(binder, "select", { ref: "laptop:l6" });
+      await page.waitForFunction(() => document.querySelector("#row-l6.is-selected"));
+      await page.waitForTimeout(1200);
+      const got = await page.evaluate(() => { const r = document.getElementById("row-l6").getBoundingClientRect(); return { centre: Math.round((r.top + r.bottom) / 2), screen: Math.round(innerHeight / 2) }; });
+      ok(Math.abs(got.centre - got.screen) <= 2, `375 px, motion ${reducedMotion}: the row chat selects lands centred (${JSON.stringify(got)})`);
+      await context.close();
+    }
+
+    // a price whose store can be opened keeps its place on the row while the binder answers (here 700 ms late)
+    const late = await serve(makeSite("compare-late", "compare"));
+    const lc = await browser.newContext({ viewport: { width: 375, height: 812 }, hasTouch: true, isMobile: true, deviceScaleFactor: 1 });
+    const lp = await lc.newPage();
+    await lp.route("**/__bind/health", async (route) => { await new Promise((r) => setTimeout(r, 700)); await route.continue(); });
+    await lp.goto(`${late.url}/`);
+    await lp.waitForFunction(() => document.querySelector("#row-option-c"));
+    const shape = () => lp.evaluate(() => { const li = document.getElementById("row-option-c"); return { right: li.querySelector(".sortv")?.innerText.replace(/\s+/g, " ") ?? "", missing: li.querySelector(".not-found")?.innerText ?? "" }; });
+    const first = await shape();
+    await lp.waitForFunction(() => /Open Other Store/.test(document.getElementById("row-option-c").innerText), null, { timeout: 5000 });
+    const settled = await shape();
+    eq(first, { right: "Price unknown · the store blocks price checks", missing: "" }, "first view: the price is on the right of its row");
+    eq(settled, { right: "Price unknown · the store blocks price checks Open Other Store ↗", missing: "" }, "once the binder answers its store link joins it there");
+    await lc.close();
+
+    // short source lines and a check's reason stay inside their cell: a fact's grid takes one column, the sorted value
+    // wraps them; so does a store link alone in a fact's caption, drawn on touch as one box over two lines
+    const specs = (v) => ({ v, src: "Specs", url: "https://specs.example/all", date: "2026-10-27" });
+    const inside = makeSite("compare-inside", "compare", (d, dir) => {
+      fs.mkdirSync(path.join(dir, "data/records"), { recursive: true });
+      fs.writeFileSync(path.join(dir, "data/records/read_offer.json"), JSON.stringify({ schema: "instafy.records@1", records: [
+        { type: "claim", cid: "clm_c", ref: "option:c", attr: "price", value: null, status: "uncertain", basis: "live", confidence: "low", note: "amazon.com could not be read",
+          prov: { source: "amazon.com", lane: "local", url: "https://www.amazon.com/c", observed_at: new Date().toISOString(), ttl_s: 3600 } }] }));
+      return { ...d, title: "Three laptops", lede: "From the makers' pages.", sort: [{ key: "price", label: "Price, low to high", dir: "asc" }], filter: undefined, unchecked: ["Reviews"],
+        columns: [{ key: "price", label: "Price", type: "price" }, { key: "cpu", label: "CPU", type: "text" }, { key: "weight", label: "Weight", type: "text" }, { key: "screen", label: "Screen", type: "text" }],
+        items: [
+          { ref: "option:a", name: "Asus Laptop", why: "The maker's page gives no weight", store: { name: "Shop", url: "https://shop.example/a", readable: false },
+            facts: { price: { v: "$999", src: "Shop", url: "https://shop.example/a", date: "2026-10-27" }, cpu: specs("Chip 7"), screen: specs("14 in"), weight: { src: "Asus", url: "https://www.asus.com/laptop/specs", date: "2026-10-27" } } },
+          { ref: "option:b", name: "Target Laptop", why: "Its store page gives no price",
+            facts: { price: { src: "Target", url: "https://www.target.com/p/b", date: "2026-10-27" }, cpu: specs("Chip 5"), screen: specs("13 in"), weight: specs("1.2 kg") } },
+          { ref: "option:c", name: "Amazon Laptop", why: "Its store could not be read", store: { name: "Amazon", url: "https://www.amazon.com/c", readable: true },
+            facts: { cpu: specs("Chip 3"), screen: specs("15 in"), weight: specs("1.4 kg") } },
+        ] };
+    });
+    const insideAt = (await serve(inside)).url;
+    const outlet = await staticServer(makeSite("compare-outlet", "compare", (d) => ({ ...d, sort: [], filter: undefined,
+      columns: [{ key: "suction", label: "Suction", type: "text" }, { key: "price", label: "Price", type: "price" }],
+      items: ["a", "b"].map((r) => ({ ref: `option:${r}`, name: `Vacuum ${r.toUpperCase()}`, why: "Listed by the maker", store: { name: "Example Home Appliance Outlet", url: `https://outlet.example/${r}`, readable: false },
+        facts: { suction: { v: "6000 Pa", src: "Maker", url: "https://maker.example/specs", date: "2026-10-27" }, price: { note: "Not checked" } } })) })));
+    for (const width of [320, 375, 414]) {
+      for (const url of [`${insideAt}/`, `${outlet}/`]) {
+        const page = await open(url, { width, height: 812, touch: true });
+        await page.waitForTimeout(300);
+        eq(await drawnParts(page), { cut: [], past: [] }, `${width} px, ${url === outlet + "/" ? "a long store link" : "short source lines"}: every part stays inside its cell, on one line in a fact`);
+        eq(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth), 0, `${width} px: no sideways scroll`);
+        await page.context().close();
+      }
+    }
+  }
+
   // ---------- 3. touch targets (coarse pointer) on every starter ----------
   for (const starter of STARTER_NAMES) {
-    // a stated limit gives compare and ranked their segmented control ("All | Under $140")
+    // a stated limit gives compare and ranked their segmented control ("All | Under $140"); "All" keeps every row, and
+    // the rows' Details, on the page
+    const limited = ["compare", "ranked"].includes(starter);
     const mutate = starter === "checklist" ? (d) => ({ ...d, people: ["Ana", "Ben"] })
-      : ["compare", "ranked"].includes(starter) ? (d) => ({ ...d, filter: { key: "price", max: 140, label: "Under $140", rest: "over $140" } }) : null;
+      : limited ? (d) => ({ ...d, filter: { key: "price", max: 140, label: "Under $140", rest: "over $140" } }) : null;
     const binder = await serve(makeSite(`touch-${starter}`, starter, mutate));
-    const page = await open(`${binder.url}/`, { touch: true });
+    const page = await open(`${binder.url}/${limited ? "?show=all" : ""}`, { touch: true });
     await page.waitForTimeout(400);
     ok(await page.evaluate(() => matchMedia("(pointer: coarse)").matches), "touch emulation gives a coarse pointer");
+    if (limited) ok(await page.locator(".seg").count() === 1 && await page.locator(".more-btn").count() >= 1, `${starter}: the limit's switch and a row's Details are both measured`);
     const small = await page.evaluate(() => {
       const out = [];
       for (const el of document.querySelectorAll("a, button, select, input, summary")) {

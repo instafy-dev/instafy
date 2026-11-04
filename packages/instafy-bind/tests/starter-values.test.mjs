@@ -440,6 +440,63 @@ test("compare on a phone: a missing value that can still be checked, opened or w
   assert.match(max, /Not found yet: Price, Two independent reviews$/, max);
 });
 
+// A phone row folded a price into "Not found yet: Price" until the binder answered, then moved it to the right of the
+// row with its store link: the row changed shape under the reader. A price whose store can be opened or checked stays
+// on the row from the first view, and the link joins it there.
+test("compare on a phone: a price whose store can be opened keeps its place while the binder answers", async () => {
+  let answer;
+  const ready = new Promise((resolve) => { answer = resolve; });
+  const client = () => ({ on() {}, ready, isPending: () => false, records: () => [], expired: () => false });
+  const page = await draw("compare", compareData(), { width: 375, search: "?show=all", bind: client });
+  const right = () => rowText(page.document, "option:blocked");
+  assert.match(right(), /Price unknown · shop-two\.example blocks automated price checks/, `on the right of the row: ${right()}`);
+  assert.doesNotMatch(right(), /Not found yet:.*Price/, right());
+  answer({ connected: true, names: [] });
+  assert.ok(await until(() => /Open Shop Two ↗/.test(right()), 1000), `the store link joins it: ${right()}`);
+  assert.match(right(), /Price unknown · shop-two\.example blocks automated price checks · Open Shop Two ↗/);
+  assert.doesNotMatch(right(), /Not found yet:.*Price/, right());
+});
+
+// A check that could not read one row's store ("the store asks for a login") said why in the wide table, but a phone
+// row whose store link is not https folded the price into "Not found yet: Price" and lost the reason.
+test("compare on a phone: a store a check could not read keeps its reason on the row", async () => {
+  const data = compareData();
+  data.items = [data.items[0], item("login", "Login Model", {}, { store: { name: "Shop Three", url: "http://shop-three.example/login", readable: true } })];
+  const blocked = { type: "claim", cid: "clm_login", ref: "option:login", attr: "price", value: null, status: "uncertain", basis: "live", confidence: "low",
+    note: "the store asks for a login", prov: { source: "shop-three.example", lane: "local", observed_at: new Date().toISOString(), ttl_s: 3600 } };
+  const client = () => ({ on() {}, ready: Promise.resolve({ connected: true, names: ["read_offer"] }), names: ["read_offer"], isPending: () => false,
+    records: (ref) => (ref === "option:login" ? [blocked] : []), expired: () => false });
+  for (const width of [375, 1280]) {
+    const { document } = await draw("compare", data, { width, search: "?show=all", bind: client });
+    const row = rowText(document, "option:login");
+    assert.match(row, /(Price u|U)nknown · the store asks for a login/, `${width}px: ${row}`);
+    assert.doesNotMatch(row, /Not found yet:.*Price/, `${width}px: ${row}`);
+  }
+});
+
+// A column without a label (which `instafy bind check` accepts) made a phone row read "Not found yet: undefined".
+test("compare on a phone: a column without a label is named by its key", async () => {
+  const data = laptopsData();
+  data.columns = [{ key: "cpu", label: "CPU", type: "text" }, { key: "colour", type: "text" }];
+  const { document } = await draw("compare", data, { width: 375 });
+  assert.match(rowText(document, "option:air"), /Not found yet: colour$/);
+  assert.doesNotMatch(document.getElementById("list").textContent, /undefined/);
+});
+
+// Each redraw of a comparison (Details, Sort by, a live price, the binder's one-minute refresh) emptied the list and
+// then read the page's width: measured with an empty list the page is as short as its header, so a phone reader
+// scrolled down landed back at the top. The width is read while the list still holds its rows.
+test("compare: a redraw reads the page's width while the list still holds its rows", async () => {
+  const page = await draw("compare", laptopsData(), { width: 375 });
+  const main = page.document.querySelector("main");
+  const list = page.document.getElementById("list");
+  const seen = [];
+  Object.defineProperty(main, "clientWidth", { get: () => { seen.push(list.childNodes.length); return 375; } });
+  page.site.render();
+  assert.ok(seen.length > 0, "the redraw reads the width");
+  assert.ok(seen.every((n) => n > 0), `the list held its rows each time the width was read: ${seen.join(", ")}`);
+});
+
 // A comparison sorted by a value no row had (every weight unknown): a phone showed "Weight unknown" on the right of
 // every row, and the page's main criterion was a column of unknowns. A sort whose column no row has a value for is
 // left out; one some rows have stays, with the rows without it listed last, and so does one in words.
