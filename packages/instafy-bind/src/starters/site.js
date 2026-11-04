@@ -552,7 +552,8 @@
     var row = g.closest ? g.closest("[data-ref]") : null;
     return row ? row.getAttribute("data-ref") + (g.closest(".more") ? " more" : "") : "";
   }
-  /** One column again for the fact grids that took one (render() calls it right after drawing; it lays nothing out). */
+  /** One column again for the fact grids that took one: render() calls it right after drawing, and fitFacts before it
+   * measures; it lays nothing out. */
   function keepFacts() {
     var grids = document.querySelectorAll(".facts");
     for (var i = 0; i < grids.length; i++) if (oneCol[factsKey(grids[i])]) grids[i].classList.add("is-one");
@@ -562,28 +563,24 @@
    * source line cut at the row's edge. A grid in a table (its Details row) has the table's width and keeps its
    * columns. */
   function fitFacts() {
-    var grids = document.querySelectorAll(".facts");
-    var keys = [];
-    for (var i = 0; i < grids.length; i++) {
-      keys[i] = factsKey(grids[i]);
-      if (oneCol[keys[i]]) grids[i].classList.add("is-one"); else grids[i].classList.remove("is-one");
-    }
+    keepFacts();
+    // a new width (or font): each grid is measured again, one at a time
     var width = document.documentElement.clientWidth;
-    if (width !== oneColWidth) {
-      oneColWidth = width;
-      oneCol = {};
-      for (var w = 0; w < grids.length; w++) grids[w].classList.remove("is-one");
-    }
+    if (width !== oneColWidth) { oneColWidth = width; oneCol = {}; }
+    var grids = document.querySelectorAll(".facts");
     for (var k = 0; k < grids.length; k++) {
       var g = grids[k];
-      if (oneCol[keys[k]] || (g.closest && g.closest("table"))) continue;
+      var key = factsKey(g);
+      if (oneCol[key]) continue;
+      g.classList.remove("is-one");
+      if (g.closest && g.closest("table")) continue;
       var parts = g.querySelectorAll(".v, .part");
       for (var j = 0; j < parts.length; j++) {
         var at = textBox(parts[j]);
         var cell = parts[j].closest ? parts[j].closest(".facts > *") : null;
         if (at && (at.last > at.first + 4 || (cell && at.right > cell.getBoundingClientRect().right + 0.5))) {
           g.classList.add("is-one");
-          if (keys[k]) oneCol[keys[k]] = true;
+          if (key) oneCol[key] = true;
           break;
         }
       }
