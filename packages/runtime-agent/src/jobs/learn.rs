@@ -119,7 +119,7 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     include_str!("legacy/agents-doc-v8.md"),
     // From before a bare "keep going" carried on what the chat left open, never a change the
     // person stopped or undid, and said which.
-    include_str!("legacy/agents-doc-v9.md"),
+    include_str!("legacy/agents-doc-v10.md"),
 ];
 const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -2384,7 +2384,7 @@ mod tests {
             "{replies}"
         );
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-        let previous = include_str!("legacy/agents-doc-v9.md");
+        let previous = include_str!("legacy/agents-doc-v10.md");
         assert!(!previous.contains("keep going"));
         let workspace = tempdir().expect("workspace");
         let path = workspace.path().join(AGENTS_DOC_FILENAME);
