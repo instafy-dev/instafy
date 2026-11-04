@@ -3,8 +3,8 @@
 //   PLAYWRIGHT_MODULE=/path/to/node_modules/playwright [SHOTS=/dir] node tests/starters.browser.mjs
 // For each starter, phone (390x844) and laptop (1280x800), light and dark: no sideways scroll, no console errors, at
 // most one primary button, ids and data-ref on every row, plain words only. Then: query state round trips, the
-// "select" command, 44 px touch targets, the five trust-line states, the missing-data notice, a page with no binder,
-// and checklist ticks shared between two pages.
+// "select" command, a comparison on phones of 320, 375 and 414 px, 44 px touch targets, the five trust-line states, the
+// missing-data notice, a page with no binder, and checklist ticks shared between two pages.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
@@ -100,6 +100,17 @@ const dotLines = (page) => page.evaluate(() => {
       const s = line.map((x) => x.c).join("");
       if (/^·|·$/.test(s)) out.push(`${t.innerText.replace(/\s+/g, " ")} [line: ${s}]`);
     }
+  }
+  return out;
+});
+
+/** Empty lines inside a row's captions (a phone's row or a table's cell): more than 4 px between a value or caption
+ * part and the next one below it. */
+const emptyLines = (page) => page.evaluate(() => {
+  const out = [];
+  for (const t of document.querySelectorAll(".list.cards .trust, .table .trust")) {
+    const boxes = [...t.querySelectorAll(".v, .meta > .part, .meta > .sp")].filter((el) => el.getClientRects().length).map((el) => ({ el, r: el.getBoundingClientRect() }));
+    for (let i = 1; i < boxes.length; i++) if (boxes[i].r.top - boxes[i - 1].r.bottom > 4) out.push(`${t.closest("li, tr").id}: an empty line before "${boxes[i].el.innerText}"`);
   }
   return out;
 });
@@ -245,6 +256,8 @@ try {
     ok(/\d more over \$140 · Show/.test(await text(phone)), "hidden rows leave one line");
     await phone.locator(".link-btn", { hasText: "Show" }).click();
     ok(/show=all/.test(phone.url()), "Show all goes into the query");
+    await phone.waitForTimeout(100);
+    eq(await emptyLines(phone), [], "phone: no empty line before a store link (a store that could not be read)");
     if (SHOTS) await phone.screenshot({ path: path.join(SHOTS, "compare-states-phone.png"), fullPage: true });
     await phone.context().close();
     // reduced motion: no fade, but the row chat pointed at is still marked
@@ -543,9 +556,124 @@ try {
     await rp.context().close();
   }
 
+  // ---------- 2i. phones (320, 375, 414): a row shows the values found and names the rest once, its facts take one
+  // column when two would cut a value or its source line, and nothing is wider than the screen; the table is as it was.
+  // A comparison with 4 of 15 values found listed every column on every phone row with "Unknown" ("Unknown · Two
+  // independent reviews not checked"), and two narrow columns cut values and their sources over lines. ----------
+  {
+    const maker = (v, page) => ({ v, src: "Maker", url: `https://maker.example/${page}`, date: "2026-10-27" });
+    const gaps = (d) => ({
+      ...d, title: "Three laptops", lede: "The maker's site gives each CPU; battery, weight, price and reviews are not checked.", sort: [], filter: undefined,
+      columns: [{ key: "cpu", label: "CPU", type: "text" }, { key: "battery", label: "Battery", type: "text" }, { key: "weight", label: "Weight", type: "text" },
+        { key: "price", label: "Price", type: "text" }, { key: "reviews", label: "Two independent reviews", type: "text" }],
+      items: [
+        { ref: "laptop:pro", name: "Maker Laptop Pro", why: "CPU and battery found on the maker's site", sources: [{ name: "Maker", url: "https://maker.example/pro" }],
+          facts: { cpu: maker("Chip Ultra Series 3", "pro"), battery: maker("Up to 20 hours, the maker says", "pro/battery"), weight: { note: "Not checked" }, price: { note: "Not checked" }, reviews: { note: "Two independent reviews not checked" } } },
+        { ref: "laptop:air", name: "Maker Laptop Air", why: "CPU found on the maker's site",
+          facts: { cpu: maker("Chip Series 3", "air"), battery: { note: "Not checked" }, weight: { note: "Not checked" }, price: { note: "Not checked" }, reviews: { note: "Two independent reviews not checked" } } },
+        { ref: "laptop:max", name: "Maker Laptop Max", why: "CPU found on the maker's site",
+          facts: { cpu: maker("Other Chip AI 300 Series", "max"), battery: { note: "Not checked" }, weight: { note: "Not checked" }, price: { note: "Not checked" }, reviews: { note: "Two independent reviews not checked" } } },
+      ],
+      unchecked: ["Battery, weight and price of the Air and the Max", "Two independent reviews for each model"],
+    });
+    const site = await staticServer(makeSite("compare-gaps", "compare", gaps));
+    // short values whose column cites one page under the list (no source line in the cells) keep two columns
+    const short = await staticServer(makeSite("compare-short", "compare", (d) => ({ ...d, sort: [], items: d.items.map((i) => ({ ...i, store: undefined, facts: {
+      weight: { v: i.ref.slice(-1) === "a" ? "8.9 oz" : "9.1 oz", src: "Maker", url: "https://example.com/specs", date: "2026-10-17" },
+      rating: { v: "4.5 of 5", src: "Reviews", url: "https://example.com/reviews", date: "2026-10-16" } } })) })));
+    const missing = {
+      "row-pro": "Not found yet: Weight, Price, Two independent reviews",
+      "row-air": "Not found yet: Battery, Weight, Price, Two independent reviews",
+      "row-max": "Not found yet: Battery, Weight, Price, Two independent reviews",
+    };
+    for (const width of [320, 375, 414]) {
+      for (const scheme of ["light", "dark"]) {
+        const where = `${width} px ${scheme}`;
+        const page = await open(`${site}/`, { width, height: 812, scheme, touch: true });
+        const facts = await page.evaluate(() => {
+          const wider = [...document.querySelectorAll("body *")].filter((el) => { const r = el.getBoundingClientRect(); return r.width && (r.right > innerWidth + 0.5 || r.left < -0.5); }).map((el) => el.className || el.tagName);
+          const cut = [...document.querySelectorAll(".list.cards .facts .v, .list.cards .facts .part")].filter((el) => {
+            const tops = [...el.getClientRects()].filter((r) => r.width || r.height).map((r) => r.top);
+            return tops.length && tops[tops.length - 1] > tops[0] + 4;
+          }).map((el) => el.textContent);
+          const cards = [...document.querySelectorAll("ol.list.cards > li[data-ref]")].map((li) => ({
+            id: li.id, ref: li.getAttribute("data-ref"),
+            missing: [...li.querySelectorAll(".not-found")].map((p) => p.innerText),
+            found: [...li.querySelectorAll("dl.facts > div")].map((d) => `${d.querySelector("dt").innerText}: ${d.querySelector("dd").innerText.replace(/\s+/g, " ")}`),
+            details: li.querySelectorAll(".more-btn").length,
+          }));
+          return { overflow: document.documentElement.scrollWidth - innerWidth, wider, cut, cards, list: document.getElementById("list").innerText, notes: document.getElementById("notes").innerText };
+        });
+        eq(facts.overflow, 0, `${where}: no sideways scroll`);
+        eq(facts.wider, [], `${where}: nothing is wider than the screen`);
+        eq(facts.cards.map((c) => [c.id, c.ref]), [["row-pro", "laptop:pro"], ["row-air", "laptop:air"], ["row-max", "laptop:max"]], `${where}: ids and order`);
+        for (const c of facts.cards) eq(c.missing, [missing[c.id]], `${where}: ${c.id} names what was not found once`);
+        ok(!/Unknown/.test(facts.list), `${where}: no stack of unknowns`);
+        eq(facts.cards[0].found.map((t) => t.replace(/ 2026 on/, " on").replace(/(\S) (checked \d)/g, "$1 · $2")), [
+          "CPU: Chip Ultra Series 3 · checked 27 Oct on maker.example ↗",
+          "Battery: Up to 20 hours, the maker says · checked 27 Oct on maker.example ↗",
+        ], `${where}: what was found, each with its source line`);
+        eq(facts.cut, [], `${where}: no value or source line is cut over two lines`);
+        eq(facts.cards[0].details, 1, `${where}: Details stays`);
+        ok(/Still to confirm\s+Battery, weight and price of the Air and the Max/.test(facts.notes), `${where}: Still to confirm stays`);
+        eq(page.errors.filter((e) => !/404|Failed to load resource/.test(e)), [], `${where}: no script errors`);
+        if (SHOTS && scheme === "dark") await page.screenshot({ path: path.join(SHOTS, `compare-gaps-${width}.png`), fullPage: true });
+        await page.context().close();
+      }
+      const sp = await open(`${short}/`, { width, height: 812, touch: true });
+      const tracks = await sp.evaluate(() => [...document.querySelectorAll("ol.list.cards .facts")].map((g) => getComputedStyle(g).gridTemplateColumns.split(" ").length));
+      eq(tracks, width >= 360 ? [2, 2, 2] : [1, 1, 1], `${width} px: short values cited under the list keep two columns where they fit`);
+      await sp.context().close();
+    }
+    // the wide table: a cell per column, each gap says "Unknown" as before, and no line of what was not found
+    const wide = await open(`${site}/`, { width: 1280, height: 800 });
+    const table = await wide.evaluate(() => ({
+      head: [...document.querySelectorAll("thead th")].map((th) => th.innerText.trim()),
+      pro: [...document.querySelectorAll("#row-pro td")].slice(1).map((td) => td.innerText.replace(/\s+/g, " ").trim()),
+      air: [...document.querySelectorAll("#row-air td")].slice(2).map((td) => td.innerText.replace(/\s+/g, " ").trim()),
+      lines: document.querySelectorAll(".not-found").length,
+    }));
+    eq(table.head, ["Option", "CPU", "Battery", "Weight", "Price", "Two independent reviews", "Details"], "1280 px: the table's columns");
+    eq(table.pro.map((t) => t.replace(/ 2026 on/, " on").replace(/(\S) (checked \d)/g, "$1 · $2")), [
+      "Chip Ultra Series 3 · checked 27 Oct on maker.example ↗", "Up to 20 hours, the maker says · checked 27 Oct on maker.example ↗",
+      "Unknown", "Unknown", "Unknown · Two independent reviews not checked", "Details",
+    ], "1280 px: a cell per column, as before");
+    eq(table.air, ["Unknown", "Unknown", "Unknown", "Unknown · Two independent reviews not checked", ""], "1280 px: the gaps say Unknown in their cells");
+    eq(table.lines, 0, "1280 px: no line of what was not found");
+    if (SHOTS) await wide.screenshot({ path: path.join(SHOTS, "compare-gaps-1280.png"), fullPage: true });
+    await wide.context().close();
+    // no binder: each row's store link ("Open Example Store ↗") stays inside its narrow price cell, with no empty line
+    const plain = await staticServer(makeSite("compare-plain-phone", "compare"));
+    const pp = await open(`${plain}/`, { width: 320, height: 812, touch: true });
+    const past = await pp.evaluate(() => [...document.querySelectorAll("ol.list.cards > li")].flatMap((li) => {
+      const box = li.getBoundingClientRect();
+      return [...li.querySelectorAll("a")].filter((a) => a.getBoundingClientRect().right > box.right + 0.5).map((a) => `${li.id}: ${a.innerText} past its row`);
+    }));
+    eq(past, [], "320 px without a binder: the store links stay inside their rows");
+    eq(await emptyLines(pp), [], "320 px without a binder: no empty line before a store link");
+    await pp.context().close();
+    // an old live price: "checked 1 Nov" and "may have changed" each take a line of their own, with no empty line
+    const oldSite = await serve(makeSite("compare-old-phone", "compare", (data, d) => {
+      fs.mkdirSync(path.join(d, "data/records"), { recursive: true });
+      fs.writeFileSync(path.join(d, "data/records/read_offer.json"), JSON.stringify({ schema: "instafy.records@1", records: [
+        { type: "offer", oid: "off_b", ref: "option:option-b", seller: { name: "Example Store" }, price: { amount: 160, currency: "USD" }, basis: "live",
+          prov: { source: "example.com", lane: "local", url: "https://example.com/option-b", observed_at: new Date(Date.now() - 3 * 86400_000).toISOString(), ttl_s: 3600 } }] }));
+      return data;
+    }));
+    for (const width of [320, 375, 414]) {
+      const op = await open(`${oldSite.url}/`, { width, height: 812, touch: true });
+      ok(/may have changed/.test(await op.locator("#row-option-b .sortv").innerText()), `${width} px: the old price says it may have changed`);
+      eq(await emptyLines(op), [], `${width} px: an old price's caption has no empty line`);
+      await op.context().close();
+    }
+  }
+
   // ---------- 3. touch targets (coarse pointer) on every starter ----------
   for (const starter of STARTER_NAMES) {
-    const binder = await serve(makeSite(`touch-${starter}`, starter, starter === "checklist" ? (d) => ({ ...d, people: ["Ana", "Ben"] }) : null));
+    // a stated limit gives compare and ranked their segmented control ("All | Under $140")
+    const mutate = starter === "checklist" ? (d) => ({ ...d, people: ["Ana", "Ben"] })
+      : ["compare", "ranked"].includes(starter) ? (d) => ({ ...d, filter: { key: "price", max: 140, label: "Under $140", rest: "over $140" } }) : null;
+    const binder = await serve(makeSite(`touch-${starter}`, starter, mutate));
     const page = await open(`${binder.url}/`, { touch: true });
     await page.waitForTimeout(400);
     ok(await page.evaluate(() => matchMedia("(pointer: coarse)").matches), "touch emulation gives a coarse pointer");
@@ -707,6 +835,7 @@ try {
     eq(await off.locator(".btn.primary").count(), 0, "no Check all prices without a binder");
     eq(await off.locator("button", { hasText: /Check/ }).count(), 0, "no check buttons without a binder");
     ok(await off.locator(".trust a", { hasText: /^Open .+ ↗$/ }).count() >= 1, "each row links its store instead");
+    eq(await emptyLines(off), [], "no empty line before a store link in a price cell");
     // looked for and not there is "Not listed" with where and when it was looked for; never a blank cell
     const b = await off.locator("#row-option-b").innerText();
     ok(/Not listed · checked 17 Oct( 2026)? on example\.com ↗/.test(b.replace(/\s+/g, " ").replace(/listed checked/, "listed · checked")) && !/Not checked|Unknown/.test(b), `a value the source does not give: Not listed (${b.replace(/\s+/g, " ")})`);

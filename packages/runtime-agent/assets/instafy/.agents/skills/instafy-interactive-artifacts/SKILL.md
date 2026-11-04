@@ -29,7 +29,8 @@ own kind of page.
 
 ## 2. Build
 
-- Phone-first, no build step, no secrets in the page. Render text with `textContent`; only open `https:` links.
+- Phone-first (never wider than the screen, one column when narrow), no build step, no secrets in the page. Render
+  text with `textContent`; only open `https:` links.
 - Light and dark, like the starters' `theme.css`: a page you write sets its dark colours, with `color-scheme: dark`,
   under `:root:not([data-theme="light"])` inside `@media (prefers-color-scheme: dark)` and under
   `:root[data-theme="dark"]` (Studio's theme, which `instafy bind serve` puts on `<html>`). Never

@@ -258,17 +258,21 @@ html[data-host-title="shown"] .title {
   .trust a:hover, .cap a:hover, .notes a:hover { color: var(--if-link); text-decoration-color: currentColor; }
 }
 .trust .age, .trust .sp.keep { white-space: nowrap; }
-/* a part the line wrapped before takes its own line, without its dot (site.js measures the drawn lines) */
+/* a part the line wrapped before takes its own line, without its dot (site.js measures the drawn lines), and the
+   break before it adds no empty line */
 .trust .sp.is-wrap, .trust .meta.is-wrap { display: block; }
 .trust .sp.is-wrap > .dot, .trust .meta.is-wrap > .lead { display: none; }
+.trust .meta > wbr:has(+ .sp.is-wrap) { display: none; }
 :where(a) .arr { white-space: nowrap; }
 .trust.is-old .v { color: var(--if-muted); }
 .trust .icon { width: 12px; height: 12px; color: var(--if-danger-icon); vertical-align: -1px; margin-right: 2px; }
 .trust .err { display: block; }
 .table .trust .meta, .facts .trust .meta, .sortv .trust .meta { display: block; }
-/* a phone row's narrow cell: the row's action ("Open Amazon ↗") on its own line, without a dot in front */
-.facts .trust .sp.is-act, .sortv .trust .sp.is-act { display: block; }
+/* a phone row's narrow cell: the row's action ("Open Amazon ↗") on its own line, without a dot in front, wrapping
+   inside the cell when it is wider */
+.facts .trust .sp.is-act, .sortv .trust .sp.is-act { display: block; white-space: normal; }
 .facts .trust .sp.is-act > .dot, .sortv .trust .sp.is-act > .dot { display: none; }
+.facts .trust .meta > wbr:has(+ .sp.is-act), .sortv .trust .meta > wbr:has(+ .sp.is-act) { display: none; }
 .table .trust .lead, .facts .trust .lead, .sortv .trust .lead { display: none; }
 /* a cell's value wraps between words (a long "J-Frame guidance for overpronation" never pushes the last columns out of
    the card); a number keeps its unit on its line through the value's own non-breaking spaces */
@@ -296,6 +300,10 @@ html[data-host-title="shown"] .title {
 .card-head .sortv { flex: none; max-width: 45%; text-align: right; font-variant-numeric: tabular-nums; }
 .facts { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--if-s2); }
 @media (min-width: 360px) { .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+/* one column when a value or its source line would wrap in two (site.js measures the drawn lines) */
+.facts.is-one { grid-template-columns: minmax(0, 1fr); }
+/* a phone row's one line of what was not found ("Not found yet: Weight, Price") wraps inside the row */
+.not-found { overflow-wrap: anywhere; }
 .facts > div { min-width: 0; }
 .facts dt { font-size: 12px; line-height: 16px; color: var(--if-muted); }
 .facts dd { font-size: 14px; line-height: 20px; font-weight: 500; color: var(--if-fg); }
@@ -474,7 +482,7 @@ html[data-host-title="shown"] .in-studio { display: inline; }
 @media (pointer: coarse) {
   .btn { min-height: 44px; }
   .name-line > .more-btn { min-height: 44px; margin-top: -12px; margin-bottom: -12px; }
-  .seg span { min-height: 36px; }
+  .seg span { min-height: 36px; min-width: 44px; justify-content: center; }
   .seg label { margin: -4px 0; padding: 4px 0; }
   .field input, .field select, .field textarea { min-height: 44px; }
   .trust a, .cap a, .lede a, .notes a, .facts a, .link-btn {

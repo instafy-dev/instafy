@@ -520,9 +520,25 @@
     for (var i = 0; i < r.length; i++) if (r[i].width > 0 || r[i].height > 0) tops.push(r[i].top);
     return tops.length ? { first: tops[0], last: tops[tops.length - 1] } : null;
   }
+  /** A fact grid (.facts) keeps two columns only while each value and each part of its source line fits its column on
+   * one line; otherwise it takes one column (.is-one), so a phone never shows "Intel Core Ultra Series" / "3". A grid
+   * in a table (its Details row) has the table's width and keeps its columns. */
+  function fitFacts() {
+    var grids = document.querySelectorAll(".facts");
+    for (var i = 0; i < grids.length; i++) {
+      var g = grids[i];
+      g.classList.remove("is-one");
+      if (g.closest && g.closest("table")) continue;
+      var parts = g.querySelectorAll(".v, .part");
+      for (var j = 0; j < parts.length; j++) {
+        var at = lines(parts[j]);
+        if (at && at.last > at.first + 4) { g.classList.add("is-one"); break; }
+      }
+    }
+  }
   /** No caption line starts or ends in a dot: a part the line wrapped before (or right after its dot) goes on a line
    * of its own without the dot, and a caption that starts under its value drops its first dot. Runs after each render
-   * and when the page width changes. */
+   * and when the page width changes, after the fact grids have their columns (fitFacts). */
   function tidyCaptions() {
     var metas = document.querySelectorAll(".trust .meta");
     for (var i = 0; i < metas.length; i++) {
@@ -531,6 +547,7 @@
       var wrapped = m.querySelectorAll(".sp.is-wrap");
       for (var j = 0; j < wrapped.length; j++) wrapped[j].classList.remove("is-wrap");
     }
+    fitFacts();
     for (var k = 0; k < metas.length; k++) {
       var meta = metas[k];
       var lead = meta.querySelector(":scope > .lead");
@@ -1035,7 +1052,7 @@
   }
 
   window.site = {
-    version: "1.7.0",
+    version: "1.8.0",
     h: h, append: append, icon: icon, link: link, slug: slug, rowAttrs: rowAttrs, safeUrl: safeUrl,
     date: date, dayDate: dayDate, ago: ago, money: money, num: num, valueText: valueText, host: host, seen: seenText,
     cite: cite, shown: shown, known: known, within: within, byFilter: byFilter, old: isOld, expired: expired,
