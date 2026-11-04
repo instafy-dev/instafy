@@ -133,7 +133,7 @@ macro_rules! shared_browser_developer_instructions {
             r#"Shared Browser transport (managed runtime policy):
 - A headed browser in the project's isolated hosted runtime is available. Use the dedicated tools from the `instafy_shared_browser` MCP server, named `mcp__instafy_shared_browser__<name>` (a code cell calls `text(await tools.mcp__instafy_shared_browser__snapshot({}))`): `status`, `snapshot`, `navigate`, `click`, `type`, `choose`, `press`, `scroll`, `request_human_input`, `list_tabs`, `open_tab`, `select_tab`, and `close_tab`. Print a step's whole result, or only the part you need of a page it returned: a step that failed or returned no page has only its message.
 - Work on the page the person chose with `navigate`: it is this chat's own tab, and the page you leave there is the one the person sees after this turn. Open a tab of your own with `open_tab` only to keep a second page open at the same time (up to three, in the same visible browser: everyone watching sees them with your badge, and the person can take any of them over). The other tools act on the tab `select_tab` (or `open_tab`) last chose; `snapshot` and `navigate` also take a `tabId`. Use only those tabs, never another tab the person or a page opened. A site's approval holds in the tab it was given in. Your own tabs are for reading: a sign-in, a step that may show a secret, a field the person must fill, a form submission or a purchase stays on the page the person chose or with the person. Close a tab you are done with; the rest close when this turn ends unless the person keeps them.
-- Take a snapshot and pass both its `snapshotId` and one indexed element to each interaction. If the page or indexed target set changes, take another snapshot instead of retrying a stale target. Arbitrary CSS selectors are not accepted. Set a select with `choose` and `option`, the option's label as the list shows it, never by clicking it.
+- Take a snapshot and pass both its `snapshotId` and one indexed element to each interaction. If the page or indexed target set changes, take another snapshot instead of retrying a stale target. Arbitrary CSS selectors are not accepted. Set a select with `choose` and `option`: `chosen` is the option it holds now, and `choose` takes any of its `options` by label, never a click.
 - The browser may start on a blank page. When `status` or `snapshot` reports `blank: true`, call `navigate` first: with the http(s) address the task names, or, when it names none, with the official site of what the task is about (for a product, its maker's site); any approval the browser asks for applies there. Never end the turn on a blank page for want of an address, unless the person's message only asks Octo to make something and this turn's prompt offers `request_build` for that: then answer with it and open no page. A blank page has nothing to read or act on. An `[origin_not_approvable]` error means the same for any other page without an http(s) address.
 - Do not invoke Shared Browser through shell commands or write an ad-hoc Playwright/CDP script. The capability is deliberately exposed only through the bounded MCP server for this turn.
 - The controller automatically emits the visible AI cursor and action-ticker events. Do not bypass it.
@@ -8245,8 +8245,11 @@ mod tests {
     /// Only the Shared Browser serves `choose`, which sets a select by its option's label,
     /// and both of its policies name it and say how a list is set, by the field the tool takes
     /// (a local test, Nov 2: a turn told "its option's label" sent `label`, and the step was
-    /// refused for an unknown field). The Personal Browser's allowlist stays its desktop app's
-    /// own list.
+    /// refused for an unknown field). They also say what a list's reading holds: `chosen`, the
+    /// option it holds now, beside `options`, how many it has, any of which `choose` takes (a
+    /// local test, Nov 4: a turn read a journey planner's two station lists, each showing only
+    /// the station it held, as the whole list, and replied that a station wasn't on it). The
+    /// Personal Browser's allowlist stays its desktop app's own list.
     #[test]
     fn only_the_shared_browser_offers_choose_and_its_policies_say_how_a_list_is_set() {
         let transport = || McpServerTransportConfig::StreamableHttp {
@@ -8285,7 +8288,7 @@ mod tests {
             assert!(policy.contains("`type`, `choose`, `press`"), "{policy}");
             assert!(
                 policy.contains(&format!(
-                    "Set a select with `choose` and `{}`, the option's label as the list shows it, never by clicking it.",
+                    "Set a select with `choose` and `{}`: `chosen` is the option it holds now, and `choose` takes any of its `options` by label, never a click.",
                     fields[0]
                 )),
                 "{policy}"
