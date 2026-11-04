@@ -2290,7 +2290,9 @@ mod tests {
         let before_not_checked = include_str!("legacy/agents-doc-v4.md");
         assert!(!before_not_checked.contains("not checked\", or stays out"));
         let before_lacks = include_str!("legacy/agents-doc-v9.md");
-        assert!(before_lacks.contains("Never say a place, stop, route, time or page doesn't exist"));
+        assert!(
+            before_lacks.contains("Never say a place, stop, route, time or page doesn't exist")
+        );
         for previous in [before_not_checked, before_lacks] {
             let workspace = tempdir().expect("workspace");
             let path = workspace.path().join(AGENTS_DOC_FILENAME);
