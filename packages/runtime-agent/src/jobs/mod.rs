@@ -19045,10 +19045,15 @@ fn resolve_exact_owned_write_scope_path(workspace_dir: &Path, raw: &str) -> Opti
 /// task that ended "then build a comparison page", a comparison's browser turn
 /// read one page and stopped "because this turn is read-only", and a browser
 /// turn asked for a page told the person "in this run: it's read-only" (local
-/// tests, Oct 31). A browser turn that hands back is told which turn makes the
-/// page; any other read-only job is told it is read-only. A browser turn that
-/// carries on the person's own message and hands nothing back is also told how
-/// to hand a message that asks Octo to make something to the building turn
+/// tests, Oct 31). A browser turn that hands back is told that reading what the
+/// request needs is why it changes no files, and that the building turn right
+/// after it makes what the person asked for: told only that it reads pages and
+/// that the building turn after it makes the page, a comparison's browser turn
+/// read one page and answered that it could not create the page "in this
+/// read-only turn" (a local test, Nov 4). Any other read-only job is told it is
+/// read-only. A browser turn that carries on the person's own message and hands
+/// nothing back is also told how to hand a message that asks Octo to make
+/// something to the building turn
 /// ([`browser_hand_back::offers_the_build_request`]).
 fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> String {
     let browser = metadata
@@ -19060,7 +19065,7 @@ fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> String {
         .and_then(JsonValue::as_str)
         .map(|transport| transport.trim().to_ascii_lowercase().replace('_', "-"));
     let line = if metadata.is_some_and(browser_hand_back::hands_back) {
-        "- This turn reads pages; the building turn after it makes the page.\n"
+        "- This turn reads what the request needs, so it changes no files; the building turn right after it makes what the person asked for from your finding lines.\n"
     } else if browser.as_deref() == Some("shared") {
         "- This turn reads pages in Instafy's browser; Octo builds in the chat.\n"
     } else if browser.as_deref() == Some("desktop-personal") {
@@ -33505,9 +33510,14 @@ mod tests {
     /// comparison page", a comparison's browser turn read one page and stopped
     /// "because this turn is read-only", and a browser turn asked for a page
     /// told the person "in this run: it's read-only" (local tests, Oct 31).
-    /// Every browser turn stays read-only: one that hands back is told which
-    /// turn makes the page, any other that Octo builds in the chat. A read-only
-    /// job outside the browser is told it is read-only.
+    /// Every browser turn stays read-only: one that hands back is told that it
+    /// reads what the request needs, which is why it changes no files, and that
+    /// the building turn right after it makes what the person asked for, any
+    /// other that Octo builds in the chat. Told that it reads pages and that the
+    /// building turn after it makes the page, a comparison's routed turn read
+    /// one page and answered that it could not create the page "in this
+    /// read-only turn" (a local test, Nov 4). A read-only job outside the
+    /// browser is told it is read-only.
     #[test]
     fn a_browser_turn_is_told_it_reads_pages_and_octo_builds_in_the_chat() {
         let browser_turn = |transport: &str, card: bool, hands_back: bool, scope: &JsonValue| {
@@ -33532,14 +33542,17 @@ mod tests {
             json!({"mode": "read_only", "rationale": "explicit write scope metadata"}),
             json!("read_only"),
         ] {
-            let section = line(&browser_turn("shared", true, true, &scope));
-            assert!(
-                section.contains(
-                    "- This turn reads pages; the building turn after it makes the page.\n"
-                ),
-                "{section}"
-            );
-            assert!(!section.contains("read-only."), "{section}");
+            for transport in ["shared", "desktop-personal"] {
+                let section = line(&browser_turn(transport, true, true, &scope));
+                assert!(
+                    section.contains(
+                        "- This turn reads what the request needs, so it changes no files; the building turn right after it makes what the person asked for from your finding lines.\n"
+                    ),
+                    "{section}"
+                );
+                assert!(!section.contains("read-only."), "{section}");
+                assert!(!section.contains("makes the page."), "{section}");
+            }
 
             // A question's card, and the person's own message in the browser.
             for metadata in [
@@ -33616,14 +33629,14 @@ mod tests {
                 assert!(!section.contains("request_build"), "{section}");
             }
         }
-        // A routed turn whose findings go back to the building turn: told which turn makes the
-        // page, and never offered a build request.
+        // A routed turn whose findings go back to the building turn: told which turn makes what
+        // the person asked for, and never offered a build request.
         for transport in ["shared", "desktop-personal"] {
             for stamp in [json!(true), json!(false)] {
                 let section = section(&routed(transport, true, stamp));
                 assert!(
                     section.contains(
-                        "- This turn reads pages; the building turn after it makes the page.\n"
+                        "- This turn reads what the request needs, so it changes no files; the building turn right after it makes what the person asked for from your finding lines.\n"
                     ),
                     "{section}"
                 );

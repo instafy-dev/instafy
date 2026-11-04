@@ -593,7 +593,7 @@ fn a_routed_browser_turn_that_hands_back_is_offered_no_build_request() {
         "{prompt}"
     );
     assert!(
-        prompt.contains("- This turn reads pages; the building turn after it makes the page.\n"),
+        prompt.contains("- This turn reads what the request needs, so it changes no files; the building turn right after it makes what the person asked for from your finding lines.\n"),
         "{prompt}"
     );
     assert!(
@@ -611,4 +611,115 @@ fn a_routed_browser_turn_that_hands_back_is_offered_no_build_request() {
         !prompt.contains("Findings for the building turn:"),
         "{prompt}"
     );
+}
+
+/// A browser turn whose findings go back to the building turn reads its part of the request right
+/// before it: the reading, while what the request asks Octo to make is the building turn's part,
+/// from its finding lines, so it never stops because it cannot make that, and it says nothing
+/// about making it in its reply. Its write-scope line says why it changes no files. Told only
+/// that it was read-only and that the building turn after it makes the page, a comparison's
+/// browser turn, sent the person's own message, read the maker's home page, answered "I can't
+/// create the comparison page in this read-only turn" and that its research was not complete,
+/// and ended: the page was built with four of its fifteen facts (a local test, Nov 4). A map's
+/// turn reads the same, and so does a follow-up on the same browser thread ("Fill in what's
+/// still missing."). A turn that hands nothing back reads neither, and nothing else differs
+/// between the two prompts.
+#[test]
+fn a_browser_turn_that_hands_back_reads_its_part_right_before_the_request() {
+    let tmp = space();
+    let routed = |hands_back: bool| {
+        json!({
+            "browserTransport": "shared",
+            "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+            "browserHandsBack": hands_back,
+            "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "00000000-0000-4000-8000-0000000000a1",
+                "routed": true,
+            },
+            "writeScope": {"mode": "read_only", "rationale": "explicit write scope metadata"},
+        })
+    };
+    let part = "\n\nYour part of this request is the reading: read every page it needs before you \
+                end. What it asks Octo to make is the building turn's part, from your finding \
+                lines, so never stop because this turn can't make it, and say nothing about \
+                making it in your reply.\n\nLatest user request:\n";
+    let scope = "\nWrite-scope guardrail:\n- Mode: read_only\n- Rationale: explicit write scope \
+                 metadata\n- This turn reads what the request needs, so it changes no files; the \
+                 building turn right after it makes what the person asked for from your finding \
+                 lines.\n\n";
+    let other_scope = "\nWrite-scope guardrail:\n- Mode: read_only\n- Rationale: explicit write \
+                       scope metadata\n- This turn reads pages in Instafy's browser; Octo builds \
+                       in the chat.\n";
+    let restored = json!({
+        "defaultThreadId": "existing-thread",
+        "sharedBrowserThreadId": "existing-browser-thread",
+        "historyReplayRequired": false,
+    });
+    // Each prompt names a project of its own.
+    let unnamed = |prompt: &str| {
+        let project = prompt
+            .split_once("\nProject: ")
+            .and_then(|(_, rest)| rest.split_once('\n'))
+            .map(|(project, _)| project.to_string())
+            .expect("the project");
+        prompt.replace(&project, "<project>")
+    };
+    for (request, state, mode) in [
+        (
+            "Compare the three latest laptops of one maker: processor, battery, weight and price, with two independent reviews each, as a comparison page.",
+            None,
+            "full",
+        ),
+        (
+            "Plan three days in one city for a first visit: where to stay, what to see each day, on a map.",
+            None,
+            "full",
+        ),
+        (
+            "Fill in what's still missing.",
+            Some(&restored),
+            "stateful_compact",
+        ),
+    ] {
+        let (hand_back, metrics) = prompt_for_request(tmp.path(), request, routed(true), state);
+        assert_eq!(metrics["promptMode"], mode, "{request}");
+        assert!(
+            hand_back.ends_with(&format!("{part}{request}")),
+            "{hand_back}"
+        );
+        assert_eq!(
+            hand_back.matches("Your part of this request").count(),
+            1,
+            "{hand_back}"
+        );
+        assert!(hand_back.contains(scope), "{hand_back}");
+        assert!(
+            !hand_back.contains("the building turn after it makes the page"),
+            "{hand_back}"
+        );
+
+        let (other, _) = prompt_for_request(tmp.path(), request, routed(false), state);
+        assert!(!other.contains("Your part of this request"), "{other}");
+        assert!(other.contains(other_scope), "{other}");
+        // Nothing else differs: without its findings and its part, and with the other turn's
+        // write-scope line, the turn that hands back reads all the other reads but its build
+        // request.
+        let findings = hand_back
+            .find("\n\nFindings for the building turn:\n")
+            .expect("the findings");
+        let latest = hand_back
+            .find("\n\nLatest user request:\n")
+            .expect("the request");
+        let without = format!("{}{}", &hand_back[..findings], &hand_back[latest..]).replacen(
+            scope,
+            &format!("{other_scope}\n"),
+            1,
+        );
+        assert_eq!(
+            unnamed(&without),
+            unnamed(&other.replacen(browser_hand_back::BUILD_REQUEST_LINE, "", 1)),
+            "{request}"
+        );
+    }
 }

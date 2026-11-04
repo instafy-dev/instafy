@@ -8975,7 +8975,10 @@ mod tests {
     /// A Shared Browser turn's reply grammar says nothing of the browser card: the runtime drops
     /// a card from such a turn, and two browse-then-build turns ended on one filled in as the
     /// default grammar's notes say (`browserLocation` auto, `continueBuilding` true). Its fields
-    /// and their types stay, so a reply keeps its shape; every other turn keeps the notes.
+    /// and their types stay, so a reply keeps its shape; every other turn keeps the notes. Every
+    /// turn's prompt asks for `summary` and `files` ("Respond with a single JSON object shaped as
+    /// { "summary": string, "files": [], ... }"), a Shared Browser turn's too, so its grammar
+    /// keeps both, and `code`, as the default has them.
     #[test]
     fn a_shared_browser_turns_reply_grammar_says_nothing_of_the_browser_card() {
         let _env_lock = env_lock();
@@ -9016,6 +9019,13 @@ mod tests {
         }
         assert_eq!(action(&browser)["required"], action(&building)["required"]);
         assert_eq!(browser["required"], building["required"]);
+        for field in ["summary", "code", "files"] {
+            assert!(building["properties"].get(field).is_some(), "{field}");
+            assert_eq!(
+                browser["properties"][field], building["properties"][field],
+                "{field}"
+            );
+        }
     }
 
     #[test]
