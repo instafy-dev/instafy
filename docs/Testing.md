@@ -1205,6 +1205,27 @@ budget, then prove both complete workloads and cleanup within the unchanged
 bounded worker lifecycle. Disable the switch for hosted routing of new runs;
 already queued runs do not move pools automatically.
 
+## Status feedback simulation
+
+The status-feedback fixture uses production toasts, toolbar clearance, workspace
+banners and preview notices with inert local boundaries. From `packages/frontend`:
+
+```bash
+pnpm exec playwright test --config tests/fixtures/status-feedback/playwright.config.ts
+```
+
+This runs Chromium, Firefox and WebKit. The same spec belongs to the required
+Chromium browser UI lane. It checks action preservation, passive confirmations,
+long text, banner movement, concurrent preview notices and short visual viewports.
+It also exercises recovery priority, focused message updates, clipped reading
+timers, absolute Undo deadlines and focus return after location Stop/dismiss.
+Unit/integration coverage in `Status.test.tsx`, `SitePreviewAsk.test.tsx` and
+`SitePreviewFollow.test.tsx` covers hidden documents, superseded follow events,
+and approvals invalidated by Reload or a new iframe document.
+Missing browser binaries fail explicitly. See the fixture README for interactive
+states, safe-area and text-size simulations. These checks do not replace native
+keyboard or Electron WebContentsView verification; report those separately.
+
 ## Support workflow simulation
 
 The support component browser suite exercises the production profile menu, report composer,

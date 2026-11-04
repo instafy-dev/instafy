@@ -251,6 +251,7 @@ describe("notification center", () => {
     });
     expect(mocks.show).toHaveBeenCalled();
     const options = mocks.show.mock.calls.at(-1)?.[3];
+    expect(options).toMatchObject({ behavior: { kind: "informational" }, nonPreemptive: true });
     expect(mocks.state).not.toHaveBeenCalledWith(expect.objectContaining({ action: "seen" }));
     await act(async () => options.onShow());
     expect(mocks.state).toHaveBeenCalledWith(expect.objectContaining({ id: A, action: "seen", accessToken: `token-${A}`, expectedUserId: A }));

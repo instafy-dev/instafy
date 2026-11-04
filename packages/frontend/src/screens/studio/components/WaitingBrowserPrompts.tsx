@@ -5,6 +5,7 @@ import type { StudioDestination } from "../../../navigation/studioNavigation";
 import { toastChatName } from "../../../notifications/useNotificationCenter";
 import type { RuntimeSharedBrowserApprovalRequest } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
+import { statusBehavior } from "../../../status/statusBehavior";
 import type { RunRecord } from "../../../types";
 import { generateUUID } from "../../../utils/uuid";
 import {
@@ -232,10 +233,10 @@ export function WaitingBrowserPrompts({
   chatsRef.current = chats;
   const onViewRef = useRef(onView);
   onViewRef.current = onView;
-  // One toast per prompt: it goes when the prompt does. It has no timeout, so
-  // a toast that takes its place puts it back in line (StatusProvider), and
-  // once the person closes it, it does not come back for the same prompt (the
-  // chat's tab still says Approve).
+  // One toast per prompt: it goes when the prompt does. It waits behind an
+  // existing action and stays until resolved or dismissed. Once the person
+  // closes it, it does not come back for the same prompt (the chat's tab still
+  // says Approve).
   const toasts = useRef(new Map<string, string>());
   useEffect(() => {
     const live = new Set(waiting.map(({ approvalId }) => approvalId));
@@ -257,6 +258,7 @@ export function WaitingBrowserPrompts({
         0,
         {
           id: toastId,
+          behavior: statusBehavior.actionRequired,
           nonPreemptive: true,
           actionLabel: "View",
           onAction: () => onViewRef.current({ conversationId: target.conversationId, localId: chat?.localId ?? null }),

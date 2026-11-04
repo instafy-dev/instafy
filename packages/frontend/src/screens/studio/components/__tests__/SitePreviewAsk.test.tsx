@@ -234,6 +234,40 @@ describe("Ask Octo from a site in a preview pane", () => {
     expect(statuses().at(-1)).toEqual({ id: cancelled.payload.id, state: "declined", reason: "Not sent." });
   });
 
+  it.each(["Reload", "navigation"] as const)("invalidates an armed approval on %s and arms the replacement document independently", async transition => {
+    await act(async () => frame().dispatchEvent(new Event("load")));
+    const first = askMessage({ confirm: true });
+    await fromFrame(first);
+    await advance(ASK_CONFIRM_ARM_MS);
+    expect(container.querySelector<HTMLButtonElement>("[data-testid=site-ask-confirm-send]")!.disabled).toBe(false);
+    const previousFrame = frame();
+    if (transition === "Reload") {
+      await act(async () => container.querySelector<HTMLButtonElement>("[data-testid=site-preview-reload]")!.click());
+      await flush();
+      expect(frame()).not.toBe(previousFrame);
+      posted = vi.spyOn(frame().contentWindow!, "postMessage").mockImplementation(() => undefined);
+      await act(async () => frame().dispatchEvent(new Event("load")));
+    } else {
+      await act(async () => frame().dispatchEvent(new Event("load")));
+      expect(frame()).toBe(previousFrame);
+      expect(statuses().at(-1)).toMatchObject({ id: first.payload.id, state: "declined" });
+    }
+    expect(container.querySelector("[data-testid=site-ask-confirm]")).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+
+    // Identical wording is still a new request in a new document, with a fresh guard.
+    const replacement = askMessage({ confirm: true });
+    await fromFrame(replacement);
+    const button = container.querySelector<HTMLButtonElement>("[data-testid=site-ask-confirm-send]")!;
+    expect(button.disabled).toBe(true);
+    await act(async () => button.click());
+    expect(send).not.toHaveBeenCalled();
+    await advance(ASK_CONFIRM_ARM_MS);
+    await act(async () => button.click());
+    expect(send).toHaveBeenCalledOnce();
+    expect(send.mock.calls[0][0].metadata).toMatchObject({ siteIntent: { askId: replacement.payload.id, confirmed: true } });
+  });
+
   it("an ask nobody just clicked sends nothing: a page posting on load, focus elsewhere, or an old click", async () => {
     const onLoad = askMessage();
     await fromFrame(onLoad, { clicked: false });

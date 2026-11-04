@@ -15,9 +15,9 @@ function Bar({ active }: { active: boolean }) {
   return <div ref={ref} data-testid="view-bar" />;
 }
 
-function Harness({ bar }: { bar: "header" | "composer" | null }) {
+function Harness({ bar, banner = false }: { bar: "header" | "composer" | null; banner?: boolean }) {
   status = useStatus();
-  return <>{bar ? <Bar active={bar === "header"} /> : null}<Status /></>;
+  return <>{banner ? <div data-testid="inserted-banner">Reconnecting</div> : null}{bar ? <Bar active={bar === "header"} /> : null}<div data-testid="transcript"><p>Message</p></div><Status /></>;
 }
 
 describe("toasts and the view bar", () => {
@@ -28,8 +28,9 @@ describe("toasts and the view bar", () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     // A view bar at 1024×768: 48 px down, 45 px tall.
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const shift = document.querySelector('[data-testid="inserted-banner"]') ? 40 : 0;
       return this.dataset.testid === "view-bar"
-        ? { top: 48, bottom: 93, left: 0, right: 1024, width: 1024, height: 45, x: 0, y: 48, toJSON: () => ({}) } as DOMRect
+        ? { top: 48 + shift, bottom: 93 + shift, left: 0, right: 1024, width: 1024, height: 45, x: 0, y: 48 + shift, toJSON: () => ({}) } as DOMRect
         : { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
     });
     container = document.createElement("div");
@@ -45,8 +46,8 @@ describe("toasts and the view bar", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  const render = (bar: "header" | "composer" | null) =>
-    act(async () => root.render(<StatusProvider><Harness bar={bar} /></StatusProvider>));
+  const render = (bar: "header" | "composer" | null, banner = false) =>
+    act(async () => root.render(<StatusProvider><Harness bar={bar} banner={banner} /></StatusProvider>));
   const regionTop = () => document.querySelector<HTMLElement>('[data-testid="status-toast"]')?.closest<HTMLElement>("section, [role=region]")?.style.top;
 
   it("knows where the view bar at the top ends, and forgets it when it goes", async () => {
@@ -69,6 +70,50 @@ describe("toasts and the view bar", () => {
     await act(async () => status!.showStatus("There is a new reply in “Plan 3 days in Seville”.", "info", 0, { actionLabel: "View", onAction: () => {} }));
     expect(regionTop()).toContain("101px");
     await render(null);
-    expect(regionTop()).not.toContain("px");
+    expect(regionTop()).not.toContain("101px");
+  });
+
+  it("follows a bar moved by a new banner without a bar resize or window resize", async () => {
+    await render("header");
+    await act(async () => status!.showStatus("Connection needs attention.", "warning", 0));
+    expect(regionTop()).toContain("101px");
+    await render("header", true);
+    await act(async () => { await new Promise(resolve => window.requestAnimationFrame(resolve)); });
+    expect(regionTop()).toContain("141px");
+    await render("header", false);
+    await act(async () => { await new Promise(resolve => window.requestAnimationFrame(resolve)); });
+    expect(regionTop()).toContain("101px");
+  });
+
+  it("bounds a notification to the visual viewport while the keyboard is open", async () => {
+    const viewport = Object.assign(new EventTarget(), { height: 400, offsetTop: 0 });
+    const original = Object.getOwnPropertyDescriptor(window, "visualViewport");
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: viewport });
+    try {
+      await render("header");
+      await act(async () => status!.showStatus("Connection needs attention.", "warning", 0));
+      const region = document.querySelector<HTMLElement>('[data-testid="status-toast"]')!.closest<HTMLElement>("section, [role=region]")!;
+      expect(region.style.maxHeight).toContain("400px");
+      await act(async () => { viewport.height = 280; viewport.dispatchEvent(new Event("resize")); });
+      expect(region.style.maxHeight).toContain("280px");
+    } finally {
+      if (original) Object.defineProperty(window, "visualViewport", original);
+      else Reflect.deleteProperty(window, "visualViewport");
+    }
+  });
+
+  it("does not remeasure for unrelated transcript streaming or cursor styles", async () => {
+    await render("header");
+    const changed = vi.fn();
+    const unsubscribe = subscribeToastClearance(changed);
+    try {
+      await act(async () => { await new Promise(resolve => window.requestAnimationFrame(resolve)); });
+      changed.mockClear();
+      const message = document.querySelector('[data-testid="transcript"] p') as HTMLElement;
+      message.append(" streaming text");
+      message.style.color = "red";
+      await act(async () => { await new Promise(resolve => window.requestAnimationFrame(resolve)); });
+      expect(changed).not.toHaveBeenCalled();
+    } finally { unsubscribe(); }
   });
 });

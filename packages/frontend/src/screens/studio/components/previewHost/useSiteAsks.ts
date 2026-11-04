@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { buildAskStatusMessage, type AskState } from "./hostMessages";
 import {
   buildSiteIntentMetadata,
@@ -42,7 +42,7 @@ export const ASK_NO_CLICK_TEXT = "Instafy sends a question only right after you 
 /** The one ask waiting for the person's confirm (the intent said `confirm: true`). */
 export type PendingAskConfirm = { line: string; send: () => void; cancel: () => void };
 
-export function useSiteAsks({ host, projectId, previewId, siteTitle, frameOnScreen, post, userGesture, limiter = studioAskLimiter }: {
+export function useSiteAsks({ host, projectId, previewId, siteTitle, frameOnScreen, documentKey, post, userGesture, limiter = studioAskLimiter }: {
   /** Null where Studio takes no asks: the layout then leaves `caps.ask` out and the site shows none. */
   host: SiteAskHost | null;
   projectId: string;
@@ -50,6 +50,8 @@ export function useSiteAsks({ host, projectId, previewId, siteTitle, frameOnScre
   /** The preview's own title (what Octo named it), never the page's. */
   siteTitle: string;
   frameOnScreen: boolean;
+  /** Approval belongs to the document that asked, never a replacement page. */
+  documentKey: string;
   /** Posts to this pane's frame at the viewer's origin; false when there is no frame. */
   post: (message: unknown) => boolean;
   /**
@@ -65,6 +67,8 @@ export function useSiteAsks({ host, projectId, previewId, siteTitle, frameOnScre
   postRef.current = post;
   const onScreenRef = useRef(frameOnScreen);
   onScreenRef.current = frameOnScreen;
+  const documentKeyRef = useRef(documentKey);
+  documentKeyRef.current = documentKey;
   const titleRef = useRef(siteTitle);
   titleRef.current = siteTitle;
   const gestureRef = useRef(userGesture);
@@ -72,7 +76,7 @@ export function useSiteAsks({ host, projectId, previewId, siteTitle, frameOnScre
 
   /** Asks sent as a message, until their run ends: id → the caps key. */
   const awaitingRun = useRef(new Map<string, string>());
-  const [confirming, setConfirming] = useState<{ ask: SiteAsk; key: string; line: string } | null>(null);
+  const [confirming, setConfirming] = useState<{ ask: SiteAsk; key: string; line: string; documentKey: string } | null>(null);
   const confirmingRef = useRef(confirming);
   confirmingRef.current = confirming;
 
@@ -124,7 +128,7 @@ export function useSiteAsks({ host, projectId, previewId, siteTitle, frameOnScre
     const line = renderAskMessage(ask, titleRef.current);
     if (ask.confirm) {
       status(ask.id, "confirm");
-      const next = { ask, key, line };
+      const next = { ask, key, line, documentKey: documentKeyRef.current };
       confirmingRef.current = next;
       setConfirming(next);
       return;
@@ -139,12 +143,16 @@ export function useSiteAsks({ host, projectId, previewId, siteTitle, frameOnScre
     if (!waiting) return;
     confirmingRef.current = null;
     setConfirming(null);
-    if (!send) { limiter.refund(waiting.key, waiting.ask.id); status(waiting.ask.id, "declined", ASK_CANCELLED_TEXT); return; }
+    if (!send || !onScreenRef.current || waiting.documentKey !== documentKeyRef.current) {
+      limiter.refund(waiting.key, waiting.ask.id); status(waiting.ask.id, "declined", ASK_CANCELLED_TEXT); return;
+    }
     void dispatch(waiting.ask, waiting.key, waiting.line, true);
   }, [dispatch, limiter, status]);
 
   // The pane went off screen, or a new document loaded: a confirm nobody is looking at is not left open.
-  useEffect(() => { if (!frameOnScreen) settleConfirm(false); }, [frameOnScreen, settleConfirm]);
+  useLayoutEffect(() => {
+    if (!frameOnScreen || (confirmingRef.current && confirmingRef.current.documentKey !== documentKey)) settleConfirm(false);
+  }, [frameOnScreen, documentKey, settleConfirm]);
 
   // An ask's run started: it holds the slot until it ends. It ended: tell the page, and let the next ask go.
   const outcomes = host?.outcomes;

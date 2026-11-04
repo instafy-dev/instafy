@@ -119,7 +119,7 @@ describe("SitePreviewPane location", () => {
       payload: { id: "a1", coords: { latitude: 25.05, longitude: 121.53, accuracy: 20 }, timestamp: 1_700_000_000_000 } }]);
     expect(sent.mock.calls.every(call => call[1] === ORIGIN)).toBe(true);
     expect(marker()?.getAttribute("aria-label")).toBe("Site preview can see your location");
-    expect(container.querySelector("[data-testid=preview-location-toast]")?.textContent).toContain("📍Site preview can see your location·Stop");
+    expect(container.querySelector("[data-testid=preview-location-toast]")?.textContent).toContain("📍Site preview can see your locationStop");
     expect(listLocationSites()).toEqual([expect.objectContaining({ title: "Site preview", space: "Trips", stopped: false })]);
     // The tab says it too.
     expect(previewTabLocation(PREVIEW_ID, "Site preview").attentionLabel).toBe("can see your location");
@@ -224,9 +224,27 @@ describe("SitePreviewPane location", () => {
   it("the toast's Stop stops the site", async () => {
     await renderFramed();
     await post(request("a1"));
+    frame().focus();
+    await act(async () => container.querySelector<HTMLButtonElement>("[data-testid=preview-location-toast-stop]")!.focus());
     await click("[data-testid=preview-location-toast-stop]");
     expect(listLocationSites()[0]?.stopped).toBe(true);
     expect(container.querySelector("[data-testid=preview-location-toast]")).toBeNull();
+    expect(document.activeElement).toBe(frame());
+  });
+
+  it("dismissing the notice restores focus without stopping the watch or blocking future location", async () => {
+    await renderFramed();
+    await post(request("watch", { watch: true }));
+    await act(async () => { [...geo.watchers.values()][0](POSITION); });
+    frame().focus();
+    await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Dismiss location notice"]')!.focus());
+    await click('button[aria-label="Dismiss location notice"]');
+    expect(document.activeElement).toBe(frame());
+    expect(listLocationSites()[0]?.stopped).toBe(false);
+    expect(geo.watchers.size).toBe(1);
+    expect(container.querySelector("[data-testid=preview-location-toast]")).toBeNull();
+    await post(request("later"));
+    expect(answers().at(-1)).toMatchObject({ type: "location", payload: { id: "later" } });
   });
 
   it("drops the toast when the pane is hidden, so it is not shown again on return", async () => {
