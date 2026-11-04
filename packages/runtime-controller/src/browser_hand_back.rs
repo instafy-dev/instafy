@@ -48,10 +48,11 @@
 //! The record carries every finding line of the browser turn's last reply as
 //! a labelled finding `{url, title, facts, readAt, viewer}`: the address,
 //! title and facts come from the line, `readAt` and `viewer` from the job
-//! itself. None of the turn's own words go with them, except its first line
-//! when a finding says a page stopped it, and a reply whose lines list no fact
-//! goes as it is ([`words_for_the_building_turn`]); the record fits the
-//! runtime's section ([`fit_the_section`]). The runtime moves those lines out
+//! itself. None of the turn's own words go with them: a page that stopped it
+//! is a finding with `stopped`, which says which page and why, and only a
+//! reply whose lines list no fact goes as it is
+//! ([`words_for_the_building_turn`]); the record fits the runtime's section
+//! ([`fit_the_section`]). The runtime moves those lines out
 //! of the reply the person reads into a Details note of the browser turn
 //! (runtime-agent `move_findings_into_details`), and the record reads them
 //! back after the reply. A browser turn whose findings go back to the building
@@ -105,12 +106,9 @@ pub(crate) const HAND_BACK_SECTION_MAX_CHARS: usize = 12_000;
 pub(crate) const TURN_REPLY_MAX_CHARS: usize = 6_000;
 const FINDING_TITLE_MAX_CHARS: usize = 160;
 const FINDING_URL_MAX_CHARS: usize = 2_048;
-/// What one finding's facts hold at most, whole facts in order: one page's
-/// facts never crowd out the others.
+/// What one finding's facts hold at most, whole facts in order, the rest
+/// counted (`factsLeftOut`): one page's facts never crowd out the others.
 const FINDING_FACTS_MAX_CHARS: usize = 2_000;
-/// The longest first line of a browser turn's words that goes with its
-/// findings, when a page stopped it.
-const STOP_LINE_MAX_CHARS: usize = 500;
 /// A browser turn older than this is history, not a turn to resume from.
 pub(crate) const HAND_BACK_WINDOW_MINUTES: i64 = 30;
 /// How much of what a browser turn was asked reaches the building turn.
@@ -204,6 +202,9 @@ pub(crate) struct Finding {
     /// [`FINDING_FACTS_MAX_CHARS`]: none for a page that was not read, or for
     /// a line that names an address alone.
     pub(crate) facts: Vec<String>,
+    /// How many more facts its lines list than [`FINDING_FACTS_MAX_CHARS`]
+    /// holds.
+    pub(crate) facts_left_out: usize,
     /// Why the page was not read: one of [`STOP_REASONS`].
     pub(crate) stopped: Option<&'static str>,
 }
@@ -346,8 +347,9 @@ fn finding_title(before: &str) -> Option<String> {
 /// and the words before it, so an address that page text put in the reply's
 /// prose never becomes a labelled finding next to the ones the skill wrote.
 /// Every line, each address once: a later line for the same page adds the
-/// facts it lists. Nothing here is checked against the pages: they label the
-/// reply's own claims, which the building turn reads as page data.
+/// facts it lists, and facts over a page's bound are counted, not kept.
+/// Nothing here is checked against the pages: they label the reply's own
+/// claims, which the building turn reads as page data.
 pub(crate) fn findings_from_reply(reply: &str) -> Vec<Finding> {
     let json_lines: Vec<Option<Finding>> = reply.lines().filter_map(json_finding).collect();
     let candidates: Vec<Finding> = if json_lines.is_empty() {
@@ -369,12 +371,14 @@ pub(crate) fn findings_from_reply(reply: &str) -> Vec<Finding> {
         }
     }
     for finding in &mut findings {
+        let listed = finding.facts.len();
         let mut room = FINDING_FACTS_MAX_CHARS;
         finding.facts.retain(|fact| {
             let fits = fact.chars().count() <= room;
             room = if fits { room - fact.chars().count() } else { 0 };
             fits
         });
+        finding.facts_left_out = listed - finding.facts.len();
     }
     findings
 }
@@ -444,6 +448,7 @@ fn json_finding(line: &str) -> Option<Option<Finding>> {
         url,
         title,
         facts,
+        facts_left_out: 0,
         stopped,
     }))
 }
@@ -455,6 +460,7 @@ fn text_finding(line: &str) -> Option<Finding> {
         url: plain_address(&raw)?,
         title: finding_title(&line[..start]),
         facts: Vec::new(),
+        facts_left_out: 0,
         stopped: None,
     })
 }
@@ -473,30 +479,87 @@ pub(crate) fn bounded_reply(reply: &str) -> (String, bool) {
 }
 
 /// What of a browser turn's own words goes to the building turn with its
-/// findings. None, once a finding line lists what its page showed: the words
-/// are the browser turn's, not a page's. Told that a place or claim they
+/// findings: none, once a finding line lists what its page showed. The words
+/// are the browser turn's, not a page's: told that a place or claim they
 /// named with no page under it was not checked, a map's hand-back still put
 /// the browser turn's day plan and advice, which no page gave, on the map (a
-/// local test, Nov 4). Only the first line goes, when a finding says a page
-/// stopped the turn: the browser turn says so there, and the building turn
-/// says what is left. A reply whose lines list no fact goes as it is, since it
-/// is all the turn said: one that wrote no finding line, whose note lists the
-/// pages its own steps opened by address alone (runtime-agent
+/// local test, Nov 4). A page that stopped the turn goes as its finding,
+/// which says which page and why: the first line, where the browser turn says
+/// so, also says what it read, and that map's turn wrote it as one paragraph
+/// with its advice in it. A reply whose lines list no fact goes as it is,
+/// since it is all the turn said: one that wrote no finding line, whose note
+/// lists the pages its own steps opened by address alone (runtime-agent
 /// `finding_lines_from_pages`), or an older runtime's reply.
 fn words_for_the_building_turn(reply: &str, findings: &[Finding]) -> String {
-    if findings.iter().all(|finding| finding.facts.is_empty()) {
-        return reply.trim().to_string();
-    }
-    if findings.iter().all(|finding| finding.stopped.is_none()) {
+    if findings.iter().any(|finding| !finding.facts.is_empty()) {
         return String::new();
     }
-    reply
-        .lines()
-        .filter(|line| json_finding(line).is_none())
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(|line| one_line(line, STOP_LINE_MAX_CHARS))
-        .unwrap_or_default()
+    reply.trim().to_string()
+}
+
+/// A finding's own characters, which it quotes at least.
+fn finding_chars(finding: &Finding) -> usize {
+    finding.url.chars().count()
+        + finding
+            .title
+            .as_deref()
+            .map_or(0, |title| title.chars().count())
+        + finding
+            .facts
+            .iter()
+            .map(|fact| fact.chars().count())
+            .sum::<usize>()
+}
+
+/// The findings that can fit the runtime's section, and how many cannot: the
+/// pages read, in order, while their own characters stay within it, and the
+/// same of the pages that stopped the turn, the first of each always. Each
+/// quotes at least its own characters, so [`fit_the_section`] would leave the
+/// rest out too; leaving them out first keeps fitting cheap however many
+/// lines a reply has.
+fn findings_that_can_fit(findings: Vec<Finding>) -> (Vec<Finding>, usize) {
+    // The characters left for the pages read and for those that stopped the
+    // turn: none counted before the first of each.
+    let mut room: [Option<usize>; 2] = [None, None];
+    let listed = findings.len();
+    let kept: Vec<Finding> = findings
+        .into_iter()
+        .filter(|finding| {
+            let room = &mut room[usize::from(finding.stopped.is_some())];
+            let chars = finding_chars(finding);
+            let left = room.unwrap_or(HAND_BACK_SECTION_MAX_CHARS);
+            let fits = room.is_none() || chars <= left;
+            *room = Some(if fits { left.saturating_sub(chars) } else { 0 });
+            fits
+        })
+        .collect();
+    let left_out = listed - kept.len();
+    (kept, left_out)
+}
+
+/// A reply's whole lines while they stay within the runtime's section, its
+/// first line cut to it when that alone is over, and whether any of it was
+/// left out: a line quotes at least its own characters, so [`fit_the_section`]
+/// would keep no more, and fitting stays cheap however long the reply.
+fn reply_that_can_fit(reply: &str) -> (String, bool) {
+    if reply.chars().count() <= HAND_BACK_SECTION_MAX_CHARS {
+        return (reply.to_string(), false);
+    }
+    let mut end = 0;
+    let mut chars = 0;
+    for line in reply.split_inclusive('\n') {
+        chars += line.chars().count();
+        if chars > HAND_BACK_SECTION_MAX_CHARS {
+            break;
+        }
+        end += line.len();
+    }
+    let kept = if end == 0 {
+        reply.chars().take(HAND_BACK_SECTION_MAX_CHARS).collect()
+    } else {
+        reply[..end].trim_end().to_string()
+    };
+    (kept, true)
 }
 
 /// How many characters the runtime quotes of a record in its section: the
@@ -523,14 +586,33 @@ fn quoted_chars(record: &JsonValue) -> usize {
     })
 }
 
+/// Leaves out the last finding of a record over its section: the last page
+/// read while another stays, else the last page that stopped the turn, whose
+/// finding is short and says which page and why. Never the only finding.
+fn leave_out_a_finding(findings: &mut Vec<JsonValue>) -> bool {
+    let read = |finding: &JsonValue| finding.get("stopped").is_none();
+    let index = if findings.iter().filter(|finding| read(finding)).count() > 1 {
+        findings.iter().rposition(read)
+    } else if findings.len() > 1 {
+        findings.iter().rposition(|finding| !read(finding))
+    } else {
+        None
+    };
+    index.map(|index| findings.remove(index)).is_some()
+}
+
 /// Keeps a record within the runtime's section ([`HAND_BACK_SECTION_MAX_CHARS`]),
 /// which an older runtime leaves out whole when it is over: whole lines, in
-/// order, the reply's last lines left out first and then the last findings,
-/// saying how many findings were left out (`findingsLeftOut`) and that the
-/// reply was cut (`replyTruncated`). The first finding always stays, and so
-/// does the reply's first line, cut only when it alone is over.
+/// order, the reply's last lines left out first and then the last findings
+/// ([`leave_out_a_finding`]), saying how many findings were left out
+/// (`findingsLeftOut`) and that the reply was cut (`replyTruncated`). A page
+/// read always stays, and so does the reply's first line, cut only when it
+/// alone is over.
 fn fit_the_section(record: &mut JsonValue) {
-    let mut left_out = 0_u64;
+    let mut left_out = record
+        .get("findingsLeftOut")
+        .and_then(JsonValue::as_u64)
+        .unwrap_or(0);
     loop {
         let over = quoted_chars(record).saturating_sub(HAND_BACK_SECTION_MAX_CHARS);
         if over == 0 {
@@ -541,14 +623,13 @@ fn fit_the_section(record: &mut JsonValue) {
             .unwrap_or_default()
             .trim_end()
             .to_string();
-        let findings = record["findings"].as_array().map_or(0, Vec::len);
         if let Some((kept, _)) = reply.rsplit_once('\n') {
             record["reply"] = json!(kept.trim_end());
             record["replyTruncated"] = json!(true);
-        } else if findings > 1 {
-            if let Some(findings) = record["findings"].as_array_mut() {
-                findings.pop();
-            }
+        } else if record["findings"]
+            .as_array_mut()
+            .is_some_and(leave_out_a_finding)
+        {
             left_out += 1;
             record["findingsLeftOut"] = json!(left_out);
         } else if !reply.is_empty() {
@@ -654,13 +735,18 @@ pub(crate) fn hand_back_record(
     let read_at = read_at.to_rfc3339_opts(SecondsFormat::Secs, true);
     let reply = reply.replace('\0', "");
     let findings = findings_from_reply(&reply);
-    let words = words_for_the_building_turn(&reply, &findings);
+    let (words, reply_truncated) =
+        reply_that_can_fit(&words_for_the_building_turn(&reply, &findings));
+    let (findings, findings_left_out) = findings_that_can_fit(findings);
     let findings: Vec<JsonValue> = findings
         .iter()
         .map(|finding| {
             let mut value = labelled(finding, viewer, &read_at);
             if !finding.facts.is_empty() {
                 value["facts"] = json!(finding.facts);
+            }
+            if finding.facts_left_out > 0 {
+                value["factsLeftOut"] = json!(finding.facts_left_out);
             }
             value
         })
@@ -675,8 +761,11 @@ pub(crate) fn hand_back_record(
         "request": browser_request_for_building(request),
         "findings": findings,
         "reply": words,
-        "replyTruncated": false,
+        "replyTruncated": reply_truncated,
     });
+    if findings_left_out > 0 {
+        record["findingsLeftOut"] = json!(findings_left_out);
+    }
     let person_request = person_request
         .map(|words| words.replace('\0', ""))
         .map(|words| {
@@ -2320,26 +2409,152 @@ https://three.example.com\n\
         assert_eq!(record["findings"][1]["facts"], json!(pages[1].2));
     }
 
-    /// A page that stopped the turn: the browser skill has it say so in its
-    /// first line, and that line alone goes with the findings, so the building
-    /// turn says what is left. The rest of its words stay out.
+    /// A page that stopped the turn goes to the building turn as its finding,
+    /// which says which page and why, and takes none of the browser turn's
+    /// words along. The browser turn says what it read in its first line, and
+    /// a stop there too: a map's browser turn wrote that line as one paragraph
+    /// with its own advice in it ("base yourself in …", "choose a quieter
+    /// nearby street …", which no page gave), so a stopped page, such as a
+    /// link-only booking site, took that advice along with the stop.
     #[test]
-    fn a_first_line_that_says_a_page_stopped_the_turn_goes_with_the_findings() {
-        let first = "The review site asked for a sign-in, so I read only the maker's pages.";
-        let pages = pages(2);
-        let stopped = r#"{"url": "https://reviews.example/laptop-13", "stopped": "login"}"#;
+    fn a_page_that_stopped_the_turn_takes_none_of_its_words_along() {
+        let words = "Read 2 pages on the city's tourism site; the booking site is link-only. For a first visit, base yourself in the old quarter or the river district: they put the sights within easy walking reach. The quarter is busy, so choose a quieter nearby street if you want a calmer stay.\n\nDay 1 — Historic heart: the palace and the cathedral.";
+        let pages = vec![
+            (
+                "https://visit.example.com/".to_string(),
+                "Home".to_string(),
+                vec!["The site links to an interactive city map.".to_string()],
+            ),
+            (
+                "https://visit.example.com/old-quarter".to_string(),
+                "Old quarter".to_string(),
+                vec!["It describes the quarter as a high-visitor area.".to_string()],
+            ),
+        ];
+        let stopped =
+            r#"{"url": "https://booking.example/search?city=old-town", "stopped": "link-only"}"#;
+        let job = Uuid::new_v4();
+        let record = hand_back_record(
+            &job,
+            &job,
+            VIEWER_WORKSPACE,
+            read_at(),
+            "",
+            Some("Plan 3 days in the city for a first visit: where to stay, what to see each day, on a map."),
+            &format!("{words}\n\n{}\n{stopped}", reply_of("", &pages).trim_start()),
+        );
+        assert_eq!(record["reply"], "", "{record}");
+        let text = record.to_string();
+        for words in [
+            "base yourself",
+            "quieter nearby street",
+            "Day 1",
+            "link-only.",
+        ] {
+            assert!(!text.contains(words), "{words}: {record}");
+        }
+        assert_eq!(
+            record["findings"][2],
+            json!({
+                "url": "https://booking.example/search?city=old-town",
+                "title": null,
+                "readAt": "2026-11-04T08:26:14Z",
+                "viewer": VIEWER_WORKSPACE,
+                "stopped": "link-only",
+            })
+        );
+        assert_eq!(record["findings"][1]["facts"], json!(pages[1].2));
+        assert!(record_read_a_page(&record));
+    }
+
+    /// Fitting the section leaves out the last pages read before a page that
+    /// stopped the turn: that finding is short, says which page and why, and
+    /// is never counted with the pages read that were left out. At least one
+    /// page read always stays.
+    #[test]
+    fn an_over_long_hand_back_keeps_the_pages_that_stopped_it() {
+        let pages = pages(40);
         let reply = format!(
-            "{first}\nDay 1 — read the maker's pages; Day 2 — compare prices.\n\n{}\n{stopped}",
-            reply_of("", &pages).trim_start()
+            "{}\n{}\n{}",
+            r#"{"url": "https://reviews.example/laptop-1", "stopped": "login"}"#,
+            reply_of("Read 40 pages.", &pages),
+            r#"{"url": "https://reviews.example/laptop-41", "stopped": "paywall"}"#,
         );
         let job = Uuid::new_v4();
         let record = hand_back_record(&job, &job, VIEWER_WORKSPACE, read_at(), "", None, &reply);
-        assert_eq!(record["reply"], first);
-        assert_eq!(record["findings"].as_array().map(Vec::len), Some(3));
-        assert_eq!(record["findings"][2]["stopped"], "login");
-        assert!(record["findings"][2].get("facts").is_none(), "{record}");
-        // A long first line is cut to one line's length.
-        let long = format!("{} {}", "word".repeat(200), first);
+        let findings = record["findings"].as_array().expect("findings");
+        assert_eq!(findings[0]["stopped"], "login", "{record}");
+        assert_eq!(findings.last().unwrap()["stopped"], "paywall", "{record}");
+        let read: Vec<&JsonValue> = findings
+            .iter()
+            .filter(|finding| finding.get("stopped").is_none())
+            .collect();
+        assert!((1..40).contains(&read.len()), "{}", read.len());
+        for (finding, (url, _, facts)) in read.iter().zip(&pages) {
+            assert_eq!(finding["url"], json!(url));
+            assert_eq!(finding["facts"], json!(facts));
+        }
+        assert_eq!(record["findingsLeftOut"], json!(40 - read.len()));
+        assert!(quoted_chars(&record) <= HAND_BACK_SECTION_MAX_CHARS);
+    }
+
+    /// However long a reply, the record keeps the same whole lines it would
+    /// keep of a short one: up to the section, one more not fitting. What can
+    /// never fit is left out before fitting, which would otherwise quote the
+    /// whole record once for each line it leaves out.
+    #[test]
+    fn a_long_reply_keeps_whole_lines_up_to_the_section() {
+        let job = Uuid::new_v4();
+        let words = (1..=4_000)
+            .map(|line| format!("Line {line}: what the browser turn said of the pages it read."))
+            .collect::<Vec<_>>();
+        let reply = format!(
+            "{}\n{{\"url\": \"https://maker.example/laptop-13\"}}",
+            words.join("\n")
+        );
+        let record = hand_back_record(&job, &job, VIEWER_WORKSPACE, read_at(), "", None, &reply);
+        let kept = record["reply"].as_str().expect("reply");
+        let lines = kept.lines().count();
+        assert_eq!(kept, words[..lines].join("\n"));
+        assert_eq!(record["replyTruncated"], true);
+        assert!(quoted_chars(&record) <= HAND_BACK_SECTION_MAX_CHARS);
+        let mut more = record.clone();
+        more["reply"] = json!(words[..=lines].join("\n"));
+        assert!(quoted_chars(&more) > HAND_BACK_SECTION_MAX_CHARS);
+
+        let lines = (1..=800)
+            .map(|page| {
+                finding_line(
+                    &format!("https://maker.example/page-{page}"),
+                    &format!("Page {page}"),
+                    &[format!("Fact {page}, as the page states it.")],
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let record = hand_back_record(&job, &job, VIEWER_WORKSPACE, read_at(), "", None, &lines);
+        let kept = record["findings"].as_array().expect("findings").len();
+        assert!((1..800).contains(&kept), "{kept}");
+        assert_eq!(record["findingsLeftOut"], json!(800 - kept));
+        assert_eq!(
+            record["findings"][kept - 1]["url"],
+            format!("https://maker.example/page-{kept}")
+        );
+        assert!(quoted_chars(&record) <= HAND_BACK_SECTION_MAX_CHARS);
+    }
+
+    /// A page's facts over their bound are counted, never dropped without a
+    /// word: the building turn would read a value the page stated, such as
+    /// its price, as not stated.
+    #[test]
+    fn a_pages_facts_over_their_bound_are_counted() {
+        let mut facts: Vec<String> = (1..=10)
+            .map(|spec| format!("Specification {spec}: {}", ["detail"; 26].join(" ")))
+            .collect();
+        facts.push("Price: from 1,349 euros.".to_string());
+        assert!(facts.iter().map(|fact| fact.chars().count()).sum::<usize>() > 2_000);
+        let line = finding_line("https://maker.example/laptop-13", "Laptop 13", &facts);
+        let job = Uuid::new_v4();
         let record = hand_back_record(
             &job,
             &job,
@@ -2347,11 +2562,30 @@ https://three.example.com\n\
             read_at(),
             "",
             None,
-            &reply.replacen(first, &long, 1),
+            &format!("Read 1 page.\n{line}"),
         );
+        let finding = &record["findings"][0];
+        let kept = finding["facts"].as_array().expect("facts").len();
+        assert!((1..facts.len()).contains(&kept), "{record}");
+        assert_eq!(finding["facts"], json!(facts[..kept]));
         assert_eq!(
-            record["reply"].as_str().unwrap().chars().count(),
-            STOP_LINE_MAX_CHARS
+            finding["factsLeftOut"],
+            json!(facts.len() - kept),
+            "{record}"
+        );
+        // A page whose facts fit has no count.
+        let record = hand_back_record(
+            &job,
+            &job,
+            VIEWER_WORKSPACE,
+            read_at(),
+            "",
+            None,
+            &finding_line("https://maker.example/laptop-13", "Laptop 13", &facts[10..]),
+        );
+        assert!(
+            record["findings"][0].get("factsLeftOut").is_none(),
+            "{record}"
         );
     }
 
@@ -2572,6 +2806,7 @@ https://three.example.com\n\
             url: url.to_string(),
             title: title.map(str::to_string),
             facts: facts.iter().map(|fact| fact.to_string()).collect(),
+            facts_left_out: 0,
             stopped,
         };
         // Once the reply writes findings as JSON lines, an address in its

@@ -887,8 +887,8 @@ async fn a_question_or_a_turn_that_read_nothing_hands_nothing_back() -> anyhow::
 
 /// The runtime posts the reply without its finding lines and keeps them in a
 /// Details note: the hand-back reads them back, so the building turn gets every
-/// finding with its facts and, of the reply the person read, only its first
-/// line, which says a page stopped the turn.
+/// finding with its facts, the page that stopped the turn among them, and none
+/// of the reply the person read.
 #[tokio::test]
 async fn finding_lines_in_the_details_note_reach_the_building_turn() -> anyhow::Result<()> {
     with_chain("browser-hand-back-details-note", |chain| {
@@ -939,10 +939,7 @@ async fn finding_lines_in_the_details_note_reach_the_building_turn() -> anyhow::
                 .map_err(|error| controller_error("hand-back", error))?;
             let hand_back_job = chain.job_of(&response).await?;
             let record = &chain.payload_metadata(&hand_back_job).await?[HAND_BACK_KEY];
-            assert_eq!(
-                record["reply"],
-                posted.lines().next().context("the reply's first line")?
-            );
+            assert_eq!(record["reply"], "", "{record}");
             assert_eq!(
                 record["findings"],
                 fixtures["stampedRecord"]["findings"]

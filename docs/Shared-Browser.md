@@ -2449,20 +2449,26 @@ unless the policy is `"covered"`.
   `blocked`, `robots`, `download`, `secret` or `link-only`, and any other reason
   counts as `blocked`): the address, title and facts come from the reply's JSON
   finding lines (each page once, a later line for it adding its facts, and a
-  page's facts at most 2,000 characters; only a reply without any falls back to
-  the addresses on its lines), `readAt` and `viewer` from the job, and an
+  page's facts at most 2,000 characters, whole facts in order, the rest
+  counted as `factsLeftOut`; only a reply without any falls back to the
+  addresses on its lines), `readAt` and `viewer` from the job, and an
   address on a loopback, private, link-local or local-only host is never a
   finding. None of the browser turn's own words go with findings that list
-  what their pages showed, except its first line when a finding says a page
-  stopped it (`reply`): a map's hand-back once built the browser turn's own day
-  plan and advice, which no page gave, into the map. A reply whose lines list
-  no fact (a turn that wrote none, whose note lists the pages it opened by
-  address, or an older runtime's reply) goes as it is. The record fits the
-  12,000 characters the runtime quotes in one section, which an older runtime
-  leaves out whole when it is over: whole lines in order, the reply's last
-  lines left out first and then the last findings, with `replyTruncated` and
-  `findingsLeftOut` saying so, and the first finding and the reply's first line
-  always stay. The runtime does the same with a record over that size. Only the person
+  what their pages showed, not even a first line that says a page stopped it
+  (that page's finding says which and why): a map's hand-back once built the
+  browser turn's own day plan and advice, which no page gave, into the map,
+  and a map's browser turn wrote its first line as one paragraph with its
+  advice in it. A reply whose lines list no fact (a turn that wrote none,
+  whose note lists the pages it opened by address, or an older runtime's
+  reply) goes as it is (`reply`). The record fits the 12,000 characters the
+  runtime quotes in one section, which an older runtime leaves out whole when
+  it is over: whole lines in order, the reply's last lines left out first,
+  then the last pages read and then the last pages that stopped the turn,
+  with `replyTruncated` and `findingsLeftOut` saying so; a page read and the
+  reply's first line always stay. What can never fit is left out before the
+  record is fitted, so a long reply costs no more to fit than a short one.
+  The runtime does the same with a record over that size, and tells the
+  building turn never to guess what was left out. Only the person
   who ran the browser turn, and whose turn sent the card, can send it, once per
   browser turn, within 30 minutes, only while no prompt was sent in the
   conversation after the browser turn (`browser_hand_back_superseded`), and
@@ -2552,7 +2558,9 @@ unless the policy is `"covered"`.
   person's own message, which asks for the page too: told only that it was
   read-only, a comparison's browser turn read the maker's home page and ended
   there. The building turn cites a page only for a
-  fact listed under it. Such a browser turn that used the browser
+  fact listed under it, and reads a reply that still goes as the browser
+  turn's words: a place or claim it names with no page under it is read on
+  its own page or left out. Such a browser turn that used the browser
   and wrote no finding line would hand nothing back, however many pages it
   read: it gets the runtime's wrap-up pass on its own thread, which holds those
   pages, asked for the finding lines alone, and not billed, as a recovery retry
