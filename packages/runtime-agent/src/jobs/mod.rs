@@ -19140,12 +19140,21 @@ fn build_read_only_write_blocked_artifact(
     })
 }
 
+/// What a turn's prompt says about its write scope. A read-only browser turn reads its own line
+/// alone ([`read_only_write_scope_line`], with the build request where it is offered): its only
+/// tools are its browser's, so a guardrail's heading, mode and rationale guard nothing there, and
+/// its scope is still held to what it returns. Under "Write-scope guardrail: / - Mode: read_only
+/// / - Rationale: explicit write scope metadata", a comparison's first browser turn read the
+/// maker's home page and answered "I can't create the comparison page in this read-only turn"
+/// (a local test, Nov 4), as one had on Oct 31. Every other turn keeps its guardrail.
 fn format_write_scope_guardrail_section(metadata: Option<&JsonValue>) -> Option<String> {
     let scope_value = write_scope_value_from_metadata(metadata)?;
-    if let Some(mode) = write_scope_mode_from_value(scope_value)
-        && (mode == "read_only" || mode == "readonly")
-        && !scope_value.is_object()
-    {
+    let read_only = write_scope_mode_from_value(scope_value)
+        .is_some_and(|mode| mode == "read_only" || mode == "readonly");
+    if read_only && metadata.is_some_and(browser_hand_back::is_browser_turn) {
+        return Some(format!("\n{}\n", read_only_write_scope_line(metadata)));
+    }
+    if read_only && !scope_value.is_object() {
         return Some(format_read_only_write_scope_guardrail_section(metadata));
     }
 
@@ -33516,8 +33525,10 @@ mod tests {
     /// other that Octo builds in the chat. Told that it reads pages and that the
     /// building turn after it makes the page, a comparison's routed turn read
     /// one page and answered that it could not create the page "in this
-    /// read-only turn" (a local test, Nov 4). A read-only job outside the
-    /// browser is told it is read-only.
+    /// read-only turn" (a local test, Nov 4). A browser turn reads that line
+    /// alone, with no guardrail heading, mode or rationale above it. A
+    /// read-only job outside the browser is told it is read-only, under its
+    /// guardrail.
     #[test]
     fn a_browser_turn_is_told_it_reads_pages_and_octo_builds_in_the_chat() {
         let browser_turn = |transport: &str, card: bool, hands_back: bool, scope: &JsonValue| {
@@ -33534,7 +33545,16 @@ mod tests {
         let line = |metadata: &JsonValue| {
             let section =
                 format_write_scope_guardrail_section(Some(metadata)).expect("write scope section");
-            assert!(section.contains("- Mode: read_only\n"), "{section}");
+            if metadata.get("browserTransport").is_some() {
+                for heading in ["Write-scope guardrail", "Mode:", "Rationale:"] {
+                    assert!(!section.contains(heading), "{heading}: {section}");
+                }
+            } else {
+                assert!(
+                    section.starts_with("\nWrite-scope guardrail:\n- Mode: read_only\n"),
+                    "{section}"
+                );
+            }
             assert!(metadata_requests_read_only_workspace(Some(metadata)));
             section
         };
@@ -33711,6 +33731,8 @@ mod tests {
         assert!(
             retry.contains("Every other request:\n- Use `instafy_shared_browser.snapshot` now.")
         );
+        // It points to the turn's prompt: a browser turn reads no write-scope guardrail.
+        assert!(!retry.contains("write-scope"), "{retry}");
         for stamp in [json!(false), json!("true"), JsonValue::Null] {
             assert_eq!(browser_hand_back::build_request_retry_line(&job(stamp)), "");
         }

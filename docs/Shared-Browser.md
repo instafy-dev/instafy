@@ -1208,15 +1208,22 @@ answer ends in a page (a comparison, prices, a route) is `browser_then_build`
 from the first message too, while research answered in a reply (facts, a
 price, opening hours, reviews) stays with Octo, whose turn reads public pages
 itself. A request to make something with no site to use first ("on a map",
-"put this on a page") stays with Octo: a browser turn cannot make it. A
-message that carries on the chat's browser work goes on there, whether or not
-that work found its answer, and a bare "keep going" carries on what the chat
-left open (what its replies or a page here mark not checked), never a change
-the person stopped or undid. A message that names the browser still stays with Octo
-when the browser turn could not do it alone: it sees only the person's words
-and the chat's earlier browser turns, so a message that needs what this space
-or another chat holds, a site that runs in this space, or a message that says
-not to use the browser is not sent there. The routes are offered only for the
+"put this on a page") stays with Octo: a browser turn cannot make it, and a
+map's skill finds and cites its places itself. So does one made from what the
+chat already found. Folded into one sentence with that second case, the rule
+for "on a map" likely lost to research that ends in a page: a three-day city
+plan "on a map" went through the browser to a map with no hotels, no day plan
+and no sight's own page cited (a local test, Nov 4). A message that carries on the
+chat's browser work goes on there, whether or not that work found its answer,
+and a bare "keep going" carries on what the chat left open (what its replies
+or a page here mark not checked or not confirmed, such as a route), never a
+change the person stopped or undid. The turn that carries it on reads the same
+in `AGENTS.md`'s "Replies", and says which. A message that names the browser
+still stays with Octo when the browser turn could not do it alone: it sees
+only the person's words and the chat's earlier browser turns, so a message
+that needs what this space or another chat holds, a site that runs in this
+space, or a message that says not to use the browser is not sent there. The
+routes are offered only for the
 person's own words (never a prompt Instafy wrote for a command such as
 `/learn`) on an interactive turn that could ask for the browser itself (not a
 hand-back, a worker, a plan, an unattended run or a browser turn) and that
@@ -1887,7 +1894,12 @@ reading what the request needs is why it changes no files, and that the
 building turn right after it makes what the person asked for from its finding
 lines: told only that it reads pages and that the building turn after it makes
 the page, a comparison's browser turn read one page and answered that it could
-not create the page in a read-only turn.
+not create the page in a read-only turn. That turn also read "Write-scope
+guardrail", "Mode: read_only" and its rationale above its line. That line,
+with the build request where it is offered, is all a browser turn reads of its
+write scope, while a building turn keeps its guardrail: a browser turn's only
+tools are its browser's, so those lines guard nothing there, and its scope
+still holds what it returns.
 
 Action/cursor polling runs only while Shared is visible and filters the selected
 page. If the agent requests input while Chat is visible, the field guidance is
@@ -2546,12 +2558,12 @@ unless the policy is `"covered"`.
   carries on a card the routing step posted for the person's own message (its
   send stamped `browserCardTurn.routed`), opened no page, and answered that the
   message asks Octo to make or change something with no website to use first
-  (the `request_build` action its write-scope line offers, or a team plan,
+  (the `request_build` action its prompt offers, or a team plan,
   which a browser turn cannot start either). Only such a turn whose card does
   not continue building is offered it: one whose findings go back to the
   building turn already has a build after it, and told both, a comparison's
-  turn read its pages and asked for a build in place of its findings. The
-  write-scope line has it decide
+  turn read its pages and asked for a build in place of its findings. That
+  line has it decide
   that before any browser step, and the run text's blank-page rule leaves it
   that answer. A build request nothing acts on (from a turn that opened a page
   and has no hand-back after it) is never dropped without a word: the reply
