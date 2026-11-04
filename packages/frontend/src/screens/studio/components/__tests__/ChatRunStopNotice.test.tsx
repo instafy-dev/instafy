@@ -34,7 +34,7 @@ describe("persisted run stop notice", () => {
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
     submit.mockReset();
     props = { conversationId: "chat", viewerUserId: "viewer", humanLabelByUserId: new Map(), canWrite: true,
-      busy: false, messages: [notice], queuedSends: [], submitMessage: submit };
+      busy: false, messages: [notice], hasNewer: false, queuedSends: [], submitMessage: submit };
   });
   afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 
@@ -124,6 +124,15 @@ describe("persisted run stop notice", () => {
     await render({ messages: [...later, asked("again", 6), laterStop] });
     expect(controls!.canContinue(notice)).toBe(false);
     expect(controls!.canContinue(laterStop)).toBe(true);
+
+    // Opened at a message the person searched for, the chat shows the
+    // messages around it: with newer ones not shown, nobody can tell that
+    // the stop is still the latest, so it offers no Continue until they are.
+    await render({ messages: [notice, ownLateRow, hiddenLine], hasNewer: true });
+    expect(controls!.canContinue(notice)).toBe(false);
+    expect(continueButton()).toBeNull();
+    await render({ hasNewer: false });
+    expect(controls!.canContinue(notice)).toBe(true);
   });
   it("allows retry after failed submission but considers queued continuation accepted", async () => {
     submit.mockResolvedValueOnce(false).mockImplementationOnce(async (_override, options) => { options?.onQueued?.(); return false; });

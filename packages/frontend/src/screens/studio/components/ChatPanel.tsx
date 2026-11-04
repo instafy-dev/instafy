@@ -5901,6 +5901,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     canWrite: canStopRuns,
     busy: stopTargets.length > 0 || activeConversationRuns.length > 0,
     messages,
+    hasNewer: messageTargetActive && messageContext.hasNewer,
     queuedSends: combinedChatSendQueue,
     submitMessage,
   });

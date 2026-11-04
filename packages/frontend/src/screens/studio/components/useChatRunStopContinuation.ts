@@ -12,6 +12,8 @@ type Options = {
   canWrite: boolean;
   busy: boolean;
   messages: readonly ChatMessage[];
+  /** The chat has messages newer than `messages` holds (the ones around a searched message). */
+  hasNewer: boolean;
   queuedSends: readonly QueuedChatSendItem[];
   submitMessage: SubmitMessageFn;
 };
@@ -39,8 +41,9 @@ export function useChatRunStopContinuation(options: Options) {
       && state.messages.some((entry) => entry.id === message.id)
       // Only the chat's latest turn: once anyone wrote after the stop, a later
       // turn took the chat on, and carrying the stopped one on would go back
-      // to where it no longer is. The chat holds both, after a reload too.
-      && !writtenAfter(state.messages, message)
+      // to where it no longer is. The chat holds both, after a reload too;
+      // with its newer messages not shown, nobody can tell.
+      && !state.hasNewer && !writtenAfter(state.messages, message)
       && !submitted.current.has(key)
       && !state.messages.some((entry) => entry.metadata?.continuedStopMessageId === message.id)
       && !state.queuedSends.some((entry) => entry.metadata?.continuedStopMessageId === message.id)

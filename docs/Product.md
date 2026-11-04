@@ -84,8 +84,9 @@ retry for the same jobs. Separately queued messages are preserved and remain eli
 delivery; Stop does not pause the chat's queue. It suppresses the selected plan's follow-up when
 all remaining workers were stopped. A muted persisted notice identifies who asked
 the agent to stop. **Continue**, when the chat is idle and writable and the stopped turn is still its
-latest (nobody wrote after it, also after a reload), sends a fresh targeted request to check existing
-work before proceeding; it does not replay the original turn or consume a draft.
+latest (nobody wrote after it, also after a reload; in a chat opened at a searched message, once its
+newest messages are shown), sends a fresh targeted request to check existing work before proceeding;
+it does not replay the original turn or consume a draft.
 
 For local interaction review without credentials or real cancellations, run:
 `pnpm --filter @instafy/frontend exec vite --config tests/fixtures/run-stop-control/vite.config.ts --host 127.0.0.1 --port 5208`

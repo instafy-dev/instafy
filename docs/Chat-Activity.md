@@ -250,14 +250,18 @@ was saved, so it holds it already.
 
 Either Undo changes a site's files with no turn, so no turn tells the pages people have open. Once
 the folder holds the files as the Undo left them, the machine does, for each site whose open
-preview's folder holds one of them (`jobs/preview_pictures.rs`): it sends the site's reload, the
-one a turn sends after it changes a bound site (`instafy bind command <site> reload '{}'`, from the
-workspace, with no credential), so every open view of the page, on every device, loads it again;
-and it pictures the site again for its card, as after a turn. The binder that serves the site takes
-the reload. A site no binder serves has nothing to take it: a plain folder's view, and a map's that
-`uw host` serves, show the Undo after their Reload. A map's own reload (`uw reload`) is not run for
-it: it writes the map's `data/version.json`, a change no save takes after an Undo, which a stop
-would keep as unsaved work and which the next Undo's folder follow would refuse to move past.
+preview's folder holds one of them (`jobs/preview_pictures.rs`), in a turn's order: it sends the
+site's reload, the one a turn sends after it changes a bound site (`instafy bind command <site>
+reload '{}'`, from the workspace, with no credential), so every open view of the page, on every
+device, loads it again; then it pictures the site again for its card, so the check's own page never
+takes that reload halfway. The binder that serves the site takes the reload. A map that `uw host`
+serves takes none, and needs none when the Undo puts back the map's earlier reload stamp: the map
+skill's last step (`uw reload`) writes one into `data/version.json`, the change's save keeps it,
+and the host watches that file and reloads every open view itself when it changes. A map change
+made without that step, and a plain folder no binder serves, show the Undo after their Reload. The
+machine runs no `uw reload` for an Undo: it writes `data/version.json`, a change no save takes after
+an Undo, which a stop would keep as unsaved work and which the next Undo's folder follow would
+refuse to move past.
 
 An Undo that worked leaves one line in the chat's history, in the controller's words: "The person
 undid the change from “…”", quoting the person's request that made the change (`POST
