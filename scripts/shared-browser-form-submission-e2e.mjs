@@ -28,14 +28,15 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // 4. A journey planner: under routine browsing, choosing a start and an end
 //    station asks nothing and sends nothing, the planner's own button asks
 //    once and the route is read. A list is named by its own label or the
-//    option it holds, never by its options; a list the page posts when it
-//    changes may post to its own site, never elsewhere; and Ask mode asks for
-//    each choice, naming the option and the list.
+//    option it holds, never by its options, and its reading says how many
+//    options it has; a list the page posts when it changes may post to its
+//    own site, never elsewhere; and Ask mode asks for each choice, naming the
+//    option and the list.
 // 5. Other lists: inside their own labels, with a word of a payment detail
 //    among their options, holding several options, long, posting to another
 //    site after an Allow or from Octo's own tab, signing in with another
-//    account, on a page that may show a secret, and moving their options
-//    while Octo chooses.
+//    account, on a page that may show a secret, moving their options while
+//    Octo chooses, and of thirty, none or one.
 // Every site is a loopback fixture; Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
@@ -177,6 +178,13 @@ const LISTS = `<h1>Lists</h1>
 <label for="airport">Airport</label><select id="airport" name="airport">${AIRPORTS.map((name) => `<option>${name}</option>`).join("")}</select>
 <form action="{other}/collect" method="post"><label for="bulk">Bulk actions</label>
 <select id="bulk" name="bulk" onchange="this.form.submit()"><option>Select all</option><option>Delete selected</option></select></form>`;
+// A list of thirty stops that holds a prompt the open list hides, a list the
+// page has not filled yet, and a list of one zone.
+const STOPS = Array.from({ length: 30 }, (_, index) => `Stop ${String(index + 1).padStart(2, "0")}`);
+const STOP_LISTS = `<h1>Stops</h1>
+<label for="from-stop">From</label><select id="from-stop" name="from"><option value="" hidden selected>Choose a stop</option>${STOPS.map((stop) => `<option>${stop}</option>`).join("")}</select>
+<label for="to-stop">To</label><select id="to-stop" name="to"></select>
+<label for="zone">Zone</label><select id="zone" name="zone"><option>Zone A</option></select>`;
 // A list whose option signs in with another account.
 const ACCOUNT_LIST = `<h1>Account</h1>
 <label for="account">Account</label><select id="account" onchange="location.href = '/oauth/' + this.value"><option value="none">Choose</option><option value="github">Sign in with GitHub</option></select>`;
@@ -276,6 +284,8 @@ export async function runSharedBrowserFormSubmissionFixture() {
         response.end(page("Journey Planner", fill(PLANNER)));
       } else if (url.pathname === "/scenario/lists") {
         response.end(page("Lists", fill(LISTS)));
+      } else if (url.pathname === "/scenario/stops") {
+        response.end(page("Stops", fill(STOP_LISTS)));
       } else if (url.pathname === "/scenario/account") {
         response.end(page("Account", fill(ACCOUNT_LIST)));
       } else if (url.pathname === "/scenario/codes") {
@@ -687,7 +697,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
     // 4. A journey planner, under routine browsing (still on). A list is
     // named by its own label, or by the option it holds when it has none,
     // never by all of its options run together, and says which option it
-    // holds.
+    // holds and how many it has.
     const plannerPage = `${sites().transit}/scenario/planner`;
     const list = (observed, label) => {
       const found = control(observed, label);
@@ -698,6 +708,8 @@ export async function runSharedBrowserFormSubmissionFixture() {
     snapshot = await ok("GET", "/v1/snapshot");
     assert.equal(list(snapshot, "Start").chosen, "24 Agosto");
     assert.equal(list(snapshot, "End").chosen, "24 Agosto");
+    assert.equal(list(snapshot, "Start").options, STATIONS.length, "the station it holds is not the whole list");
+    assert.equal(list(snapshot, "End").options, STATIONS.length);
     assert.equal(list(snapshot, "All lines").chosen, "All lines", "a list with no label is named by the option it holds");
     assert.ok(
       !snapshot.interactiveElements.some((element) => /Agosto ?Aeroporto|Line A ?Line D/.test(element.label)),
@@ -810,8 +822,10 @@ export async function runSharedBrowserFormSubmissionFixture() {
       await runPage.evaluate(() => Array.from(document.getElementById("topics").selectedOptions, (option) => option.label)),
       ["Art", "Music"],
     );
-    // d. An option past the first thousand of a long list is found.
+    // d. An option past the first thousand of a long list is found, and the
+    // list counts all of its options.
     snapshot = await ok("GET", "/v1/snapshot");
+    assert.equal(list(snapshot, "Airport").options, AIRPORTS.length);
     chosen = await ok("POST", "/v1/choose", { index: list(snapshot, "Airport").index, snapshotId: snapshot.snapshotId, option: "Airport 1100" });
     assert.equal(list(chosen, "Airport").chosen, "Airport 1100");
     assert.deepEqual(promptsSince(start), [], "None of these asked");
@@ -850,6 +864,8 @@ export async function runSharedBrowserFormSubmissionFixture() {
     await runPage.goto(`${sites().transit}/scenario/codes`);
     snapshot = await ok("GET", "/v1/snapshot");
     assert.equal(snapshot.secretScreen, true);
+    assert.equal(list(snapshot, "Mark as used").chosen, undefined);
+    assert.equal(list(snapshot, "Mark as used").options, undefined, "a secret screen counts no options");
     const unlisted = await refused(/No option in "Mark as used" is called "anything", so nothing was chosen\./u, "POST", "/v1/choose", { index: list(snapshot, "Mark as used").index, snapshotId: snapshot.snapshotId, option: "anything" });
     assert.ok(!/4829|7731/u.test(unlisted), unlisted);
     // i. The option chosen is the one named, even on a page that moves its
@@ -870,10 +886,34 @@ export async function runSharedBrowserFormSubmissionFixture() {
       flips += 1;
     }
     assert.ok(flips >= 6, `most choices went through (${flips} of 12)`);
+    // j. A list's reading says how many options it has and names only the
+    // one it holds, so that one never reads as the whole list: thirty stops
+    // held on a prompt the open list hides count thirty, and any of them is
+    // chosen by its label; a list the page has not filled counts none and
+    // holds none; a list of one counts one.
+    await runPage.goto(`${sites().transit}/scenario/stops`);
+    snapshot = await ok("GET", "/v1/snapshot");
+    const namesOtherStops = (observed, held) => STOPS.filter((stop) => stop !== held && JSON.stringify(observed).includes(stop));
+    assert.equal(list(snapshot, "From").options, STOPS.length);
+    assert.equal(list(snapshot, "From").chosen, "Choose a stop");
+    assert.deepEqual(namesOtherStops(snapshot, null), [], "a reading names none of a list's options");
+    assert.equal(list(snapshot, "To").options, 0);
+    assert.equal(list(snapshot, "To").chosen, undefined);
+    assert.equal(list(snapshot, "Zone").options, 1);
+    assert.equal(list(snapshot, "Zone").chosen, "Zone A");
+    start = prompts.length;
+    requests.length = 0;
+    chosen = await ok("POST", "/v1/choose", { index: list(snapshot, "From").index, snapshotId: snapshot.snapshotId, option: "Stop 17" });
+    assert.equal(await runPage.locator("#from-stop").inputValue(), "Stop 17");
+    assert.equal(list(chosen, "From").chosen, "Stop 17");
+    assert.equal(list(chosen, "From").options, STOPS.length);
+    assert.deepEqual(namesOtherStops(chosen, "Stop 17"), [], "the reading after names only the stop chosen");
+    assert.deepEqual(promptsSince(start), [], "Choosing a stop asked nothing");
+    assert.deepEqual(requests, [], "Choosing a stop sent nothing");
 
     const result = {
       status: "passed",
-      fixtureVersion: 4,
+      fixtureVersion: 5,
       cases: table.cases.length,
       prompts: prompts.length,
       checks: [
@@ -900,6 +940,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
         "a risky choice the person allows, and a choice in Octo's own tab, send no form anywhere the step was not approved to send it",
         "an option that signs in with another account is refused before any prompt, and an answer on a page that may show a secret names no option",
         "a list that moves its options while Octo chooses never gets another option than the one named",
+        "a list's reading says how many options it has (thirty, none, one, 1,200) and names only the one it holds, and any of them is chosen by its label; a secret screen counts none",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",
@@ -921,7 +962,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.log(JSON.stringify(result, null, 2));
   }).catch((error) => {
     fs.mkdirSync(resultDirectory, { recursive: true });
-    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 4 })}\n`);
+    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 5 })}\n`);
     console.error(error.stack || error.message);
     process.exitCode = 1;
   });

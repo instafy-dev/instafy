@@ -1418,10 +1418,34 @@ function describeInPage(rule, forms, names, element, sources) {
     area = "";
   }
 
+  // How many options a select's open list offers, counted as `choose` reads
+  // them (selectOptionsInPage): an option the page hides is left out. Only
+  // the number leaves the page here; the options' names are page text, which
+  // `choose` lists when a name misses.
+  let optionCount = null;
+  try {
+    if (element instanceof HTMLSelectElement) {
+      const view = element.ownerDocument.defaultView;
+      optionCount = 0;
+      for (const option of Array.from(element.options).slice(0, 10_000)) {
+        let hidden = option.hidden;
+        try {
+          hidden = hidden || view.getComputedStyle(option).display === "none";
+        } catch (_) {
+          // An option whose style cannot be read counts as shown.
+        }
+        if (!hidden) optionCount += 1;
+      }
+    }
+  } catch (_) {
+    optionCount = null;
+  }
+
   return {
     shown: true,
     expanded,
     area,
+    optionCount,
     tag: bounded(element.tagName.toLowerCase(), 64),
     role: bounded(element.getAttribute("role"), 128),
     idAttribute: bounded(element.getAttribute("id")),
@@ -1604,6 +1628,9 @@ async function describeElement(locator, index, hiddenNames, described = undefine
     nameHints,
     expanded: typeof attributes.expanded === "boolean" ? attributes.expanded : null,
     area: AREA_NAMES.has(attributes.area) ? attributes.area : "",
+    optionCount: Number.isSafeInteger(attributes.optionCount) && attributes.optionCount >= 0
+      ? Math.min(attributes.optionCount, MAX_SELECT_OPTIONS)
+      : null,
     box: {
       x: Math.round(box.x),
       y: Math.round(box.y),
@@ -2071,13 +2098,17 @@ function humanInputFieldsAsObserved(url, interactive, body) {
 // What the model reads about one control. Empty fields are left out to keep
 // the observation small; the box stays internal, where the visible cursor
 // uses it. A select says which option it holds (`chosen`), as a person sees it
-// closed; `choose` sets it.
+// closed, and how many options it has (`options`), so the one it holds never
+// reads as the whole list; `choose` sets it by any option's label.
 function publicElementDescription(description) {
   const entry = { index: description.index, label: description.label, tag: description.tag };
   for (const field of ["role", "href", "inputType", "autocomplete", "area", "chosen"]) {
     if (typeof description[field] === "string" && description[field]) {
       entry[field] = description[field];
     }
+  }
+  if (Number.isSafeInteger(description.options) && description.options >= 0) {
+    entry.options = description.options;
   }
   if (typeof description.expanded === "boolean") {
     entry.expanded = description.expanded;
@@ -2318,11 +2349,13 @@ async function snapshot(page, { withhold = false } = {}) {
         autocomplete: description.autocomplete
           ? strictlyMasked(description.autocomplete)
           : description.autocomplete,
-        // The option a select holds, page text masked like a control's name;
-        // a secret screen lists none.
+        // The option a select holds, page text masked like a control's name,
+        // and how many options it has, never their names; a secret screen
+        // says neither.
         chosen: isSelectDescription(description) && !view.secretScreen
           ? strictlyMasked(Array.from(description.shownText || "").slice(0, MAX_LABEL_CHARS).join(""))
           : "",
+        options: isSelectDescription(description) && !view.secretScreen ? description.optionCount : null,
       }),
     ),
     // How many controls were left out because a person cannot see them yet,

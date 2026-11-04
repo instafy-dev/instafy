@@ -117,6 +117,9 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     // From before one rule (never describe the turn itself) replaced the examples of what tools saw
     // and inside words, and a reply said which page it didn't reach.
     include_str!("legacy/agents-doc-v8.md"),
+    // From before a reply said a site or page lacks something (a station, a route) only when a
+    // page it read said so.
+    include_str!("legacy/agents-doc-v9.md"),
 ];
 const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -2244,19 +2247,24 @@ mod tests {
         }
     }
 
-    /// A reply states only what a page read in its turn says, else "not checked"; it never says a place, stop,
-    /// route, time or page doesn't exist or didn't load unless a page says so, and says which page it didn't
-    /// reach ("the planner itself didn't load in the page", of a planner whose own page the turn never opened);
-    /// and it names only steps its turn started ("I'm sending Instafy's browser…" with no browser card is a
-    /// promise nobody keeps). `AGENTS.md` is what web turns carry, and a browser turn is given its "Replies"
-    /// too. The copy from before is upgraded.
+    /// A reply states only what a page read in its turn says, else "not checked"; it never says a site or
+    /// page lacks something (a place, stop, route or time), or that a page didn't load, unless a page says so,
+    /// and says which page it didn't reach ("the planner itself didn't load in the page", of a planner whose
+    /// own page the turn never opened); and it names only steps its turn started ("I'm sending Instafy's
+    /// browser…" with no browser card is a promise nobody keeps). `AGENTS.md` is what web turns carry, and a
+    /// browser turn is given its "Replies" too. The copies from before are upgraded.
+    ///
+    /// The rule named what doesn't exist ("a place, stop, route, time or page"), and a turn that read a
+    /// journey planner's station list, which showed only the station it held, replied that the planner
+    /// didn't list another station, and that a directions page it never opened gave no directions; a page
+    /// made from that reply said both again. It names what a site or page lacks now.
     #[test]
     fn agents_doc_says_unread_facts_are_not_checked_and_names_only_steps_the_turn_started() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
         let doc = flat(AGENTS_DOC_TEMPLATE);
         for needle in [
             "A fact no page you read this turn states says \"not checked\", or stays out.",
-            "Never say a place, stop, route, time or page doesn't exist or didn't load unless a page you read says so: say which page you didn't reach.",
+            "Never say a site or page lacks something (a place, stop, route or time), or that a page didn't load, unless a page you read says so: say which page you didn't reach.",
             "Say only steps this turn did or started.",
             "offer it as a next step instead",
         ] {
@@ -2277,14 +2285,19 @@ mod tests {
             "{replies}"
         );
         assert_eq!(replies.matches("didn't load").count(), 1, "{replies}");
+        assert!(!replies.contains("doesn't exist"), "{replies}");
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-        let previous = include_str!("legacy/agents-doc-v4.md");
-        assert!(!previous.contains("not checked\", or stays out"));
-        let workspace = tempdir().expect("workspace");
-        let path = workspace.path().join(AGENTS_DOC_FILENAME);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
+        let before_not_checked = include_str!("legacy/agents-doc-v4.md");
+        assert!(!before_not_checked.contains("not checked\", or stays out"));
+        let before_lacks = include_str!("legacy/agents-doc-v9.md");
+        assert!(before_lacks.contains("Never say a place, stop, route, time or page doesn't exist"));
+        for previous in [before_not_checked, before_lacks] {
+            let workspace = tempdir().expect("workspace");
+            let path = workspace.path().join(AGENTS_DOC_FILENAME);
+            fs::write(&path, previous).unwrap();
+            ensure_project_memory_scaffold(workspace.path());
+            assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
+        }
     }
 
     /// A command that outlives its wait is still running: a map turn left two such lookups behind

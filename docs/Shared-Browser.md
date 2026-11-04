@@ -1635,7 +1635,10 @@ sits in (`header`, `nav`, `menu`, `dialog`, `tabs`, `search`, `footer` or
 takes that path too and resolves it against the current page's site; a path
 that names another host is refused, and a blank page needs a full address. The
 text reads a closed select's chosen option as a word of its own, and the select
-says which option it holds in `chosen` (none on a secret screen). A snapshot
+says which option it holds in `chosen` and how many options it has in
+`options`, so the one it holds never reads as the whole list; their names come
+only from `choose`, which lists them when a name misses (neither field on a
+secret screen). A snapshot
 never shows what is typed into a field or whether a box is checked, so the
 reading after such a step matches the one before it, and a turn that could not
 tell its text went in gave up a form after its first field. A `type` step's
