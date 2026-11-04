@@ -841,7 +841,11 @@ fn pack_profile_with_limits(profile_dir: &Path, limits: ProfileArchiveLimits) ->
     let mut wrote_any = false;
     {
         let mut zip = ZipWriter::new(&mut output);
-        let options = FileOptions::<()>::default().compression_method(CompressionMethod::Deflated);
+        // Snapshot equality compares archive bytes, so the time of packing must not
+        // change them. ZIP's `time` feature can be enabled by another dependency.
+        let options = FileOptions::<()>::default()
+            .compression_method(CompressionMethod::Deflated)
+            .last_modified_time(zip::DateTime::default());
 
         for relative in PROFILE_FILE_ALLOWLIST {
             let absolute = profile_dir.join(relative);
@@ -2045,6 +2049,27 @@ mod tests {
         let empty = tempfile::tempdir().expect("tempdir");
         let packed = pack_profile(empty.path()).expect("pack");
         assert!(packed.is_empty());
+    }
+
+    #[test]
+    fn unchanged_profile_archives_match_across_a_zip_timestamp_boundary() {
+        let profile = tempfile::tempdir().expect("profile tempdir");
+        std::fs::write(profile.path().join("Local State"), b"os-crypt-key").unwrap();
+        let storage = profile.path().join("Default/Local Storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        std::fs::write(storage.join("session"), b"signed in").unwrap();
+
+        let first = pack_profile(profile.path()).expect("first archive");
+        assert!(!first.is_empty());
+        // DOS timestamps have two-second resolution. Repack unchanged files after
+        // crossing a boundary, even when zip's unified `time` feature is enabled.
+        std::thread::sleep(Duration::from_millis(2100));
+        let second = pack_profile(profile.path()).expect("later archive");
+        assert_eq!(first, second, "packing time must not create a new snapshot");
+
+        std::fs::write(storage.join("session"), b"signed in again").unwrap();
+        let changed = pack_profile(profile.path()).expect("changed archive");
+        assert_ne!(second, changed, "changed profile bytes still need a save");
     }
 
     #[cfg(unix)]
