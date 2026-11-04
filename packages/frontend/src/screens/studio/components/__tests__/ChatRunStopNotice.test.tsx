@@ -34,7 +34,7 @@ describe("persisted run stop notice", () => {
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
     submit.mockReset();
     props = { conversationId: "chat", viewerUserId: "viewer", humanLabelByUserId: new Map(), canWrite: true,
-      busy: false, messages: [notice], queuedSends: [], submitMessage: submit };
+      busy: false, messages: [notice], hasNewer: false, queuedSends: [], submitMessage: submit };
   });
   afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 
@@ -81,6 +81,57 @@ describe("persisted run stop notice", () => {
     await render({ messages: [notice, { ...undone, metadata: { ...undone.metadata, undoneRunId: "run-9" } }] });
     expect(controls!.canContinue(notice)).toBe(true);
     await render({ messages: [notice, { ...undone, metadata: { ...undone.metadata, source: "client" } }] });
+    expect(controls!.canContinue(notice)).toBe(true);
+  });
+  // A local test, Nov 4: the row of a turn stopped before it changed anything
+  // still offered Continue after two later turns had finished, and again
+  // after a reload.
+  it("offers Continue only on the chat's latest turn", async () => {
+    const asked = (id: string, timestamp: number): ChatMessage => ({
+      id, role: "user", authorId: "viewer", content: "Add a one-line tip.", timestamp, files: null,
+    });
+    const replied = (id: string, timestamp: number, jobId: string): ChatMessage => ({
+      id, role: "assistant", authorId: null, content: "Added the tip.", timestamp, files: null,
+      metadata: { jobId },
+    });
+    const continueButton = () => container.querySelector('[data-testid="chat-run-stop-continue"]');
+    // The stopped turn's own late rows and the lines nobody wrote keep it
+    // the latest.
+    const ownLateRow = replied("late", 2, "job-2");
+    const hiddenLine: ChatMessage = {
+      id: "hidden", role: "assistant", authorId: null, content: "The person undid the change from “…”", timestamp: 3,
+      files: null, metadata: { source: "controller", kind: "change_undone", presentation: { hidden: true },
+        undoneMessageId: "other", undoneRunId: "run-9" },
+    };
+    await render({ messages: [notice, ownLateRow, hiddenLine] });
+    expect(controls!.canContinue(notice)).toBe(true);
+    expect(continueButton()).not.toBeNull();
+
+    // Then the person asked for something else, and that turn finished.
+    const later = [notice, ownLateRow, hiddenLine, asked("next", 4), replied("next-reply", 5, "job-3")];
+    await render({ messages: later });
+    expect(controls!.canContinue(notice)).toBe(false);
+    expect(continueButton()).toBeNull();
+    // After a reload the chat holds the same messages: still no Continue.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render({ messages: [...later] });
+    expect(continueButton()).toBeNull();
+    // A later stopped turn is the latest one: its row offers Continue.
+    const laterStop: ChatMessage = { ...notice, id: "stop-2", timestamp: 6, metadata: { details: {
+      stopRequested: true, actorUserId: "viewer", agentHandles: ["octo"], jobIds: ["job-4"], runIds: ["run-4"],
+    } } };
+    await render({ messages: [...later, asked("again", 6), laterStop] });
+    expect(controls!.canContinue(notice)).toBe(false);
+    expect(controls!.canContinue(laterStop)).toBe(true);
+
+    // Opened at a message the person searched for, the chat shows the
+    // messages around it: with newer ones not shown, nobody can tell that
+    // the stop is still the latest, so it offers no Continue until they are.
+    await render({ messages: [notice, ownLateRow, hiddenLine], hasNewer: true });
+    expect(controls!.canContinue(notice)).toBe(false);
+    expect(continueButton()).toBeNull();
+    await render({ hasNewer: false });
     expect(controls!.canContinue(notice)).toBe(true);
   });
   it("allows retry after failed submission but considers queued continuation accepted", async () => {

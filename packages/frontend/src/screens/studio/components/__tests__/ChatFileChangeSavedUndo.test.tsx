@@ -68,6 +68,7 @@ vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
 
 import { ChatFileChangeList } from "../ChatFileChangeList";
 import { ChatLaterChangesContext, conversationLaterChanges } from "../chatLaterChanges";
+import { ChatSiteContext } from "../chatSiteContext";
 import type { ChatMessage, ChatMessageFileChange } from "../../types";
 
 const APP = "sites/livraria-lello/app.js";
@@ -195,6 +196,11 @@ describe("Undo of a saved change", () => {
       (chip) => chip.title,
     );
   const notSavedChips = () => container.querySelectorAll('[data-testid="chat-file-change-not-saved-chip"]');
+  // The row's own line: what the change is, its files one press away.
+  const rowLine = () => container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-toggle-files"]');
+  async function showFiles() {
+    await act(async () => rowLine()?.click());
+  }
 
   const undoChip = () => container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-revert"]');
   const confirmButton = () =>
@@ -268,9 +274,54 @@ describe("Undo of a saved change", () => {
     expect(undoChip()).toBeNull();
     expect(container.querySelector('[data-testid="chat-file-change-undo"]')).toBeNull();
     expect(container.querySelector('[data-testid="chat-file-change-review"]')).toBeNull();
+    expect(rowLine()?.textContent).toBe("Undone");
+    await showFiles();
     const chip = container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-file-chip"]');
     expect(chip?.title).toBe(`${APP} (reverted)`);
     expect(fetchWorkspaceGitHistoryReview).not.toHaveBeenCalled();
+  });
+
+  // A local test, Nov 4: each undone row read "↺ app.js", a file's name, under
+  // a reply that still said "the page is updated". The row says "Undone",
+  // with its files folded behind it, as soon as the Undo lands, after a
+  // reload, and in a chat whose site's rows read "Changed the site".
+  it("reads Undone, with its files one press away", async () => {
+    await renderRow();
+    expect(rowLine()).toBeNull();
+    expect(chipTitles()).toEqual([APP]);
+    await undo();
+    expect(rowLine()?.textContent).toBe("Undone");
+    expect(rowLine()?.getAttribute("aria-expanded")).toBe("false");
+    expect(chipTitles()).toEqual([]);
+    await showFiles();
+    expect(chipTitles()).toEqual([`${APP} (reverted)`]);
+
+    await reload([SAVED, UNDO_LINE]);
+    expect(rowLine()?.textContent).toBe("Undone");
+    expect(chipTitles()).toEqual([]);
+    await showFiles();
+    expect(chipTitles()).toEqual([`${APP} (reverted)`]);
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ChatSiteContext.Provider value={{ firstChangeAt: SAVED.timestamp }}>
+          <ChatLaterChangesContext.Provider value={conversationLaterChanges([SAVED, UNDO_LINE])}>
+            <ChatFileChangeList
+              files={SAVED.files ?? []}
+              projectId="p1"
+              commitRange={SAVED.commitRange ?? null}
+              messageId={SAVED.id}
+              messageTimestamp={SAVED.timestamp}
+            />
+          </ChatLaterChangesContext.Provider>
+        </ChatSiteContext.Provider>,
+      );
+    });
+    await settle();
+    expect(rowLine()?.textContent).toBe("Undone");
+    expect(chipTitles()).toEqual([]);
   });
 
   // The Undo's answer is shown, and its line goes into the chat's history, as
@@ -286,7 +337,7 @@ describe("Undo of a saved change", () => {
     expect(recordChangeUndone).toHaveBeenCalledWith({ projectId: "p1", messageId: SAVED.id, paths: [APP] });
     expect(showStatus).toHaveBeenCalledWith("Reverted. Saved as a new version.", "success", 4000, undefined);
     expect(undoChip()).toBeNull();
-    expect(chipTitles()).toEqual([`${APP} (reverted)`]);
+    expect(rowLine()?.textContent).toBe("Undone");
   });
 
   // A row with a secret file the turn's save left out. Undo reverts the saved

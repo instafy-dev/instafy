@@ -364,7 +364,7 @@ describe("Undo of a change a Stop left unsaved", () => {
     expect(revertWorkspaceGitPaths).toHaveBeenCalledWith(
       expect.objectContaining({ paths: [APP], expected: { [APP]: LEFT_AS } }),
     );
-    expect(container.textContent).toContain("1 reverted");
+    expect(container.textContent).toContain("1 undone");
     expect(container.textContent).toContain("app.js(reverted)");
     expect(container.textContent).not.toContain("plan.md(removed)");
   });

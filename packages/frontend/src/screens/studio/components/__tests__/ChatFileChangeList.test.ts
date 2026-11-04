@@ -1111,6 +1111,22 @@ describe("ChatFileChangeList", () => {
       return document.querySelector<HTMLElement>('[data-testid="chat-file-change-revert-dialog"]');
     }
 
+    // The row's line: "Undone" once every file is undone, its files folded behind it.
+    function rowLine() {
+      return container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-toggle-files"]');
+    }
+
+    async function shownFileTitles() {
+      if (rowLine()?.getAttribute("aria-expanded") === "false") {
+        await act(async () => {
+          rowLine()?.click();
+        });
+      }
+      return Array.from(container.querySelectorAll<HTMLElement>('[data-testid="chat-file-change-file-chip"]')).map(
+        (chip) => chip.title,
+      );
+    }
+
     async function openRevertDialog() {
       await act(async () => {
         revertChip()?.click();
@@ -1271,7 +1287,7 @@ describe("ChatFileChangeList", () => {
         });
         expect(showStatus).toHaveBeenCalledWith("Reverted. Saved as a new version.", "success", 4000, undefined);
         expect(commits).toHaveLength(1);
-        expect(container.textContent).toContain("Reverted 2 files");
+        expect(rowLine()?.textContent).toBe("Undone");
         expect(revertChip()).toBeNull();
         expect(revertWorkspaceGitPaths).not.toHaveBeenCalled();
       } finally {
@@ -1571,7 +1587,7 @@ describe("ChatFileChangeList", () => {
       await confirmRevert();
 
       expect(container.querySelector('[data-testid="chat-file-change-toggle-files"]')?.textContent).toContain(
-        "Edited 2 files · 1 reverted",
+        "Edited 2 files · 1 undone",
       );
       const chipTitles = Array.from(
         container.querySelectorAll<HTMLElement>('[data-testid="chat-file-change-file-chip"]'),
@@ -1606,9 +1622,7 @@ describe("ChatFileChangeList", () => {
         Array.from(container.querySelectorAll<HTMLElement>('[data-testid="chat-file-change-file-chip"]')).map(
           (chip) => chip.title,
         );
-      expect(container.querySelector('[data-testid="chat-file-change-toggle-files"]')?.textContent).toContain(
-        "Reverted 2 files",
-      );
+      expect(rowLine()?.textContent).toBe("Undone");
       await act(async () => {
         container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-toggle-files"]')?.click();
       });
@@ -1825,10 +1839,8 @@ describe("ChatFileChangeList", () => {
           expect(showStatus).toHaveBeenCalledWith("Those changes are undone.", "success", 4000, undefined);
           expect(commits).toHaveLength(1);
           expect(revertChip()).toBeNull();
-          const chipTitles = Array.from(
-            container.querySelectorAll<HTMLElement>('[data-testid="chat-file-change-file-chip"]'),
-          ).map((chip) => chip.title);
-          expect(chipTitles).toEqual(["src/app.ts (reverted)"]);
+          expect(rowLine()?.textContent).toBe("Undone");
+          expect(await shownFileTitles()).toEqual(["src/app.ts (reverted)"]);
         } finally {
           window.removeEventListener("instafy:workspace-commit", onCommit);
         }
@@ -1898,7 +1910,7 @@ describe("ChatFileChangeList", () => {
       // The saved file is undone; the secret the save left out and the
       // never-saved tmp/ file are untouched, and .env still says Not saved.
       expect(container.querySelector('[data-testid="chat-file-change-toggle-files"]')?.textContent).toContain(
-        "Edited 3 files · 1 reverted · 1 not saved",
+        "Edited 3 files · 1 undone · 1 not saved",
       );
       const chipTitles = Array.from(
         container.querySelectorAll<HTMLElement>('[data-testid="chat-file-change-file-chip"]'),
@@ -1950,10 +1962,11 @@ describe("ChatFileChangeList", () => {
         await waitFor(0);
 
         // The only file is reverted, so the action row is gone: focus lands
-        // on the file chip, never on the body.
+        // on the row's "Undone", never on the body.
         expect(document.querySelector('[data-testid="chat-file-change-revert-dialog"]')).toBeNull();
         expect(revertChip()).toBeNull();
-        expect(document.activeElement?.getAttribute("data-testid")).toBe("chat-file-change-file-chip");
+        expect(document.activeElement).toBe(rowLine());
+        expect(rowLine()?.textContent).toBe("Undone");
       });
 
       it("returns focus to Undo when the revert fails", async () => {
@@ -2019,10 +2032,8 @@ describe("ChatFileChangeList", () => {
         });
         await waitFor(0);
         expect(showStatus).toHaveBeenCalledWith("Reverted. Saved as a new version.", "success", 4000, undefined);
-        expect(container.querySelector('[data-testid="chat-file-change-file-chip"]')?.getAttribute("title")).toBe(
-          "src/app.ts (reverted)",
-        );
-        expect(document.activeElement?.getAttribute("data-testid")).toBe("chat-file-change-file-chip");
+        expect(rowLine()?.textContent).toBe("Undone");
+        expect(document.activeElement).toBe(rowLine());
       });
 
       it("closes on Escape while the revert runs", async () => {
@@ -2113,9 +2124,7 @@ describe("ChatFileChangeList", () => {
           });
           expect(showStatus).toHaveBeenCalledTimes(2);
           expect(showStatus).toHaveBeenLastCalledWith("Reverted. Saved as a new version.", "success", 4000, undefined);
-          expect(container.querySelector('[data-testid="chat-file-change-file-chip"]')?.getAttribute("title")).toBe(
-            "src/app.ts (reverted)",
-          );
+          expect(rowLine()?.textContent).toBe("Undone");
           expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(1);
         } finally {
           vi.useRealTimers();
@@ -2208,13 +2217,11 @@ describe("ChatFileChangeList", () => {
           });
           expect(showStatus).toHaveBeenCalledTimes(2);
           expect(showStatus).toHaveBeenLastCalledWith("Reverted. Saved as a new version.", "success", 4000, undefined);
-          expect(container.querySelector('[data-testid="chat-file-change-file-chip"]')?.getAttribute("title")).toBe(
-            "src/app.ts (reverted)",
-          );
+          expect(rowLine()?.textContent).toBe("Undone");
           expect(commits).toHaveLength(1);
           expect(dialog()).toBeNull();
           expect(revertChip()).toBeNull();
-          expect(document.activeElement?.getAttribute("data-testid")).toBe("chat-file-change-file-chip");
+          expect(document.activeElement).toBe(rowLine());
           expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(1);
         } finally {
           vi.useRealTimers();
@@ -2264,9 +2271,7 @@ describe("ChatFileChangeList", () => {
           });
           expect(showStatus).toHaveBeenCalledTimes(3);
           expect(showStatus).toHaveBeenLastCalledWith("Reverted. Saved as a new version.", "success", 4000, undefined);
-          expect(container.querySelector('[data-testid="chat-file-change-file-chip"]')?.getAttribute("title")).toBe(
-            "src/app.ts (reverted)",
-          );
+          expect(rowLine()?.textContent).toBe("Undone");
           expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledTimes(1);
           expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(1);
         } finally {
@@ -2355,9 +2360,7 @@ describe("ChatFileChangeList", () => {
       expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledWith(
         expect.objectContaining({ originId: "desktop-origin", routing: "default", commit: head }),
       );
-      expect(container.querySelector('[data-testid="chat-file-change-file-chip"]')?.textContent).toContain(
-        "(reverted)",
-      );
+      expect(rowLine()?.textContent).toBe("Undone");
     });
   });
 });
