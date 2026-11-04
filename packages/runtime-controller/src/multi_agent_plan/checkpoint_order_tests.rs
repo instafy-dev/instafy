@@ -267,18 +267,24 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                 }
             };
             let group = Uuid::new_v4();
+            let parent_job = Uuid::new_v4();
             let plan = json!({"groupId":group,"role":"worker","mode":"read_only",
-                "parentJobId":Uuid::new_v4(),"parentRuntimeId":space.hosted_runtime_id,
+                "parentJobId":parent_job,"parentRuntimeId":space.hosted_runtime_id,
                 "lead":{"leadHandle":"octo","continuationPrompt":"Summarize the verified results."}});
             let (conversation, first, _) = insert_finished_plan_lane(&space, None, "alpha", plan.clone(), json!({})).await?;
             let (_, last, _) = insert_finished_plan_lane(&space, Some(conversation), "beta", plan, json!({})).await?;
             let ended_ago: i64 = match case { "settling" => 30, "too_old" => 3 * 3600, "given_up" => 20 * 60, _ => 5 * 60 };
             let connection = pool.get().await?;
+            // The planning job the workers came from: the lead inherits its research budget.
+            // It started before the workers ended, so it is no newer turn.
+            connection.execute("insert into agent_jobs(id,project_id,conversation_id,status,outcome,created_at,completed_at,payload)
+                values($1,$2,$3,'completed','succeeded',now()-($4::bigint*interval '1 second'),now()-($4::bigint*interval '1 second'),'{}'::jsonb)",
+                &[&parent_job,&space.project_id,&conversation,&(ended_ago+120)]).await?;
             // The hierarchy columns the controller's dispatch fills for every worker.
-            connection.execute("update agent_jobs set agent_role='worker',plan_group_id=$2,
-                completed_at=now()-($3::bigint*interval '1 second') where id=$1", &[&first,&group,&(ended_ago+60)]).await?;
-            connection.execute("update agent_jobs set agent_role='worker',plan_group_id=$2,summary='LATEST VERIFIED RESULT',
-                completed_at=now()-($3::bigint*interval '1 second') where id=$1", &[&last,&group,&ended_ago]).await?;
+            connection.execute("update agent_jobs set agent_role='worker',plan_group_id=$2,parent_job_id=$4,
+                completed_at=now()-($3::bigint*interval '1 second') where id=$1", &[&first,&group,&(ended_ago+60),&parent_job]).await?;
+            connection.execute("update agent_jobs set agent_role='worker',plan_group_id=$2,parent_job_id=$4,summary='LATEST VERIFIED RESULT',
+                completed_at=now()-($3::bigint*interval '1 second') where id=$1", &[&last,&group,&ended_ago,&parent_job]).await?;
             match case {
                 "deleted" => { connection.execute("update projects set status='deleted' where id=$1", &[&space.project_id]).await?; }
                 "stopped" => { connection.execute("insert into conversation_messages(id,conversation_id,project_id,role,content,metadata)
