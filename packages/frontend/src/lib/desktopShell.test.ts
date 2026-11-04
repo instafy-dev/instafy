@@ -6,6 +6,7 @@ import {
   desktopTitleBarFree,
   desktopWindowChrome,
   isDesktopShell,
+  isInsideDesktopShell,
   showBackToLanding,
 } from "./desktopShell";
 
@@ -14,6 +15,34 @@ describe("isDesktopShell", () => {
     expect(isDesktopShell({ instafyDesktop: {} })).toBe(true);
     expect(isDesktopShell({})).toBe(false);
     expect(isDesktopShell(undefined)).toBe(false);
+  });
+});
+
+describe("isInsideDesktopShell", () => {
+  it("counts the shell's main frame and a same-origin frame inside it", () => {
+    const shell = { instafyDesktop: {} };
+    expect(isInsideDesktopShell(shell)).toBe(true);
+    // Only the main frame gets the preload bridge.
+    expect(isInsideDesktopShell({ top: shell })).toBe(true);
+  });
+
+  it("does not count the web, a top-level page, or a parent on another origin", () => {
+    const webTop = {};
+    expect(isInsideDesktopShell({ top: webTop })).toBe(false);
+    const topLevel: { top?: unknown } = {};
+    topLevel.top = topLevel;
+    expect(isInsideDesktopShell(topLevel)).toBe(false);
+    // Reading a property of a cross-origin window throws.
+    const crossOriginTop = new Proxy(
+      {},
+      {
+        get() {
+          throw new DOMException("Blocked a frame from accessing a cross-origin frame.", "SecurityError");
+        },
+      },
+    );
+    expect(isInsideDesktopShell({ top: crossOriginTop })).toBe(false);
+    expect(isInsideDesktopShell(undefined)).toBe(false);
   });
 });
 

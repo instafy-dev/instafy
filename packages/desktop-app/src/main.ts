@@ -36,6 +36,7 @@ import {
 import { desktopLog, installDesktopLogging } from "./logging";
 import { externalBrowserUrl } from "./externalUrls";
 import {
+  createHeldDesktopAuthCallback,
   findInstafyDesktopDeepLinkArg,
   INSTAFY_DESKTOP_PROTOCOL,
   resolveDesktopDeepLinkTargetUrl,
@@ -651,8 +652,8 @@ let pendingDesktopDeepLinkTargetUrl: string | null = null;
 // deep link, or (on macOS) while the app is running with every window closed.
 // webContents.send would be delivered to nobody, so the URL is parked here and
 // the renderer drains it on mount, mirroring how the mobile bridge hands over
-// its pending URL.
-let pendingDesktopAuthCallbackUrl: string | null = null;
+// its pending URL. It expires ten minutes after it arrives.
+const heldDesktopAuthCallback = createHeldDesktopAuthCallback();
 
 function focusMainWindow(mainWindow: BrowserWindow) {
   if (mainWindow.isMinimized()) {
@@ -679,7 +680,7 @@ function handleDesktopDeepLink(rawUrl: string | null | undefined): boolean {
     // Park it unconditionally, then try live delivery. The renderer drains the
     // slot on mount, so a callback that arrives before it is listening -- or
     // with no window at all -- still completes the sign-in.
-    pendingDesktopAuthCallbackUrl = rawUrl;
+    heldDesktopAuthCallback.hold(rawUrl);
     const window = getStudioWindow() ?? null;
     if (window) {
       window.webContents.send("instafy:authCallback", rawUrl);
@@ -1962,9 +1963,7 @@ app.whenReady().then(() => {
   // ask for it.
   ipcMain.handle("instafy:consumePendingAuthCallback", async (event) => {
     assertAllowedCaller(event);
-    const pending = pendingDesktopAuthCallbackUrl;
-    pendingDesktopAuthCallbackUrl = null;
-    return pending;
+    return heldDesktopAuthCallback.take();
   });
 
   // The sanctioned way out to a browser. Restricted to http/https so a

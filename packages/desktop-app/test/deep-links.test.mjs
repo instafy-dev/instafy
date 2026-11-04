@@ -22,11 +22,53 @@ test("resolveDesktopDeepLinkTargetUrl maps host-style Studio links to the config
 test("resolveDesktopDeepLinkTargetUrl maps path-style Studio links to the configured app origin", () => {
   assert.equal(
     resolveDesktopDeepLinkTargetUrl(
-      "instafy:///studio?projectId=project-1#bottom",
+      "instafy:///studio?projectId=project-1",
       "http://127.0.0.1:5173/studio",
     ),
-    "http://127.0.0.1:5173/studio?projectId=project-1#bottom",
+    "http://127.0.0.1:5173/studio?projectId=project-1",
   );
+});
+
+// The page's auth client reads its address: #access_token=... replaces the
+// session and #error_description=... ends it. No Instafy link carries a
+// fragment, so none is passed on.
+test("resolveDesktopDeepLinkTargetUrl drops every fragment", () => {
+  for (const [deepLink, expected] of [
+    ["instafy:///studio?projectId=project-1#bottom", "https://prod.instafy.dev/studio?projectId=project-1"],
+    ["instafy://login#access_token=a&refresh_token=b&token_type=bearer", "https://prod.instafy.dev/login"],
+    ["instafy://studio#error_description=x", "https://prod.instafy.dev/studio"],
+    // Route matching is case-sensitive, so this is a navigation, not a callback.
+    ["instafy://AUTH#access_token=a&refresh_token=b", "https://prod.instafy.dev/AUTH"],
+  ]) {
+    assert.equal(resolveDesktopDeepLinkTargetUrl(deepLink, "https://prod.instafy.dev/studio"), expected, deepLink);
+  }
+});
+
+test("resolveDesktopDeepLinkTargetUrl rejects links that carry session parameters", () => {
+  for (const deepLink of [
+    "instafy://login?error_description=x&redirect=%2Fstudio",
+    "instafy://studio?projectId=project-1&code=code-from-a-link",
+    "instafy:///login?access_token=a&refresh_token=b",
+    "instafy://studio?error=access_denied",
+    "instafy://studio?%61ccess_token=a",
+    "instafy://studio?ERROR_DESCRIPTION=x",
+    "instafy://studio?%20code%20=x",
+  ]) {
+    assert.equal(resolveDesktopDeepLinkTargetUrl(deepLink, "https://prod.instafy.dev/studio"), null, deepLink);
+  }
+});
+
+test("resolveDesktopDeepLinkTargetUrl keeps the links Instafy makes", () => {
+  for (const [deepLink, expected] of [
+    [
+      "instafy://studio?projectId=project-1&panel=settings&settingsTab=project",
+      "https://prod.instafy.dev/studio?projectId=project-1&panel=settings&settingsTab=project",
+    ],
+    ["instafy://login?type=recovery", "https://prod.instafy.dev/login?type=recovery"],
+    ["instafy://invite?token=invite-token", "https://prod.instafy.dev/invite?token=invite-token"],
+  ]) {
+    assert.equal(resolveDesktopDeepLinkTargetUrl(deepLink, "https://prod.instafy.dev/studio"), expected, deepLink);
+  }
 });
 
 test("resolveDesktopDeepLinkTargetUrl rejects auth and non-Instafy links", () => {
