@@ -142,8 +142,9 @@ fn sse_output(item: Option<Value>, end_turn: Option<bool>, usage: Option<Value>)
 
 /// The Instafy proxy's envelope for a retryable upstream rate limit, which it still sends as an
 /// HTTP 429 to a request that does not stream. The proxy always sends a Retry-After with it.
-/// Codex never retries an HTTP 429 (`retry_429` is off for every provider), so the proxy streams
-/// a transient rate limit to codex as `proxy_stream_rate_limit` instead.
+/// Codex's HTTP client never retries a 429 (`retry_429` is off for every provider); since
+/// rust-v0.166 its turn retries one that has a Retry-After, after that wait, within the stream
+/// retry budget. The proxy streams a transient rate limit to codex as `proxy_stream_rate_limit`.
 fn proxy_rate_limit() -> Response {
     let body = json!({"error":{"message":"The upstream provider rate limit was reached.",
         "type":"upstream_error", "code":"upstream_rate_limit", "retryable":true}});
@@ -703,8 +704,8 @@ fn no_change_reply(body: &Value, reply: &str) -> String {
     }
 }
 
-/// Collects every line of every string in a request. The prompt travels as `instructions`, or
-/// for a Responses Lite model (gpt-6-luna, gpt-6-sol) as a developer input item.
+/// Collects every line of every string in a request. The prompt travels as the input's first
+/// developer message (before rust-v0.166, as `instructions` for a model that is not Responses Lite).
 fn request_text_lines(value: &Value, output: &mut Vec<String>) {
     match value {
         Value::String(text) => output.extend(text.lines().map(str::to_string)),
@@ -1198,8 +1199,13 @@ scenario_test!(
     2
 );
 scenario_test!(transient_503_recovers_in_same_session, "transient", 2);
-// Codex never retries an HTTP 429, and the runtime does not restart the run for one.
-scenario_test!(http_429_is_not_retried, "http_429", 1);
+// Codex retries an HTTP 429 with a Retry-After once, within its stream retry budget (since
+// rust-v0.166), and the runtime does not restart the run for one.
+scenario_test!(
+    http_429_is_retried_once_within_the_stream_budget,
+    "http_429",
+    2
+);
 scenario_test!(plan_usage_limit_429_is_not_retried, "usage_limit_429", 1);
 // The shapes the proxy streams in place of a transient 429, which codex retries by itself.
 scenario_test!(

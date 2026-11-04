@@ -46,7 +46,7 @@ use codex_protocol::permissions::{
 use codex_protocol::protocol::{
     AskForApproval, CodexErrorInfo, EnvironmentConfigState, Event, EventMsg, Op, SandboxPolicy,
     SessionSource, StreamErrorEvent, ThreadHistoryMode, ThreadSettingsOverrides, TokenUsage,
-    TurnEnvironmentSelection, TurnEnvironmentSelections,
+    TurnEnvironmentRequest, TurnEnvironmentRequests,
 };
 use codex_protocol::turn_input::{
     NotSubmittedReason, StartIfIdleSubmission, SteerSubmission, TurnInput, TurnInputRequest,
@@ -2494,7 +2494,7 @@ impl CodexClient {
                     // environment. MCP tools do not require one, while every
                     // filesystem, image, patch, and shell tool does. Ordinary
                     // runtime turns still need the explicit local selection.
-                    environments: Some(turn_environment_selections(
+                    environments: Some(turn_environment_requests(
                         default_cwd.clone(),
                         bounded,
                     )),
@@ -2524,7 +2524,7 @@ impl CodexClient {
             .await
             .context("failed to submit prompt to Codex")?
         {
-            StartIfIdleSubmission::Started { turn_id } => turn_id,
+            StartIfIdleSubmission::Started { turn_id, .. } => turn_id,
             StartIfIdleSubmission::NotSubmitted { reason } => {
                 return Err(anyhow!("Codex declined the runtime prompt: {reason:?}"));
             }
@@ -4356,7 +4356,9 @@ pub fn personal_browser_capability_contract() -> Result<JsonValue> {
 
     let cwd = AbsolutePathBuf::current_dir()
         .context("failed to resolve cwd for Personal Browser capability contract")?;
-    let environment_count = turn_environment_selections(cwd, true).environments.len();
+    let environment_count = turn_environment_requests(cwd, true)
+        .environment_requests
+        .len();
     if environment_count != 0 {
         return Err(anyhow!(
             "bounded Personal Browser contract unexpectedly exposes a local execution environment"
@@ -4552,21 +4554,21 @@ fn apply_bounded_security_overrides(config: &mut Config, enabled: bool) -> Resul
     Ok(())
 }
 
-fn turn_environment_selections(
+fn turn_environment_requests(
     default_cwd: AbsolutePathBuf,
     bounded: bool,
-) -> TurnEnvironmentSelections {
+) -> TurnEnvironmentRequests {
     let environments = if bounded {
         Vec::new()
     } else {
-        vec![TurnEnvironmentSelection {
+        vec![TurnEnvironmentRequest {
             environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
             cwd: PathUri::from_abs_path(&default_cwd),
             workspace_roots: vec![PathUri::from_abs_path(&default_cwd)],
             config: EnvironmentConfigState::FromThread,
         }]
     };
-    TurnEnvironmentSelections::new(default_cwd, environments)
+    TurnEnvironmentRequests::new(default_cwd, environments)
 }
 
 pub(crate) fn resolve_runtime_reasoning_effort(
@@ -5904,7 +5906,7 @@ fn assistant_response_item_text(item: &ResponseItem) -> Option<String> {
     let text = content
         .iter()
         .filter_map(|entry| match entry {
-            ContentItem::OutputText { text } => Some(text.as_str()),
+            ContentItem::OutputText { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -5916,6 +5918,9 @@ fn assistant_response_item_text(item: &ResponseItem) -> Option<String> {
 fn message_phase_label(phase: Option<&MessagePhase>) -> Option<&'static str> {
     match phase {
         Some(MessagePhase::Commentary) => Some("commentary"),
+        // Answer text that more output or tool calls may follow; Studio's answer draft is
+        // only a `final_answer`.
+        Some(MessagePhase::PartialAnswer) => Some("partial_answer"),
         Some(MessagePhase::FinalAnswer) => Some("final_answer"),
         None => None,
     }
@@ -8700,13 +8705,13 @@ mod tests {
         let cwd = AbsolutePathBuf::try_from(workspace.path().to_path_buf())
             .expect("absolute workspace path");
 
-        let bounded = turn_environment_selections(cwd.clone(), true);
-        assert!(bounded.environments.is_empty());
+        let bounded = turn_environment_requests(cwd.clone(), true);
+        assert!(bounded.environment_requests.is_empty());
 
-        let ordinary = turn_environment_selections(cwd, false);
-        assert_eq!(ordinary.environments.len(), 1);
+        let ordinary = turn_environment_requests(cwd, false);
+        assert_eq!(ordinary.environment_requests.len(), 1);
         assert_eq!(
-            ordinary.environments[0].environment_id,
+            ordinary.environment_requests[0].environment_id,
             LOCAL_ENVIRONMENT_ID
         );
     }
@@ -10454,12 +10459,9 @@ required = true
                 parsed_cmd: Vec::new(),
                 source: ExecCommandSource::Agent,
                 interaction_input: None,
-                stdout: "README.md\n".to_string(),
-                stderr: String::new(),
                 aggregated_output: "README.md\n".to_string(),
                 exit_code: 0,
                 duration: Duration::from_millis(25),
-                formatted_output: "README.md".to_string(),
                 status: ExecCommandStatus::Completed,
                 plugin_id: None,
                 script_path: None,
@@ -10544,12 +10546,9 @@ required = true
                 parsed_cmd: Vec::new(),
                 source: ExecCommandSource::Agent,
                 interaction_input: None,
-                stdout: output.into(),
-                stderr: String::new(),
                 aggregated_output: output.into(),
                 exit_code: 0,
                 duration: Duration::from_millis(5),
-                formatted_output: output.into(),
                 status: ExecCommandStatus::Completed,
                 plugin_id: None,
                 script_path: None,
@@ -10682,12 +10681,9 @@ required = true
                 parsed_cmd: Vec::new(),
                 source: ExecCommandSource::Agent,
                 interaction_input: None,
-                stdout: "{}".into(),
-                stderr: String::new(),
                 aggregated_output: "{}".into(),
                 exit_code: 0,
                 duration: Duration::from_millis(1),
-                formatted_output: "{}".into(),
                 status: ExecCommandStatus::Completed,
                 plugin_id: None,
                 script_path: None,
@@ -11714,12 +11710,9 @@ required = true
                 parsed_cmd: Vec::new(),
                 source: ExecCommandSource::Agent,
                 interaction_input: None,
-                stdout: String::new(),
-                stderr: String::new(),
                 aggregated_output: String::new(),
                 exit_code: 0,
                 duration: Duration::from_millis(25),
-                formatted_output: String::new(),
                 status: ExecCommandStatus::Completed,
                 plugin_id: None,
                 script_path: None,
@@ -11775,6 +11768,7 @@ required = true
         let completed = adapter.collect(&Event {
             id: "evt_turn_complete".to_string(),
             msg: EventMsg::TurnComplete(TurnCompleteEvent {
+                root_turn_id: None,
                 turn_id: "turn_1".to_string(),
                 last_agent_message: None,
                 error: None,
@@ -11829,6 +11823,7 @@ required = true
         let turn_complete = adapter.collect(&Event {
             id: "evt_turn_complete".to_string(),
             msg: EventMsg::TurnComplete(TurnCompleteEvent {
+                root_turn_id: None,
                 turn_id: "turn_1".to_string(),
                 last_agent_message: None,
                 error: None,
@@ -11998,9 +11993,13 @@ required = true
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "{\"summary\":\"ok-from-raw\",\"files\":[]}".to_string(),
+                        annotations: None,
+                        logprobs: None,
                     }],
                     phase: Some(MessagePhase::FinalAnswer),
                     internal_chat_message_metadata_passthrough: None,
+                    encrypted_content: None,
+                    status: None,
                 },
             }),
         });
@@ -12016,6 +12015,7 @@ required = true
         let turn_complete = adapter.collect(&Event {
             id: "evt_turn_complete".to_string(),
             msg: EventMsg::TurnComplete(TurnCompleteEvent {
+                root_turn_id: None,
                 turn_id: "turn_1".to_string(),
                 last_agent_message: None,
                 error: None,
@@ -12037,9 +12037,13 @@ required = true
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: "working".to_string(),
+                annotations: None,
+                logprobs: None,
             }],
             phase: Some(MessagePhase::Commentary),
             internal_chat_message_metadata_passthrough: None,
+            encrypted_content: None,
+            status: None,
         };
 
         assert_eq!(assistant_response_item_text(&item), None);
@@ -12088,6 +12092,7 @@ required = true
                 info: Some(TokenUsageInfo {
                     total_token_usage: total,
                     last_token_usage: last,
+                    last_usage_includes_reasoning: None,
                     model_context_window: Some(128_000),
                 }),
                 rate_limits: None,
@@ -12099,6 +12104,7 @@ required = true
         Event {
             id: turn_id.to_string(),
             msg: EventMsg::TurnComplete(TurnCompleteEvent {
+                root_turn_id: None,
                 turn_id: turn_id.to_string(),
                 last_agent_message: None,
                 error: None,
