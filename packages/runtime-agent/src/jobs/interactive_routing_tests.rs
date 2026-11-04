@@ -365,6 +365,38 @@ fn a_pages_card_comes_before_its_check() {
     }
 }
 
+/// A comparison looked right on a laptop and cramped on a phone, and the hub said only
+/// "Phone-first". It says what that means for a page Octo writes itself (the starters already do
+/// it): never wider than the screen, one column when narrow. An unedited earlier copy of the hub is
+/// upgraded; an edited one is kept.
+#[test]
+fn a_page_is_never_wider_than_a_phone_and_one_column_when_narrow() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hub =
+        include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
+    let previous = include_str!("legacy/interactive-artifacts-v9.md");
+    let line = "Phone-first (never wider than the screen, one column when narrow)";
+    assert!(flat(hub).contains(line), "{hub}");
+    assert!(!flat(previous).contains("never wider than the screen"));
+    assert!(
+        hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+        "{} bytes",
+        hub.len()
+    );
+
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    learn::ensure_project_memory_scaffold(root);
+    let path = root.join(learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
+    fs::write(&path, previous).unwrap();
+    learn::ensure_project_memory_scaffold(root);
+    assert_eq!(fs::read_to_string(&path).unwrap(), hub);
+    let edited = format!("{previous}\nLocal page preference.\n");
+    fs::write(&path, &edited).unwrap();
+    learn::ensure_project_memory_scaffold(root);
+    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+}
+
 /// A hand-back's own words are always the controller's one line, which names no page. Research
 /// that ends in a page goes to the browser first, so the hand-back is often its chat's first
 /// building turn: its skills were picked from that line, the browser skill and no page builder,

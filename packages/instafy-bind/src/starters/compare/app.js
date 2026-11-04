@@ -1,5 +1,6 @@
-/* Compare starter: 2-8 options side by side. A table when the page is wide, a list on phones, same order and ids.
- * You design the content in data.json; keep theme.css and site.js. Restyle only when asked.
+/* Compare starter: 2-8 options side by side. A table when the page is wide, a list on phones, same order and ids: a
+ * phone's row shows the values found, each with its source line, and names the rest once ("Not found yet: Weight,
+ * Price"). You design the content in data.json; keep theme.css and site.js. Restyle only when asked.
  *
  * data.json:
  *   title, lede            the page title and its one-line answer: the verdict, and the biggest unknown about the
@@ -189,6 +190,8 @@
     return f.unknown || ((col ? col.label : f.key) + " unknown");
   }
   function lowerFirst(text) { text = String(text || ""); return text.charAt(0).toLowerCase() + text.slice(1); }
+  /** "A", "A and B", "A, B and C". */
+  function and(list) { return list.length > 1 ? list.slice(0, -1).join(", ") + " and " + list[list.length - 1] : list[0]; }
 
   function render(data, st) {
     site.head(data);
@@ -226,12 +229,15 @@
     bar.hidden = !bar.firstChild;
 
     var list = document.getElementById("list");
+    // the width is read before the list is emptied: measured with an empty list, the page would be as short as its
+    // header, and a reader scrolled down would land back at the top
+    var wide = isWide();
     list.replaceChildren();
     if (!items.length) {
       list.appendChild(site.empty("No options yet.", null, "Ask in chat to add some."));
     } else {
       var stores = hasPrice ? site.priceNotice(all) : null;
-      wideNow = isWide();
+      wideNow = wide;
       var wrap = h("div", { "class": "stack" });
       if (shown.length) wrap.appendChild(wideNow ? table(data, shown, st, shared) : cards(data, shown, st, shared));
       else wrap.appendChild(h("p", { "class": "cap", text: "None is known to be " + lowerFirst(data.filter.label || "within the limit") + "." }));
@@ -284,7 +290,6 @@
    * cell of those columns has its own source. */
   function sharedLine(data, src, items) {
     var groups = {};
-    var and = function (list) { return list.length > 1 ? list.slice(0, -1).join(", ") + " and " + list[list.length - 1] : list[0]; };
     columns(data).forEach(function (c) {
       var s = src.cols[c.key];
       if (!s) return;
@@ -358,21 +363,63 @@
   }
 
   /** Phones: one list, a row per option. The sorted value (with its caption) sits on the right, so you compare by
-   * scanning down the right edge; the other columns follow as facts in the same order on every row. */
+   * scanning down the right edge; the values found follow as facts in the same order on every row, each with its
+   * source line. What nobody found is named once under them ("Not found yet: Weight, Price"), not a stack of
+   * "Unknown"s. */
   function cards(data, items, st, shared) {
     var cols = columns(data);
     var def = sortDef(data, st);
     var sortCol = def ? colOf(data, def.key) : null;
     return h("ol", { "class": "list cards" }, items.map(function (item) {
       var open = st.open === site.slug(item.ref);
-      var rest = cols.filter(function (c) { return c !== sortCol; });
+      var gaps = [];
+      var drawn = cols.map(function (c) {
+        var el = cell(item, c, shared, c === sortCol ? c.label : undefined);
+        if (!isGap(item, c, el)) return el;
+        gaps.push({ label: String(c.label || c.key), note: gapNote(valueOf(item, c), c) });
+        return null;
+      });
+      var top = sortCol ? drawn[cols.indexOf(sortCol)] : null;
+      var facts = cols.map(function (c, i) {
+        return c !== sortCol && drawn[i] ? h("div", null, h("dt", { text: c.label }), h("dd", null, drawn[i])) : null;
+      }).filter(Boolean);
       return h("li", { attrs: site.rowAttrs(item.ref) },
         h("div", { "class": "card-head" },
           h("div", null, nameBlock(item)),
-          sortCol ? h("div", { "class": "sortv" }, cell(item, sortCol, shared, sortCol.label)) : null),
-        rest.length ? h("dl", { "class": "facts" }, rest.map(function (c) { return h("div", null, h("dt", { text: c.label }), h("dd", null, cell(item, c, shared))); })) : null,
+          top ? h("div", { "class": "sortv" }, top) : null),
+        facts.length ? h("dl", { "class": "facts" }, facts) : null,
+        gaps.length ? h("p", { "class": "cap not-found", text: notFound(gaps) }) : null,
         hasMore(item) ? h("div", { "class": "actions" }, detailsButton(item, st)) : null,
         open && hasMore(item) ? more(item) : null);
     }));
+  }
+  /** A cell that says only "Unknown" (and why): no value, no page read for it ("Not listed · checked … ↗" cites one), no
+   * check running or failed, and nothing to press or open ("where to check ↗"). A price whose store can be opened or
+   * checked stays on its row: its "Open store ↗" or "Check price" comes once the binder has answered (the row keeps its
+   * shape), and a check that could not read the store says there why. */
+  function isGap(item, col, drawn) {
+    var f = valueOf(item, col);
+    if (site.shown(f) || (f && (f.src || f.status === "not_found"))) return false;
+    if (isPrice(col) && (site.anyPending([item]) || (item.store && (item.store.readable || site.safeUrl(item.store.url))))) return false;
+    return !drawn.querySelector("a, button, svg, .err");
+  }
+  /** Why a value is missing, from its note; "" when the note only says that it is ("Not checked", "Weight not
+   * checked", "Unknown"). */
+  function gapNote(f, col) {
+    var note = String((f && f.note) || "").replace(/\s+/g, " ").trim().replace(/\.$/, "");
+    var rest = note.toLowerCase();
+    var label = String(col.label || "").toLowerCase();
+    if (label && rest.indexOf(label) === 0) rest = rest.slice(label.length).trim();
+    return !rest || /^(unknown|to confirm|((is|are|was|were) )?not (yet )?(checked|verified|found|known|listed|read)( yet)?)$/.test(rest) ? "" : note.slice(0, 100);
+  }
+  /** "Not found yet: Weight, Price, Reviews"; values missing for one reason share it: "Not found yet: Price and Battery
+   * (maker.example did not answer), Suction". */
+  function notFound(gaps) {
+    var parts = [];
+    gaps.forEach(function (g) {
+      var same = g.note ? parts.filter(function (p) { return p.note === g.note; })[0] : null;
+      if (same) same.labels.push(g.label); else parts.push({ note: g.note, labels: [g.label] });
+    });
+    return "Not found yet: " + parts.map(function (p) { return and(p.labels) + (p.note ? " (" + p.note + ")" : ""); }).join(", ");
   }
 })();

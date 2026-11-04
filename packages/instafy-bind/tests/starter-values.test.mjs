@@ -90,8 +90,10 @@ class Element extends Node {
   querySelectorAll(selector) { return all(this).filter((el) => el !== this && matches(el, selector)); }
 }
 const all = (root) => [root, ...root.childNodes.filter((c) => c.nodeType === 1).flatMap(all)];
-/** One compound selector ("main", "h1.title", ".is-selected", "#list", "[data-ref]"); anything else matches nothing. */
+/** One compound selector ("main", "h1.title", ".is-selected", "#list", "[data-ref]") or a list of them ("a, button");
+ *  anything else matches nothing. */
 function matches(el, selector) {
+  if (selector.includes(",")) return selector.split(",").some((one) => matches(el, one));
   const m = /^([a-z0-9]*)((?:\.[\w-]+)*)(#[\w-]+)?(\[[\w-]+\])?$/i.exec(selector.trim());
   if (!m || !(m[1] || m[2] || m[3] || m[4])) return false;
   if (m[1] && el.tagName !== m[1].toUpperCase()) return false;
@@ -286,7 +288,8 @@ test("compare: when no row is known to fit, the page says so instead of an empty
 });
 
 // The third 28 Oct drive: the maker's site never answered, so no value of the three models was read; the page dropped
-// them all and read "No options yet". A candidate nothing could be read for stays a row: a table of unknowns.
+// them all and read "No options yet". A candidate nothing could be read for stays a row: a table of unknowns, and on a
+// phone a row that names what was not found, and why, once.
 test("compare: candidates nothing could be read for are a table of unknowns, never \"No options yet\"", async () => {
   const data = compareData();
   data.items = ["Model One", "Model Two", "Model Three"].map((name, i) => item(`m${i + 1}`, name, { price: { note: "maker.example did not answer" } }));
@@ -297,8 +300,13 @@ test("compare: candidates nothing could be read for are a table of unknowns, nev
     assert.match(list, /None is known to be €600 or less\./);
     assert.deepEqual(rows(document).apart, ["option:m1", "option:m2", "option:m3"], `${width}px: every candidate is a row`);
     const row = rowText(document, "option:m2");
-    assert.match(row, /(Price u|U)nknown · maker\.example did not answer/, row);
-    assert.equal((row.match(/[Uu]nknown/g) || []).length, 3, `price, battery and suction each say so: ${row}`);
+    if (width === 1280) {
+      assert.match(row, /(Price u|U)nknown · maker\.example did not answer/, row);
+      assert.equal((row.match(/[Uu]nknown/g) || []).length, 3, `price, battery and suction each say so: ${row}`);
+    } else {
+      assert.match(row, /Not found yet: Price \(maker\.example did not answer\), Battery, Suction$/, row);
+      assert.doesNotMatch(row, /[Uu]nknown/, `no stack of unknowns: ${row}`);
+    }
   }
 });
 
@@ -348,6 +356,147 @@ test("compare: no cell is blank or a dash, and every value cites its page and da
   assert.doesNotMatch(document.getElementById("list").textContent, /^Battery: |Suction: /m);
 });
 
+// A comparison of three laptops with 4 of 15 values found (each CPU, one battery). On a phone every row listed every
+// column with its label and "Unknown" ("Unknown · Two independent reviews not checked"): a stack of unknowns, while the
+// wide table held the same gaps tidily. A phone's row shows the values found, each with its source line, and names the
+// rest once, in the columns' order; the table, the ids, the order, Details and "Still to confirm" are as they were.
+const MAKER = (v, ref) => ({ v, src: "Maker", url: `https://maker.example/${ref}`, date: DAY });
+const laptopsData = () => ({
+  title: "Three laptops",
+  lede: "The maker's site gives each CPU; battery, weight, price and reviews are not checked.",
+  sort: [],
+  columns: [{ key: "cpu", label: "CPU", type: "text" }, { key: "battery", label: "Battery", type: "text" }, { key: "weight", label: "Weight", type: "text" },
+    { key: "price", label: "Price", type: "text" }, { key: "reviews", label: "Two independent reviews", type: "text" }],
+  items: [
+    item("pro", "Maker Laptop Pro", { cpu: MAKER("Chip Ultra Series 3", "pro"), battery: MAKER("Up to 20 hours (the maker's claim)", "pro/battery"),
+      weight: { note: "Not checked" }, price: { note: "Not checked" }, reviews: { note: "Two independent reviews not checked" } }, { sources: [{ name: "Maker", url: "https://maker.example/pro" }] }),
+    item("air", "Maker Laptop Air", { cpu: MAKER("Chip Series 3", "air"), battery: { note: "Not checked" }, weight: { note: "Not checked" },
+      price: { note: "Not checked" }, reviews: { note: "Two independent reviews not checked" } }),
+    item("max", "Maker Laptop Max", { cpu: MAKER("Other Chip AI 300 Series", "max"), battery: { note: "Not checked" }, weight: { note: "Not checked" },
+      price: { note: "Not checked" }, reviews: { note: "Two independent reviews not checked" } }),
+  ],
+  unchecked: ["Battery, weight and price of the Air and the Max", "Two independent reviews for each model"],
+});
+
+test("compare on a phone: a row shows the values found with their sources and names the rest once", async () => {
+  for (const width of [320, 375, 414]) {
+    const { document } = await draw("compare", laptopsData(), { width });
+    const list = document.getElementById("list");
+    assert.equal(list.querySelectorAll("table").length, 0, `${width}px: a list, not a table`);
+    const cards = list.querySelectorAll("li[data-ref]");
+    assert.deepEqual(cards.map((li) => [li.id, li.getAttribute("data-ref")]), [["row-pro", "option:pro"], ["row-air", "option:air"], ["row-max", "option:max"]], `${width}px: ids and order`);
+    const missing = cards.map((li) => li.querySelectorAll("p.not-found").map((p) => p.textContent));
+    assert.deepEqual(missing, [
+      ["Not found yet: Weight, Price, Two independent reviews"],
+      ["Not found yet: Battery, Weight, Price, Two independent reviews"],
+      ["Not found yet: Battery, Weight, Price, Two independent reviews"],
+    ], `${width}px: one line per row names what was not found`);
+    assert.doesNotMatch(list.textContent, /Unknown/, `${width}px: no stack of unknowns`);
+    // the values found, each with its source line, under its column's label
+    const found = (li) => (li.querySelector("dl.facts")?.children ?? []).map((d) => `${d.querySelector("dt").textContent}: ${d.querySelector("dd").textContent}`);
+    assert.deepEqual(found(cards[0]).map((t) => t.replace(/ 2026 on/, " on")), [
+      "CPU: Chip Ultra Series 3 · checked 27 Oct on maker.example ↗",
+      "Battery: Up to 20 hours (the maker's claim) · checked 27 Oct on maker.example ↗",
+    ], `${width}px: what was found, with its page and day`);
+    assert.deepEqual(found(cards[2]).map((t) => t.replace(/ 2026 on/, " on")), ["CPU: Other Chip AI 300 Series · checked 27 Oct on maker.example ↗"]);
+    assert.equal(cards[0].querySelectorAll("button").filter((b) => b.textContent === "Details").length, 1, `${width}px: Details stays`);
+    assert.match(document.getElementById("notes").textContent, /Still to confirm\s*Battery, weight and price of the Air and the Max/);
+  }
+  // the wide table keeps a cell per column, and its gaps say "Unknown" as before
+  const { document } = await draw("compare", laptopsData(), { width: 1280 });
+  const cells = (ref) => document.querySelectorAll("tr[data-ref]").find((tr) => tr.getAttribute("data-ref") === ref).querySelectorAll("td").map((td) => td.textContent.replace(/ 2026 on/, " on"));
+  assert.deepEqual(cells("option:pro").slice(1), [
+    "Chip Ultra Series 3 · checked 27 Oct on maker.example ↗",
+    "Up to 20 hours (the maker's claim) · checked 27 Oct on maker.example ↗",
+    "Unknown", "Unknown", "Unknown · Two independent reviews not checked", "Details",
+  ]);
+  assert.deepEqual(cells("option:air").slice(2), ["Unknown", "Unknown", "Unknown", "Unknown · Two independent reviews not checked", ""]);
+  assert.equal(document.querySelectorAll("p.not-found").length, 0, "no line of what was not found under the table");
+});
+
+test("compare on a phone: a missing value that can still be checked, opened or was looked for stays on its row", async () => {
+  const data = laptopsData();
+  data.columns[3] = { key: "price", label: "Price", type: "price" };
+  data.sort = [{ key: "price", label: "Price, low to high", dir: "asc" }];
+  data.items = [
+    // one reason for two values: said once
+    item("pro", "Maker Laptop Pro", { cpu: MAKER("Chip Ultra Series 3", "pro"), battery: { note: "maker.example did not answer" }, price: { v: "€1,349", src: "Shop", url: "https://shop.example/pro", date: DAY },
+      weight: { note: "maker.example did not answer" } }),
+    // a store that can be opened (no binder): "Price unknown · Open Shop ↗" stays on the right; notes that only say a
+    // value is missing are not repeated
+    item("air", "Maker Laptop Air", { cpu: MAKER("Chip Series 3", "air"), price: { note: "not read yet" }, battery: { note: "Battery not checked." }, weight: { note: "Unknown" } },
+      { store: { name: "Shop", url: "https://shop.example/air", readable: true } }),
+    // the maker's page was read and does not give the weight: "Not listed · checked … ↗" stays a fact
+    item("max", "Maker Laptop Max", { cpu: MAKER("Other Chip AI 300 Series", "max"), weight: { src: "Maker", url: "https://maker.example/max/specs", date: DAY }, battery: { v: "85 Wh", url: "https://maker.example/max" } }),
+  ];
+  const { document } = await draw("compare", data, { width: 375 });
+  const line = (ref) => rowText(document, ref).match(/Not found yet: .*$/)?.[0] ?? "";
+  assert.equal(line("option:pro"), "Not found yet: Battery and Weight (maker.example did not answer), Two independent reviews");
+  assert.equal(line("option:air"), "Not found yet: Battery, Weight, Two independent reviews");
+  assert.match(rowText(document, "option:air"), /Price unknown · not read yet · Open Shop ↗/, "the store link stays on the right");
+  const max = rowText(document, "option:max");
+  assert.match(max, /WeightNot listed · checked 27 Oct( 2026)? on maker\.example ↗/, `a page read without it is cited: ${max}`);
+  assert.match(max, /BatteryUnknown · where to check ↗/, `a value without its page keeps where to check: ${max}`);
+  assert.match(max, /Not found yet: Price, Two independent reviews$/, max);
+});
+
+// A phone row folded a price into "Not found yet: Price" until the binder answered, then moved it to the right of the
+// row with its store link: the row changed shape under the reader. A price whose store can be opened or checked stays
+// on the row from the first view, and the link joins it there.
+test("compare on a phone: a price whose store can be opened keeps its place while the binder answers", async () => {
+  let answer;
+  const ready = new Promise((resolve) => { answer = resolve; });
+  const client = () => ({ on() {}, ready, isPending: () => false, records: () => [], expired: () => false });
+  const page = await draw("compare", compareData(), { width: 375, search: "?show=all", bind: client });
+  const right = () => rowText(page.document, "option:blocked");
+  assert.match(right(), /Price unknown · shop-two\.example blocks automated price checks/, `on the right of the row: ${right()}`);
+  assert.doesNotMatch(right(), /Not found yet:.*Price/, right());
+  answer({ connected: true, names: [] });
+  assert.ok(await until(() => /Open Shop Two ↗/.test(right()), 1000), `the store link joins it: ${right()}`);
+  assert.match(right(), /Price unknown · shop-two\.example blocks automated price checks · Open Shop Two ↗/);
+  assert.doesNotMatch(right(), /Not found yet:.*Price/, right());
+});
+
+// A check that could not read one row's store ("the store asks for a login") said why in the wide table, but a phone
+// row whose store link is not https folded the price into "Not found yet: Price" and lost the reason.
+test("compare on a phone: a store a check could not read keeps its reason on the row", async () => {
+  const data = compareData();
+  data.items = [data.items[0], item("login", "Login Model", {}, { store: { name: "Shop Three", url: "http://shop-three.example/login", readable: true } })];
+  const blocked = { type: "claim", cid: "clm_login", ref: "option:login", attr: "price", value: null, status: "uncertain", basis: "live", confidence: "low",
+    note: "the store asks for a login", prov: { source: "shop-three.example", lane: "local", observed_at: new Date().toISOString(), ttl_s: 3600 } };
+  const client = () => ({ on() {}, ready: Promise.resolve({ connected: true, names: ["read_offer"] }), names: ["read_offer"], isPending: () => false,
+    records: (ref) => (ref === "option:login" ? [blocked] : []), expired: () => false });
+  for (const width of [375, 1280]) {
+    const { document } = await draw("compare", data, { width, search: "?show=all", bind: client });
+    const row = rowText(document, "option:login");
+    assert.match(row, /(Price u|U)nknown · the store asks for a login/, `${width}px: ${row}`);
+    assert.doesNotMatch(row, /Not found yet:.*Price/, `${width}px: ${row}`);
+  }
+});
+
+// A column without a label (which `instafy bind check` accepts) made a phone row read "Not found yet: undefined".
+test("compare on a phone: a column without a label is named by its key", async () => {
+  const data = laptopsData();
+  data.columns = [{ key: "cpu", label: "CPU", type: "text" }, { key: "colour", type: "text" }];
+  const { document } = await draw("compare", data, { width: 375 });
+  assert.match(rowText(document, "option:air"), /Not found yet: colour$/);
+  assert.doesNotMatch(document.getElementById("list").textContent, /undefined/);
+});
+
+// Each redraw of a comparison (Details, Sort by, a live price, the binder's one-minute refresh) emptied the list and
+// then read the page's width: measured with an empty list the page is as short as its header, so a phone reader
+// scrolled down landed back at the top. The width is read while the list still holds its rows.
+test("compare: a redraw reads the page's width while the list still holds its rows", async () => {
+  const page = await draw("compare", laptopsData(), { width: 375 });
+  const main = page.document.querySelector("main");
+  const list = page.document.getElementById("list");
+  const seen = [];
+  Object.defineProperty(main, "clientWidth", { get: () => { seen.push(list.childNodes.length); return 375; } });
+  page.site.render();
+  assert.ok(seen.length > 0, "the redraw reads the width");
+  assert.ok(seen.every((n) => n > 0), `the list held its rows each time the width was read: ${seen.join(", ")}`);
+});
+
 // A comparison sorted by a value no row had (every weight unknown): a phone showed "Weight unknown" on the right of
 // every row, and the page's main criterion was a column of unknowns. A sort whose column no row has a value for is
 // left out; one some rows have stays, with the rows without it listed last, and so does one in words.
@@ -368,11 +517,11 @@ test("compare: a sort by a column no row has a value for is left out", async () 
   const price = { key: "price", label: "Price, low to high", dir: "asc" };
   const shownOnTheRight = (document) => document.querySelectorAll(".sortv").map((el) => el.querySelector(".v")?.textContent ?? el.textContent);
 
-  // three laptops, no weight known: no row ends in "Weight unknown"; the weight is one of each row's facts
+  // three laptops, no weight known: no row ends in "Weight unknown"; the row names the weight once, with why
   const three = laptops([laptop("a", "10 h", "€900"), laptop("b", "14 h", "€1,100"), laptop("c", "12 h", "€1,000")], [weight]);
   let { document } = await draw("compare", three, { width: 390 });
   assert.deepEqual(shownOnTheRight(document), [], "nothing on the right of the rows");
-  assert.match(rowText(document, "option:a"), /Weight\s*Unknown · not on the maker's page/);
+  assert.match(rowText(document, "option:a"), /Not found yet: Weight \(not on the maker's page\)$/);
   // a sort the rows have takes the right of each row instead
   ({ document } = await draw("compare", { ...three, sort: [weight, battery] }, { width: 390 }));
   assert.deepEqual(shownOnTheRight(document), ["10 h", "14 h", "12 h"]);

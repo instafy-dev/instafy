@@ -520,9 +520,77 @@
     for (var i = 0; i < r.length; i++) if (r[i].width > 0 || r[i].height > 0) tops.push(r[i].top);
     return tops.length ? { first: tops[0], last: tops[tops.length - 1] } : null;
   }
+  /** Where an element's words are drawn: the top of their first and last line and their right edge (null when none
+   * is). Read from the text, so a link drawn as an inline-block (a 44 px target on touch) counts each of its lines. */
+  function textBox(el) {
+    if (!document.createRange || !document.createTreeWalker) {
+      var at = lines(el);
+      return at && { first: at.first, last: at.last, right: -Infinity };
+    }
+    var range = document.createRange();
+    var walk = document.createTreeWalker(el, 4); // NodeFilter.SHOW_TEXT
+    var box = null;
+    for (var n = walk.nextNode(); n; n = walk.nextNode()) {
+      range.selectNodeContents(n);
+      var r = range.getClientRects();
+      for (var i = 0; i < r.length; i++) {
+        if (!(r[i].width > 0)) continue;
+        if (!box) box = { first: r[i].top, last: r[i].top, right: r[i].right };
+        box.first = Math.min(box.first, r[i].top);
+        box.last = Math.max(box.last, r[i].top);
+        box.right = Math.max(box.right, r[i].right);
+      }
+    }
+    return box;
+  }
+  // The rows whose facts took one column at this width (by data-ref): a redraw gives them one column at once, before
+  // anything is laid out, so the page never grows shorter under a reader and they keep their place. Cleared when the
+  // width or the font changes (not the height: a phone's browser bar hides and shows as it scrolls).
+  var oneCol = {};
+  var oneColWidth = 0;
+  function factsKey(g) {
+    var row = g.closest ? g.closest("[data-ref]") : null;
+    return row ? row.getAttribute("data-ref") + (g.closest(".more") ? " more" : "") : "";
+  }
+  /** One column again for the fact grids that took one: render() calls it right after drawing, and fitFacts before it
+   * measures; it lays nothing out. */
+  function keepFacts() {
+    var grids = document.querySelectorAll(".facts");
+    for (var i = 0; i < grids.length; i++) if (oneCol[factsKey(grids[i])]) grids[i].classList.add("is-one");
+  }
+  /** A fact grid (.facts) keeps two columns only while each value and each part of its source line fits its column on
+   * one line; otherwise it takes one column (.is-one), so a phone never shows "Intel Core Ultra Series" / "3", nor a
+   * source line cut at the row's edge. A grid in a table (its Details row) has the table's width and keeps its
+   * columns. */
+  function fitFacts() {
+    keepFacts();
+    // a new width (or font): each grid is measured again, one at a time
+    var width = document.documentElement.clientWidth;
+    if (width !== oneColWidth) { oneColWidth = width; oneCol = {}; }
+    var grids = document.querySelectorAll(".facts");
+    for (var k = 0; k < grids.length; k++) {
+      var g = grids[k];
+      var key = factsKey(g);
+      if (oneCol[key]) continue;
+      g.classList.remove("is-one");
+      if (g.closest && g.closest("table")) continue;
+      var parts = g.querySelectorAll(".v, .part");
+      for (var j = 0; j < parts.length; j++) {
+        var at = textBox(parts[j]);
+        var cell = parts[j].closest ? parts[j].closest(".facts > *") : null;
+        if (at && (at.last > at.first + 4 || (cell && at.right > cell.getBoundingClientRect().right + 0.5))) {
+          g.classList.add("is-one");
+          if (key) oneCol[key] = true;
+          break;
+        }
+      }
+    }
+  }
+  /** Measure every fact grid again (the font changed). */
+  function refit() { oneColWidth = 0; tidySoon(); }
   /** No caption line starts or ends in a dot: a part the line wrapped before (or right after its dot) goes on a line
    * of its own without the dot, and a caption that starts under its value drops its first dot. Runs after each render
-   * and when the page width changes. */
+   * and when the page width changes, after the fact grids have their columns (fitFacts). */
   function tidyCaptions() {
     var metas = document.querySelectorAll(".trust .meta");
     for (var i = 0; i < metas.length; i++) {
@@ -531,6 +599,7 @@
       var wrapped = m.querySelectorAll(".sp.is-wrap");
       for (var j = 0; j < wrapped.length; j++) wrapped[j].classList.remove("is-wrap");
     }
+    fitFacts();
     for (var k = 0; k < metas.length; k++) {
       var meta = metas[k];
       var lead = meta.querySelector(":scope > .lead");
@@ -725,6 +794,7 @@
       console.error("[site] render failed", e);
       return fail();
     }
+    keepFacts();
     markSelected();
     syncThemeColor();
     tidySoon();
@@ -899,7 +969,10 @@
     var patch = hooks.select && selectedRef ? hooks.select(selectedRef) : null;
     if (patch) setState(patch); else render();
     var row = selectedRef && rowFor(selectedRef);
-    if (row) row.scrollIntoView({ block: "center", behavior: reducedMotion() ? "auto" : "smooth" });
+    if (!row) return;
+    // the rows take their final shape (fact columns, captions) before the scroll is aimed, so the row lands centred
+    tidyCaptions();
+    row.scrollIntoView({ block: "center", behavior: reducedMotion() ? "auto" : "smooth" });
   }
   function reducedMotion() { return !!(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches); }
   function highlight(refs, ms) {
@@ -954,7 +1027,7 @@
     window.addEventListener("popstate", render);
     // captions are tidied against the drawn lines: again when the width or the font changes
     window.addEventListener("resize", tidySoon);
-    if (document.fonts && document.fonts.ready) document.fonts.ready.then(tidySoon);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(refit);
     try { new MutationObserver(syncThemeColor).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] }); } catch (e) { /* old browsers */ }
     var b = bind();
     if (!b) return;
@@ -1035,7 +1108,7 @@
   }
 
   window.site = {
-    version: "1.7.0",
+    version: "1.8.0",
     h: h, append: append, icon: icon, link: link, slug: slug, rowAttrs: rowAttrs, safeUrl: safeUrl,
     date: date, dayDate: dayDate, ago: ago, money: money, num: num, valueText: valueText, host: host, seen: seenText,
     cite: cite, shown: shown, known: known, within: within, byFilter: byFilter, old: isOld, expired: expired,

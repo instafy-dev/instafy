@@ -343,6 +343,8 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // From before the card came before the check, so a failing check never held it back (it said "Check before
     // the card").
     include_str!("legacy/interactive-artifacts-v8.md"),
+    // From before a page said what phone-first means: never wider than the screen, one column when narrow.
+    include_str!("legacy/interactive-artifacts-v9.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),
