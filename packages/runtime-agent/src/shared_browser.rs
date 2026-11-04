@@ -2792,34 +2792,42 @@ fn terminal_consent_call_result_with_step(
     result
 }
 
+/// The result of a call that ends the run, or of any call after it. Its words
+/// are in its structured content too (`message`): a model that calls the tools
+/// one at a time, not from code, reads only that, so a sign-in pause told it
+/// only the code, and never to end the turn.
 fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
-    if code == "human_input_required" {
-        let mut result = CallToolResult::success(vec![ContentBlock::text(
-            "Human input is needed. End this turn now. The user will fill the highlighted fields directly after confirmed shutdown, then explicitly continue in a fresh browser turn. Never request or repeat their values.",
-        )]);
-        result.structured_content = Some(terminal_consent_signal(code));
-        return result;
-    }
-    if code == BROWSER_UNAVAILABLE_CODE {
-        let mut result = CallToolResult::error(vec![ContentBlock::text(
-            "Instafy's browser closed or stopped responding on this space's machine. End this turn now: do not retry or call another browser tool. Say in one short sentence that the browser closed and that they can open it again and send a message to continue.",
-        )]);
-        result.structured_content = Some(terminal_consent_signal(code));
-        return result;
-    }
-    if code == "approval_timeout" {
+    let (message, is_error) = match code {
+        "human_input_required" => (
+            "Human input is needed. End this turn now. The user will fill the highlighted fields directly after confirmed shutdown, then explicitly continue in a fresh browser turn. Never request or repeat their values.".to_string(),
+            false,
+        ),
+        BROWSER_UNAVAILABLE_CODE => (
+            "Instafy's browser closed or stopped responding on this space's machine. End this turn now: do not retry or call another browser tool. Say in one short sentence that the browser closed and that they can open it again and send a message to continue.".to_string(),
+            true,
+        ),
         // Unanswered is not a denial, but it still ends the browser for this
         // turn, so prompts never chain while the person is away.
-        let mut result = CallToolResult::success(vec![ContentBlock::text(
-            "The person has not answered the browser's approval prompt yet, so the step was not performed. End this turn now: do not retry or call another browser tool. Say in one short sentence what you were waiting for their OK on. They will continue in a new message when they are ready.",
-        )]);
-        result.structured_content = Some(terminal_consent_signal(code));
-        return result;
-    }
-    let mut result = CallToolResult::error(vec![ContentBlock::text(format!(
-        "Shared Browser consent is blocked for this run ({code}). Start a fresh browser run before requesting another browser action."
-    ))]);
-    result.structured_content = Some(terminal_consent_signal(code));
+        "approval_timeout" => (
+            "The person has not answered the browser's approval prompt yet, so the step was not performed. End this turn now: do not retry or call another browser tool. Say in one short sentence what you were waiting for their OK on. They will continue in a new message when they are ready.".to_string(),
+            false,
+        ),
+        _ => (
+            format!(
+                "Shared Browser consent is blocked for this run ({code}). Start a fresh browser run before requesting another browser action."
+            ),
+            true,
+        ),
+    };
+    let content = vec![ContentBlock::text(message.clone())];
+    let mut result = if is_error {
+        CallToolResult::error(content)
+    } else {
+        CallToolResult::success(content)
+    };
+    let mut structured = terminal_consent_signal(code);
+    structured["message"] = JsonValue::String(message);
+    result.structured_content = Some(structured);
     result
 }
 
@@ -3017,7 +3025,8 @@ impl ServerHandler for SharedBrowserMcpServer {
         request: CallToolRequestParams,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> std::result::Result<CallToolResponse, McpError> {
-        let browser_request = mcp_tool_request(request.name.as_ref(), request.arguments)
+        let tool = request.name.to_string();
+        let browser_request = mcp_tool_request(&tool, request.arguments)
             .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
         // rmcp may dispatch independent requests concurrently. The approval
         // protocol deliberately owns one fixed runtime-local request slot, so
@@ -3029,7 +3038,7 @@ impl ServerHandler for SharedBrowserMcpServer {
             .execute_with_failure_latch(&browser_request, || execute_request(&browser_request))
             .await
         {
-            Ok(payload) => Ok(successful_tool_result(payload).into()),
+            Ok(payload) => Ok(successful_tool_result(&tool, payload).into()),
             Err(SharedBrowserMcpExecutionFailure::TerminalConsent(code)) => {
                 let step = self.terminal_step.lock().await.take();
                 Ok(terminal_consent_call_result_with_step(code, step).into())
@@ -3182,15 +3191,44 @@ fn network_failure_tool_result(failure: &NetworkFailure) -> CallToolResult {
     result
 }
 
-/// A successful call's result. The text is compact JSON: a code-mode model
-/// reads the whole result, text and structured content alike, so pretty
-/// printing only spent its context on whitespace.
-fn successful_tool_result(payload: JsonValue) -> CallToolResult {
-    let text = serde_json::to_string(&payload)
-        .unwrap_or_else(|_| "Shared Browser returned an unreadable result".to_string());
-    let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+/// A successful call's result: the step's payload, a page's reading included,
+/// as its structured content, and one line that says what the step did as its
+/// text. Codex hands a call made outside a code cell the structured content
+/// alone, and a cell's `text(r)` prints the whole result, so either way the
+/// model reads the page once. With the payload as the text too, a cell printed
+/// every page twice: in a 22-page browser turn, half of what its steps sent,
+/// and 7 of its pages were cut at the cell's output limit.
+fn successful_tool_result(tool: &str, payload: JsonValue) -> CallToolResult {
+    let mut result = CallToolResult::success(vec![ContentBlock::text(step_line(tool, &payload))]);
     result.structured_content = Some(payload);
     result
+}
+
+/// What a step did, in one line: the controller's own words when it has them
+/// (a page it did not show as asked, being blank, withheld, still busy or on a
+/// site not approved yet, a step that ran out of time, a field typed into, a box
+/// checked), else what the step was.
+fn step_line(tool: &str, payload: &JsonValue) -> String {
+    let said = ["message", "done"]
+        .into_iter()
+        .filter_map(|field| payload.get(field).and_then(JsonValue::as_str))
+        .find(|said| !said.trim().is_empty());
+    let did = said.unwrap_or(match tool {
+        "status" => "Read the browser's status.",
+        "snapshot" => "Read the page.",
+        "navigate" => "Opened the page.",
+        "click" => "Clicked the control.",
+        "type" => "Typed into the field.",
+        "choose" => "Chose the option.",
+        "press" => "Pressed the key.",
+        "scroll" => "Scrolled the page.",
+        "list_tabs" => "Listed the tabs.",
+        "open_tab" => "Opened the page in a new tab.",
+        "select_tab" => "Switched tabs.",
+        "close_tab" => "Closed the tab.",
+        _ => "Done.",
+    });
+    format!("{did} Its result is in structuredContent.")
 }
 
 pub fn is_shared_browser_mcp_command(args: &[OsString]) -> bool {

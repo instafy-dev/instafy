@@ -208,6 +208,40 @@ const PERSONAL_BROWSER_MCP_TOOLS: McpToolDefinition[] = [
   },
 ];
 
+const PERSONAL_BROWSER_STEP_LINES: Record<PersonalBrowserControlOperation, string> = {
+  status: "Read the browser's status.",
+  snapshot: "Read the page.",
+  navigate: "Opened the page.",
+  click: "Clicked the control.",
+  type: "Typed into the field.",
+  press: "Pressed the key.",
+  scroll: "Scrolled the page.",
+  request_human_input: "Handed the fields to the person.",
+  list_tabs: "Listed the tabs.",
+  open_tab: "Opened the page in a new tab.",
+  select_tab: "Switched tabs.",
+  close_tab: "Closed the tab.",
+};
+
+/**
+ * A step's text: one line that says what it did, in the browser's own words when it has them
+ * (a withheld page, the hand-off to the person). The step's result, a page's reading included,
+ * is its structured content alone: Codex hands a call made outside a code cell only that, and
+ * a cell's `text(r)` prints the whole result, so either way the model reads the page once. With
+ * the result as JSON text too, a cell printed every page twice.
+ */
+function personalBrowserStepLine(
+  tool: PersonalBrowserControlOperation,
+  result: Record<string, unknown>,
+): string {
+  const snapshot = result.snapshot;
+  const said = [
+    result.message,
+    snapshot && typeof snapshot === "object" ? (snapshot as Record<string, unknown>).message : undefined,
+  ].find((value): value is string => typeof value === "string" && value.trim() !== "");
+  return `${said ?? PERSONAL_BROWSER_STEP_LINES[tool]} Its result is in structuredContent.`;
+}
+
 function mcpError(id: unknown, code: number, message: string, data?: unknown) {
   return {
     jsonrpc: "2.0",
@@ -560,7 +594,7 @@ export class PersonalBrowserControlServer {
         jsonrpc: "2.0",
         id: id ?? null,
         result: {
-          content: [{ type: "text", text: JSON.stringify(structured) }],
+          content: [{ type: "text", text: personalBrowserStepLine(tool.name, structured) }],
           structuredContent: structured,
           isError: false,
         },

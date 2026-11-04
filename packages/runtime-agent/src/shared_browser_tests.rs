@@ -3246,6 +3246,61 @@ async fn a_failed_step_with_facts_still_tells_the_model_what_failed() {
     }
 }
 
+/// A step that failed, and a result that ends the run (the sign-in pause, a
+/// denial, a prompt left unanswered, the browser gone), reach the model with
+/// their words whichever way it reads them: a code cell's `text(r)`, or a call
+/// made outside a cell, which gets the structured content alone when there is
+/// one. A result that ends the run carried only its code there
+/// (`{"terminalConsent":…}`), so such a call was never told to end the turn;
+/// it now carries its words beside the code, which still drives the runtime.
+#[tokio::test]
+async fn a_failed_step_or_the_end_of_the_run_reaches_the_model_in_its_own_words() {
+    for (result, words) in [
+        (
+            failed_tool_result(
+                "Shared Browser snapshot is stale; take a fresh snapshot before acting",
+            ),
+            "Shared Browser snapshot is stale; take a fresh snapshot before acting",
+        ),
+        (
+            failed_tool_result("page.goto: net::ERR_CONNECTION_REFUSED at https://down.example/"),
+            SITE_UNREACHABLE_REASON,
+        ),
+    ] {
+        let view = model_view(result).await;
+        assert!(view.cell.contains(words), "{}", view.cell);
+        assert!(view.direct.contains(words), "{}", view.direct);
+    }
+    for (code, words) in [
+        (
+            "human_input_required",
+            "Human input is needed. End this turn now.",
+        ),
+        (
+            "approval_denied",
+            "Shared Browser consent is blocked for this run (approval_denied).",
+        ),
+        (
+            "approval_timeout",
+            "The person has not answered the browser's approval prompt yet",
+        ),
+        (
+            BROWSER_UNAVAILABLE_CODE,
+            "Instafy's browser closed or stopped responding",
+        ),
+    ] {
+        let view = model_view(terminal_consent_call_result_with_step(code, Some("click"))).await;
+        assert!(view.cell.contains(words), "{code}: {}", view.cell);
+        assert!(view.direct.contains(words), "{code}: {}", view.direct);
+        let direct: JsonValue = serde_json::from_str(&view.direct).expect("structured content");
+        assert_eq!(
+            direct["terminalConsent"],
+            terminal_consent_signal(code)["terminalConsent"]
+        );
+        assert_eq!(direct["activity"], json!({ "step": "click" }));
+    }
+}
+
 #[tokio::test]
 async fn the_call_that_ends_the_run_names_its_step_in_its_answer() {
     let server = SharedBrowserMcpServer::new();
@@ -6129,23 +6184,186 @@ fn snapshot_controls_leave_out_empty_fields_and_name_same_site_links_by_path() {
     assert_eq!(requests[0]["destinationFingerprint"], full_address);
 }
 
-#[test]
-fn mcp_results_carry_compact_json_text_beside_the_structured_payload() {
-    let payload = json!({
-        "ok": true,
-        "visibleText": "Fixture page",
-        "interactiveElements": [{ "index": 0, "label": "Search", "tag": "input" }],
-    });
-    let result = successful_tool_result(payload.clone());
-    assert_eq!(result.is_error, Some(false));
-    assert_eq!(result.content.len(), 1);
-    let text = &result.content[0].as_text().expect("text content").text;
-    assert_eq!(
-        text,
-        &serde_json::to_string(&payload).expect("compact JSON")
+/// What a model reads of `result`, the ways Codex hands it over: a code cell's
+/// `r` is the result off the wire without `_meta` (Codex's `code_mode_result`),
+/// which `text(r)` prints whole, and a call made outside a cell gets the
+/// structured content alone when there is one
+/// (`CallToolResult::as_function_call_output_payload`).
+struct ModelView {
+    /// A cell's `text(r)`.
+    cell: String,
+    /// A cell's `text(r.structuredContent)`.
+    structured: Option<String>,
+    /// A call made outside a cell.
+    direct: String,
+}
+
+async fn model_view(result: CallToolResult) -> ModelView {
+    let read: codex_protocol::mcp::CallToolResult =
+        serde_json::from_value(wire_result(result).await).expect("a result Codex reads");
+    ModelView {
+        cell: serde_json::to_string(&read).expect("the cell's result"),
+        structured: read.structured_content.as_ref().map(JsonValue::to_string),
+        direct: read
+            .as_function_call_output_payload()
+            .body
+            .to_text()
+            .expect("the call's text"),
+    }
+}
+
+/// Every way a model reads a step's result holds the page it returned once: a
+/// code cell's `text(r)` and `text(r.structuredContent)`, and a call made
+/// outside a cell, which gets the structured content alone. The text was the
+/// page again, as JSON, so a cell's `text(r)` printed every page twice: in a
+/// 22-page browser turn (a local test, Nov 4), half of the 409k characters its
+/// 15 uncut steps sent, and 7 more steps cut at the cell's output limit. The
+/// text now says what the step did, in the controller's own words when it has
+/// them: a step that ran out of time, a typed field, a withheld page.
+#[tokio::test]
+async fn every_way_a_model_reads_a_step_holds_its_page_once() {
+    const PAGE_TEXT: &str = "Battery: up to 20 hours on one charge";
+    let page = |extra: JsonValue| {
+        let mut page = json!({
+            "snapshotId": SNAPSHOT_ID,
+            "url": "https://maker.example/laptop",
+            "title": "Laptop",
+            "visibleText": PAGE_TEXT,
+            "secretScreen": false,
+            "interactiveElements": [{ "index": 0, "label": "Reviews", "tag": "a", "href": "/reviews" }],
+            "activity": { "step": "navigate", "url": "https://maker.example/laptop" },
+        });
+        for (field, value) in extra.as_object().cloned().unwrap_or_default() {
+            page[field] = value;
+        }
+        page
+    };
+    let timed_out = "This step was still running after 20 seconds, so it stopped where it was. This is the page as it is now: check what the step did before you act again.";
+    let typed = "Typed 12 characters into \"Customer name:\", and the field holds them. A page's reading never shows typed text.";
+    for (tool, payload, did) in [
+        ("navigate", page(json!({})), "Opened the page."),
+        ("snapshot", page(json!({})), "Read the page."),
+        (
+            "open_tab",
+            page(json!({ "openedTab": true })),
+            "Opened the page in a new tab.",
+        ),
+        (
+            "navigate",
+            page(json!({ "stepTimedOut": true, "message": timed_out })),
+            timed_out,
+        ),
+        ("type", page(json!({ "done": typed })), typed),
+    ] {
+        let view = model_view(successful_tool_result(tool, payload.clone())).await;
+        assert_eq!(
+            view.cell.matches(PAGE_TEXT).count(),
+            1,
+            "{tool}: {}",
+            view.cell
+        );
+        let line = serde_json::to_string(&format!("{did} Its result is in structuredContent."))
+            .expect("the line as JSON");
+        assert!(view.cell.contains(&line), "{tool}: {}", view.cell);
+        assert_eq!(view.structured, Some(payload.to_string()), "{tool}");
+        assert_eq!(view.direct, payload.to_string(), "{tool}");
+    }
+
+    // A page that shows a secret: its text withheld, the controller's words
+    // about it say what happened, and the signal stays for the runtime.
+    let withheld = "This page appears to show a credential value, so its text is withheld until a new page loads. Do not try to reveal, copy or read the value. Stop here and tell the user in words which control on this page shows it; they can open the page in their own browser to see it.";
+    let secret = page(json!({ "visibleText": "", "secretScreen": true, "message": withheld }));
+    let view = model_view(successful_tool_result("click", secret.clone())).await;
+    let line = serde_json::to_string(&format!("{withheld} Its result is in structuredContent."))
+        .expect("the line as JSON");
+    assert!(view.cell.contains(&line), "{}", view.cell);
+    assert_eq!(view.structured, Some(secret.to_string()));
+    assert_eq!(view.direct, secret.to_string());
+    assert!(
+        view.direct.contains(r#""secretScreen":true"#),
+        "{}",
+        view.direct
     );
-    assert!(!text.contains('\n'));
-    assert_eq!(result.structured_content, Some(payload));
+}
+
+/// The runtime reads a step's signals from its structured content, which still
+/// holds the whole payload: the page a step opened (for the hand-back), a page
+/// that shows a secret (the run stops there for the person), and a result that
+/// ends the run (its code, never its words, reaches the turn's activity).
+#[tokio::test]
+async fn the_runtime_reads_each_steps_signals_from_its_result() {
+    use codex_protocol::protocol::{Event, EventMsg, McpInvocation, McpToolCallEndEvent};
+    let end = |tool: &str, result: codex_protocol::mcp::CallToolResult| Event {
+        id: "evt_mcp_end".to_string(),
+        msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+            call_id: format!("call_{tool}"),
+            invocation: McpInvocation {
+                server: "instafy_shared_browser".to_string(),
+                tool: tool.to_string(),
+                arguments: None,
+            },
+            connector_id: None,
+            mcp_app_resource_uri: None,
+            link_id: None,
+            app_name: None,
+            action_name: None,
+            plugin_id: None,
+            duration: std::time::Duration::from_millis(1),
+            result: Ok(result),
+            mcp_app_ui: None,
+            read_only_hint: None,
+            turn_id: "turn-1".to_string(),
+        }),
+    };
+    let read = |result: CallToolResult| async move {
+        serde_json::from_value::<codex_protocol::mcp::CallToolResult>(wire_result(result).await)
+            .expect("a result Codex reads")
+    };
+    let page = |secret: bool| {
+        json!({
+            "url": "https://maker.example/laptop",
+            "title": "Laptop",
+            "visibleText": if secret { "" } else { "Battery: up to 20 hours" },
+            "secretScreen": secret,
+            "interactiveElements": [],
+            "activity": { "step": "navigate", "url": "https://maker.example/laptop" },
+        })
+    };
+    let mut adapter = crate::codex::CodexEventStreamAdapter::default();
+    let projected = adapter.collect(&end(
+        "navigate",
+        read(successful_tool_result("navigate", page(false))).await,
+    ));
+    assert_eq!(projected[0]["item"]["status"], "completed");
+    assert_eq!(projected[0]["item"]["browserStep"]["host"], "maker.example");
+    assert_eq!(
+        adapter.browser_pages(),
+        ["https://maker.example/laptop".to_string()]
+    );
+    assert!(!adapter.browser_secret_screen());
+
+    adapter.collect(&end(
+        "navigate",
+        read(successful_tool_result("navigate", page(true))).await,
+    ));
+    assert!(adapter.browser_secret_screen());
+
+    for code in [
+        "human_input_required",
+        "approval_denied",
+        BROWSER_UNAVAILABLE_CODE,
+    ] {
+        let result = terminal_consent_call_result_with_step(code, Some("click"));
+        let words = result.content[0].as_text().expect("text").text.clone();
+        let projected = adapter.collect(&end("click", read(result).await));
+        assert_eq!(projected[0]["item"]["terminalConsent"]["code"], code);
+        assert_eq!(projected[0]["item"]["browserStep"]["step"], "click");
+        assert!(
+            !projected[0].to_string().contains(&words),
+            "{}",
+            projected[0]
+        );
+    }
 }
 
 #[test]
@@ -12014,11 +12232,13 @@ async fn mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result()
     ] {
         *latch.terminal_consent_failure.lock().await = Some(code);
         let blocked = wire.call("snapshot", json!({})).await;
+        // The words are in the structured content too: a call made outside a
+        // code cell reads only that.
         assert_eq!(
             blocked["result"],
             json!({
                 "content": [{ "type": "text", "text": text }],
-                "structuredContent": { "terminalConsent": signal(code) },
+                "structuredContent": { "terminalConsent": signal(code), "message": text },
                 "isError": is_error,
             }),
             "{blocked}"
@@ -12031,7 +12251,7 @@ async fn mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result()
             json!({
                 "content": [{
                     "type": "text",
-                    "text": format!(r#"{{"originApproved":false,"ready":{ready},"redacted":true,"terminalConsent":{{"code":"{code}","retryable":false,"state":"blocked","terminal":true}},"title":null,"url":null}}"#),
+                    "text": "Read the browser's status. Its result is in structuredContent.",
                 }],
                 "structuredContent": {
                     "terminalConsent": signal(code),
@@ -12051,15 +12271,14 @@ async fn mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result()
     *latch.terminal_consent_failure.lock().await = Some("approval_denied");
     *latch.terminal_step.lock().await = Some("search");
     let blocked = wire.call("snapshot", json!({})).await;
+    let text = "Shared Browser consent is blocked for this run (approval_denied). Start a fresh browser run before requesting another browser action.";
     assert_eq!(
         blocked["result"],
         json!({
-            "content": [{
-                "type": "text",
-                "text": "Shared Browser consent is blocked for this run (approval_denied). Start a fresh browser run before requesting another browser action.",
-            }],
+            "content": [{ "type": "text", "text": text }],
             "structuredContent": {
                 "terminalConsent": signal("approval_denied"),
+                "message": text,
                 "activity": { "step": "search" },
             },
             "isError": true,
@@ -12070,14 +12289,14 @@ async fn mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result()
 
 #[tokio::test]
 async fn mcp_wire_carries_each_kind_of_browser_result_whole() {
-    // A step's payload, as compact JSON text beside the payload itself.
+    // A step's payload, with one line that says what the step did.
     let payload = json!({ "ok": true, "url": "https://example.test/", "title": "Example" });
     assert_eq!(
-        wire_result(successful_tool_result(payload.clone())).await,
+        wire_result(successful_tool_result("navigate", payload.clone())).await,
         json!({
             "content": [{
                 "type": "text",
-                "text": r#"{"ok":true,"title":"Example","url":"https://example.test/"}"#,
+                "text": "Opened the page. Its result is in structuredContent.",
             }],
             "structuredContent": payload,
             "isError": false,

@@ -427,13 +427,16 @@ impl ServerHandler for LocalBrowserMcpServer {
     }
 }
 
-/// An observation's tool result: its payload as pretty JSON text beside the payload itself, or
-/// why the observation failed.
+/// An observation's tool result: its payload as the structured content, with one line that
+/// says what it did as the text, or why the observation failed. Codex hands a call made outside
+/// a code cell the structured content alone, and a cell's `text(r)` prints the whole result, so
+/// either way the model reads the observation once, as it did twice when the text was the
+/// payload too.
 fn observation_result(outcome: Result<JsonValue>) -> CallToolResult {
     match outcome {
         Ok(payload) => {
             let mut result = CallToolResult::success(vec![ContentBlock::text(
-                serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                "Observed the page. Its result is in structuredContent.",
             )]);
             result.structured_content = Some(payload);
             result
@@ -1295,28 +1298,33 @@ mod tests {
             "{failed}"
         );
 
+        // The observation once, as the structured content, and one line that says what it did.
         let payload = json!({
             "url": "https://example.com/",
             "title": "Example Domain",
-            "observations": [{ "name": "heading", "text": "Example Domain" }],
+            "observations": [{ "name": "heading", "text": "Observed heading text" }],
         });
-        let text = r#"{
-  "observations": [
-    {
-      "name": "heading",
-      "text": "Example Domain"
-    }
-  ],
-  "title": "Example Domain",
-  "url": "https://example.com/"
-}"#;
+        let observed = wire_result(observation_result(Ok(payload.clone()))).await;
         assert_eq!(
-            wire_result(observation_result(Ok(payload.clone()))).await,
+            observed,
             json!({
-                "content": [{ "type": "text", "text": text }],
+                "content": [{
+                    "type": "text",
+                    "text": "Observed the page. Its result is in structuredContent.",
+                }],
                 "structuredContent": payload,
                 "isError": false,
             })
+        );
+        let result: codex_protocol::mcp::CallToolResult =
+            serde_json::from_value(observed).expect("a result Codex reads");
+        // A cell's `text(r)` prints the whole result (Codex's `code_mode_result`: the result
+        // without `_meta`), and a call outside a cell gets the structured content alone.
+        let cell = serde_json::to_string(&result).expect("the cell's result");
+        assert_eq!(cell.matches("Observed heading text").count(), 1, "{cell}");
+        assert_eq!(
+            result.as_function_call_output_payload().body.to_text(),
+            Some(payload.to_string())
         );
     }
 }
