@@ -8,9 +8,45 @@ import { useCallback, useRef } from "react";
  */
 const bars = new Set<HTMLElement>();
 const listeners = new Set<() => void>();
+let layoutObserver: MutationObserver | null = null;
+let layoutResizeObserver: ResizeObserver | null = null;
+let layoutFrame: number | null = null;
 
 function notify(): void {
   for (const listener of listeners) listener();
+}
+
+function scheduleMeasure(): void {
+  if (layoutFrame !== null) return;
+  layoutFrame = window.requestAnimationFrame(() => {
+    layoutFrame = null;
+    notify();
+  });
+}
+
+function observeLayout(): void {
+  layoutObserver?.disconnect();
+  layoutResizeObserver?.disconnect();
+  const ancestors = new Set<HTMLElement>();
+  const preceding = new Set<HTMLElement>();
+  for (const bar of bars) {
+    for (let node: HTMLElement | null = bar; node; node = node.parentElement) {
+      ancestors.add(node);
+      for (let sibling = node.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
+        if (sibling instanceof HTMLElement) preceding.add(sibling);
+      }
+    }
+  }
+  // Observe only the bar's layout path. Streaming text and cursor changes in
+  // unrelated descendants must not force a measurement on every frame.
+  for (const node of ancestors) {
+    layoutObserver?.observe(node, { childList: true, attributes: true, attributeFilter: ["class", "style", "hidden"] });
+    layoutResizeObserver?.observe(node);
+  }
+  for (const node of preceding) {
+    layoutObserver?.observe(node, { attributes: true, attributeFilter: ["class", "style", "hidden"] });
+    layoutResizeObserver?.observe(node);
+  }
 }
 
 /** Where the lowest bar on screen ends, in px from the top of the viewport; 0 with none. */
@@ -23,11 +59,28 @@ export function toastClearanceBottom(): number {
   return Math.ceil(bottom);
 }
 
-/** Calls `listener` when a bar comes, goes or changes size. */
+/** Calls `listener` when a bar or the layout above it changes. */
 export function subscribeToastClearance(listener: () => void): () => void {
   listeners.add(listener);
+  // A sibling banner can move a fixed-size bar without resizing the bar.
+  if (!layoutObserver && typeof MutationObserver === "function") {
+    layoutObserver = new MutationObserver(records => {
+      if (records.some(record => record.type === "childList")) observeLayout();
+      scheduleMeasure();
+    });
+    layoutResizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(scheduleMeasure) : null;
+    observeLayout();
+  }
   return () => {
     listeners.delete(listener);
+    if (listeners.size === 0) {
+      layoutObserver?.disconnect();
+      layoutObserver = null;
+      layoutResizeObserver?.disconnect();
+      layoutResizeObserver = null;
+      if (layoutFrame !== null) window.cancelAnimationFrame(layoutFrame);
+      layoutFrame = null;
+    }
   };
 }
 
@@ -39,6 +92,7 @@ export function useToastClearanceRef<T extends HTMLElement>(active: boolean): (n
       held.current.observer?.disconnect();
       bars.delete(held.current.bar);
       held.current = null;
+      observeLayout();
       notify();
     }
     if (!active || !node) return;
@@ -46,6 +100,7 @@ export function useToastClearanceRef<T extends HTMLElement>(active: boolean): (n
     observer?.observe(node);
     held.current = { bar: node, observer };
     bars.add(node);
+    observeLayout();
     notify();
   }, [active]);
 }

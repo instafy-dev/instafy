@@ -431,6 +431,65 @@ describe("SitePreviewPane follow mode", () => {
       expect(q("[data-testid=follow-note]")).toBeNull();
     });
 
+    async function discloseLocation() {
+      Object.defineProperty(navigator, "geolocation", { configurable: true, value: {
+        getCurrentPosition: vi.fn((success: (position: unknown) => void) => success({
+          coords: { latitude: 25.05, longitude: 121.53, accuracy: 20 }, timestamp: Date.now(),
+        })),
+      } });
+      setLocationSitesAccount("follow-reader");
+      resetLocationSitesForTests();
+      await fromSite("location-request", { payload: { id: "location-before-follow" } });
+      expect(q("[data-testid=preview-location-toast]")).not.toBeNull();
+    }
+
+    it("preserves a follow note's remaining reading time while location controls suppress it", async () => {
+      try {
+        await following();
+        await streamEvent({ type: "state", snapshot: { presence: { presentationId: "pres-lena", presenter: lena, state: "live", followers: 1 }, followers: [] } });
+        await wait(1_000);
+        await discloseLocation();
+        expect(q("[data-testid=follow-note]")).toBeNull();
+        // Location lasts longer than the complete follow note budget.
+        await wait(7_999);
+        expect(q("[data-testid=follow-note]")).toBeNull();
+        await wait(1);
+        expect(q("[data-testid=follow-note]")?.textContent).toBe("Lena took over from Kim");
+        await wait(1_999);
+        expect(q("[data-testid=follow-note]")).not.toBeNull();
+        await wait(1);
+        expect(q("[data-testid=follow-note]")).toBeNull();
+      } finally { Reflect.deleteProperty(navigator, "geolocation"); }
+    });
+
+    it("retains only the latest follow event while the lane is suppressed", async () => {
+      try {
+        await following();
+        await discloseLocation();
+        await streamEvent({ type: "state", snapshot: { presence: { presentationId: "pres-lena", presenter: lena, state: "live", followers: 1 }, followers: [] } });
+        await wait(4_000);
+        await streamEvent({ type: "end", reason: "stopped" });
+        await wait(4_000);
+        expect(q("[data-testid=follow-note]")?.textContent).toBe("Lena stopped presenting");
+        await wait(3_999);
+        expect(q("[data-testid=follow-note]")).not.toBeNull();
+        await wait(1);
+        expect(q("[data-testid=follow-note]")).toBeNull();
+      } finally { Reflect.deleteProperty(navigator, "geolocation"); }
+    });
+
+    it("does not revive a suppressed takeover after the person stops following", async () => {
+      try {
+        await following();
+        await discloseLocation();
+        await streamEvent({ type: "state", snapshot: { presence: { presentationId: "pres-lena", presenter: lena, state: "live", followers: 1 }, followers: [] } });
+        await click("[data-testid=follow-action]");
+        await wait(8_000);
+        expect(q("[data-testid=follow-note]")).toBeNull();
+        expect(q("[data-testid=follow-status]")?.textContent).toBe("Lena is presenting");
+      } finally { Reflect.deleteProperty(navigator, "geolocation"); }
+    });
+
     it("says Kim went away (not that she stopped), and follows her again when she presents again", async () => {
       await following();
       await streamEvent({ type: "end", reason: "timeout" });

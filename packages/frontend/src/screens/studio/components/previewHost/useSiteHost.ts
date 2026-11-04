@@ -93,7 +93,9 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
     return () => observer.disconnect();
   }, []);
   const userGesture = useFrameGesture(frame);
-  const siteAsks = useSiteAsks({ host: asks, projectId, previewId, siteTitle: record?.title ?? title, frameOnScreen, post: postToFrame, userGesture });
+  const [documentEpoch, setDocumentEpoch] = useState(0);
+  const siteAsks = useSiteAsks({ host: asks, projectId, previewId, siteTitle: record?.title ?? title, frameOnScreen,
+    documentKey: `${viewerUrl ?? ""}:${frameKey}:${documentEpoch}`, post: postToFrame, userGesture });
   const askCaps = siteAsks.caps;
   const sendLayout = useCallback(() => { postToFrame(buildHostLayoutMessage(theme, askCaps)); }, [askCaps, postToFrame, theme]);
   useEffect(() => { sendLayout(); }, [sendLayout]);
@@ -139,7 +141,10 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
     // frame's watches and pending answers end. The first load is left alone, since the
     // site's scripts may have asked before it fired. Positions are kept: the new page
     // may still hold them (in its URL), so a shared view must still keep them out.
-    if (loadsSinceFresh.current > 1) broker.current?.stopAll();
+    if (loadsSinceFresh.current > 1) {
+      broker.current?.stopAll();
+      setDocumentEpoch(value => value + 1);
+    }
     sendLayout();
   }, [sendLayout]);
 
@@ -213,6 +218,7 @@ export function useSiteHost({ frame, viewerUrl, frameKey, projectId, previewId, 
   const follow = usePreviewFollow({
     projectId,
     previewId,
+    feedbackBlocked: Boolean(siteAsks.confirm || locationBlocked || (locationToast && locationSite && !locationStatus.stopped)),
     frameOnScreen,
     postToFrame,
     supportsView: supports.includes("view"),

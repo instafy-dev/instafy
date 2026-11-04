@@ -11,6 +11,9 @@ const mocks = vi.hoisted(() => ({
   keepTabOpen: vi.fn(),
   focusTab: vi.fn(),
   closeTab: vi.fn(),
+  conversations: [] as Array<{ localId: string; title: string; visibility: string; lifecycleStatus: string; controllerId?: string; parentConversationId?: string }>,
+  setConversationLifecycleStatus: vi.fn(),
+  showStatus: vi.fn(),
 }));
 
 vi.mock("../WorkspaceTabsProvider", () => ({
@@ -30,15 +33,15 @@ vi.mock("../WorkspaceTabsProvider", () => ({
 }));
 vi.mock("../../conversations/ConversationsProvider", () => ({
   useConversations: () => ({
-    conversations: [{ localId: "a", title: "Design review", visibility: "private", lifecycleStatus: "active" }],
+    conversations: mocks.conversations,
     createConversation: vi.fn(),
     setConversationControllerId: vi.fn(),
     setConversationTitle: vi.fn(),
-    setConversationLifecycleStatus: vi.fn(),
+    setConversationLifecycleStatus: mocks.setConversationLifecycleStatus,
   }),
 }));
 vi.mock("../../projects/useProject", () => ({ useProject: () => ({ activeProjectId: "project-1" }) }));
-vi.mock("../../status/useStatus", () => ({ useStatus: () => ({ showStatus: vi.fn() }) }));
+vi.mock("../../status/useStatus", () => ({ useStatus: () => ({ showStatus: mocks.showStatus }) }));
 vi.mock("../useWorkspace", () => ({ useWorkspaceUi: () => ({ requestConversationInvite: vi.fn() }) }));
 vi.mock("../../sdk/instafy", () => ({ controllerClient: { conversations: {} } }));
 vi.mock("../../lib/desktopShell", () => ({ desktopTitleBarFree: () => false }));
@@ -69,6 +72,10 @@ describe("Workspace conversation preview tab", () => {
     vi.stubGlobal("CSS", { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") });
     mocks.preview = true;
     mocks.kind = "conversation";
+    mocks.conversations = [{ localId: "a", title: "Design review", visibility: "private", lifecycleStatus: "active" }];
+    mocks.setConversationLifecycleStatus.mockImplementation((id: string, lifecycleStatus: string) => {
+      mocks.conversations = mocks.conversations.map(entry => entry.localId === id ? { ...entry, lifecycleStatus } : entry);
+    });
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -79,6 +86,7 @@ describe("Workspace conversation preview tab", () => {
     await act(async () => root.unmount());
     container.remove();
     vi.clearAllMocks();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
@@ -90,6 +98,41 @@ describe("Workspace conversation preview tab", () => {
     await act(async () => tabTrigger().dispatchEvent(new KeyboardEvent("keydown", { key, shiftKey, bubbles: true, cancelable: true })));
     return document.querySelector<HTMLElement>('[data-testid="conversation-tab-menu"]')!;
   }
+
+  it.each([[5999, true], [6000, false], [9000, false]] as const)("keeps the Trash Undo offer bounded to six seconds at %ims", async (elapsed, allowed) => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1000);
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    await openKeyboardMenu();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="conversation-tab-menu-delete"]')!.click());
+    await act(async () => root.render(<WorkspaceTabs />));
+    const [message, intent, duration, options] = mocks.showStatus.mock.calls.at(-1)!;
+    expect([message, intent, duration]).toEqual(["Moved conversation to Trash.", "warning", 6000]);
+    expect(options.behavior).toEqual({ kind: "deadline", expiresAt: 7000 });
+    mocks.setConversationLifecycleStatus.mockClear();
+    now.mockReturnValue(1000 + elapsed);
+    await act(async () => options.onAction());
+    if (allowed) expect(mocks.setConversationLifecycleStatus).toHaveBeenCalledWith("a", "active");
+    else expect(mocks.setConversationLifecycleStatus).not.toHaveBeenCalled();
+  });
+
+  it("does not restore missing or subsequently changed conversations from an Undo snapshot", async () => {
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    mocks.conversations = [
+      { localId: "a", controllerId: "remote-a", title: "Design review", visibility: "private", lifecycleStatus: "active" },
+      { localId: "b", parentConversationId: "remote-a", title: "Thread", visibility: "private", lifecycleStatus: "hidden" },
+      { localId: "c", parentConversationId: "remote-a", title: "Removed thread", visibility: "private", lifecycleStatus: "active" },
+    ];
+    await act(async () => root.render(<WorkspaceTabs />));
+    await openKeyboardMenu();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="conversation-tab-menu-delete"]')!.click());
+    const options = mocks.showStatus.mock.calls.at(-1)![3];
+    mocks.conversations = mocks.conversations.filter(entry => entry.localId !== "c")
+      .map(entry => entry.localId === "b" ? { ...entry, lifecycleStatus: "archived" } : entry);
+    await act(async () => root.render(<WorkspaceTabs />));
+    mocks.setConversationLifecycleStatus.mockClear();
+    await act(async () => options.onAction());
+    expect(mocks.setConversationLifecycleStatus.mock.calls).toEqual([["a", "active"]]);
+  });
 
   it("distinguishes a preview visually and accessibly, and only keeps it after a double click", async () => {
     expect(tabTrigger().title).toContain("Preview");

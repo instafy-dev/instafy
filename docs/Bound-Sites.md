@@ -195,8 +195,19 @@ message it sends must be its own rendering, and repeated ids are dropped.
   still the page's: Octo is told so (below). It goes through the composer's own send path to Octo (queued behind a
   busy turn like any message; a conversation that would only record it sends nothing), with `metadata.siteIntent:
   {previewId, askId, intent, label, say?, ref, params, withheld?, coarsened?, confirmed?}`.
-- **Confirm.** An intent with `confirm: true` shows Studio's one-line strip over the frame first ("Send “…” as
-  you?", Send or Cancel; Send is off for 600 ms and nothing has focus), and Send adds `confirmed: true`. Studio
+- **Confirm.** An intent with `confirm: true` shows Studio's nonmodal prompt over the frame first ("Send “…” as
+  you?", Cancel or Send; Send is off for 600 ms and focus stays where it was), and Send adds `confirmed: true`. The
+  complete message wraps, with actions below it at every width. Confirmation and location notices share a
+  pane-contained, scrollable area, so none covers another action even in a short split pane or with a keyboard
+  open. Tab can reach both actions; Escape inside the prompt cancels. Closing returns focus only when the person
+  entered the prompt, and repeated activation cannot send twice. Reloading or loading another document cancels
+  the old document's unsent confirmation; its Send handler cannot dispatch a stale approval.
+  Informational follow notices wait only while still current; they do not obscure a decision or location controls
+  and do not build a backlog of old takeover events. Their three-/four-second reading allowance starts when
+  visible. Location notices allow eight seconds (twelve for blocked access), paused while hovered, focused,
+  clipped, while a confirmation is open, or in a hidden tab. Stop ends location sharing; dismissing or expiring
+  the disclosure only hides that notice. Stop and dismiss return focus to the control the person entered from
+  only if the removed notice still owned focus. Studio
   takes `confirm` from the page, so a page could leave it out; Octo then reads `bound.json` and does not run an
   intent marked `confirm: true` without `confirmed`. No other ask asks for consent: it is visible as the person's
   own message.

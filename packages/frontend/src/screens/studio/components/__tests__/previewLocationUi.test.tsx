@@ -60,7 +60,7 @@ describe("location in previews: marker, toast and list", () => {
     await render(<LocationToast title="Cafés" onStop={onStop} onDismiss={onDismiss} />);
     const toast = container.querySelector("[data-testid=preview-location-toast]")!;
     expect(toast.getAttribute("role")).toBe("status");
-    expect(toast.textContent).toBe("📍Cafés can see your location·Stop");
+    expect(toast.textContent).toBe("📍Cafés can see your locationStop");
     await click(container.querySelector("[data-testid=preview-location-toast-stop]"));
     expect(onStop).toHaveBeenCalledTimes(1);
     await act(async () => { await vi.advanceTimersByTimeAsync(LOCATION_TOAST_MS); });
@@ -71,7 +71,8 @@ describe("location in previews: marker, toast and list", () => {
     await render(<LocationToast title="Running shoes for flat feet" onStop={vi.fn()} onDismiss={vi.fn()} />);
     const toast = container.querySelector<HTMLElement>("[data-testid=preview-location-toast]")!;
     expect(toast.querySelector(".truncate")).toBeNull();
-    expect(toast.querySelector(".line-clamp-2")?.textContent).toBe("Running shoes for flat feet can see your location");
+    expect(toast.querySelector(".line-clamp-2")).toBeNull();
+    expect(toast.textContent).toContain("Running shoes for flat feet can see your location");
   });
 
   it("when Instafy itself is blocked, says where to turn it on: the app's settings on desktop, the browser's on the web", async () => {

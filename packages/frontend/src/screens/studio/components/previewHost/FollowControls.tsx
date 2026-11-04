@@ -1,9 +1,12 @@
 import { Presentation } from "iconoir-react";
 import { Button } from "../../../../components/Button";
+import { FeedbackNotice } from "../../../../components/FeedbackNotice";
 import { HumanAvatar } from "../../../../components/HumanAvatar";
 import type { FollowPerson } from "../../../../services/runtimeController/previewFollow";
 import { followLabels, presentMenuLabel, type FollowLabels, type FollowRole } from "./followMode";
 import type { FollowRipple, usePreviewFollow } from "./usePreviewFollow";
+import { PreviewFeedbackPlacement } from "./PreviewFeedbackPlacement";
+import type { PreviewFeedbackTiming } from "./usePreviewFeedbackTimer";
 
 /**
  * What people see of follow mode (docs/Follow-Mode.md): the chip and Present
@@ -82,12 +85,13 @@ export function FollowRipples({ ripples }: { ripples: FollowRipple[] }) {
   </div>;
 }
 
-/** "Lena took over from Kim", "Kim stopped presenting", "📍 Your location is left out": a few seconds, never in the way. */
-export function FollowToast({ text, testId = "follow-note" }: { text: string; testId?: string }) {
-  return <div role="status" aria-live="polite" data-testid={testId}
-    className="pointer-events-none absolute inset-x-0 top-2 z-20 flex justify-center px-3">
-    <span className="max-w-full truncate rounded-full bg-slate-900/90 px-3 py-1.5 text-xs font-medium text-white shadow-lg backdrop-blur">{text}</span>
-  </div>;
+/** Follow events use their owner's visible-time budget; the location advisory lasts while presenting. */
+export function FollowToast({ text, testId = "follow-note", contained = false, timing }: {
+  text: string; testId?: string; contained?: boolean; timing?: PreviewFeedbackTiming;
+}) {
+  return <PreviewFeedbackPlacement contained={contained} ref={timing?.ref} {...timing?.interactionProps}>
+    <FeedbackNotice role="status" aria-live="polite" data-testid={testId}>{text}</FeedbackNotice>
+  </PreviewFeedbackPlacement>;
 }
 
 type PreviewFollow = ReturnType<typeof usePreviewFollow>;

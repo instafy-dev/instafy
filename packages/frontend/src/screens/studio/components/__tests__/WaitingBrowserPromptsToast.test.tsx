@@ -21,7 +21,7 @@ vi.mock("../../../../sdk/instafy", () => ({
   },
 }));
 
-import { WaitingBrowserPrompts, type WaitingPromptChat } from "../WaitingBrowserPrompts";
+import { WaitingBrowserPrompts, WAITING_PROMPT_REREAD_GRACE_MS, type WaitingPromptChat } from "../WaitingBrowserPrompts";
 
 const me = "55555555-5555-4555-8555-555555555555";
 const project = "77777777-7777-4777-8777-777777777777";
@@ -111,22 +111,24 @@ describe("the waiting-prompt toast, with Studio's own toasts", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  // "Copied message." or an error in the chat on screen closed the waiting
-  // toast for good, while the prompt still waited: it then ran out unseen.
-  it("comes back once a toast that replaced it closes, while the prompt still waits", async () => {
+  // An active decision keeps its place. Other feedback waits until the person
+  // dismisses it or its owner resolves the prompt.
+  it("keeps the approval visible through a copy and queues a later error", async () => {
     expect(toasts()).toEqual([`${WAITING}View`]);
     await act(async () => status!.showStatus("Copied message.", "success", 2_000, { presentation: "confirmation" }));
-    expect(toasts()).toEqual(["Copied message."]);
+    expect(toasts()).toEqual([`${WAITING}View`]);
     await act(async () => { await vi.advanceTimersByTimeAsync(2_500); });
     expect(toasts()).toEqual([`${WAITING}View`]);
 
-    // An error the person has to close first: the waiting toast is back after it.
+    // The later error must not replace a control the person may be about to use.
     await act(async () => status!.showStatus("Couldn't copy that message.", "error", 0));
-    expect(toasts()).toEqual(["Couldn't copy that message."]);
+    expect(toasts()).toEqual([`${WAITING}View`]);
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(toasts()).toEqual([`${WAITING}View`]);
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Dismiss notification"]')!.click());
     expect(toasts()).toEqual(["Couldn't copy that message."]);
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Dismiss notification"]')!.click());
-    expect(toasts()).toEqual([`${WAITING}View`]);
+    expect(toasts()).toEqual([]);
     // Nothing here answers the prompt.
     expect(mocks.decideApproval).not.toHaveBeenCalled();
   });
@@ -138,10 +140,16 @@ describe("the waiting-prompt toast, with Studio's own toasts", () => {
     expect(toasts()).toEqual([]);
   });
 
-  it("goes when the prompt is answered while another toast shows", async () => {
-    await act(async () => status!.showStatus("Copied message.", "success", 2_000, { presentation: "confirmation" }));
+  it("releases queued feedback when the prompt is answered", async () => {
+    await act(async () => status!.showStatus("Connection interrupted.", "warning", 2_000));
+    expect(toasts()).toEqual([`${WAITING}View`]);
     mocks.fetchPendingApproval.mockImplementation(async () => null);
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    // A grant refresh can briefly return no prompt; keep the existing grace
+    // before the owner invalidates its standing notice.
+    expect(toasts()).toEqual([`${WAITING}View`]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(WAITING_PROMPT_REREAD_GRACE_MS); });
+    expect(toasts()).toEqual(["Connection interrupted."]);
     await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
     expect(toasts()).toEqual([]);
   });

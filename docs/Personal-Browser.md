@@ -4,6 +4,20 @@
 
 Personal Browser is the desktop-only browser identity for one Instafy user on one device. It renders a native Chromium surface inside the Electron app, keeps that user's browser state locally, and gives an explicitly resumed local agent a narrow, confirmed control channel. It complements rather than replaces the remote Shared Browser.
 
+While the active Personal Browser surface owns the native page, global status
+notifications use a reserved row above that page. The existing notification queue,
+actions, keyboard access and passive copy confirmations move into the row. The
+native page stays live and its bounds follow the available space. Long feedback
+normally scrolls within 40% of the remaining page area. Short panes allow a 64px
+row while reserving 64px for the native page; at least 128px below browser chrome
+is needed to fit both with padding. A 44px action and a 64px live page already need
+108px before padding; arbitrarily shorter panes cannot expose both completely.
+Changing pane size or hiding it preserves the queue and its existing expiration rules.
+Dismissing or expiring the last notice collapses the row.
+Hiding Personal Browser, switching to Shared, or
+replacing its owner returns notifications to their normal floating placement.
+Moving the same portal container preserves notice timers and focused controls.
+
 Browser and sharing tools use floating dialogs. The renderer reports an optional
 `occluded` bounds flag while those dialogs cover the native surface. Main hides
 the WebContentsView and its input shield without changing the page's dimensions

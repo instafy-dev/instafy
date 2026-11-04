@@ -21,10 +21,10 @@ import { BrowserChromeShell, BrowserStatusPill } from "./BrowserChromeShell";
 import { withHostQuery } from "./previewHost/hostMessages";
 import { useSiteHost, type SiteMessageEvent, type SiteRecord } from "./previewHost/useSiteHost";
 import { setLocationStopped } from "./previewHost/locationSites";
-import { LocationBarControl, LocationBlockedNotice, LocationToast } from "./previewHost/PreviewLocation";
+import { LocationBarControl } from "./previewHost/PreviewLocation";
 import { followLabels } from "./previewHost/followMode";
-import { FollowRing, FollowRipples, FollowToast, SitePreviewFollowControls } from "./previewHost/FollowControls";
-import { AskConfirmStrip } from "./previewHost/AskConfirmStrip";
+import { FollowRing, FollowRipples, SitePreviewFollowControls } from "./previewHost/FollowControls";
+import { PreviewFeedbackLane } from "./previewHost/PreviewFeedback";
 import type { SiteAskHost } from "./previewHost/useSiteAsks";
 import { PreviewWakeError, START_NEEDS_BUILDER_TEXT, wakeUntilLive } from "./sitePreviewWake";
 import { holdSitePreviewPage, registerSitePreviewPaneCheck, shareSitePreviewPageShown, shareSitePreviewRecord } from "./SitePreviewCard";
@@ -534,13 +534,16 @@ export function SitePreviewPane({ projectId, previewId, title, visible, spaceNam
         ) : null}
         {frameShown && follow.state.role === "following" ? <FollowRing /> : null}
         {frameShown ? <FollowRipples ripples={follow.ripples} /> : null}
-        {host.location.blocked ? <LocationBlockedNotice onDismiss={host.location.dismissBlocked} /> : null}
-        {host.askConfirm ? <AskConfirmStrip line={host.askConfirm.line} onSend={host.askConfirm.send} onCancel={host.askConfirm.cancel} /> : null}
-        {host.location.toast && host.location.site ? (
-          <LocationToast title={host.location.site.title} onDismiss={host.location.dismissToast}
-            onStop={() => { if (host.location.site) setLocationStopped(host.location.site, true); host.location.dismissToast(); }} />
-        ) : followNote ? <FollowToast text={followNote} />
-          : follow.locationLeftOut && follow.state.role === "presenting" ? <FollowToast text="📍 Your location is left out" testId="follow-location-toast" /> : null}
+        <PreviewFeedbackLane active={frameOnScreen}
+          confirmation={host.askConfirm ? { line: host.askConfirm.line, onSend: host.askConfirm.send, onCancel: host.askConfirm.cancel } : null}
+          blockedLocation={host.location.blocked ? { onDismiss: host.location.dismissBlocked } : null}
+          location={host.location.toast && host.location.site ? {
+            title: host.location.site.title,
+            onDismiss: host.location.dismissToast,
+            onStop: () => { if (host.location.site) setLocationStopped(host.location.site, true); host.location.dismissToast(); },
+          } : null}
+          follow={followNote ? { text: followNote, timing: follow.noteTiming } : follow.locationLeftOut && follow.state.role === "presenting"
+            ? { text: "📍 Your location is left out", testId: "follow-location-toast" } : null} />
         {shown === "opening" || shown === "starting" || frameLoading || drawing ? (
           <div className={`absolute inset-0 flex items-center justify-center gap-2 text-sm text-slate-500 dark:text-slate-400 ${
             pageCovered ? "bg-white dark:bg-[var(--color-studio-dark-canvas)]" : "pointer-events-none"}`} data-testid="site-preview-progress">
