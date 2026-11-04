@@ -626,12 +626,14 @@ pull requests and manual runs retain always-run, fail-closed aggregation.
 | Rust test git service | Complete git-service suite | `public-rust-test-git` |
 | Rust test tunnel broker | Complete tunnel-broker workspace suite, `--locked` | `public-rust-test-broker` |
 
-The `native_compaction::` selector runs only the two isolated, localhost lifecycle
+The `native_compaction::` selector runs four isolated, localhost lifecycle
 tests for ChatGPT streaming and API-key JSON responses through the real proxy.
 They use inert credentials and temporary runtime homes to verify native compaction,
 preference correction before the next sampling request, opaque checkpoint
-preservation, and preference removal after cold rollout resume. It does not select
-the live-auth proxy integration tests.
+preservation, and preference removal after cold rollout resume. Empty and corrupt
+rollouts also verify that history is replayed before the first model request and
+is not duplicated on the following turn. The selector does not include the
+live-auth proxy integration tests.
 
 The `native_images::` selector runs one isolated, localhost test with inert credentials. It
 sends a turn with a downloaded chat image through the real proxy and checks that the image

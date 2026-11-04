@@ -270,10 +270,18 @@ async fn the_runtime_shutdown_saves_once_and_nothing_after() {
 async fn the_runtime_shutdown_respects_its_budget() {
     let fake = Fake::new("ready");
     let store = FakeStore::new();
-    let host = fake.spawn_persisting(store.clone(), NO_PERIODIC);
+    store.set_open(false);
+    let host = fake.spawn_persisting(store.clone(), PERIODIC);
     start_ready(&host).await;
     write_cookies(&fake, b"signed in");
-    store.set_open(false);
+    // Begin the budget with an upload already blocked, rather than requiring
+    // real process teardown and packing to finish before the budget expires.
+    eventually(
+        "the upload to block before shutdown",
+        Duration::from_secs(10),
+        || store.uploads_started() == 1,
+    )
+    .await;
     let started = std::time::Instant::now();
     host.shutdown(Duration::from_secs(3)).await;
     assert!(
@@ -281,7 +289,8 @@ async fn the_runtime_shutdown_respects_its_budget() {
         "took {:?}",
         started.elapsed()
     );
-    assert_eq!(store.uploads_started(), 1, "the final save was attempted");
+    assert_eq!(store.uploads_started(), 1);
+    assert_eq!(store.uploads_finished(), 0, "shutdown did not wait forever");
     assert_eq!(store.stored().0, 0);
 }
 

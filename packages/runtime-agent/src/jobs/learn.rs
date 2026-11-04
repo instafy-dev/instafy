@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+#[cfg(test)]
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -10,7 +11,8 @@ use uuid::Uuid;
 
 use crate::controller::LeaseJob;
 
-use super::JobExecution;
+use super::{JobExecution, workspace_memory_io};
+use origin_http_server::workspace_fs::WorkspaceDir;
 
 pub const INSTAFY_FILENAME: &str = "INSTAFY.md";
 pub const AGENTS_DOC_FILENAME: &str = "AGENTS.md";
@@ -620,7 +622,6 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     let agents_doc_path = workspace_dir.join(AGENTS_DOC_FILENAME);
     let claude_doc_path = workspace_dir.join(CLAUDE_DOC_FILENAME);
     let agents_script_path = workspace_dir.join(AGENTS_SCRIPT_FILENAME);
-    let skills_root_dir = workspace_dir.join(SKILLS_ROOT_RELATIVE_PATH);
     let policy_path = workspace_dir.join(LEARNING_POLICY_RELATIVE_PATH);
     let git_canonical_path = workspace_dir.join(GIT_CANONICAL_RELATIVE_PATH);
     let git_conflicts_path = workspace_dir.join(GIT_CANONICAL_CONFLICTS_RELATIVE_PATH);
@@ -650,7 +651,6 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
         workspace_dir.join(BROWSER_AUTOMATION_REFERENCE_RELATIVE_PATH);
     let skill_reading_path = workspace_dir.join(SKILL_READING_RELATIVE_PATH);
     let learned_index_path = workspace_dir.join(LEARNED_INDEX_RELATIVE_PATH);
-    let learned_blocks_dir_path = workspace_dir.join(LEARNED_BLOCKS_DIR_RELATIVE_PATH);
     let bound_sites_path = workspace_dir.join(BOUND_SITES_RELATIVE_PATH);
     let bound_sites_cheatsheet_path = workspace_dir.join(BOUND_SITES_CHEATSHEET_RELATIVE_PATH);
     let web_research_path = workspace_dir.join(WEB_RESEARCH_RELATIVE_PATH);
@@ -659,14 +659,15 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     let research_team_path = workspace_dir.join(RESEARCH_TEAM_RELATIVE_PATH);
     let research_team_researcher_path = workspace_dir.join(RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH);
 
-    if fs::create_dir_all(&skills_root_dir).is_err() {
+    let Ok(workspace) = WorkspaceDir::open(workspace_dir) else {
+        return;
+    };
+    if workspace.create_dir_all(SKILLS_ROOT_RELATIVE_PATH).is_err() {
         return;
     }
 
-    if !instafy_path.exists() {
-        if fs::write(&instafy_path, INSTAFY_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_missing_memory_file(workspace_dir, &instafy_path, INSTAFY_TEMPLATE) {
+        wrote_any = true;
     }
 
     if upgrade_bundled_skill(
@@ -678,61 +679,40 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
         wrote_any = true;
     }
 
-    if !claude_doc_path.exists() {
-        if fs::write(&claude_doc_path, CLAUDE_DOC_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_missing_memory_file(workspace_dir, &claude_doc_path, CLAUDE_DOC_TEMPLATE) {
+        wrote_any = true;
     }
 
-    if !agents_script_path.exists() {
-        if fs::write(&agents_script_path, AGENTS_SCRIPT_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_missing_memory_file(workspace_dir, &agents_script_path, AGENTS_SCRIPT_TEMPLATE) {
+        wrote_any = true;
     }
 
-    if !policy_path.exists() {
-        if let Some(parent) = policy_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::write(&policy_path, LEARNING_POLICY_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_missing_memory_file(workspace_dir, &policy_path, LEARNING_POLICY_TEMPLATE) {
+        wrote_any = true;
     }
 
-    if !git_canonical_path.exists() {
-        if let Some(parent) = git_canonical_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::write(&git_canonical_path, GIT_CANONICAL_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_missing_memory_file(workspace_dir, &git_canonical_path, GIT_CANONICAL_TEMPLATE) {
+        wrote_any = true;
     }
 
-    if !git_conflicts_path.exists() {
-        if let Some(parent) = git_conflicts_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::write(&git_conflicts_path, GIT_CANONICAL_CONFLICTS_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_missing_memory_file(
+        workspace_dir,
+        &git_conflicts_path,
+        GIT_CANONICAL_CONFLICTS_TEMPLATE,
+    ) {
+        wrote_any = true;
     }
 
-    if !runtime_flavors_path.exists() {
-        if let Some(parent) = runtime_flavors_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::write(&runtime_flavors_path, RUNTIME_FLAVORS_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_missing_memory_file(
+        workspace_dir,
+        &runtime_flavors_path,
+        RUNTIME_FLAVORS_TEMPLATE,
+    ) {
+        wrote_any = true;
     }
 
-    if !secrets_path.exists() {
-        if let Some(parent) = secrets_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::write(&secrets_path, SECRETS_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_missing_memory_file(workspace_dir, &secrets_path, SECRETS_TEMPLATE) {
+        wrote_any = true;
     }
 
     if upgrade_bundled_skill(
@@ -772,63 +752,42 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
         wrote_any = true;
     }
 
-    if !byoc_ai_credentials_path.exists() {
-        if let Some(parent) = byoc_ai_credentials_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::write(&byoc_ai_credentials_path, BYOC_AI_CREDENTIALS_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_missing_memory_file(
+        workspace_dir,
+        &byoc_ai_credentials_path,
+        BYOC_AI_CREDENTIALS_TEMPLATE,
+    ) {
+        wrote_any = true;
     }
 
-    if let Some(parent) = collaboration_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
     // Keep built-in collaboration guidance current so new CLI capabilities (for example role
     // changes in addition to invites) are immediately available in existing pre-live workspaces.
-    if fs::read_to_string(&collaboration_path).ok().as_deref() != Some(COLLABORATION_TEMPLATE) {
-        if fs::write(&collaboration_path, COLLABORATION_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_file_if_changed(workspace_dir, &collaboration_path, COLLABORATION_TEMPLATE) {
+        wrote_any = true;
     }
 
-    if let Some(parent) = agent_collaboration_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if fs::read_to_string(&agent_collaboration_path)
-        .ok()
-        .as_deref()
-        != Some(AGENT_COLLABORATION_TEMPLATE)
-    {
-        if fs::write(&agent_collaboration_path, AGENT_COLLABORATION_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_file_if_changed(
+        workspace_dir,
+        &agent_collaboration_path,
+        AGENT_COLLABORATION_TEMPLATE,
+    ) {
+        wrote_any = true;
     }
 
-    if let Some(parent) = group_participation_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if fs::read_to_string(&group_participation_path)
-        .ok()
-        .as_deref()
-        != Some(GROUP_PARTICIPATION_TEMPLATE)
-    {
-        if fs::write(&group_participation_path, GROUP_PARTICIPATION_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_file_if_changed(
+        workspace_dir,
+        &group_participation_path,
+        GROUP_PARTICIPATION_TEMPLATE,
+    ) {
+        wrote_any = true;
     }
 
-    if let Some(parent) = conversation_history_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if fs::read_to_string(&conversation_history_path)
-        .ok()
-        .as_deref()
-        != Some(CONVERSATION_HISTORY_TEMPLATE)
-    {
-        if fs::write(&conversation_history_path, CONVERSATION_HISTORY_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_file_if_changed(
+        workspace_dir,
+        &conversation_history_path,
+        CONVERSATION_HISTORY_TEMPLATE,
+    ) {
+        wrote_any = true;
     }
 
     if upgrade_bundled_skill(
@@ -840,32 +799,24 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
         wrote_any = true;
     }
 
-    if !diagnostics_path.exists() {
-        if let Some(parent) = diagnostics_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::write(&diagnostics_path, DIAGNOSTICS_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_missing_memory_file(workspace_dir, &diagnostics_path, DIAGNOSTICS_TEMPLATE) {
+        wrote_any = true;
     }
 
-    if !diagnostics_openai_path.exists() {
-        if let Some(parent) = diagnostics_openai_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::write(&diagnostics_openai_path, DIAGNOSTICS_OPENAI_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_missing_memory_file(
+        workspace_dir,
+        &diagnostics_openai_path,
+        DIAGNOSTICS_OPENAI_TEMPLATE,
+    ) {
+        wrote_any = true;
     }
 
-    if let Some(parent) = location_sharing_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if fs::read_to_string(&location_sharing_path).ok().as_deref() != Some(LOCATION_SHARING_TEMPLATE)
-    {
-        if fs::write(&location_sharing_path, LOCATION_SHARING_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_file_if_changed(
+        workspace_dir,
+        &location_sharing_path,
+        LOCATION_SHARING_TEMPLATE,
+    ) {
+        wrote_any = true;
     }
 
     if upgrade_bundled_skill(
@@ -877,26 +828,16 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
         wrote_any = true;
     }
 
-    if let Some(parent) = persistent_contexts_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if fs::read_to_string(&persistent_contexts_path)
-        .ok()
-        .as_deref()
-        != Some(PERSISTENT_CONTEXTS_TEMPLATE)
-    {
-        if fs::write(&persistent_contexts_path, PERSISTENT_CONTEXTS_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_file_if_changed(
+        workspace_dir,
+        &persistent_contexts_path,
+        PERSISTENT_CONTEXTS_TEMPLATE,
+    ) {
+        wrote_any = true;
     }
 
-    if let Some(parent) = skill_router_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if fs::read_to_string(&skill_router_path).ok().as_deref() != Some(SKILL_ROUTER_TEMPLATE) {
-        if fs::write(&skill_router_path, SKILL_ROUTER_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_file_if_changed(workspace_dir, &skill_router_path, SKILL_ROUTER_TEMPLATE) {
+        wrote_any = true;
     }
 
     if upgrade_bundled_skill(
@@ -973,25 +914,18 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
         }
     }
 
-    if !skill_reading_path.exists() {
-        if let Some(parent) = skill_reading_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::write(&skill_reading_path, SKILL_READING_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_missing_memory_file(workspace_dir, &skill_reading_path, SKILL_READING_TEMPLATE) {
+        wrote_any = true;
     }
 
-    if !learned_index_path.exists() {
-        if let Some(parent) = learned_index_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::write(&learned_index_path, LEARNED_INDEX_TEMPLATE).is_ok() {
-            wrote_any = true;
-        }
+    if write_missing_memory_file(workspace_dir, &learned_index_path, LEARNED_INDEX_TEMPLATE) {
+        wrote_any = true;
     }
 
-    if fs::create_dir_all(&learned_blocks_dir_path).is_ok() {
+    if workspace
+        .create_dir_all(LEARNED_BLOCKS_DIR_RELATIVE_PATH)
+        .is_ok()
+    {
         // Directory creation isn't meaningful "write" for git, but helps avoid races for /learn.
     }
 
@@ -1010,28 +944,24 @@ fn upgrade_bundled_skill(
     legacy: &[&str],
     current: &str,
 ) -> bool {
-    let local = path
-        .ancestors()
-        .take_while(|ancestor| *ancestor != workspace_dir)
-        .all(|ancestor| {
-            fs::symlink_metadata(ancestor)
-                .map(|metadata| !metadata.file_type().is_symlink())
-                .unwrap_or_else(|error| error.kind() == std::io::ErrorKind::NotFound)
-        });
-    if !local {
-        return false;
+    let budget = legacy.iter().map(|text| text.len()).max().unwrap_or(0);
+    let replaceable = match workspace_memory_io::read_prefix(workspace_dir, path, budget) {
+        Ok((bytes, false)) => {
+            std::str::from_utf8(&bytes).is_ok_and(|content| legacy.contains(&content))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        _ => false,
+    };
+    replaceable && write_file_if_changed(workspace_dir, path, current)
+}
+
+fn write_missing_memory_file(workspace_dir: &Path, path: &Path, content: &str) -> bool {
+    match workspace_memory_io::open_file(workspace_dir, path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            write_file_if_changed(workspace_dir, path, content)
+        }
+        _ => false,
     }
-    let replaceable = !path.exists()
-        || fs::read_to_string(path)
-            .ok()
-            .is_some_and(|content| legacy.contains(&content.as_str()));
-    if !replaceable {
-        return false;
-    }
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    fs::write(path, current).is_ok()
 }
 
 pub fn parse_learn_request(prompt_text: &str) -> Option<LearnRequest> {
@@ -1458,15 +1388,8 @@ Output requirements:\n\
     )
 }
 
-fn write_file_if_changed(path: &Path, content: &str) -> bool {
-    let existing = fs::read_to_string(path).unwrap_or_default();
-    if existing == content {
-        return false;
-    }
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    fs::write(path, content).is_ok()
+fn write_file_if_changed(workspace_dir: &Path, path: &Path, content: &str) -> bool {
+    workspace_memory_io::write_if_changed(workspace_dir, path, content).unwrap_or(false)
 }
 
 fn bytes_to_best_effort_utf8(bytes: &[u8]) -> String {
@@ -1535,51 +1458,47 @@ fn extract_used_learned_block_names(text: &str) -> HashSet<String> {
     out
 }
 
-fn load_learned_usage(path: &Path) -> LearnedUsageFile {
-    let bytes = fs::read(path).unwrap_or_default();
-    if bytes.is_empty() {
-        return LearnedUsageFile {
-            version: 1,
-            updated_at_ms: 0,
-            blocks: BTreeMap::new(),
-        };
-    }
+fn load_learned_usage(workspace_dir: &Path, path: &Path) -> Option<LearnedUsageFile> {
+    // More than enough for the 500 retained entries, but never allocate an arbitrary source.
+    let bytes = match workspace_memory_io::read_prefix(workspace_dir, path, 1024 * 1024) {
+        Ok((bytes, false)) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        _ => return None,
+    };
     let parsed: LearnedUsageFile = serde_json::from_slice(&bytes).unwrap_or_default();
-    LearnedUsageFile {
+    Some(LearnedUsageFile {
         version: if parsed.version == 0 {
             1
         } else {
             parsed.version
         },
         ..parsed
-    }
+    })
 }
 
-fn write_learned_usage_if_changed(path: &Path, usage: &LearnedUsageFile) -> bool {
+fn write_learned_usage_if_changed(
+    workspace_dir: &Path,
+    path: &Path,
+    usage: &LearnedUsageFile,
+) -> bool {
     let json = serde_json::to_string_pretty(usage).unwrap_or_else(|_| "{}".to_string());
-    write_file_if_changed(path, normalize_newlines(json.as_str()).as_str())
+    write_file_if_changed(
+        workspace_dir,
+        path,
+        normalize_newlines(json.as_str()).as_str(),
+    )
 }
 
 fn list_existing_learned_skill_blocks(workspace_dir: &Path) -> HashSet<String> {
-    let learned_blocks_dir = workspace_dir.join(LEARNED_BLOCKS_DIR_RELATIVE_PATH);
-    let mut names = HashSet::new();
-    if let Ok(entries) = fs::read_dir(&learned_blocks_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !is_valid_block_name(name.as_str()) {
-                continue;
-            }
-            if !path.join("SKILL.md").is_file() {
-                continue;
-            }
-            names.insert(name);
-        }
-    }
-    names
+    workspace_memory_io::child_directories(workspace_dir, LEARNED_BLOCKS_DIR_RELATIVE_PATH)
+        .into_iter()
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?.to_owned();
+            (is_valid_block_name(&name)
+                && workspace_memory_io::open_file(workspace_dir, &path.join("SKILL.md")).is_ok())
+            .then_some(name)
+        })
+        .collect()
 }
 
 fn cap_learned_usage_entries(usage: &mut LearnedUsageFile) {
@@ -1608,7 +1527,9 @@ fn update_learned_usage_from_conversation(
     changed_paths: &mut Vec<String>,
 ) -> (usize, usize, usize) {
     let usage_path = workspace_dir.join(LEARNED_USAGE_RELATIVE_PATH);
-    let mut usage = load_learned_usage(&usage_path);
+    let Some(mut usage) = load_learned_usage(workspace_dir, &usage_path) else {
+        return (0, 0, 0);
+    };
     let before = usage.blocks.len();
 
     let existing_blocks = list_existing_learned_skill_blocks(workspace_dir);
@@ -1654,7 +1575,7 @@ fn update_learned_usage_from_conversation(
     usage.updated_at_ms = now_millis();
 
     let after = usage.blocks.len();
-    if write_learned_usage_if_changed(&usage_path, &usage) {
+    if write_learned_usage_if_changed(workspace_dir, &usage_path, &usage) {
         changed_paths.push(LEARNED_USAGE_RELATIVE_PATH.to_string());
     }
     (before, after, marked_used)
@@ -1689,8 +1610,7 @@ fn parse_front_matter_description(text: &str) -> Option<String> {
     None
 }
 
-fn describe_block(block_skill_path: &Path) -> String {
-    let bytes = fs::read(block_skill_path).unwrap_or_default();
+fn describe_block(bytes: &[u8]) -> String {
     let preview = bytes_to_best_effort_utf8(&bytes[..bytes.len().min(4096)]);
     if let Some(desc) = parse_front_matter_description(preview.as_str()) {
         return desc;
@@ -1836,67 +1756,77 @@ fn optimize_learned_index(
     changed_paths: &mut Vec<String>,
 ) -> (usize, usize, usize, usize) {
     let learned_index_path = workspace_dir.join(LEARNED_INDEX_RELATIVE_PATH);
-    let learned_blocks_dir = workspace_dir.join(LEARNED_BLOCKS_DIR_RELATIVE_PATH);
     let usage_path = workspace_dir.join(LEARNED_USAGE_RELATIVE_PATH);
-    let usage = load_learned_usage(&usage_path);
+    let usage = load_learned_usage(workspace_dir, &usage_path).unwrap_or_default();
     let now_ms = now_millis();
 
-    let before = fs::read(&learned_index_path).map(|b| b.len()).unwrap_or(0);
+    let before = workspace_memory_io::open_file(workspace_dir, &learned_index_path)
+        .and_then(|file| file.metadata())
+        .map(|metadata| metadata.len() as usize)
+        .unwrap_or(0);
 
     let mut blocks: Vec<(String, u32, u128, u128, u128, u128, String)> = Vec::new();
-    if let Ok(entries) = fs::read_dir(&learned_blocks_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !path.is_dir() {
-                continue;
-            }
-            if name.starts_with('.') || name.starts_with('_') {
-                continue;
-            }
-            let skill_path = path.join("SKILL.md");
-            if !skill_path.is_file() {
-                continue;
-            }
-            let modified = fs::metadata(&skill_path)
-                .and_then(|m| m.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            let mtime_key = system_time_sort_key(modified);
-            let skill_text = fs::read_to_string(&skill_path).unwrap_or_default();
-            let quality_penalty = learned_block_quality_penalty(skill_text.as_str());
-            let desc = describe_block(&skill_path);
-
-            let usage_entry = usage.blocks.get(name.as_str());
-            let uses = usage_entry.map(|entry| entry.uses).unwrap_or(0);
-            let last_used_ms = usage_entry
-                .and_then(|entry| entry.last_used_ms)
-                .unwrap_or(mtime_key as u64) as u128;
-
-            let age_since_used_secs = if last_used_ms == 0 {
-                u64::MAX
-            } else {
-                now_ms.saturating_sub(last_used_ms as u64) / 1000
-            };
-
-            // Demote cold/low-use blocks so high-frequency ones stay discoverable in the capped index.
-            let cold_rank = if uses == 0 && age_since_used_secs > COLD_BLOCK_UNUSED_TTL_SECS {
-                2u128
-            } else if uses <= 1 && age_since_used_secs > COLD_BLOCK_LOW_USE_TTL_SECS {
-                1u128
-            } else {
-                0u128
-            };
-
-            blocks.push((
-                name,
-                uses,
-                cold_rank,
-                quality_penalty,
-                last_used_ms,
-                mtime_key,
-                desc,
-            ));
+    for path in
+        workspace_memory_io::child_directories(workspace_dir, LEARNED_BLOCKS_DIR_RELATIVE_PATH)
+    {
+        let Some(name) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if name.starts_with('.') || name.starts_with('_') {
+            continue;
         }
+        let skill_path = path.join("SKILL.md");
+        let Ok(file) = workspace_memory_io::open_file(workspace_dir, &skill_path) else {
+            continue;
+        };
+        let modified = file
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let mtime_key = system_time_sort_key(modified);
+        let Ok((bytes, _)) =
+            workspace_memory_io::read_prefix(workspace_dir, &skill_path, 64 * 1024)
+        else {
+            continue;
+        };
+        let skill_text = std::str::from_utf8(&bytes).unwrap_or_default();
+        let quality_penalty = learned_block_quality_penalty(skill_text);
+        let desc = describe_block(&bytes);
+
+        let usage_entry = usage.blocks.get(name.as_str());
+        let uses = usage_entry.map(|entry| entry.uses).unwrap_or(0);
+        let last_used_ms = usage_entry
+            .and_then(|entry| entry.last_used_ms)
+            .unwrap_or(mtime_key as u64) as u128;
+
+        let age_since_used_secs = if last_used_ms == 0 {
+            u64::MAX
+        } else {
+            now_ms.saturating_sub(last_used_ms as u64) / 1000
+        };
+
+        // Demote cold/low-use blocks so high-frequency ones stay discoverable in the capped index.
+        let cold_rank = if uses == 0 && age_since_used_secs > COLD_BLOCK_UNUSED_TTL_SECS {
+            2u128
+        } else if uses <= 1 && age_since_used_secs > COLD_BLOCK_LOW_USE_TTL_SECS {
+            1u128
+        } else {
+            0u128
+        };
+
+        blocks.push((
+            name,
+            uses,
+            cold_rank,
+            quality_penalty,
+            last_used_ms,
+            mtime_key,
+            desc,
+        ));
     }
     blocks.sort_by(|a, b| {
         // (uses desc, cold_rank asc, quality_penalty asc, last_used desc, mtime desc, name asc)
@@ -1943,7 +1873,7 @@ fn optimize_learned_index(
     };
 
     let after = new_index.as_bytes().len();
-    if write_file_if_changed(&learned_index_path, new_index.as_str()) {
+    if write_file_if_changed(workspace_dir, &learned_index_path, new_index.as_str()) {
         changed_paths.push(LEARNED_INDEX_RELATIVE_PATH.to_string());
     }
 
@@ -1971,7 +1901,7 @@ fn optimize_learned_index(
             .join(SKILLS_ROOT_RELATIVE_PATH)
             .join("instafy-learned")
             .join("ARCHIVE.md");
-        if write_file_if_changed(&archive_path, archive_lines.as_str()) {
+        if write_file_if_changed(workspace_dir, &archive_path, archive_lines.as_str()) {
             if let Ok(relative) = archive_path.strip_prefix(workspace_dir) {
                 changed_paths.push(relative.to_string_lossy().to_string());
             }
@@ -3922,7 +3852,7 @@ User: please use block-03
         );
 
         let usage_path = root.join(LEARNED_USAGE_RELATIVE_PATH);
-        let usage = load_learned_usage(&usage_path);
+        let usage = load_learned_usage(root, &usage_path).expect("safe usage");
         let entry = usage.blocks.get("block-01").expect("usage entry exists");
         assert!(entry.uses >= 1);
         assert!(entry.last_used_ms.is_some());

@@ -12,9 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::active_turn_input::ActiveTurnInputReceiver;
 use crate::codex::{
     BUILDING_THREAD_KEYS, CodexClient, CodexFallbackSummaryKind, CodexFinalOutputSchema,
-    CodexRunOptions, CodexRunOutput, RETIRED_BROWSER_THREAD_KEYS, ScopedWorkerExecution,
-    ThreadLane, classify_internal_codex_fallback_summary, lane_history_replay_required,
-    provider_thread_restorable_on_this_runtime,
+    CodexRunOptions, CodexRunOutput, CodexThreadRestoreNeedsHistory, RETIRED_BROWSER_THREAD_KEYS,
+    ScopedWorkerExecution, ThreadLane, classify_internal_codex_fallback_summary,
+    lane_history_replay_required, provider_thread_restorable_on_this_runtime,
 };
 use crate::config::Config;
 use crate::controller::{LeaseJob, Registration};
@@ -101,6 +101,9 @@ pub(crate) mod user_input_request;
 mod web_research_routing_tests;
 mod workspace_change_detection;
 mod workspace_commit;
+mod workspace_memory_io;
+#[cfg(test)]
+mod workspace_memory_tests;
 
 use self::routing_evidence::{RoutingEvidenceRequirements, routing_evidence_progress};
 use self::skill_routing::{PromptRoutingTerms, SkillRoutingProfile};
@@ -598,11 +601,12 @@ fn split_shared_thread_state(state: Option<JsonValue>) -> (Option<JsonValue>, bo
 
 /// The controller attaches the previous run's provider state when it enqueues a job, whichever
 /// runtime later leases it. After a restart, or on a fresh runtime, the thread that state names
-/// for the turn's lane is often not restorable here, and Codex then quietly starts an empty
+/// for the turn's lane is often not restorable here, and Codex must start an empty
 /// thread. The prompt lane and the contextual-instruction suppression are both chosen from this
 /// state before Codex tries, so a state that still claims a restored thread would send the
 /// compact reminder to a model with no history, no workspace memory snapshot and no skills
 /// catalog. Such a state is marked for the lane's history replay so the turn gets the full lane.
+/// Actual restore errors found later stop setup before inference and rebuild the prompt too.
 /// The second value says whether the state was marked.
 fn provider_conversation_state_for_this_runtime(
     state: Option<JsonValue>,
@@ -634,11 +638,9 @@ fn prompt_context_replayed_history(prompt_context: &JsonValue) -> bool {
             .is_some_and(|turns| turns > 0)
 }
 
-/// Codex keeps the lane's replay flag set after a run that could not restore its thread,
-/// because that run's prompt was normally built before the loss was known and carried no
-/// history. When this run's prompt did replay the lane's history, as it does once
-/// `provider_conversation_state_for_this_runtime` has spotted a lost thread, the fresh thread
-/// already holds it. Keeping the flag would make the next turn in this lane, whose new rollout
+/// Codex marks the lane's state after a run that replaced its lost thread. When this run's
+/// prompt replayed the lane's history, either after the early check or setup-only recovery,
+/// the fresh thread already holds it. Keeping the flag would make the next turn in this lane, whose new rollout
 /// resumes, send the history, workspace snapshot and skills catalog into that thread a second
 /// time. Only this lane's restore and replay flags are cleared; the other lane's stay as they
 /// are, and the flag both lanes shared before follows the other lane's.
@@ -960,18 +962,14 @@ async fn run_agents_memory_snapshot(
     Some(combined.trim().to_string())
 }
 
-fn read_text_file_lossy_truncated(path: &Path, max_bytes: usize) -> Option<(String, bool)> {
-    if max_bytes == 0 {
-        return Some(("".to_string(), false));
-    }
-    let data = fs::read(path).ok()?;
-    let truncated = data.len() > max_bytes;
-    let slice = if truncated {
-        &data[..max_bytes]
-    } else {
-        &data[..]
-    };
-    Some((String::from_utf8_lossy(slice).to_string(), truncated))
+fn read_text_file_lossy_truncated(
+    workspace_dir: &Path,
+    path: &Path,
+    max_bytes: usize,
+) -> Option<(String, bool)> {
+    let (bytes, truncated) =
+        workspace_memory_io::read_prefix(workspace_dir, path, max_bytes).ok()?;
+    Some((String::from_utf8_lossy(&bytes).into_owned(), truncated))
 }
 
 #[derive(Debug, Clone)]
@@ -1272,26 +1270,11 @@ fn parse_skill_header_kv(raw: &str) -> SkillMetadata {
     out
 }
 
-fn read_skill_metadata(path: &Path) -> SkillMetadata {
+fn read_skill_metadata(workspace_dir: &Path, path: &Path) -> Option<SkillMetadata> {
     // Front matter is always at the top; avoid reading large files.
     const MAX_BYTES: usize = 4096;
-    let Ok(data) = fs::read(path) else {
-        return SkillMetadata {
-            name: None,
-            description: None,
-            context_kind: None,
-            context_parents: Vec::new(),
-            context_children: Vec::new(),
-            routing_keywords: Vec::new(),
-            always_include: false,
-            max_children: None,
-        };
-    };
-    let slice = if data.len() > MAX_BYTES {
-        &data[..MAX_BYTES]
-    } else {
-        &data[..]
-    };
+    let (data, _) = workspace_memory_io::read_prefix(workspace_dir, path, MAX_BYTES).ok()?;
+    let slice = data.as_slice();
     let decoded = String::from_utf8_lossy(slice);
     let dir_name = path
         .parent()
@@ -1312,12 +1295,12 @@ fn read_skill_metadata(path: &Path) -> SkillMetadata {
     {
         let mut merged = front_matter;
         merged.merge_defaults(defaults);
-        return merged;
+        return Some(merged);
     }
 
     let mut header = parse_skill_header_kv(&decoded);
     header.merge_defaults(defaults);
-    header
+    Some(header)
 }
 
 #[derive(Debug, Clone)]
@@ -1466,13 +1449,15 @@ fn exact_routing_score_delta(prompt: &ExactRoutingCues, candidate: &ExactRouting
 /// pushes the body out of the window). Exact cues (quoted literals, `/routes`) come from the same
 /// text.
 fn read_skill_routing(
+    workspace_dir: &Path,
     id: &str,
     path: &Path,
     metadata: &SkillMetadata,
 ) -> (SkillRoutingProfile, ExactRoutingCues) {
-    let raw = read_text_file_lossy_truncated(path, skill_routing::MAX_ROUTING_FILE_BYTES)
-        .map(|(text, _)| text)
-        .unwrap_or_default();
+    let raw =
+        read_text_file_lossy_truncated(workspace_dir, path, skill_routing::MAX_ROUTING_FILE_BYTES)
+            .map(|(text, _)| text)
+            .unwrap_or_default();
     let (_front_matter, body) = skill_routing::split_front_matter(&raw);
     let window = skill_routing::body_window(body);
     let profile = SkillRoutingProfile::build(
@@ -1553,37 +1538,27 @@ fn score_context_route(
 }
 
 fn build_top_level_context_nodes(workspace_dir: &Path) -> Vec<ContextNode> {
-    let skills_dir = workspace_dir.join(learn::SKILLS_ROOT_RELATIVE_PATH);
-    if !skills_dir.is_dir() {
-        return Vec::new();
-    }
-
     let mut contexts = Vec::new();
-    if let Ok(entries) = fs::read_dir(&skills_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let skill_md = path.join("SKILL.md");
-            if !skill_md.is_file() {
-                continue;
-            }
-            let id = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("skill")
-                .to_string();
-            let metadata = read_skill_metadata(&skill_md);
-            let (routing, exact_cues) = read_skill_routing(&id, &skill_md, &metadata);
-            contexts.push(ContextNode {
-                id,
-                metadata,
-                path: skill_md,
-                routing,
-                exact_cues,
-            });
-        }
+    for path in
+        workspace_memory_io::child_directories(workspace_dir, learn::SKILLS_ROOT_RELATIVE_PATH)
+    {
+        let skill_md = path.join("SKILL.md");
+        let id = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("skill")
+            .to_string();
+        let Some(metadata) = read_skill_metadata(workspace_dir, &skill_md) else {
+            continue;
+        };
+        let (routing, exact_cues) = read_skill_routing(workspace_dir, &id, &skill_md, &metadata);
+        contexts.push(ContextNode {
+            id,
+            metadata,
+            path: skill_md,
+            routing,
+            exact_cues,
+        });
     }
 
     contexts.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1852,35 +1827,28 @@ fn select_learned_block_candidates(
     const MAX_BLOCKS_TO_LOAD: usize = 2;
     const MAX_SCORE_GAP_FROM_TOP: usize = 3;
 
-    let blocks_dir = workspace_dir.join(learn::LEARNED_BLOCKS_DIR_RELATIVE_PATH);
-    if !blocks_dir.is_dir() {
-        return Vec::new();
-    }
-
     let normalized_prompt = prompt_text.trim().to_ascii_lowercase();
     let prompt_terms = PromptRoutingTerms::new(prompt_text);
     let prompt_exact_cues = extract_exact_routing_cues(prompt_text);
 
     let mut candidates = Vec::new();
-    if let Ok(entries) = fs::read_dir(&blocks_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.trim().is_empty() {
-                continue;
-            }
-            let skill_md = path.join("SKILL.md");
-            if !skill_md.is_file() {
-                continue;
-            }
-            let metadata = read_skill_metadata(&skill_md);
-            let (routing, exact_cues) = read_skill_routing(&name, &skill_md, &metadata);
-            if routing.is_empty() {
-                continue;
-            }
+    for path in workspace_memory_io::child_directories(
+        workspace_dir,
+        learn::LEARNED_BLOCKS_DIR_RELATIVE_PATH,
+    ) {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if name.trim().is_empty() {
+            continue;
+        }
+        let skill_md = path.join("SKILL.md");
+        let Some(metadata) = read_skill_metadata(workspace_dir, &skill_md) else {
+            continue;
+        };
+        let (routing, exact_cues) = read_skill_routing(workspace_dir, &name, &skill_md, &metadata);
+        if !routing.is_empty() {
             candidates.push((name, skill_md, metadata, routing, exact_cues));
         }
     }
@@ -2185,6 +2153,7 @@ fn workspace_file_section(
     heading: &str,
 ) -> Option<String> {
     let (text, _) = read_text_file_lossy_truncated(
+        workspace_dir,
         &workspace_dir.join(relative_path),
         PROJECT_MEMORY_MAX_FILE_BYTES,
     )?;
@@ -2230,7 +2199,8 @@ fn format_project_memory_snapshot_with_preferences(
             return;
         }
         let budget = PROJECT_MEMORY_MAX_FILE_BYTES.min(*remaining);
-        if let Some((text, truncated)) = read_text_file_lossy_truncated(path, budget) {
+        if let Some((text, truncated)) = read_text_file_lossy_truncated(workspace_dir, path, budget)
+        {
             let rel = path.strip_prefix(workspace_dir).unwrap_or(path);
             let _ = writeln!(out, "\n## {} ({})", label, rel.display());
             out.push_str("```markdown\n");
@@ -2251,7 +2221,7 @@ fn format_project_memory_snapshot_with_preferences(
                 return;
             }
             let Some((text, cut)) =
-                read_text_file_lossy_truncated(path, PROJECT_MEMORY_MAX_TOTAL_BYTES)
+                read_text_file_lossy_truncated(workspace_dir, path, PROJECT_MEMORY_MAX_TOTAL_BYTES)
             else {
                 return;
             };
@@ -2459,7 +2429,7 @@ fn format_project_memory_snapshot_with_preferences(
 
                     let budget = MAX_LEARNED_BLOCK_FILE_BYTES.min(remaining);
                     if let Some((text, truncated)) =
-                        read_text_file_lossy_truncated(&candidate.path, budget)
+                        read_text_file_lossy_truncated(workspace_dir, &candidate.path, budget)
                     {
                         let rel_display = candidate
                             .path
@@ -2510,7 +2480,7 @@ fn format_project_memory_snapshot_with_preferences(
                     });
                     let budget = MAX_LEARNED_BLOCK_FILE_BYTES.min(remaining);
                     if let Some((text, truncated)) =
-                        read_text_file_lossy_truncated(&candidate.path, budget)
+                        read_text_file_lossy_truncated(workspace_dir, &candidate.path, budget)
                     {
                         let rel_display = candidate
                             .path
@@ -7549,6 +7519,7 @@ impl JobProcessor {
                     Some(attachments),
                 )
             };
+        let prompt_suffix_start = prompt.len();
         if worker_reply_receipt.is_some() {
             prompt.push_str("\nThe controller accepted this turn's worker answers. Continue only with the remaining user request above; do not restart or answer the waiting worker assignments.\n");
             enrich_prompt_context_metrics(&mut prompt_context, &prompt);
@@ -7579,6 +7550,9 @@ impl JobProcessor {
             broad_context_suppression_reason,
             codex_run_options.require_first_tool_call,
         );
+        // The lane's prompt may need rebuilding if the rollout exists but fails to load.
+        // Keep turn-specific additions once, outside the rebuilt conversation context.
+        let prompt_suffix = prompt[prompt_suffix_start..].to_string();
         tracing::info!(
             job_id = %job.id,
             intent = ?job.intent,
@@ -7744,50 +7718,131 @@ impl JobProcessor {
         let _client_timezone_guard =
             ClientTimezoneGuard::from_metadata(job.payload.get("metadata"));
         let _turn_clock_guard = TurnClockGuard::start(Some(turn_files));
-        let native_prompt = if granted_execution {
-            prompt.as_str()
-        } else {
-            without_project_preferences(&prompt, &project_id, &project_preferences)?
-        };
-        let output_result = if streaming_context.is_some() {
-            let mut event_handler = |event: &JsonValue| -> Result<()> {
-                if let Some(draft) = reply_draft.as_mut() {
-                    draft.observe(event);
-                }
-                if let Some(ctx) = streaming_context.as_mut() {
-                    ctx.events.push(event.clone());
-                    if ctx.active {
-                        let messages = with_runtime_metadata_vec(
-                            extract_codex_messages(&ctx.events),
-                            &runtime_id_for_messages,
-                        );
-                        for message in messages.iter().skip(ctx.streamed_count) {
-                            if ctx.sender.send(message.clone()).is_err() {
-                                warn!(
-                                    job_id = %job_id,
-                                    "job progress receiver dropped; disabling streaming for remaining events"
-                                );
-                                ctx.active = false;
-                                ctx.status.store(false, Ordering::SeqCst);
-                                break;
-                            }
-                        }
-                        ctx.streamed_count = messages.len();
-                    }
-                }
-                Ok(())
+        codex_run_options.preserve_run_deadline()?;
+        let mut recovered_thread_restore = false;
+        let output_result = loop {
+            let native_prompt = if granted_execution {
+                prompt.as_str()
+            } else {
+                without_project_preferences(&prompt, &project_id, &project_preferences)?
             };
-            codex
-                .execute_with_options(
-                    native_prompt,
-                    Some(&mut event_handler),
-                    codex_run_options.clone(),
-                )
-                .await
-        } else {
-            codex
-                .execute_with_options(native_prompt, None, codex_run_options.clone())
-                .await
+            let output_result = if streaming_context.is_some() {
+                let mut event_handler = |event: &JsonValue| -> Result<()> {
+                    if let Some(draft) = reply_draft.as_mut() {
+                        draft.observe(event);
+                    }
+                    if let Some(ctx) = streaming_context.as_mut() {
+                        ctx.events.push(event.clone());
+                        if ctx.active {
+                            let messages = with_runtime_metadata_vec(
+                                extract_codex_messages(&ctx.events),
+                                &runtime_id_for_messages,
+                            );
+                            for message in messages.iter().skip(ctx.streamed_count) {
+                                if ctx.sender.send(message.clone()).is_err() {
+                                    warn!(
+                                        job_id = %job_id,
+                                        "job progress receiver dropped; disabling streaming for remaining events"
+                                    );
+                                    ctx.active = false;
+                                    ctx.status.store(false, Ordering::SeqCst);
+                                    break;
+                                }
+                            }
+                            ctx.streamed_count = messages.len();
+                        }
+                    }
+                    Ok(())
+                };
+                codex
+                    .execute_with_options(
+                        native_prompt,
+                        Some(&mut event_handler),
+                        codex_run_options.clone(),
+                    )
+                    .await
+            } else {
+                codex
+                    .execute_with_options(native_prompt, None, codex_run_options.clone())
+                    .await
+            };
+            match output_result {
+                Err(error)
+                    if !recovered_thread_restore
+                        && error.is::<CodexThreadRestoreNeedsHistory>() =>
+                {
+                    recovered_thread_restore = true;
+                    let mut replay_state = codex_run_options
+                        .provider_conversation_state
+                        .clone()
+                        .unwrap_or_else(|| json!({}));
+                    replay_state[thread_lane.history_replay_key()] = json!(true);
+                    let replay_state = Some(replay_state);
+                    let suppression_reason = broad_contextual_instruction_suppression_reason(
+                        job,
+                        prompt_text,
+                        scoped_worker_has_precollected_observations,
+                        replay_state.as_ref(),
+                        thread_lane,
+                        direct_write_broad_context_suppression_eligible(
+                            runtime_expectations,
+                            browser_mode,
+                        ),
+                    );
+                    let (rebuilt_prompt, _rebuilt_blocks, rebuilt_metrics) =
+                        if expects_generic_mcp_tool_execution {
+                            let (prompt, metrics) = self.build_mcp_task_prompt(
+                                &project_id,
+                                prompt_text,
+                                &project_preferences,
+                            )?;
+                            (prompt, Vec::new(), metrics)
+                        } else if granted_execution {
+                            let (prompt, metrics) =
+                                granted_turn_prompt(job, prompt_text, replay_state.as_ref());
+                            (prompt, Vec::new(), metrics)
+                        } else {
+                            // The initial prompt already downloaded and holds the attachments.
+                            let (prompt, blocks, metrics, _) = self.build_prompt_with_preferences(
+                                &project_id,
+                                job,
+                                &workspace_dir,
+                                prompt_text,
+                                true,
+                                replay_state.as_ref(),
+                                &project_context_cards,
+                                scoped_worker_path_observation.as_ref(),
+                                routing_pre_observation.as_ref(),
+                                &project_preferences,
+                                native_image_limit,
+                            )?;
+                            (prompt, blocks, metrics)
+                        };
+                    prompt = rebuilt_prompt;
+                    prompt.push_str(&prompt_suffix);
+                    prompt_context = rebuilt_metrics;
+                    prompt_context["historyReplayReason"] = json!("provider_thread_restore_failed");
+                    enrich_prompt_context_metrics(&mut prompt_context, &prompt);
+                    annotate_prompt_context_final_output_mode(
+                        &mut prompt_context,
+                        final_output_mode,
+                    );
+                    annotate_prompt_context_codex_context_strategy(
+                        &mut prompt_context,
+                        suppression_reason,
+                        codex_run_options.require_first_tool_call,
+                    );
+                    codex_run_options.provider_conversation_state = replay_state;
+                    codex_run_options.suppress_contextual_instructions =
+                        suppression_reason.is_some();
+                    tracing::info!(
+                        job_id = %job.id,
+                        lane = thread_lane.name(),
+                        "replaying conversation history after provider thread setup failed before inference"
+                    );
+                }
+                result => break result,
+            }
         };
         let output = match output_result {
             Ok(output) => output,
@@ -9828,7 +9883,17 @@ impl JobProcessor {
         } else {
             supplied_contexts
         };
-        let new_contexts = self.record_new_contexts(project_id, contexts_to_track);
+        let recorded_contexts = self.record_new_contexts(project_id, contexts_to_track.clone());
+        // A rebuilt prompt must retain the current references even if setup already recorded
+        // them before discovering the lost thread. No turn was submitted on that attempt.
+        let new_contexts = if lane_history_replay_required(
+            provider_conversation_state,
+            thread_lane_for_job(job),
+        ) {
+            contexts_to_track
+        } else {
+            recorded_contexts
+        };
 
         let multi_agent_lead_continuation_checkpoint = is_multi_agent_lead_continuation_job(job);
         let lead_continuation_checkpoint = multi_agent_lead_continuation_checkpoint;
@@ -17299,16 +17364,9 @@ fn read_workspace_file_utf8(workspace_dir: &Path, requested_path: &str) -> Optio
     let normalized = sanitize_relative_workspace_path(requested_path)?;
     let target = workspace_dir.join(normalized);
 
-    let metadata = fs::metadata(&target).ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
-    if metadata.len() > MAX_BYTES as u64 {
-        return None;
-    }
-
-    let bytes = fs::read(target).ok()?;
-    if bytes.len() > MAX_BYTES {
+    let (bytes, truncated) =
+        workspace_memory_io::read_prefix(workspace_dir, &target, MAX_BYTES).ok()?;
+    if truncated {
         return None;
     }
     String::from_utf8(bytes).ok()

@@ -1,8 +1,10 @@
 //! Bounded trimming of ordinary memory, with explicit defaults kept whole.
 
-use std::fs;
-use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::fs::{self, File, Metadata};
+use std::io::Read;
+use std::path::Path;
+
+use origin_http_server::workspace_fs::{WorkspaceDir, WorkspaceEntryKind};
 
 use crate::jobs::project_preferences::ProjectPreferencesSnapshot;
 
@@ -79,23 +81,57 @@ fn commit_trim(
     let root = workspace_dir
         .canonicalize()
         .map_err(|_| "workspace_unavailable")?;
-    let (source_file, source_path) = stage_file(&root, INSTAFY_FILENAME, candidate)?;
-    let (overflow_file, overflow_path) = stage_file(&root, OVERFLOW_PATH, overflow_details)?;
+    let workspace = WorkspaceDir::open(&root).map_err(|_| "workspace_unavailable")?;
+    let mut previous = open_archive(&workspace)?;
+    let mut source_file = stage_file(&workspace, INSTAFY_FILENAME, &mut candidate.as_bytes())?;
+    let mut overflow_file = if let Some((file, metadata)) = previous.as_mut() {
+        // Stream the old archive rather than allocating it. Read one extra byte
+        // to detect growth, and never let a growing file extend this copy forever.
+        let separator = if metadata.len() == 0 { "" } else { "\n\n" };
+        let mut reader = file
+            .by_ref()
+            .take(metadata.len().saturating_add(1))
+            .chain(separator.as_bytes())
+            .chain(overflow_details.as_bytes());
+        let staged = stage_file(&workspace, OVERFLOW_PATH, &mut reader)?;
+        let expected = metadata
+            .len()
+            .checked_add(separator.len() as u64)
+            .and_then(|bytes| bytes.checked_add(overflow_details.len() as u64))
+            .ok_or("archive_changed")?;
+        if staged.bytes != expected
+            || !same_file_state(
+                metadata,
+                &file.metadata().map_err(|_| "archive_read_failed")?,
+            )
+        {
+            return Err("archive_changed");
+        }
+        staged
+    } else {
+        stage_file(&workspace, OVERFLOW_PATH, &mut overflow_details.as_bytes())?
+    };
     if ProjectPreferencesSnapshot::load(&root).source() != Some(source) {
         return Err("source_changed");
     }
+    let current_archive = open_archive(&workspace)?;
+    if !match (&previous, &current_archive) {
+        (None, None) => true,
+        (Some((_, before)), Some((_, after))) => same_file_state(before, after),
+        _ => false,
+    } {
+        return Err("archive_changed");
+    }
     // Never shorten the source unless the removed material was saved successfully.
     overflow_file
-        .persist(overflow_path)
+        .persist()
         .map_err(|_| "archive_write_failed")?;
     changed_paths.push(OVERFLOW_PATH.to_owned());
     // Check the entire source, not just defaults: an edit or deletion must win.
     if ProjectPreferencesSnapshot::load(&root).source() != Some(source) {
         return Err("source_changed");
     }
-    source_file
-        .persist(source_path)
-        .map_err(|_| "source_write_failed")?;
+    source_file.persist().map_err(|_| "source_write_failed")?;
     changed_paths.push(INSTAFY_FILENAME.to_owned());
     Ok(candidate.len())
 }
@@ -115,51 +151,259 @@ fn split_at_newline_boundary(text: &str, max_bytes: usize) -> (&str, &str) {
     text.split_at(cut)
 }
 
-// Only called with the two static paths above. Reject symlinked parent/leaf entries,
-// then stage a replacement in the same directory so writes never follow a leaf link.
-fn stage_file(
-    root: &Path,
-    relative: &str,
-    content: &str,
-) -> Result<(tempfile::NamedTempFile, PathBuf), &'static str> {
-    let relative = Path::new(relative);
-    let mut parent = root.to_path_buf();
-    for component in relative.parent().ok_or("unsafe_destination")?.components() {
-        let Component::Normal(component) = component else {
-            return Err("unsafe_destination");
-        };
-        parent.push(component);
-        match fs::symlink_metadata(&parent) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&parent).map_err(|_| "destination_write_failed")?;
-            }
-            _ => return Err("unsafe_destination"),
+fn open_archive(workspace: &WorkspaceDir) -> Result<Option<(File, Metadata)>, &'static str> {
+    match workspace.entry_kind(OVERFLOW_PATH) {
+        Ok(WorkspaceEntryKind::File) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        _ => return Err("unsafe_destination"),
+    }
+    let file = workspace
+        .open_file(OVERFLOW_PATH)
+        .map_err(|_| "archive_read_failed")?;
+    let metadata = file.metadata().map_err(|_| "archive_read_failed")?;
+    Ok(Some((file, metadata)))
+}
+
+fn same_file_state(before: &Metadata, after: &Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != after.dev() || before.ino() != after.ino() {
+            return false;
         }
     }
-    let destination = root.join(relative);
-    let permissions = match fs::symlink_metadata(&destination) {
-        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-            Some(metadata.permissions())
+    before.len() == after.len() && before.modified().ok() == after.modified().ok()
+}
+
+struct StagedFile {
+    workspace: WorkspaceDir,
+    relative: String,
+    destination: &'static str,
+    bytes: u64,
+    persisted: bool,
+}
+
+impl StagedFile {
+    fn persist(&mut self) -> std::io::Result<()> {
+        self.workspace.rename(&self.relative, self.destination)?;
+        self.persisted = true;
+        Ok(())
+    }
+}
+
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        if !self.persisted {
+            let _ = self.workspace.remove_file(&self.relative);
         }
+    }
+}
+
+// Both static destinations and the temporary leaves are resolved relative to
+// the pinned workspace descriptor, including the final rename and cleanup.
+fn stage_file(
+    workspace: &WorkspaceDir,
+    destination: &'static str,
+    reader: &mut impl Read,
+) -> Result<StagedFile, &'static str> {
+    let permissions = match workspace.entry_kind(destination) {
+        Ok(WorkspaceEntryKind::File) => Some(
+            workspace
+                .open_file(destination)
+                .and_then(|file| file.metadata())
+                .map_err(|_| "destination_read_failed")?
+                .permissions(),
+        ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         _ => return Err("unsafe_destination"),
     };
-    let mut file =
-        tempfile::NamedTempFile::new_in(parent).map_err(|_| "destination_write_failed")?;
-    file.write_all(content.as_bytes())
+    let parent = Path::new(destination)
+        .parent()
+        .and_then(Path::to_str)
+        .ok_or("unsafe_destination")?;
+    let name = format!(".instafy-memory-{}", uuid::Uuid::new_v4());
+    let relative = if parent.is_empty() {
+        name
+    } else {
+        format!("{parent}/{name}")
+    };
+    let mut staged = StagedFile {
+        workspace: workspace.clone(),
+        relative,
+        destination,
+        bytes: 0,
+        persisted: false,
+    };
+    staged.bytes = workspace
+        .replace_private_file(&staged.relative, reader)
         .map_err(|_| "destination_write_failed")?;
     if let Some(permissions) = permissions {
-        file.as_file()
-            .set_permissions(permissions)
+        workspace
+            .set_file_permissions(&staged.relative, permissions)
             .map_err(|_| "destination_write_failed")?;
     }
-    Ok((file, destination))
+    Ok(staged)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persisted_stage_does_not_remove_a_reused_temporary_leaf() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let workspace = WorkspaceDir::open(workspace_dir.path()).unwrap();
+        let mut staged =
+            stage_file(&workspace, INSTAFY_FILENAME, &mut "memory".as_bytes()).unwrap();
+        let temporary = staged.relative.clone();
+        staged.persist().unwrap();
+        workspace
+            .replace_private_file(&temporary, &mut "another writer's file".as_bytes())
+            .unwrap();
+        drop(staged);
+        assert_eq!(
+            fs::read_to_string(workspace_dir.path().join(temporary)).unwrap(),
+            "another writer's file"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace_dir.path().join(INSTAFY_FILENAME)).unwrap(),
+            "memory"
+        );
+    }
+
+    #[test]
+    fn repeated_trimming_preserves_prior_overflow_and_current_preferences() {
+        let original_preferences = "## Project preferences\nOriginal default.\n";
+        for current_preferences in ["", "## Project preferences\nCorrected default.\n"] {
+            let workspace = tempfile::tempdir().unwrap();
+            let path = workspace.path().join(INSTAFY_FILENAME);
+            let archive = workspace.path().join(OVERFLOW_PATH);
+            fs::write(
+                &path,
+                format!(
+                    "{original_preferences}\n## Facts\n{}FIRST_ARCHIVED_FACT\n",
+                    "ordinary fact\n".repeat(1_000)
+                ),
+            )
+            .unwrap();
+            let mut changed = Vec::new();
+            assert_eq!(optimize_instafy_md(workspace.path(), &mut changed).2, None);
+            let first_source = fs::read_to_string(&path).unwrap();
+            let first_archive = fs::read_to_string(&archive).unwrap();
+            assert!(!first_source.contains("FIRST_ARCHIVED_FACT"));
+            assert!(first_archive.contains("FIRST_ARCHIVED_FACT"));
+            assert!(!first_archive.contains("Original default"));
+
+            fs::write(
+                &path,
+                format!(
+                    "{}\n{}SECOND_ARCHIVED_FACT\n",
+                    first_source.replacen(original_preferences, current_preferences, 1),
+                    "new ordinary fact\n".repeat(1_000)
+                ),
+            )
+            .unwrap();
+            let before = ProjectPreferencesSnapshot::load(workspace.path()).metrics();
+            changed.clear();
+            assert_eq!(optimize_instafy_md(workspace.path(), &mut changed).2, None);
+            let second_source = fs::read_to_string(&path).unwrap();
+            let second_archive = fs::read_to_string(&archive).unwrap();
+            assert!(second_source.len() <= MAX_INSTAFY_MD_BYTES);
+            assert!(!second_source.contains("FIRST_ARCHIVED_FACT"));
+            assert!(!second_source.contains("SECOND_ARCHIVED_FACT"));
+            assert!(!second_source.contains("Original default"));
+            assert!(second_archive.starts_with(&first_archive));
+            assert_eq!(second_archive.matches("FIRST_ARCHIVED_FACT").count(), 1);
+            assert_eq!(second_archive.matches("SECOND_ARCHIVED_FACT").count(), 1);
+            assert_eq!(
+                ProjectPreferencesSnapshot::load(workspace.path()).metrics(),
+                before
+            );
+            assert_eq!(changed, [OVERFLOW_PATH, INSTAFY_FILENAME]);
+
+            changed.clear();
+            assert_eq!(optimize_instafy_md(workspace.path(), &mut changed).2, None);
+            assert_eq!(fs::read_to_string(path).unwrap(), second_source);
+            assert_eq!(fs::read_to_string(archive).unwrap(), second_archive);
+            assert!(changed.is_empty());
+        }
+    }
+
+    #[test]
+    fn existing_archive_bytes_are_preserved_without_restoring_old_defaults() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join(INSTAFY_FILENAME);
+        let archive = workspace.path().join(OVERFLOW_PATH);
+        // A legacy archive need not be valid UTF-8 to preserve its bytes safely.
+        let previous = b"## Project preferences\nObsolete default.\n\xff";
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        fs::write(&archive, previous).unwrap();
+        fs::write(&path, "ordinary fact\n".repeat(1_000)).unwrap();
+        let before = ProjectPreferencesSnapshot::load(workspace.path()).metrics();
+        assert_eq!(
+            optimize_instafy_md(workspace.path(), &mut Vec::new()).2,
+            None
+        );
+        assert!(fs::read(archive).unwrap().starts_with(previous));
+        assert!(
+            !fs::read_to_string(path)
+                .unwrap()
+                .contains("Obsolete default")
+        );
+        assert_eq!(
+            ProjectPreferencesSnapshot::load(workspace.path()).metrics(),
+            before
+        );
+    }
+
+    #[test]
+    fn blocked_archive_never_shortens_source() {
+        for blocked in [".agents", OVERFLOW_PATH] {
+            let workspace = tempfile::tempdir().unwrap();
+            let path = workspace.path().join(INSTAFY_FILENAME);
+            let source = "ordinary fact\n".repeat(1_000);
+            fs::write(&path, &source).unwrap();
+            let destination = workspace.path().join(blocked);
+            if blocked == OVERFLOW_PATH {
+                fs::create_dir_all(&destination).unwrap();
+            } else {
+                fs::write(&destination, "existing file").unwrap();
+            }
+            let mut changed = Vec::new();
+            let (before, after, reason) = optimize_instafy_md(workspace.path(), &mut changed);
+            assert_eq!(reason, Some("unsafe_destination"));
+            assert_eq!((before, after), (source.len(), source.len()));
+            assert_eq!(fs::read_to_string(path).unwrap(), source);
+            assert!(changed.is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_and_source_permissions_survive_repeated_trimming() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join(INSTAFY_FILENAME);
+        let archive = workspace.path().join(OVERFLOW_PATH);
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        fs::write(&archive, "previous facts").unwrap();
+        fs::write(&path, "ordinary fact\n".repeat(1_000)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&archive, fs::Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(
+            optimize_instafy_md(workspace.path(), &mut Vec::new()).2,
+            None
+        );
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(archive).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+    }
 
     #[test]
     fn changed_or_deleted_source_is_not_replaced() {
@@ -184,5 +428,32 @@ mod tests {
             assert!(!workspace.path().join(OVERFLOW_PATH).exists());
             assert!(changed.is_empty());
         }
+    }
+
+    #[test]
+    fn changed_source_does_not_replace_existing_archive() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join(INSTAFY_FILENAME);
+        let archive = workspace.path().join(OVERFLOW_PATH);
+        fs::write(&path, "New source").unwrap();
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        fs::write(&archive, "Previously archived fact").unwrap();
+        let mut changed = Vec::new();
+        assert_eq!(
+            commit_trim(
+                workspace.path(),
+                "Old source",
+                "Trimmed source",
+                "New overflow",
+                &mut changed
+            ),
+            Err("source_changed")
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), "New source");
+        assert_eq!(
+            fs::read_to_string(archive).unwrap(),
+            "Previously archived fact"
+        );
+        assert!(changed.is_empty());
     }
 }

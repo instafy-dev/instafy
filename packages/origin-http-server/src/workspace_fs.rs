@@ -9,7 +9,7 @@
 //! including links whose current target happens to remain inside the workspace.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::{File, Metadata};
+use std::fs::{File, Metadata, Permissions};
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -21,7 +21,7 @@ use std::sync::Arc;
 #[cfg(windows)]
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 #[cfg(windows)]
-use cap_std::fs::{Dir as CapabilityDir, OpenOptions};
+use cap_std::fs::{Dir as CapabilityDir, OpenOptions, OpenOptionsExt};
 #[cfg(unix)]
 use rustix::fd::OwnedFd;
 #[cfg(unix)]
@@ -35,6 +35,7 @@ const DIRECTORY_OPEN_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::CLOEXEC);
 #[cfg(unix)]
 const FILE_OPEN_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::NONBLOCK)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 
@@ -122,6 +123,11 @@ impl WorkspaceDir {
         Ok(file)
     }
 
+    /// Update a regular file's permissions without following any path component.
+    pub fn set_file_permissions(&self, relative: &str, permissions: Permissions) -> io::Result<()> {
+        self.open_file(relative)?.set_permissions(permissions)
+    }
+
     /// List regular files and real directories. Symlinks and special files are
     /// intentionally omitted so callers cannot accidentally turn metadata or
     /// `hasChildren` probes into a traversal primitive.
@@ -164,10 +170,28 @@ impl WorkspaceDir {
         reader: &mut R,
         executable: bool,
     ) -> io::Result<u64> {
+        self.replace_file_with_mode(
+            relative,
+            reader,
+            Mode::from_raw_mode(if executable { 0o755 } else { 0o644 }),
+        )
+    }
+
+    /// Replace through a temporary file created owner-only before copying any payload.
+    /// Callers staging existing private memory can restore its permissions before publishing it.
+    pub fn replace_private_file<R: Read>(&self, relative: &str, reader: &mut R) -> io::Result<u64> {
+        self.replace_file_with_mode(relative, reader, Mode::from_raw_mode(0o600))
+    }
+
+    fn replace_file_with_mode<R: Read>(
+        &self,
+        relative: &str,
+        reader: &mut R,
+        mode: Mode,
+    ) -> io::Result<u64> {
         let components = validated_components(relative, false)?;
         let (parent, leaf) = self.open_parent(&components, true)?;
         let temp_name = OsString::from(format!(".instafy-write-{}", Uuid::new_v4()));
-        let mode = Mode::from_raw_mode(if executable { 0o755 } else { 0o644 });
         let temp_fd = fs::openat(
             &parent,
             &temp_name,
@@ -429,6 +453,28 @@ impl WorkspaceDir {
         Ok(file)
     }
 
+    /// Update attributes through a no-follow handle with the required Windows rights.
+    pub fn set_file_permissions(&self, relative: &str, permissions: Permissions) -> io::Result<()> {
+        // File::set_permissions uses SetFileInformationByHandle(FILE_BASIC_INFO),
+        // which needs FILE_WRITE_ATTRIBUTES even when the file is already writable.
+        const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        let components = validated_components(relative, false)?;
+        let (parent, leaf) = self.open_parent(&components, false)?;
+        let mut options = OpenOptions::new();
+        options
+            .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+            .follow(FollowSymlinks::No);
+        let file = parent.dir.open_with(&leaf, &options)?.into_std();
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "workspace entry is not a regular file",
+            ));
+        }
+        file.set_permissions(permissions)
+    }
+
     pub fn list(&self, relative: Option<&str>) -> io::Result<Vec<WorkspaceListEntry>> {
         let directory = match relative.filter(|value| !value.trim().is_empty()) {
             Some(relative) => self.open_dir(relative)?,
@@ -482,6 +528,12 @@ impl WorkspaceDir {
             let _ = parent.dir.remove_file_or_symlink(&temp_name);
         }
         result
+    }
+
+    /// Windows inherits the destination directory's ACL, as NamedTempFile did here.
+    /// There is no POSIX mode or post-copy permission widening in this path.
+    pub fn replace_private_file<R: Read>(&self, relative: &str, reader: &mut R) -> io::Result<u64> {
+        self.replace_file(relative, reader, false)
     }
 
     pub fn remove(&self, relative: &str) -> io::Result<()> {
@@ -690,6 +742,100 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn private_replacement_is_owner_only_before_and_during_payload_copy() {
+        use std::io::{self, Read};
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::mpsc::{self, Receiver, SyncSender};
+        use std::time::Duration;
+
+        struct PausedReader {
+            copied: bool,
+            ready: SyncSender<bool>,
+            proceed: Receiver<()>,
+        }
+        impl Read for PausedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if buffer.is_empty() {
+                    return Ok(0);
+                }
+                self.ready.send(self.copied).unwrap();
+                self.proceed
+                    .recv()
+                    .map_err(|_| io::Error::other("test stopped"))?;
+                if self.copied {
+                    return Ok(0);
+                }
+                let payload = b"private memory";
+                assert!(buffer.len() >= payload.len());
+                buffer[..payload.len()].copy_from_slice(payload);
+                self.copied = true;
+                Ok(payload.len())
+            }
+        }
+
+        let workspace = TempDir::new().unwrap();
+        let root = WorkspaceDir::open(workspace.path()).unwrap();
+        let (ready, phases) = mpsc::sync_channel(0);
+        let (proceed, gate) = mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            root.replace_private_file(
+                "memory.md",
+                &mut PausedReader {
+                    copied: false,
+                    ready,
+                    proceed: gate,
+                },
+            )
+        });
+        for copied in [false, true] {
+            assert_eq!(phases.recv_timeout(Duration::from_secs(5)).unwrap(), copied);
+            let temporary = fs::read_dir(workspace.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".instafy-write-")
+                })
+                .expect("copy remains in its private temporary leaf");
+            let metadata = fs::metadata(temporary).unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+            assert_eq!(metadata.len(), if copied { 14 } else { 0 });
+            assert!(!workspace.path().join("memory.md").exists());
+            proceed.send(()).unwrap();
+        }
+        worker.join().unwrap().unwrap();
+        assert_eq!(
+            fs::read(workspace.path().join("memory.md")).unwrap(),
+            b"private memory"
+        );
+        assert_eq!(
+            fs::metadata(workspace.path().join("memory.md"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_fifo_reads_without_waiting_for_a_writer() {
+        let workspace = TempDir::new().unwrap();
+        let path = workspace.path().join("memory.fifo");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("mkfifo is available on Unix")
+            .success());
+        let root = WorkspaceDir::open(workspace.path()).unwrap();
+        assert!(root.open_file("memory.fifo").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn rejects_final_and_ancestor_symlinks_for_reads_and_lists() {
         let workspace = TempDir::new().expect("workspace");
         let outside = TempDir::new().expect("outside");
@@ -838,6 +984,27 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn file_permissions_update_windows_attributes_without_changing_contents() {
+        let workspace = TempDir::new().expect("workspace");
+        let root = WorkspaceDir::open(workspace.path()).expect("open workspace");
+        let path = workspace.path().join("memory.txt");
+        fs::write(&path, b"private memory").unwrap();
+        let original = fs::metadata(&path).unwrap().permissions();
+        let mut readonly = original.clone();
+        readonly.set_readonly(true);
+
+        root.set_file_permissions("memory.txt", readonly).unwrap();
+        let was_readonly = fs::metadata(&path).unwrap().permissions().readonly();
+        // Restoring the attributes must work even when the file is now readonly.
+        root.set_file_permissions("memory.txt", original).unwrap();
+
+        assert!(was_readonly);
+        assert!(!fs::metadata(&path).unwrap().permissions().readonly());
+        assert_eq!(fs::read(&path).unwrap(), b"private memory");
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn rejects_windows_junction_ancestors() {
         use std::process::Command;
 
@@ -856,6 +1023,17 @@ mod tests {
         let root = WorkspaceDir::open(workspace.path()).expect("open workspace");
         assert!(root.open_dir("junction").is_err());
         assert!(root.open_file("junction/secret.txt").is_err());
+        let mut permissions = fs::metadata(outside.path().join("secret.txt"))
+            .unwrap()
+            .permissions();
+        permissions.set_readonly(true);
+        assert!(root
+            .set_file_permissions("junction/secret.txt", permissions)
+            .is_err());
+        assert!(!fs::metadata(outside.path().join("secret.txt"))
+            .unwrap()
+            .permissions()
+            .readonly());
         let names = root
             .list(None)
             .expect("list root")
