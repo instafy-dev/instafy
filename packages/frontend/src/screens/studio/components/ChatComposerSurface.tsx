@@ -35,10 +35,6 @@ import { Surface } from "../../../components/Surface";
 import { AttachmentThumbnail } from "../../../components/AttachmentThumbnail";
 import { Text } from "../../../components/Text";
 import { ComposerMessagePopover } from "./ComposerMessagePanel";
-import {
-  DARK_PANEL_BORDER_CLASS,
-  DARK_RAISED_CONTROL_BG_CLASS,
-} from "../../../theme/darkSurfaces";
 import { ComposerActionMenu } from "./ComposerActionMenu";
 import { ComposerInviteModal } from "./ComposerInviteModal";
 import { ChatComposerRunActions, resolveComposerRunStopPlacement } from "./ChatComposerRunActions";
@@ -1106,6 +1102,7 @@ export function ChatComposerSurface({
           title={primaryActionLabel}
           style={{ touchAction: "none" }}
           variant={sendButtonVariant === "primary" ? "primary" : "ghost"}
+          elevation="none"
           size="md"
           radius="xl"
           className={[
@@ -1192,14 +1189,16 @@ export function ChatComposerSurface({
               setDraftExpanded(false);
             }
           }}
-          className={`chat-composer-reading-column chat-reading-inset pointer-events-auto ${CHAT_COMPOSER_COLUMN_CLASS_NAME} ${draftExpanded ? "h-full min-h-0" : ""}`}
+          className={`chat-composer-reading-column chat-reading-inset pointer-events-none ${CHAT_COMPOSER_COLUMN_CLASS_NAME} ${draftExpanded ? "h-full min-h-0" : ""}`}
           style={{
             paddingBottom: nativeKeyboardOpen
               ? "0.5rem"
               : "max(var(--instafy-safe-area-inset-bottom), 0.5rem)",
           }}
         >
-          <div className={draftExpanded ? "flex h-full min-h-0 flex-col gap-2" : "space-y-2"}>
+          {/* Only visible composer content catches input. Transparent reading
+              gutters let wheel/touch scrolling reach the transcript below. */}
+          <div className={`pointer-events-auto ${draftExpanded ? "flex h-full min-h-0 flex-col gap-2" : "space-y-2"}`}>
             {replyContext}
             {showActiveGoal && !draftExpanded ? (
               <div
@@ -1390,13 +1389,9 @@ export function ChatComposerSurface({
             ) : null}
             {silenceHintProps ? <OctoSilenceHint {...silenceHintProps} /> : null}
             <Surface
-              tone="default"
+              preset="composer"
               radius="none"
-              shadow="none"
-              // The composer keeps the raised-control background but borrows the
-              // panel border tier: raised-control (13%) is meant for small
-              // controls, and reads too hard along a full-width composer edge.
-              className={`chat-composer-surface flex flex-col overflow-hidden border-slate-200/70 bg-slate-50 p-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS} ${draftExpanded ? "min-h-0 flex-1" : ""}`}
+              className={`chat-composer-surface flex flex-col overflow-hidden p-1.5 ${draftExpanded ? "min-h-0 flex-1" : ""}`}
               data-compact-navigation={compactNavigationLayout ? "true" : undefined}
               style={{ "--chat-composer-viewport-height": `${visibleViewport.height}px` } as CSSProperties}
               data-testid="chat-composer-surface"

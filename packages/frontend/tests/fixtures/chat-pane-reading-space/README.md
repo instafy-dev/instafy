@@ -12,6 +12,23 @@ the actual composer is positioned over the transcript, as it is in ChatPanel.
 Scrollbar measurements flow from the viewport to the composer through the same
 optional props as the production chat.
 
+Transcript and composer share a 16px reading inset below a 640px pane, and 24px
+in wider panes (rem-based so text scaling also scales these spaces). The composer
+reserves the transcript's measured scrollbar width on the right. Its transparent
+outer gutters pass scrolling through to the transcript; visible composer content
+remains interactive.
+
+Own messages use the shared `OWN_MESSAGE_BUBBLE_CLASS` appearance from
+`components/messageStyles.ts`, also used by the landing demo: a neutral fill,
+16px corners, and no decorative outline or square corner. Other participants
+retain their grouped names and faces; below a 640px pane those identities sit
+above the text instead of reserving an avatar column.
+
+The composer and landing demo use `Surface preset="composer"` for one complete,
+shadow-free appearance: white in light mode, raised-control neutral in dark mode,
+and the softer panel border. Callers own padding, layout and responsive corner
+geometry, without overriding the shared fill or border.
+
 ## Run
 
 From `packages/frontend`:
@@ -20,6 +37,10 @@ From `packages/frontend`:
 pnpm exec vite --config tests/fixtures/chat-pane-reading-space/vite.config.ts
 pnpm exec playwright test --config tests/fixtures/chat-pane-reading-space/playwright.config.ts
 ```
+
+Set `INSTAFY_CHAT_READING_REVIEW_ORIGIN` to an isolated fixture server origin if
+the default review port is already in use. The reading-space and composer-gutter
+suites use that origin without changing which tests run.
 
 Open `/tests/fixtures/chat-pane-reading-space/index.html`. Query options:
 
@@ -45,6 +66,9 @@ reservation, matching composer/transcript edges, keyboard profile activation,
 local approval dismissal, draft preservation across resizing and scrolling, multi-agent
 typing, recovery warnings, resizing across the identity breakpoint, and horizontal
 overflow. Mobile matrix cases use touch/coarse-pointer Chromium emulation.
+The narrow-pane resize regression preserves writing room when crossing the old
+384px inset boundary. Composer-gutter checks exercise wheel scrolling beside both
+edges, then verify that typing and the action menu still work.
 The actual message menu exposes its timestamp through keyboard and native
 emulated long-press; Escape returns keyboard focus. Desktop forced-colors
 fallback is checked as well. Browser approval decisions are recorded locally rather than sent.
