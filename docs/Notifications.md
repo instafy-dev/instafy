@@ -132,8 +132,41 @@ view or its Browser view is in front (the reply belongs to the turn the person i
 watching there), not while one of its files or previews is. An in-app toast starts
 under the chat's view bar (Chat | Browser) when that bar is at the top of the
 screen, and under the address bar of the Browser view, a preview or the browser in
-the desktop app while one is on screen, so it never covers either
-(`toastClearance.ts`, `BrowserChromeShell.tsx`).
+the desktop app while one is on screen. Placement follows banners that move that
+bar without resizing it (`toastClearance.ts`, `BrowserChromeShell.tsx`). When a
+keyboard leaves too little height below the bar, the notice moves into the visible
+viewport and scrolls. When that viewport ends above the device edge, placement
+does not subtract the bottom safe-area inset again. Extremely short viewports
+(for example, landscape Safari with expanded browser chrome and the keyboard)
+may not fit a full control; closing the keyboard restores the notice and draft.
+In Electron's active native Personal Browser, notifications occupy a reserved row
+above the live page instead; see [Personal Browser](Personal-Browser.md).
+
+Short copy confirmations are passive, politely announced feedback without a tab
+stop. They never replace active errors, Undo actions or waiting approvals, and are
+suppressed instead of queued behind them. `statusBehavior` provides four lifetime
+presets for the shared status provider:
+
+- `acknowledgement`: a short, passive confirmation (2.2 seconds by default).
+- `informational`: visible reading time, paused while hovered, focused, clipped,
+  or in a hidden document. Without an explicit duration it allows 5–30 seconds
+  according to message length; existing explicit durations remain supported.
+- `actionRequired`: persists until dismissed, acted on, or hidden by its owner.
+  Waiting approvals must be hidden when the request resolves or becomes stale.
+- `deadline(expiresAt)`: an absolute offer deadline. Hover, focus and waiting in
+  the queue do not extend it, and an expired action cannot run.
+
+The trash Undo offer keeps its six-second deadline. This is a client offer limit,
+not a backend expiry or a concurrency guarantee. Undo also checks that the local
+conversation still has the expected lifecycle state before restoring it.
+Active errors and actions are protected from unrelated replacement. Pending
+notices are deduplicated, with priority for actionable work. Routine timed
+background notices are bounded to five and discarded after a minute waiting.
+Persistent approvals/recovery and deadline actions are retained until their owner
+clears them or their deadline expires; the noise limit cannot silently discard an
+unseen approval. A queued notice is never acknowledged as presented until it is
+actually shown. Legacy
+callers keep their explicit durations and the default five-second allowance.
 
 The worker's `NotificationTransport` interface accepts an account-bound, static
 envelope and returns a classified delivery result. Its registered implementation

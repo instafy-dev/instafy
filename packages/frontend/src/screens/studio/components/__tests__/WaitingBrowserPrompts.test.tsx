@@ -159,7 +159,7 @@ describe("WaitingBrowserPrompts", () => {
     expect(text).not.toMatch(/Edit|metrodoporto|click/);
     expect(intent).toBe("info");
     expect(duration).toBe(0);
-    expect(options).toMatchObject({ actionLabel: "View", nonPreemptive: true });
+    expect(options).toMatchObject({ actionLabel: "View", behavior: { kind: "action-required" }, nonPreemptive: true });
     // Chat A's tab says Approve.
     expect(waitingChats()).toEqual([chatA]);
 

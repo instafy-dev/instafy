@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { MenuTrigger } from "react-aria-components";
 import { Xmark } from "iconoir-react";
 import { Button, IconButton } from "../../../../components/Button";
+import { FeedbackNotice } from "../../../../components/FeedbackNotice";
 import { Text } from "../../../../components/Text";
 import { StudioDialogBody, StudioDialogHeader } from "../../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../../components/aria/StudioModal";
@@ -9,6 +10,8 @@ import { StudioMenu, StudioMenuItem } from "../../../../components/aria/StudioMe
 import { StudioPopover } from "../../../../components/aria/StudioPopover";
 import { formatRelativeTimestamp } from "../../homeFeed";
 import { locationPreviewStatus, setLocationStopped, useLocationSites, type LocationSiteMeta, type LocationSiteRecord, type LocationSiteStatus } from "./locationSites";
+import { PreviewFeedbackPlacement } from "./PreviewFeedbackPlacement";
+import { usePreviewFeedbackTimer } from "./usePreviewFeedbackTimer";
 
 /**
  * What the person sees about location in previews: the 📍 in the preview's
@@ -35,34 +38,26 @@ export function LocationMarker({ title, watching }: { title: string; watching: b
 
 export const LOCATION_TOAST_MS = 8_000;
 
-/** Centred just under the preview's bar, over the top of the site, wrapping instead of cutting the name off. */
-const TOAST_PLACEMENT = "top-2 justify-center px-3";
-
-/** "📍 <title> can see your location · Stop": once per site on this device, never in the way. */
-export function LocationToast({ title, onStop, onDismiss }: {
+/** The complete location disclosure and its Stop action, once per site on this device. */
+export function LocationToast({ title, onStop, onDismiss, contained = false, paused = false }: {
   title: string;
   onStop: () => void;
   onDismiss: () => void;
+  contained?: boolean;
+  paused?: boolean;
 }) {
-  useEffect(() => {
-    const timer = window.setTimeout(onDismiss, LOCATION_TOAST_MS);
-    return () => window.clearTimeout(timer);
-  }, [onDismiss]);
-  return <div role="status" aria-live="polite" data-testid="preview-location-toast"
-    className={`pointer-events-none absolute inset-x-0 z-20 flex ${TOAST_PLACEMENT}`}>
-    <div className="pointer-events-auto flex min-h-9 max-w-full items-center gap-1 rounded-2xl bg-slate-900/90 py-0.5 pl-3 pr-1 text-xs font-medium text-white shadow-lg backdrop-blur">
-      <span aria-hidden="true">📍</span>
-      <span className="min-w-0 line-clamp-2">{locationMarkerLabel(title)}</span>
-      <span aria-hidden="true" className="text-white/60">·</span>
-      <Button variant="ghost" size="sm" radius="full" data-testid="preview-location-toast-stop"
-        aria-label={`Stop sharing location with ${title}`} onPress={onStop}
-        className="h-8 px-2 text-xs font-semibold text-white hover:bg-white/10 pointer-coarse:h-11">Stop</Button>
-      <IconButton variant="ghost" radius="full" size="xs" aria-label="Dismiss" onPress={onDismiss}
-        className="text-white/80 hover:bg-white/10 pointer-coarse:h-11 pointer-coarse:w-11">
-        <Xmark className="h-3.5 w-3.5" aria-hidden="true" />
-      </IconButton>
-    </div>
-  </div>;
+  const timer = usePreviewFeedbackTimer(LOCATION_TOAST_MS, onDismiss, paused);
+  return <PreviewFeedbackPlacement contained={contained} restoreFocus ref={timer.ref} {...timer.interactionProps}>
+    <FeedbackNotice role="status" aria-live="polite" data-testid="preview-location-toast"
+      icon={<span aria-hidden="true">📍</span>}
+      dismiss={<IconButton variant="ghost" radius="lg" size="sm" aria-label="Dismiss location notice" onPress={onDismiss}>
+        <Xmark className="h-4 w-4" aria-hidden="true" />
+      </IconButton>}
+      actions={<Button variant="secondary" preset="inline" data-testid="preview-location-toast-stop"
+        aria-label={`Stop sharing location with ${title}`} onPress={onStop}>Stop</Button>}>
+      {locationMarkerLabel(title)}
+    </FeedbackNotice>
+  </PreviewFeedbackPlacement>;
 }
 
 function lastSeen(record: LocationSiteRecord, now: number): string {
@@ -146,23 +141,21 @@ function useLocationBlockedBy(): LocationBlockedBy | null {
 }
 
 /** A site asked and Instafy itself is not allowed location: say where to change that (sites can't tell). */
-export function LocationBlockedNotice({ onDismiss }: { onDismiss: () => void }) {
+export function LocationBlockedNotice({ onDismiss, contained = false, paused = false }: {
+  onDismiss: () => void;
+  contained?: boolean;
+  paused?: boolean;
+}) {
   const blockedBy = useLocationBlockedBy();
-  useEffect(() => {
-    const timer = window.setTimeout(onDismiss, LOCATION_BLOCKED_MS);
-    return () => window.clearTimeout(timer);
-  }, [onDismiss]);
-  return <div role="status" aria-live="polite" data-testid="preview-location-blocked"
-    className={`pointer-events-none absolute inset-x-0 z-20 flex ${TOAST_PLACEMENT}`}>
-    <div className="pointer-events-auto flex max-w-md items-start gap-2 rounded-2xl bg-slate-900/90 py-2 pl-3 pr-1 text-xs font-medium text-white shadow-lg backdrop-blur">
-      <span aria-hidden="true">📍</span>
-      <span className="min-w-0 flex-1">{blockedBy ? locationBlockedText(blockedBy) : "Location is off for Instafy."}</span>
-      <IconButton variant="ghost" radius="full" size="xs" aria-label="Dismiss" onPress={onDismiss}
-        className="text-white/80 hover:bg-white/10 pointer-coarse:h-11 pointer-coarse:w-11">
-        <Xmark className="h-3.5 w-3.5" aria-hidden="true" />
-      </IconButton>
-    </div>
-  </div>;
+  const timer = usePreviewFeedbackTimer(LOCATION_BLOCKED_MS, onDismiss, paused || blockedBy === null);
+  return <PreviewFeedbackPlacement contained={contained} restoreFocus ref={timer.ref} {...timer.interactionProps}>
+    <FeedbackNotice role="status" aria-live="polite" data-testid="preview-location-blocked" tone="warning"
+      dismiss={<IconButton variant="ghost" radius="lg" size="sm" aria-label="Dismiss location notice" onPress={onDismiss}>
+        <Xmark className="h-4 w-4" aria-hidden="true" />
+      </IconButton>}>
+      {blockedBy ? locationBlockedText(blockedBy) : "Location is off for Instafy."}
+    </FeedbackNotice>
+  </PreviewFeedbackPlacement>;
 }
 
 /** The list in a dialog, opened from the 📍 in a preview's bar. */

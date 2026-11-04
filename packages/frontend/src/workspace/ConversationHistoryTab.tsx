@@ -27,6 +27,7 @@ import { useStartConversationThread } from "./useStartConversationThread";
 import { useWorkspaceUi } from "./useWorkspace";
 import { useWorkspaceTabs } from "./WorkspaceTabsProvider";
 import { useStatus } from "../status/useStatus";
+import { statusBehavior } from "../status/statusBehavior";
 import { useStudioDesktopLayout } from "../screens/studio/useStudioDesktopLayout";
 import { DrawerHeader } from "../components/DrawerHeader";
 import { SearchInput } from "../components/SearchInput";
@@ -55,6 +56,8 @@ export function ConversationHistoryTab({
   } = useConversations();
   const { conversationWorkspace, tabs, closeTab, keepTabOpen, openConversationTab, requestUrlPush } = useWorkspaceTabs();
   const { showStatus } = useStatus();
+  const conversationsRef = useRef(conversations);
+  conversationsRef.current = conversations;
   const { requestConversationInvite } = useWorkspaceUi();
   const isLargeScreen = useStudioDesktopLayout();
   const startThread = useStartConversationThread(() => {
@@ -377,11 +380,17 @@ export function ConversationHistoryTab({
 
     const affectedLabel = subtreeIds.length > 1 ? ` (${subtreeIds.length - 1} thread${subtreeIds.length === 2 ? "" : "s"})` : "";
 
+    // The offer expires independently of reading time; lifecycle metadata does not.
+    const undoExpiresAt = Date.now() + 6000;
     showStatus(`${nextLabel}${affectedLabel}`, nextStatus === "deleted" ? "warning" : "info", 6000, {
+      behavior: statusBehavior.deadline(undoExpiresAt),
       actionLabel: "Undo",
       onAction: () => {
+        if (Date.now() >= undoExpiresAt) return;
         previousStatuses.forEach((status, id) => {
-          setConversationLifecycleStatus(id, status);
+          if (conversationsRef.current.find((entry) => entry.localId === id)?.lifecycleStatus === nextStatus) {
+            setConversationLifecycleStatus(id, status);
+          }
         });
       }
     });

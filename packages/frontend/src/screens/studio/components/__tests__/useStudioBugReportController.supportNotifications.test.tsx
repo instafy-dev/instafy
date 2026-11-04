@@ -153,7 +153,7 @@ describe("useStudioBugReportController support notifications", () => {
       "Your Instafy support report was resolved.",
       "success",
       12_000,
-      expect.objectContaining({ actionLabel: "View report" }),
+      expect.objectContaining({ actionLabel: "View report", behavior: { kind: "informational" }, nonPreemptive: true }),
     );
 
     const toastOptions = mocks.showStatus.mock.calls[0]?.[3] as { onAction: () => void };

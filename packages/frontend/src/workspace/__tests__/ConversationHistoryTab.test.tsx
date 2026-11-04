@@ -61,6 +61,7 @@ describe("ConversationHistoryTab", () => {
     mocks.activeConversationId = "a";
     mocks.preview = false;
     vi.clearAllMocks();
+    mocks.setConversationLifecycleStatus.mockReset();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -70,6 +71,7 @@ describe("ConversationHistoryTab", () => {
     await act(async () => root.unmount());
     container.remove();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -128,6 +130,45 @@ describe("ConversationHistoryTab", () => {
     expect(mocks.requestUrlPush).toHaveBeenCalledTimes(1);
     expect(mocks.openConversationTab).toHaveBeenCalledWith("b", { preview: true });
     expect(onRequestClose).toHaveBeenCalledTimes(width < 900 ? 1 : 0);
+  });
+
+  it.each(["archive", "hide", "delete"])("expires the %s Undo offer after six seconds even if its callback was retained", async action => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1000);
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    mocks.setConversationLifecycleStatus.mockImplementation((id: string, lifecycleStatus: ConversationState["lifecycleStatus"]) => {
+      mocks.conversations = mocks.conversations.map(entry => entry.localId === id ? { ...entry, lifecycleStatus } : entry);
+    });
+    await render();
+    await click('[data-testid="conversation-history-menu-a"]');
+    await click(`[role="menuitem"][data-key="${action}"]`);
+    await render();
+    const options = mocks.showStatus.mock.calls.at(-1)![3];
+    expect(options.behavior).toEqual({ kind: "deadline", expiresAt: 7000 });
+    mocks.setConversationLifecycleStatus.mockClear();
+    now.mockReturnValue(7000);
+    await act(async () => options.onAction());
+    expect(mocks.setConversationLifecycleStatus).not.toHaveBeenCalled();
+  });
+
+  it("undoes only unchanged, still-present lifecycle entries within the offer window", async () => {
+    mocks.conversations = [
+      conversation("a", { controllerId: "remote-a" }),
+      conversation("b", { parentConversationId: "remote-a" }),
+      conversation("c", { parentConversationId: "remote-a" }),
+    ];
+    mocks.setConversationLifecycleStatus.mockImplementation((id: string, lifecycleStatus: ConversationState["lifecycleStatus"]) => {
+      mocks.conversations = mocks.conversations.map(entry => entry.localId === id ? { ...entry, lifecycleStatus } : entry);
+    });
+    await render();
+    await click('[data-testid="conversation-history-menu-a"]');
+    await click('[role="menuitem"][data-key="archive"]');
+    const options = mocks.showStatus.mock.calls.at(-1)![3];
+    mocks.conversations = mocks.conversations.filter(entry => entry.localId !== "c")
+      .map(entry => entry.localId === "b" ? { ...entry, lifecycleStatus: "hidden" } : entry);
+    await render();
+    mocks.setConversationLifecycleStatus.mockClear();
+    await act(async () => options.onAction());
+    expect(mocks.setConversationLifecycleStatus.mock.calls).toEqual([["a", "active"]]);
   });
 
   it("keeps thread creation and private invitations reachable in each chat menu", async () => {

@@ -236,6 +236,16 @@ its actions slot. Do not truncate actionable errors or make their explanation av
 only in a hover tooltip. Recovery actions retain their existing permission checks,
 destinations and pending behavior; shared presentation does not own that logic.
 
+Floating feedback uses `FeedbackNotice`: a neutral floating `Surface`, 12px radius,
+subtle shadow, shared text and action slots, with semantic color on the status icon.
+Actions sit in a wrapping footer aligned with the message column. Dismiss icons
+align with the first text line while retaining the shared full pointer/touch target.
+Use its compact treatment for passive acknowledgements. Its owner supplies placement,
+announcements and lifetime; the component does not turn an inline error into a popup.
+Preview confirmations and location notices share a bounded lane so they cannot cover
+one another. Keep approval text complete and controls reachable when the lane scrolls.
+Global notices are constrained to the visual viewport, including keyboard-open states.
+
 The `/tests/fixtures/browser-approval-feedback/index.html` review mounts the actual
 approval, participant-control, handoff and recovery components with inert data. Its
 required browser checks cover 320px, 390px and desktop widths in both themes, including

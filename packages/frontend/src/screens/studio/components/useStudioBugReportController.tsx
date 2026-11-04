@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps 
 import { logAppInfo, logAppWarn } from "../../../debug/appLogs";
 import { useAppLogs } from "../../../debug/useAppLogs";
 import { useStatus } from "../../../status/useStatus";
+import { statusBehavior } from "../../../status/statusBehavior";
 import type { BuildLogEntry } from "../../../types";
 import { BugReportDialog } from "./BugReportDialog";
 import { BugReportInboxDialog } from "./BugReportInboxDialog";
@@ -183,6 +184,7 @@ export function useStudioBugReportController({
           12_000,
           {
             id: toastId,
+            behavior: statusBehavior.informational,
             actionLabel: claim.claimedCount === 1 ? "View report" : "View reports",
             nonPreemptive: true,
             onClose: () => {

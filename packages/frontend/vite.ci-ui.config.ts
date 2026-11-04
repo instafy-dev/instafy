@@ -33,7 +33,7 @@ export default defineConfig({
     // fixture navigation, exhausting the serial suite's budget on CI. Its
     // solid set is a separate entry point, so it is listed as well.
     entries: [],
-    include: ["react", "react-dom/client", "react-aria-components", "react-router-dom", "iconoir-react", "iconoir-react/solid"],
+    include: ["react", "react-dom/client", "react-aria-components", "@react-aria/overlays", "react-router-dom", "iconoir-react", "iconoir-react/solid"],
     noDiscovery: true,
   },
   server: {

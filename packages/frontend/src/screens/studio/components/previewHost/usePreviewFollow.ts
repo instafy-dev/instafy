@@ -45,6 +45,7 @@ import {
   useFollowEntry,
 } from "./followStore";
 import type { SiteEvent } from "./hostMessages";
+import { usePreviewFeedbackTimer } from "./usePreviewFeedbackTimer";
 
 /** The presenter refreshes who watches this often (the presence event only carries a count). */
 export const FOLLOW_FOLLOWERS_POLL_MS = 15_000;
@@ -56,6 +57,8 @@ type Deps = {
   previewId: string;
   /** The frame is mounted, live and on screen. */
   frameOnScreen: boolean;
+  /** A decision or location notice takes the lane before informational notes. */
+  feedbackBlocked?: boolean;
   /** Posts to this pane's frame at the viewer's origin; false when there is no frame. */
   postToFrame: (message: unknown) => boolean;
   /** What the site's `layout-ack` listed. Studio sends `present` and `apply-view` only to a site that supports "view". */
@@ -383,12 +386,15 @@ export function usePreviewFollow(deps: Deps) {
     if (checked) takeFollowRequest(previewId);
   }, [checked, entry.followRequested, entry.presence, follow, frameOnScreen, previewId]);
 
-  // Short-lived notes: "Lena took over from Kim" for 3 s, "Kim stopped presenting" for 4 s.
-  useEffect(() => {
-    if (!state.note) return;
-    const timer = window.setTimeout(() => dispatch({ type: "clear-note" }), state.note.kind === "ended" ? FOLLOW_ENDED_NOTE_MS : FOLLOW_TAKEOVER_NOTE_MS);
-    return () => window.clearTimeout(timer);
-  }, [state.note]);
+  // The owner retains one current event and its remaining reading time even
+  // when a higher-priority notice removes FollowToast from the lane.
+  const note = state.note;
+  const noteTiming = usePreviewFeedbackTimer(
+    note?.kind === "ended" ? FOLLOW_ENDED_NOTE_MS : FOLLOW_TAKEOVER_NOTE_MS,
+    () => { if (stateRef.current.note === note) dispatch({ type: "clear-note" }); },
+    !note || !frameOnScreen || deps.feedbackBlocked,
+    note,
+  );
 
   // A phone held during a call must not dim while presenting or following (no prompt; where supported).
   const keepAwake = state.role === "presenting" || state.role === "following";
@@ -452,6 +458,7 @@ export function usePreviewFollow(deps: Deps) {
     followers,
     ripples,
     locationLeftOut,
+    noteTiming,
     present,
     stopPresenting: stopOwn,
     stopElsewhere,
