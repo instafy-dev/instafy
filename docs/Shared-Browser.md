@@ -623,9 +623,9 @@ that holds the list is read without the list's options. Octo sets a select
 with `choose` and an option's label as the open list shows it (its `option`;
 case, accents and spacing aside), never by clicking it; a list that holds
 several options at once is left to the person. An option the list does not
-have, or one the page
-turned off, chooses nothing, and the answer lists the options, except on a
-page that may show a secret. The option is chosen by its label and its place
+have, one the page hides (alone or in a hidden group) or one it turned off
+chooses nothing, and the answer lists the options the open list offers, except
+on a page that may show a secret. The option is chosen by its label and its place
 together, so a list that moves its options meanwhile chooses nothing. A choice
 is judged like a click on a radio button named by the list's own label and that
 option (`classifyStep("choose", target, { option })`): signing in with another
@@ -1657,8 +1657,13 @@ sits in (`header`, `nav`, `menu`, `dialog`, `tabs`, `search`, `footer` or
 `aside`), and a link on the page's own site is given as its path. `navigate`
 takes that path too and resolves it against the current page's site; a path
 that names another host is refused, and a blank page needs a full address. The
-text reads a closed select's chosen option as a word of its own, and the select
-says which option it holds in `chosen` (none on a secret screen). A snapshot
+text reads a closed select's chosen option as a word of its own, and a list
+drawn open (a listbox) as the options it offers. A select says which option it
+holds in `chosen` and how many its open list offers in `options` (none the page
+hides, alone or in a group: one rule counts them, reads them and lets `choose`
+pick them), so the one it holds never reads as the whole list; a closed
+select's option names come only from `choose`, which lists them when a name
+misses. A secret screen gives neither field. A snapshot
 never shows what is typed into a field or whether a box is checked, so the
 reading after such a step matches the one before it, and a turn that could not
 tell its text went in gave up a form after its first field. A `type` step's
