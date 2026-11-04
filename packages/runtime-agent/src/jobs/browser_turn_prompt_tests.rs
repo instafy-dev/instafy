@@ -616,7 +616,7 @@ fn a_routed_browser_turn_that_hands_back_is_offered_no_build_request() {
 /// A browser turn whose findings go back to the building turn reads its part of the request right
 /// before it: the reading, while what the request asks Octo to make is the building turn's part,
 /// from its finding lines, so it never stops because it cannot make that, and it says nothing
-/// about making it in its reply. Its write-scope line says why it changes no files. Told only
+/// about making it in its reply. Its own line says why it changes no files. Told only
 /// that it was read-only and that the building turn after it makes the page, a comparison's
 /// browser turn, sent the person's own message, read the maker's home page, answered "I can't
 /// create the comparison page in this read-only turn" and that its research was not complete,
@@ -644,13 +644,9 @@ fn a_browser_turn_that_hands_back_reads_its_part_right_before_the_request() {
                 end. What it asks Octo to make is the building turn's part, from your finding \
                 lines, so never stop because this turn can't make it, and say nothing about \
                 making it in your reply.\n\nLatest user request:\n";
-    let scope = "\nWrite-scope guardrail:\n- Mode: read_only\n- Rationale: explicit write scope \
-                 metadata\n- This turn reads what the request needs, so it changes no files; the \
-                 building turn right after it makes what the person asked for from your finding \
-                 lines.\n\n";
-    let other_scope = "\nWrite-scope guardrail:\n- Mode: read_only\n- Rationale: explicit write \
-                       scope metadata\n- This turn reads pages in Instafy's browser; Octo builds \
-                       in the chat.\n";
+    let scope = "\n- This turn reads what the request needs, so it changes no files; the building \
+                 turn right after it makes what the person asked for from your finding lines.\n\n";
+    let other_scope = "\n- This turn reads pages in Instafy's browser; Octo builds in the chat.\n";
     let restored = json!({
         "defaultThreadId": "existing-thread",
         "sharedBrowserThreadId": "existing-browser-thread",
@@ -703,8 +699,7 @@ fn a_browser_turn_that_hands_back_reads_its_part_right_before_the_request() {
         assert!(!other.contains("Your part of this request"), "{other}");
         assert!(other.contains(other_scope), "{other}");
         // Nothing else differs: without its findings and its part, and with the other turn's
-        // write-scope line, the turn that hands back reads all the other reads but its build
-        // request.
+        // own line, the turn that hands back reads all the other reads but its build request.
         let findings = hand_back
             .find("\n\nFindings for the building turn:\n")
             .expect("the findings");
@@ -722,4 +717,83 @@ fn a_browser_turn_that_hands_back_reads_its_part_right_before_the_request() {
             "{request}"
         );
     }
+}
+
+/// A browser turn reads its own line about files, and the build request where it is offered,
+/// with no "Write-scope guardrail", "Mode" or "Rationale" above them: its only tools are its
+/// browser's, so they guard nothing there. Under "Mode: read_only" and "Rationale: explicit write
+/// scope metadata", a comparison's first browser turn read the maker's home page and answered "I
+/// can't create the comparison page in this read-only turn" (a local test, Nov 4). Its scope
+/// stays read-only, on a new thread and a restored one, in either browser. A building turn with
+/// the same scope keeps its guardrail.
+#[test]
+fn a_browser_turns_prompt_reads_its_own_line_with_no_write_scope_guardrail() {
+    let tmp = space();
+    // The scope the controller stamps on a browser turn.
+    let scope = json!({
+        "mode": "read_only",
+        "ownedPaths": [],
+        "readOnlyPaths": [],
+        "rationale": "explicit write scope metadata",
+        "source": "metadata",
+    });
+    let request = "Compare the three latest laptops of one maker: processor, battery, weight and price, with two independent reviews each, as a comparison page.";
+    let restored = json!({
+        "defaultThreadId": "existing-thread",
+        "sharedBrowserThreadId": "existing-browser-thread",
+        "historyReplayRequired": false,
+    });
+    for transport in ["shared", "desktop-personal"] {
+        // A routed turn whose findings go back to the building turn, one that hands nothing back
+        // (offered the build request), and the person's own browser turn.
+        for (card, hands_back, routed) in [
+            (true, true, true),
+            (true, false, true),
+            (false, false, false),
+        ] {
+            let mut metadata = json!({
+                "browserTransport": transport,
+                "browserHandsBack": hands_back,
+                "writeScope": scope,
+            });
+            if card {
+                metadata["browserRequestOf"] = json!("job:00000000-0000-4000-8000-0000000000a1");
+                metadata["browserCardTurn"] = json!({
+                    "version": 1,
+                    "cardJobId": "00000000-0000-4000-8000-0000000000a1",
+                    "routed": routed,
+                });
+            }
+            for state in [None, Some(&restored)] {
+                let (prompt, _) = prompt_for_request(tmp.path(), request, metadata.clone(), state);
+                for heading in ["Write-scope guardrail", "Mode: read_only", "Rationale:"] {
+                    assert!(
+                        !prompt.contains(heading),
+                        "{transport}: {heading}\n{prompt}"
+                    );
+                }
+                let own = read_only_write_scope_line(Some(&metadata));
+                assert!(own.starts_with("- This turn reads "), "{own}");
+                assert!(
+                    prompt.contains(&format!("\n\n{own}\n")),
+                    "{transport}\n{prompt}"
+                );
+                assert_eq!(
+                    prompt.contains(browser_hand_back::BUILD_REQUEST_LINE),
+                    card && routed && !hands_back,
+                    "{transport}\n{prompt}"
+                );
+                assert!(metadata_requests_read_only_workspace(Some(&metadata)));
+            }
+        }
+    }
+
+    let (building, _) =
+        prompt_for_request(tmp.path(), request, json!({ "writeScope": scope }), None);
+    assert!(
+        building.contains(
+            "\nWrite-scope guardrail:\n- Mode: read_only\n- Rationale: explicit write scope metadata\n- This job is read-only. Do not create, edit, move, delete, or return workspace file changes.\n"
+        ),
+        "{building}"
+    );
 }

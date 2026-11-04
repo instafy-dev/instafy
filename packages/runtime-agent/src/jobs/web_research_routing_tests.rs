@@ -952,9 +952,9 @@ fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() 
         line("browser_then_build"),
         "- `browser_then_build`: the same, and Octo then makes or changes something in this space \
          (a page, a map, a table). So is research whose answer ends in a page (a comparison, \
-         prices, a route), from the first message. A request to make one from what this chat \
-         already found, or with no site to use first (\"on a map\", \"put this on a page\"), is \
-         `direct`."
+         prices, a route), from the first message. A request to make one with no site to use \
+         first (\"on a map\", \"put this on a page\") is `direct`: a map's skill finds and \
+         cites its places itself. So is one made from what this chat already found."
     );
     let reply = section
         .lines()
@@ -1012,7 +1012,7 @@ fn a_follow_up_on_the_chats_browser_work_browses_even_when_it_needs_a_page_here(
         "{stay}"
     );
     // Making a page from what the browser found, with no site to use first, is still a build.
-    assert!(section.contains("(\"on a map\", \"put this on a page\"), is `direct`."));
+    assert!(section.contains("(\"on a map\", \"put this on a page\") is `direct`"));
 
     // The routing prompt for such a follow-up carries the line, whole.
     let tmp = scaffolded_space();
@@ -1299,7 +1299,7 @@ fn a_bare_keep_going_carries_on_what_the_chat_left_open() {
         .expect("the browser line");
     assert!(
         line.ends_with(
-            "or it carries on browser work this chat started, whether or not that found the answer: a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked); when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`."
+            "or it carries on browser work this chat started, whether or not that found the answer: a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked or not confirmed, such as a route); when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`."
         ),
         "{line}"
     );
@@ -2192,7 +2192,7 @@ fn research_that_ends_in_a_page_reaches_its_build_and_keep_going_never_undoes_an
     assert!(!rules[1].contains("stopped or undid"), "{}", rules[1]);
     assert!(
         rules[2].ends_with(
-            "A request to make one from what this chat already found, or with no site to use first (\"on a map\", \"put this on a page\"), is `direct`."
+            "A request to make one with no site to use first (\"on a map\", \"put this on a page\") is `direct`: a map's skill finds and cites its places itself. So is one made from what this chat already found."
         ),
         "{}",
         rules[2]
@@ -2226,6 +2226,106 @@ fn research_that_ends_in_a_page_reaches_its_build_and_keep_going_never_undoes_an
 
     let previous = include_str!("legacy/browser-automation-v27.md");
     assert!(previous.contains("never a change the person stopped or undid; when a page here"));
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+}
+
+/// A request to make something on a map is one building turn, and a bare "keep going" carries on
+/// what the chat's replies or page mark not confirmed (local tests, Nov 4). Folded into one longer
+/// sentence with a page made from what the chat already found, the rule for "on a map" lost to
+/// research that ends in a page: "Plan 3 days in Seville for a first visit: where to stay, what to
+/// see each day, on a map." went to the browser, and the build after it pinned a neighbourhood as
+/// the stay, kept the browser turn's day plan as text and cited no sight's own page, where the
+/// same message's own building turn had found hotels, a day plan and each sight's site. The rule
+/// has its sentence back, with its reason, and a page made from what the chat found has one of
+/// its own. After a page that marked its metro route unverified, a stopped edit and an Undo, a
+/// bare "keep going" asked what to continue: the chat's replies said "couldn't confirm" and its
+/// page "unverified", where the rule looked for what they mark not checked. The kinds of work on
+/// a website are named more briefly, so the section stays within what the routing step reads. The
+/// routing step reads it whole for each message, and an unedited earlier copy is upgraded.
+#[test]
+fn a_map_request_is_a_build_and_keep_going_carries_on_what_is_not_confirmed() {
+    let start = BROWSER_SKILL
+        .find("\n## Routing preflight\n")
+        .expect("routing section")
+        + 1;
+    let section = BROWSER_SKILL[start..].trim_end();
+    let rule = |route: &str| {
+        section
+            .lines()
+            .find(|line| line.starts_with(&format!("- `{route}`:")))
+            .unwrap_or_else(|| panic!("no {route} line"))
+    };
+    let build = rule("browser_then_build");
+    assert!(
+        build.ends_with(
+            "So is research whose answer ends in a page (a comparison, prices, a route), from the first message. A request to make one with no site to use first (\"on a map\", \"put this on a page\") is `direct`: a map's skill finds and cites its places itself. So is one made from what this chat already found."
+        ),
+        "{build}"
+    );
+    let browser = rule("browser");
+    for words in [
+        "the work happens on a website (use a site, sign in, send a form, press its buttons), or it carries on browser work this chat started",
+        "a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked or not confirmed, such as a route); when a page here shows it",
+    ] {
+        assert!(browser.contains(words), "{words}\n{browser}");
+    }
+    for earlier in [
+        "A request to make one from what this chat already found, or with no site to use first",
+        "(what its replies or page mark not checked);",
+        "walk through its screens",
+    ] {
+        assert!(!section.contains(earlier), "{earlier}");
+    }
+    // Never a change the person stopped or undid: still the first rule, ahead of every route.
+    assert_eq!(
+        section.lines().find(|line| line.starts_with("- ")),
+        Some("- A bare \"keep going\" never carries on a change the person stopped or undid.")
+    );
+    assert!(
+        section.chars().count() <= BROWSER_SKILL_ROUTING_MAX_CHARS,
+        "{} chars",
+        section.chars().count()
+    );
+
+    let tmp = scaffolded_space();
+    for request in [
+        "Plan 3 days in Seville for a first visit: where to stay, what to see each day, on a map.",
+        "Plan a weekend in Lisbon on a map",
+        "Compare the three latest Framework laptops: CPU, battery, weight, price, with two independent reviews each, as a comparison page.",
+        "Fill in what's still missing.",
+        "Put the hours and the metro route on a small page I can share.",
+        "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+        "Now find how to get there by metro from São Bento.",
+        "keep going",
+        "Open github.com in your browser, sign me in, then star the instafy-dev/maps-skill-pack repository.",
+        "Open httpbin.org/forms/post in your browser, fill in a test pizza order with made-up details and submit it.",
+    ] {
+        let job = test_lease_job(
+            Some("feature"),
+            json!({ "prompt_text": request, "metadata": {} }),
+        );
+        let routes = browser_routing_snapshot_for_job(&job, tmp.path(), request)
+            .expect("the message is offered the browser routes");
+        assert!(!routes.contains("(truncated)"), "{request}: {routes}");
+        assert!(routes.contains(section), "{request}: {routes}");
+        let prompt = build_agent_routing_preflight_prompt_with_browser_routes(
+            tmp.path(),
+            request,
+            None,
+            None,
+            Some(&routes),
+        );
+        assert!(prompt.contains(build), "{request}");
+        assert!(prompt.contains(browser), "{request}");
+    }
+
+    let previous = include_str!("legacy/browser-automation-v28.md");
+    assert!(previous.contains(
+        "A request to make one from what this chat already found, or with no site to use first"
+    ));
     let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
     fs::write(&skill, previous).unwrap();
     learn::ensure_project_memory_scaffold(tmp.path());
