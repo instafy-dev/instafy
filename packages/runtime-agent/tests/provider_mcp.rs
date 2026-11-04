@@ -275,7 +275,7 @@ async fn the_broker_serves_its_grants_tools_and_sends_each_call_with_the_turns_t
         json!({
             "protocolVersion": "2025-06-18",
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "rmcp", "version": "3.2.0" },
+            "serverInfo": { "name": "rmcp", "version": "3.5.1" },
             "instructions": format!("{DEVICE_INSTRUCTIONS}\n\n{LAMP_INSTRUCTIONS}"),
         }),
         "{initialized}"

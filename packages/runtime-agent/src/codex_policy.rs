@@ -48,7 +48,7 @@ const DESTRUCTIVE_ACTIONS_TITLE: &str = "Destructive Actions";
 ///   Its extension registry (`codex::codex_extension_registry`) holds only the
 ///   run's instructions and project preferences (World State sections), the
 ///   turn-usage recorder and the required-execution gate. It never installs
-///   `codex_skills_extension`, which at rust-v0.159.2 is what renders the
+///   `codex_skills_extension`, which at rust-v0.166.0 is what renders the
 ///   "## Skills" / "### Available skills" catalog this section refers to and
 ///   serves `skills.list` / `skills.read`. Instafy skills under `.agents/skills`
 ///   reach the model through the runtime's own prompt instead (workspace memory
@@ -179,7 +179,7 @@ pub(crate) fn apply_runtime_codex_policy(config: &mut Config, bounded: bool) -> 
         None => codex_models_manager::bundled_models_response()
             .context("failed to load the bundled Codex model catalog")?,
     };
-    apply_model_catalog_policy(&mut catalog);
+    apply_model_catalog_policy(&mut catalog, bounded);
     config.model_catalog = Some(catalog);
 
     // Ordinary lanes and team plan workers replace the model prompt with the
@@ -234,8 +234,14 @@ pub(crate) fn apply_native_subagent_limit(config: &mut Config, limit: Option<Nat
 
 /// Applies the catalog part of the policy to every model the run could select,
 /// including subagents that switch models.
-fn apply_model_catalog_policy(catalog: &mut ModelsResponse) {
+fn apply_model_catalog_policy(catalog: &mut ModelsResponse, bounded: bool) {
     for model in &mut catalog.models {
+        if bounded {
+            // A bounded turn requests no execution environment, yet Codex offers `apply_patch`
+            // to every model whose entry names a patch tool: since rust-v0.166 its environment
+            // tools stay advertised without one. The entry is the only switch for this tool.
+            model.apply_patch_tool_type = None;
+        }
         for window in [&mut model.context_window, &mut model.max_context_window] {
             if let Some(window) = window.as_mut() {
                 *window = (*window).min(MAX_BILLED_CONTEXT_WINDOW);
@@ -298,10 +304,18 @@ enum FeaturePin {
 fn feature_pin(feature: Feature) -> FeaturePin {
     use FeaturePin::{Off, OffInBounded, On, Upstream};
     match feature {
-        // Billing: Fast mode selects the paid priority tier.
-        Feature::FastMode => Off,
+        // Billing: Fast mode selects the paid priority tier, Ultra Fast mode the paid
+        // `ultrafast` tier (on by default upstream), even from an agent role's config.
+        Feature::FastMode | Feature::UltrafastMode => Off,
         // A sleeping turn idles while it holds a runtime lease.
         Feature::SleepTool => Off,
+        // A child agent's message would start a new turn on a root thread whose run has
+        // finished: billed, and read by nobody.
+        Feature::WakeOnAgentMessages => Off,
+        // Would probe the runtime's stdio MCP servers (the provider broker and both browsers)
+        // with the 2026-07-28 discovery handshake instead of a 2025-06-18 `initialize`, and share
+        // a run's servers, with their grants and browser authority, across threads.
+        Feature::McpConnectionSharing => Off,
         // Model traffic uses only the configured provider route.
         Feature::RespectSystemProxy | Feature::SystemProxyFallback => Off,
         // Shell snapshots replay exported env vars, including job credentials,
@@ -339,10 +353,11 @@ fn feature_pin(feature: Feature) -> FeaturePin {
         Feature::CodeModeOnly | Feature::CodeMode => OffInBounded,
 
         Feature::ShellTool
-        | Feature::ShellZshFork
         | Feature::ExecPermissionApprovals
         | Feature::ApplyPatchStreamingEvents
         | Feature::ViewImage
+        | Feature::MultiEnvCopyFile
+        | Feature::CodeModeToolSearch
         | Feature::SpawnCsv
         | Feature::MultiAgentV2
         | Feature::Collab
@@ -358,6 +373,7 @@ fn feature_pin(feature: Feature) -> FeaturePin {
         | Feature::CodexHooks
         | Feature::SkillMcpDependencyInstall
         | Feature::ExecutorCapabilityDiscovery
+        | Feature::ExecutorCapabilityDiscoveryV2
         | Feature::EnableMcpApps
         | Feature::BrowserUse
         | Feature::BrowserUseFullCdpAccess
@@ -377,57 +393,84 @@ fn feature_pin(feature: Feature) -> FeaturePin {
         // and the turn selects no execution environment.
         Feature::AnalyticsPlanHistory
         | Feature::ApiKeyModelDiscovery
-        | Feature::TranscriptV2
+        | Feature::ApiKeyCyberAccessPrograms
         | Feature::SecretAuthStorage
         | Feature::DaemonAutoStart
+        | Feature::CliDaybreak
+        | Feature::TuiMultiBackend
+        | Feature::AppServerWebSocketCompression
         | Feature::ContentItemKinds
         | Feature::ExecutedToolCallMetadata
+        | Feature::UntrustedAsToolOutput
         | Feature::CodeModePrewarm
         | Feature::CodeModeInterrupt
+        | Feature::CodeModeHostGrpc
+        | Feature::CodeModeOnlyStrictThirdPartyTools
         | Feature::UnifiedExec
         | Feature::UnifiedExecTty
         | Feature::TerminalVisualizationInstructions
-        | Feature::ApplyPatchPreserveLineEndings
         | Feature::WriteStdinApproval
         | Feature::UseLegacyLandlock
         | Feature::PowerShellShellVersion
         | Feature::ShellSnapshotV2
+        | Feature::LoginShellPackagePath
         | Feature::DeferredExecutor
         | Feature::CwdRelativeTurnDiffs
         | Feature::RuntimeMetrics
+        | Feature::CriticalPathTiming
         | Feature::LocalThreadStoreCompression
         | Feature::BackgroundPaginatedRolloutMigration
         | Feature::EnableRequestCompression
         | Feature::NetworkProxy
-        | Feature::Worktrees
+        | Feature::CredentialMasking
         | Feature::DeferMailboxPreemption
         | Feature::InstantInterrupt
         | Feature::AgentMessageBoard
+        | Feature::ModelCatalogInContext
+        | Feature::MultiAgentV2DynamicTools
+        | Feature::SubagentThreadEnvironments
         | Feature::Psp
         | Feature::Mcp20260728
         | Feature::CodexAppsMcp20260728
         | Feature::McpOAuthRefreshCoordination
+        | Feature::McpToolListChanged
         | Feature::UseXaa
         | Feature::DeferredToolWorldState
+        | Feature::IncrementalTools
+        | Feature::PredictionPreserveParentTools
         | Feature::NonPrefixedMcpToolNames
         | Feature::RecommendedPlugins
+        | Feature::PluginDiscoveryPrefetch
+        | Feature::SimplifiedSelectionHints
         | Feature::SkipHostSkillDiscovery
         | Feature::InAppBrowser
         | Feature::InAppChat
         | Feature::InAppDictation
         | Feature::InAppLocalAutomation
         | Feature::InAppUpdates
+        | Feature::InAppVoice
+        | Feature::BrowserAnnotationApi
         | Feature::OmitAppServerNotificationMedia
         | Feature::ImageResizeNotice
         | Feature::UnifiedImageBudget
         | Feature::ConcurrentReasoningSummaries
+        | Feature::OutputTokenReplay
         | Feature::SkillSearch
+        | Feature::OmitSkillDescriptions
+        | Feature::SkillCatalogDeltas
         | Feature::MentionsV2
         | Feature::GuardianApproval
         | Feature::GuardianReuseParentCompaction
         | Feature::GuardianEnhancedNodeReplTranscripts
         | Feature::GuardianNodeReplTranscriptImages
+        | Feature::GuardianRecordedItems
+        | Feature::GuardianRootHandoffContext
+        | Feature::GuardianNativeMultiAgentHistory
+        | Feature::GuardianTrustOrchestratorConnectors
+        | Feature::GuardianConversationHistoryTools
         | Feature::GuardianV2
+        | Feature::GuardianV2DecisionsComparison
+        | Feature::GuardianV3
         | Feature::TokenBudget
         | Feature::ContextManagement
         | Feature::RolloutBudget
@@ -435,19 +478,30 @@ fn feature_pin(feature: Feature) -> FeaturePin {
         | Feature::NonfatalClockReadErrors
         | Feature::BedrockSetupWizard
         | Feature::StepModelSwitching
-        | Feature::RealtimeConversation
         | Feature::PreventIdleSleep
         | Feature::CompactionImageBudget
+        | Feature::AsyncCompaction
         | Feature::RetainClientDeveloperMessages
+        | Feature::RetainClientToolOutputs
         | Feature::UseAgentIdentity
+        | Feature::RuntimeAgentInstances
         | Feature::WindowsSandboxService
         | Feature::PreferMxc => Upstream,
 
+        // A child agent then takes its model's own window from the catalog, which the policy
+        // caps at the billed window too.
+        Feature::SubagentDefaultContextLimits => Upstream,
+
         // Retired upstream: Codex keeps these keys only so old configs parse.
-        // UnifiedExecZshFork still gates the zsh bridge together with
-        // ShellZshFork, which is off wherever it matters.
         Feature::CodeModeBufferedExec
+        | Feature::CodeModeToolDescriptionFirst
+        | Feature::ShellZshFork
         | Feature::UnifiedExecZshFork
+        | Feature::StableEnvironmentTools
+        | Feature::ApplyPatchPreserveLineEndings
+        | Feature::TranscriptV2
+        | Feature::Worktrees
+        | Feature::RealtimeConversation
         | Feature::TerminalResizeReflow
         | Feature::LocalThreadStoreSharedCompression
         | Feature::MultiAgentMode
@@ -543,7 +597,7 @@ mod tests {
         "gpt-5.5",
     ];
 
-    /// The top-level sections of each policy model's upstream prompt at rust-v0.159.2, then of
+    /// The top-level sections of each policy model's upstream prompt at rust-v0.166.0, then of
     /// the prompt its catalog lanes send. Fails closed: a bump that renames, drops or adds a
     /// section (a removed one included) fails here, so what to remove and keep is decided again
     /// instead of an exact-heading removal silently turning into a no-op.
@@ -1070,11 +1124,12 @@ mod tests {
 
     #[tokio::test]
     async fn configured_context_windows_and_service_tiers_cannot_raise_billing() {
-        let config_toml = "model_context_window = 1000000\nmodel_auto_compact_token_limit = 900000\nservice_tier = \"priority\"\n[features]\nfast_mode = true\n";
+        let config_toml = "model_context_window = 1000000\nmodel_auto_compact_token_limit = 900000\nservice_tier = \"priority\"\n[features]\nfast_mode = true\nultrafast_mode = true\n";
         let (_home, mut config) = load_config("gpt-6-luna", None, config_toml).await;
         assert_eq!(config.model_context_window, Some(1_000_000));
         assert!(config.service_tier.is_some());
         assert!(config.features.enabled(Feature::FastMode));
+        assert!(config.features.enabled(Feature::UltrafastMode));
         apply_runtime_codex_policy(&mut config, false).expect("policy");
         assert_eq!(config.model_context_window, Some(MAX_BILLED_CONTEXT_WINDOW));
         assert_eq!(
@@ -1083,6 +1138,8 @@ mod tests {
         );
         assert_eq!(config.service_tier, None);
         assert!(!config.features.enabled(Feature::FastMode));
+        // An agent role's `service_tier = "ultrafast"` is honored only with this on.
+        assert!(!config.features.enabled(Feature::UltrafastMode));
         let resolved = construct_model_info_offline("gpt-6-luna", &config);
         assert_eq!(
             resolved.resolved_context_window(),
@@ -1175,6 +1232,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bounded_turns_get_no_patch_tool_on_any_model() {
+        for bounded in [false, true] {
+            let (_home, mut config) = load_config("gpt-5.5", None, "").await;
+            apply_runtime_codex_policy(&mut config, bounded).expect("policy");
+            for slug in POLICY_MODELS {
+                let resolved = construct_model_info_offline(slug, &config);
+                if bounded {
+                    assert_eq!(resolved.apply_patch_tool_type, None, "{slug}");
+                } else {
+                    assert_eq!(
+                        resolved.apply_patch_tool_type,
+                        upstream_model(slug).apply_patch_tool_type,
+                        "{slug}"
+                    );
+                }
+            }
+        }
+        // The ordinary lanes keep upstream's patch tool, which the bounded ones lose.
+        assert!(upstream_model("gpt-5.5").apply_patch_tool_type.is_some());
+    }
+
+    #[tokio::test]
     async fn upstream_multi_agent_version_and_code_mode_stay_as_shipped() {
         // Owner decision (Sep 30): take upstream's multi-agent v2 for GPT-6 Luna.
         let (_home, mut config) = load_config("gpt-6-luna", None, "").await;
@@ -1193,7 +1272,7 @@ mod tests {
 
     #[tokio::test]
     async fn feature_pins_hold_on_every_lane_even_against_config_files() {
-        let config_toml = "[features]\nsleep_tool = true\nrespect_system_proxy = true\nsystem_proxy_fallback = true\nshell_snapshot = true\nsend_message_to_user_async = true\ncurrent_time_reminder = true\ncode_mode_host = false\nshell_tool = true\napps = true\nunbounded_connection_retries = true\n";
+        let config_toml = "[features]\nsleep_tool = true\nrespect_system_proxy = true\nsystem_proxy_fallback = true\nshell_snapshot = true\nsend_message_to_user_async = true\ncurrent_time_reminder = true\ncode_mode_host = false\nshell_tool = true\napps = true\nunbounded_connection_retries = true\nwake_on_agent_messages = true\nmcp_connection_sharing = true\n";
         for bounded_browser in [false, true] {
             let (_home, mut config) = load_config("gpt-6-luna", None, config_toml).await;
             apply_runtime_codex_policy(&mut config, bounded_browser).expect("policy");
@@ -1208,6 +1287,8 @@ mod tests {
             }
             assert!(config.features.enabled(Feature::CodeModeHost));
             assert!(!config.features.enabled(Feature::UnboundedConnectionRetries));
+            assert!(!config.features.enabled(Feature::WakeOnAgentMessages));
+            assert!(!config.features.enabled(Feature::McpConnectionSharing));
             // Upstream multi-agent v2 stays on ordinary lanes; browser turns get no child agents.
             assert_eq!(config.agents_enabled, !bounded_browser);
             assert_eq!(
@@ -1218,6 +1299,25 @@ mod tests {
             // Codex forces unified exec on; a bounded browser turn is kept off
             // shell tools by ShellTool and by selecting no environment.
             assert!(config.features.enabled(Feature::UnifiedExec));
+        }
+    }
+
+    /// The runtime's stdio MCP servers (the provider broker and both browsers) get a 2025-06-18
+    /// `initialize`: Codex starts with the 2026-07-28 handshake only when `mcp_20260728` is on
+    /// (off by default, and the runtime sets no `CODEX_MCP_PROTOCOL_VERSION`), and probes a stdio
+    /// server with 2026-07-28 discovery only under `mcp_connection_sharing`, which stays off.
+    #[tokio::test]
+    async fn stdio_mcp_servers_get_the_2025_06_18_handshake() {
+        use codex_rmcp_client::McpProtocolMode;
+        for bounded in [false, true] {
+            let (_home, mut config) = load_config("gpt-6-luna", None, "").await;
+            apply_runtime_codex_policy(&mut config, bounded).expect("policy");
+            assert_eq!(
+                config.mcp_protocol_mode(),
+                McpProtocolMode::Legacy,
+                "bounded={bounded}"
+            );
+            assert!(!config.features.enabled(Feature::McpConnectionSharing));
         }
     }
 
@@ -1344,7 +1444,10 @@ mod tests {
             .collect();
         for key in [
             "fast_mode",
+            "ultrafast_mode",
             "sleep_tool",
+            "wake_on_agent_messages",
+            "mcp_connection_sharing",
             "respect_system_proxy",
             "system_proxy_fallback",
             "shell_snapshot",

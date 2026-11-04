@@ -25,7 +25,7 @@ use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, JsonObject,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
 };
 use serde_json::{Value as JsonValue, json};
 use tokio::sync::Mutex as AsyncMutex;
@@ -349,8 +349,8 @@ fn message_search_tool() -> Tool {
 }
 
 impl ServerHandler for Broker {
-    fn get_info(&self) -> ServerInfo {
-        let info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
+    fn get_info(&self) -> ServerConfig {
+        let info = ServerConfig::new(ServerCapabilities::builder().enable_tools().build());
         match self.instructions.as_deref() {
             Some(instructions) => info.with_instructions(instructions),
             None => info,

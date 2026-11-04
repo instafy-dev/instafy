@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use codex_extension_api::{
     ContextContributor, ExtensionFuture, PreviousWorldStateSection, RenderedWorldStateFragment,
-    WorldStateContributionInput, WorldStateSectionContribution,
+    WorldStateContributionInput, WorldStateSectionContribution, input_text,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -88,6 +88,8 @@ impl RunInstructionsContext {
         }
     }
 
+    /// The run section, then the note section. Each records its current state on every step,
+    /// whether or not it sends text.
     fn sections(&self) -> Vec<WorldStateSectionContribution> {
         vec![self.run_section(), self.turn_note_section()]
     }
@@ -95,31 +97,10 @@ impl RunInstructionsContext {
     fn run_section(&self) -> WorldStateSectionContribution {
         let policy = self.policy.clone();
         let current = self.policy_snapshot.clone();
-        WorldStateSectionContribution::new(
-            RUN_SECTION_ID,
-            self.policy_snapshot.clone(),
-            move |previous| {
-                let had_text = match previous {
-                    PreviousWorldStateSection::Known(previous) if previous == &current => {
-                        return None;
-                    }
-                    PreviousWorldStateSection::Known(previous) => Some(has_revision(previous)),
-                    PreviousWorldStateSection::Unknown => Some(true),
-                    PreviousWorldStateSection::Absent => None,
-                };
-                let body = match (policy.as_deref(), had_text) {
-                    (Some(policy), None) => policy.to_string(),
-                    (Some(policy), Some(_)) => format!("{REPLACE}\n\n{policy}"),
-                    (None, Some(true)) => WITHDRAW.to_string(),
-                    (None, _) => return None,
-                };
-                Some(RenderedWorldStateFragment::new(
-                    "developer",
-                    (RUN_OPEN, RUN_CLOSE),
-                    body,
-                ))
-            },
-        )
+        WorldStateSectionContribution::new(RUN_SECTION_ID, move |previous| {
+            let fragment = run_fragment(policy.as_deref(), &current, previous);
+            (Some(current.clone()), fragment)
+        })
         .with_retained_fragment_matcher(is_run_block)
         .with_legacy_matcher(|role, text| {
             is_run_block(role, text) || is_legacy_run_text(role, text)
@@ -129,34 +110,63 @@ impl RunInstructionsContext {
     fn turn_note_section(&self) -> WorldStateSectionContribution {
         let note = self.turn_note.clone();
         let current = self.turn_note_snapshot.clone();
-        WorldStateSectionContribution::new(
-            NOTE_SECTION_ID,
-            self.turn_note_snapshot.clone(),
-            move |previous| {
-                let had_note = match previous {
-                    PreviousWorldStateSection::Known(previous) if previous == &current => {
-                        return None;
-                    }
-                    PreviousWorldStateSection::Known(previous) => has_revision(previous),
-                    PreviousWorldStateSection::Unknown => true,
-                    PreviousWorldStateSection::Absent => false,
-                };
-                let body = match (note.as_deref(), had_note) {
-                    (Some(note), true) => format!("{NOTE_REPLACE}\n{NOTE_FOR_THIS_TURN}\n{note}"),
-                    (Some(note), false) => format!("{NOTE_FOR_THIS_TURN}\n{note}"),
-                    (None, true) => NOTE_WITHDRAW.to_string(),
-                    (None, false) => return None,
-                };
-                Some(RenderedWorldStateFragment::new(
-                    "developer",
-                    (NOTE_OPEN, NOTE_CLOSE),
-                    body,
-                ))
-            },
-        )
+        WorldStateSectionContribution::new(NOTE_SECTION_ID, move |previous| {
+            let fragment = turn_note_fragment(note.as_deref(), &current, previous);
+            (Some(current.clone()), fragment)
+        })
         .with_retained_fragment_matcher(is_turn_note_block)
         .with_legacy_matcher(is_turn_note_block)
     }
+}
+
+/// The run section's text for a thread whose last recorded state is `previous`, if it needs any.
+fn run_fragment(
+    policy: Option<&str>,
+    current: &Value,
+    previous: PreviousWorldStateSection<'_>,
+) -> Option<RenderedWorldStateFragment> {
+    let had_text = match previous {
+        PreviousWorldStateSection::Known(previous) if previous == current => return None,
+        PreviousWorldStateSection::Known(previous) => Some(has_revision(previous)),
+        PreviousWorldStateSection::Unknown => Some(true),
+        PreviousWorldStateSection::Absent => None,
+    };
+    let body = match (policy, had_text) {
+        (Some(policy), None) => policy.to_string(),
+        (Some(policy), Some(_)) => format!("{REPLACE}\n\n{policy}"),
+        (None, Some(true)) => WITHDRAW.to_string(),
+        (None, _) => return None,
+    };
+    Some(RenderedWorldStateFragment::new(
+        "developer",
+        (RUN_OPEN, RUN_CLOSE),
+        input_text(body),
+    ))
+}
+
+/// The note section's text for a thread whose last recorded state is `previous`, if it needs any.
+fn turn_note_fragment(
+    note: Option<&str>,
+    current: &Value,
+    previous: PreviousWorldStateSection<'_>,
+) -> Option<RenderedWorldStateFragment> {
+    let had_note = match previous {
+        PreviousWorldStateSection::Known(previous) if previous == current => return None,
+        PreviousWorldStateSection::Known(previous) => has_revision(previous),
+        PreviousWorldStateSection::Unknown => true,
+        PreviousWorldStateSection::Absent => false,
+    };
+    let body = match (note, had_note) {
+        (Some(note), true) => format!("{NOTE_REPLACE}\n{NOTE_FOR_THIS_TURN}\n{note}"),
+        (Some(note), false) => format!("{NOTE_FOR_THIS_TURN}\n{note}"),
+        (None, true) => NOTE_WITHDRAW.to_string(),
+        (None, false) => return None,
+    };
+    Some(RenderedWorldStateFragment::new(
+        "developer",
+        (NOTE_OPEN, NOTE_CLOSE),
+        input_text(body),
+    ))
 }
 
 impl ContextContributor for RunInstructionsContext {
@@ -210,6 +220,7 @@ fn is_legacy_run_text(role: &str, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_extension_api::ContentItem;
 
     const POLICY: &str = "Browser/UI execution run:\n- Keep the visible page open.";
     const OTHER_POLICY: &str =
@@ -236,40 +247,62 @@ mod tests {
         sections.try_into().unwrap_or_else(|_| unreachable!())
     }
 
+    /// The state Codex records for a section; every step records the same one.
+    fn snapshot_of(section: &WorldStateSectionContribution) -> Value {
+        section
+            .render_diff(PreviousWorldStateSection::Absent)
+            .0
+            .expect("a recorded state")
+    }
+
+    /// What a section sends a thread whose last recorded state is `previous`.
+    fn sent(
+        section: &WorldStateSectionContribution,
+        previous: PreviousWorldStateSection<'_>,
+    ) -> Option<RenderedWorldStateFragment> {
+        section.render_diff(previous).1
+    }
+
+    /// A fragment's text.
+    fn body(fragment: &RenderedWorldStateFragment) -> &str {
+        match fragment.body() {
+            ContentItem::InputText { text } => text,
+            other => panic!("a section sends text, not {other:?}"),
+        }
+    }
+
     /// The text Codex puts into history for a fragment.
     fn rendered(fragment: &RenderedWorldStateFragment) -> String {
         let (open, close) = fragment.markers();
-        format!("{open}{}{close}", fragment.body())
+        format!("{open}{}{close}", body(fragment))
     }
 
     #[test]
     fn an_unchanged_run_sends_nothing_and_a_changed_one_replaces_every_earlier_text() {
         let [current, _] = sections(&run(POLICY, None));
         let [other, _] = sections(&run(OTHER_POLICY, None));
+        let (current_state, other_state) = (snapshot_of(&current), snapshot_of(&other));
 
         assert!(
-            current
-                .render_diff(PreviousWorldStateSection::Known(current.snapshot()))
-                .is_none(),
+            sent(&current, PreviousWorldStateSection::Known(&current_state)).is_none(),
             "a thread that read this text is not sent it again"
         );
 
         for previous in [
-            PreviousWorldStateSection::Known(other.snapshot()),
+            PreviousWorldStateSection::Known(&other_state),
             PreviousWorldStateSection::Unknown,
         ] {
-            let fragment = current.render_diff(previous).expect("a changed run's text");
+            let fragment = sent(&current, previous).expect("a changed run's text");
             assert_eq!(fragment.role(), "developer");
             assert_eq!(fragment.markers(), (RUN_OPEN, RUN_CLOSE));
-            assert_eq!(fragment.body(), format!("{REPLACE}\n\n{POLICY}"));
+            assert_eq!(body(&fragment), format!("{REPLACE}\n\n{POLICY}"));
             assert!(current.matches_retained_fragment("developer", &rendered(&fragment)));
         }
 
-        let fresh = current
-            .render_diff(PreviousWorldStateSection::Absent)
-            .expect("a fresh thread's text");
-        assert_eq!(fresh.body(), POLICY);
-        assert!(!fresh.body().contains(REPLACE));
+        let fresh =
+            sent(&current, PreviousWorldStateSection::Absent).expect("a fresh thread's text");
+        assert_eq!(body(&fresh), POLICY);
+        assert!(!body(&fresh).contains(REPLACE));
         assert_eq!(
             rendered(&fresh),
             format!("<instafy_run_instructions>\n{POLICY}\n</instafy_run_instructions>")
@@ -280,19 +313,20 @@ mod tests {
     fn a_run_without_text_withdraws_the_earlier_text_once() {
         let [with_text, _] = sections(&run(POLICY, None));
         let [without, _] = sections(&RunInstructions::default());
+        let (with_text_state, without_state) = (snapshot_of(&with_text), snapshot_of(&without));
         for previous in [
-            PreviousWorldStateSection::Known(with_text.snapshot()),
+            PreviousWorldStateSection::Known(&with_text_state),
             PreviousWorldStateSection::Unknown,
         ] {
-            let fragment = without.render_diff(previous).expect("withdrawal");
-            assert_eq!(fragment.body(), WITHDRAW);
+            let fragment = sent(&without, previous).expect("withdrawal");
+            assert_eq!(body(&fragment), WITHDRAW);
             assert_eq!(fragment.role(), "developer");
         }
         for previous in [
-            PreviousWorldStateSection::Known(without.snapshot()),
+            PreviousWorldStateSection::Known(&without_state),
             PreviousWorldStateSection::Absent,
         ] {
-            assert!(without.render_diff(previous).is_none());
+            assert!(sent(&without, previous).is_none());
         }
     }
 
@@ -301,28 +335,30 @@ mod tests {
         let [_, note] = sections(&run(POLICY, Some(NOTE)));
         let [_, other_note] = sections(&run(POLICY, Some("- Another note.")));
         let [_, without] = sections(&run(POLICY, None));
+        let note_state = snapshot_of(&note);
+        let other_note_state = snapshot_of(&other_note);
+        let without_state = snapshot_of(&without);
 
         for previous in [
             PreviousWorldStateSection::Absent,
-            PreviousWorldStateSection::Known(without.snapshot()),
+            PreviousWorldStateSection::Known(&without_state),
         ] {
-            let fragment = note.render_diff(previous).expect("the note");
+            let fragment = sent(&note, previous).expect("the note");
             assert_eq!(fragment.role(), "developer");
             assert_eq!(fragment.markers(), (NOTE_OPEN, NOTE_CLOSE));
-            assert_eq!(fragment.body(), format!("For this turn only:\n{NOTE}"));
+            assert_eq!(body(&fragment), format!("For this turn only:\n{NOTE}"));
             assert!(note.matches_retained_fragment("developer", &rendered(&fragment)));
         }
         assert!(
-            note.render_diff(PreviousWorldStateSection::Known(note.snapshot()))
-                .is_none(),
+            sent(&note, PreviousWorldStateSection::Known(&note_state)).is_none(),
             "the same note in effect (a retry of the same turn) is not repeated"
         );
         for previous in [
-            PreviousWorldStateSection::Known(other_note.snapshot()),
+            PreviousWorldStateSection::Known(&other_note_state),
             PreviousWorldStateSection::Unknown,
         ] {
             assert_eq!(
-                note.render_diff(previous).expect("a replacing note").body(),
+                body(&sent(&note, previous).expect("a replacing note")),
                 format!(
                     "This note replaces any earlier turn note in this conversation.\nFor this turn only:\n{NOTE}"
                 )
@@ -330,47 +366,47 @@ mod tests {
         }
 
         // The next turn without a note withdraws it once, then says nothing.
-        let withdrawal = without
-            .render_diff(PreviousWorldStateSection::Known(note.snapshot()))
-            .expect("withdrawal");
+        let withdrawal =
+            sent(&without, PreviousWorldStateSection::Known(&note_state)).expect("withdrawal");
         assert_eq!(
-            withdrawal.body(),
+            body(&withdrawal),
             "Earlier turn notes in this conversation no longer apply."
         );
         assert!(without.matches_retained_fragment("developer", &rendered(&withdrawal)));
-        assert!(
-            without
-                .render_diff(PreviousWorldStateSection::Known(without.snapshot()))
-                .is_none()
-        );
-        assert!(
-            without
-                .render_diff(PreviousWorldStateSection::Absent)
-                .is_none()
-        );
+        assert!(sent(&without, PreviousWorldStateSection::Known(&without_state)).is_none());
+        assert!(sent(&without, PreviousWorldStateSection::Absent).is_none());
         // History holds a note but its state was lost: withdraw it to be sure.
         assert_eq!(
-            without
-                .render_diff(PreviousWorldStateSection::Unknown)
-                .expect("withdrawal")
-                .body(),
+            body(&sent(&without, PreviousWorldStateSection::Unknown).expect("withdrawal")),
             NOTE_WITHDRAW
         );
+    }
+
+    /// Codex keeps a section's stored state when a step records none, so every step records the
+    /// run's own: whatever this turn sent or left unsaid, the next one compares against it.
+    #[test]
+    fn every_step_records_the_runs_own_state() {
+        let [run_section, note_section] = sections(&run(POLICY, Some(NOTE)));
+        let [other_run, other_note] = sections(&run(OTHER_POLICY, None));
+        for (section, other) in [(&run_section, &other_run), (&note_section, &other_note)] {
+            let own = snapshot_of(section);
+            let other = snapshot_of(other);
+            for previous in [
+                PreviousWorldStateSection::Absent,
+                PreviousWorldStateSection::Unknown,
+                PreviousWorldStateSection::Known(&own),
+                PreviousWorldStateSection::Known(&other),
+            ] {
+                assert_eq!(section.render_diff(previous).0.as_ref(), Some(&own));
+            }
+        }
     }
 
     #[test]
     fn only_whole_tagged_developer_blocks_count_as_run_text() {
         let [run_section, note_section] = sections(&run(POLICY, Some(NOTE)));
-        let block = rendered(
-            &run_section
-                .render_diff(PreviousWorldStateSection::Absent)
-                .unwrap(),
-        );
-        let note = rendered(
-            &note_section
-                .render_diff(PreviousWorldStateSection::Absent)
-                .unwrap(),
-        );
+        let block = rendered(&sent(&run_section, PreviousWorldStateSection::Absent).unwrap());
+        let note = rendered(&sent(&note_section, PreviousWorldStateSection::Absent).unwrap());
         for (section, block) in [(&run_section, &block), (&note_section, &note)] {
             assert!(section.matches_retained_fragment("developer", block));
             assert!(section.matches_retained_fragment("developer", &format!("\n{block}\n")));
@@ -391,11 +427,7 @@ mod tests {
     #[test]
     fn threads_started_before_the_section_are_recognized_by_their_lane_heading() {
         let [run_section, note_section] = sections(&run(POLICY, None));
-        let block = rendered(
-            &run_section
-                .render_diff(PreviousWorldStateSection::Absent)
-                .unwrap(),
-        );
+        let block = rendered(&sent(&run_section, PreviousWorldStateSection::Absent).unwrap());
         assert!(run_section.matches_legacy_fragment("developer", &block));
         assert!(!run_section.matches_legacy_fragment("user", &block));
         for heading in LEGACY_LANE_HEADINGS {
@@ -455,7 +487,7 @@ mod tests {
     fn snapshots_hold_a_digest_and_never_the_text() {
         let [run_section, note_section] = sections(&run(POLICY, Some(NOTE)));
         for (section, text) in [(&run_section, POLICY), (&note_section, NOTE)] {
-            let snapshot = section.snapshot().to_string();
+            let snapshot = snapshot_of(section).to_string();
             assert!(
                 snapshot.starts_with("{\"revision\":\"sha256:"),
                 "{snapshot}"
@@ -465,9 +497,9 @@ mod tests {
             }
         }
         let [other, _] = sections(&run(OTHER_POLICY, None));
-        assert_ne!(run_section.snapshot(), other.snapshot());
+        assert_ne!(snapshot_of(&run_section), snapshot_of(&other));
         let [empty, no_note] = sections(&RunInstructions::default());
-        assert_eq!(empty.snapshot(), &json!({ "state": "none" }));
-        assert_eq!(no_note.snapshot(), &json!({ "state": "none" }));
+        assert_eq!(snapshot_of(&empty), json!({ "state": "none" }));
+        assert_eq!(snapshot_of(&no_note), json!({ "state": "none" }));
     }
 }

@@ -1,10 +1,11 @@
 import type { HTMLAttributes } from "react";
-import { DARK_FLOATING_RAISED_BG_CLASS, DARK_FLOATING_SURFACE_CLASS, DARK_FLOATING_SHADOW_CLASS } from "../theme/darkSurfaces";
+import { DARK_FLOATING_RAISED_BG_CLASS, DARK_FLOATING_SURFACE_CLASS, DARK_FLOATING_SHADOW_CLASS, DARK_PANEL_BORDER_CLASS, DARK_RAISED_CONTROL_BG_CLASS } from "../theme/darkSurfaces";
 import { SEMANTIC_TONE_CLASSES, type SemanticTone } from "../theme/semanticTones";
 
 type SurfaceTone = "default" | "floating" | "muted" | "subtle" | "raised" | SemanticTone;
 type SurfaceRadius = "none" | "lg" | "xl" | "2xl" | "3xl";
 type SurfaceShadow = "none" | "sm" | "md" | "lg";
+export type SurfacePreset = "composer";
 
 const BASE = "border text-slate-700 dark:text-slate-200";
 
@@ -26,6 +27,13 @@ const TONE_CLASSES: Record<SurfaceTone, string> = {
   danger: SEMANTIC_TONE_CLASSES.danger.surface,
 };
 
+// Presets own fill, border and elevation. Radius and layout remain caller-owned.
+// A large editable surface uses the quieter panel border, not the stronger
+// small-control edge. White preserves the composer's existing light appearance.
+const PRESET_CLASSES: Record<SurfacePreset, string> = {
+  composer: `border-slate-200/70 bg-white ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`,
+};
+
 const RADIUS_CLASSES: Record<SurfaceRadius, string> = {
   none: "",
   lg: "rounded-lg",
@@ -42,12 +50,15 @@ const SHADOW_CLASSES: Record<SurfaceShadow, string> = {
 };
 
 export type SurfaceProps = HTMLAttributes<HTMLDivElement> & {
+  /** Owns fill, border and elevation; takes precedence over tone and shadow. */
+  preset?: SurfacePreset;
   tone?: SurfaceTone;
   radius?: SurfaceRadius;
   shadow?: SurfaceShadow;
 };
 
 export function Surface({
+  preset,
   tone = "default",
   radius = "2xl",
   shadow = "sm",
@@ -58,9 +69,9 @@ export function Surface({
     <div
       className={[
         BASE,
-        TONE_CLASSES[tone],
+        preset ? PRESET_CLASSES[preset] : TONE_CLASSES[tone],
         RADIUS_CLASSES[radius],
-        SHADOW_CLASSES[shadow],
+        preset ? "" : SHADOW_CLASSES[shadow],
         className,
       ]
         .filter(Boolean)
