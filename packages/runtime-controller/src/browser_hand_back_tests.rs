@@ -481,8 +481,8 @@ async fn a_turns_reply_carries_its_steps_for_the_done_line() -> anyhow::Result<(
 }
 
 /// Card, browser turn, building turn: the hand-back carries the browser
-/// turn's reply as a checked record with labelled findings, once, and only
-/// for the person whose browser turn it was.
+/// turn's findings as a checked record, each labelled and with what its page
+/// showed, once, and only for the person whose browser turn it was.
 #[tokio::test]
 async fn a_browser_turn_hands_its_findings_back_to_one_building_turn() -> anyhow::Result<()> {
     with_chain("browser-hand-back-chain", |chain| {
@@ -886,8 +886,9 @@ async fn a_question_or_a_turn_that_read_nothing_hands_nothing_back() -> anyhow::
 }
 
 /// The runtime posts the reply without its finding lines and keeps them in a
-/// Details note: the hand-back reads them back, so the building turn gets the
-/// same findings, after the reply the person read.
+/// Details note: the hand-back reads them back, so the building turn gets every
+/// finding with its facts, the page that stopped the turn among them, and none
+/// of the reply the person read.
 #[tokio::test]
 async fn finding_lines_in_the_details_note_reach_the_building_turn() -> anyhow::Result<()> {
     with_chain("browser-hand-back-details-note", |chain| {
@@ -938,7 +939,20 @@ async fn finding_lines_in_the_details_note_reach_the_building_turn() -> anyhow::
                 .map_err(|error| controller_error("hand-back", error))?;
             let hand_back_job = chain.job_of(&response).await?;
             let record = &chain.payload_metadata(&hand_back_job).await?[HAND_BACK_KEY];
-            assert_eq!(record["reply"], format!("{posted}\n\n{lines}"));
+            assert_eq!(record["reply"], "", "{record}");
+            assert_eq!(
+                record["findings"],
+                fixtures["stampedRecord"]["findings"]
+                    .as_array()
+                    .context("findings")?
+                    .iter()
+                    .map(|finding| {
+                        let mut finding = finding.clone();
+                        finding["readAt"] = record["readAt"].clone();
+                        finding
+                    })
+                    .collect::<serde_json::Value>()
+            );
             let findings: Vec<serde_json::Value> = record["findings"]
                 .as_array()
                 .context("findings")?
@@ -964,9 +978,9 @@ async fn finding_lines_in_the_details_note_reach_the_building_turn() -> anyhow::
 /// A browser turn whose findings go back to the building turn posts no words
 /// of its own (runtime-agent `move_findings_into_details`): its reply is
 /// blank, which Studio leaves out, and its Details note holds its words ahead
-/// of its findings. The hand-back still goes, with that note as the record's
-/// whole reply, never a message the turn streamed on its way, and a building
-/// job's lease lists the turn the same way.
+/// of its findings. The hand-back still goes, with that note's findings and
+/// none of its words, never a message the turn streamed on its way, and a
+/// building job's lease lists the turn with the note as its reply.
 #[tokio::test]
 async fn a_browser_turn_that_posted_no_words_hands_back_its_note() -> anyhow::Result<()> {
     with_chain("browser-hand-back-no-words", |chain| {
@@ -1037,11 +1051,16 @@ async fn a_browser_turn_that_posted_no_words_hands_back_its_note() -> anyhow::Re
                 .map_err(|error| controller_error("hand-back", error))?;
             let hand_back_job = chain.job_of(&response).await?;
             let record = &chain.payload_metadata(&hand_back_job).await?[HAND_BACK_KEY];
-            assert_eq!(record["reply"], json!(note), "{record}");
+            assert_eq!(record["reply"], json!(""), "{record}");
             assert_eq!(
                 record["findings"][0]["url"],
                 "https://rail.example.org/timetable"
             );
+            assert_eq!(
+                record["findings"][0]["facts"],
+                json!(["The 08:05 express arrives at 10:16."])
+            );
+            assert!(!record.to_string().contains("not checked"), "{record}");
             Ok(())
         })
     })

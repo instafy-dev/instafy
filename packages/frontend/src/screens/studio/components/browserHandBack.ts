@@ -17,7 +17,7 @@ import {
  * builds finishes, Studio sends one turn back to the building lane, so Octo
  * keeps building with what the browser found. A card for a question gets no
  * hand-back: the browser turn's reply is the answer. The prompt names the browser job; the controller checks
- * it and gives the turn the browser's reply as quoted page data, never as the
+ * it and gives the turn the browser's findings as quoted page data, never as the
  * person's words or consent (runtime-controller `browser_hand_back.rs`). The
  * claim key and prompt are pinned in
  * packages/runtime-controller/src/browser_hand_back_fixtures.json.

@@ -2443,14 +2443,32 @@ unless the policy is `"covered"`.
   `browserHandBack` with what the browser turn was asked (at most 2,000
   characters), for a card the routing step posted the message's own words as
   `personRequest` (from that message's job, at most 8,000 characters; the
-  building turn reads them as the person's request), its final reply (at most
-  6,000 characters) and up to six labelled findings `{url, title, readAt, viewer}`
+  building turn reads them as the person's request), and every finding line of
+  its final reply as a labelled finding `{url, title, facts, readAt, viewer}`
   (plus `stopped` for a page that was not read: `login`, `captcha`, `paywall`,
   `blocked`, `robots`, `download`, `secret` or `link-only`, and any other reason
-  counts as `blocked`): the address and title come from the reply's JSON
-  finding lines (only a reply without any falls back to the addresses on its
-  lines), `readAt` and `viewer` from the job, and an address on a loopback,
-  private, link-local or local-only host is never a finding. Only the person
+  counts as `blocked`): the address, title and facts come from the reply's JSON
+  finding lines (each page once, a later line for it adding its facts, and a
+  page's facts at most 2,000 characters, whole facts in order, the rest
+  counted as `factsLeftOut`; only a reply without any falls back to the
+  addresses on its lines), `readAt` and `viewer` from the job, and an
+  address on a loopback, private, link-local or local-only host is never a
+  finding. None of the browser turn's own words go with findings that list
+  what their pages showed, not even a first line that says a page stopped it
+  (that page's finding says which and why): a map's hand-back once built the
+  browser turn's own day plan and advice, which no page gave, into the map,
+  and a map's browser turn wrote its first line as one paragraph with its
+  advice in it. A reply whose lines list no fact (a turn that wrote none,
+  whose note lists the pages it opened by address, or an older runtime's
+  reply) goes as it is (`reply`). The record fits the 12,000 characters the
+  runtime quotes in one section, which an older runtime leaves out whole when
+  it is over: whole lines in order, the reply's last lines left out first,
+  then the last pages read and then the last pages that stopped the turn,
+  with `replyTruncated` and `findingsLeftOut` saying so; a page read and the
+  reply's first line always stay. What can never fit is left out before the
+  record is fitted, so a long reply costs no more to fit than a short one.
+  The runtime does the same with a record over that size, and tells the
+  building turn never to guess what was left out. Only the person
   who ran the browser turn, and whose turn sent the card, can send it, once per
   browser turn, within 30 minutes, only while no prompt was sent in the
   conversation after the browser turn (`browser_hand_back_superseded`), and
@@ -2482,7 +2500,8 @@ unless the policy is `"covered"`.
   turns since the building thread's last turn (`browser_turns_since`: the
   newest six of this agent's, never the one a hand-back's record carries, and
   whether older ones were left out), each with what it was asked and its reply
-  with its finding lines put back, bounded and labelled like the record. A building turn on a restored thread reads them
+  with its finding lines put back (at most 6,000 characters), those findings
+  labelled like the record's. A building turn on a restored thread reads them
   as one section of quoted page data; a new or lost building thread reads them
   in its replay of the chat, each browser turn as one quoted block (one that
   carries on the person's own message with its reply alone: the message is in
@@ -2518,9 +2537,9 @@ unless the policy is `"covered"`.
   them either (no reply draft): the building turn says what it made a moment
   later, and the browser turn's account of what it could not build ("this
   turn is read-only") is no answer. Those words go into the note ahead of the
-  findings, and a turn that posted none has that note as its reply in the
-  record, so the record still gives the building turn what the browser turn
-  did not read. A controller that reads the note so says so on every lease
+  findings, and a turn that posted none has that note as its reply, whose
+  words the record keeps only when no finding lists a fact. A controller that
+  reads the note so says so on every lease
   (`browser_hand_back_reads_note: true`). An older controller refuses the
   hand-back of a turn that posted no reply, so a runtime leased by one, such
   as a desktop app's own runtime ahead of its controller, posts "Finished in
@@ -2539,8 +2558,9 @@ unless the policy is `"covered"`.
   person's own message, which asks for the page too: told only that it was
   read-only, a comparison's browser turn read the maker's home page and ended
   there. The building turn cites a page only for a
-  fact listed under it; a place or claim the reply names with no page under it
-  is read on its own page or left out. Such a browser turn that used the browser
+  fact listed under it, and reads a reply that still goes as the browser
+  turn's words: a place or claim it names with no page under it is read on
+  its own page or left out. Such a browser turn that used the browser
   and wrote no finding line would hand nothing back, however many pages it
   read: it gets the runtime's wrap-up pass on its own thread, which holds those
   pages, asked for the finding lines alone, and not billed, as a recovery retry
@@ -2551,8 +2571,8 @@ unless the policy is `"covered"`.
   pass, its note holds its reply and one line per page its own steps opened,
   by the address the browser reported (the turn's activity messages still
   name only a page's host), so the hand-back still goes and the turn posts no
-  words of its own; those lines list no fact, so the building turn reads a
-  page itself or leaves the claim out. A turn that stopped on a step that is
+  words of its own; those lines list no fact, so the building turn cites none
+  of them for one, and the reply goes to it as it is. A turn that stopped on a step that is
   the person's (it paused for their input on the page, a step's approval ended
   it, or a page it opened showed a secret) gets neither: its reply says what
   they do next, so it stays in the chat as the turn wrote it, and Studio sends
