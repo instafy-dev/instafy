@@ -103,6 +103,14 @@ Current effective constraints:
 
 This is intentional. The router is supposed to be useful and predictable, not load everything.
 
+The runtime's memory discovery, scaffolding and optimizer I/O stay inside the active project.
+They reject symlinked files and directories, including links into another project. Prompt reads
+apply their byte bounds before allocating the file contents. Keep reusable skills as regular
+files within the project rather than linking to files elsewhere on the runtime. This does not
+sandbox project scripts such as `AGENTS.py`; they retain the turn's execution permissions.
+On Unix, newly generated memory files are private to their owner (`0600`). Updates preserve
+existing file permissions, and temporary copies stay private while their contents are written.
+
 ## Current optimizer
 
 The optimizer is in:
@@ -121,6 +129,10 @@ It reads at most 64 KiB and skips unavailable or ambiguous sources instead of pa
 defaults. A skipped source remains untouched, with the reason recorded in the optimizer artifact.
 This bound replaces the former unbounded source read; files above 64 KiB require an explicit edit
 before trimming can resume.
+
+Repeated trims preserve earlier overflow in the archive before appending new overflow. If the
+archive cannot be safely read or written, the active source is left intact; archived content is
+never copied back into current project preferences.
 
 The optimizer should act like downward pressure, not like a second agent inventing new behavior.
 

@@ -1069,7 +1069,27 @@ pub struct TurnWrapUp {
 /// The run-log event a wrap-up steer leaves (whether Codex took it, and when).
 pub(crate) const TURN_WRAP_UP_EVENT_TYPE: &str = "runtime.turn_wrap_up";
 
+/// Setup lost the saved thread before submitting any turn. The caller must rebuild the
+/// prompt for a fresh thread before trying again; a restored-thread reminder is insufficient.
+#[derive(Debug, thiserror::Error)]
+#[error("provider thread could not be restored; rebuild the prompt with conversation history")]
+pub(crate) struct CodexThreadRestoreNeedsHistory;
+
 impl CodexRunOptions {
+    /// Keep setup recovery inside the original turn budget, including an operator's limit.
+    pub(crate) fn preserve_run_deadline(&mut self) -> Result<()> {
+        if let Some(limit) = self.hard_limit() {
+            let deadline = tokio::time::Instant::now()
+                .checked_add(limit)
+                .context("Codex execution time budget exceeds the supported clock range")?;
+            self.run_deadline = Some(
+                self.run_deadline
+                    .map_or(deadline, |prior| prior.min(deadline)),
+            );
+        }
+        Ok(())
+    }
+
     /// Whether this run's Codex config leaves out what the workspace wrote
     /// (`load_hardened_codex_config`): an isolated worker's and a granted turn's do.
     fn hardened_config(&self) -> bool {
@@ -1596,6 +1616,17 @@ impl CodexClient {
             match result {
                 Ok(Ok(output)) => return Ok(output),
                 Ok(Err(error)) => {
+                    if error.is::<CodexThreadRestoreNeedsHistory>() {
+                        return if attempt == 0 {
+                            Err(error)
+                        } else {
+                            // An earlier attempt may already have executed tools. Do not let
+                            // the caller treat this as setup-only recovery and repeat the turn.
+                            Err(anyhow!(
+                                "provider thread restoration failed after execution began"
+                            ))
+                        };
+                    }
                     let error_text = format!("{error:#}");
                     let should_retry = attempt < max_retries && should_retry_codex_run(&error_text);
                     if !should_retry {
@@ -2406,6 +2437,17 @@ impl CodexClient {
             new_thread.thread
         };
         let run_result = async {
+            // This prompt was built before restoration. Do not let an empty replacement
+            // thread sample a prompt that claims the previous conversation is already there.
+            // Keep this inside the finalizer so every MCP process is shut down before retry.
+            if thread_restore_failed
+                && !lane_history_replay_required(
+                    options.provider_conversation_state.as_ref(),
+                    thread_lane,
+                )
+            {
+                return Err(CodexThreadRestoreNeedsHistory.into());
+            }
             let mut aggregator =
                 CodexEventStreamAdapter::with_turn_start_token_usage(turn_start_token_usage)
                     .for_job(options.job_id);

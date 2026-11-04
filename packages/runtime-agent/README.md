@@ -139,6 +139,13 @@ See `TODO.md` for upcoming work: streaming progress, implementing plan/approval,
 
 ## Routing evidence
 
+Conversation continuation restores the saved provider thread when possible. If actual restore
+fails after prompt construction, the runtime stops before model sampling, rebuilds the current
+turn with the existing lane-scoped history replay, and retries setup once within the original
+deadline. It preserves the turn's permissions and does not replay completed tool work. Missing
+or corrupt rollout files therefore do not defer history recovery until the next user message.
+Low-level Codex callers that cannot supply a rebuilt prompt fail before sampling instead.
+
 Ordinary routing receives sanitized current-conversation history. Required prior-context
 retrieval and fresh workspace observations are tracked independently from successful command
 receipts. The existing bounded recovery attempt preserves permissions and output format while

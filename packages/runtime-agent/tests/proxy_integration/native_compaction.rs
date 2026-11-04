@@ -13,6 +13,7 @@ const OPAQUE: &str = "inert-opaque-compaction-checkpoint+/=";
 const PROVIDER_KEY: &str = "inert-native-compaction-provider-key";
 const ACCOUNT: &str = "inert-native-compaction-account";
 const TOOL_WITNESS: &str = "NATIVE_COMPACTION_TOOL_EXECUTED";
+const HISTORY_WITNESS: &str = "The fixture's earlier reference is cobalt-orchid.";
 
 #[derive(Clone, Copy)]
 enum Transport {
@@ -39,17 +40,39 @@ impl Transport {
 
 #[test]
 fn native_compaction_refreshes_preferences_and_cold_resumes_via_proxy() -> Result<()> {
-    run_isolated(Transport::ChatGpt)
+    run_isolated(Transport::ChatGpt, None, Transport::ChatGpt.test_name())
 }
 
 #[test]
 fn native_compaction_refreshes_preferences_and_cold_resumes_via_api_key_proxy() -> Result<()> {
-    run_isolated(Transport::ApiKey)
+    run_isolated(Transport::ApiKey, None, Transport::ApiKey.test_name())
 }
 
-fn run_isolated(transport: Transport) -> Result<()> {
+#[test]
+fn an_empty_rollout_replays_history_before_sampling() -> Result<()> {
+    run_isolated(
+        Transport::ChatGpt,
+        Some(""),
+        "native_compaction::an_empty_rollout_replays_history_before_sampling",
+    )
+}
+
+#[test]
+fn a_corrupt_rollout_replays_history_before_sampling() -> Result<()> {
+    run_isolated(
+        Transport::ApiKey,
+        Some("{not valid rollout JSON}\n"),
+        "native_compaction::a_corrupt_rollout_replays_history_before_sampling",
+    )
+}
+
+fn run_isolated(
+    transport: Transport,
+    damaged_rollout: Option<&'static str>,
+    test_name: &str,
+) -> Result<()> {
     if std::env::var(CHILD).as_deref() != Ok("1") {
-        return run_isolated_fixture(CHILD, transport.test_name(), "native-compaction");
+        return run_isolated_fixture(CHILD, test_name, "native-compaction");
     }
 
     const STACK: usize = 32 * 1024 * 1024;
@@ -62,7 +85,7 @@ fn run_isolated(transport: Transport) -> Result<()> {
                 .worker_threads(2)
                 .thread_stack_size(STACK)
                 .build()?
-                .block_on(run_lifecycle(transport))
+                .block_on(run_lifecycle(transport, damaged_rollout))
         })?
         .join()
         .map_err(|_| anyhow::anyhow!("native-compaction fixture panicked"))?
@@ -185,7 +208,7 @@ async fn provider_request(
                 true,
             )
         }
-        2 | 3 => {
+        2..=4 => {
             assert!(
                 !compaction,
                 "continuation and cold resume are ordinary sampling"
@@ -196,7 +219,7 @@ async fn provider_request(
     }
 }
 
-async fn run_lifecycle(transport: Transport) -> Result<()> {
+async fn run_lifecycle(transport: Transport, damaged_rollout: Option<&str>) -> Result<()> {
     let _env = env_guard().await;
     let workspace_root = TempDir::new()?;
     let runtime_home = TempDir::new()?;
@@ -329,15 +352,14 @@ async fn run_lifecycle(transport: Transport) -> Result<()> {
         parent_dispositions_runtime_on_shutdown: false,
     });
     let registration = registration_for_live(Uuid::new_v4());
+    let mut initial_job = job(project_id, conversation_id, None);
+    if damaged_rollout.is_some() {
+        initial_job.payload["prompt_text"] = json!(format!(
+            "{HISTORY_WITNESS} Report the fixture result without changing workspace files."
+        ));
+    }
     let first = JobProcessor::new(config.clone())
-        .run_apply_job(
-            &registration,
-            &job(project_id, conversation_id, None),
-            true,
-            None,
-            None,
-            None,
-        )
+        .run_apply_job(&registration, &initial_job, true, None, None, None)
         .await
         .context("initial compaction job")?;
     let saved = first
@@ -353,6 +375,10 @@ async fn run_lifecycle(transport: Transport) -> Result<()> {
         "rollout must stay in disposable runtime home"
     );
     assert!(rollout.is_file());
+    if let Some(contents) = damaged_rollout {
+        // Existence passes the job's early check, but native restoration must fail.
+        fs::write(&rollout, contents)?;
+    }
 
     // A new processor constructs a fresh CodexClient/ThreadManager. No in-memory
     // thread is available: opaque compaction must survive legacy rollout resume.
@@ -360,30 +386,45 @@ async fn run_lifecycle(transport: Transport) -> Result<()> {
         workspace.join("INSTAFY.md"),
         "# Project\n\n## Facts\nLocal fixture only.\n",
     )?;
-    let resumed = JobProcessor::new(config)
-        .run_apply_job(
-            &registration,
-            &job(project_id, conversation_id, Some(saved.clone())),
-            true,
-            None,
-            None,
-            None,
-        )
+    let mut resume_job = job(project_id, conversation_id, Some(saved.clone()));
+    if damaged_rollout.is_some() {
+        resume_job.payload["conversation_history"] = json!([
+            {"role":"user", "content":initial_job.payload["prompt_text"]},
+            {"role":"assistant", "content":"Local compaction fixture completed."},
+        ]);
+    }
+    let resumed = JobProcessor::new(config.clone())
+        .run_apply_job(&registration, &resume_job, true, None, None, None)
         .await
         .context("cold-resumed removal job")?;
     let restored = resumed
         .provider_conversation_state
         .context("resumed provider state")?;
-    assert_eq!(restored["defaultThreadId"], saved["defaultThreadId"]);
-    assert_eq!(restored["defaultThreadRestoreSource"], "rollout");
+    if damaged_rollout.is_some() {
+        assert_ne!(restored["defaultThreadId"], saved["defaultThreadId"]);
+        assert_eq!(restored["defaultThreadRestoreSource"], "failed_new");
+        let mut next_job = job(project_id, conversation_id, Some(restored.clone()));
+        next_job.payload["conversation_history"] =
+            resume_job.payload["conversation_history"].clone();
+        let next = JobProcessor::new(config)
+            .run_apply_job(&registration, &next_job, true, None, None, None)
+            .await
+            .context("resume the replacement thread without replaying twice")?;
+        let next_state = next.provider_conversation_state.context("next state")?;
+        assert_eq!(next_state["defaultThreadId"], restored["defaultThreadId"]);
+        assert_eq!(next_state["defaultThreadRestoreSource"], "rollout");
+    } else {
+        assert_eq!(restored["defaultThreadId"], saved["defaultThreadId"]);
+        assert_eq!(restored["defaultThreadRestoreSource"], "rollout");
+    }
     assert_eq!(restored["defaultThreadRestoreFailed"], false);
     assert_eq!(restored["historyReplayRequired"], false);
 
     let requests = state.requests.lock().unwrap().clone();
     assert_eq!(
         requests.len(),
-        4,
-        "sampling, compaction, continuation, cold resume"
+        if damaged_rollout.is_some() { 5 } else { 4 },
+        "restoration setup must never sample before history is available"
     );
     assert_eq!(
         input_text(&requests[0]).matches(INITIAL).count(),
@@ -395,7 +436,12 @@ async fn run_lifecycle(transport: Transport) -> Result<()> {
         input_text(&requests[1]).contains(TOOL_WITNESS),
         "compaction follows a completed real tool call"
     );
-    for request in &requests[2..] {
+    let opaque_requests = if damaged_rollout.is_some() {
+        &requests[2..3]
+    } else {
+        &requests[2..]
+    };
+    for request in opaque_requests {
         let opaque = request["input"]
             .as_array()
             .context("provider input items")?
@@ -410,6 +456,27 @@ async fn run_lifecycle(transport: Transport) -> Result<()> {
         assert_eq!(opaque[0]["encrypted_content"], OPAQUE);
     }
     assert_current_snapshot(&requests[3], project_id, "empty", "");
+    if damaged_rollout.is_some() {
+        let recovered_input = input_text(&requests[3]);
+        assert!(
+            recovered_input.contains(HISTORY_WITNESS),
+            "{recovered_input}"
+        );
+        assert!(
+            recovered_input.contains("Local fixture only."),
+            "workspace memory is rebuilt"
+        );
+        assert!(!recovered_input.contains("The provider thread was restored successfully"));
+        assert_eq!(
+            requests[3]["tools"], requests[0]["tools"],
+            "setup recovery preserves the lane's tools"
+        );
+        assert_eq!(
+            input_text(&requests[4]).matches(HISTORY_WITNESS).count(),
+            1,
+            "the next turn resumes the replay, without appending it again"
+        );
+    }
     // Check this last so the initial red run still proves proxy transport and
     // cold resume. Prefix-only delivery keeps A here and cannot refresh to B.
     assert_current_snapshot(&requests[2], project_id, "loaded", CORRECTED);

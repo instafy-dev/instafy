@@ -66,7 +66,9 @@ because adding a separator would exceed its bound. A skip is recorded as `instaf
 in the `learn/optimizer` artifact; other learned-index maintenance can still proceed.
 
 Overflow must be saved before the source is shortened. Detected source edits or deletion abort
-replacement; existing archive contents never restore an old preference. This protects the
+replacement. Later trims preserve the existing overflow archive and append newly removed
+content, streaming the archive rather than loading it into memory. An unreadable or unsafe
+archive prevents trimming. Existing archive contents never restore an old preference. This protects the
 section present after the model's edits, not a saved version from before `/learn`. It does not
 prove that a model will learn or edit the correct preferences.
 
