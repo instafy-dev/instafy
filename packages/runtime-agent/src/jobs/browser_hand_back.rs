@@ -139,7 +139,7 @@ pub(super) const BUILD_REQUEST_LINE: &str = "- When the person's message only as
 /// requirement to open a page: a turn that answered in words alone that it
 /// could not make the thing asked for gets one more chance to say so with the
 /// build request, which hands the message back instead of browsing.
-pub(super) const BUILD_REQUEST_RETRY_LINE: &str = "- First, as this turn's write-scope line says: when the person's message only asks Octo to make or change something in this space and needs no website first, answer with the action `{type: 'request_build'}` alone, with no browser step. Every other request:\n";
+pub(super) const BUILD_REQUEST_RETRY_LINE: &str = "- First, as this turn's prompt says: when the person's message only asks Octo to make or change something in this space and needs no website first, answer with the action `{type: 'request_build'}` alone, with no browser step. Every other request:\n";
 
 fn metadata_string<'a>(metadata: &'a JsonValue, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
@@ -151,7 +151,7 @@ fn metadata_string<'a>(metadata: &'a JsonValue, keys: &[&str]) -> Option<&'a str
 
 /// Whether a turn runs in Instafy's browser, in the workspace or on the
 /// person's device.
-fn is_browser_turn(metadata: &JsonValue) -> bool {
+pub(super) fn is_browser_turn(metadata: &JsonValue) -> bool {
     metadata_string(metadata, &["browserTransport", "browser_transport"]).is_some_and(|transport| {
         matches!(
             transport.to_ascii_lowercase().replace('_', "-").as_str(),
