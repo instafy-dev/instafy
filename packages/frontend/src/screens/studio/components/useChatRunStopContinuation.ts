@@ -16,6 +16,15 @@ type Options = {
   submitMessage: SubmitMessageFn;
 };
 
+/**
+ * Whether someone wrote in the chat after `message`: a later turn has taken
+ * the chat on from there.
+ */
+function writtenAfter(messages: readonly ChatMessage[], message: ChatMessage): boolean {
+  const index = messages.findIndex((entry) => entry.id === message.id);
+  return index >= 0 && messages.slice(index + 1).some((entry) => entry.role === "user");
+}
+
 /** Continue is a new targeted instruction, preserving the person's composer draft. */
 export function useChatRunStopContinuation(options: Options) {
   const current = useRef(options);
@@ -28,6 +37,10 @@ export function useChatRunStopContinuation(options: Options) {
     return Boolean(state.conversationId && state.viewerUserId && state.canWrite && !state.busy
       && notice.requested && notice.handles.length && notice.jobIds.length && notice.runIds.length
       && state.messages.some((entry) => entry.id === message.id)
+      // Only the chat's latest turn: once anyone wrote after the stop, a later
+      // turn took the chat on, and carrying the stopped one on would go back
+      // to where it no longer is. The chat holds both, after a reload too.
+      && !writtenAfter(state.messages, message)
       && !submitted.current.has(key)
       && !state.messages.some((entry) => entry.metadata?.continuedStopMessageId === message.id)
       && !state.queuedSends.some((entry) => entry.metadata?.continuedStopMessageId === message.id)

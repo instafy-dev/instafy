@@ -222,9 +222,9 @@ impl OriginService {
         server.set_browser_page_capture_script(
             crate::shared_browser::sent_page_capture_script().into(),
         );
-        // A person's Undo of a change no save took puts files back here
-        // (`/git/revert`): the open previews of their sites are pictured
-        // again, as after a turn that changed them.
+        // A person's Undo puts files back here (`/git/revert`): the open
+        // views of their sites are sent the sites' reload, and their previews
+        // are pictured again, as after a turn that changed them.
         if let Some(hook) = crate::jobs::preview_pictures::files_reverted_hook() {
             server.set_files_reverted_hook(hook);
         }

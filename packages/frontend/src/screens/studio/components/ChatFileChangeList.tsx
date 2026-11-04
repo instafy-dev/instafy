@@ -526,6 +526,8 @@ export function ChatFileChangeList({
   const totalCount = uniquePaths.length;
 
   const revertedCount = totalCount - pendingCount;
+  // Every file of the change is undone: the row is history.
+  const allUndone = totalCount > 0 && pendingCount === 0;
   // Files the turn's save left out; reverted ones have nothing left to save.
   const notSavedCount = pendingEntries.filter((entry) => entry.file.notSaved).length;
 
@@ -533,23 +535,26 @@ export function ChatFileChangeList({
   const siteSummary = siteLabel !== null;
   // The chat's site can show up after these files did (a later turn opened its
   // card): its files then fold behind the site's line, unless the person opened them.
+  // So do the files of a change that is undone, behind "Undone", before the row
+  // is drawn, also when it was undone elsewhere or before a reload.
   const railToggledByPerson = useRef(false);
-  useEffect(() => {
-    if (siteSummary && !railToggledByPerson.current) setRailExpanded(false);
-  }, [siteSummary]);
+  useLayoutEffect(() => {
+    if ((siteSummary || allUndone) && !railToggledByPerson.current) setRailExpanded(false);
+  }, [allUndone, siteSummary]);
   const compactSummaryLabel = (() => {
     if (totalCount === 0) {
       return "No file changes";
     }
-    if (pendingCount === 0) {
-      return `Reverted ${formatFileCount(totalCount)}`;
+    // One word, so the reply above it no longer reads as how things are now.
+    if (allUndone) {
+      return "Undone";
     }
     const notSavedSuffix = notSavedCount > 0 ? ` · ${notSavedCount} not saved` : "";
     if (siteLabel) {
       return `${siteLabel}${notSavedSuffix}`;
     }
     if (revertedCount > 0) {
-      return `${resolveChangeSetVerb(pendingEntries)} ${formatFileCount(totalCount)} · ${revertedCount} reverted${notSavedSuffix}`;
+      return `${resolveChangeSetVerb(pendingEntries)} ${formatFileCount(totalCount)} · ${revertedCount} undone${notSavedSuffix}`;
     }
     return `${resolveChangeSetVerb(pendingEntries)} ${formatFileCount(pendingCount)}${notSavedSuffix}`;
   })();
@@ -560,8 +565,9 @@ export function ChatFileChangeList({
   const unsavedNoteId = `${cardIdBase}-unsaved`;
 
   // A single file needs no summary/toggle chip: the file chip carries
-  // everything. A site the turn made has one, whatever its size.
-  const showSummaryToggle = totalCount > 1 || siteSummary;
+  // everything. A site the turn made has one, whatever its size, and so does
+  // an undone change ("Undone"), its files one press away.
+  const showSummaryToggle = totalCount > 1 || siteSummary || allUndone;
   const visibleChipEntries = railExpanded || !showSummaryToggle ? resolvedFiles : [];
   const chipLabels = resolveChipLabels(resolvedFiles);
   // Stats load only from a ready runtime. A space whose machine is not running
@@ -893,11 +899,6 @@ export function ChatFileChangeList({
         });
         showStatus("Undid changes.", "success", 4000);
         setDiffRefreshNonce((value) => value + 1);
-        // Fully reverted rails are history: tuck them down to the summary chip.
-        const remainingPending = pendingPaths.filter((path) => !targetPaths.includes(path));
-        if (remainingPending.length === 0 && totalCount > 1) {
-          setRailExpanded(false);
-        }
       } finally {
         setUndoing(false);
       }
@@ -911,7 +912,6 @@ export function ChatFileChangeList({
       projectId,
       runtimeReady,
       showStatus,
-      totalCount,
       undoing,
     ],
   );
@@ -1216,9 +1216,6 @@ export function ChatFileChangeList({
           }
           return next;
         });
-        if (targetPaths.length === pendingPaths.length && totalCount > 1) {
-          setRailExpanded(false);
-        }
         if (typeof window !== "undefined") {
           window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId } }));
         }
@@ -1236,7 +1233,7 @@ export function ChatFileChangeList({
         askAgent ? { actionLabel: "Ask the agent to undo it", onAction: askAgent } : undefined,
       );
     },
-    [changeTypeByPath, handleUndoRequest, messageId, pendingEntries, pendingPaths, projectId, showStatus, totalCount],
+    [changeTypeByPath, handleUndoRequest, messageId, pendingEntries, projectId, showStatus],
   );
 
   // A late answer is shown with the card as it is then, not as it was when
@@ -1264,9 +1261,6 @@ export function ChatFileChangeList({
           }
           return next;
         });
-        if (undone.length === pendingPaths.length && totalCount > 1) {
-          setRailExpanded(false);
-        }
         if (projectId && messageId && undone.length > 0) void recordChangeUndone({ projectId, messageId, paths: undone });
       }
       const askAgent = outcome.offerAgentUndo && messageId ? handleUndoRequest : null;
@@ -1277,7 +1271,7 @@ export function ChatFileChangeList({
         askAgent ? { actionLabel: "Ask the agent to undo it", onAction: askAgent } : undefined,
       );
     },
-    [handleUndoRequest, messageId, pendingPaths, projectId, showStatus, totalCount],
+    [handleUndoRequest, messageId, projectId, showStatus],
   );
 
   const applyUnsavedRevertOutcomeRef = useRef(applyUnsavedRevertOutcome);
@@ -1349,8 +1343,9 @@ export function ChatFileChangeList({
   // until its next turn. So the folder follows that version at once, as a
   // refresh does (`/git/revert` with `saved` on the folder's own origin): it
   // keeps every local edit, moves only when nothing is in the way, and its
-  // origin pictures the page again. A Desktop folder is where the version was
-  // saved, so it holds it already.
+  // machine then sends the page's reload to every view open on it and
+  // pictures it again. A Desktop folder is where the version was saved, so it
+  // holds it already.
   const savedFolderRuntimeId = effectiveRuntimeId ?? null;
   const savedFolderOriginId =
     versioning.mode === "desktop" ? null : runtimeFolderOriginId(runtimeStatuses, savedFolderRuntimeId);

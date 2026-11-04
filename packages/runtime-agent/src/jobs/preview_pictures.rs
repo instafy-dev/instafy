@@ -28,6 +28,12 @@
 //! picture came of it) and whether it was opened with `--no-thumbnail`. A
 //! preview without a recorded folder, or opened with `--no-thumbnail`, is
 //! left alone; one without a picture time counts every change as newer.
+//!
+//! A person's Undo puts a site's files back with no turn (`/git/revert` on
+//! this machine's origin), so no turn sends the site's reload either. The
+//! runtime sends it then, as a turn would, to every open view of each site
+//! the Undo changed, and pictures those sites again
+//! ([`picture_sites_people_revert`]).
 
 use std::ffi::OsString;
 use std::future::Future;
@@ -69,6 +75,12 @@ const PICTURE_FILE: &str = "card.jpg";
 const MAX_PICTURE_BYTES: u64 = 512 * 1024;
 /// What the check writes beside the picture is small.
 const MAX_PICTURE_FACTS_BYTES: u64 = 16 * 1024;
+/// At most this many sites are sent their reload after one Undo.
+const MAX_RELOADS: usize = 8;
+/// How long sending one site's reload may take.
+const RELOAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// What the reload command prints (its binder's answer) is small.
+const MAX_RELOAD_ANSWER_BYTES: u64 = 16 * 1024;
 
 /// One open preview whose card's picture is older than a change this turn
 /// made to its site.
@@ -169,9 +181,9 @@ fn workspace_paths(paths: impl IntoIterator<Item = String>) -> Vec<String> {
 }
 
 /// What this machine's own origin says a person's revert put back or removed
-/// in the checkout (Undo of a change no save took, `/git/revert`): the open
-/// previews of those sites are pictured again, as after a turn that changed
-/// them. Set once, by [`picture_sites_people_revert`].
+/// in the checkout (an Undo, `/git/revert`): the open views of those sites
+/// load them again, and their previews are pictured again, as after a turn
+/// that changed them. Set once, by [`picture_sites_people_revert`].
 static PEOPLE_REVERTED: std::sync::OnceLock<
     tokio::sync::mpsc::UnboundedSender<origin_http_server::routes::FilesReverted>,
 > = std::sync::OnceLock::new();
@@ -185,11 +197,12 @@ pub(crate) fn files_reverted_hook() -> Option<origin_http_server::routes::FilesR
     }))
 }
 
-/// Pictures again, with `sender` (this runtime's own credential), each open
-/// preview whose site a person's revert changed after it was last pictured,
-/// from the folder a turn of that space runs in (`workspace_dir_of`). Once
-/// per process; the checks are the ones a turn's end runs, within the same
-/// time.
+/// After a person's revert, from the folder a turn of that space runs in
+/// (`workspace_dir_of`): sends each open site it changed its reload, so every
+/// open view shows the files as the Undo left them ([`reload_reverted_sites`]),
+/// and pictures again, with `sender` (this runtime's own credential), each
+/// open preview whose site it changed after it was last pictured. Once per
+/// process; the checks are the ones a turn's end runs, within the same time.
 pub(crate) fn picture_sites_people_revert(
     workspace_dir_of: impl Fn(&Uuid) -> std::path::PathBuf + Send + 'static,
     sender: Arc<dyn PictureSender>,
@@ -202,16 +215,198 @@ pub(crate) fn picture_sites_people_revert(
         while let Some(reverted) = reverted_rx.recv().await {
             let reverted: origin_http_server::routes::FilesReverted = reverted;
             let workspace_dir = workspace_dir_of(&reverted.project_id);
+            let changed = workspace_paths(reverted.paths);
+            tokio::spawn(reload_reverted_sites(
+                workspace_dir.clone(),
+                reverted.project_id,
+                changed.clone(),
+            ));
             PictureRetake::start_for_paths(
                 &workspace_dir,
                 reverted.project_id,
-                workspace_paths(reverted.paths),
+                changed,
                 None,
                 Some(sender.clone()),
             )
             .detach();
         }
     });
+}
+
+/// The folders of the sites a person's revert changed (`changed`, places in
+/// the workspace) that someone may have open: the previews in `state` (the
+/// CLI's state file) that this machine has open for `project_id`, with a
+/// tunnel client still running, whose folder holds a changed path. As for a
+/// picture, a path in the folder of another of the space's sites inside a
+/// site's folder is that other site's change only. Each folder once, at most
+/// [`MAX_RELOADS`], as the command names it: `./<folder>`, or `.` for the
+/// workspace, so a folder never reads as an option. A folder outside the
+/// workspace is never named.
+pub(super) fn reverted_sites(
+    state: &JsonValue,
+    project_id: &Uuid,
+    changed: &[String],
+    client_runs: impl Fn(i64) -> bool,
+) -> Vec<String> {
+    if changed.is_empty() {
+        return Vec::new();
+    }
+    let Some(previews) = state.get("previews").and_then(JsonValue::as_array) else {
+        return Vec::new();
+    };
+    let project = project_id.to_string();
+    let ours: Vec<&JsonValue> = previews
+        .iter()
+        .filter(|entry| {
+            entry.get("projectId").and_then(JsonValue::as_str) == Some(project.as_str())
+        })
+        .collect();
+    let site_dirs: Vec<&str> = ours
+        .iter()
+        .filter_map(|entry| entry.get("siteDir").and_then(JsonValue::as_str))
+        .collect();
+    let mut sites: Vec<String> = Vec::new();
+    for entry in ours {
+        let Some(site_dir) = entry.get("siteDir").and_then(JsonValue::as_str) else {
+            continue;
+        };
+        let folder = site_folder(site_dir);
+        let in_workspace = folder == "."
+            || Path::new(folder)
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)));
+        if !in_workspace {
+            continue;
+        }
+        let Some(pid) = entry.get("pid").and_then(JsonValue::as_i64) else {
+            continue;
+        };
+        let site_changed = changed.iter().any(|changed| {
+            in_site(changed, site_dir) && !in_site_inside(changed, site_dir, &site_dirs)
+        });
+        // Only a preview whose tunnel still runs can have someone viewing it.
+        if !site_changed || !client_runs(pid) {
+            continue;
+        }
+        let named = if folder == "." {
+            ".".to_string()
+        } else {
+            format!("./{folder}")
+        };
+        if !sites.contains(&named) {
+            sites.push(named);
+        }
+        if sites.len() == MAX_RELOADS {
+            break;
+        }
+    }
+    sites
+}
+
+/// Sends each open site a person's revert changed ([`reverted_sites`]) its
+/// reload, the one a turn sends after it changes a bound site (`instafy bind
+/// command <site> reload '{}'`): every open view of it, on every device,
+/// loads the page again, so nobody keeps seeing a change the person undid.
+/// The binder that serves the site's folder takes it; a site no binder serves
+/// (a plain folder, a map that `uw host` serves) gets nothing this way. A
+/// map's own reload (`uw reload`) is not run: it writes the map's
+/// `data/version.json`, a change of the site that no save takes after an
+/// Undo, which a stop would keep as unsaved work and which the next Undo's
+/// folder follow would refuse to move past. The command gets no credential,
+/// as a check does ([`check_environment`]).
+async fn reload_reverted_sites(
+    workspace_dir: std::path::PathBuf,
+    project_id: Uuid,
+    changed: Vec<String>,
+) {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let state_file = Path::new(&home).join(PREVIEW_STATE_RELATIVE_PATH);
+    let Some(state) = read_state(&state_file).await else {
+        return;
+    };
+    let sites = reverted_sites(&state, &project_id, &changed, client_runs);
+    if sites.is_empty() {
+        return;
+    }
+    let environment = check_environment();
+    for site in sites {
+        send_reload(&workspace_dir, &site, &environment).await;
+    }
+}
+
+/// Runs `instafy bind command <site> reload '{}'` from the workspace, for at
+/// most `RELOAD_TIMEOUT`, and says in the log how many open views the site's
+/// binder sent it to.
+async fn send_reload(workspace_dir: &Path, site: &str, environment: &[(OsString, OsString)]) {
+    let mut command = Command::new("instafy");
+    command
+        .args(["bind", "command", site, "reload", "{}"])
+        .current_dir(workspace_dir)
+        .env_clear()
+        .envs(environment.iter().map(|(key, value)| (key, value)))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    // It leads a process group of its own, so the binder's client it starts
+    // goes with it when it runs out of time.
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            warn!(site, %error, "could not send the reload of a site an Undo changed; its open views keep what they show");
+            return;
+        }
+    };
+    let mut group = CheckGroup(child.id().and_then(|pid| i32::try_from(pid).ok()));
+    let answer = tokio::time::timeout(RELOAD_TIMEOUT, async {
+        let mut printed = Vec::new();
+        if let Some(stdout) = child.stdout.take() {
+            use tokio::io::AsyncReadExt;
+            let _ = stdout
+                .take(MAX_RELOAD_ANSWER_BYTES)
+                .read_to_end(&mut printed)
+                .await;
+        }
+        // The pipe is closed by now: a command that prints more is not
+        // waited on to drain it.
+        (child.wait().await, printed)
+    })
+    .await;
+    if let Some(pgid) = group.stop() {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        reap_group(pgid).await;
+    }
+    match answer {
+        Ok((Ok(status), printed)) if status.success() => {
+            let viewers = serde_json::from_slice::<JsonValue>(&printed)
+                .ok()
+                .and_then(|answer| answer.get("viewers").and_then(JsonValue::as_u64));
+            info!(
+                site,
+                ?viewers,
+                "sent the reload of a site an Undo changed to its open views"
+            );
+        }
+        Ok((Ok(status), _)) => info!(
+            site,
+            exit_code = ?status.code(),
+            "no binder took the reload of a site an Undo changed (none serves it); its open views keep what they show"
+        ),
+        Ok((Err(error), _)) => warn!(
+            site,
+            %error,
+            "could not send the reload of a site an Undo changed; its open views keep what they show"
+        ),
+        Err(_) => warn!(
+            site,
+            "sending the reload of a site an Undo changed ran out of time; its open views keep what they show"
+        ),
+    }
 }
 
 /// The previews in `state` (the CLI's state file) that this machine has open
@@ -1080,6 +1275,84 @@ mod tests {
         );
     }
 
+    // A local test, Nov 4: after each of three Undos, the open view of a bound
+    // page kept the section the person undid for 17 to 60 s, until its
+    // Reload. The folder and the card's picture followed, but nothing sent
+    // the page's reload, which a turn's own change sends.
+    #[test]
+    fn an_undo_reloads_each_open_site_it_changed_and_no_other() {
+        let project = Uuid::new_v4();
+        let site = |id: &str, folder: &str, extra: JsonValue| {
+            let mut fields = json!({ "previewId": id, "siteDir": folder });
+            fields
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            entry(&project, fields)
+        };
+        let mut no_folder = site("preview-no-folder", "sites/lisbon", json!({}));
+        no_folder.as_object_mut().unwrap().remove("siteDir");
+        let state = json!({ "version": 1, "previews": [
+            site("preview-lello", "sites/lello", json!({ "localPort": 4180 })),
+            // Opened without a picture on its card: someone may still view it.
+            site("preview-seville", "sites/seville/", json!({ "noThumbnail": true })),
+            // A second view of the same site: its one reload reaches both.
+            site("preview-lello-print", "./sites/lello", json!({ "localPort": 4180, "path": "/print/" })),
+            // Not changed by the Undo.
+            site("preview-porto", "sites/porto", json!({ "localPort": 4181 })),
+            // Its tunnel stopped: nobody can be viewing it.
+            site("preview-braga", "sites/braga", json!({ "pid": 7 })),
+            // Another space's site in a folder of the same name.
+            entry(&Uuid::new_v4(), json!({ "siteDir": "sites/lello" })),
+            // No folder recorded: any file could be its site's.
+            no_folder,
+        ]});
+        let sites = |changed: &[&str]| {
+            let changed: Vec<String> = changed.iter().map(|path| path.to_string()).collect();
+            reverted_sites(&state, &project, &changed, |pid| pid == 4242)
+        };
+        assert_eq!(
+            sites(&[
+                "sites/lello/app.js",
+                "sites/seville/map.config.json",
+                "sites/braga/index.html",
+                "sites/lisbon/index.html",
+            ]),
+            ["./sites/lello", "./sites/seville"]
+        );
+        // A change no open site's folder holds reloads nothing.
+        assert!(sites(&["notes/todo.md", "sites/sintra/index.html"]).is_empty());
+        assert!(sites(&[]).is_empty());
+
+        // A site served from the workspace itself is named `.`; a change in
+        // the folder of another site inside it is that site's alone.
+        let root = json!({ "version": 1, "previews": [
+            site("preview-root", ".", json!({ "localPort": 20549 })),
+            site("preview-lello", "sites/lello", json!({ "localPort": 4180 })),
+        ]});
+        let changed = |paths: &[&str]| {
+            paths
+                .iter()
+                .map(|path| path.to_string())
+                .collect::<Vec<_>>()
+        };
+        let root_sites =
+            |paths: &[&str]| reverted_sites(&root, &project, &changed(paths), |pid| pid == 4242);
+        assert_eq!(root_sites(&["sites/lello/app.js"]), ["./sites/lello"]);
+        assert_eq!(root_sites(&["notes/todo.md"]), ["."]);
+        // A folder name that starts like an option is still named as a folder,
+        // and a recorded folder that leaves the workspace is never named, even
+        // for a change of a folder that holds it.
+        let odd = json!({ "version": 1, "previews": [
+            site("preview-dash", "-x", json!({})),
+            site("preview-escape", "sites/../../etc", json!({ "localPort": 4182 })),
+        ]});
+        let odd_sites =
+            |paths: &[&str]| reverted_sites(&odd, &project, &changed(paths), |pid| pid == 4242);
+        assert_eq!(odd_sites(&["-x/index.html"]), ["./-x"]);
+        assert!(odd_sites(&["sites"]).is_empty());
+    }
+
     #[test]
     fn changed_paths_leave_out_files_only_read() {
         let file = |path: &str, kind: FileChangeKind| CodexFileDescriptor {
@@ -1262,6 +1535,8 @@ mod tests {
                 format!(
                     r#"#!/bin/sh
 seen='{seen}'
+# A site's reload after an Undo: no binder serves these sites.
+if [ "$1" = bind ]; then echo "reload=$*" >> "$seen"; exit 1; fi
 {{ echo "args=$*"; echo "cwd=$(pwd -P)"; echo "job=${{CONTROLLER_ACCESS_TOKEN:-}}"; echo "machine=${{RUNTIME_ACCESS_TOKEN:-}}"; echo "model=${{CODEX_API_KEY:-}}"; echo "github=${{GITHUB_TOKEN:-}}"; echo "research=${{INSTAFY_RESEARCH_ACCESS_TOKEN:-}}"; echo "secret=${{BOOKING_PARTNER:-}}"; echo "settings=${{NODE_PATH:-}} ${{INSTAFY_SKILL_PACKS_DIR:-}} ${{INSTAFY_PREVIEW_DENY_PORTS:-}}"; }} >> "$seen"
 port=; out=; picture=
 while [ $# -gt 0 ]; do
@@ -1631,6 +1906,188 @@ echo "sent-by-check=no" >> "$seen"
         assert!(
             take_seen().contains("args=preview check --port 4173 --path /map"),
             "the map's own preview was checked"
+        );
+    }
+
+    // A local test, Nov 4: a person undid a saved change to a bound page three
+    // times; each time the page's file and its card's picture followed, but
+    // the page they had open kept the undone section until they pressed its
+    // Reload. Now the Undo sends the page's reload as a turn's change does:
+    // the command a turn runs, from the workspace, with no credential, for
+    // each open site the Undo changed and no other. A map is left with what
+    // it serves: its own reload would write into its folder.
+    #[cfg(unix)]
+    #[test]
+    fn an_undo_sends_each_open_site_it_changed_its_reload() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD_MARKER: &str = "INSTAFY_PREVIEW_RELOAD_TEST_CHILD";
+        const TEST_NAME: &str =
+            "jobs::preview_pictures::tests::an_undo_sends_each_open_site_it_changed_its_reload";
+
+        // HOME, PATH and the hook are process-wide: run in a test process of
+        // its own.
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            let sandbox = tempfile::tempdir().unwrap();
+            let bin = sandbox.path().join("bin");
+            let home = sandbox.path().join("home");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::create_dir_all(home.join(".instafy")).unwrap();
+            let seen = sandbox.path().join("seen");
+            // A stand-in `instafy`: one line per run. Like the binder, its
+            // `bind command` is taken for a folder a binder serves (one with
+            // `.bind/server.json`) and refused for any other; a check takes
+            // no picture.
+            std::fs::write(
+                bin.join("instafy"),
+                format!(
+                    r#"#!/bin/sh
+echo "args=$* | cwd=$(pwd -P) | job=${{CONTROLLER_ACCESS_TOKEN:-}} | machine=${{RUNTIME_ACCESS_TOKEN:-}} | secret=${{GITHUB_TOKEN:-}}" >> '{seen}'
+if [ "$1" = bind ] && [ "$2" = command ]; then
+  if [ -f "$3/.bind/server.json" ]; then
+    echo '{{"ok":true,"viewers":2}}'
+    exit 0
+  fi
+  echo "no running binder for $3" >&2
+fi
+exit 1
+"#,
+                    seen = seen.display()
+                ),
+            )
+            .unwrap();
+            // A stand-in for the map's own command, which must not run.
+            std::fs::write(
+                bin.join("uw"),
+                format!(
+                    "#!/bin/sh\necho \"uw=$*\" >> '{seen}'\nexit 0\n",
+                    seen = seen.display()
+                ),
+            )
+            .unwrap();
+            for name in ["instafy", "uw"] {
+                std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+            let path = format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST_NAME, "--nocapture"])
+                .env(CHILD_MARKER, sandbox.path())
+                .env("HOME", &home)
+                .env("PATH", path)
+                .env("CONTROLLER_ACCESS_TOKEN", "job-token")
+                .env("RUNTIME_ACCESS_TOKEN", "machine-token")
+                .env("GITHUB_TOKEN", "space-secret")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .contains("test result: ok. 1 passed"),
+                "stdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let sandbox = std::path::PathBuf::from(std::env::var_os(CHILD_MARKER).unwrap());
+        let seen_file = sandbox.join("seen");
+        let workspace = sandbox.join("workspace");
+        // Two bound pages, each with its binder, and a map that `uw host`
+        // serves.
+        for (site, files) in [
+            ("lello", &["index.html", "app.js", ".bind/server.json"][..]),
+            ("porto", &["index.html", "app.js", ".bind/server.json"][..]),
+            ("seville", &["index.html", "map.config.json"][..]),
+        ] {
+            for file in files {
+                let file = workspace.join("sites").join(site).join(file);
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, "{}").unwrap();
+            }
+        }
+        let project = Uuid::new_v4();
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        let open = |id: &str, port: u16, site: &str| {
+            entry(
+                &project,
+                json!({
+                    "previewId": id,
+                    "localPort": port,
+                    "pid": std::process::id(),
+                    "siteDir": format!("sites/{site}"),
+                }),
+            )
+        };
+        let state = json!({ "version": 1, "previews": [
+            open("preview-seville", 4181, "seville"),
+            open("preview-porto", 4182, "porto"),
+            open("preview-lello", 4180, "lello"),
+        ]});
+        std::fs::write(home.join(PREVIEW_STATE_RELATIVE_PATH), state.to_string()).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let reverted_workspace = workspace.clone();
+        runtime.block_on(async {
+            picture_sites_people_revert(
+                move |_| reverted_workspace.clone(),
+                Arc::new(SentPictures::default()) as Arc<dyn PictureSender>,
+            );
+        });
+        // The Undo put back the page's script and the map's settings.
+        let hook = files_reverted_hook().expect("the hook the origin calls");
+        hook(origin_http_server::routes::FilesReverted {
+            project_id: project,
+            workspace_root: workspace.clone(),
+            paths: vec![
+                "sites/lello/app.js".to_string(),
+                "sites/seville/map.config.json".to_string(),
+            ],
+        });
+        let reloads = || {
+            std::fs::read_to_string(&seen_file)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.starts_with("args=bind "))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        // The sites are sent their reload in the order the state lists them:
+        // the page's comes last.
+        let until = Instant::now() + Duration::from_secs(10);
+        while !reloads().iter().any(|line| line.contains("./sites/lello")) && Instant::now() < until
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let workspace_real = workspace.canonicalize().unwrap();
+        let page = format!(
+            "args=bind command ./sites/lello reload {{}} | cwd={} | job= | machine= | secret=",
+            workspace_real.display()
+        );
+        let reloads = reloads();
+        assert!(reloads.contains(&page), "{reloads:?}");
+        // Only the sites the Undo changed: the other page gets nothing.
+        assert!(
+            !reloads.iter().any(|line| line.contains("porto")),
+            "{reloads:?}"
+        );
+        // The map's own reload never runs, and nothing is written in its
+        // folder: it holds what the Undo left.
+        let seen = std::fs::read_to_string(&seen_file).unwrap_or_default();
+        assert!(!seen.contains("uw="), "{seen}");
+        assert!(!workspace.join("sites/seville/data").exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("sites/seville/map.config.json")).unwrap(),
+            "{}"
         );
     }
 }

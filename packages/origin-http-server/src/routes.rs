@@ -98,7 +98,8 @@ pub struct AppState {
 
 /// The files a person's revert put back as `HEAD` has them, or removed, in
 /// this origin's checkout. The process hosting the origin may act on them:
-/// a runtime pictures the open previews of the sites they belong to again.
+/// a runtime sends the sites they belong to their reload, so the views open
+/// on them load them again, and pictures their open previews again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FilesReverted {
     pub project_id: Uuid,
