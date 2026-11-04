@@ -1405,7 +1405,8 @@ fn card_continuation(card: Uuid, continue_building: bool) -> Value {
 }
 
 /// The hand-back the controller checks and stamps on the building turn after the browser turn
-/// `browser` (its card from `card`) read `pages`: its reply with one finding per page.
+/// `browser` (its card from `card`) read `pages`: one finding per page with what it showed, and
+/// none of the browser turn's own words.
 fn checked_hand_back(
     browser: Uuid,
     card: Uuid,
@@ -1414,13 +1415,12 @@ fn checked_hand_back(
 ) -> Value {
     let read_at = "2026-01-05T10:00:00Z";
     let viewer = "Instafy's browser in the workspace";
-    let mut reply = format!("Read {} pages.", pages.len());
-    let mut findings = Vec::new();
-    for (url, title, fact) in pages {
-        reply.push('\n');
-        reply.push_str(&json!({"url": url, "title": title, "facts": [fact]}).to_string());
-        findings.push(json!({"url": url, "title": title, "readAt": read_at, "viewer": viewer}));
-    }
+    let findings = pages
+        .iter()
+        .map(|(url, title, fact)| {
+            json!({"url": url, "title": title, "facts": [fact], "readAt": read_at, "viewer": viewer})
+        })
+        .collect::<Vec<_>>();
     json!({
         "browserHandBack": {
             "version": 1,
@@ -1431,7 +1431,7 @@ fn checked_hand_back(
             "readAt": read_at,
             "request": request,
             "findings": findings,
-            "reply": reply,
+            "reply": "",
             "replyTruncated": false,
         }
     })
