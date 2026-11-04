@@ -1537,11 +1537,12 @@ tab strip, or a phone's chat list) says **Approve**. The toast names the chat
 and nothing else: not the step, the page or the site. **View** opens the chat
 with Chat in front, or its Browser view if that was in front, where the prompt
 shows and is answered as above. The toast and the tab's **Approve** go when the
-prompt is answered or runs out, or when its chat comes on screen. Another toast
-(a copy, an error) takes its place for a while, and the waiting toast comes back
-once that one closes (`StatusProvider` puts a background toast with no timeout
-back in line, not away, when another replaces it); once the person closes it,
-it does not come back for the same prompt. A teammate's run is never read.
+prompt is answered or runs out, or when its chat comes on screen. While visible,
+the waiting toast keeps its place; later notices wait until it is dismissed or
+its owner clears it. Pending notices then appear by priority, with actions and
+errors ahead of routine information. Once the person closes the waiting toast,
+it does not come back for the same prompt. Passive copy confirmations are
+suppressed while it is visible. A teammate's run is never read.
 
 Prompts are raised only inside a run, and only the agent writes the action log,
 so the browser view reads both fast only while work can produce them. While a

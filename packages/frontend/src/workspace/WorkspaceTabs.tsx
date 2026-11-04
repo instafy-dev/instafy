@@ -27,6 +27,7 @@ import { HorizontalTabStrip } from "../components/tabs/HorizontalTabStrip";
 import { useConversations, type ConversationLifecycleStatus } from "../conversations/ConversationsProvider";
 import { controllerClient } from "../sdk/instafy";
 import { useStatus } from "../status/useStatus";
+import { statusBehavior } from "../status/statusBehavior";
 import {
   DARK_CANVAS_CLASS,
   DARK_DIVIDER_CLASS,
@@ -113,6 +114,8 @@ export function WorkspaceTabs({
     setConversationLifecycleStatus,
   } = useConversations();
   const { showStatus } = useStatus();
+  const conversationsRef = useRef(conversations);
+  conversationsRef.current = conversations;
   const { requestConversationInvite } = useWorkspaceUi();
   const startThread = useStartConversationThread();
   const [conversationMenu, setConversationMenu] = useState<{
@@ -447,11 +450,17 @@ export function WorkspaceTabs({
     const affectedLabel =
       subtreeIds.length > 1 ? ` (${subtreeIds.length - 1} thread${subtreeIds.length === 2 ? "" : "s"})` : "";
 
+    // This is a short client Undo offer; Trash itself remains restorable later.
+    const undoExpiresAt = Date.now() + 6000;
     showStatus(`Moved conversation to Trash.${affectedLabel}`, "warning", 6000, {
+      behavior: statusBehavior.deadline(undoExpiresAt),
       actionLabel: "Undo",
       onAction: () => {
+        if (Date.now() >= undoExpiresAt) return;
         previousStatuses.forEach((status, id) => {
-          setConversationLifecycleStatus(id, status);
+          if (conversationsRef.current.find((entry) => entry.localId === id)?.lifecycleStatus === "deleted") {
+            setConversationLifecycleStatus(id, status);
+          }
         });
       },
     });

@@ -31,6 +31,7 @@ import { Text } from "../../../components/Text";
 import { Surface } from "../../../components/Surface";
 import { InlineNotice } from "../../../components/InlineNotice";
 import { LoadingStatus } from "../../../components/LoadingStatus";
+import { StatusDock } from "../../../status/StatusDock";
 import { StudioMenuAction, StudioMenuSeparator } from "../../../components/aria/StudioMenu";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { BrowserToolsOverlayContext, BrowserToolsPopover } from "./BrowserToolsPopover";
@@ -782,6 +783,8 @@ export function PersonalBrowserSurface({
         error={humanInputAvailable ? null : humanInputState.error}
         onTakeOver={() => void humanInputState.takeOver()}
       />
+      <div className="flex min-h-0 flex-1 flex-col" data-testid="personal-browser-page-area">
+      <StatusDock active={visible && ownsNativeStatus && typeof window.instafyDesktop?.personalBrowserSetBounds === "function"} ownerKey={ownerId} />
       <div
         ref={viewportRef}
         aria-label="Personal browser content"
@@ -817,6 +820,7 @@ export function PersonalBrowserSurface({
             </Surface>
           </div>
         ) : null}
+      </div>
       </div>
     </div>
     </BrowserToolsOverlayContext.Provider>

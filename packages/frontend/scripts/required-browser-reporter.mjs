@@ -17,7 +17,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
     ],
   },
   "browser-ui": {
-    minimumTests: 59,
+    minimumTests: 62,
     // CI runs this lane as two Playwright shards, one job each. Each part
     // proves only its own tests; the required job checks this contract on
     // both parts' receipts together (combineRequiredBrowserParts).
@@ -56,12 +56,16 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "settings-history-scroll.spec.ts",
       "segmented-control-responsive.spec.ts",
       "studio-history-controls.spec.ts",
+      "status-feedback.spec.ts",
       "thread-spine-surface.spec.ts",
       "toast-view-bar-clearance.spec.ts",
       "turn-activity-line.spec.ts",
       "typing-agent-stack.spec.ts",
     ],
     titles: [
+      "Copy never removes an available Undo and passive confirmations add no Tab stop",
+      "a workspace banner moves a persistent notification below unchanged browser chrome",
+      "preview decisions and location feedback coexist with full text and Send runs once",
       "agent tabs are badged, listed and taken over in one press at 390px in light mode",
       "agent tabs are badged, listed and taken over in one press at 390px in dark mode",
       "agent tabs are badged, listed and taken over in one press at 1100px in light mode",

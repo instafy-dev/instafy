@@ -298,7 +298,7 @@ export function reduceFollow(state: FollowState, action: FollowAction): FollowSt
       return { ...state, presence: action.presence, role: "presenting", ownPresentationId: action.presence.presentationId, note: null, rejoin: null };
     case "stop-presenting":
       if (state.role !== "presenting") return state;
-      return { ...state, role: "none", ownPresentationId: null, presence: null };
+      return { ...state, role: "none", ownPresentationId: null, presence: null, note: null };
     case "own-ended":
       if (state.role !== "presenting") return state;
       return { ...state, role: "none", ownPresentationId: null, presence: null, note: { kind: "own-ended", at: action.at } };
@@ -342,18 +342,22 @@ export function reduceFollow(state: FollowState, action: FollowAction): FollowSt
       }
       if (before && before.presentationId !== next.presentationId && state.role === "stopped-following") {
         // A new presentation: the "Follow again" is about the old one.
-        return { ...state, presence: next, role: "none" };
+        return { ...state, presence: next, role: "none", note: null };
       }
-      return { ...state, presence: next };
+      // A delayed note belongs to the presentation it describes. Presence
+      // refreshes preserve it; a different presentation makes it stale. A
+      // replacement notice may arrive just before its matching presence.
+      return { ...state, presence: next, note: before?.presentationId === next.presentationId
+        || (!before && state.note?.kind === "replaced" && state.note.by === next.presenter.name) ? state.note : null };
     }
     case "follow":
       if (!state.presence || state.role === "presenting") return state;
       return { ...state, role: "following", note: null };
     case "stop-following":
       if (state.role !== "following" && state.role !== "stopped-following") return state;
-      return { ...state, role: "none" };
+      return { ...state, role: "none", note: null };
     case "interact":
-      return state.role === "following" ? { ...state, role: "stopped-following" } : state;
+      return state.role === "following" ? { ...state, role: "stopped-following", note: null } : state;
     case "ended": {
       if (state.role === "presenting") return { ...state, presence: null, role: "none", ownPresentationId: null };
       const name = state.presence?.presenter.name;

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { controllerClient } from "../sdk/instafy";
 import { useStatus } from "../status/useStatus";
+import { statusBehavior } from "../status/statusBehavior";
 import type { NotificationPage, NotificationPreferences, ProductNotification } from "./notificationContract";
 import { claimNotificationPresentation, NOTIFICATION_RECEIVED_EVENT } from "./notificationPresentation";
 import { NOTIFICATION_PREFERENCES_CHANGED_EVENT } from "./notificationPreferencesEvents";
@@ -275,7 +276,7 @@ export function useNotificationCenter({ userId, accessToken, navigate, chatName 
           toastIds.current.add(id);
           const conversationId = replyConversationId(item);
           const text = notificationToastText(item, conversationId ? chatNameRef.current?.(conversationId) ?? null : null);
-          showStatus(text, "info", 10_000, { id, nonPreemptive: true, actionLabel: "View", onShow: () => {
+          showStatus(text, "info", 10_000, { id, behavior: statusBehavior.informational, nonPreemptive: true, actionLabel: "View", onShow: () => {
             if (current() && isAppInForeground()) {
               void controllerClient.notifications.updateState({ id: item.id, action: "seen", accessToken, expectedUserId: userId, isCurrent: current }).catch(() => {});
             }

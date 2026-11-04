@@ -9,6 +9,9 @@ import {
   PersonalBrowserSurface,
 } from "../PersonalBrowserSurface";
 import type { usePersonalBrowserBridge } from "../usePersonalBrowserBridge";
+import { Status } from "../../../../status/Status";
+import { StatusProvider, type StatusContextValue } from "../../../../status/StatusProvider";
+import { useStatus } from "../../../../status/useStatus";
 
 type PersonalBrowserModel = ReturnType<typeof usePersonalBrowserBridge>;
 type BoundsReply = InstafyDesktopPersonalBrowserStatus & { previewDataUrl?: string };
@@ -146,6 +149,39 @@ describe("PersonalBrowserSurface", () => {
     window.cancelAnimationFrame = originalCancelAnimationFrame;
     HTMLElement.prototype.getBoundingClientRect = originalGetBoundingClientRect;
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("docks global feedback only for the active native owner without hiding the page", async () => {
+    const model = createModel();
+    const setBounds = vi.fn(async (bounds: InstafyDesktopPersonalBrowserBounds) => ({ ...model.status!, visible: bounds.visible ?? true }));
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: setBounds };
+    let status: StatusContextValue;
+    const Harness = ({ active }: { active: boolean }) => {
+      status = useStatus();
+      return <><PersonalBrowserSurface active={active} model={model} /><Status /></>;
+    };
+    const render = async (active: boolean) => {
+      await act(async () => root.render(<StatusProvider><Harness active={active} /></StatusProvider>));
+    };
+    await render(true);
+    await act(async () => status.showStatus("Persistent warning", "warning", 0));
+    const toast = document.querySelector('[data-testid="status-toast"]')!;
+    expect(toast.closest('[data-testid="status-dock"]')).not.toBeNull();
+    expect(setBounds.mock.calls.every(([bounds]) => !bounds.occluded)).toBe(true);
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBeNull();
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    expect(setBounds.mock.calls.at(-1)?.[0].occluded).toBe(true);
+    expect(toast.closest('[data-testid="status-dock"]')).not.toBeNull();
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
+    expect(setBounds.mock.calls.at(-1)?.[0].occluded).toBe(false);
+
+    await render(false);
+    expect(toast.closest('[data-testid="status-dock"]')).toBeNull();
+    await render(true);
+    expect(toast.closest('[data-testid="status-dock"]')).not.toBeNull();
+    model.status = { ...model.status!, ownerId: "another-owner" };
+    await render(true);
+    expect(toast.closest('[data-testid="status-dock"]')).toBeNull();
   });
 
   it("opens tools above the native page without changing its bounds or authority", async () => {
@@ -521,7 +557,8 @@ describe("PersonalBrowserSurface", () => {
     const readingRow = document.querySelector('[data-testid="browser-reading-row"]');
     expect(readingRow).not.toBeNull();
     expect(chrome.parentElement?.nextElementSibling).toBe(readingRow);
-    expect(readingRow?.nextElementSibling).toBe(viewport);
+    expect(readingRow?.nextElementSibling).toBe(viewport.parentElement);
+    expect(viewport.previousElementSibling?.getAttribute("data-testid")).toBe("status-dock");
     expect(
       container
         .querySelector('[data-testid="personal-browser-agent-status"]')

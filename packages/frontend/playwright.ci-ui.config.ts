@@ -63,6 +63,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "settings-history-scroll.spec.ts",
   "segmented-control-responsive.spec.ts",
   "studio-history-controls.spec.ts",
+  "status-feedback.spec.ts",
   "thread-spine-surface.spec.ts",
   "toast-view-bar-clearance.spec.ts",
   "turn-activity-line.spec.ts",
