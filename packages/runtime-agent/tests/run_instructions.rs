@@ -1724,7 +1724,8 @@ async fn run_follow_ups_from_the_chat(harness: &mut Harness) {
 /// stopped or undid, that send research ending in a page to the browser from the first message,
 /// and that keep a request to make something from what the chat already found, or with no site to
 /// use first, out of it. Each browser turn is told that it reads pages in Instafy's browser
-/// and Octo builds in the chat, never only that it is read-only. The page is one building turn,
+/// and Octo builds in the chat, never only that it is read-only, with no write-scope guardrail,
+/// mode or rationale above that line. The page is one building turn,
 /// which reads every browser turn as page data and none outside it.
 fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
     for label in ["N3", "N5"] {
@@ -1745,7 +1746,7 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "a bare \"keep going\" never carries on a change the person stopped or undid",
             ),
             (
-                "a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked); when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`.",
+                "a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked or not confirmed, such as a route); when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`.",
                 "a bare \"keep going\" carries on what the chat left open",
             ),
             (
@@ -1753,8 +1754,8 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "research ending in a page goes to the browser from the first message",
             ),
             (
-                "A request to make one from what this chat already found, or with no site to use first (\"on a map\", \"put this on a page\"), is `direct`.",
-                "a request to make something from what the chat found, or with no site to use first, stays direct",
+                "A request to make one with no site to use first (\"on a map\", \"put this on a page\") is `direct`: a map's skill finds and cites its places itself. So is one made from what this chat already found.",
+                "a request to make something with no site to use first, or from what the chat found, stays direct",
             ),
         ] {
             ensure!(
@@ -1777,6 +1778,12 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 !text.contains("This job is read-only"),
                 "{label}#{index} is told only that it is read-only"
             );
+            for heading in ["Write-scope guardrail", "- Mode: read_only", "- Rationale:"] {
+                ensure!(
+                    !text.contains(heading),
+                    "{label}#{index} reads \"{heading}\" above its own line"
+                );
+            }
         }
     }
     let page = harness.turn("N7");

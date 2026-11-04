@@ -117,9 +117,12 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     // From before one rule (never describe the turn itself) replaced the examples of what tools saw
     // and inside words, and a reply said which page it didn't reach.
     include_str!("legacy/agents-doc-v8.md"),
+    // From before a bare "keep going" carried on what the chat left open, never a change the
+    // person stopped or undid, and said which.
+    include_str!("legacy/agents-doc-v10.md"),
     // From before a reply said a site or page lacks something (a station, a route) only when a
     // page it read said so.
-    include_str!("legacy/agents-doc-v9.md"),
+    include_str!("legacy/agents-doc-v11.md"),
 ];
 const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -451,6 +454,10 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // the chat asked for a page not made yet, and a page made from what the chat already found
     // stayed `direct`.
     include_str!("legacy/browser-automation-v27.md"),
+    // From before a request to make something "on a map" was `direct` in a sentence of its own,
+    // with the reason (a map's skill finds and cites its places itself), and a bare "keep going"
+    // carried on what the chat's replies or page mark not confirmed, such as a route.
+    include_str!("legacy/browser-automation-v28.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,
@@ -2289,7 +2296,7 @@ mod tests {
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
         let before_not_checked = include_str!("legacy/agents-doc-v4.md");
         assert!(!before_not_checked.contains("not checked\", or stays out"));
-        let before_lacks = include_str!("legacy/agents-doc-v9.md");
+        let before_lacks = include_str!("legacy/agents-doc-v11.md");
         assert!(
             before_lacks.contains("Never say a place, stop, route, time or page doesn't exist")
         );
@@ -2458,6 +2465,38 @@ mod tests {
         let previous = include_str!("legacy/agents-doc-v7.md");
         assert!(previous.contains("(shown as \"Process running with session ID …\")"));
         assert!(!previous.contains("text(r)"));
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join(AGENTS_DOC_FILENAME);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
+    }
+
+    /// A bare "keep going" carries on what the chat left open and the reply says which. A local
+    /// test, Nov 4: after a page that marked its metro route unverified, a stopped edit to that
+    /// page and an Undo, the turn after "keep going" asked "What would you like me to continue
+    /// with…?". The routing step reads its own rule; the turn that carries on reads `AGENTS.md`'s
+    /// "Replies", as a building turn and a browser turn are given it, and that turn never reads
+    /// the routing step's rule, so the line names what it never carries on too: a change the
+    /// person stopped or undid. The copy from before is upgraded.
+    #[test]
+    fn agents_doc_says_a_bare_keep_going_carries_on_what_the_chat_left_open() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let doc = flat(AGENTS_DOC_TEMPLATE);
+        let replies = doc
+            .split("## Replies")
+            .nth(1)
+            .and_then(|rest| rest.split("## ").next())
+            .expect("Replies section");
+        assert!(
+            replies.contains(
+                "- A bare \"keep going\" carries on what the chat left open, never a change the person stopped or undid, and says which."
+            ),
+            "{replies}"
+        );
+        assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+        let previous = include_str!("legacy/agents-doc-v10.md");
+        assert!(!previous.contains("keep going"));
         let workspace = tempdir().expect("workspace");
         let path = workspace.path().join(AGENTS_DOC_FILENAME);
         fs::write(&path, previous).unwrap();
