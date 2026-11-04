@@ -6,7 +6,9 @@
   padding-inline-end: max(var(--chat-reading-inline-inset), var(--instafy-safe-area-inset-right, 0px));
 }
 
-@container chat-reading-area (min-width: 24rem) {
+/* Keep phone-sized and split chat panes at 16px. The wider reading inset
+   starts at 640px of actual pane space, not the desktop window width. */
+@container chat-reading-area (min-width: 40rem) {
   .chat-reading-inset { --chat-reading-inline-inset: 1.5rem; }
 }
 

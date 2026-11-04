@@ -11954,7 +11954,7 @@ async fn mcp_wire_offers_the_bounded_operations_and_refuses_any_other_call() {
         json!({
             "protocolVersion": "2025-06-18",
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "rmcp", "version": "3.2.0" },
+            "serverInfo": { "name": "rmcp", "version": "3.5.1" },
             "instructions": "Control the visible Instafy Shared Browser through bounded, instrumented actions. Take a fresh snapshot before using element indices.",
         }),
         "{}",

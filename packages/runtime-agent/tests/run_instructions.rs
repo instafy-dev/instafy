@@ -3093,8 +3093,10 @@ fn print_costs(harness: &Harness) -> Vec<(String, f64)> {
         .collect()
 }
 
-/// The request head a provider caches ahead of the input: a request can be served from the
-/// cache of an earlier one only when all of it is the same, on the same thread.
+/// The request head a provider caches ahead of the input, and Codex's own instructions, which
+/// open the input: a request can be served from the cache of an earlier one only when all of it
+/// is the same, on the same thread. (A provider would still serve the head alone of a request on
+/// other Codex instructions; the costs leave that out, as they did when those were in the head.)
 fn same_head(earlier: &Value, later: &Value) -> bool {
     [
         "prompt_cache_key",
@@ -3106,6 +3108,20 @@ fn same_head(earlier: &Value, later: &Value) -> bool {
     ]
     .iter()
     .all(|key| earlier[*key] == later[*key])
+        && codex_instructions(earlier) == codex_instructions(later)
+}
+
+/// The base instructions Codex gives a turn's lane, the start of `input[0]` ahead of the tagged
+/// blocks of the developer messages the thread opened with (`<permissions instructions>`,
+/// `<instafy_run_instructions>`, ...). Codex sends them as the input's first developer message
+/// (before rust-v0.166 it put them in the request's `instructions`, except on a Responses Lite
+/// model), so a turn on another lane's instructions starts its input anew.
+fn codex_instructions(request: &Value) -> String {
+    let opening = item_text(&request["input"][0]);
+    match opening.find("\n\n<") {
+        Some(end) => opening[..end].to_string(),
+        None => opening,
+    }
 }
 
 fn compactions(request: &Value) -> Vec<&Value> {

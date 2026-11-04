@@ -59,6 +59,9 @@ export const DARK_PANEL_SOFT_BG_CLASS = "dark:bg-[var(--color-studio-dark-panel-
 export const DARK_PANEL_BORDER_CLASS = "dark:border-[color:var(--color-studio-dark-panel-border)]";
 export const DARK_PANEL_SURFACE_CLASS = `${DARK_PANEL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`;
 
+// Own-message bubbles separate prose by fill, without a control's border.
+export const DARK_MESSAGE_BG_CLASS = "dark:bg-[var(--color-studio-dark-message)]";
+
 export const DARK_FLOATING_BG_CLASS = "dark:bg-[var(--color-studio-dark-floating)]";
 export const DARK_FLOATING_SOLID_BG_CLASS = "dark:bg-[var(--color-studio-dark-floating-solid)]";
 export const DARK_FLOATING_RAISED_BG_CLASS =

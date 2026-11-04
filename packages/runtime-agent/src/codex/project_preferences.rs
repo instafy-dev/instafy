@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use codex_extension_api::{
     ContextContributor, ExtensionFuture, PreviousWorldStateSection, RenderedWorldStateFragment,
-    WorldStateContributionInput, WorldStateSectionContribution,
+    WorldStateContributionInput, WorldStateSectionContribution, input_text,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -40,16 +40,14 @@ impl ProjectPreferencesContext {
             .as_object_mut()
             .expect("preference metrics")
             .retain(|_, value| !value.is_null());
-        let current = snapshot.clone();
-        WorldStateSectionContribution::new(SECTION_ID, snapshot, move |previous| {
-            if matches!(previous, PreviousWorldStateSection::Known(value) if value == &current) {
-                return None;
-            }
-            Some(RenderedWorldStateFragment::new(
-                "user",
-                (OPEN, CLOSE),
-                body.clone(),
-            ))
+        // Every step records the current state, whether or not it sends the block.
+        WorldStateSectionContribution::new(SECTION_ID, move |previous| {
+            let unchanged =
+                matches!(previous, PreviousWorldStateSection::Known(value) if value == &snapshot);
+            let fragment = (!unchanged).then(|| {
+                RenderedWorldStateFragment::new("user", (OPEN, CLOSE), input_text(body.clone()))
+            });
+            (Some(snapshot.clone()), fragment)
         })
         // A stored revision alone cannot establish that the model still sees it
         // after compaction. Match the whole scoped block, including its content.
@@ -71,7 +69,33 @@ impl ContextContributor for ProjectPreferencesContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_extension_api::ContentItem;
+    use serde_json::Value;
     use std::fs;
+
+    /// The state Codex records for the section; every step records the same one.
+    fn snapshot_of(section: &WorldStateSectionContribution) -> Value {
+        section
+            .render_diff(PreviousWorldStateSection::Absent)
+            .0
+            .expect("a recorded state")
+    }
+
+    /// What the section sends a thread whose last recorded state is `previous`.
+    fn sent(
+        section: &WorldStateSectionContribution,
+        previous: PreviousWorldStateSection<'_>,
+    ) -> Option<RenderedWorldStateFragment> {
+        section.render_diff(previous).1
+    }
+
+    /// A fragment's text.
+    fn body(fragment: &RenderedWorldStateFragment) -> &str {
+        match fragment.body() {
+            ContentItem::InputText { text } => text,
+            other => panic!("preferences are sent as text, not {other:?}"),
+        }
+    }
 
     fn write(root: &std::path::Path, body: &str) {
         fs::write(
@@ -88,25 +112,16 @@ mod tests {
         let id = Uuid::new_v4();
         let context = ProjectPreferencesContext::new(id, workspace.path().to_owned());
         let section = context.capture();
-        let fragment = section
-            .render_diff(PreviousWorldStateSection::Absent)
-            .unwrap();
+        let fragment = sent(&section, PreviousWorldStateSection::Absent).unwrap();
         assert_eq!(fragment.role(), "user");
-        assert!(!section.snapshot().to_string().contains("Use concise"));
-        assert!(
-            section
-                .render_diff(PreviousWorldStateSection::Known(section.snapshot()))
-                .is_none()
-        );
+        let state = snapshot_of(&section);
+        assert!(!state.to_string().contains("Use concise"));
+        assert!(sent(&section, PreviousWorldStateSection::Known(&state)).is_none());
         // A surviving checkpoint without model-visible context must be rehydrated.
-        assert!(
-            section
-                .render_diff(PreviousWorldStateSection::Unknown)
-                .is_some()
-        );
+        assert!(sent(&section, PreviousWorldStateSection::Unknown).is_some());
         let visible = format!(
             "other context\n{OPEN}{}{CLOSE}\nmore context",
-            fragment.body()
+            body(&fragment)
         );
         assert!(section.matches_retained_fragment("user", &visible));
         assert!(!section.matches_retained_fragment("developer", &visible));
@@ -129,27 +144,22 @@ mod tests {
         let original = context.capture();
         write(workspace.path(), "Corrected default.");
         let corrected = context.capture();
-        let update = corrected
-            .render_diff(PreviousWorldStateSection::Known(original.snapshot()))
-            .unwrap();
-        assert!(update.body().contains("Corrected default."));
-        assert!(!update.body().contains("Original default."));
-        assert_ne!(
-            original.snapshot()["revision"],
-            corrected.snapshot()["revision"]
-        );
+        let (original_state, corrected_state) = (snapshot_of(&original), snapshot_of(&corrected));
+        let update = sent(
+            &corrected,
+            PreviousWorldStateSection::Known(&original_state),
+        )
+        .unwrap();
+        assert!(body(&update).contains("Corrected default."));
+        assert!(!body(&update).contains("Original default."));
+        assert_ne!(original_state["revision"], corrected_state["revision"]);
 
         fs::remove_file(&path).unwrap();
         let absent = context.capture();
-        let withdrawal = absent
-            .render_diff(PreviousWorldStateSection::Known(corrected.snapshot()))
-            .unwrap();
-        assert!(
-            withdrawal
-                .body()
-                .contains("Withdraw prior defaults for this project/source only")
-        );
-        assert_eq!(absent.snapshot()["state"], "empty");
+        let absent_state = snapshot_of(&absent);
+        let withdrawal = sent(&absent, PreviousWorldStateSection::Known(&corrected_state)).unwrap();
+        assert!(body(&withdrawal).contains("Withdraw prior defaults for this project/source only"));
+        assert_eq!(absent_state["state"], "empty");
 
         fs::write(
             &path,
@@ -157,28 +167,30 @@ mod tests {
         )
         .unwrap();
         let unavailable = context.capture();
-        let notice = unavailable
-            .render_diff(PreviousWorldStateSection::Known(absent.snapshot()))
-            .unwrap();
-        assert!(notice.body().contains("not a removal or a new revision"));
-        assert!(unavailable.snapshot().get("revision").is_none());
+        let unavailable_state = snapshot_of(&unavailable);
+        let notice = sent(
+            &unavailable,
+            PreviousWorldStateSection::Known(&absent_state),
+        )
+        .unwrap();
+        assert!(body(&notice).contains("not a removal or a new revision"));
+        assert!(unavailable_state.get("revision").is_none());
         // This is the null-free shape Codex persists, so it suppresses unchanged notices.
         assert!(
-            unavailable
-                .render_diff(PreviousWorldStateSection::Known(unavailable.snapshot()))
-                .is_none()
+            sent(
+                &unavailable,
+                PreviousWorldStateSection::Known(&unavailable_state)
+            )
+            .is_none()
         );
-        assert!(
-            unavailable
-                .render_diff(PreviousWorldStateSection::Unknown)
-                .is_some()
-        );
+        assert!(sent(&unavailable, PreviousWorldStateSection::Unknown).is_some());
         write(workspace.path(), "Corrected default.");
         assert!(
-            context
-                .capture()
-                .render_diff(PreviousWorldStateSection::Known(unavailable.snapshot()))
-                .is_some()
+            sent(
+                &context.capture(),
+                PreviousWorldStateSection::Known(&unavailable_state)
+            )
+            .is_some()
         );
     }
 

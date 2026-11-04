@@ -7,6 +7,7 @@
 // classes, and so are the label colours that read on them.
 
 import { AI_TILE_SHAPE_CLASS } from "../../components/OctoCoin";
+import { OWN_MESSAGE_BUBBLE_CLASS } from "../../components/messageStyles";
 import {
   DARK_ACTIVE_BG_CLASS,
   DARK_CANVAS_CLASS,
@@ -229,8 +230,8 @@ export const SPEAKER_TIME = "flex-none text-xxs font-medium text-slate-400 dark:
 // ChatMessageEntries.tsx:101-137 NotchedMessageShell with the teammate tone (327-331).
 export const SHELL_MESSAGE = "group relative inline-flex w-fit max-w-[min(92%,56rem)] min-w-0 flex-col items-start py-1 text-sm text-slate-800 dark:text-slate-200";
 export const SHELL_MESSAGE_BODY = "w-full min-w-0";
-// ChatMessageEntries.tsx:325-330 the current user's own bubble.
-export const OWN_BUBBLE = `group relative inline-flex w-fit max-w-[min(92%,56rem)] min-w-0 flex-col items-start rounded-2xl rounded-br-none bg-slate-50/90 px-3.5 py-2.5 text-sm text-slate-800 ring-1 ring-inset ring-slate-200/70 ${DARK_RAISED_CONTROL_BG_CLASS} dark:text-slate-200 dark:ring-[color:var(--color-studio-dark-raised-control-border)]`;
+// Share the current user's message appearance with Studio; only the shell is local.
+export const OWN_BUBBLE = `group relative inline-flex w-fit max-w-[min(92%,56rem)] min-w-0 flex-col items-start text-sm ${OWN_MESSAGE_BUBBLE_CLASS}`;
 
 
 // AgentJobThreadPreviewLayout.tsx:1283-1290 thread root; spine offsets from
@@ -489,8 +490,8 @@ export const ACTION_CARD = "max-w-[min(80%,42rem)] px-3 py-2.5 text-sm text-slat
 // chat-input/ChatInput.tsx:343, Button.tsx primary)
 
 export const COMPOSER_WRAP = "px-3 pb-2 sm:px-4";
-// ChatComposerSurface.tsx:1301-1312 Surface overrides.
-export const COMPOSER_SURFACE = `flex flex-col overflow-hidden border-slate-200/70 bg-slate-50 p-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`;
+// Appearance comes from Surface's composer preset; only layout belongs here.
+export const COMPOSER_SURFACE = "flex flex-col overflow-hidden p-1.5";
 export const COMPOSER_ROW = "relative flex items-end gap-2";
 export const COMPOSER_LEADING = "flex flex-none items-center gap-0.5";
 export const COMPOSER_TRAILING = "flex flex-none items-center justify-end gap-0.5";

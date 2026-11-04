@@ -2,7 +2,7 @@
 //! MCP, before browser authority returns to the human, and a granted turn's `provider-mcp`, which
 //! holds the turn's grant token.
 //!
-//! Upstream Codex (rust-v0.159) reports `ShutdownComplete` after a best-effort MCP shutdown: it
+//! Upstream Codex (rust-v0.166) reports `ShutdownComplete` after a best-effort MCP shutdown: it
 //! sends SIGTERM to each MCP process group and schedules SIGKILL from a detached thread, without
 //! waiting for either. A broker (or a process it started, which shares its process group) could
 //! therefore still act after runtime-agent ended the turn. runtime-agent closes that gap itself:

@@ -16,6 +16,7 @@ import {
 import { Globe, MoreHoriz, WarningTriangle } from "iconoir-react";
 import { AttachmentThumbnail } from "../../../components/AttachmentThumbnail";
 import { Button } from "../../../components/Button";
+import { OWN_MESSAGE_BUBBLE_CLASS } from "../../../components/messageStyles";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
 import { getSkillImportMessageLabel } from "../../../conversations/conversationAutoTitle";
@@ -560,7 +561,7 @@ function PersonMessageBubble({
       padding={isOwnMessage ? "none" : "normal"}
       className={
         isOwnMessage
-          ? "rounded-2xl rounded-br-none bg-slate-50/90 px-3.5 py-2.5 text-slate-800 ring-1 ring-inset ring-slate-200/70 dark:bg-[var(--color-studio-dark-raised-control)] dark:text-slate-200 dark:ring-[color:var(--color-studio-dark-raised-control-border)]"
+          ? OWN_MESSAGE_BUBBLE_CLASS
           : "text-slate-800 dark:text-slate-200"
       }
     >

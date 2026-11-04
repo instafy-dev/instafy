@@ -13,7 +13,7 @@ use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, JsonObject,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
 };
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use tokio::process::Child;
@@ -390,8 +390,8 @@ impl LocalBrowserMcpServer {
 }
 
 impl ServerHandler for LocalBrowserMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Observe a public HTTP(S) page in a fresh owner-local headless browser. This capability is read-only and has no saved login state.",
         )
     }
@@ -1240,7 +1240,7 @@ mod tests {
             json!({
                 "protocolVersion": "2025-06-18",
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "rmcp", "version": "3.2.0" },
+                "serverInfo": { "name": "rmcp", "version": "3.5.1" },
                 "instructions": "Observe a public HTTP(S) page in a fresh owner-local headless browser. This capability is read-only and has no saved login state.",
             }),
             "{}",
