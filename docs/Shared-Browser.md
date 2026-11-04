@@ -1211,9 +1211,9 @@ itself. A request to make something with no site to use first ("on a map",
 "put this on a page") stays with Octo: a browser turn cannot make it, and a
 map's skill finds and cites its places itself. So does one made from what the
 chat already found. Folded into one sentence with that second case, the rule
-for "on a map" lost to research that ends in a page, and a three-day city plan
-"on a map" went through the browser to a map with no hotels, no day plan and
-no sight's own page cited (a local test, Nov 4). A message that carries on the
+for "on a map" likely lost to research that ends in a page: a three-day city
+plan "on a map" went through the browser to a map with no hotels, no day plan
+and no sight's own page cited (a local test, Nov 4). A message that carries on the
 chat's browser work goes on there, whether or not that work found its answer,
 and a bare "keep going" carries on what the chat left open (what its replies
 or a page here mark not checked or not confirmed, such as a route), never a
