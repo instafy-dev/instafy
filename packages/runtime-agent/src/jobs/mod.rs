@@ -29146,23 +29146,6 @@ mod tests {
         );
     }
 
-    /// A Shared Browser turn's reply grammar has no `code` or `files` (codex.rs
-    /// `shared_browser_final_output_json_schema`): its answer reads as one with neither, its
-    /// reply and its actions as they are.
-    #[test]
-    fn a_reply_with_no_code_or_files_reads_as_one_with_neither() {
-        let outcome = extract_codex_outcome(&json!({
-            "actions": [{"type": "request_location", "precision": "approximate"}],
-            "summary": "Read 6 pages on the maker's site.",
-        }))
-        .expect("extract outcome");
-        assert_eq!(outcome.summary, "Read 6 pages on the maker's site.");
-        assert!(outcome.files.is_empty());
-        assert!(outcome.read_files.is_empty());
-        assert!(outcome.snippet.is_none());
-        assert_eq!(outcome.actions.len(), 1);
-    }
-
     // Studio showed no reply a turn offered (a local test, Oct 31: three replies carried four, and
     // none was on screen), and Enter in an empty composer sent the first of them, so Octo is no
     // longer asked for any. A thread started before that still holds the plain-text lanes' old

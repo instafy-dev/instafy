@@ -614,16 +614,16 @@ fn a_routed_browser_turn_that_hands_back_is_offered_no_build_request() {
 }
 
 /// A browser turn whose findings go back to the building turn reads its part of the request right
-/// before it: the reading, while what the request asks Octo to make is made right after the turn
-/// from its finding lines, so it never stops because it cannot make that, and never says it
-/// cannot. Its write-scope line says the same of its read-only mode. Told only that it was
-/// read-only and that the building turn after it makes the page, a comparison's browser turn,
-/// sent the person's own message, read the maker's home page, answered "I can't create the
-/// comparison page in this read-only turn" and that its research was not complete, and ended:
-/// the page was built with four of its fifteen facts (a local test, Nov 4). A map's turn reads
-/// the same, and so does a follow-up on the same browser thread ("Fill in what's still
-/// missing."). A turn that hands nothing back reads neither, and nothing else differs between
-/// the two prompts.
+/// before it: the reading, while what the request asks Octo to make is the building turn's part,
+/// from its finding lines, so it never stops because it cannot make that, and it says nothing
+/// about making it in its reply. Its write-scope line says why it changes no files. Told only
+/// that it was read-only and that the building turn after it makes the page, a comparison's
+/// browser turn, sent the person's own message, read the maker's home page, answered "I can't
+/// create the comparison page in this read-only turn" and that its research was not complete,
+/// and ended: the page was built with four of its fifteen facts (a local test, Nov 4). A map's
+/// turn reads the same, and so does a follow-up on the same browser thread ("Fill in what's
+/// still missing."). A turn that hands nothing back reads neither, and nothing else differs
+/// between the two prompts.
 #[test]
 fn a_browser_turn_that_hands_back_reads_its_part_right_before_the_request() {
     let tmp = space();
@@ -641,9 +641,9 @@ fn a_browser_turn_that_hands_back_reads_its_part_right_before_the_request() {
         })
     };
     let part = "\n\nYour part of this request is the reading: read every page it needs before you \
-                end. What it asks Octo to make is made right after this turn from your finding \
-                lines, so never stop because this turn can't make it, and never say that it \
-                can't.\n\nLatest user request:\n";
+                end. What it asks Octo to make is the building turn's part, from your finding \
+                lines, so never stop because this turn can't make it, and say nothing about \
+                making it in your reply.\n\nLatest user request:\n";
     let scope = "\nWrite-scope guardrail:\n- Mode: read_only\n- Rationale: explicit write scope \
                  metadata\n- This turn reads what the request needs, so it changes no files; the \
                  building turn right after it makes what the person asked for from your finding \
