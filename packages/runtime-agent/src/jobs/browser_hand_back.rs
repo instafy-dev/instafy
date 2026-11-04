@@ -6,7 +6,10 @@
 //! because the browser turn's reply is the answer. The browser turn that
 //! continues a building card (`metadata.browserRequestOf` with
 //! `metadata.browserHandsBack`) is told to end its reply with labelled
-//! findings, one line per page. Those lines are for Octo, not the person: the
+//! findings, one line per page, and, right before the request, that its part
+//! of the request is the reading, while what it asks Octo to make is the
+//! building turn's part ([`READING_PART`]). Those lines are for Octo, not the
+//! person: the
 //! runtime takes them out of the posted reply and keeps them in a Details note
 //! ([`move_findings_into_details`]). The turn posts no words of its own, unless
 //! a page stopped it: the building turn says what it made with them a moment
@@ -88,6 +91,20 @@ a bot check, a paywall, a block or HTTP 401/403/429, robots.txt, a download, a p
 Report only what the pages showed, each fact under a page you read that states it, not one that only quotes it, and copy no long listing text; Instafy adds when and in which browser each page was read. \
 The building turn can't open the browser: before you end, read what the request needs (each item's own page and, for reviews, review pages a page you read links to, else a reviewer's own site), then say what you read (\"Read 6 pages on <site>\"), never \"I couldn't finish\". \
 If a page stopped you (a manual step, a refused or challenge page), say so in your first line.";
+
+/// What a browser turn whose findings go back to the building turn ([`hands_back`]) reads last,
+/// after [`FINDINGS_CONTRACT`] and right before the request: its part of the request, in plain
+/// words. Its request is often the person's own message, which asks for the thing made too ("…,
+/// as a comparison page."). Told only that it was read-only and that the building turn after it
+/// makes the page, a comparison's browser turn read the maker's home page, answered "I can't
+/// create the comparison page in this read-only turn" and that its research was not complete,
+/// and ended: the page was built with four of its fifteen facts (a local test, Nov 4). It says
+/// nothing about making the thing in its reply, and is never told that the thing is made after
+/// it: when every page stopped it, no hand-back follows and [`move_findings_into_details`] posts
+/// its words, so a promise to make the thing would be kept by nothing.
+const READING_PART: &str = "\n\nYour part of this request is the reading: read every page it needs before you end. \
+What it asks Octo to make is the building turn's part, from your finding lines, \
+so never stop because this turn can't make it, and say nothing about making it in your reply.";
 
 /// The action a browser turn that carries on the person's own message answers
 /// with when that message asks Octo to make or change something in this space
@@ -236,11 +253,13 @@ pub(super) fn build_request_note() -> JobMessage {
 }
 
 /// The findings contract for a browser turn whose findings go back to the
-/// building turn ([`hands_back`]), or None for any other turn.
+/// building turn ([`hands_back`]), with its part of the request after it
+/// ([`READING_PART`]), or None for any other turn. The prompt puts the request
+/// right after this section.
 pub(super) fn format_browser_findings_contract_section(
     metadata: Option<&JsonValue>,
 ) -> Option<String> {
-    hands_back(metadata?).then(|| FINDINGS_CONTRACT.to_string())
+    hands_back(metadata?).then(|| format!("{FINDINGS_CONTRACT}{READING_PART}"))
 }
 
 /// A turn the controller stamped as a hand-back: it continues the building
@@ -829,6 +848,16 @@ mod tests {
                 r#"then say what you read ("Read 6 pages on <site>"), never "I couldn't finish""#
             ));
             assert!(!section.contains("If you stopped before finishing"));
+            // It ends with the turn's part of the request, which the request follows.
+            assert!(
+                section.ends_with(
+                    "say so in your first line.\n\nYour part of this request is the reading: \
+                     read every page it needs before you end. What it asks Octo to make is the \
+                     building turn's part, from your finding lines, so never stop because this \
+                     turn can't make it, and say nothing about making it in your reply."
+                ),
+                "{section}"
+            );
         }
         // A card for a question: the browser turn's reply is the answer, and
         // nothing goes back. A browser turn the person started themselves, or
@@ -909,6 +938,50 @@ mod tests {
         ] {
             assert!(!section.contains(old), "{old}: {section}");
         }
+    }
+
+    /// A browser turn whose findings go back to the building turn is told that making what the
+    /// request asks for is the building turn's part, so that it never stops because it cannot
+    /// make that, and to say nothing about making it in its reply: neither that it is made after
+    /// the turn, which the turn is never told, nor that it cannot be. When every page stopped the
+    /// turn, no hand-back follows (Studio and the controller send none for a turn that read no
+    /// page) and its words are what the person reads, so a promise to make the thing would be
+    /// kept by nothing.
+    #[test]
+    fn a_browser_turn_that_hands_back_says_nothing_about_making_what_is_asked() {
+        let metadata = json!({
+            "browserTransport": "shared",
+            "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+            "browserHandsBack": true,
+        });
+        let section = format_browser_findings_contract_section(Some(&metadata)).expect("contract");
+        let (_, part) = section.rsplit_once("\n\n").expect("the part");
+        assert_eq!(
+            part,
+            "Your part of this request is the reading: read every page it needs before you end. \
+             What it asks Octo to make is the building turn's part, from your finding lines, so \
+             never stop because this turn can't make it, and say nothing about making it in your \
+             reply."
+        );
+        for promise in ["is made", "right after", "never say that it can't"] {
+            assert!(!section.contains(promise), "{promise}: {section}");
+        }
+
+        // Every page stopped it: its words are posted as it wrote them, and its note names no
+        // page read, so no hand-back follows them.
+        let words = "The maker's site showed a bot check, and the review site asked for a sign-in.";
+        let stopped = [
+            r#"{"url": "https://maker.example/laptops", "stopped": "captcha"}"#,
+            r#"{"url": "https://reviews.example/laptop-13", "stopped": "login"}"#,
+        ]
+        .join("\n");
+        let mut turn = execution(&format!("{words}\n\n{stopped}"));
+        move_findings_into_details(&reading_the_note(browser_job(metadata)), &mut turn);
+        assert_eq!(turn.summary, words);
+        assert_eq!(
+            turn.final_messages[0].metadata.as_ref().unwrap()["browserFindings"],
+            json!({ "pages": 2, "pagesRead": 0 })
+        );
     }
 
     /// A page is cited only for a fact listed under it. A local test, Nov 2: a map's hand-back,

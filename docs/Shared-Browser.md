@@ -1866,7 +1866,12 @@ goes on from that run; otherwise the card waits for a press. A browser
 closed or hidden now keeps the press. A browser turn is told that it reads pages in
 Instafy's browser and that Octo builds in the chat, never only that it is
 read-only: told that, a browser turn asked for a page replied that "this run"
-was read-only.
+was read-only. One whose findings go back to the building turn is told that
+reading what the request needs is why it changes no files, and that the
+building turn right after it makes what the person asked for from its finding
+lines: told only that it reads pages and that the building turn after it makes
+the page, a comparison's browser turn read one page and answered that it could
+not create the page in a read-only turn.
 
 Action/cursor polling runs only while Shared is visible and filters the selected
 page. If the agent requests input while Chat is visible, the field guidance is
@@ -2491,7 +2496,15 @@ unless the policy is `"covered"`.
   building turn cannot open the browser, so it reads what the request needs
   before it ends:
   each item's own page and, for reviews, the review pages a page it read links
-  to, else a reviewer's own site. The building turn cites a page only for a
+  to, else a reviewer's own site. Right before the request it reads its part
+  of it in plain words: the reading, every page the request needs, while what
+  the request asks Octo to make is the building turn's part, from its finding
+  lines, so it never stops because it cannot make that, and it says nothing
+  about making it in its reply: when every page stopped it, no hand-back
+  follows, and its words are what the person reads. Its request is often the
+  person's own message, which asks for the page too: told only that it was
+  read-only, a comparison's browser turn read the maker's home page and ended
+  there. The building turn cites a page only for a
   fact listed under it; a place or claim the reply names with no page under it
   is read on its own page or left out. Such a browser turn that used the browser
   and wrote no finding line would hand nothing back, however many pages it
