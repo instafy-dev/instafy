@@ -635,6 +635,8 @@ async function browserWentAway(browser) {
 // max-height: 0). A scroll container with a real size only scrolls, so what it
 // holds can be brought into its box and counts as reachable there. An open
 // modal dialog or popover is drawn over the page, so no box around it clips it.
+// A select's open list offers an option unless the page hides it, alone or in
+// a group (optionOffered).
 function shownRuleInPage() {
   // Less than half a pixel either way is nothing a person can see or click.
   const MIN_SIZE = 0.5;
@@ -823,14 +825,35 @@ function shownRuleInPage() {
     if ((!parent || rendered(parent)) && reachable(rect, from, position, doc)) return true;
     return Array.from(element.labels || []).some((label) => elementShown(label));
   };
-  return { styleOf, isElement, flatParent, hiddenFromPeople, reachable, textRendered, elementShown };
+  // Whether a select's open list offers `option`: neither it nor a group it
+  // sits in is hidden (the `hidden` attribute, or display: none). A closed
+  // list's options have no box, so their styles say it; the open list draws
+  // none of a hidden group's options, and its keys skip them. A style that
+  // cannot be read leaves the option offered.
+  const optionOffered = (option) => {
+    for (
+      let node = option, depth = 0;
+      isElement(node) && String(node.tagName).toUpperCase() !== "SELECT" && depth < 64;
+      node = node.parentElement, depth += 1
+    ) {
+      if (node.hidden) return false;
+      try {
+        if (styleOf(node).display === "none") return false;
+      } catch (_) {
+        // Judged on the `hidden` attribute alone.
+      }
+    }
+    return true;
+  };
+  return { styleOf, isElement, flatParent, hiddenFromPeople, reachable, textRendered, elementShown, optionOffered };
 }
 
 // Runs inside the page (see withShownRule). The text a person can see, in
 // reading order, judged by the same rule as the controls. Block boundaries
 // become line breaks and table cells tabs, as in innerText; a closed select
-// shows its chosen option as a word of its own. Field values are never read,
-// and open shadow roots are read where they render.
+// shows its chosen option as a word of its own, and one drawn open (a
+// listbox) the options it offers. Field values are never read, and open
+// shadow roots are read where they render.
 function shownTextInPage(rule, request) {
   const doc = document;
   if (!doc.body) return "";
@@ -881,8 +904,9 @@ function shownTextInPage(rule, request) {
     });
   };
   const select = (element) => {
-    const options = Array.from(element.options || []);
-    const chosen = element.multiple || element.size > 1 ? options : Array.from(element.selectedOptions || []);
+    const chosen = element.multiple || element.size > 1
+      ? Array.from(element.options || []).slice(0, 10_000).filter((option) => rule.optionOffered(option))
+      : Array.from(element.selectedOptions || []);
     const value = chosen
       .map((option) => String(option.label || option.text || "").replace(/\s+/g, " ").trim())
       .filter(Boolean)
@@ -1418,10 +1442,27 @@ function describeInPage(rule, forms, names, element, sources) {
     area = "";
   }
 
+  // How many options a select's open list offers, counted as `choose` reads
+  // them (selectOptionsInPage, by rule.optionOffered): an option the page
+  // hides, alone or in a group, is left out. Only the number leaves the page
+  // here; the options' names are page text, which `choose` lists when a name
+  // misses.
+  let optionCount = null;
+  try {
+    if (element instanceof HTMLSelectElement) {
+      optionCount = Array.from(element.options)
+        .slice(0, 10_000)
+        .filter((option) => rule.optionOffered(option)).length;
+    }
+  } catch (_) {
+    optionCount = null;
+  }
+
   return {
     shown: true,
     expanded,
     area,
+    optionCount,
     tag: bounded(element.tagName.toLowerCase(), 64),
     role: bounded(element.getAttribute("role"), 128),
     idAttribute: bounded(element.getAttribute("id")),
@@ -1495,9 +1536,10 @@ function stableNameHints(description) {
 }
 
 // Page functions run inside the page: Playwright sends their source, so they
-// cannot use anything from this file's scope. The two that judge what a
-// person can see get the rule's source joined in front, so controls and text
-// are judged by one copy of it. Only this file's own functions are joined.
+// cannot use anything from this file's scope. The ones that judge what a
+// person can see get the rule's source joined in front, so controls, text and
+// a list's options are judged by one copy of it. Only this file's own
+// functions are joined.
 function withShownRule(pageFunction) {
   return new Function("...args", `return (${pageFunction})((${shownRuleInPage})(), ...args);`);
 }
@@ -1604,6 +1646,9 @@ async function describeElement(locator, index, hiddenNames, described = undefine
     nameHints,
     expanded: typeof attributes.expanded === "boolean" ? attributes.expanded : null,
     area: AREA_NAMES.has(attributes.area) ? attributes.area : "",
+    optionCount: Number.isSafeInteger(attributes.optionCount) && attributes.optionCount >= 0
+      ? Math.min(attributes.optionCount, MAX_SELECT_OPTIONS)
+      : null,
     box: {
       x: Math.round(box.x),
       y: Math.round(box.y),
@@ -2071,13 +2116,17 @@ function humanInputFieldsAsObserved(url, interactive, body) {
 // What the model reads about one control. Empty fields are left out to keep
 // the observation small; the box stays internal, where the visible cursor
 // uses it. A select says which option it holds (`chosen`), as a person sees it
-// closed; `choose` sets it.
+// closed, and how many options it has (`options`), so the one it holds never
+// reads as the whole list; `choose` sets it by any option's label.
 function publicElementDescription(description) {
   const entry = { index: description.index, label: description.label, tag: description.tag };
   for (const field of ["role", "href", "inputType", "autocomplete", "area", "chosen"]) {
     if (typeof description[field] === "string" && description[field]) {
       entry[field] = description[field];
     }
+  }
+  if (Number.isSafeInteger(description.options) && description.options >= 0) {
+    entry.options = description.options;
   }
   if (typeof description.expanded === "boolean") {
     entry.expanded = description.expanded;
@@ -2318,11 +2367,13 @@ async function snapshot(page, { withhold = false } = {}) {
         autocomplete: description.autocomplete
           ? strictlyMasked(description.autocomplete)
           : description.autocomplete,
-        // The option a select holds, page text masked like a control's name;
-        // a secret screen lists none.
+        // The option a select holds, page text masked like a control's name,
+        // and how many options it has, never their names; a secret screen
+        // says neither.
         chosen: isSelectDescription(description) && !view.secretScreen
           ? strictlyMasked(Array.from(description.shownText || "").slice(0, MAX_LABEL_CHARS).join(""))
           : "",
+        options: isSelectDescription(description) && !view.secretScreen ? description.optionCount : null,
       }),
     ),
     // How many controls were left out because a person cannot see them yet,
@@ -2963,15 +3014,15 @@ const MAX_OPTIONS_TEXT_CHARS = 1_500;
 // and the list to be shown and turned on.
 const CHOICE_SELECT_TIMEOUT_MS = 2_000;
 
-// Runs inside the page through Playwright, so it must not use anything from
-// this file's scope. A select's options as a person reads them once it is
-// open: whether it holds several at once, the options whose label reads as
-// `request.wanted` (as written, or else with case, accents and spacing
-// aside), how many there are, how many the page lets a person pick, and the
-// first of them, for an answer that lists them. Each gives its label, its
-// index and whether the page turned it off. An option the page hides is left
-// out: nobody can pick it.
-function selectOptionsInPage(element, request) {
+// Runs inside the page (see withShownRule). A select's options as a person
+// reads them once it is open: whether it holds several at once, the options
+// whose label reads as `request.wanted` (as written, or else with case,
+// accents and spacing aside), how many there are, how many the page lets a
+// person pick, and the first of them, for an answer that lists them. Each
+// gives its label, its index and whether the page turned it off. An option
+// the page hides, alone or in a group, is left out (rule.optionOffered):
+// nobody can pick it.
+function selectOptionsInPage(rule, element, request) {
   if (!(element instanceof HTMLSelectElement)) {
     return { kind: "select-options", select: false, multiple: false, matches: [], options: [], count: 0, enabled: 0 };
   }
@@ -2981,7 +3032,6 @@ function selectOptionsInPage(element, request) {
   const listChars = Math.min(Math.max(Number(request && request.listChars) || 0, 0), 4_000);
   const wanted = tidy(request && request.wanted);
   const wantedKey = key(wanted);
-  const view = element.ownerDocument.defaultView;
   const exact = [];
   const close = [];
   const options = [];
@@ -2989,13 +3039,7 @@ function selectOptionsInPage(element, request) {
   let count = 0;
   let enabled = 0;
   for (const option of Array.from(element.options).slice(0, limit)) {
-    let hidden = option.hidden;
-    try {
-      hidden = hidden || view.getComputedStyle(option).display === "none";
-    } catch (_) {
-      // An option whose style cannot be read counts as shown.
-    }
-    if (hidden) continue;
+    if (!rule.optionOffered(option)) continue;
     const label = tidy(option.label || option.text).slice(0, 500);
     const entry = { index: option.index, label, disabled: option.matches(":disabled") };
     count += 1;
@@ -3021,11 +3065,13 @@ function selectOptionsInPage(element, request) {
   };
 }
 
+const SELECT_OPTIONS_IN_PAGE = withShownRule(selectOptionsInPage);
+
 // A select's options as the page reports them (selectOptionsInPage), for
 // `wanted`. The step stops when the page did not say.
 async function selectOptions(target, wanted) {
   const answer = await target.locator
-    .evaluate(selectOptionsInPage, {
+    .evaluate(SELECT_OPTIONS_IN_PAGE, {
       kind: "select-options",
       wanted,
       limit: MAX_SELECT_OPTIONS,

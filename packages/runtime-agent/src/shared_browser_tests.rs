@@ -128,14 +128,16 @@ const sentFieldsFor = () => {
   return { names, count: mode === "submit-order-long-form" ? 30 : names.length };
 };
 // A journey planner's station list and a bulk-actions list, as the page
-// describer reports a select: its text is every option run together, and it
-// shows the option it holds.
+// describer reports a select: its text is every option run together, it
+// shows the option it holds, and it counts its options.
 const STATIONS = ["24 Agosto", "Aeroporto", "Aliados", "Campanh\u00e3", "S\u00e3o Bento", "Trindade"];
 const MOVED_STATIONS = ["24 Agosto", "Aeroporto", "Aliados", "Campanh\u00e3", "Trindade", "S\u00e3o Bento"];
 const BULK_ACTIONS = ["Select all", "Delete selected"];
 const LINES = ["All lines", "Line A", "Line D"];
 const list = (label, options, shownText) => ({
-  description: control(options.join(""), { tag: "select", inputType: "", labels: label, shownText }),
+  description: control(options.join(""), {
+    tag: "select", inputType: "", labels: label, shownText, optionCount: options.length,
+  }),
 });
 const special = {
   "station-list": list("Start", STATIONS, "Trindade"),
@@ -7259,7 +7261,9 @@ fn chosen_options(fixture: &EmbeddedControllerFixture) -> Vec<String> {
 /// A journey planner's station list labelled "Start" asked as a commit, named by all of its
 /// stations run together, and no step could pick one. Under routine browsing Octo chooses an
 /// option by its label with no prompt, case and accents aside; the list is named by its own
-/// label and says which option it holds; and a click on it is no commit button.
+/// label and says which option it holds and how many it has (a turn that saw only the one it
+/// held took it for the whole list and said a station wasn't on it); and a click on it is no
+/// commit button.
 #[test]
 fn a_routine_start_chooses_a_station_by_its_label_without_a_prompt() {
     let fixture = EmbeddedControllerFixture::new();
@@ -7268,6 +7272,8 @@ fn a_routine_start_chooses_a_station_by_its_label_without_a_prompt() {
     assert_eq!(station["label"], "Start");
     assert_eq!(station["tag"], "select");
     assert_eq!(station["chosen"], "Trindade");
+    // How many stations the list has, so the one it holds never reads as the whole list.
+    assert_eq!(station["options"], 6);
     let body = json!({"index": 0, "snapshotId": snapshot["snapshotId"], "option": "sao bento"})
         .to_string();
     // "100" fails any prompt this step would publish as unanswered.
@@ -7533,7 +7539,7 @@ fn a_choice_is_bound_to_the_option_it_was_judged_on() {
 
 /// `choose` sets a select and nothing else; an option the list does not have, or one the page
 /// turned off, chooses nothing, and the answer lists the options so the next try names one
-/// exactly. A secret screen says which option no list holds.
+/// exactly. A secret screen says neither which option a list holds nor how many it has.
 #[test]
 fn choose_refuses_what_is_no_list_and_options_a_list_does_not_offer() {
     let fixture = EmbeddedControllerFixture::new();
@@ -7597,6 +7603,7 @@ fn choose_refuses_what_is_no_list_and_options_a_list_does_not_offer() {
     assert_eq!(snapshot["secretScreen"], true);
     assert_eq!(snapshot["interactiveElements"][0]["tag"], "select");
     assert_eq!(snapshot["interactiveElements"][0].get("chosen"), None);
+    assert_eq!(snapshot["interactiveElements"][0].get("options"), None);
     // There, an option the list does not have chooses nothing, and the answer names none of the
     // list's options, which are the page's text.
     let body = json!({"index": 0, "snapshotId": snapshot["snapshotId"], "option": "Sao Bentoo"})

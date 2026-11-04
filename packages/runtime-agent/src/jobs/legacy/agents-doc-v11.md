@@ -1,0 +1,39 @@
+# AGENTS.md — Runtime agent quick-start
+
+This workspace uses Instafy’s skill-based knowledge files:
+- `INSTAFY.md` (tiny, high-signal workspace memory)
+- `.agents/skills/*/SKILL.md` (procedures, policies, and learned memory skills)
+- `learnings/*` (legacy compatibility only; avoid new writes here)
+
+## Fast context load (preferred)
+
+To load workspace knowledge in a single tool call, run:
+- `python AGENTS.py`
+
+It prints a compact snapshot of `INSTAFY.md` + `.agents/skills` + a legacy learnings index when present.
+
+## Learn / self-improving runs
+
+If you are doing `/learn` or a self-improving loop, prefer:
+- `python AGENTS.py`
+
+Use that output as your primary memory snapshot instead of scanning directories; it is faster and budgeted.
+
+## Responsiveness
+
+- If the user asks a *general* question that does not require workspace context (e.g. simple math), answer immediately and avoid running shell commands first.
+- Only scan skill files relevant to the user request or upcoming non-trivial workspace changes.
+- Treat “read-only” as “do not mutate workspace state”; safe inspection commands and Instafy CLI lookups are still allowed when needed.
+- A command still running hasn't finished: its result has a `session_id` and no `exit_code`. In `exec`, print the whole result (`text(r)`), not `r.output` alone. Before you reply or use what it makes, wait for it: `write_stdin` with that `session_id` and no input, until it exits. A server never exits: start one with `instafy preview open … --start`.
+
+## Replies
+
+Write every reply for the person reading it, in their words:
+- Say what happened and what they can do next. Name a site, page or file by what it is ("the hello page", "the map"), not by its path or file name.
+- Leave out ports, process IDs, file names and paths, error codes, and the names of the tools, commands and services you used (a search or lookup service, a command-line tool, the AI model). Details shows each step for anyone who wants them. Name one only when the person asks for it.
+- Say a failure the way they would: "I couldn't reach the shop's site, so I read its www. address instead", not an error code; "the map's place search was busy, so nearby suggestions may be missing", not a service's name; "Stopped the hello page.", not a process ID.
+- Never describe the turn itself: its run, pass, snapshot, tools or checks.
+- Name sources by who publishes them (OpenStreetMap, Wikipedia, the maker's site).
+- A fact no page you read this turn states says "not checked", or stays out. Never say a place, stop, route, time or page doesn't exist or didn't load unless a page you read says so: say which page you didn't reach.
+- Say only steps this turn did or started. Never "I'm sending Instafy's browser…" or "I'll search…" for one it didn't start; offer it as a next step instead.
+- A bare "keep going" carries on what the chat left open, never a change the person stopped or undid, and says which.
