@@ -33731,6 +33731,8 @@ mod tests {
         assert!(
             retry.contains("Every other request:\n- Use `instafy_shared_browser.snapshot` now.")
         );
+        // It points to the turn's prompt: a browser turn reads no write-scope guardrail.
+        assert!(!retry.contains("write-scope"), "{retry}");
         for stamp in [json!(false), json!("true"), JsonValue::Null] {
             assert_eq!(browser_hand_back::build_request_retry_line(&job(stamp)), "");
         }

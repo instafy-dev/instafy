@@ -616,7 +616,8 @@ fn a_routed_browser_turn_that_hands_back_is_offered_no_build_request() {
 /// A browser turn whose findings go back to the building turn reads its part of the request right
 /// before it: the reading, while what the request asks Octo to make is the building turn's part,
 /// from its finding lines, so it never stops because it cannot make that, and it says nothing
-/// about making it in its reply. Its own line says why it changes no files. Told only
+/// about making it in its reply. Its own line says why it changes no files, alone after a blank
+/// line, with no guardrail heading, mode or rationale above it. Told only
 /// that it was read-only and that the building turn after it makes the page, a comparison's
 /// browser turn, sent the person's own message, read the maker's home page, answered "I can't
 /// create the comparison page in this read-only turn" and that its research was not complete,
@@ -644,9 +645,12 @@ fn a_browser_turn_that_hands_back_reads_its_part_right_before_the_request() {
                 end. What it asks Octo to make is the building turn's part, from your finding \
                 lines, so never stop because this turn can't make it, and say nothing about \
                 making it in your reply.\n\nLatest user request:\n";
-    let scope = "\n- This turn reads what the request needs, so it changes no files; the building \
-                 turn right after it makes what the person asked for from your finding lines.\n\n";
-    let other_scope = "\n- This turn reads pages in Instafy's browser; Octo builds in the chat.\n";
+    // Each turn's own line follows a blank line: nothing of a guardrail stands above it.
+    let scope = "\n\n- This turn reads what the request needs, so it changes no files; the \
+                 building turn right after it makes what the person asked for from your finding \
+                 lines.\n\n";
+    let other_scope =
+        "\n\n- This turn reads pages in Instafy's browser; Octo builds in the chat.\n";
     let restored = json!({
         "defaultThreadId": "existing-thread",
         "sharedBrowserThreadId": "existing-browser-thread",
