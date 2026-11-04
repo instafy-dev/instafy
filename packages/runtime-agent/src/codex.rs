@@ -546,11 +546,15 @@ fn default_final_output_json_schema() -> JsonValue {
     .expect("default final output schema must be valid JSON")
 }
 
-/// The default grammar without its notes on filling in a browser card (`browserLocation`,
-/// `continueBuilding`), for a Shared Browser turn. Such a turn may not ask for the browser: the
-/// runtime drops its card, and browse-then-build turns ended on one filled in as those notes
-/// say, where they could have read the pages themselves. The fields stay, so a reply keeps its
-/// shape.
+/// The default grammar for a Shared Browser turn, without what such a turn cannot use: its notes
+/// on filling in a browser card (`browserLocation`, `continueBuilding`), and the `code` and
+/// `files` fields. Such a turn may not ask for the browser: the runtime drops its card, and
+/// browse-then-build turns ended on one filled in as those notes say, where they could have read
+/// the pages themselves. Nor does it change a file or return code: it reads pages, read-only. A
+/// comparison's browser turn whose findings went to a build filled in an empty `files` and
+/// answered, after one page, that it could not create the page in its read-only turn (a local
+/// test, Nov 4). The other fields stay, with their types, so a reply keeps the rest of its shape;
+/// every other turn, a Personal Browser turn's included, keeps the default.
 fn shared_browser_final_output_json_schema() -> JsonValue {
     let mut schema = default_final_output_json_schema();
     if let Some(fields) = schema
@@ -562,6 +566,16 @@ fn shared_browser_final_output_json_schema() -> JsonValue {
                 field.remove("description");
             }
         }
+    }
+    let unused = ["code", "files"];
+    if let Some(fields) = schema
+        .get_mut("properties")
+        .and_then(JsonValue::as_object_mut)
+    {
+        fields.retain(|field, _| !unused.contains(&field.as_str()));
+    }
+    if let Some(required) = schema.get_mut("required").and_then(JsonValue::as_array_mut) {
+        required.retain(|field| field.as_str().is_none_or(|field| !unused.contains(&field)));
     }
     schema
 }
@@ -8969,8 +8983,12 @@ mod tests {
 
     /// A Shared Browser turn's reply grammar says nothing of the browser card: the runtime drops
     /// a card from such a turn, and two browse-then-build turns ended on one filled in as the
-    /// default grammar's notes say (`browserLocation` auto, `continueBuilding` true). Its fields
-    /// and their types stay, so a reply keeps its shape; every other turn keeps the notes.
+    /// default grammar's notes say (`browserLocation` auto, `continueBuilding` true). Nor has it
+    /// the `code` and `files` fields: such a turn reads pages and changes no file, and a
+    /// comparison's browser turn whose findings went to a build filled in an empty `files` and
+    /// answered that it could not create the page in its read-only turn (a local test, Nov 4).
+    /// The rest keeps its fields and their types; every other turn keeps the notes and both
+    /// fields.
     #[test]
     fn a_shared_browser_turns_reply_grammar_says_nothing_of_the_browser_card() {
         let _env_lock = env_lock();
@@ -9010,7 +9028,20 @@ mod tests {
             );
         }
         assert_eq!(action(&browser)["required"], action(&building)["required"]);
-        assert_eq!(browser["required"], building["required"]);
+        assert_eq!(browser["required"], json!(["summary", "actions"]));
+        assert_eq!(
+            building["required"],
+            json!(["summary", "code", "files", "actions"])
+        );
+        for field in ["code", "files"] {
+            assert!(browser["properties"].get(field).is_none(), "{field}");
+            assert!(building["properties"].get(field).is_some(), "{field}");
+        }
+        assert_eq!(
+            browser["properties"]["summary"],
+            building["properties"]["summary"]
+        );
+        assert_eq!(browser["additionalProperties"], false);
     }
 
     #[test]

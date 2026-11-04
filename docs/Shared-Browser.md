@@ -1866,7 +1866,12 @@ goes on from that run; otherwise the card waits for a press. A browser
 closed or hidden now keeps the press. A browser turn is told that it reads pages in
 Instafy's browser and that Octo builds in the chat, never only that it is
 read-only: told that, a browser turn asked for a page replied that "this run"
-was read-only.
+was read-only. One whose findings go back to the building turn is told that
+reading what the request needs is why it changes no files, and that the
+building turn right after it makes what the person asked for from its finding
+lines: told only that it reads pages and that the building turn after it makes
+the page, a comparison's browser turn read one page and answered that it could
+not create the page in a read-only turn.
 
 Action/cursor polling runs only while Shared is visible and filters the selected
 page. If the agent requests input while Chat is visible, the field guidance is
@@ -2462,7 +2467,9 @@ unless the policy is `"covered"`.
   first turn or any later one, and a Shared Browser turn's reply format leaves
   out the notes on filling one in: a chat keeps one browser thread, so what its
   first turn is offered stays in every later one, and a browser turn that
-  ended on a card stopped where it could have read the pages itself. A card
+  ended on a card stopped where it could have read the pages itself. Nor has
+  that format the `code` and `files` fields: a browser turn reads pages and
+  changes no file, and every turn of its thread answers in that format. A card
   from a turn that may not send it, and one dropped as the reply is read (no
   task, a task over 8,000 characters or an unknown browser location), leaves a
   line in the runtime's log with the turn's job.
@@ -2491,7 +2498,13 @@ unless the policy is `"covered"`.
   building turn cannot open the browser, so it reads what the request needs
   before it ends:
   each item's own page and, for reviews, the review pages a page it read links
-  to, else a reviewer's own site. The building turn cites a page only for a
+  to, else a reviewer's own site. Right before the request it reads its part
+  of it in plain words: the reading, every page the request needs, while what
+  the request asks Octo to make is made right after the turn from its finding
+  lines, so it never stops because it cannot make that, and never says it
+  cannot. Its request is often the person's own message, which asks for the
+  page too: told only that it was read-only, a comparison's browser turn read
+  the maker's home page and ended there. The building turn cites a page only for a
   fact listed under it; a place or claim the reply names with no page under it
   is read on its own page or left out. Such a browser turn that used the browser
   and wrote no finding line would hand nothing back, however many pages it
