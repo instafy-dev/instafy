@@ -422,8 +422,10 @@ test("compare on a phone: a missing value that can still be checked, opened or w
     // one reason for two values: said once
     item("pro", "Maker Laptop Pro", { cpu: MAKER("Chip Ultra Series 3", "pro"), battery: { note: "maker.example did not answer" }, price: { v: "€1,349", src: "Shop", url: "https://shop.example/pro", date: DAY },
       weight: { note: "maker.example did not answer" } }),
-    // a store that can be opened (no binder): "Price unknown · Open Shop ↗" stays on the right
-    item("air", "Maker Laptop Air", { cpu: MAKER("Chip Series 3", "air"), price: { note: "not read yet" } }, { store: { name: "Shop", url: "https://shop.example/air", readable: true } }),
+    // a store that can be opened (no binder): "Price unknown · Open Shop ↗" stays on the right; notes that only say a
+    // value is missing are not repeated
+    item("air", "Maker Laptop Air", { cpu: MAKER("Chip Series 3", "air"), price: { note: "not read yet" }, battery: { note: "Battery not checked." }, weight: { note: "Unknown" } },
+      { store: { name: "Shop", url: "https://shop.example/air", readable: true } }),
     // the maker's page was read and does not give the weight: "Not listed · checked … ↗" stays a fact
     item("max", "Maker Laptop Max", { cpu: MAKER("Other Chip AI 300 Series", "max"), weight: { src: "Maker", url: "https://maker.example/max/specs", date: DAY }, battery: { v: "85 Wh", url: "https://maker.example/max" } }),
   ];

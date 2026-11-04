@@ -399,13 +399,13 @@
     return !drawn.querySelector("a, button, svg, .err");
   }
   /** Why a value is missing, from its note; "" when the note only says that it is ("Not checked", "Weight not
-   * checked"). */
+   * checked", "Unknown"). */
   function gapNote(f, col) {
     var note = String((f && f.note) || "").replace(/\s+/g, " ").trim().replace(/\.$/, "");
     var rest = note.toLowerCase();
     var label = String(col.label || "").toLowerCase();
     if (label && rest.indexOf(label) === 0) rest = rest.slice(label.length).trim();
-    return !rest || /^((is|are|was|were) )?not (yet )?(checked|verified|found|known|listed|read)( yet)?$/.test(rest) ? "" : note.slice(0, 100);
+    return !rest || /^(unknown|to confirm|((is|are|was|were) )?not (yet )?(checked|verified|found|known|listed|read)( yet)?)$/.test(rest) ? "" : note.slice(0, 100);
   }
   /** "Not found yet: Weight, Price, Reviews"; values missing for one reason share it: "Not found yet: Price and Battery
    * (maker.example did not answer), Suction". */
