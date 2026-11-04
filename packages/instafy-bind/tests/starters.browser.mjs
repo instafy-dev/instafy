@@ -749,7 +749,13 @@ try {
       await page.waitForTimeout(400);
       await command(binder, "select", { ref: "laptop:l6" });
       await page.waitForFunction(() => document.querySelector("#row-l6.is-selected"));
-      await page.waitForTimeout(1200);
+      // the scroll has ended once two readings 200 ms apart agree
+      for (let last = -1, i = 0; i < 25; i++) {
+        await page.waitForTimeout(200);
+        const y = await page.evaluate(() => scrollY);
+        if (y === last) break;
+        last = y;
+      }
       const got = await page.evaluate(() => { const r = document.getElementById("row-l6").getBoundingClientRect(); return { centre: Math.round((r.top + r.bottom) / 2), screen: Math.round(innerHeight / 2) }; });
       ok(Math.abs(got.centre - got.screen) <= 2, `375 px, motion ${reducedMotion}: the row chat selects lands centred (${JSON.stringify(got)})`);
       await context.close();
