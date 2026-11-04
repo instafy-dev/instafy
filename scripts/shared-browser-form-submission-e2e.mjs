@@ -36,7 +36,8 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    among their options, holding several options, long, posting to another
 //    site after an Allow or from Octo's own tab, signing in with another
 //    account, on a page that may show a secret, moving their options while
-//    Octo chooses, and of thirty, none or one.
+//    Octo chooses, of thirty, none or one, and hiding some, alone or in a
+//    group.
 // Every site is a loopback fixture; Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
@@ -178,13 +179,17 @@ const LISTS = `<h1>Lists</h1>
 <label for="airport">Airport</label><select id="airport" name="airport">${AIRPORTS.map((name) => `<option>${name}</option>`).join("")}</select>
 <form action="{other}/collect" method="post"><label for="bulk">Bulk actions</label>
 <select id="bulk" name="bulk" onchange="this.form.submit()"><option>Select all</option><option>Delete selected</option></select></form>`;
-// A list of thirty stops that holds a prompt the open list hides, a list the
-// page has not filled yet, and a list of one zone.
+// A list of thirty stops that holds a prompt the open list hides, and two
+// more stops in groups it hides, a list the page has not filled yet, a list
+// of one zone, and a list drawn open that hides a line, alone and in a group.
 const STOPS = Array.from({ length: 30 }, (_, index) => `Stop ${String(index + 1).padStart(2, "0")}`);
+const HIDDEN_STOPS = ["Stop 31", "Stop 32"];
+const stopOptions = (stops) => stops.map((stop) => `<option>${stop}</option>`).join("");
 const STOP_LISTS = `<h1>Stops</h1>
-<label for="from-stop">From</label><select id="from-stop" name="from"><option value="" hidden selected>Choose a stop</option>${STOPS.map((stop) => `<option>${stop}</option>`).join("")}</select>
+<label for="from-stop">From</label><select id="from-stop" name="from"><option value="" hidden selected>Choose a stop</option>${stopOptions(STOPS.slice(0, 15))}<optgroup label="Closed" hidden>${stopOptions(HIDDEN_STOPS.slice(0, 1))}</optgroup><optgroup label="Night" style="display: none">${stopOptions(HIDDEN_STOPS.slice(1))}</optgroup>${stopOptions(STOPS.slice(15))}</select>
 <label for="to-stop">To</label><select id="to-stop" name="to"></select>
-<label for="zone">Zone</label><select id="zone" name="zone"><option>Zone A</option></select>`;
+<label for="zone">Zone</label><select id="zone" name="zone"><option>Zone A</option></select>
+<label for="line">Line</label><select id="line" name="line" size="3"><option>Line A</option><option hidden>Line H</option><optgroup label="Closed" hidden><option>Line X</option></optgroup><option>Line B</option></select>`;
 // A list whose option signs in with another account.
 const ACCOUNT_LIST = `<h1>Account</h1>
 <label for="account">Account</label><select id="account" onchange="location.href = '/oauth/' + this.value"><option value="none">Choose</option><option value="github">Sign in with GitHub</option></select>`;
@@ -890,7 +895,9 @@ export async function runSharedBrowserFormSubmissionFixture() {
     // one it holds, so that one never reads as the whole list: thirty stops
     // held on a prompt the open list hides count thirty, and any of them is
     // chosen by its label; a list the page has not filled counts none and
-    // holds none; a list of one counts one.
+    // holds none; a list of one counts one. A stop in a group the page hides
+    // is drawn nowhere, so it is neither counted nor chosen, and a list drawn
+    // open reads none of the options it hides.
     await runPage.goto(`${sites().transit}/scenario/stops`);
     snapshot = await ok("GET", "/v1/snapshot");
     const namesOtherStops = (observed, held) => STOPS.filter((stop) => stop !== held && JSON.stringify(observed).includes(stop));
@@ -901,6 +908,11 @@ export async function runSharedBrowserFormSubmissionFixture() {
     assert.equal(list(snapshot, "To").chosen, undefined);
     assert.equal(list(snapshot, "Zone").options, 1);
     assert.equal(list(snapshot, "Zone").chosen, "Zone A");
+    // A list drawn open shows the options it offers in the page's text, and
+    // none the page hides.
+    assert.equal(list(snapshot, "Line").options, 2);
+    assert.match(snapshot.visibleText, /Line A, Line B/u);
+    assert.doesNotMatch(snapshot.visibleText, /Line H|Line X/u, "the text names no hidden option");
     start = prompts.length;
     requests.length = 0;
     chosen = await ok("POST", "/v1/choose", { index: list(snapshot, "From").index, snapshotId: snapshot.snapshotId, option: "Stop 17" });
@@ -910,6 +922,18 @@ export async function runSharedBrowserFormSubmissionFixture() {
     assert.deepEqual(namesOtherStops(chosen, "Stop 17"), [], "the reading after names only the stop chosen");
     assert.deepEqual(promptsSince(start), [], "Choosing a stop asked nothing");
     assert.deepEqual(requests, [], "Choosing a stop sent nothing");
+    assert.ok(!HIDDEN_STOPS.some((stop) => JSON.stringify(chosen).includes(stop)), "a reading names no hidden stop");
+    for (const stop of HIDDEN_STOPS) {
+      const missed = await refused(
+        new RegExp(`No option in "From" is called "${stop}", so nothing was chosen\\. Its options: Stop 01, .*Stop 30\\. Choose one of them by its label\\.`, "u"),
+        "POST", "/v1/choose", { index: list(chosen, "From").index, snapshotId: chosen.snapshotId, option: stop },
+      );
+      assert.equal(missed.split(stop).length, 2, `the options listed leave out the hidden ones: ${missed}`);
+      assert.ok(!HIDDEN_STOPS.some((hidden) => hidden !== stop && missed.includes(hidden)), missed);
+    }
+    assert.equal(await runPage.locator("#from-stop").inputValue(), "Stop 17", "a hidden stop was not chosen");
+    assert.deepEqual(promptsSince(start), [], "Naming a hidden stop asked nothing");
+    assert.deepEqual(requests, [], "Naming a hidden stop sent nothing");
 
     const result = {
       status: "passed",
@@ -940,7 +964,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
         "a risky choice the person allows, and a choice in Octo's own tab, send no form anywhere the step was not approved to send it",
         "an option that signs in with another account is refused before any prompt, and an answer on a page that may show a secret names no option",
         "a list that moves its options while Octo chooses never gets another option than the one named",
-        "a list's reading says how many options it has (thirty, none, one, 1,200) and names only the one it holds, and any of them is chosen by its label; a secret screen counts none",
+        "a list's reading says how many options it has (thirty, none, one, 1,200) and names only the one it holds, and any of them is chosen by its label; an option in a group the page hides is neither counted, chosen nor read; a secret screen counts none",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",
