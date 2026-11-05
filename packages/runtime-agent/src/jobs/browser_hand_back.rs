@@ -79,25 +79,27 @@ const TURNS_SINCE_LEFT_OUT_KEY: &str = "browser_turns_since_earlier_left_out";
 /// An older controller refuses the hand-back of such a turn as empty.
 const READS_NOTE_KEY: &str = "browser_hand_back_reads_note";
 
-/// What a browser turn whose findings go back to the building turn is told ([`hands_back`]). Its
-/// task is often the person's own message, which the routing step sent here. The turn that builds
-/// next is a hand-back, which never opens the browser (`suppress_browser_requests_where_unsupported`),
-/// so this turn reads what the request needs before it ends: a comparison's browser turn read one
-/// maker page and handed back, and its follow-up saw links to reviews of each laptop and opened
-/// none.
+/// What a browser turn whose findings go back to the building turn is told ([`hands_back`]): how
+/// to write its finding lines, the one format it reads (its browser skill gives none). What it
+/// reads, and who makes the thing, is [`READING_PART`]'s, said once: told who builds three times
+/// (here, in its line about files and in its part), beside lines that said stop early, the same
+/// comparison message read eighteen, one, seven and one pages in four local tests (Oct 31 to
+/// Nov 4).
 const FINDINGS_CONTRACT: &str = "\n\nFindings for the building turn:\n\
-A building turn makes what the person asked for from your findings. \
 End your reply with one finding per page, each one JSON object on its own line: \
 `{\"url\": \"<address>\", \"title\": \"<page title>\", \"facts\": [\"<what the page showed>\"]}` for a page you read, \
 or `{\"url\": \"<address>\", \"stopped\": \"login|captcha|paywall|blocked|robots|download|secret|link-only\"}` for one that ended at a sign-in, \
 a bot check, a paywall, a block or HTTP 401/403/429, robots.txt, a download, a page showing secrets or a link-only site (never retry such a page another way). \
-Report only what the pages showed, each fact under a page you read that states it, not one that only quotes it, and copy no long listing text; Instafy adds when and in which browser each page was read. \
-The building turn can't open the browser: before you end, read what the request needs (each item's own page and, for reviews, review pages a page you read links to, else a reviewer's own site), then say what you read (\"Read 6 pages on <site>\"), never \"I couldn't finish\". \
+Report only what the pages showed, never a secret, each fact under a page you read that states it, not one that only quotes it, and copy no long listing text; Instafy adds when and in which browser each page was read. \
+Say what you read (\"Read 6 pages on <site>\"), never \"I couldn't finish\". \
 If a page stopped you (a manual step, a refused or challenge page), say so in your first line.";
 
 /// What a browser turn whose findings go back to the building turn ([`hands_back`]) reads last,
 /// after [`FINDINGS_CONTRACT`] and right before the request: its part of the request, in plain
-/// words. Its request is often the person's own message, which asks for the thing made too ("…,
+/// words, with what reading the request needs means. The turn that builds next is a hand-back,
+/// which never opens the browser (`suppress_browser_requests_where_unsupported`): a comparison's
+/// browser turn read one maker page and handed back, and its follow-up saw links to reviews of
+/// each laptop and opened none. Its request is often the person's own message, which asks for the thing made too ("…,
 /// as a comparison page."). Told only that it was read-only and that the building turn after it
 /// makes the page, a comparison's browser turn read the maker's home page, answered "I can't
 /// create the comparison page in this read-only turn" and that its research was not complete,
@@ -105,7 +107,8 @@ If a page stopped you (a manual step, a refused or challenge page), say so in yo
 /// nothing about making the thing in its reply, and is never told that the thing is made after
 /// it: when every page stopped it, no hand-back follows and [`move_findings_into_details`] posts
 /// its words, so a promise to make the thing would be kept by nothing.
-const READING_PART: &str = "\n\nYour part of this request is the reading: read every page it needs before you end. \
+const READING_PART: &str = "\n\nYour part of this request is the reading: read every page it needs before you end \
+(each item's own page and, for reviews, review pages a page you read links to, else a reviewer's own site). \
 What it asks Octo to make is the building turn's part, from your finding lines, \
 so never stop because this turn can't make it, and say nothing about making it in your reply.";
 
@@ -930,16 +933,18 @@ mod tests {
             // The browser turn says what it read, and never that it couldn't finish what the
             // next turn does.
             assert!(section.contains(
-                r#"then say what you read ("Read 6 pages on <site>"), never "I couldn't finish""#
+                r#"Say what you read ("Read 6 pages on <site>"), never "I couldn't finish""#
             ));
             assert!(!section.contains("If you stopped before finishing"));
             // It ends with the turn's part of the request, which the request follows.
             assert!(
                 section.ends_with(
                     "say so in your first line.\n\nYour part of this request is the reading: \
-                     read every page it needs before you end. What it asks Octo to make is the \
-                     building turn's part, from your finding lines, so never stop because this \
-                     turn can't make it, and say nothing about making it in your reply."
+                     read every page it needs before you end (each item's own page and, for \
+                     reviews, review pages a page you read links to, else a reviewer's own site). \
+                     What it asks Octo to make is the building turn's part, from your finding \
+                     lines, so never stop because this turn can't make it, and say nothing about \
+                     making it in your reply."
                 ),
                 "{section}"
             );
@@ -987,7 +992,7 @@ mod tests {
         let section = format_browser_findings_contract_section(Some(&metadata)).expect("contract");
         assert!(
             section.contains(
-                "Report only what the pages showed, each fact under a page you read that states it, not one that only quotes it, and copy no long listing text;"
+                "Report only what the pages showed, never a secret, each fact under a page you read that states it, not one that only quotes it, and copy no long listing text;"
             ),
             "{section}"
         );
@@ -998,7 +1003,8 @@ mod tests {
     /// a building turn (it was the person's own message) and that the building turn finishes the
     /// work, a comparison's browser turn read one maker page in 14 s and handed back; its
     /// follow-up read four, wrote that one of them links to reviews of each model, and opened none
-    /// of them, while the hand-back was told the person can ask for a missing page.
+    /// of them, while the hand-back was told the person can ask for a missing page. What the
+    /// request needs is said in its part, once: the findings section says no more who builds.
     #[test]
     fn a_browser_turn_that_hands_back_reads_what_the_request_needs() {
         let metadata = json!({
@@ -1008,13 +1014,18 @@ mod tests {
         });
         let section = format_browser_findings_contract_section(Some(&metadata)).expect("contract");
         for line in [
-            "\nA building turn makes what the person asked for from your findings. End your reply",
-            "The building turn can't open the browser: before you end, read what the request needs \
-             (each item's own page and, for reviews, review pages a page you read links to, else a \
-             reviewer's own site), then say what you read (\"Read 6 pages on <site>\"), never \"I \
-             couldn't finish\". ",
+            "\nFindings for the building turn:\nEnd your reply",
+            "read every page it needs before you end (each item's own page and, for reviews, \
+             review pages a page you read links to, else a reviewer's own site). ",
+            "Say what you read (\"Read 6 pages on <site>\"), never \"I couldn't finish\". ",
         ] {
             assert!(section.contains(line), "{line}: {section}");
+        }
+        for twice in [
+            "A building turn makes what the person asked for",
+            "The building turn can't open the browser",
+        ] {
+            assert!(!section.contains(twice), "{twice}: {section}");
         }
         for old in [
             "Octo asked for this browser task from a building turn",
@@ -1043,10 +1054,11 @@ mod tests {
         let (_, part) = section.rsplit_once("\n\n").expect("the part");
         assert_eq!(
             part,
-            "Your part of this request is the reading: read every page it needs before you end. \
-             What it asks Octo to make is the building turn's part, from your finding lines, so \
-             never stop because this turn can't make it, and say nothing about making it in your \
-             reply."
+            "Your part of this request is the reading: read every page it needs before you end \
+             (each item's own page and, for reviews, review pages a page you read links to, else \
+             a reviewer's own site). What it asks Octo to make is the building turn's part, from \
+             your finding lines, so never stop because this turn can't make it, and say nothing \
+             about making it in your reply."
         );
         for promise in ["is made", "right after", "never say that it can't"] {
             assert!(!section.contains(promise), "{promise}: {section}");

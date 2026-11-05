@@ -125,6 +125,9 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     // From before a reply said a site or page lacks something (a station, a route) only when a
     // page it read said so.
     include_str!("legacy/agents-doc-v11.md"),
+    // From before it stopped telling every turn to load the memory its prompt already holds
+    // (`python AGENTS.py`, a "fast context load" and a `/learn` section).
+    include_str!("legacy/agents-doc-v12.md"),
 ];
 const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -353,6 +356,9 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     include_str!("legacy/interactive-artifacts-v8.md"),
     // From before a page said what phone-first means: never wider than the screen, one column when narrow.
     include_str!("legacy/interactive-artifacts-v9.md"),
+    // From before a reply about a page to share said who can open it and how to get a link, not as
+    // an assumption, and replies to send nobody sees went.
+    include_str!("legacy/interactive-artifacts-v10.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),
@@ -460,6 +466,12 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // with the reason (a map's skill finds and cites its places itself), and a bare "keep going"
     // carried on what the chat's replies or page mark not confirmed, such as a route.
     include_str!("legacy/browser-automation-v28.md"),
+    // From before a browser turn read one set of rules: its run instructions say how its browser
+    // works, which steps are the person's and what asks first, and the skill keeps what they do
+    // not say; lines for scripts and one-call checks ("stop there"), session kinds no turn can
+    // make, a second findings format, a third copy of how a list is set and a building turn's
+    // card (`no_shell_omits`) left what a browser turn reads.
+    include_str!("legacy/browser-automation-v29.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,
@@ -512,6 +524,10 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     // From before it said that a browser turn's readers are its browser tools and the `instafy`
     // commands are for building turns.
     include_str!("legacy/web-research-v13.md"),
+    // From before a browser turn left out the readers, searches and page-building rules only a
+    // building turn can use (`no_shell_omits`), and reading stopped "when material facts are
+    // supported".
+    include_str!("legacy/web-research-v14.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -529,6 +545,14 @@ const SKILL_READING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-skill-reading/SKILL.md"
 ));
+/// Earlier bundled copies of the skill-reading rules a scaffold may replace.
+const LEGACY_SKILL_READING_TEMPLATES: &[&str] = &[
+    // From before a turn read the skills it picks, and what they say to read, without caps:
+    // "stop early", "at most 2 links", "more than ~8k characters … stop reading". Map turns that
+    // carried them read the map skill's trip reference cut at 1,400 or 4,000 tokens, or never,
+    // and built no plan (local tests, Nov 1 and Nov 4); one without them read it whole.
+    include_str!("legacy/skill-reading-v1.md"),
+];
 const LEARNED_INDEX_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-learned/SKILL.md"
@@ -914,7 +938,12 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
         }
     }
 
-    if write_missing_memory_file(workspace_dir, &skill_reading_path, SKILL_READING_TEMPLATE) {
+    if upgrade_bundled_skill(
+        workspace_dir,
+        &skill_reading_path,
+        LEGACY_SKILL_READING_TEMPLATES,
+        SKILL_READING_TEMPLATE,
+    ) {
         wrote_any = true;
     }
 
@@ -2318,6 +2347,11 @@ mod tests {
                 LEGACY_WEB_RESEARCH_LINK_ONLY_TEMPLATES,
                 WEB_RESEARCH_LINK_ONLY_TEMPLATE,
             ),
+            (
+                "skill reading",
+                LEGACY_SKILL_READING_TEMPLATES,
+                SKILL_READING_TEMPLATE,
+            ),
         ] {
             for (index, copy) in earlier.iter().enumerate() {
                 assert_ne!(
@@ -2819,6 +2853,90 @@ mod tests {
         }
     }
 
+    /// A turn reads the skills it picks, and what they say to read, with no cap: the skill-reading
+    /// rules said to stop early, follow at most 2 links and stop reading past ~8k characters, and
+    /// map turns that carried them read the map skill's trip reference cut at 1,400 or 4,000
+    /// tokens, or never, and built no plan (local tests, Nov 1 and Nov 4). The rules were written
+    /// only into a space that had none; an unedited earlier copy is upgraded now, and an edited
+    /// one is kept. Nor does the persistent-contexts root say to stop once a turn can act, or name
+    /// browser sessions no turn can make.
+    #[test]
+    fn a_turn_reads_the_skills_it_picks_with_no_cap() {
+        for cap in [
+            "Stop early",
+            "Cap link-following",
+            "Avoid deep reads",
+            "Context budget awareness",
+            "~8k characters",
+            "ask the user which path they want",
+            "ask one short clarifying question",
+        ] {
+            assert!(!SKILL_READING_TEMPLATE.contains(cap), "{cap}");
+        }
+        assert!(SKILL_READING_TEMPLATE.contains("**Conflict handling**"));
+        assert!(
+            SKILL_READING_TEMPLATE
+                .contains("Do not mention internal skill names to the user unless they asked.")
+        );
+        for gone in [
+            "Stop when you can act safely.",
+            "isolated session",
+            "runtime-backed session",
+        ] {
+            assert!(!PERSISTENT_CONTEXTS_TEMPLATE.contains(gone), "{gone}");
+        }
+
+        let previous = include_str!("legacy/skill-reading-v1.md");
+        assert!(previous.contains("If you’ve read more than ~8k characters of skills/docs in one turn, stop reading and act."));
+        let workspace = tempdir().expect("workspace tempdir");
+        ensure_project_memory_scaffold(workspace.path());
+        let path = workspace.path().join(SKILL_READING_RELATIVE_PATH);
+        assert_eq!(fs::read_to_string(&path).unwrap(), SKILL_READING_TEMPLATE);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), SKILL_READING_TEMPLATE);
+        let edited = format!("{previous}\n- Our own rule.\n");
+        fs::write(&path, &edited).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+    }
+
+    /// A page the person wants to share: its reply says in one line who can open it and how to get
+    /// a link anyone can open, not as an assumption. For "a small page I can share", a reply said
+    /// "Assumed: you wanted a simple visit-info page, not a public link." and never said either (a
+    /// local test, Nov 4); others said "Built and opened…" (nothing was opened), "the provided
+    /// read" and "updated for viewers". A vague ask's defaults keep their one `Assumed:` line. The
+    /// replies to send as-is, which Studio never shows, go. An unedited earlier copy is upgraded.
+    #[test]
+    fn a_shared_pages_reply_says_who_can_open_it_and_how_to_get_a_link() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let reply = flat(
+            INTERACTIVE_ARTIFACTS_TEMPLATE
+                .split("## 4. Reply")
+                .nth(1)
+                .expect("reply section"),
+        );
+        assert!(reply.contains("A page they want to share says in one line who can open it (people in this space) and how to get a link anyone can open (ask for a public link), not as an assumption."));
+        assert!(reply.contains("ONE `Assumed:` line for the defaults you chose"));
+        assert!(reply.contains("never point them to it or say it opened"));
+        assert!(reply.contains("\"the provided read\" or \"updated for viewers\""));
+        let page = flat(INTERACTIVE_ARTIFACTS_TEMPLATE);
+        for gone in ["suggested replies", "reload open viewers"] {
+            assert!(!page.contains(gone), "{gone}");
+        }
+        let previous = include_str!("legacy/interactive-artifacts-v10.md");
+        assert!(previous.contains("ONE `Assumed:` line"));
+        let workspace = tempdir().expect("workspace tempdir");
+        let path = workspace.path().join(INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            INTERACTIVE_ARTIFACTS_TEMPLATE
+        );
+    }
+
     /// Until Oct 19 the bundled browser guidance asked before opening a
     /// browser, and these three skills were only written when absent, so an
     /// existing workspace kept that guidance for good. Each unedited earlier
@@ -3128,18 +3246,16 @@ mod tests {
         );
     }
 
-    /// The bundled browser skill names the Personal Browser's tab tools; v7 is
-    /// the copy from before, and an unedited v7 is upgraded.
+    /// The Personal Browser's tab tools are named where a Personal Browser turn reads them, its
+    /// run text (`codex::tests::the_run_text_says_what_the_skills_notes_on_the_local_browsers_say`):
+    /// the bundled browser skill keeps the tab every browser turn may open for a second page, and
+    /// no longer says that the broker controls one visible page. v7 is the copy from before, and
+    /// an unedited v7 is upgraded.
     #[test]
     fn browser_automation_names_the_personal_browser_tab_tools() {
-        for needle in [
-            "`open_tab`",
-            "`select_tab`",
-            "`close_tab`",
-            "at most three of your tabs",
-            "public pages only",
-        ] {
-            assert!(BROWSER_AUTOMATION_TEMPLATE.contains(needle), "{needle}");
+        assert!(BROWSER_AUTOMATION_TEMPLATE.contains("open your own tab (`open_tab`, 3 at most)"));
+        for moved in ["`select_tab`", "`close_tab`"] {
+            assert!(!BROWSER_AUTOMATION_TEMPLATE.contains(moved), "{moved}");
         }
         assert!(!BROWSER_AUTOMATION_TEMPLATE.contains("The broker controls one visible page."));
         let v7 = include_str!("legacy/browser-automation-v7.md");

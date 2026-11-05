@@ -2706,9 +2706,12 @@ fn check_browser_turns_are_told_only_what_they_can_use(harness: &Harness) -> Res
                 if message.contains("\nProject memory snapshot (from workspace; already loaded):\n")
                 {
                     fresh_browser_threads += 1;
+                    // Its browser skill's last section a browser turn reads, and none of those it
+                    // leaves out (the routing step's, and a building turn's card).
                     ensure!(
-                        message.contains("## Good outputs")
-                            && !message.contains("## Routing preflight"),
+                        message.contains("## Default decision order")
+                            && !message.contains("## Routing preflight")
+                            && !message.contains("## Open or resume from Chat"),
                         "{}#{index} does not carry the browser skill whole",
                         turn.label
                     );
@@ -2781,15 +2784,16 @@ fn check_browser_turns_go_on_past_a_page(harness: &Harness) -> Result<()> {
                 !text.contains("a stale target, a changed page"),
                 "{label}#{index} reads a stale target or a changed page as final"
             );
-            // The turn's own reply rules say the same.
+            // Its browser skill's "Finding a page" says what comes next, on a new thread and a
+            // restored one; its reply rules no longer say it a third way.
             let input = input_text(request);
             ensure!(
-                input.contains("If a browser tool fails or refuses a page, that ends that page, not the task: go on to the next source in this turn."),
-                "{label}#{index} never read that a failed page ends that page in its reply rules"
+                input.contains("A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn."),
+                "{label}#{index} never read what comes after a failed page"
             );
             ensure!(
-                !input.contains("If a browser tool fails, say in plain words"),
-                "{label}#{index} reads a failed browser tool as the end of the turn"
+                !input.contains("If a browser tool fails"),
+                "{label}#{index} reads a failed browser tool in its reply rules"
             );
         }
     }

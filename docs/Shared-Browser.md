@@ -814,8 +814,16 @@ skill, whatever its words: the router loads a skill by the words of a request,
 and a browser turn's often has none of the skill's ("Now find how to get there
 by tram", or a task that names an address). On a fresh thread the skill loads
 first of the turn's skills, so the snapshot's budget never runs out before it,
-and whole, but for its "Routing preflight", which only the routing step reads.
-Besides it the turn is told of, and loads when its words route them, only the
+and whole, but for its "Routing preflight", which only the routing step reads
+(no turn's snapshot carries that section), and the sections its front matter
+names for a turn with no shell (`no_shell_omits`: the card a building turn hands
+the person, what the skill is for, the browsers' names, and where a turn with a
+shell reads more). Every skill a browser turn loads leaves out the sections it
+names the same way, so a browser turn never reads of commands it does not have:
+the `instafy-web-research` skill's readers, searches and rules for building
+pages, for one. Of the space's `AGENTS.md`, a browser turn reads its "Replies",
+as a restored one does (a copy with no such section comes whole). Besides it
+the turn is told of, and loads when its words route them, only the
 skills it can use with no shell (runtime-agent `usable_with_no_shell`): not the
 space's memory, routing and team skills (`context_kind` `root`, `meta` or
 `learned_index`), not a skill that runs code of its own (a `scripts/` folder, or
@@ -832,8 +840,8 @@ person's time zone without the commands that take one, and a Shared Browser
 thread begins on base instructions without the structured lane's paragraphs on
 the command tool and file writes (`SHARED_BROWSER_BASE_INSTRUCTIONS`), which it
 keeps when a later run resumes it, as a thread begun before keeps its own. The
-space's `AGENTS.md` and `INSTAFY.md`, and a skill it can use, may still name
-commands that other turns run. What other turns read of the skill when they
+space's `INSTAFY.md`, and a skill it can use, may still name commands that
+other turns run. What other turns read of the skill when they
 need it (how to write a learned block and the cues a run reports for one, the
 owner-local `observe` tool, the Personal Browser's own notes, and what a script
 that drives a browser keeps in mind) is in its
@@ -859,10 +867,8 @@ error page such as a 504) sends the turn to the place's own site at once, in the
 same turn, and then to another official source; facts from a place's
 own page, and a route from the operator's journey planner with its stations
 chosen, for the day and time the person travels (a daytime hour when they gave
-none) and saying which, not a listing or a kiosk page; "not checked", or
-nothing, for anything not read this turn (how far, how to get there, what is
-best included); a comparison's models, those a page's menu names
-included, each read on
+none) and saying which, not a listing or a kiosk page; a comparison's models,
+those a page's menu names included, each read on
 its own page; and a cookie banner's refusal, so the banner does not cover the
 page. A sign-in, a bot check, a paywall or a refused read ends that page, never
 the task: nothing a turn carries tells it to stop there, so neither a card's

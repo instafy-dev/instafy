@@ -28,7 +28,7 @@ Notes:
 - If two skills apply, you may combine them, but keep the execution mode clear (for example: “Tunnel preview mode” vs “Live browser assist mode”).
 - An outside lookup that is unavailable (exit 4, `status: "unavailable"`: a place search, a router, a store's site did
   not answer) is not "not found": never retry it with another query or call the thing missing. Use what was found,
-  say plainly what could not be looked up, and offer a retry among the suggested replies.
+  say plainly what could not be looked up, and offer to try again.
 
 ## Learned blocks (/learn)
 

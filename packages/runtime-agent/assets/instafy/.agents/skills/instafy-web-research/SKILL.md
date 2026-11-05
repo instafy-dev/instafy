@@ -4,6 +4,7 @@ description: Research and cite web facts, cross-check sources and respect site r
 context_kind: workflow
 context_parent: instafy-skill-router
 routing_keywords: with sources, and sources, cite, citation, fact check, search the web, web search, opening hours, opening times, timetable, last train, price of, prices for, compare prices, how much is, how much does, official site, official page, hotel prices, compare hotels, on booking.com, on airbnb, on tripadvisor, on expedia, on agoda, independent reviews
+no_shell_omits: Readers, Finding sources, Searching, Into pages and datasets
 ---
 
 # Web research
@@ -14,15 +15,15 @@ Read permitted pages this turn; trace facts to their sources. Find pages, mark w
 
 ## Readers
 
-Read pages only with these readers (a browser turn's are its browser tools; the `instafy` commands are for Octo's building turns):
+Read pages only with these readers:
 
 - `instafy web read <url…> --json --find '<terms>'`: relevant passages from up to 6 public URLs over HTTP, without JavaScript, cookies or sign-in. It enforces robots.txt, task/per-site budgets and 2 s site pacing. Follow each result's `tell`. `needs_browser` means JavaScript is needed;
 - the browser tools exposed on this turn: tabs the person can watch, for a `needs_browser` page, an aggregator, or a page the person wants to see or show;
 - `instafy_local_browser.observe` when it is exposed: one public page per call, read-only;
 - a reading command or open API that an installed skill names for that source;
-- for a `needs_browser` page, or when none of these is there: one `request_browser` card that lists the related reads, at most 6, and asks for one labelled finding per page, `{url, title, readAt, viewer, facts}` or `{url, stopped}` (`instafy-browser-automation`, "Several reads in one card").
+- for a `needs_browser` page, or when none of these is there: one `request_browser` card that lists the related reads, at most 6 (`instafy-browser-automation`, "Several reads in one card").
 
-Do not fetch pages with `curl`, `wget` or an ad-hoc script: they skip robots.txt, the private-address check and the stops below.
+Do not fetch pages with `curl`, `wget` or an ad-hoc script: they skip robots.txt, the private-address check and the stops below. For larger or delegated work, inspect `instafy web budget --json`. Parent, helpers and continued workers share the allowance; spawning adds none. Reuse excerpts and cached pages. Failed fresh reads and new redirect sites count. Never use `--fresh` just to reformat.
 
 ## Sources by need
 
@@ -72,9 +73,7 @@ When the task needs a `no-agents` site (hotel prices on Booking.com):
 
 ## How much to read
 
-- For larger or delegated work, inspect `instafy web budget --json`. Parent, helpers and continued workers share the allowance; spawning adds none.
-- Stop when material facts are supported; never crawl, paginate results or sweep listings.
-- Reuse excerpts and cached pages. Failed fresh reads and new redirect sites count. Never use `--fresh` just to reformat.
+- Never crawl, paginate results or sweep listings.
 - Budget exhausted or unavailable: use gathered evidence and name gaps. Never bypass the reader or raise limits.
 - Read the specific timetable, room or product page, not its home page.
 
@@ -91,7 +90,6 @@ Say per item what you found:
 - Price: the maker's or a shop's own page. None there, or a stop: say so ("no price on <page>", "<page> is closed to automated reads"), then try a shop robots.txt allows: `instafy web search "<name> price" --json`, or `--chain reference-search` for shops' official sites; a link-only shop gets `instafy web link <site> query=<name>` (Guided mode). Still none: "price unknown", and the page for the person to open and send to Octo; never a remembered or guessed price.
 - Sources asked for ("two independent reviews"): that many per item, each on that exact model, by a publisher other than the maker, the shops and each other (a sibling model's review does not count). Short: "<item>: 1 of 2 reviews found", in the reply and on the page, citing only those reviews.
 - A limit ("under €600"): an item with no price read this turn is listed as "price unknown", never as within it.
-- A failed search or site never ends the turn without the page: every item stays on it, each fact not read marked unknown with why.
 
 ## Stops
 
@@ -118,6 +116,7 @@ Every fact keeps its finding `{url, title, readAt, viewer}`: `readAt` is when it
 
 ## Into pages and datasets
 
+- A failed search or site never ends the turn without the page: every item stays on it, each fact not read marked unknown with why.
 - Coordinates come only from the venue's own site (its structured data or its own map) or openly licensed data (OpenStreetMap, Wikidata). Never take coordinates from a map service's links or embeds. Otherwise geocode the address with an open geocoder a skill names and label the pin "approximate".
 - Prices are stored with "seen <date>", never as live prices.
 - Shopping and trip items link to the shop's or operator's page. Booking and buying happen there, by the person.

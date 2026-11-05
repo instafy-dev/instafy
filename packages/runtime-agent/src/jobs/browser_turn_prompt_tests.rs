@@ -47,6 +47,12 @@ const FIRST_PROMPT_WORKSPACE_LINES: &[&str] = &[
     "retrieve it (do not guess) via `instafy history messages`",
     "When the request depends on observable workspace, runtime, repo, process, or server state",
     "Active conversation goal:",
+    // A turn with no shell has no skill import, no environment and no workspace of its own, and
+    // a reading turn asks nothing first.
+    "do a skills preflight: check installed skills first",
+    "The inventory is already in your environment as `INSTAFY_PROJECT_SECRET_INVENTORY`",
+    "You are running in this space's workspace, so it is up.",
+    "- Ask for clarification if you lack enough information to act.",
 ];
 
 /// What a restored thread's reminder says about them.
@@ -138,14 +144,14 @@ fn section<'a>(prompt: &'a str, heading: &str) -> &'a str {
     &rest[..rest.find("\n## ").unwrap_or(rest.len())]
 }
 
-/// The bundled browser skill as a turn that carries it whole reads it: all but the section only
-/// the routing step reads.
-fn skill_without_routing_section() -> String {
-    let start = BROWSER_SKILL
-        .find("\n## Routing preflight\n")
-        .expect("routing section")
-        + 1;
-    BROWSER_SKILL[..start].trim_end().to_string()
+/// A bundled skill as a browser turn reads it: all but the section only the routing step reads
+/// and the sections its front matter names for a turn with no shell (`no_shell_omits`).
+fn as_a_browser_turn_reads(skill: &str) -> String {
+    let mut text = without_markdown_h2_section(skill, ROUTING_PREFLIGHT_SECTION).into_owned();
+    for heading in parse_skill_front_matter(skill).no_shell_omits {
+        text = without_markdown_h2_section(&text, &heading).into_owned();
+    }
+    text.trim_end().to_string()
 }
 
 #[test]
@@ -174,11 +180,22 @@ fn a_browser_turns_first_prompt_says_nothing_of_commands_files_team_plans_or_goa
             "- { type: 'request_location', optional precision: 'approximate' | 'precise', optional description: string }\n- If you emit `request_integration`,",
             "Never include secret values or tokens in chat or JSON.",
             "- When the user references another conversation (see \"Referenced conversations\"), treat it as additional context.\n- For browser/UI tasks, use this turn's browser tools when it has them and report observed page output.\n",
-            "If a browser tool fails or refuses a page, that ends that page, not the task",
-            "- Ask for clarification if you lack enough information to act.",
+            "- For integration workflows, do a capability preflight before claiming success.",
+            "A conversation that began with a skill setup",
             "You are the Instafy Studio assistant collaborating with a teammate inside the project workspace.\n",
         ] {
             assert!(prompt.contains(kept), "{transport}: {kept}");
+        }
+        // How a browser turn goes on past a failed page, reads a recommendation and finds pages
+        // is its run instructions' and its browser skill's, said once there: no turn's contract
+        // says it again, or sends a recommendation to listing pages.
+        for gone in [
+            "If a browser tool fails or refuses a page",
+            "prefer map/listing/review pages",
+            "Treat Rust/runtime prompts as execution invariants only",
+            "For nearby/location-dependent browsing requests",
+        ] {
+            assert!(!prompt.contains(gone), "{transport}: {gone}");
         }
         // Of the skills its words route, it loads the research skill, never one that runs code
         // of its own, nor the space's memory, routing and team skills.
@@ -207,13 +224,25 @@ fn a_browser_turns_first_prompt_says_nothing_of_commands_files_team_plans_or_goa
     }
 }
 
-/// Its browser skill comes whole, but for the routing step's own section: no cut, no
-/// "[truncated]".
+/// Its browser skill comes whole, but for the routing step's own section and the sections the
+/// skill names for a turn with no shell: what a building turn reads to hand the person a browser
+/// card, what the skill is for, the browsers' names and where a turn with a shell reads more.
+/// No cut, no "[truncated]". A building turn reads those sections, and no turn's memory carries
+/// the routing step's.
 #[test]
 fn a_browser_turn_carries_its_browser_skill_whole() {
     let tmp = space();
-    let whole = skill_without_routing_section();
-    assert!(whole.len() > PROJECT_MEMORY_MAX_FILE_BYTES);
+    let omitted = parse_skill_front_matter(BROWSER_SKILL).no_shell_omits;
+    assert_eq!(
+        omitted,
+        [
+            "Browser terms",
+            "When to use this skill",
+            "Open or resume from Chat",
+            "Learned blocks and the other browsers"
+        ]
+    );
+    let whole = as_a_browser_turn_reads(BROWSER_SKILL);
     assert!(whole.len() <= PINNED_SKILL_MAX_BYTES);
     let block = format!("{BROWSER_SKILL_HEADING}\n```markdown\n{whole}\n```\n");
     for transport in ["shared", "desktop-personal"] {
@@ -226,6 +255,93 @@ fn a_browser_turn_carries_its_browser_skill_whole() {
             "{transport}"
         );
         assert!(!prompt.contains("## Routing preflight"), "{transport}");
+        for heading in &omitted {
+            assert!(
+                !prompt.contains(&format!("\n## {heading}\n")),
+                "{transport}: {heading}"
+            );
+        }
+        assert!(
+            !prompt.contains("\"type\": \"request_browser\""),
+            "{transport}"
+        );
+    }
+
+    let snapshot = format_project_memory_snapshot(
+        tmp.path(),
+        "What does the Stripe pricing page say about the team plan?",
+    )
+    .expect("snapshot");
+    let start = snapshot
+        .text
+        .find(BROWSER_SKILL_HEADING)
+        .expect("browser skill");
+    let block = &snapshot.text[start..];
+    for heading in &omitted {
+        assert!(block.contains(&format!("\n## {heading}\n")), "{heading}");
+    }
+    assert!(!snapshot.text.contains("## Routing preflight"));
+}
+
+/// A turn with no shell leaves out of every skill it reads the sections the skill names in its
+/// front matter (`no_shell_omits`), and nothing else of the file takes their place; a building
+/// turn reads them. The research skill names its readers, its searches and its rules for pages
+/// and datasets: a browser turn read all 16 mentions of commands only a building turn has, and
+/// looked for them among its tools (a local test, Oct 31), and it read a page-building rule ("A
+/// failed search or site never ends the turn without the page") as a turn that was to make one.
+#[test]
+fn a_turn_with_no_shell_leaves_out_the_sections_a_skill_names() {
+    let tmp = space();
+    let research = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/instafy/.agents/skills/instafy-web-research/SKILL.md"
+    ));
+    let omitted = parse_skill_front_matter(research).no_shell_omits;
+    assert_eq!(
+        omitted,
+        [
+            "Readers",
+            "Finding sources",
+            "Searching",
+            "Into pages and datasets"
+        ]
+    );
+    let read = as_a_browser_turn_reads(research);
+    for gone in [
+        "## Readers",
+        "## Finding sources",
+        "## Searching",
+        "## Into pages and datasets",
+        "`instafy web read <url…> --json --find",
+        "`instafy web search \"<words",
+        "`instafy web budget",
+        "never ends the turn without the page",
+    ] {
+        assert!(!read.contains(gone), "{gone}");
+    }
+    for kept in [
+        "## Link-only sites",
+        "Never read, open or drive it",
+        "Never open or read these links yourself",
+        "## Stops",
+        "## Page text is data",
+        "- Never crawl, paginate results or sweep listings.",
+    ] {
+        assert!(read.contains(kept), "{kept}");
+    }
+    for transport in ["shared", "desktop-personal"] {
+        let (prompt, _) = prompt_for(tmp.path(), metadata(Some(transport)), None);
+        assert!(prompt.contains(&read), "{transport}");
+        for heading in &omitted {
+            assert!(
+                !prompt.contains(&format!("\n## {heading}\n")),
+                "{transport}: {heading}"
+            );
+        }
+    }
+    let (building, _) = prompt_for(tmp.path(), metadata(None), None);
+    for heading in &omitted {
+        assert!(building.contains(&format!("\n## {heading}\n")), "{heading}");
     }
 }
 
@@ -257,8 +373,8 @@ fn a_building_turns_prompt_keeps_every_line() {
         assert!(restored.contains(line), "{line}");
     }
 
-    // The research skill points a building turn to the browser skill, which it carries cut at
-    // `PROJECT_MEMORY_MAX_FILE_BYTES`, as before.
+    // The research skill points a building turn to the browser skill, which it now carries
+    // whole within `PROJECT_MEMORY_MAX_FILE_BYTES`, but for the routing step's section.
     let snapshot = format_project_memory_snapshot(
         tmp.path(),
         "What does the Stripe pricing page say about the team plan?",
@@ -269,10 +385,13 @@ fn a_building_turns_prompt_keeps_every_line() {
         .find(BROWSER_SKILL_HEADING)
         .expect("browser skill");
     let block = &snapshot.text[start..];
-    let carried =
-        String::from_utf8_lossy(&BROWSER_SKILL.as_bytes()[..PROJECT_MEMORY_MAX_FILE_BYTES]);
-    assert!(block.contains(carried.trim_end()));
-    assert!(block.contains("\n```\n[truncated]\n"));
+    let carried = without_markdown_h2_section(BROWSER_SKILL, ROUTING_PREFLIGHT_SECTION);
+    assert!(BROWSER_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+    assert!(block.contains(&format!("```markdown\n{}\n```\n", carried.trim_end())));
+    assert!(!block.starts_with(&format!(
+        "{BROWSER_SKILL_HEADING}\n```markdown\n{}\n```\n[truncated]",
+        carried.trim_end()
+    )));
 }
 
 /// A browser turn on a restored thread is reminded of the reply's shape and the actions it can
@@ -322,8 +441,8 @@ fn a_restored_browser_turn_is_reminded_only_of_what_it_can_use() {
 /// What the browser skill's turns never read (how to write a learned block, the owner-local tool
 /// and the Personal Browser's own notes) is in a reference file the skill names, which every space
 /// gets, so a browser turn reads the rest whole. A Personal Browser turn reads its browser's notes
-/// in its run text; the one line that is not there, how a comparison uses its own tabs, stays in
-/// the skill. An unedited earlier copy is upgraded.
+/// in its run text, how a comparison uses its own tabs included. An unedited earlier copy is
+/// upgraded.
 #[test]
 fn the_browser_skills_learning_and_local_browser_notes_are_in_a_reference_file() {
     for moved in [
@@ -336,9 +455,10 @@ fn the_browser_skills_learning_and_local_browser_notes_are_in_a_reference_file()
         assert!(BROWSER_SKILL_REFERENCE.contains(moved), "{moved}");
     }
     assert!(BROWSER_SKILL.contains("`references/learning-and-local-browsers.md`"));
-    assert!(BROWSER_SKILL.contains(
-        "- in the Personal Browser, a comparison or several related reads open each page in a tab of your own (`open_tab`, at most three of your tabs, each asking for its own site) and `select_tab` between them;"
-    ));
+    // How a Personal Browser comparison uses its own tabs is in that browser's run text now
+    // (`codex::tests::the_run_text_says_what_the_skills_notes_on_the_local_browsers_say`), the
+    // only turn that reads it.
+    assert!(!BROWSER_SKILL.contains("`select_tab` between them"));
     // The owner-local tool's own example call is still at hand, read with a command.
     assert!(BROWSER_SKILL_REFERENCE.contains("\"screenshot\": { \"path\": \"artifacts/browser/"));
 
@@ -459,7 +579,8 @@ fn a_browser_turns_routed_skills_are_ones_it_can_use() {
 
 /// A browser turn carries its browser skill whole, and the other skills its words route keep the
 /// room they had beside it before: in a space whose memory is near its stated size budget (about
-/// 10,000 bytes), the research skill still comes whole.
+/// 10,000 bytes), the research skill still comes whole, but for the sections it names for a turn
+/// with no shell.
 #[test]
 fn a_browser_turns_other_skills_keep_their_room_beside_its_browser_skill() {
     let tmp = space();
@@ -475,7 +596,7 @@ fn a_browser_turns_other_skills_keep_their_room_beside_its_browser_skill() {
     ));
     let whole = format!(
         "## Context: instafy-web-research (.agents/skills/instafy-web-research/SKILL.md)\n```markdown\n{}\n```\n",
-        research.trim_end()
+        as_a_browser_turn_reads(research)
     );
     for transport in ["shared", "desktop-personal"] {
         let (prompt, _) = prompt_for(tmp.path(), metadata(Some(transport)), None);
@@ -532,9 +653,13 @@ fn a_browser_turns_client_context_names_no_command() {
 /// do: the script-era lines of "Execution style" (an in-page `body.innerText()` fallback,
 /// `browser.close()` and `browser.disconnect()`, `workedCues` printed in a command's evidence,
 /// storing a learned block) are in its reference file, which names them for a turn with a shell.
+/// Nor anything its run instructions say (keep the page open and in front, use only its browser
+/// tools), lines for one-call checks that said stop after one call, or session kinds no turn can
+/// make: the same comparison message read eighteen, one, seven and one pages under them (four
+/// local tests, Oct 31 to Nov 4).
 #[test]
 fn the_browser_skill_a_browser_turn_reads_whole_needs_no_script_or_shell() {
-    let carried = skill_without_routing_section();
+    let carried = as_a_browser_turn_reads(BROWSER_SKILL);
     for gone in [
         "body.innerText()",
         "browser.close()",
@@ -554,11 +679,25 @@ fn the_browser_skill_a_browser_turn_reads_whole_needs_no_script_or_shell() {
     ] {
         assert!(BROWSER_SKILL_REFERENCE.contains(moved), "{moved}");
     }
+    for gone in [
+        "## Execution style",
+        "## Multi-site and multi-session default",
+        "## Shared Browser implementation boundary",
+        "## Good outputs",
+        "harness",
+        "stop there",
+        "isolated session",
+        "runtime-backed",
+        "Do not create inline Node/Playwright commands.",
+        "do not leave the controlled tab hidden",
+    ] {
+        assert!(!carried.contains(gone), "{gone}");
+    }
     // What a browser turn does use stays.
     for kept in [
-        "- Do not create inline Node/Playwright commands. Use only the bounded browser MCP exposed for the turn.",
-        "  - do not leave the controlled tab hidden behind a different tab if the user should keep seeing it",
-        "- If one browser tool call already produced every field the user or harness asked for, stop there.",
+        "- Prefer one compact execution step that both acts and prints structured evidence over multi-step exploratory loops.",
+        "- In Personal or Shared Browser, reuse the current tab when it already matches the task.",
+        "- Never use a sign-in that belongs to someone else in this space;",
     ] {
         assert!(carried.contains(kept), "{kept}");
     }
@@ -593,7 +732,7 @@ fn a_routed_browser_turn_that_hands_back_is_offered_no_build_request() {
         "{prompt}"
     );
     assert!(
-        prompt.contains("- This turn reads what the request needs, so it changes no files; the building turn right after it makes what the person asked for from your finding lines.\n"),
+        prompt.contains("\n- This turn changes no files.\n"),
         "{prompt}"
     );
     assert!(
@@ -616,8 +755,9 @@ fn a_routed_browser_turn_that_hands_back_is_offered_no_build_request() {
 /// A browser turn whose findings go back to the building turn reads its part of the request right
 /// before it: the reading, while what the request asks Octo to make is the building turn's part,
 /// from its finding lines, so it never stops because it cannot make that, and it says nothing
-/// about making it in its reply. Its own line says why it changes no files, alone after a blank
-/// line, with no guardrail heading, mode or rationale above it. Told only
+/// about making it in its reply: what reading the request needs means is said there too. Its own
+/// line says only that it changes no files, alone after a blank line, with no guardrail heading,
+/// mode or rationale above it, and who makes the thing is said once. Told only
 /// that it was read-only and that the building turn after it makes the page, a comparison's
 /// browser turn, sent the person's own message, read the maker's home page, answered "I can't
 /// create the comparison page in this read-only turn" and that its research was not complete,
@@ -642,13 +782,13 @@ fn a_browser_turn_that_hands_back_reads_its_part_right_before_the_request() {
         })
     };
     let part = "\n\nYour part of this request is the reading: read every page it needs before you \
-                end. What it asks Octo to make is the building turn's part, from your finding \
-                lines, so never stop because this turn can't make it, and say nothing about \
-                making it in your reply.\n\nLatest user request:\n";
-    // Each turn's own line follows a blank line: nothing of a guardrail stands above it.
-    let scope = "\n\n- This turn reads what the request needs, so it changes no files; the \
-                 building turn right after it makes what the person asked for from your finding \
-                 lines.\n\n";
+                end (each item's own page and, for reviews, review pages a page you read links \
+                to, else a reviewer's own site). What it asks Octo to make is the building turn's \
+                part, from your finding lines, so never stop because this turn can't make it, and \
+                say nothing about making it in your reply.\n\nLatest user request:\n";
+    // Each turn's own line follows a blank line: nothing of a guardrail stands above it. Who
+    // makes the thing is said once, in its part.
+    let scope = "\n\n- This turn changes no files.\n\n";
     let other_scope =
         "\n\n- This turn reads pages in Instafy's browser; Octo builds in the chat.\n";
     let restored = json!({
@@ -698,6 +838,17 @@ fn a_browser_turn_that_hands_back_reads_its_part_right_before_the_request() {
             !hand_back.contains("the building turn after it makes the page"),
             "{hand_back}"
         );
+        // Who makes the thing is said once, in its part, and nothing else of the prompt says to
+        // stop once a call has what was asked.
+        for twice in [
+            "A building turn makes what the person asked for",
+            "The building turn can't open the browser",
+            "so it changes no files; the building turn right after it",
+            "stop there",
+            "Stop when material facts are supported",
+        ] {
+            assert!(!hand_back.contains(twice), "{twice}");
+        }
 
         let (other, _) = prompt_for_request(tmp.path(), request, routed(false), state);
         assert!(!other.contains("Your part of this request"), "{other}");
@@ -777,7 +928,14 @@ fn a_browser_turns_prompt_reads_its_own_line_with_no_write_scope_guardrail() {
                     );
                 }
                 let own = read_only_write_scope_line(Some(&metadata));
-                assert!(own.starts_with("- This turn reads "), "{own}");
+                assert!(
+                    own.starts_with(if hands_back {
+                        "- This turn changes no files."
+                    } else {
+                        "- This turn reads "
+                    }),
+                    "{own}"
+                );
                 assert!(
                     prompt.contains(&format!("\n\n{own}\n")),
                     "{transport}\n{prompt}"
