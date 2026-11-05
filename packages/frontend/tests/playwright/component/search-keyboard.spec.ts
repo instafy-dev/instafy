@@ -97,5 +97,38 @@ for (const theme of ["light", "dark"]) {
       await fullyInsideResults(page, page.locator(".studio-search-empty"));
       await singleScrollOwner(page);
     });
+
+    test("keeps wrapped-scope recovery visible and scrolls it into a shorter viewport", async ({ page }) => {
+      await page.setViewportSize({ width: 320, height: 438 });
+      await page.addInitScript(() => {
+        addEventListener("DOMContentLoaded", () => {
+          document.documentElement.style.setProperty("--safe-area-inset-top", "24px");
+          document.documentElement.style.setProperty("--safe-area-inset-bottom", "16px");
+        });
+      });
+      await openSearch(page, theme, "&state=error");
+      const scope = page.getByRole("combobox", { name: "Search scope" });
+      const heading = await page.locator(".studio-search-heading").boundingBox();
+      expect((await scope.boundingBox())!.y).toBeGreaterThanOrEqual(heading!.y + heading!.height);
+      await fullyInsideResults(page, page.getByRole("alert"));
+      const retry = page.getByRole("button", { name: "Retry search" });
+      expect((await retry.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+
+      await page.setViewportSize({ width: 320, height: 390 });
+      await scope.focus();
+      await page.keyboard.press("Tab");
+      await expect(retry).toBeFocused();
+      await fullyInsideResults(page, retry);
+      await singleScrollOwner(page);
+      await expect(page.getByTestId("studio-search-input")).toHaveValue("navigation");
+      await expect(scope).toHaveValue("space");
+      await retry.press("Enter");
+      expect(await page.evaluate(() => (window as unknown as { __searchKeyboardReview: { retries: number } }).__searchKeyboardReview.retries)).toBe(1);
+      await page.getByTestId("studio-search-input").focus();
+      await page.getByTestId("studio-search-input").press("ArrowDown");
+      const result = page.getByTestId("studio-search-result-chat-0");
+      await expect(result).toBeFocused();
+      await fullyInsideResults(page, result);
+    });
   });
 }

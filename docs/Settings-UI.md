@@ -491,6 +491,9 @@ the window drag region.
 Search uses shared buttons, input typography, scope-chip surfaces and the native scope select.
 Its CSS owns wrapping and result layout; shared controls own pointer sizing, focus, colors and
 corners. Result metadata uses the same secondary text hierarchy as the rest of Studio.
+On short phone viewports, the results title and count share a wrapping row and the heading
+uses tighter vertical spacing. Scope controls retain their touch targets; the results area
+scrolls to reveal recovery actions and keyboard-focused results when space is constrained.
 When reading an older search result, keep **Return to latest** above the composer, reachable
 without scrolling through the loaded history. It replaces the footer action and becomes
 **New messages** only when messages have actually arrived. Returning moves keyboard focus to

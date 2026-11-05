@@ -181,6 +181,8 @@
 }
 
 .studio-search-results {
+  /* Contain the absolute live-region count within the scrolling results. */
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow: auto;
@@ -404,6 +406,18 @@
   }
   .studio-search-page .studio-search-result {
     gap: 10px;
+  }
+}
+
+@media(max-width:599px) and (max-height:500px) {
+  /* Keep recovery and the first result in view when the scope picker wraps.
+     Shared text and touch targets retain their normal sizes. */
+  .studio-search-page .studio-search-scope-header {
+    padding-top: 8px;
+  }
+  .studio-search-page .studio-search-heading {
+    flex-direction: row;
+    column-gap: 8px;
   }
 }
 
