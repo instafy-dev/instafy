@@ -457,6 +457,12 @@ describe("instafy preview", () => {
     const [first, second] = await Promise.all([execCli(args, home), execCli(args, home)]);
     expect(first.code, first.stderr).toBe(0);
     expect(second.code, second.stderr).toBe(0);
+    // The mock ready response does not wait for the stub script to write its marker.
+    const recordedPid = readState(home).previews[0]?.pid;
+    await expect.poll(
+      () => rathole.pids().some((pid) => pid === recordedPid && isAlive(pid)),
+      { timeout: 5_000 },
+    ).toBe(true);
     const live = rathole.pids().filter(isAlive);
     expect(live).toHaveLength(1);
     expect(readState(home).previews.map((entry) => entry.pid)).toEqual(live);

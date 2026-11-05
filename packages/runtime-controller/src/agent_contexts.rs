@@ -17,7 +17,7 @@ use crate::active_job_auth::{
     authorize_active_job_if_scoped, ActiveJobAuthorization, ActiveJobProjectAccess,
 };
 use crate::auth::authenticate_request;
-use crate::conversations::load_conversation_record;
+use crate::conversations::{ensure_conversation_access, load_conversation_record};
 use crate::projects::{ensure_project_access, ensure_project_write_access, load_project_record};
 use crate::{
     ai_agents, bad_request, forbidden, internal_error, not_found, unauthorized, ApiError, AppState,
@@ -145,7 +145,11 @@ async fn list_agent_contexts(
         .scope_id
         .as_deref()
         .map(normalize_scope_id)
-        .transpose()?;
+        .transpose()?
+        .map(|id| match scope_kind.as_deref() {
+            Some("conversation") => Uuid::parse_str(&id).map(|id| id.to_string()).unwrap_or(id),
+            _ => id,
+        });
     let search_terms = normalize_search_terms(query.q);
 
     let mut connection = state
@@ -178,6 +182,10 @@ async fn list_agent_contexts(
         .ok_or_else(|| unauthorized("user session required"))?;
     let active_root_conversation_id = active_job.as_ref().map(|job| job.root_conversation_id);
     let active_job_restricted = active_job.is_some();
+    let service_role = active_job
+        .as_ref()
+        .map(|job| job.subject_context().is_service_role)
+        .unwrap_or(context.is_service_role);
 
     let agent_filter = resolve_optional_agent_filter(
         &transaction,
@@ -212,13 +220,30 @@ async fn list_agent_contexts(
              join user_agents ua on ua.id = acc.agent_id
              left join conversations scoped_conversation
                on acc.scope_kind = 'conversation'
-              and acc.scope_id = scoped_conversation.id::text
+              and lower(acc.scope_id) = scoped_conversation.id::text
              where acc.project_id = $1
                and acc.user_id = $2
                and ua.deleted_at is null
                and ($3::uuid is null or acc.agent_id = $3)
                and ($4::text is null or acc.scope_kind = $4)
-               and ($5::text is null or acc.scope_id = $5)
+               and ($5::text is null or acc.scope_id = $5
+                    or (acc.scope_kind = 'conversation' and lower(acc.scope_id) = lower($5)))
+               and (
+                 acc.scope_kind <> 'conversation'
+                 or (
+                   scoped_conversation.project_id = $1
+                   and (
+                     $10
+                     or scoped_conversation.visibility <> 'private'
+                     or scoped_conversation.created_by = $2
+                     or exists (
+                       select 1 from conversation_participants participant
+                       where participant.conversation_id = scoped_conversation.id
+                         and participant.user_id = $2
+                     )
+                   )
+                 )
+               )
                and (
                  not $7
                  or (acc.scope_kind = 'project' and acc.scope_id = $1::text)
@@ -256,6 +281,7 @@ async fn list_agent_contexts(
                 &active_job_restricted,
                 &active_root_conversation_id,
                 &limit,
+                &service_role,
             ],
         )
         .await
@@ -279,7 +305,7 @@ async fn upsert_agent_context(
     let request_context = authenticate_request(&state.config, &headers).await?;
     let project_id = parse_uuid(&project_id_raw, "projectId")?;
     let scope_kind = normalize_scope_kind(&body.scope_kind)?;
-    let scope_id = normalize_scope_id(&body.scope_id)?;
+    let mut scope_id = normalize_scope_id(&body.scope_id)?;
     let context = normalize_context(&body.context)?;
     let title = normalize_optional_title(body.title)?;
     let metadata = normalize_metadata(body.metadata)?;
@@ -316,10 +342,20 @@ async fn upsert_agent_context(
                 active_job
                     .ensure_conversation_write(&transaction, &conversation)
                     .await?;
+                scope_id = conversation_id.to_string();
             }
         }
     } else {
         ensure_project_write_access(&transaction, &project, &request_context, None).await?;
+        if scope_kind == "conversation" {
+            let conversation_id = parse_uuid(&scope_id, "scopeId")?;
+            let conversation = load_conversation_record(&transaction, &conversation_id).await?;
+            if conversation.project_id != project_id {
+                return Err(forbidden("conversation context project mismatch"));
+            }
+            ensure_conversation_access(&transaction, &conversation, &request_context).await?;
+            scope_id = conversation_id.to_string();
+        }
     }
     let user_id = active_job
         .as_ref()
@@ -336,11 +372,19 @@ async fn upsert_agent_context(
     )
     .await?;
 
+    // Reuse a legacy conversation card's casing rather than creating a second
+    // card when new writes canonicalize its UUID. Other scope IDs stay exact.
     let row = transaction
         .query_one(
             "insert into agent_context_cards (
                  user_id, project_id, agent_id, scope_kind, scope_id, title, context, metadata
-             ) values ($1, $2, $3, $4, $5, $6, $7, $8)
+             ) values ($1, $2, $3, $4, coalesce((
+                 select existing.scope_id from agent_context_cards existing
+                 where existing.user_id = $1 and existing.project_id = $2
+                   and existing.agent_id = $3 and existing.scope_kind = $4
+                   and $4 = 'conversation' and lower(existing.scope_id) = $5
+                 order by existing.scope_id limit 1
+             ), $5), $6, $7, $8)
              on conflict (user_id, project_id, agent_id, scope_kind, scope_id)
              do update set title = excluded.title,
                            context = excluded.context,

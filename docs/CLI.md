@@ -108,8 +108,10 @@ The variable must hold a conversation UUID, here, for `instafy history messages`
 `--scope-id`. Any other value, such as a title or a path, is rejected before a request is sent.
 
 `conversation search` inspects recent titles/previews and recent messages in at most 12
-conversations. It does not search all persisted message content. For exact evidence in older
-messages, use `conversation grep` and then `conversation context`:
+conversations. Results require a text match; recency alone does not qualify. With no match,
+search returns an empty list and title-based `show` reports an error. It does not search all
+persisted message content. For exact evidence in older messages, use `conversation grep`
+and then `conversation context`:
 
 ```bash
 instafy conversation grep "fruit discussion" --json

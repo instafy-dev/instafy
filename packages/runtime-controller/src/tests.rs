@@ -101,6 +101,9 @@ mod human_profile_http_tests;
 #[path = "agent_profile_http_tests.rs"]
 mod agent_profile_http_tests;
 
+#[path = "agent_context_http_tests.rs"]
+mod agent_context_http_tests;
+
 #[path = "message_search_http_tests.rs"]
 mod message_search_http_tests;
 
@@ -29306,6 +29309,13 @@ async fn agent_context_cards_round_trip_scoped_by_agent_and_conversation() -> an
             &[&project_id, &user_id],
         )
         .await?;
+    connection
+        .execute(
+            "insert into conversations(id, project_id, created_by, visibility, metadata)
+             values ($1, $2, $3, 'private', '{}')",
+            &[&conversation_id, &project_id, &user_id],
+        )
+        .await?;
 
     let config = build_app_config(
         test_origin_private_key(),
@@ -29424,6 +29434,8 @@ async fn agent_context_cards_prune_oldest_per_user_project_agent() -> anyhow::Re
 
     let user_id = Uuid::new_v4();
     let project_id = Uuid::new_v4();
+    let seed_conversation_id = Uuid::new_v4();
+    let fresh_conversation_id = Uuid::new_v4();
     ensure_agent_context_cards_test_table(&pool).await?;
     ensure_test_user(&pool, &user_id).await?;
     let connection = pool.get().await?;
@@ -29432,6 +29444,18 @@ async fn agent_context_cards_prune_oldest_per_user_project_agent() -> anyhow::Re
             "insert into projects (id, owner_user_id, project_type, status)
              values ($1, $2, 'customer', 'active')",
             &[&project_id, &user_id],
+        )
+        .await?;
+    connection
+        .execute(
+            "insert into conversations(id, project_id, created_by, visibility, metadata)
+             values ($1, $3, $4, 'public', '{}'), ($2, $3, $4, 'public', '{}')",
+            &[
+                &seed_conversation_id,
+                &fresh_conversation_id,
+                &project_id,
+                &user_id,
+            ],
         )
         .await?;
 
@@ -29448,7 +29472,7 @@ async fn agent_context_cards_prune_oldest_per_user_project_agent() -> anyhow::Re
     let seed_payload = json!({
         "agent": "@octo",
         "scopeKind": "conversation",
-        "scopeId": Uuid::new_v4().to_string(),
+        "scopeId": seed_conversation_id.to_string(),
         "title": "Seed",
         "context": "Seed context card."
     });
@@ -29504,7 +29528,7 @@ async fn agent_context_cards_prune_oldest_per_user_project_agent() -> anyhow::Re
         )
         .await?;
 
-    let fresh_scope_id = Uuid::new_v4().to_string();
+    let fresh_scope_id = fresh_conversation_id.to_string();
     let fresh_payload = json!({
         "agent": "@octo",
         "scopeKind": "conversation",
