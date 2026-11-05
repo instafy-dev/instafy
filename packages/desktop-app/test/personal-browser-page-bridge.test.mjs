@@ -174,8 +174,11 @@ function createPageHarness() {
     elements: [],
     // Non-interactive elements are only visible to whole-page scans.
     passive: [],
+    // Frames and canvases, which a reading names instead of reading.
+    unread: [],
     querySelectorAll(selector) {
-      for (const element of this.elements) element.ownerDocument = this;
+      for (const element of [...this.elements, ...this.unread]) element.ownerDocument = this;
+      if (selector === "iframe, frame, object, embed, canvas") return this.unread;
       return selector === "*" ? [...this.elements, ...this.passive] : this.elements;
     },
     getElementById(id) {
@@ -190,6 +193,7 @@ function createPageHarness() {
   };
   const context = vm.createContext({
     crypto: webcrypto,
+    URL,
     document,
     location: { href: "https://example.test/form" },
     innerWidth: 1_200,
@@ -573,4 +577,62 @@ test("a link that sends a request or runs a declared script is not a plain link"
     assert.equal(security.classifyPersonalBrowserStep("click", descriptor).verdict, "ask");
   }
   assert.equal(security.classifyPersonalBrowserStep("click", railsDescriptor).category, "destructive");
+});
+
+test("a reading names the frames and pictures it cannot read, keeps its lines, and says where its text is cut", async () => {
+  const harness = createPageHarness();
+  const booking = new harness.Element("iframe", {});
+  booking.src = "https://booking.example/rooms";
+  // A tracking frame and an icon are nothing a person sees.
+  const pixel = new harness.Element("iframe", {});
+  pixel.src = "https://tracker.example/pixel";
+  pixel.rect = { x: 0, y: 0, width: 1, height: 1 };
+  const map = new harness.Element("canvas", { "aria-label": "Map of the route" });
+  map.rect = { x: 10, y: 60, width: 400, height: 200 };
+  const icon = new harness.Element("canvas", {});
+  icon.rect = { x: 10, y: 300, width: 20, height: 20 };
+  harness.document.unread = [booking, pixel, map, icon];
+  harness.document.body = { innerText: "Book your stay\n\nPrice\t120 euros\n" };
+  let snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.equal(
+    snapshot.text,
+    "Book your stay\nPrice\t120 euros\n[frame not read: booking.example]\n[picture with no text: Map of the route]",
+  );
+
+  harness.document.unread = [];
+  harness.document.body = { innerText: "x".repeat(61_234) };
+  snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.equal(snapshot.text, `${"x".repeat(60_000)}\n[Text cut here: about 1,200 more characters.]`);
+});
+
+test("a reading says which controls are open, chosen or selected, and counts those outside the view", async () => {
+  const harness = createPageHarness();
+  const medium = new harness.HTMLInputElement({ type: "radio", "aria-label": "Medium" });
+  medium.checked = true;
+  const large = new harness.HTMLInputElement({ type: "radio", "aria-label": "Large" });
+  const memory = new harness.HTMLButtonElement({ type: "button", text: "Memory options", "aria-expanded": "false" });
+  const overview = new harness.HTMLButtonElement({ type: "button", role: "tab", text: "Overview", "aria-selected": "true" });
+  const edition = new harness.HTMLAnchorElement({ href: "https://example.test/diy", role: "radio", text: "DIY Edition", "aria-checked": "true" });
+  // Below the view until the page is scrolled to it.
+  const next = new harness.HTMLAnchorElement({ href: "https://example.test/next", text: "Next page" });
+  next.rect = { x: 10, y: 900, width: 80, height: 30 };
+  harness.document.elements = [medium, large, memory, overview, edition, next];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.deepEqual(
+    Array.from(snapshot.interactive, ({ name, expanded, checked, selected }) => ({ name, expanded, checked, selected })),
+    [
+      { name: "Medium", expanded: undefined, checked: true, selected: undefined },
+      { name: "Large", expanded: undefined, checked: undefined, selected: undefined },
+      { name: "Memory options", expanded: false, checked: undefined, selected: undefined },
+      { name: "Overview", expanded: undefined, checked: undefined, selected: true },
+      { name: "DIY Edition", expanded: undefined, checked: true, selected: undefined },
+    ],
+  );
+  assert.equal(snapshot.omittedControls, 1);
+  // The states are no part of a target's fingerprint: a click that checks a
+  // box leaves its approval as it was.
+  const before = security.personalBrowserTargetSecurityFingerprint(snapshot.interactive[1].descriptor);
+  large.checked = true;
+  const after = await bridge.inspectPersonalBrowserTarget(harness.webContents, { index: 1 });
+  assert.equal(security.personalBrowserTargetSecurityFingerprint(after), before);
 });

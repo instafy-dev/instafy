@@ -336,6 +336,43 @@ test("a secret screen stays withheld until a new page loads", async () => {
   assert.equal(result.snapshot.text, "Dashboard");
 });
 
+test("a reading's control states and the controls it leaves out reach the agent; a secret screen names nothing chosen", async () => {
+  const entries = (documentToken) => [
+    { index: 0, tag: "input", type: "radio", name: "Medium", disabled: false, checked: true },
+    { index: 1, tag: "button", role: "tab", name: "Overview", disabled: false, selected: true },
+    { index: 2, tag: "button", name: "Memory options", disabled: false, expanded: false },
+  ].map((entry) => ({
+    ...entry,
+    identity: `${documentToken}:${entry.index}`,
+    descriptor: { found: true, identity: `${documentToken}:${entry.index}`, tag: entry.tag, text: entry.name },
+  }));
+  let page = { ...snapshotPage({ text: "Order" }), interactive: entries("doc-a"), omittedControls: 3 };
+  const { host } = fixture(undefined, { snapshotPersonalBrowserPage: async () => page });
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  const states = (result) => result.snapshot.interactive.map(({ checked, selected, expanded }) => ({ checked, selected, expanded }));
+  let result = await host.handleControlOperation("snapshot", {});
+  assert.deepEqual(states(result), [
+    { checked: true, selected: undefined, expanded: undefined },
+    { checked: undefined, selected: true, expanded: undefined },
+    { checked: undefined, selected: undefined, expanded: false },
+  ]);
+  assert.equal(result.snapshot.omittedControls, 3);
+
+  page = {
+    ...snapshotPage({ documentToken: "doc-b", text: "API-Schlüssel", signals: { ...NO_SECRET_SIGNALS, secretField: true } }),
+    interactive: entries("doc-b"),
+    omittedControls: 3,
+  };
+  result = await host.handleControlOperation("snapshot", {});
+  assert.equal(result.snapshot.secretScreen, true);
+  assert.deepEqual(states(result), [
+    { checked: undefined, selected: undefined, expanded: undefined },
+    { checked: undefined, selected: undefined, expanded: undefined },
+    { checked: undefined, selected: undefined, expanded: false },
+  ]);
+  assert.equal(result.snapshot.omittedControls, 3);
+});
+
 test("a page whose secret signals are missing is withheld", async () => {
   const page = snapshotPage({ text: "Unchecked text", names: ["Continue"] });
   delete page.signals;

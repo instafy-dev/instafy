@@ -508,6 +508,15 @@ instafy_personal_browser.list_tabs / open_tab / select_tab / close_tab
 | `select_tab` | Show one open tab; every other tool acts on the tab on screen |
 | `close_tab` | Close a tab the agent opened; the person's own tab cannot be closed |
 
+A snapshot's text keeps the page's line breaks and table cells, as the Shared
+Browser's does, and names what it cannot hold in the same words: a frame as
+"[frame not read: <site>]" and a canvas as "[picture with no text]", after the
+page's text; a frame's page is never read. Past 60,000 characters it ends with
+"[Text cut here: about N more characters.]". A control lists `expanded` for a
+toggle, and `checked` or `selected` only when the page shows it chosen (never
+on a secret screen). The list holds the controls in view; `omittedControls`
+counts those drawn outside it, which scrolling reaches, and any past 500.
+
 ### Agent tabs
 
 While the person has resumed control, the agent can open up to three tabs of its

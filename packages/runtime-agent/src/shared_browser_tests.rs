@@ -874,7 +874,11 @@ const makePage = (targetId, opened = null) => {
       if (arg && Array.isArray(arg.elements) && arg.sources && arg.sources.kind === "page-policy") {
         return Promise.all(arg.elements.map((element) => element.evaluate(undefined, arg.sources)));
       }
-      if (arg && arg.kind === "shown-text") return shownTextFor(currentUrl, targetId);
+      // The walker's answer: the text read, all of it in the window.
+      if (arg && arg.kind === "shown-text") {
+        const text = shownTextFor(currentUrl, targetId);
+        return { text, start: 0, end: text.length, above: 0, below: 0, more: false, scrollBy: null };
+      }
       if (arg && arg.kind === "page-policy") return signalsFor();
       if (arg && arg.kind === "withheld-read") return Boolean(markPath && fs.existsSync(markPath));
       if (arg && arg.kind === "withheld-mark") {
@@ -4432,16 +4436,14 @@ fn a_type_step_names_the_field_and_how_many_characters_went_in_never_the_text() 
     }
 }
 
-// A click on a checkbox says whether it is checked now: the reading never shows that either.
-// Any other click says nothing more than its reading.
+// A click on a checkbox says whether it is checked now. Any other click says nothing more than
+// its reading.
 #[test]
 fn a_click_on_a_checkbox_says_whether_it_is_checked_now() {
     for (mode, done) in [
         (
             "topping-checkbox",
-            Some(
-                "Clicked \"Extra Cheese\", and it is checked now. A page's reading never shows whether a box is checked.",
-            ),
+            Some("Clicked \"Extra Cheese\", and it is checked now."),
         ),
         ("plain-button", None),
     ] {

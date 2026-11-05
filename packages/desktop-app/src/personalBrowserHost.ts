@@ -2279,6 +2279,9 @@ export class PersonalBrowserHost {
       name?: string;
       type?: string;
       disabled: boolean;
+      expanded?: boolean;
+      checked?: true;
+      selected?: true;
     }>;
   } {
     const origin = getPersonalBrowserOrigin(snapshot.url);
@@ -2352,9 +2355,12 @@ export class PersonalBrowserHost {
   private redactAgentSnapshot(snapshot: PersonalBrowserPageSnapshot) {
     const withhold = this.shouldWithholdDocument(snapshot.documentToken);
     const rawNames = snapshot.interactive.map((entry) => entry.name);
+    // Which of a group is chosen is page state, like a list's chosen option
+    // in the Shared Browser: a withheld page says neither.
     const describe = (
-      { index, tag, role, type, disabled }: PersonalBrowserPageSnapshot["interactive"][number],
+      { index, tag, role, type, disabled, expanded, checked, selected }: PersonalBrowserPageSnapshot["interactive"][number],
       name: string | undefined,
+      withheld: boolean,
     ) => ({
       index,
       tag,
@@ -2362,7 +2368,13 @@ export class PersonalBrowserHost {
       ...(name ? { name } : {}),
       ...(type ? { type } : {}),
       disabled,
+      ...(typeof expanded === "boolean" ? { expanded } : {}),
+      ...(checked === true && !withheld ? { checked: true as const } : {}),
+      ...(selected === true && !withheld ? { selected: true as const } : {}),
     });
+    const omitted = Number.isSafeInteger(snapshot.omittedControls) && (snapshot.omittedControls ?? 0) > 0
+      ? { omittedControls: snapshot.omittedControls }
+      : {};
     try {
       if (!snapshot.signals) {
         throw new Error("Page secret signals are missing.");
@@ -2384,7 +2396,9 @@ export class PersonalBrowserHost {
         text: redacted.text,
         capturedAt: snapshot.capturedAt,
         ...(redacted.secretScreen ? { secretScreen: true as const, message: redacted.message } : {}),
-        interactive: snapshot.interactive.map((entry, position) => describe(entry, redacted.names[position])),
+        interactive: snapshot.interactive.map((entry, position) =>
+          describe(entry, redacted.names[position], redacted.secretScreen)),
+        ...omitted,
       };
     } catch {
       this.withholdDocument(snapshot.documentToken);
@@ -2395,7 +2409,8 @@ export class PersonalBrowserHost {
         capturedAt: snapshot.capturedAt,
         secretScreen: true as const,
         message: "This page could not be checked for secrets, so it is withheld. Navigate to another page or ask the user to continue.",
-        interactive: snapshot.interactive.map((entry) => describe(entry, undefined)),
+        interactive: snapshot.interactive.map((entry) => describe(entry, undefined, true)),
+        ...omitted,
       };
     }
   }

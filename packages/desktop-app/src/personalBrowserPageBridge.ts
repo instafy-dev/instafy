@@ -29,6 +29,12 @@ export type PersonalBrowserInteractiveElement = {
   name?: string;
   type?: string;
   disabled: boolean;
+  /** Whether a toggle is open, as the Shared Browser's reading says it. */
+  expanded?: boolean;
+  /** Only when true: a box, radio button, switch or pressed toggle that is on. */
+  checked?: true;
+  /** Only when true: the tab, option or day the page marks selected. */
+  selected?: true;
   identity: string;
   descriptor: PersonalBrowserTargetDescriptor;
 };
@@ -50,6 +56,8 @@ export type PersonalBrowserPageSnapshot = {
   title: string;
   text: string;
   interactive: PersonalBrowserInteractiveElement[];
+  /** Controls left out of `interactive`: outside the view, which scrolling reaches, or past its 500. */
+  omittedControls?: number;
   documentToken: string;
   signals?: PersonalBrowserPageSecretSignals;
   /** The page's web links, raw, when the snapshot asked for them (Send page to Octo). */
@@ -702,7 +710,28 @@ export async function snapshotPersonalBrowserPage(
   const result = await executeIsolated<Omit<PersonalBrowserPageSnapshot, "capturedAt">>(
     webContents,
     buildPageScript({ links }, `
-      const interactive = candidates().slice(0, 500).map((element, index) => {
+      // A control's state, read as the Shared Browser reads it: whether a
+      // toggle is open, and, only when true, whether it is the one of its
+      // group the page shows chosen. Never a field's value.
+      const flag = (element, name) => clean(element.getAttribute(name), 16).toLowerCase();
+      const stateOf = (element) => {
+        const open = flag(element, "aria-expanded");
+        const expanded = open === "true" || open === "false"
+          ? open === "true"
+          : element.tagName === "SUMMARY" && element.parentElement?.tagName === "DETAILS"
+            ? element.parentElement.open === true
+            : null;
+        const checked = element instanceof HTMLInputElement && (element.type === "checkbox" || element.type === "radio")
+          ? element.checked === true
+          : flag(element, "aria-checked") === "true" || flag(element, "aria-pressed") === "true";
+        return {
+          ...(typeof expanded === "boolean" ? { expanded } : {}),
+          ...(checked ? { checked: true } : {}),
+          ...(flag(element, "aria-selected") === "true" ? { selected: true } : {}),
+        };
+      };
+      const listed = candidates();
+      const interactive = listed.slice(0, 500).map((element, index) => {
         const item = descriptor(element);
         if (!item.found || !item.identity) return null;
         const fallbackName = item.placeholder || item.title || item.type || item.tag;
@@ -713,15 +742,74 @@ export async function snapshotPersonalBrowserPage(
           ...((item.ariaLabel || item.text || fallbackName) ? { name: item.ariaLabel || item.text || fallbackName } : {}),
           ...(item.type ? { type: item.type } : {}),
           disabled: item.disabled === true,
+          ...stateOf(element),
           identity: item.identity,
           descriptor: item,
         };
       }).filter(Boolean);
+      // Controls drawn outside the view are not listed until it is scrolled
+      // to them; they are counted, so the list never reads as the whole page.
+      const drawn = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = globalThis.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+      };
+      const outside = Array.from(document.querySelectorAll(interactiveSelector)).slice(0, 5_000)
+        .filter((element) => element.ownerDocument === document && !forbiddenTarget(element) && !visible(element) && drawn(element))
+        .length;
+      const omittedControls = outside + Math.max(0, listed.length - 500);
+      // What a person sees that the text cannot hold, in the words the
+      // Shared Browser's reading uses where it shows them: a frame, named by
+      // its site, and a canvas, a picture with no text. Too small to see (a
+      // tracking frame) is nothing.
+      const aboutCharacters = (count) => (count >= 1_000 ? Math.round(count / 100) * 100 : count).toLocaleString("en-US");
+      const unread = [];
+      for (const element of Array.from(document.querySelectorAll("iframe, frame, object, embed, canvas")).slice(0, 200)) {
+        const tag = String(element.tagName || "").toUpperCase();
+        if (!["IFRAME", "FRAME", "OBJECT", "EMBED", "CANVAS"].includes(tag) || element.ownerDocument !== document) continue;
+        if (!drawn(element) || element.closest?.("[aria-hidden='true'], [inert]")) continue;
+        if (typeof element.checkVisibility === "function" && !element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) continue;
+        const rect = element.getBoundingClientRect();
+        let part = "";
+        if (tag === "CANVAS") {
+          if (rect.width < 40 || rect.height < 40) continue;
+          const label = clean(element.getAttribute("aria-label"), 80);
+          part = label ? "[picture with no text: " + label + "]" : "[picture with no text]";
+        } else {
+          if (rect.width < 16 || rect.height < 16) continue;
+          let site = "";
+          try {
+            const url = new URL((tag === "OBJECT" ? element.data : element.src) || "about:blank", document.baseURI);
+            site = url.protocol === "http:" || url.protocol === "https:"
+              ? url.hostname
+              : url.protocol === "about:" ? globalThis.location.hostname : "";
+          } catch {
+            site = "";
+          }
+          part = site ? "[frame not read: " + site + "]" : "[frame not read]";
+        }
+        if (unread.length < 20) unread.push(part);
+      }
+      // The page's rendered text with its line breaks and table cells kept,
+      // as the Shared Browser keeps them; past 60,000 characters it says how
+      // much more there is.
+      const whole = String(document.body?.innerText ?? "")
+        .replace(/\\r\\n?/g, "\\n")
+        .replace(/[^\\S\\n\\t]+/g, " ")
+        .replace(/ *([\\n\\t]) */g, "$1")
+        .replace(/\\n{2,}/g, "\\n")
+        .trim();
+      const text = [
+        whole.slice(0, 60_000),
+        ...unread,
+        ...(whole.length > 60_000 ? ["[Text cut here: about " + aboutCharacters(whole.length - 60_000) + " more characters.]"] : []),
+      ].filter(Boolean).join("\\n");
       return {
         url: globalThis.location.href,
         title: clean(document.title, 1_000),
-        text: clean(document.body?.innerText ?? "", 60_000),
+        text,
         interactive,
+        ...(omittedControls > 0 ? { omittedControls } : {}),
         documentToken: registry.documentToken,
         signals: pageSecretSignals(),
         ...(args.links > 0 ? { links: (${PAGE_LINKS_IN_PAGE_SOURCE})(args.links) } : {}),

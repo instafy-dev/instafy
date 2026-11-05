@@ -1694,6 +1694,23 @@ prompt names the form as it is now. A take-over while the prompt waits still
 ends the step, and a page that left its site after the yes ends the run with
 `approval_stale`.
 
+After it, `scripts/shared-browser-page-reading-e2e.mjs` reads loopback pages
+whose parts a reading could hide. A details' summary and a tab out of the tab
+order are listed and say whether they are open or selected, and opening one
+reads what it showed, without a prompt; the radio button, box, radio link and
+open list's option shown chosen say so; a planner's list and button waiting
+for its first field are listed as disabled, and a click or a choice on them is
+refused at once with nothing sent or asked. A frame of the page's site and one
+of another site are named by their site, canvases as pictures with no text, a
+tracking frame and an icon not at all, and no word of a frame is read. A long
+review reads to its end in parts by following the cut line's scroll, every
+part within the reading's 12,000 characters, and a page of 261 links lists its
+last one once scrolled down, counting those left out. Password, card and code
+fields in a frame or a shadow root carry no value into the reading, and a key
+in a shadow root's read-only field still makes a secret screen. The Personal
+Browser's page bridge and host have unit tests for the same frames, pictures,
+cut line, states and count.
+
 The accompanying UI tests use production React controls with a synthetic native
 host to prove Take over waits for confirmed quiescence, keeps manual state across
 Expand/Collapse, and sends an explicit Done continuation. Rust/native/hook tests
