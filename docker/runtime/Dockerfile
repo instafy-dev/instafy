@@ -38,11 +38,15 @@ ARG CHROMIUM_MIN_VERSION=152.0.7977.82-1~deb13u1
 ARG GZIP_MIN_VERSION=1.13-1+deb13u1
 ARG PCRE2_MIN_VERSION=10.46-1~deb13u2
 ARG SQLITE3_MIN_VERSION=3.46.1-7+deb13u2
+# Trixie ships apt 3.0.3; 3.0.4 fixes CVE-2026-109518.
+ARG APT_MIN_VERSION=3.0.4
 ARG WEBDEV_BASE=mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
 # The pinned Playwright base ships OpenSSL 3.0.13-0ubuntu3.11; 3.0.13-0ubuntu3.16 fixes CVE-2026-84782.
 ARG WEBDEV_OPENSSL_MIN_VERSION=3.0.13-0ubuntu3.16
 # The pinned Playwright base ships libbrotli1 1.1.0-2build2; 1.1.0-2ubuntu0.1 fixes CVE-2026-111497.
 ARG WEBDEV_BROTLI_MIN_VERSION=1.1.0-2ubuntu0.1
+# The pinned Playwright base ships apt 2.8.3; 2.8.4ubuntu0.1 fixes CVE-2026-109518.
+ARG WEBDEV_APT_MIN_VERSION=2.8.4ubuntu0.1
 
 ########################
 # Runtime Node distribution
@@ -348,6 +352,7 @@ ARG CHROMIUM_MIN_VERSION
 ARG GZIP_MIN_VERSION
 ARG PCRE2_MIN_VERSION
 ARG SQLITE3_MIN_VERSION
+ARG APT_MIN_VERSION
 ARG RATHOLE_VERSION=0.5.0
 ARG RATHOLE_SHA256_AMD64
 ARG RATHOLE_SHA256_ARM64
@@ -368,6 +373,7 @@ COPY --from=node-runtime /usr/local/ /usr/local/
 RUN test -n "${CHROMIUM_MIN_VERSION}" && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
+      apt \
       bash \
       bsdutils \
       ca-certificates \
@@ -376,6 +382,7 @@ RUN test -n "${CHROMIUM_MIN_VERSION}" && \
       git \
       gzip \
       less \
+      libapt-pkg7.0 \
       libpcre2-8-0 \
       libsqlite3-0 \
       login \
@@ -397,9 +404,12 @@ RUN test -n "${CHROMIUM_MIN_VERSION}" && \
     && dpkg --compare-versions \
       "$(dpkg-query -W -f='${Version}' chromium)" ge "${CHROMIUM_MIN_VERSION}" \
     && test -n "${GZIP_MIN_VERSION}" && test -n "${PCRE2_MIN_VERSION}" && test -n "${SQLITE3_MIN_VERSION}" \
+    && test -n "${APT_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' gzip)" ge "${GZIP_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libpcre2-8-0)" ge "${PCRE2_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libsqlite3-0)" ge "${SQLITE3_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge "${APT_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libapt-pkg7.0)" ge "${APT_MIN_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g "npm@${NPM_VERSION}" && \
@@ -587,9 +597,11 @@ ARG UNDICI_VERSION
 ARG UNDICI_SHA256
 ARG WEBDEV_OPENSSL_MIN_VERSION
 ARG WEBDEV_BROTLI_MIN_VERSION
+ARG WEBDEV_APT_MIN_VERSION
 
 RUN test -n "${WEBDEV_OPENSSL_MIN_VERSION}" && \
     test -n "${WEBDEV_BROTLI_MIN_VERSION}" && \
+    test -n "${WEBDEV_APT_MIN_VERSION}" && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
       bash \
@@ -616,9 +628,13 @@ RUN test -n "${WEBDEV_OPENSSL_MIN_VERSION}" && \
       libssl3t64 \
       openssl \
       libbrotli1 \
+      apt \
+      libapt-pkg6.0t64 \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libssl3t64)" ge "${WEBDEV_OPENSSL_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' openssl)" ge "${WEBDEV_OPENSSL_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libbrotli1)" ge "${WEBDEV_BROTLI_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge "${WEBDEV_APT_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libapt-pkg6.0t64)" ge "${WEBDEV_APT_MIN_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g "npm@${NPM_VERSION}" && \
