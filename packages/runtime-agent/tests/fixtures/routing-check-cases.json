@@ -1,0 +1,529 @@
+{
+  "about": "Messages with the chat they were sent in, and the route the routing step should give each. The routing check builds each case's routing input with the runtime's own code and asks the routing model. history holds the chat's earlier entries as the runtime receives them; the message is added after them. Nine cases were sent in a recorded local test, each with the entries its routing step received there: map-trip, comparison-page, comparison-fill-in, page-from-findings, browser-named, browser-follow-up, keep-going-open-route, browser-sign-in and browser-form. keep-going-after-stop-and-undo was not: its chat is keep-going-open-route's up to the first Undo, with the route exchange taken out, the request and reply that named the route edited to match, and that reply's offer of more cut. map-weekend was not sent there, and plain-answer and rewrite-names-a-map come from the Octo turn eval's cases.",
+  "cases": [
+    {
+      "id": "map-trip",
+      "message": "Plan 3 days in Seville for a first visit: where to stay, what to see each day, on a map.",
+      "expect": {
+        "route": "direct"
+      },
+      "why": "A trip asked for on a map is one building turn: the map's skill finds and cites its own places."
+    },
+    {
+      "id": "map-weekend",
+      "message": "Plan a weekend in Lisbon on a map",
+      "expect": {
+        "route": "direct"
+      },
+      "why": "The same kind of ask in fewer words."
+    },
+    {
+      "id": "comparison-page",
+      "message": "Compare the three latest Framework laptops: CPU, battery, weight, price, with two independent reviews each, as a comparison page.",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "Research whose answer is a page goes to the browser from the first message, then builds."
+    },
+    {
+      "id": "comparison-fill-in",
+      "history": [
+        {
+          "role": "user",
+          "content": "Compare the three latest Framework laptops: CPU, battery, weight, price, with two independent reviews each, as a comparison page.",
+          "runId": "run-1",
+          "createdAt": "2026-11-04T08:18:01.547Z"
+        },
+        {
+          "role": "user",
+          "content": "Compare the three latest Framework laptops: CPU, battery, weight, price, with two independent reviews each, as a comparison page.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-04T08:18:07.824Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Compare the three latest Framework laptops: CPU, battery, weight, price, with two independent reviews each, as a comparison page.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              },
+              "browserHandsBack": true
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-04T08:18:28.152Z"
+        },
+        {
+          "role": "user",
+          "content": "Continue building with what the browser turn found.",
+          "runId": "run-3",
+          "createdAt": "2026-11-04T08:18:28.378Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Built and opened the Framework laptop comparison page. It includes all three models and the CPU details found on Framework’s site, checked 4 Nov on [frame.work](https://frame.work/at/en). Battery, weight, price, and two independent reviews per model remain unverified.",
+          "runId": "run-3",
+          "createdAt": "2026-11-04T08:19:45.838Z"
+        }
+      ],
+      "message": "Fill in what's still missing.",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "Carries on this chat's browser research for the page it made, whose reply names what is still unverified."
+    },
+    {
+      "id": "page-from-findings",
+      "history": [
+        {
+          "role": "user",
+          "content": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+          "runId": "run-1",
+          "createdAt": "2026-11-04T08:29:02.706Z"
+        },
+        {
+          "role": "user",
+          "content": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-04T08:29:08.663Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Livraria Lello is listed as open daily from 09:00 to 19:30. Visit Porto notes it is closed on January 1, Easter Sunday, May 1, June 24, and December 25. [Visit Porto](https://visitporto.travel/en-GB/poi/621629fd8e037700019c3258)",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-04T08:30:22.839Z"
+        },
+        {
+          "role": "user",
+          "content": "Now find how to get there by metro from São Bento.",
+          "runId": "run-3",
+          "createdAt": "2026-11-04T08:31:23.067Z"
+        },
+        {
+          "role": "user",
+          "content": "Now find how to get there by metro from São Bento.",
+          "runId": "run-4",
+          "lane": "browser",
+          "createdAt": "2026-11-04T08:31:27.832Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-3",
+              "browserAutoStarted": true,
+              "dispatchContent": "Now find how to get there by metro from São Bento.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-3",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "I couldn't confirm a metro route from São Bento on Metro do Porto's journey planner: its station list shows Trindade and Casa da Música, but not São Bento. The Visit Porto page links to a general “How to get there” page, but it didn't provide metro directions.",
+          "runId": "run-4",
+          "lane": "browser",
+          "createdAt": "2026-11-04T08:32:07.551Z"
+        }
+      ],
+      "message": "Put the hours and the metro route on a small page I can share.",
+      "expect": {
+        "route": "direct"
+      },
+      "why": "A page made from what this chat already found is one building turn. In the recorded chat the route was not confirmed."
+    },
+    {
+      "id": "browser-named",
+      "message": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+      "expect": {
+        "route": "browser"
+      },
+      "why": "The person names the browser and the answer is a reply."
+    },
+    {
+      "id": "browser-follow-up",
+      "history": [
+        {
+          "role": "user",
+          "content": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+          "runId": "run-1",
+          "createdAt": "2026-11-04T08:29:02.706Z"
+        },
+        {
+          "role": "user",
+          "content": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-04T08:29:08.663Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Livraria Lello is listed as open daily from 09:00 to 19:30. Visit Porto notes it is closed on January 1, Easter Sunday, May 1, June 24, and December 25. [Visit Porto](https://visitporto.travel/en-GB/poi/621629fd8e037700019c3258)",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-04T08:30:22.839Z"
+        }
+      ],
+      "message": "Now find how to get there by metro from São Bento.",
+      "expect": {
+        "route": "browser"
+      },
+      "why": "Carries on this chat's browser work, and the answer is a reply."
+    },
+    {
+      "id": "keep-going-open-route",
+      "history": [
+        {
+          "role": "user",
+          "content": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+          "runId": "run-1",
+          "createdAt": "2026-11-04T08:29:02.706Z"
+        },
+        {
+          "role": "user",
+          "content": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-04T08:29:08.663Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Livraria Lello is listed as open daily from 09:00 to 19:30. Visit Porto notes it is closed on January 1, Easter Sunday, May 1, June 24, and December 25. [Visit Porto](https://visitporto.travel/en-GB/poi/621629fd8e037700019c3258)",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-04T08:30:22.839Z"
+        },
+        {
+          "role": "user",
+          "content": "Now find how to get there by metro from São Bento.",
+          "runId": "run-3",
+          "createdAt": "2026-11-04T08:31:23.067Z"
+        },
+        {
+          "role": "user",
+          "content": "Now find how to get there by metro from São Bento.",
+          "runId": "run-4",
+          "lane": "browser",
+          "createdAt": "2026-11-04T08:31:27.832Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-3",
+              "browserAutoStarted": true,
+              "dispatchContent": "Now find how to get there by metro from São Bento.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-3",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "I couldn't confirm a metro route from São Bento on Metro do Porto's journey planner: its station list shows Trindade and Casa da Música, but not São Bento. The Visit Porto page links to a general “How to get there” page, but it didn't provide metro directions.",
+          "runId": "run-4",
+          "lane": "browser",
+          "createdAt": "2026-11-04T08:32:07.551Z"
+        },
+        {
+          "role": "user",
+          "content": "Put the hours and the metro route on a small page I can share.",
+          "runId": "run-5",
+          "createdAt": "2026-11-04T08:33:09.751Z"
+        },
+        {
+          "role": "assistant",
+          "content": "I made a small shareable page with Livraria Lello’s opening hours and a note that the metro route from São Bento could not be confirmed. The hours are from Visit Porto; check the route locally before travelling.\n\nAssumed: you wanted a simple visit-info page, not a public link. Tell me if you’d like walking directions added.",
+          "runId": "run-5",
+          "createdAt": "2026-11-04T08:36:12.844Z"
+        },
+        {
+          "role": "user",
+          "content": "Add a short \"Before you go\" section to that page.",
+          "runId": "run-6",
+          "createdAt": "2026-11-04T08:38:09.630Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Stopped this run.",
+          "runId": "run-6",
+          "createdAt": "2026-11-04T08:38:24.831Z",
+          "metadata": {
+            "kind": "run_cancellation"
+          }
+        },
+        {
+          "role": "user",
+          "content": "Add a one-line tip about the best time to visit.",
+          "runId": "run-7",
+          "createdAt": "2026-11-04T08:39:13.636Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Added a one-line visit tip: arrive near opening for the longest visit window. Crowd levels aren’t verified, and the page is updated.",
+          "runId": "run-7",
+          "createdAt": "2026-11-04T08:40:16.553Z"
+        },
+        {
+          "role": "assistant",
+          "content": "The person undid the change from “Add a one-line tip about the best time to visit.”",
+          "createdAt": "2026-11-04T08:41:50.516Z",
+          "metadata": {
+            "source": "controller",
+            "kind": "change_undone",
+            "presentation": {
+              "hidden": true
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": "Add a one-line tip about the best time to visit.",
+          "runId": "run-8",
+          "createdAt": "2026-11-04T08:43:33.952Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Added a one-line tip to arrive near opening for the longest visit window, noting that crowd levels aren’t verified. The page is updated.",
+          "runId": "run-8",
+          "createdAt": "2026-11-04T08:44:44.357Z"
+        },
+        {
+          "role": "assistant",
+          "content": "The person undid the change from “Add a one-line tip about the best time to visit.”",
+          "createdAt": "2026-11-04T08:45:44.274Z",
+          "metadata": {
+            "source": "controller",
+            "kind": "change_undone",
+            "presentation": {
+              "hidden": true
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": "Add a one-line tip about the best time to visit.",
+          "runId": "run-9",
+          "createdAt": "2026-11-04T08:47:09.291Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Stopped this run.",
+          "runId": "run-9",
+          "createdAt": "2026-11-04T08:48:27.281Z",
+          "metadata": {
+            "kind": "run_cancellation"
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Applied file changes: /workspace/00000000-0000-4000-8000-000000000001/sites/livraria-lello/app.js",
+          "runId": "run-9",
+          "createdAt": "2026-11-04T08:48:29.155Z",
+          "metadata": {
+            "kind": "update"
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "The person undid the change from “Add a one-line tip about the best time to visit.”",
+          "createdAt": "2026-11-04T08:49:30.153Z",
+          "metadata": {
+            "source": "controller",
+            "kind": "change_undone",
+            "presentation": {
+              "hidden": true
+            }
+          }
+        }
+      ],
+      "message": "keep going",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "What the chat left open is the route its page marks not confirmed. The changes the person stopped or undid are not carried on."
+    },
+    {
+      "id": "keep-going-after-stop-and-undo",
+      "history": [
+        {
+          "role": "user",
+          "content": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+          "runId": "run-1",
+          "createdAt": "2026-11-04T08:29:02.706Z"
+        },
+        {
+          "role": "user",
+          "content": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-04T08:29:08.663Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Livraria Lello is listed as open daily from 09:00 to 19:30. Visit Porto notes it is closed on January 1, Easter Sunday, May 1, June 24, and December 25. [Visit Porto](https://visitporto.travel/en-GB/poi/621629fd8e037700019c3258)",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-04T08:30:22.839Z"
+        },
+        {
+          "role": "user",
+          "content": "Put the hours on a small page I can share.",
+          "runId": "run-5",
+          "createdAt": "2026-11-04T08:33:09.751Z"
+        },
+        {
+          "role": "assistant",
+          "content": "I made a small shareable page with Livraria Lello’s opening hours. The hours are from Visit Porto.\n\nAssumed: you wanted a simple visit-info page, not a public link.",
+          "runId": "run-5",
+          "createdAt": "2026-11-04T08:36:12.844Z"
+        },
+        {
+          "role": "user",
+          "content": "Add a short \"Before you go\" section to that page.",
+          "runId": "run-6",
+          "createdAt": "2026-11-04T08:38:09.630Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Stopped this run.",
+          "runId": "run-6",
+          "createdAt": "2026-11-04T08:38:24.831Z",
+          "metadata": {
+            "kind": "run_cancellation"
+          }
+        },
+        {
+          "role": "user",
+          "content": "Add a one-line tip about the best time to visit.",
+          "runId": "run-7",
+          "createdAt": "2026-11-04T08:39:13.636Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Added a one-line visit tip: arrive near opening for the longest visit window. Crowd levels aren’t verified, and the page is updated.",
+          "runId": "run-7",
+          "createdAt": "2026-11-04T08:40:16.553Z"
+        },
+        {
+          "role": "assistant",
+          "content": "The person undid the change from “Add a one-line tip about the best time to visit.”",
+          "createdAt": "2026-11-04T08:41:50.516Z",
+          "metadata": {
+            "source": "controller",
+            "kind": "change_undone",
+            "presentation": {
+              "hidden": true
+            }
+          }
+        }
+      ],
+      "message": "keep going",
+      "expect": {
+        "route": "direct",
+        "workspaceFileChangeRequirement": [
+          "none",
+          "conditional"
+        ]
+      },
+      "why": "Only a change the person stopped and one they undid are left, and a bare \"keep going\" carries on neither: it goes direct, and the routing step requires no change. Whether the turn after it leaves the undone change alone only a real turn shows."
+    },
+    {
+      "id": "browser-sign-in",
+      "message": "Open github.com in your browser, sign me in, then star the instafy-dev/maps-skill-pack repository.",
+      "expect": {
+        "route": "browser"
+      },
+      "why": "The person names the browser; the sign-in pauses for them."
+    },
+    {
+      "id": "browser-form",
+      "message": "Open httpbin.org/forms/post in your browser, fill in a test pizza order with made-up details and submit it.",
+      "expect": {
+        "route": "browser"
+      },
+      "why": "The person names the browser; sending the form asks them first."
+    },
+    {
+      "id": "plain-answer",
+      "message": "How does a heat pump heat a house when it's freezing outside? Keep it short.",
+      "expect": {
+        "route": "direct"
+      },
+      "why": "From the Octo turn eval: a question whose answer is a reply and names no browser stays direct."
+    },
+    {
+      "id": "rewrite-names-a-map",
+      "message": "Rewrite this to sound friendlier: 'Send me the comparison table and the map by Friday.'",
+      "expect": {
+        "route": "direct"
+      },
+      "why": "From the Octo turn eval: words like \"comparison\" and \"map\" inside text to rewrite ask for no page and no browser."
+    }
+  ]
+}

@@ -84,6 +84,13 @@ name = "run_instructions"
 path = "tests/run_instructions.rs"
 harness = false
 
+# The routing check's command (docs/Octo-Turn-Eval.md, "Routing check"). With no arguments it
+# runs offline and spends nothing; asking a real model is opt-in, and CI never runs it.
+[[test]]
+name = "routing_check"
+path = "tests/routing_check.rs"
+harness = false
+
 [dev-dependencies]
 axum = { version = "0.7", default-features = false, features = ["json", "tokio", "http1"] }
 # Paused time for the rolling saves' cadence tests.
