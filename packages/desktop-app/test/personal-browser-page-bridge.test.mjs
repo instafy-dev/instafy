@@ -60,6 +60,14 @@ function createPageHarness() {
     closest(selector) {
       if (selector === "a[href]" && this instanceof HTMLAnchorElement) return this;
       if (selector === "form") return this.ancestorForm;
+      // Role lists ("[role=listbox], [role=tree]"), up the elements a test
+      // set as each one's `parent`.
+      const roles = selector.split(",").map((part) => /^\s*\[role=(\w+)\]\s*$/.exec(part)?.[1]);
+      if (roles.every(Boolean)) {
+        for (let node = this; node; node = node.parent) {
+          if (roles.includes(node.getAttribute("role"))) return node;
+        }
+      }
       return null;
     }
 
@@ -174,8 +182,11 @@ function createPageHarness() {
     elements: [],
     // Non-interactive elements are only visible to whole-page scans.
     passive: [],
+    // Frames and canvases, which a reading names instead of reading.
+    unread: [],
     querySelectorAll(selector) {
-      for (const element of this.elements) element.ownerDocument = this;
+      for (const element of [...this.elements, ...this.unread]) element.ownerDocument = this;
+      if (selector === "iframe, frame, object, embed, canvas") return this.unread;
       return selector === "*" ? [...this.elements, ...this.passive] : this.elements;
     },
     getElementById(id) {
@@ -190,6 +201,7 @@ function createPageHarness() {
   };
   const context = vm.createContext({
     crypto: webcrypto,
+    URL,
     document,
     location: { href: "https://example.test/form" },
     innerWidth: 1_200,
@@ -197,7 +209,7 @@ function createPageHarness() {
     scrollX: 0,
     scrollY: 0,
     scrollBy() {},
-    getComputedStyle: () => ({ visibility: "visible", display: "block", pointerEvents: "auto" }),
+    getComputedStyle: (element) => ({ visibility: "visible", display: "block", pointerEvents: "auto", ...element?.style?.computed }),
     Element,
     HTMLElement,
     HTMLButtonElement,
@@ -573,4 +585,118 @@ test("a link that sends a request or runs a declared script is not a plain link"
     assert.equal(security.classifyPersonalBrowserStep("click", descriptor).verdict, "ask");
   }
   assert.equal(security.classifyPersonalBrowserStep("click", railsDescriptor).category, "destructive");
+});
+
+test("a reading names the frames and pictures it cannot read, keeps its lines, and says where its text is cut", async () => {
+  const harness = createPageHarness();
+  const booking = new harness.Element("iframe", {});
+  booking.src = "https://booking.example/rooms";
+  // A tracking frame and an icon are nothing a person sees.
+  const pixel = new harness.Element("iframe", {});
+  pixel.src = "https://tracker.example/pixel";
+  pixel.rect = { x: 0, y: 0, width: 1, height: 1 };
+  const map = new harness.Element("canvas", { "aria-label": "Map of the route" });
+  map.rect = { x: 10, y: 60, width: 400, height: 200 };
+  const icon = new harness.Element("canvas", {});
+  icon.rect = { x: 10, y: 300, width: 20, height: 20 };
+  harness.document.unread = [booking, pixel, map, icon];
+  harness.document.body = { innerText: "Book your stay\n\nPrice\t120 euros\n" };
+  let snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  // A canvas's label is page text; a frame's site is an address, kept apart
+  // until the text is masked and judged.
+  assert.equal(snapshot.text, "Book your stay\nPrice\t120 euros\n[picture with no text: Map of the route]");
+  assert.deepEqual(Array.from(snapshot.frames), ["[frame not read: booking.example]"]);
+
+  harness.document.unread = [];
+  harness.document.body = { innerText: "x".repeat(61_234) };
+  snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.equal(snapshot.text, "x".repeat(60_000));
+  assert.equal(snapshot.textCut, 1_234);
+  assert.equal(snapshot.frames, undefined);
+});
+
+test("a reading says which controls are open, chosen or selected, and counts those outside the view", async () => {
+  const harness = createPageHarness();
+  const medium = new harness.HTMLInputElement({ type: "radio", "aria-label": "Medium" });
+  medium.checked = true;
+  const large = new harness.HTMLInputElement({ type: "radio", "aria-label": "Large" });
+  const memory = new harness.HTMLButtonElement({ type: "button", text: "Memory options", "aria-expanded": "false" });
+  const overview = new harness.HTMLButtonElement({ type: "button", role: "tab", text: "Overview", "aria-selected": "true" });
+  const edition = new harness.HTMLAnchorElement({ href: "https://example.test/diy", role: "radio", text: "DIY Edition", "aria-checked": "true" });
+  // Below the view until the page is scrolled to it.
+  const next = new harness.HTMLAnchorElement({ href: "https://example.test/next", text: "Next page" });
+  next.rect = { x: 10, y: 900, width: 80, height: 30 };
+  harness.document.elements = [medium, large, memory, overview, edition, next];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.deepEqual(
+    Array.from(snapshot.interactive, ({ name, expanded, checked, selected }) => ({ name, expanded, checked, selected })),
+    [
+      { name: "Medium", expanded: undefined, checked: true, selected: undefined },
+      { name: "Large", expanded: undefined, checked: undefined, selected: undefined },
+      { name: "Memory options", expanded: false, checked: undefined, selected: undefined },
+      { name: "Overview", expanded: undefined, checked: undefined, selected: true },
+      { name: "DIY Edition", expanded: undefined, checked: true, selected: undefined },
+    ],
+  );
+  assert.equal(snapshot.omittedControls, 1);
+  // The states are no part of a target's fingerprint: a click that checks a
+  // box leaves its approval as it was.
+  const before = security.personalBrowserTargetSecurityFingerprint(snapshot.interactive[1].descriptor);
+  large.checked = true;
+  const after = await bridge.inspectPersonalBrowserTarget(harness.webContents, { index: 1 });
+  assert.equal(security.personalBrowserTargetSecurityFingerprint(after), before);
+});
+
+test("a text area is never named by what it holds", async () => {
+  const harness = createPageHarness();
+  const codes = new harness.HTMLTextAreaElement({ text: "4821 7730 9912 0045" });
+  const note = new harness.HTMLTextAreaElement({ text: "Draft: meet at noon", "aria-label": "Note" });
+  harness.document.elements = [codes, note];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.deepEqual(Array.from(snapshot.interactive, ({ name }) => name), ["textarea", "Note"]);
+  for (const entry of snapshot.interactive) {
+    assert.equal(entry.descriptor.text, "");
+    assert.equal(entry.descriptor.shownText, "");
+  }
+  assert.ok(!JSON.stringify(snapshot).includes("4821"), "A text area's text reached the reading");
+});
+
+test("a suggestion the keys reach in a field's list is not marked selected; a list of its own's is", async () => {
+  const harness = createPageHarness();
+  const field = new harness.HTMLInputElement({ role: "combobox", "aria-controls": "stations", "aria-label": "To" });
+  const suggestions = new harness.Element("ul", { role: "listbox", id: "stations" });
+  const highlighted = new harness.HTMLButtonElement({ type: "button", role: "option", text: "Bolhao", "aria-selected": "true" });
+  highlighted.parent = suggestions;
+  const lines = new harness.Element("ul", { role: "listbox", id: "lines" });
+  const chosen = new harness.HTMLButtonElement({ type: "button", role: "option", text: "Blue line", "aria-selected": "true" });
+  chosen.parent = lines;
+  harness.document.elements = [field, highlighted, chosen];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.deepEqual(
+    Array.from(snapshot.interactive, ({ name, selected }) => ({ name, selected })),
+    [{ name: "To", selected: undefined }, { name: "Bolhao", selected: undefined }, { name: "Blue line", selected: true }],
+  );
+});
+
+test("a control in view that no click reaches is not counted as outside the view", async () => {
+  const harness = createPageHarness();
+  const from = new harness.HTMLInputElement({ "aria-label": "From" });
+  // Turned off the way style sheets draw it: in view, and no click reaches it.
+  const plan = new harness.HTMLButtonElement({ text: "Plan Your Journey" });
+  plan.disabled = true;
+  plan.style.computed = { pointerEvents: "none" };
+  const swap = new harness.HTMLButtonElement({ type: "button", text: "Swap" });
+  // Off to the side, where scrolling never brings it (a closed drawer).
+  const drawer = new harness.HTMLAnchorElement({ href: "https://example.test/menu", text: "Menu" });
+  drawer.rect = { x: -400, y: 10, width: 300, height: 30 };
+  harness.document.elements = [from, plan, swap, drawer];
+  let snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.deepEqual(Array.from(snapshot.interactive, ({ name }) => name), ["From", "Swap"]);
+  assert.equal(snapshot.omittedControls, undefined);
+  // Below the view, which scrolling reaches, it counts.
+  const next = new harness.HTMLAnchorElement({ href: "https://example.test/next", text: "Next page" });
+  next.rect = { x: 10, y: 900, width: 80, height: 30 };
+  harness.document.elements = [from, plan, swap, drawer, next];
+  snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.equal(snapshot.omittedControls, 1);
 });

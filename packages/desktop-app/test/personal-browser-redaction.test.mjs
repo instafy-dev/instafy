@@ -131,6 +131,17 @@ test("six to eight digit codes are masked next to the word code", () => {
   assert.equal(redaction.redactText("Invoice 48291377 total 1.234.567,00").text, "Invoice 48291377 total 1.234.567,00");
 });
 
+test("a code drawn in groups of their own boxes or cells is masked too", () => {
+  // A page's text keeps its line breaks and table cells, so a code shown as
+  // "482" and "193" in boxes of their own reads with a line break or a tab.
+  assert.equal(redaction.redactText("Your sign-in code\n482\n193\nIt expires in 10 minutes.").text,
+    "Your sign-in code\n[redacted secret]\nIt expires in 10 minutes.");
+  assert.equal(redaction.redactText("Your sign-in code\t4821\t9930").text, "Your sign-in code\t[redacted secret]");
+  assert.equal(redaction.redactText("Code:\r\n482\r\n913").text, "Code:\r\n[redacted secret]");
+  // Not a part of a longer number on the line before.
+  assert.equal(redaction.redactText("Code 12\n345\n678").text, "Code 12\n345\n678");
+});
+
 test("ordinary numbers near words that only contain code stay readable", () => {
   for (const sentence of [
     "Steuercode\tBetrag\n20.10.2026\t20260012",

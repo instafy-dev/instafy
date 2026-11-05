@@ -1648,11 +1648,39 @@ shows up in the click's own result: after an action the controller waits, at
 most a second, for running transitions and animations that end, so a menu that
 opens with a transition is observed where it lands. `omittedControls` counts
 the controls left out, so a list cut short by a closed menu, or by a box the
-page scrolls itself, does not read as the whole page.
+page scrolls itself, does not read as the whole page; it counts the controls
+past the list's 200 too. Every control the page has (up to 5,000) is judged
+before the list is chosen, so a closed list's hundreds of options never crowd
+a form's fields and button out of it. When a page shows more than 200, the
+ones scrolled past, above the view, are left out, then the ones the page
+turned off, so scrolling down a long page reaches every control on it and a
+page full of taken seats still lists the free ones; neither depends on how
+many controls lie below the view.
+The list holds what a person operates on such pages: a details' summary
+(`expanded` says whether its section is open), the tabs, options, menu items
+and tree items pages often take out of the tab order, and a switch. An element
+is not listed for `aria-expanded` alone: pages set it on the section a toggle
+opens too. A control the page
+turned off (disabled, inside a disabled fieldset, or `aria-disabled`) is
+listed with `disabled`, so a button that waits for a form's fields never reads
+as missing, and a click, typing, a choice or a key on it is refused at once
+with nothing sent or asked; nor is the person asked to fill it
+(`request_human_input`, a sign-in's fields). `checked` marks the box, radio button, switch or
+pressed toggle that is on, and `selected` the tab, option or day the page marks
+selected; each of these three is there only when it is true, and a secret
+screen gives neither `checked` nor `selected`. In the list a field opens as a
+person types (a combobox's suggestions), the option marked selected is only
+the one the keys reach, not what the field holds, so it carries no `selected`.
+A text area is named by its label, or the words beside it, never by what it
+holds. A click lands where a person would click, the middle of the control in
+view; when another control sits there inside it (a form's button in a
+section, an item of a menu or tree it holds), or a frame, the click would act
+on that, which the step was not judged or asked for, so nothing is clicked and
+the step says so.
 Snapshots and actions build the list with the same function, so indices and the
 `snapshotId` agree. Whether a page is a secret screen is still judged on all of
-its rendered text and every control's name, seen or not, so leaving hidden
-parts out never lifts withholding. Each control carries only its non-empty
+its rendered text and every control's name, seen or not and listed or left out,
+so leaving parts out never lifts withholding. Each control carries only its non-empty
 fields; `expanded` reports a toggle's state and `area` the part of the page it
 sits in (`header`, `nav`, `menu`, `dialog`, `tabs`, `search`, `footer` or
 `aside`), and a link on the page's own site is given as its path. `navigate`
@@ -1665,14 +1693,40 @@ hides, alone or in a group: one rule counts them, reads them and lets `choose`
 pick them), so the one it holds never reads as the whole list; a closed
 select's option names come only from `choose`, which lists them when a name
 misses. A secret screen gives neither field. A snapshot
-never shows what is typed into a field or whether a box is checked, so the
-reading after such a step matches the one before it, and a turn that could not
-tell its text went in gave up a form after its first field. A `type` step's
-result says what it did in `done` instead: the field, how many characters went
-in, and whether the field holds them, read only to be counted ("Typed 12
-characters into "Customer name:", and the field holds them."), never the text,
-which may be private. A click on a checkbox, a radio button or a switch says
-whether it is checked now. The control's
+never shows what is typed into a field, so the reading after such a step
+matches the one before it, and a turn that could not tell its text went in gave
+up a form after its first field. A `type` step's result says what it did in
+`done` instead: the field, how many characters went in, and whether the field
+holds them, read only to be counted ("Typed 12 characters into "Customer
+name:", and the field holds them."), never the text, which may be private. A
+click on a checkbox, a radio button or a switch says whether it is checked now.
+
+What the text cannot hold is named where a person sees it: a frame (an
+`iframe`, `frame`, `object` or `embed`) as "[frame not read: <site>]", by the
+site it shows, and a canvas, such as a map or a chart, as "[picture with no
+text]" (with its label when it has one). A frame's page is never read, so a
+booking engine, a payment form or a video in one never reads as missing, and
+a field in it never reaches the reading; one too small to see (a tracking
+frame) is nothing. A frame's site is an address, never page text: it is put
+in after the text is masked and judged, so a random-looking ad server's name
+makes no secret screen. A canvas's label is page text and is masked as the
+rest is. A page with more text than the reading holds is read from
+where it is scrolled to: the text starts at the first line in view after the
+lines scrolled past, and text pinned in view (a fixed or sticky header) moves
+neither, so a skip link or a banner that scrolls away before a pinned header
+changes nothing. A long run of text (a paragraph, a plain-text page or a
+`<pre>`) is kept as lines of about a thousand characters, split between words
+and placed where each is drawn, so it is read in parts too. Lines in
+brackets say how much is above ("[Text above not shown: about 21,400
+characters. Scroll up to read it.]") and below, and how far to scroll to read
+on ("[Text cut here: about 18,600 more characters. Scroll down (y: 1562) to
+read on.]"), within the reading's 12,000 characters. A page whose part in view
+is further down than a reading walks (over a million characters) says so
+("[Text cut here: the part of the page in view is further down than a reading
+reaches.]"). The text between them is masked exactly as the whole page's text
+is; when it cannot be, the page is read from its top with the cut line. `scripts/shared-browser-page-reading-e2e.mjs`
+shows each of these in Chromium. A closed shadow root is read by neither the
+text nor the list. The control's
 box stays inside the controller for the visible cursor, and the step's result
 is its structured content, with one line as its text (see above).
 On the page the person chose, a page with sign-in fields (a password or

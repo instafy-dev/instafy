@@ -3301,7 +3301,7 @@ pub(crate) fn shared_browser_mcp_tools() -> Vec<Tool> {
         Tool::new(
             Cow::Borrowed("snapshot"),
             Cow::Borrowed(
-                "Read what a person can see on the page: title, URL, visible text, and indexed interactive elements. Controls a person cannot see yet, such as those in closed menus and drawers, are left out; `omittedControls` counts them, and opening a menu or scrolling may reveal them. `expanded` tells whether a toggle is open, `area` is the part of the page a control sits in, a select's `chosen` is the option it holds and `options` how many it has, and links on the page's own site are paths. With `tabId`, that tab becomes the one later tools act on first.",
+                "Read what a person can see on the page: title, URL, visible text, and indexed interactive elements. Controls a person cannot see yet, such as those in closed menus and drawers, are left out, as are those past the first 200; `omittedControls` counts them, and opening a menu or scrolling may reveal them. `expanded` tells whether a toggle is open, `area` is the part of the page a control sits in, a select's `chosen` is the option it holds and `options` how many it has, `checked` and `selected` mark what the page shows chosen and `disabled` a control it turned off (each only when true), and links on the page's own site are paths. With `tabId`, that tab becomes the one later tools act on first.",
             ),
             schema(json!({
                 "type": "object",

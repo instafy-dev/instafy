@@ -104,7 +104,7 @@ const PERSONAL_BROWSER_MCP_TOOLS: McpToolDefinition[] = [
   {
     name: "snapshot",
     description:
-      "Read the approved page URL, title, visible text, and fresh indexed interactive elements.",
+      "Read the approved page URL, title, visible text, and fresh indexed interactive elements. Controls outside the view are left out until it is scrolled to them; `omittedControls` counts them. `expanded` tells whether a toggle is open, and `checked` and `selected` mark what the page shows chosen (only when true).",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
