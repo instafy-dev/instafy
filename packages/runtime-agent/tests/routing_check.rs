@@ -9,13 +9,13 @@
 //! See [`USAGE`]. Every mode that runs the routing step runs it in a child process with an
 //! emptied environment and a HOME, TMPDIR and Codex home of its own, so no login, key or config
 //! of the machine is read. The model is sent an inert key: the endpoint given to `--live` must
-//! serve the model without one. Without arguments, or under a test filter, it is the offline test
-//! `routing_check_offline`.
+//! serve the model without one. Without the check's own options it is a test binary, and runs
+//! the [`TESTS`] that libtest's filters and options select.
 
 use std::convert::Infallible;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,13 +27,28 @@ use axum::response::sse::{Event, Sse};
 use axum::routing::post;
 use futures_util::stream;
 use runtime_agent::jobs::routing_check::{
-    self, Case, CaseResult, RoutingInput, Run, Verdict, load_cases, prepare_workspace, route_once,
+    self, Case, CaseResult, RoutingInput, Run, load_cases, prepare_workspace, route_once,
     routing_input,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-const TEST_NAME: &str = "routing_check_offline";
+/// This binary's own tests, as `cargo test` runs them.
+const TESTS: &[(&str, fn() -> Result<()>)] = &[
+    ("routing_check_offline", offline),
+    ("routing_check_paths_are_the_callers", paths_are_the_callers),
+    ("routing_check_reads_libtest_options", reads_libtest_options),
+];
+/// libtest's options that take the next argument as their value.
+const LIBTEST_VALUE_OPTIONS: &[&str] = &[
+    "--color",
+    "--format",
+    "--logfile",
+    "--shuffle-seed",
+    "--skip",
+    "--test-threads",
+    "-Z",
+];
 const CHILD: &str = "INSTAFY_ROUTING_CHECK_CHILD";
 /// What the model is sent instead of a key.
 const INERT_KEY: &str = "routing-check-inert-key";
@@ -52,13 +67,16 @@ Usage: cargo test --manifest-path packages/runtime-agent/Cargo.toml --test routi
                      prompt) and <id>.request.json (the whole request the routing step sends).
   --live <url>       Ask the model at <url>, an OpenAI Responses endpoint such as
                      http://127.0.0.1:8790/v1 that serves the model without a key, --runs times
-                     per case. Prints a table; exits 1 when a case's majority is wrong.
+                     per case. Prints a table; exits 1 when a case's majority is wrong, and 2
+                     when none is but a case got no answer (rerun it).
   --runs <n>         Runs per case with --live (default 3).
   --model <id>       The model (default gpt-6-luna, Instafy AI's).
   --case <id>        Only this case; repeat for more.
   --cases <file>     Another case file (default tests/fixtures/routing-check-cases.json).
   --json <file>      Also write the results as JSON.
-  --timeout <secs>   Time for one routing step (default 180).";
+  --timeout <secs>   Time for one routing step (default 180).
+
+A relative path starts in the folder the command runs in: packages/runtime-agent under cargo.";
 
 #[derive(Debug, Clone)]
 enum Mode {
@@ -79,11 +97,25 @@ struct Options {
     timeout: Duration,
 }
 
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            mode: Mode::Offline,
+            runs: DEFAULT_RUNS,
+            model: DEFAULT_MODEL.to_string(),
+            case_ids: Vec::new(),
+            cases: default_cases(),
+            json: None,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
+        }
+    }
+}
+
 enum Invocation {
-    /// As a test binary under `cargo test`: run `routing_check_offline` when selected.
+    /// As a test binary under `cargo test`: the tests libtest's filters and options select.
     Test {
         list: bool,
-        selected: bool,
+        selected: Vec<&'static str>,
     },
     Command(Options),
 }
@@ -101,6 +133,44 @@ fn absolute(path: &str) -> Result<PathBuf> {
     })
 }
 
+/// The tests that `cargo test`'s arguments select, as libtest reads them: its filters (whole
+/// names with `--exact`) less its `--skip`s, none with `--ignored`, and its other options'
+/// values read as values.
+fn selected_tests(args: &[String]) -> Vec<&'static str> {
+    let mut filters = Vec::new();
+    let mut skips = Vec::new();
+    let mut args_iter = args.iter().map(String::as_str);
+    while let Some(arg) = args_iter.next() {
+        if LIBTEST_VALUE_OPTIONS.contains(&arg) {
+            let value = args_iter.next();
+            if arg == "--skip" {
+                skips.extend(value);
+            }
+        } else if let Some(value) = arg.strip_prefix("--skip=") {
+            skips.push(value);
+        } else if !arg.starts_with('-') {
+            filters.push(arg);
+        }
+    }
+    if args.iter().any(|arg| arg == "--ignored") {
+        return Vec::new();
+    }
+    let exact = args.iter().any(|arg| arg == "--exact");
+    let matches = |name: &str, filter: &str| {
+        if exact {
+            name == filter
+        } else {
+            name.contains(filter)
+        }
+    };
+    TESTS
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| filters.is_empty() || filters.iter().any(|filter| matches(name, filter)))
+        .filter(|name| !skips.iter().any(|skip| matches(name, skip)))
+        .collect()
+}
+
 fn parse(args: &[String]) -> Result<Invocation> {
     const FLAGS: &[&str] = &[
         "--dump",
@@ -115,32 +185,12 @@ fn parse(args: &[String]) -> Result<Invocation> {
     ];
     if !args.iter().any(|arg| FLAGS.contains(&arg.as_str())) {
         // `cargo test` passes libtest's own options and any filter to every test binary.
-        let exact = args.iter().any(|arg| arg == "--exact");
-        let filters: Vec<&String> = args.iter().filter(|arg| !arg.starts_with('-')).collect();
-        let only_ignored = args.iter().any(|arg| arg == "--ignored");
-        let selected = !only_ignored
-            && (filters.is_empty()
-                || filters.iter().any(|filter| {
-                    if exact {
-                        filter.as_str() == TEST_NAME
-                    } else {
-                        TEST_NAME.contains(filter.as_str())
-                    }
-                }));
         return Ok(Invocation::Test {
             list: args.iter().any(|arg| arg == "--list"),
-            selected,
+            selected: selected_tests(args),
         });
     }
-    let mut options = Options {
-        mode: Mode::Offline,
-        runs: DEFAULT_RUNS,
-        model: DEFAULT_MODEL.to_string(),
-        case_ids: Vec::new(),
-        cases: default_cases(),
-        json: None,
-        timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
-    };
+    let mut options = Options::default();
     let mut runs_given = false;
     let mut args = args.iter();
     while let Some(flag) = args.next() {
@@ -198,6 +248,34 @@ fn parse(args: &[String]) -> Result<Invocation> {
     Ok(Invocation::Command(options))
 }
 
+/// The options as the child's arguments. The child runs in a folder of its own, so each path
+/// goes as the absolute path `parse` made of it here, in the caller's folder.
+fn child_args(options: &Options) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut give = |flag: &str, value: String| {
+        args.push(flag.to_string());
+        args.push(value);
+    };
+    match &options.mode {
+        Mode::Offline => {}
+        Mode::Dump(dir) => give("--dump", dir.display().to_string()),
+        Mode::Live(url) => {
+            give("--live", url.clone());
+            give("--runs", options.runs.to_string());
+        }
+    }
+    give("--model", options.model.clone());
+    for id in &options.case_ids {
+        give("--case", id.clone());
+    }
+    give("--cases", options.cases.display().to_string());
+    if let Some(json) = &options.json {
+        give("--json", json.display().to_string());
+    }
+    give("--timeout", options.timeout.as_secs().to_string());
+    args
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let invocation = match parse(&args) {
@@ -219,37 +297,18 @@ fn main() -> ExitCode {
         return run_child(options);
     }
     match invocation {
-        Invocation::Test { list: true, .. } => {
-            println!("{TEST_NAME}: test");
-            ExitCode::SUCCESS
-        }
         Invocation::Test {
-            selected: false, ..
+            list: true,
+            selected,
         } => {
-            println!("test result: ok. 0 passed; 0 failed; 1 filtered out");
+            for name in selected {
+                println!("{name}: test");
+            }
             ExitCode::SUCCESS
         }
-        Invocation::Test { .. } => {
-            println!("test {TEST_NAME} ...");
-            let mut child_args = vec!["--cases".to_string()];
-            child_args.push(default_cases().display().to_string());
-            match spawn_isolated_child(&child_args) {
-                Ok(code) if code == 0 => {
-                    println!("test {TEST_NAME} ... ok");
-                    ExitCode::SUCCESS
-                }
-                Ok(_) => {
-                    println!("test {TEST_NAME} ... FAILED");
-                    ExitCode::FAILURE
-                }
-                Err(error) => {
-                    eprintln!("routing check: {error:#}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        Invocation::Command(_) => match spawn_isolated_child(&args) {
-            Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        Invocation::Test { selected, .. } => run_tests(&selected),
+        Invocation::Command(options) => match spawn_isolated_child(&child_args(&options)) {
+            Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(2)),
             Err(error) => {
                 eprintln!("routing check: {error:#}");
                 ExitCode::from(2)
@@ -258,9 +317,130 @@ fn main() -> ExitCode {
     }
 }
 
+/// Runs the selected tests one after another, reported as libtest reports them.
+fn run_tests(selected: &[&str]) -> ExitCode {
+    let mut failed = 0;
+    for (name, test) in TESTS.iter().filter(|(name, _)| selected.contains(name)) {
+        println!("test {name} ...");
+        match test() {
+            Ok(()) => println!("test {name} ... ok"),
+            Err(error) => {
+                println!("test {name} ... FAILED: {error:#}");
+                failed += 1;
+            }
+        }
+    }
+    println!(
+        "\ntest result: {}. {} passed; {failed} failed; {} filtered out",
+        if failed == 0 { "ok" } else { "FAILED" },
+        selected.len() - failed,
+        TESTS.len() - selected.len()
+    );
+    if failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Every case builds and goes once through the routing step to the stand-in, which checks what
+/// it was sent.
+fn offline() -> Result<()> {
+    let code = spawn_isolated_child(&child_args(&Options::default()))?;
+    ensure!(code == 0, "the offline check exited {code}");
+    Ok(())
+}
+
+/// A relative `--dump`, `--json` or `--cases` is the caller's, though the check runs in a folder
+/// of its own.
+fn paths_are_the_callers() -> Result<()> {
+    let caller = tempfile::TempDir::new()?;
+    fs::copy(default_cases(), caller.path().join("cases.json"))?;
+    let status = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--dump",
+            "dump",
+            "--json",
+            "results.json",
+            "--cases",
+            "cases.json",
+            "--case",
+            "map-trip",
+        ])
+        .current_dir(caller.path())
+        .stdin(Stdio::null())
+        .status()
+        .context("failed to start the routing check")?;
+    ensure!(status.success(), "the routing check exited with {status}");
+    for file in [
+        "dump/map-trip.prompt.md",
+        "dump/map-trip.request.json",
+        "results.json",
+    ] {
+        ensure!(
+            caller.path().join(file).is_file(),
+            "{file} is not in the folder the command ran in"
+        );
+    }
+    Ok(())
+}
+
+/// `cargo test`'s arguments select these tests as libtest's would: an option's value is no
+/// filter, and `--skip` leaves a test out.
+fn reads_libtest_options() -> Result<()> {
+    let selected = |args: &[&str]| -> Result<Vec<&'static str>> {
+        let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        match parse(&args)? {
+            Invocation::Test { selected, .. } => Ok(selected),
+            Invocation::Command(_) => bail!("{args:?} read as the check's own options"),
+        }
+    };
+    let all: Vec<&str> = TESTS.iter().map(|(name, _)| *name).collect();
+    let every_test: [&[&str]; 5] = [
+        &[],
+        &["--test-threads", "1"],
+        &["--format", "terse", "--nocapture"],
+        &["--color", "never", "-Z", "unstable-options"],
+        &["--exact", "--skip", "offline"],
+    ];
+    for args in every_test {
+        let got = selected(args)?;
+        ensure!(got == all, "{args:?} selects {got:?}");
+    }
+    let one_test: [(&[&str], &str); 3] = [
+        (
+            &["--exact", "routing_check_offline"],
+            "routing_check_offline",
+        ),
+        (
+            &["--test-threads", "1", "paths"],
+            "routing_check_paths_are_the_callers",
+        ),
+        (
+            &["libtest", "--test-threads=1"],
+            "routing_check_reads_libtest_options",
+        ),
+    ];
+    for (args, name) in one_test {
+        let got = selected(args)?;
+        ensure!(got == [name], "{args:?} selects {got:?}");
+    }
+    let skipped: [&[&str]; 2] = [&["--skip", "routing_check_offline"], &["--skip=offline"]];
+    for args in skipped {
+        let got = selected(args)?;
+        ensure!(
+            got.len() == all.len() - 1 && !got.contains(&"routing_check_offline"),
+            "{args:?} selects {got:?}"
+        );
+    }
+    let got = selected(&["--ignored"])?;
+    ensure!(got.is_empty(), "--ignored selects {got:?}");
+    Ok(())
+}
+
 /// Runs this binary again with `args` in a child with an emptied environment and a HOME and
 /// TMPDIR of its own, so nothing reads the machine's Codex login, keys or config. Its output is
-/// this run's output.
+/// this run's output, and so is its exit status (2 when it has none).
 fn spawn_isolated_child(args: &[String]) -> Result<i32> {
     let isolated = tempfile::TempDir::new()?;
     let home = isolated.path().join("home");
@@ -275,20 +455,19 @@ fn spawn_isolated_child(args: &[String]) -> Result<i32> {
         .env("HOME", &home)
         .env("TMPDIR", &scratch)
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-        // A runtime machine's shell and clock, as the routing step there sees them.
-        .env("SHELL", "/bin/bash")
+        // A runtime machine's clock.
         .env("TZ", "Etc/UTC")
         .env("LANG", "C.UTF-8")
         .env("RUST_MIN_STACK", "33554432")
         .current_dir(&home)
-        .stdin(std::process::Stdio::null());
+        .stdin(Stdio::null());
     if let Some(filter) = std::env::var_os("RUST_LOG") {
         command.env("RUST_LOG", filter);
     }
     let status = command
         .status()
         .context("failed to start the routing check")?;
-    Ok(status.code().unwrap_or(1))
+    Ok(status.code().unwrap_or(2))
 }
 
 fn run_child(options: Options) -> ExitCode {
@@ -660,13 +839,5 @@ async fn check(options: Options) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     println!("{}", routing_check::table(&cases, &results));
-    let wrong = results
-        .iter()
-        .filter(|result| result.verdict == Verdict::Wrong)
-        .count();
-    Ok(if wrong == 0 {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
+    Ok(ExitCode::from(routing_check::exit_status(&results)))
 }

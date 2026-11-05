@@ -1,5 +1,5 @@
 {
-  "about": "Messages with the chat they were sent in, and the route the routing step should give each. The routing check builds each case's routing input with the runtime's own code and asks the routing model. history holds the chat's earlier entries as the runtime receives them; the message is added after them. Contexts come from a recorded local test (Nov 4).",
+  "about": "Messages with the chat they were sent in, and the route the routing step should give each. The routing check builds each case's routing input with the runtime's own code and asks the routing model. history holds the chat's earlier entries as the runtime receives them; the message is added after them. Nine cases were sent in a recorded local test, each with the entries its routing step received there: map-trip, comparison-page, comparison-fill-in, page-from-findings, browser-named, browser-follow-up, keep-going-open-route, browser-sign-in and browser-form. keep-going-after-stop-and-undo was not: its chat is keep-going-open-route's up to the first Undo, with the route exchange taken out, the request and reply that named the route edited to match, and that reply's offer of more cut. map-weekend was not sent there, and plain-answer and rewrite-names-a-map come from the Octo turn eval's cases.",
   "cases": [
     {
       "id": "map-trip",
@@ -439,7 +439,7 @@
         },
         {
           "role": "assistant",
-          "content": "I made a small shareable page with Livraria Lello’s opening hours. The hours are from Visit Porto.\n\nAssumed: you wanted a simple visit-info page, not a public link. Tell me if you’d like walking directions added.",
+          "content": "I made a small shareable page with Livraria Lello’s opening hours. The hours are from Visit Porto.\n\nAssumed: you wanted a simple visit-info page, not a public link.",
           "runId": "run-5",
           "createdAt": "2026-11-04T08:36:12.844Z"
         },
@@ -491,7 +491,7 @@
           "conditional"
         ]
       },
-      "why": "The recorded chat without its route exchange: only a stopped change and an undone change are left. Neither is carried on, so nothing must change."
+      "why": "Only a change the person stopped and one they undid are left, and a bare \"keep going\" carries on neither: it goes direct, and the routing step requires no change. Whether the turn after it leaves the undone change alone only a real turn shows."
     },
     {
       "id": "browser-sign-in",

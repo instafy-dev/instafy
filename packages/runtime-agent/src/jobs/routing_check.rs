@@ -371,9 +371,11 @@ pub async fn route_once(
 #[serde(rename_all = "camelCase")]
 pub enum Verdict {
     Pass,
-    /// It passes, with a run against it.
+    /// It passes, with a run that did not give the expected answer.
     Unsteady,
     Wrong,
+    /// Runs that got no answer decide it, so it needs a rerun.
+    NoAnswer,
 }
 
 impl Verdict {
@@ -382,19 +384,44 @@ impl Verdict {
             Self::Pass => "pass",
             Self::Unsteady => "unsteady",
             Self::Wrong => "WRONG",
+            Self::NoAnswer => "no answer",
         }
     }
 }
 
 /// A case passes when more than half of its runs give the expected answer. One that passes with
-/// a run against it (2 of 3) is unsteady.
-pub fn verdict(right: usize, runs: usize) -> Verdict {
-    if right * 2 <= runs {
+/// a run that did not (2 of 3) is unsteady. A run that got no answer (the endpoint failed or
+/// timed out) gave no route: a case is wrong only when its wrong answers alone keep it from
+/// passing, and has no answer when the runs without one decide it.
+pub fn verdict(right: usize, wrong: usize, runs: usize) -> Verdict {
+    if right * 2 > runs {
+        if right == runs {
+            Verdict::Pass
+        } else {
+            Verdict::Unsteady
+        }
+    } else if wrong > 0 && wrong * 2 >= runs {
         Verdict::Wrong
-    } else if right < runs {
-        Verdict::Unsteady
     } else {
-        Verdict::Pass
+        Verdict::NoAnswer
+    }
+}
+
+/// The command's exit status: 1 when a case is wrong, otherwise 2 when a case has no answer (a
+/// rerun settles it), and 0 when every case passes.
+pub fn exit_status(results: &[CaseResult]) -> u8 {
+    if results
+        .iter()
+        .any(|result| result.verdict == Verdict::Wrong)
+    {
+        1
+    } else if results
+        .iter()
+        .any(|result| result.verdict == Verdict::NoAnswer)
+    {
+        2
+    } else {
+        0
     }
 }
 
@@ -418,10 +445,11 @@ impl CaseResult {
                     .is_some_and(|answer| case.answered_by(answer))
             })
             .count();
+        let answered = runs.iter().filter(|run| run.answer.is_some()).count();
         Self {
             id: case.id.clone(),
             expected: case.expected(),
-            verdict: verdict(right, runs.len()),
+            verdict: verdict(right, answered - right, runs.len()),
             runs,
         }
     }
@@ -510,11 +538,12 @@ pub fn table(cases: &[Case], results: &[CaseResult]) -> String {
     let count = |verdict: Verdict| results.iter().filter(|r| r.verdict == verdict).count();
     let _ = writeln!(
         out,
-        "\n{}: {} pass, {} unsteady, {} wrong. {} took {:.0} s and {} tokens in ({} of them cached) and {} out.",
+        "\n{}: {} pass, {} unsteady, {} wrong, {} with no answer. {} took {:.0} s and {} tokens in ({} of them cached) and {} out.",
         plural(results.len(), "case"),
         count(Verdict::Pass),
         count(Verdict::Unsteady),
         count(Verdict::Wrong),
+        count(Verdict::NoAnswer),
         plural(calls, "routing step"),
         seconds,
         tokens.input,
@@ -600,16 +629,16 @@ mod tests {
 
     #[test]
     fn the_majority_decides_and_two_of_three_is_unsteady() {
-        assert_eq!(verdict(3, 3), Verdict::Pass);
-        assert_eq!(verdict(2, 3), Verdict::Unsteady);
-        assert_eq!(verdict(1, 3), Verdict::Wrong);
-        assert_eq!(verdict(0, 3), Verdict::Wrong);
-        assert_eq!(verdict(1, 1), Verdict::Pass);
-        assert_eq!(verdict(0, 1), Verdict::Wrong);
+        // Every run answered: (right, wrong, runs).
+        assert_eq!(verdict(3, 0, 3), Verdict::Pass);
+        assert_eq!(verdict(2, 1, 3), Verdict::Unsteady);
+        assert_eq!(verdict(1, 2, 3), Verdict::Wrong);
+        assert_eq!(verdict(0, 3, 3), Verdict::Wrong);
+        assert_eq!(verdict(1, 0, 1), Verdict::Pass);
+        assert_eq!(verdict(0, 1, 1), Verdict::Wrong);
         // Half is no majority.
-        assert_eq!(verdict(1, 2), Verdict::Wrong);
-        assert_eq!(verdict(3, 5), Verdict::Unsteady);
-        assert_eq!(verdict(0, 0), Verdict::Wrong);
+        assert_eq!(verdict(1, 1, 2), Verdict::Wrong);
+        assert_eq!(verdict(3, 2, 5), Verdict::Unsteady);
 
         let cases = shipped();
         let map = case(&cases, "map-trip");
@@ -627,12 +656,6 @@ mod tests {
             },
             seconds: 5.0,
         };
-        let failed = Run {
-            answer: None,
-            error: Some("unreachable".to_string()),
-            tokens: Tokens::default(),
-            seconds: 1.0,
-        };
         let steady = CaseResult::new(&map, vec![run("direct"), run("direct"), run("direct")]);
         assert_eq!(steady.verdict, Verdict::Pass);
         let unsteady = CaseResult::new(
@@ -642,7 +665,11 @@ mod tests {
         assert_eq!(unsteady.verdict, Verdict::Unsteady);
         let wrong = CaseResult::new(
             &map,
-            vec![run("browser_then_build"), failed.clone(), run("direct")],
+            vec![
+                run("browser_then_build"),
+                run("browser_then_build"),
+                run("direct"),
+            ],
         );
         assert_eq!(wrong.verdict, Verdict::Wrong);
 
@@ -678,7 +705,7 @@ mod tests {
         );
         assert!(
             table.contains(
-                "| browser_then_build, error, direct | WRONG | routed browser_then_build |"
+                "| browser_then_build, browser_then_build, direct | WRONG | routed browser_then_build |"
             ),
             "{table}"
         );
@@ -687,9 +714,72 @@ mod tests {
             "{table}"
         );
         assert!(
-            table.contains("4 cases: 1 pass, 1 unsteady, 2 wrong. 11 routing steps"),
+            table.contains(
+                "4 cases: 1 pass, 1 unsteady, 2 wrong, 0 with no answer. 11 routing steps"
+            ),
             "{table}"
         );
+    }
+
+    /// A run that got no answer (the endpoint failed or timed out) gave no route, so it never
+    /// makes a case wrong: runs like it that decide a case leave it with no answer, which the
+    /// command's exit status keeps apart from a wrong one.
+    #[test]
+    fn a_run_with_no_answer_is_no_route() {
+        // (right, wrong, runs): the other runs got no answer.
+        assert_eq!(verdict(2, 0, 3), Verdict::Unsteady);
+        assert_eq!(verdict(1, 0, 3), Verdict::NoAnswer);
+        assert_eq!(verdict(0, 0, 3), Verdict::NoAnswer);
+        // One answer each way, and the run without one decides.
+        assert_eq!(verdict(1, 1, 3), Verdict::NoAnswer);
+        assert_eq!(verdict(0, 1, 3), Verdict::NoAnswer);
+        // The wrong answers alone keep it from passing.
+        assert_eq!(verdict(0, 2, 3), Verdict::Wrong);
+        assert_eq!(verdict(0, 1, 2), Verdict::Wrong);
+        assert_eq!(verdict(0, 0, 0), Verdict::NoAnswer);
+
+        let cases = shipped();
+        let map = case(&cases, "map-trip");
+        let failed = Run {
+            answer: None,
+            error: Some("Connection failed: error sending request".to_string()),
+            tokens: Tokens::default(),
+            seconds: 0.1,
+        };
+        let answered = |route: &str| Run {
+            answer: Some(Answer {
+                route: route.to_string(),
+                workspace_file_change_requirement: Some("none".to_string()),
+                reason: format!("routed {route}"),
+            }),
+            error: None,
+            tokens: Tokens::default(),
+            seconds: 5.0,
+        };
+        let unreachable = CaseResult::new(&map, vec![failed.clone(), failed.clone(), failed]);
+        assert_eq!(unreachable.verdict, Verdict::NoAnswer);
+        let table = table(
+            std::slice::from_ref(&map),
+            std::slice::from_ref(&unreachable),
+        );
+        assert!(
+            table.contains(
+                "| map-trip | direct | error, error, error | no answer | Connection failed: error sending request |"
+            ),
+            "{table}"
+        );
+        assert!(
+            table.contains("1 case: 0 pass, 0 unsteady, 0 wrong, 1 with no answer."),
+            "{table}"
+        );
+        assert_eq!(exit_status(std::slice::from_ref(&unreachable)), 2);
+
+        let wrong = CaseResult::new(&map, vec![answered("browser_then_build")]);
+        assert_eq!(wrong.verdict, Verdict::Wrong);
+        let pass = CaseResult::new(&map, vec![answered("direct")]);
+        assert_eq!(pass.verdict, Verdict::Pass);
+        assert_eq!(exit_status(&[pass.clone(), unreachable, wrong]), 1);
+        assert_eq!(exit_status(&[pass]), 0);
     }
 
     #[test]
