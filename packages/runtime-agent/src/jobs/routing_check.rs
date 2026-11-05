@@ -545,16 +545,6 @@ mod tests {
             .clone()
     }
 
-    /// The evidence section of a routing prompt: the chat as the routing step reads it.
-    fn evidence_of(prompt: &str) -> String {
-        let start = prompt
-            .find("Supplied current-conversation evidence (JSON string data only):\n")
-            .expect("the evidence section");
-        let rest = &prompt[start..];
-        let line = rest.lines().nth(1).expect("the evidence line");
-        serde_json::from_str(line).expect("the evidence is a JSON string")
-    }
-
     #[test]
     fn the_shipped_case_file_parses() {
         let cases = shipped();
@@ -707,61 +697,57 @@ mod tests {
         let cases = shipped();
         let workspace = tempdir().unwrap();
         prepare_workspace(workspace.path()).unwrap();
+        // The chat as the routing step reads it: the runtime's own projection of a job's history,
+        // the case's entries and then its message.
+        let read = |case: &Case| {
+            let mut history = case.history.clone();
+            history.push(json!({"role": "user", "content": case.message}));
+            super::super::conversation_context::build_routing_conversation_context(Some(&json!(
+                history
+            )))
+            .section_text
+        };
         for case in &cases {
             let input = routing_input(case, workspace.path()).unwrap();
             assert!(input.browser_routes_offered, "{}", case.id);
+            assert!(input.prompt.contains(&case.message), "{}", case.id);
+            let chat = read(case);
             assert!(
-                input.prompt.contains(&format!(
-                    "Latest user request:\n```text\n{}\n```",
-                    case.message
-                )),
-                "{}",
-                case.id
-            );
-            let evidence = evidence_of(&input.prompt);
-            assert!(
-                evidence.ends_with(&format!("User: {}", case.message)),
-                "{}: {evidence}",
+                input
+                    .prompt
+                    .contains(&serde_json::to_string(&chat).unwrap()),
+                "{}: the chat is not in the routing input",
                 case.id
             );
             for entry in &case.history {
                 let content = entry["content"].as_str().unwrap().trim();
                 if !content.is_empty() {
-                    assert!(evidence.contains(content), "{}: {content}", case.id);
+                    assert!(chat.contains(content), "{}: {content}", case.id);
                 }
             }
         }
 
-        // With no chat, the evidence is the message alone.
+        // With no chat, the routing step reads the message alone.
         let first = case(&cases, "map-trip");
+        assert!(first.history.is_empty());
         let input = routing_input(&first, workspace.path()).unwrap();
-        assert_eq!(
-            evidence_of(&input.prompt),
-            format!("User: {}", first.message)
-        );
         assert_eq!(input.history_metrics["includedTurns"], json!(1));
+        assert_eq!(read(&first).matches(&first.message).count(), 1);
 
         // A chat's message sent straight to the browser is stored again as that browser turn's
         // request, and is read once; an empty reply is not read.
         let fill_in = case(&cases, "comparison-fill-in");
-        let input = routing_input(&fill_in, workspace.path()).unwrap();
-        let evidence = evidence_of(&input.prompt);
         let request = fill_in.history[0]["content"].as_str().unwrap();
-        assert_eq!(evidence.matches(request).count(), 1, "{evidence}");
+        assert_eq!(read(&fill_in).matches(request).count(), 1);
+        let input = routing_input(&fill_in, workspace.path()).unwrap();
         assert_eq!(input.history_metrics["includedTurns"], json!(4));
         assert_eq!(input.history_metrics["ignoredEntries"], json!(2));
 
-        // An Undo and a Stop reach the routing step as the chat shows them.
+        // A Stop and an Undo reach the routing step as the chat shows them.
         let undone = case(&cases, "keep-going-after-stop-and-undo");
-        let evidence = evidence_of(&routing_input(&undone, workspace.path()).unwrap().prompt);
-        assert!(
-            evidence.contains("Assistant: Stopped this run."),
-            "{evidence}"
-        );
-        assert!(
-            evidence.contains("Assistant: The person undid the change from"),
-            "{evidence}"
-        );
+        let chat = read(&undone);
+        assert!(chat.contains("Stopped this run."), "{chat}");
+        assert!(chat.contains("The person undid the change from"), "{chat}");
     }
 
     /// The routing input is the job's, reading the browser skill's routing section from the
@@ -779,21 +765,19 @@ mod tests {
             "the space's copy is the checkout's"
         );
         let before = routing_input(&map, workspace.path()).unwrap().prompt;
-        assert!(
-            before.contains("Focused browser routing skill snapshot:"),
-            "{before}"
-        );
 
         // A reworded rule in the space's copy reaches the routing input, and nothing else moves.
+        let heading = format!("\n## {}\n", super::super::ROUTING_PREFLIGHT_SECTION);
         let start = skill
-            .find("\n## Routing preflight\n")
+            .find(&heading)
             .expect("the browser skill has a routing section");
         let (head, section) = skill.split_at(start);
         let rule = section
             .lines()
-            .find(|line| line.starts_with("- "))
-            .expect("the routing section has a rule");
-        let reworded = "- A map goes `browser_then_build`.";
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with('#'))
+            .expect("the routing section says something");
+        let reworded = "A map goes `browser_then_build`.";
         std::fs::write(
             &skill_path,
             format!("{head}{}", section.replacen(rule, reworded, 1)),
