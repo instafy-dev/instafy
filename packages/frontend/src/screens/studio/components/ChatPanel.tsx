@@ -3757,22 +3757,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     };
   }, [closeMessageMenu, messageMenu]);
 
-  useEffect(() => {
-    if (!imageLightbox) {
-      return;
-    }
-    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setImageLightbox(null);
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [imageLightbox]);
-
   const openMessageMenuAt = useCallback((messageId: string, clientX: number, clientY: number) => {
     const { x, y, maxHeight } = clampMessageMenuPosition(clientX, clientY);
     const liveSelectedText = getCurrentSelectedTextForMessage(messageId);
@@ -6565,7 +6549,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               canReturnToLatest={Boolean(chatScrollHistoryVisit)}
               onLoadNewer={() => void messageContext.loadNewer()}
               onReturnToLatest={returnToLatestMessages}
-              hideLatest={hasNewMessages}
+              hideLatest
             />
             <ChatPostTranscriptAuxiliaryRows
               jobThreadPresent={Boolean(jobThread)}
@@ -6869,7 +6853,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onSelect={handleBrowserSubtabChange} onSplitChange={split => updateSurfaces(surfaceScope, state => ({ ...state, split }))}
         /> : null}
         overlayWidth={splitSurfaces ? `calc((1 - var(--conversation-resource-ratio, ${surfaces.ratio})) * 100%)` : undefined}
-        aboveComposer={hasNewMessages ? <ChatNewMessagesButton onPress={jumpToNewMessages} /> : null}
+        aboveComposer={chatVisible && (hasNewMessages || (messageTargetActive && chatScrollHistoryVisit)) ? (
+          <ChatNewMessagesButton
+            hasNewMessages={hasNewMessages}
+            readingRegionRef={scrollContainerRef}
+            onPress={messageTargetActive ? returnToLatestMessages : jumpToNewMessages}
+          />
+        ) : null}
         mutationDisabled={projectWriteDisabled}
         silenceHintProps={
           octoSilenceHint.visible ? { onDismiss: octoSilenceHint.dismiss } : null

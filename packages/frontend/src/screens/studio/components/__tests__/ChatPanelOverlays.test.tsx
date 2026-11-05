@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ChatMessageMenuOverlay } from "../ChatPanelOverlays";
+import { ChatImageLightboxOverlay, ChatMessageMenuOverlay } from "../ChatPanelOverlays";
 import { formatSpeakerTimestamp } from "../chatSpeakerTimestamp";
 
 const actionsMenu = {
@@ -43,6 +43,30 @@ describe("ChatPanelOverlays", () => {
     container.remove();
     document.querySelector("[data-overlay-return-trigger]")?.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("opens an image in a keyboard-owned dialog and returns to its thumbnail", async () => {
+    const onClose = vi.fn();
+    const trigger = document.createElement("button");
+    trigger.textContent = "Open attached image";
+    trigger.dataset.overlayReturnTrigger = "true";
+    document.body.appendChild(trigger);
+    trigger.focus();
+    await act(async () => root.render(<ChatImageLightboxOverlay
+      imageLightbox={{ src: "/sample.png", alt: "Screenshot of the previous design" }} onClose={onClose} />));
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Image preview"]')!;
+    expect(dialog).not.toBeNull();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(dialog.querySelector("img")?.alt).toBe("Screenshot of the previous design");
+    expect(dialog.querySelector('[aria-label="Close image preview"]')).not.toBeNull();
+    await act(async () => {
+      document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    expect(onClose).toHaveBeenCalledOnce();
+    await act(async () => root.render(<ChatImageLightboxOverlay imageLightbox={null} onClose={onClose} />));
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    expect(document.activeElement).toBe(trigger);
   });
 
   it("keeps message stats behind the message action menu", async () => {

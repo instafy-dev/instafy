@@ -18,8 +18,11 @@ Hiding Personal Browser, switching to Shared, or
 replacing its owner returns notifications to their normal floating placement.
 Moving the same portal container preserves notice timers and focused controls.
 
-Browser and sharing tools use floating dialogs. The renderer reports an optional
-`occluded` bounds flag while those dialogs cover the native surface. Main hides
+Browser and sharing tools use floating dialogs. Shared Studio modals, including
+chat image and text attachment viewers in a split workspace, also cover the native
+surface. The renderer reports an optional `occluded` bounds flag while those
+dialogs are mounted. Nested modals keep the page covered until the last one leaves;
+the fullscreen Personal Browser container itself is exempt so its page stays live. Main hides
 the WebContentsView and its input shield without changing the page's dimensions
 or logical visibility. On the transition into occlusion, the existing bounds IPC
 can return a bounded page preview to the same owner renderer. It rechecks owner

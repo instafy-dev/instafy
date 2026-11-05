@@ -3,6 +3,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -22,12 +23,11 @@ import {
 import { Text } from "../../../components/Text";
 import { Button } from "../../../components/Button";
 import { InlineNotice } from "../../../components/InlineNotice";
+import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
+import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { controllerClient } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
-import {
-  addFloatingSurfaceViewportChangeListener,
-  clampFloatingSurfacePositionToStudioViewport,
-} from "../../../utils/floatingSurfacePosition";
+import { addFloatingSurfaceViewportChangeListener } from "../../../utils/floatingSurfacePosition";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import { getAssistantMentionClass, resolveAssistantMentionToken } from "./assistantMentionUI";
 import {
@@ -117,12 +117,6 @@ type WorkspaceFilePreviewPosition = {
   width: number;
 };
 
-type WorkspaceFileActionMenuPosition = {
-  left: number;
-  top: number;
-  maxHeight: number;
-};
-
 const WORKSPACE_FILE_PREVIEW_WIDTH_PX = 420;
 const WORKSPACE_FILE_PREVIEW_MAX_HEIGHT_PX = 280;
 const WORKSPACE_FILE_PREVIEW_MAX_CHARS = 3600;
@@ -131,9 +125,6 @@ const WORKSPACE_FILE_PREVIEW_HOVER_DELAY_MS = 220;
 const WORKSPACE_FILE_PREVIEW_TOUCH_DELAY_MS = 520;
 const WORKSPACE_FILE_PREVIEW_TIMEOUT_MS = 5_000;
 const WORKSPACE_FILE_PREVIEW_CACHE_TTL_MS = 30_000;
-const WORKSPACE_FILE_ACTION_MENU_WIDTH_PX = 176;
-const WORKSPACE_FILE_ACTION_MENU_HEIGHT_ESTIMATE_PX = 96;
-const WORKSPACE_FILE_ACTION_MENU_PADDING_PX = 12;
 const WORKSPACE_FILE_PREVIEW_INTENT_EVENT = "instafy:workspace-file-preview-intent";
 // Punctuation that reads as part of the chip before it and must not wrap alone.
 const CHIP_TRAILING_PUNCTUATION_REGEX = /^[:;,.!?)\]]+/;
@@ -664,24 +655,6 @@ function resolveWorkspaceFilePreviewPosition(anchor: HTMLElement): WorkspaceFile
   };
 }
 
-function resolveWorkspaceFileActionMenuPosition(
-  clientX: number,
-  clientY: number,
-): WorkspaceFileActionMenuPosition {
-  const { x, y, maxHeight } = clampFloatingSurfacePositionToStudioViewport({
-    clientX,
-    clientY,
-    surfaceWidth: WORKSPACE_FILE_ACTION_MENU_WIDTH_PX,
-    surfaceHeight: WORKSPACE_FILE_ACTION_MENU_HEIGHT_ESTIMATE_PX,
-    padding: WORKSPACE_FILE_ACTION_MENU_PADDING_PX,
-  });
-  return {
-    left: x,
-    top: y,
-    maxHeight,
-  };
-}
-
 function formatWorkspaceFilePreviewContent(
   content: string,
   targetLine?: number | null,
@@ -786,7 +759,8 @@ function WorkspaceFileReferenceChip({
   const anchorRef = useRef<HTMLButtonElement | null>(null);
   const previewRef = useRef<HTMLSpanElement | null>(null);
   const previewBodyRef = useRef<HTMLSpanElement | null>(null);
-  const actionMenuRef = useRef<HTMLSpanElement | null>(null);
+  const previewId = useId();
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
   const hoverTimerRef = useRef<number | null>(null);
   const hideTimerRef = useRef<number | null>(null);
   const touchTimerRef = useRef<number | null>(null);
@@ -797,7 +771,7 @@ function WorkspaceFileReferenceChip({
   const previewLoadKeyRef = useRef<string | null>(null);
   const previewStateRef = useRef<WorkspaceFilePreviewState>({ status: "idle" });
   const [previewLoadNonce, setPreviewLoadNonce] = useState(0);
-  const [actionMenuPosition, setActionMenuPosition] = useState<WorkspaceFileActionMenuPosition | null>(null);
+  const [actionMenuOpen, setActionMenuOpen] = useState(false);
 
   const canNavigate = Boolean(reference.path.trim().length > 0);
   const presentation = formatWorkspaceFileReferencePresentation(reference);
@@ -869,7 +843,7 @@ function WorkspaceFileReferenceChip({
     setPreviewState({ status: "idle" });
     previewLoadKeyRef.current = null;
     setPreviewLoadNonce(0);
-    setActionMenuPosition(null);
+    setActionMenuOpen(false);
     suppressNextClickRef.current = false;
   }, [previewKey]);
 
@@ -884,7 +858,7 @@ function WorkspaceFileReferenceChip({
       clearTimer(touchTimerRef);
       setPreviewOpen(false);
       setPreviewPosition(null);
-      setActionMenuPosition(null);
+      setActionMenuOpen(false);
       suppressNextClickRef.current = false;
     };
     window.addEventListener(WORKSPACE_FILE_PREVIEW_INTENT_EVENT, handlePreviewIntent);
@@ -943,36 +917,21 @@ function WorkspaceFileReferenceChip({
   }, [previewOpen]);
 
   useEffect(() => {
-    if (!actionMenuPosition) {
-      return;
-    }
-    const handlePointerDownOutside = (event: globalThis.PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) {
-        return;
-      }
-      if (anchorRef.current?.contains(target) || actionMenuRef.current?.contains(target)) {
-        return;
-      }
-      setActionMenuPosition(null);
+    const cancelTouchPreview = () => {
+      if (!touchStartRef.current) return;
+      clearTimer(touchTimerRef);
+      touchStartRef.current = null;
+      suppressNextClickRef.current = true;
+      setPreviewOpen(false);
     };
-    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setActionMenuPosition(null);
-      }
-    };
-    document.addEventListener("pointerdown", handlePointerDownOutside, true);
-    document.addEventListener("keydown", handleKeyDown);
-    const removeViewportChangeListener = addFloatingSurfaceViewportChangeListener(() => {
-      setActionMenuPosition(null);
-    });
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDownOutside, true);
-      document.removeEventListener("keydown", handleKeyDown);
-      removeViewportChangeListener();
-    };
-  }, [actionMenuPosition]);
+    window.addEventListener("scroll", cancelTouchPreview, true);
+    return () => window.removeEventListener("scroll", cancelTouchPreview, true);
+  }, [clearTimer]);
+
+  useEffect(() => {
+    if (!actionMenuOpen) return;
+    return addFloatingSurfaceViewportChangeListener(() => setActionMenuOpen(false));
+  }, [actionMenuOpen]);
 
   useEffect(() => {
     return () => {
@@ -1080,11 +1039,12 @@ function WorkspaceFileReferenceChip({
   }, [previewOpen, previewState]);
 
   const handleMouseEnter = useCallback(() => {
+    if (actionMenuOpen) return;
     announceWorkspaceFilePreviewIntent(previewKey);
     clearTimer(hideTimerRef);
     clearTimer(hoverTimerRef);
     hoverTimerRef.current = window.setTimeout(openPreview, WORKSPACE_FILE_PREVIEW_HOVER_DELAY_MS);
-  }, [clearTimer, openPreview, previewKey]);
+  }, [actionMenuOpen, clearTimer, openPreview, previewKey]);
 
   const handleMouseLeave = useCallback(() => {
     clearTimer(hoverTimerRef);
@@ -1104,18 +1064,20 @@ function WorkspaceFileReferenceChip({
   const handlePointerLeave = useCallback(
     (event: ReactPointerEvent<HTMLSpanElement>) => {
       if (event.pointerType !== "mouse") {
+        clearTimer(touchTimerRef);
         return;
       }
       handleMouseLeave();
     },
-    [handleMouseLeave],
+    [clearTimer, handleMouseLeave],
   );
 
   const handlePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLButtonElement>) => {
-      if (event.pointerType === "mouse") {
+      if (event.pointerType === "mouse" || event.isPrimary === false) {
         return;
       }
+      touchStartRef.current = { x: event.clientX, y: event.clientY };
       announceWorkspaceFilePreviewIntent(previewKey);
       clearTimer(touchTimerRef);
       suppressNextClickRef.current = false;
@@ -1127,11 +1089,22 @@ function WorkspaceFileReferenceChip({
     [clearTimer, openPreview, previewKey],
   );
 
+  const handlePointerMove = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+    const start = touchStartRef.current;
+    if (!start || Math.hypot(event.clientX - start.x, event.clientY - start.y) <= 8) return;
+    clearTimer(touchTimerRef);
+    touchStartRef.current = null;
+    suppressNextClickRef.current = true;
+    setPreviewOpen(false);
+  }, [clearTimer]);
+
   const handlePointerUp = useCallback(() => {
+    touchStartRef.current = null;
     clearTimer(touchTimerRef);
   }, [clearTimer]);
 
   const handlePointerCancel = useCallback(() => {
+    touchStartRef.current = null;
     clearTimer(touchTimerRef);
     suppressNextClickRef.current = false;
   }, [clearTimer]);
@@ -1144,31 +1117,33 @@ function WorkspaceFileReferenceChip({
     onOpen(reference);
   }, [onOpen, reference]);
 
-  const handleContextMenu = useCallback(
-    (event: ReactMouseEvent<HTMLButtonElement>) => {
-      if (!canNavigate) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      announceWorkspaceFilePreviewIntent(previewKey);
-      clearTimer(hoverTimerRef);
-      clearTimer(touchTimerRef);
-      clearTimer(hideTimerRef);
-      setPreviewOpen(false);
-      setPreviewPosition(null);
-      setActionMenuPosition(resolveWorkspaceFileActionMenuPosition(event.clientX, event.clientY));
-    },
-    [canNavigate, clearTimer, previewKey],
-  );
+  const openActionMenu = useCallback(() => {
+    if (!canNavigate) return;
+    announceWorkspaceFilePreviewIntent(previewKey);
+    clearTimer(hoverTimerRef);
+    clearTimer(touchTimerRef);
+    clearTimer(hideTimerRef);
+    setPreviewOpen(false);
+    setPreviewPosition(null);
+    // Right-click does not focus buttons in every browser. Record the return
+    // target before the shared popover moves focus into its keyboard menu.
+    anchorRef.current?.focus({ preventScroll: true });
+    setActionMenuOpen(true);
+  }, [canNavigate, clearTimer, previewKey]);
+
+  const handleContextMenu = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openActionMenu();
+  }, [openActionMenu]);
 
   const handlePreviewFromMenu = useCallback(() => {
-    setActionMenuPosition(null);
+    setActionMenuOpen(false);
     openPreview();
   }, [openPreview]);
 
   const handleOpenFromMenu = useCallback(() => {
-    setActionMenuPosition(null);
+    setActionMenuOpen(false);
     onOpen(reference);
   }, [onOpen, reference]);
 
@@ -1186,8 +1161,18 @@ function WorkspaceFileReferenceChip({
         onClick={handleClick}
         onContextMenu={handleContextMenu}
         onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerCancel}
+        onKeyDown={(event) => {
+          if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+            event.preventDefault();
+            event.stopPropagation();
+            openActionMenu();
+          }
+        }}
+        aria-keyshortcuts="Shift+F10"
+        aria-describedby={previewOpen ? previewId : undefined}
         disabled={!canNavigate}
         data-testid="chat-message-file-reference-inline"
         data-workspace-path={reference.path}
@@ -1195,6 +1180,7 @@ function WorkspaceFileReferenceChip({
         aria-label={presentation.ariaLabel}
         className={[
           WORKSPACE_FILE_REFERENCE_TOKEN_CLASS,
+          "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-500",
           canNavigate
             ? "group/file-ref cursor-pointer hover:bg-primary-100/80 hover:text-primary-800 dark:hover:bg-primary-300/15 dark:hover:text-primary-100"
             : "cursor-default opacity-60",
@@ -1219,45 +1205,21 @@ function WorkspaceFileReferenceChip({
           </span>
         )}
       </button>
-      {actionMenuPosition ? (
-        <span
-          ref={actionMenuRef}
-          role="menu"
+      <StudioPopover isOpen={actionMenuOpen} onOpenChange={setActionMenuOpen} triggerRef={anchorRef} placement="bottom start" layout="menu">
+        <StudioMenu
+          autoFocus="first"
           aria-label={`File actions for ${presentation.previewHeaderLabel}`}
           data-testid="chat-message-file-reference-menu"
-          className="fixed z-[80] block w-44 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-1 text-left text-sm shadow-xl shadow-slate-950/15 ring-1 ring-slate-950/5 dark:border-[color:var(--color-studio-dark-floating-border)] dark:bg-[var(--color-studio-dark-floating)] dark:shadow-black/25 dark:ring-white/[0.08]"
-          style={{
-            left: actionMenuPosition.left,
-            top: actionMenuPosition.top,
-            maxHeight: actionMenuPosition.maxHeight,
-          }}
-          onContextMenu={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-          }}
-          onPointerDown={(event) => event.stopPropagation()}
+          onAction={(key) => { if (key === "preview") handlePreviewFromMenu(); else handleOpenFromMenu(); }}
         >
-          <button
-            type="button"
-            role="menuitem"
-            className="block w-full rounded-xl px-3 py-2 text-left text-slate-700 hover:bg-slate-100 focus:bg-slate-100 focus:outline-none dark:text-slate-100 dark:hover:bg-slate-800 dark:focus:bg-slate-800"
-            onClick={handlePreviewFromMenu}
-          >
-            Preview
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            className="block w-full rounded-xl px-3 py-2 text-left text-slate-700 hover:bg-slate-100 focus:bg-slate-100 focus:outline-none dark:text-slate-100 dark:hover:bg-slate-800 dark:focus:bg-slate-800"
-            onClick={handleOpenFromMenu}
-          >
-            Open
-          </button>
-        </span>
-      ) : null}
+          <StudioMenuItem id="preview">Preview</StudioMenuItem>
+          <StudioMenuItem id="open">Open</StudioMenuItem>
+        </StudioMenu>
+      </StudioPopover>
       {previewOpen && previewPosition ? (
         <span
           ref={previewRef}
+          id={previewId}
           role="tooltip"
           data-testid="chat-message-file-reference-preview"
           className="fixed z-50 block overflow-hidden rounded-2xl border border-slate-200 bg-white text-left shadow-xl shadow-slate-950/15 ring-1 ring-slate-950/5 dark:border-[color:var(--color-studio-dark-floating-border)] dark:bg-[var(--color-studio-dark-floating)] dark:shadow-black/25 dark:ring-white/[0.08]"

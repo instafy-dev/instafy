@@ -94,9 +94,17 @@
 }
 
 @media (pointer: coarse) {
+  .chat-message-shell:has(.chat-message-actions-trigger) {
+    /* The target grows with text size. Reserve its overhang within the row,
+       retaining the existing 92% reading width wherever it leaves enough room. */
+    max-width: min(92%, calc(100% - 1.5rem), 56rem);
+    /* Keep prose and links clear of the inward hit area and its focus ring. */
+    padding-inline-end: calc(1.25rem + 4px);
+  }
+
   .chat-message-actions-trigger {
-    /* Keep the 44px target and its 4px focus outline inside a 320px pane;
-       the painted icon remains outside the message text. */
-    transform: translateX(-16px);
+    /* Match the rem-based touch target, including enlarged text. Its glyph
+       stays in the shell's end padding while the hit area reaches the gutter. */
+    transform: translateX(-1.5rem);
   }
 }

@@ -217,6 +217,24 @@ describe('Studio search', () => {
     expect(props.onOpen).toHaveBeenCalledOnce();
   });
 
+  it.each(['Escape', 'ArrowDown', 'ArrowUp'])('keeps %s inside an active input composition', async keyName => {
+    const onDismiss = vi.fn();
+    const onRequestChange = vi.fn();
+    props = { ...props, onDismiss, onRequestChange };
+    await open();
+    await enterQuery('report');
+    onRequestChange.mockClear();
+
+    await key(keyName, { isComposing: true });
+
+    expect(document.activeElement).toBe(input());
+    expect(input().value).toBe('report');
+    expect(resultIds()).toEqual(['chat-current', 'file-current', 'action-current']);
+    expect(onDismiss).not.toHaveBeenCalled();
+    expect(onRequestChange).not.toHaveBeenCalled();
+    expectNoActivation();
+  });
+
   it('keeps Backspace inside a nonempty query', async () => {
     await open();
     await enterQuery('report');
@@ -328,6 +346,19 @@ describe('Studio search', () => {
     expectNoActivation();
   });
 
+  it('dismisses search with Escape from a focused result without activating it', async () => {
+    const onDismiss = vi.fn();
+    props = { ...props, onDismiss };
+    await open();
+    await key('ArrowDown');
+    const result = document.activeElement as HTMLElement;
+    expect(result.dataset.testid).toBe('studio-search-result-chat-current');
+    await key('Escape', {}, result);
+    expect(resultIds()).toEqual([]);
+    expect(onDismiss).toHaveBeenCalledOnce();
+    expectNoActivation();
+  });
+
   it('activates only the chosen record after broadening, despite duplicate result titles', async () => {
     await open();
     await selectScope('all');
@@ -404,8 +435,7 @@ describe('Studio search', () => {
     expect(originalInput.hasAttribute('aria-controls')).toBe(false);
     const closeButton = button('Close search');
     expect(closeButton.disabled).toBe(true);
-    expect(closeButton.getAttribute('aria-hidden')).toBe('true');
-    expect(closeButton.tabIndex).toBe(-1);
+    expect(closeButton.closest('[aria-hidden="true"][inert]')).not.toBeNull();
     expect(props.onOpen).not.toHaveBeenCalled();
 
     await act(async () => originalInput.focus());
@@ -538,6 +568,31 @@ describe('Studio search', () => {
 
     await render({ ...props, records: [] });
     expect(container.textContent).not.toContain('No results');
+  });
+
+  it.each(['spaces', 'messages'] as const)('keeps the %s pagination action focused while pending and ignores another press', async kind => {
+    const onLoad = vi.fn();
+    props = kind === 'spaces'
+      ? { ...props, remainingSpaces: 2, onLoadMoreSpaces: onLoad }
+      : { ...props, hasMoreMessages: true, onLoadMoreMessages: onLoad };
+    await open();
+    const more = container.querySelector<HTMLButtonElement>('.studio-search-more')!;
+    await act(async () => more.focus());
+    await click(more);
+    expect(onLoad).toHaveBeenCalledOnce();
+
+    await render(kind === 'spaces' ? { ...props, loading: true } : { ...props, loadingMoreMessages: true });
+    expect(document.activeElement).toBe(more);
+    expect(more.disabled).toBe(false);
+    expect(more.getAttribute('aria-disabled')).toBe('true');
+    await click(more);
+    expect(onLoad).toHaveBeenCalledOnce();
+
+    await render({ ...props, loading: false, loadingMoreMessages: false });
+    expect(document.activeElement).toBe(more);
+    await click(more);
+    expect(onLoad).toHaveBeenCalledTimes(2);
+    expectNoActivation();
   });
 
   it('matches all query terms across titles, descriptions and keywords within the chosen scope', async () => {

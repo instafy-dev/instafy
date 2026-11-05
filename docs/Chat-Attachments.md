@@ -84,9 +84,18 @@ it goes only with its space or its team, whose purge covers it.
   Everything kept is dropped when the signed-in person changes.
 - A read Storage refuses (someone who is not a reader of the conversation) or an object that
   is gone shows a plain "Image unavailable" placeholder. A download that could not reach
-  Storage shows "Couldn't load image" with a "Try again" button. Text attachments are listed
-  by name.
+  Storage shows "Couldn't load image" with a "Try again" button. Unreadable image bytes show
+  "Image unavailable" rather than a broken thumbnail.
+- Text attachments are named buttons. Opening one downloads it with the person's session
+  into a read-only dialog, displayed as literal text. The preview reads up to
+  100 KiB per page, with **Previous** and **Next** keeping every character readable. Web
+  browsers also offer **Download file** for the complete attachment; native mobile shells
+  currently offer the reader without a download action. Failed reads
+  offer **Try again**, refused or missing files say they are unavailable, and closing the
+  dialog drops the text. Escape returns focus to the attachment; changing the signed-in
+  person closes the viewer and drops any pending read.
 - Older images with a `workspacePath` still load through the workspace's raw file route.
+  A failed URL request or image load offers **Try again** instead of remaining on a loading tile.
 - When a file someone is editing changes underneath them and the two versions together are
   long (over 12,000 characters), the merge request sends them as two `kind: "file"` text
   attachments of that chat instead of writing snapshot files into the workspace. The prompt

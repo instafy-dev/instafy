@@ -75,6 +75,7 @@ describe("ChatMessageContent", () => {
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.stubGlobal("CSS", { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") });
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -96,6 +97,7 @@ describe("ChatMessageContent", () => {
     delete runtimeWindow.__INSTAFY_PENDING_OPEN_WORKSPACE_FILE__;
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   it("renders a markdown pipe table as a table that scrolls inside its own frame", async () => {
@@ -1262,7 +1264,7 @@ describe("ChatMessageContent", () => {
       chip?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 80, clientY: 90 }));
     });
 
-    const menu = container.querySelector('[data-testid="chat-message-file-reference-menu"]');
+    const menu = document.querySelector('[data-testid="chat-message-file-reference-menu"]');
     expect(menu?.getAttribute("aria-label")).toBe("File actions for notes/persistence-check.md:3");
   });
 
@@ -1330,14 +1332,14 @@ describe("ChatMessageContent", () => {
       );
     });
 
-    let menu = container.querySelector('[data-testid="chat-message-file-reference-menu"]');
+    let menu = document.querySelector('[data-testid="chat-message-file-reference-menu"]');
     expect(menu?.textContent).toContain("Preview");
     expect(menu?.textContent).toContain("Open");
 
-    const previewButton = Array.from(menu?.querySelectorAll("button") ?? []).find(
+    const previewButton = Array.from(menu?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []).find(
       (button) => button.textContent?.trim() === "Preview",
     );
-    expect(previewButton).toBeInstanceOf(HTMLButtonElement);
+    expect(previewButton).toBeInstanceOf(HTMLElement);
 
     await act(async () => {
       previewButton?.click();
@@ -1366,12 +1368,12 @@ describe("ChatMessageContent", () => {
       );
     });
 
-    menu = container.querySelector('[data-testid="chat-message-file-reference-menu"]');
+    menu = document.querySelector('[data-testid="chat-message-file-reference-menu"]');
     expect(container.querySelector('[data-testid="chat-message-file-reference-preview"]')).toBeNull();
-    const openButton = Array.from(menu?.querySelectorAll("button") ?? []).find(
+    const openButton = Array.from(menu?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []).find(
       (button) => button.textContent?.trim() === "Open",
     );
-    expect(openButton).toBeInstanceOf(HTMLButtonElement);
+    expect(openButton).toBeInstanceOf(HTMLElement);
 
     await act(async () => {
       openButton?.click();
@@ -1780,11 +1782,11 @@ describe("ChatMessageContent", () => {
     });
 
     expect(container.querySelector('[data-testid="chat-message-file-reference-preview"]')).toBeNull();
-    const menu = container.querySelector('[data-testid="chat-message-file-reference-menu"]');
-    const previewButton = Array.from(menu?.querySelectorAll("button") ?? []).find(
+    const menu = document.querySelector('[data-testid="chat-message-file-reference-menu"]');
+    const previewButton = Array.from(menu?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []).find(
       (button) => button.textContent?.trim() === "Preview",
     );
-    expect(previewButton).toBeInstanceOf(HTMLButtonElement);
+    expect(previewButton).toBeInstanceOf(HTMLElement);
 
     await act(async () => {
       previewButton?.click();
@@ -1797,6 +1799,61 @@ describe("ChatMessageContent", () => {
     expect(readWorkspaceFile).toHaveBeenCalledTimes(2);
     expect(requestUrlPush).not.toHaveBeenCalled();
     expect(openPanelTab).not.toHaveBeenCalled();
+  });
+
+  it("opens file actions from the keyboard and restores the file reference on Escape", async () => {
+    await act(async () => {
+      root.render(<MessageContent content="Inspect TODO.md before editing." projectId="project-1" />);
+    });
+    const chip = container.querySelector<HTMLButtonElement>('[data-testid="chat-message-file-reference-inline"]')!;
+    await act(async () => {
+      chip.focus();
+      chip.dispatchEvent(new KeyboardEvent("keydown", { key: "F10", shiftKey: true, bubbles: true, cancelable: true }));
+    });
+    const menu = document.querySelector('[data-testid="chat-message-file-reference-menu"]')!;
+    expect(menu.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement?.textContent).toBe("Preview");
+    await act(async () => {
+      document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    });
+    expect(document.activeElement?.textContent).toBe("Open");
+    await act(async () => {
+      document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      await new Promise((resolve) => window.setTimeout(resolve, 30));
+    });
+    expect(document.querySelector('[data-testid="chat-message-file-reference-menu"]')).toBeNull();
+    expect(document.activeElement).toBe(chip);
+    expect(openPanelTab).not.toHaveBeenCalled();
+  });
+
+  it.each(["movement", "scroll"])("cancels a touch preview on %s and keeps the transcript readable", async (gesture) => {
+    vi.useFakeTimers();
+    await act(async () => {
+      root.render(<MessageContent content="Inspect TODO.md before editing." projectId="project-1" />);
+    });
+    const chip = container.querySelector<HTMLButtonElement>('[data-testid="chat-message-file-reference-inline"]')!;
+    const touch = (type: string, y: number) => {
+      const event = new MouseEvent(type, { bubbles: true, clientX: 20, clientY: y });
+      Object.defineProperty(event, "pointerType", { value: "touch" });
+      return event;
+    };
+    await act(async () => {
+      chip.dispatchEvent(touch("pointerdown", 20));
+      if (gesture === "movement") chip.dispatchEvent(touch("pointermove", 35));
+      else window.dispatchEvent(new Event("scroll"));
+      vi.advanceTimersByTime(600);
+      chip.dispatchEvent(touch("pointerup", 35));
+      chip.click();
+    });
+    expect(container.querySelector('[data-testid="chat-message-file-reference-preview"]')).toBeNull();
+    expect(readWorkspaceFile).not.toHaveBeenCalled();
+    expect(openPanelTab).not.toHaveBeenCalled();
+    await act(async () => {
+      chip.dispatchEvent(touch("pointerdown", 20));
+      chip.dispatchEvent(touch("pointerup", 20));
+      chip.click();
+    });
+    expect(openPanelTab).toHaveBeenCalledWith("code");
   });
 
   it("previews workspace file references on touch hold without navigating", async () => {

@@ -1,5 +1,8 @@
 import type { ReactNode } from "react";
 import { NavArrowDown, Xmark } from "iconoir-react";
+import { Button, IconButton } from "../../../components/Button";
+import { Text } from "../../../components/Text";
+import { StudioSearchScopeChip } from "./StudioSearchScopeChip";
 import type { StudioSearchScope } from "./useStudioSearch";
 import "./StudioSearchContext.css";
 
@@ -18,16 +21,16 @@ export function StudioSearchContext({ scope, context, onBroaden }: {
   onBroaden: (scope: StudioSearchScope, focusInput?: boolean) => void;
 }) {
   return <span className="studio-search-context" data-testid="studio-search-context" onClick={event => event.stopPropagation()}>
-    {scope !== "all" ? <span className="studio-scope-picker-chip">
+    {scope !== "all" ? <StudioSearchScopeChip className="studio-scope-picker-chip">
       {context.team}
-      <button type="button" className="studio-scope-remove" aria-label="Search all orgs" title="Search all orgs" onClick={() => onBroaden("all", true)}><Xmark aria-hidden="true" /></button>
-    </span> : <button type="button" className="studio-search-all studio-all-scope-picker" aria-label="Choose team or space" onClick={context.onBrowseTeams}>All orgs<NavArrowDown aria-hidden="true" /></button>}
+      <IconButton variant="ghost" tone="muted" size="xs" className="studio-scope-remove" aria-label="Search all orgs" title="Search all orgs" onPress={() => onBroaden("all", true)}><Xmark aria-hidden="true" /></IconButton>
+    </StudioSearchScopeChip> : <Button variant="secondary" size="xs" radius="lg" elevation="none" className="studio-all-scope-picker" aria-label="Choose team or space" onPress={context.onBrowseTeams}>All orgs<NavArrowDown aria-hidden="true" /></Button>}
     {scope === "space" ? <>
-      <span className="studio-search-separator" aria-hidden="true">/</span>
-      <span className="studio-scope-picker-chip">
+      <Text as="span" variant="caption" tone="subtle" className="studio-search-separator" aria-hidden="true">/</Text>
+      <StudioSearchScopeChip className="studio-scope-picker-chip">
         {context.space}
-        <button type="button" className="studio-scope-remove" aria-label={`Search within ${context.teamName}`} title={`Search within ${context.teamName}`} onClick={() => onBroaden("org", true)}><Xmark aria-hidden="true" /></button>
-      </span>
+        <IconButton variant="ghost" tone="muted" size="xs" className="studio-scope-remove" aria-label={`Search within ${context.teamName}`} title={`Search within ${context.teamName}`} onPress={() => onBroaden("org", true)}><Xmark aria-hidden="true" /></IconButton>
+      </StudioSearchScopeChip>
     </> : null}
   </span>;
 }

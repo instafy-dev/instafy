@@ -49,6 +49,16 @@ for (const theme of ["light", "dark"]) {
 
   test.describe(`${theme} short search scrolling`, () => {
     test.use({ viewport: { width: 360, height: 438 }, hasTouch: true });
+    test("dismisses search from a keyboard-focused result without opening it", async ({ page }) => {
+      await openSearch(page, theme);
+      await page.getByTestId("studio-search-input").press("ArrowDown");
+      const result = page.getByTestId("studio-search-result-chat-0");
+      await expect(result).toBeFocused();
+      await result.press("Escape");
+      await expect(page.getByTestId("studio-search-results")).toHaveCount(0);
+      expect(await page.evaluate(() => (window as unknown as { __searchKeyboardReview: { activations: number } }).__searchKeyboardReview.activations)).toBe(0);
+    });
+
     test("scrolls results and the index explanation together while preserving input focus and scope", async ({ page }) => {
       await openSearch(page, theme, "&many=1");
       await singleScrollOwner(page);
