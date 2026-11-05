@@ -12,6 +12,8 @@ import {
   clearNativeAuthCallbackAttemptId,
   clearPendingNativeAuthAttempt,
   createPendingNativeAuthAttempt,
+  isNativeAuthCallbackClaimed,
+  isTokenPairNativeAuthCallback,
   NATIVE_AUTH_ERROR_EVENT,
   NATIVE_AUTH_PROVIDER_LABELS,
   NATIVE_AUTH_SUCCESS_EVENT,
@@ -20,6 +22,7 @@ import {
   type NativeAuthProvider,
   parseNativeAuthCallbackUrl,
   readNativeAuthCallbackAttemptId,
+  readNativeAuthCallbackParams,
   readPendingNativeAuthAttempt,
   readNativeAuthError,
   releaseNativeAuthCallbackUrlClaims,
@@ -33,6 +36,9 @@ import {
 import { hasSupabaseConfig, supabase, supabaseAnonKey } from "../../lib/supabaseClient";
 import { describeExchangeError } from "../../auth/pkce";
 import { postAuthTelemetryEvent } from "../../services/runtimeController/authTelemetry";
+
+// How many desktop callbacks wait while another is being exchanged.
+const MAX_WAITING_DESKTOP_CALLBACKS = 3;
 
 // The OAuth providers the login page offers. Everything downstream of the
 // entry function -- pending attempts, deep links, telemetry metadata -- is
@@ -155,7 +161,7 @@ export function useNativeGithubAuth({
 
   const completePendingGithubLoginAttempt = useCallback(
     (
-      completionMethod: "exchange_code_for_session" | "set_session",
+      completionMethod: "exchange_code_for_session",
       nextUserEmail: string | null,
     ) => {
       const pendingAttempt = readPendingNativeAuthAttempt();
@@ -350,33 +356,20 @@ export function useNativeGithubAuth({
 
     let cancelled = false;
     let inFlight = false;
+    // Desktop callbacks that arrived while another was being exchanged. The
+    // shell hands each callback over once, so one dropped here is lost.
+    const waitingDesktopCallbacks: string[] = [];
     let bridgeListener: DirectPluginListenerHandle | null = null;
     let appUrlListener: DirectPluginListenerHandle | null = null;
     let resumeListener: DirectPluginListenerHandle | null = null;
     let resumeDrainTimeout: number | null = null;
-
-    const extractAuthParam = (
-      url: URL,
-      hashParams: URLSearchParams,
-      key: string,
-    ): string | null => {
-      const fromSearch = url.searchParams.get(key);
-      if (typeof fromSearch === "string" && fromSearch.trim().length > 0) {
-        return fromSearch.trim();
-      }
-      const fromHash = hashParams.get(key);
-      if (typeof fromHash === "string" && fromHash.trim().length > 0) {
-        return fromHash.trim();
-      }
-      return null;
-    };
 
     const handleCallbackUrl = async (rawUrl: string, transport: "desktop" | "native") => {
       if (cancelled) {
         return;
       }
       const trimmed = (rawUrl ?? "").trim();
-      if (!trimmed || inFlight) {
+      if (!trimmed || (inFlight && transport === "native")) {
         return;
       }
 
@@ -384,26 +377,35 @@ export function useNativeGithubAuth({
       if (!parsed) {
         return;
       }
-      const hash = parsed.hash.startsWith("#") ? parsed.hash.slice(1) : parsed.hash;
-      const hashParams = new URLSearchParams(hash);
-      const code = extractAuthParam(parsed, hashParams, "code");
-      const accessToken = extractAuthParam(parsed, hashParams, "access_token");
-      const refreshToken = extractAuthParam(parsed, hashParams, "refresh_token");
-      const oauthError =
-        extractAuthParam(parsed, hashParams, "error_description") ??
-        extractAuthParam(parsed, hashParams, "error") ??
-        null;
+      const { code, accessToken, refreshToken, oauthError } = readNativeAuthCallbackParams(parsed);
+      // Session tokens instead of a code: see isTokenPairNativeAuthCallback.
+      // Checked before the claim, so neither this handler nor AuthProvider's
+      // acts on it.
+      if (isTokenPairNativeAuthCallback({ code, accessToken, refreshToken, oauthError })) {
+        return;
+      }
 
       const pendingAttempt = readPendingNativeAuthAttempt();
       // Any page or app can open instafy://auth. So on desktop a callback is
       // acted on only while a sign-in this app started is pending, and only
       // when it is what that sign-in returns: a PKCE code, which only this
-      // app's verifier can exchange, or the provider's refusal. A token pair,
-      // or a callback with no sign-in pending, would let whoever opened the
-      // link choose the account this app is signed in to, or sign it out. It
-      // is dropped unclaimed and without a message, since its contents are
-      // the sender's.
+      // app's verifier can exchange, or the provider's refusal. A callback
+      // with no sign-in pending would let whoever opened the link sign this
+      // app in or out. It is dropped unclaimed and without a message, since
+      // its contents are the sender's.
       if (transport === "desktop" && (!pendingAttempt || (!code && !oauthError))) {
+        return;
+      }
+      if (inFlight) {
+        // A desktop callback: keep it until the exchange in progress settles.
+        // Bounded, and the newest kept, since the person's own code is the
+        // one that arrives last.
+        if (!isNativeAuthCallbackClaimed(parsed) && !waitingDesktopCallbacks.includes(trimmed)) {
+          waitingDesktopCallbacks.push(trimmed);
+          if (waitingDesktopCallbacks.length > MAX_WAITING_DESKTOP_CALLBACKS) {
+            waitingDesktopCallbacks.shift();
+          }
+        }
         return;
       }
       if (!claimNativeAuthCallback(parsed)) {
@@ -469,25 +471,6 @@ export function useNativeGithubAuth({
           return;
         }
 
-        if (accessToken && refreshToken) {
-          const result = await supabase.auth.setSession({
-            access_token: accessToken,
-            refresh_token: refreshToken,
-          });
-          if (result.error) {
-            failPendingGithubLoginAttempt(kind("session_failed"), result.error.message, {
-              phase: "set_session",
-              source: "login_page_direct_plugins",
-            });
-            return;
-          }
-          completePendingGithubLoginAttempt(
-            "set_session",
-            result.data.session?.user?.email ?? result.data.user?.email ?? null,
-          );
-          return;
-        }
-
         failPendingGithubLoginAttempt(
           kind("callback_incomplete"),
           `${OAUTH_PROVIDER_LABELS[provider]} sign-in returned to the app without completing. Try again.`,
@@ -510,6 +493,14 @@ export function useNativeGithubAuth({
         );
       } finally {
         inFlight = false;
+        // Each waiting callback takes the full path again: after a sign-in
+        // completes, the gate drops the rest, since no attempt is pending.
+        while (!inFlight && !cancelled && waitingDesktopCallbacks.length > 0) {
+          const next = waitingDesktopCallbacks.shift();
+          if (next) {
+            void handleCallbackUrl(next, "desktop");
+          }
+        }
       }
     };
 
@@ -536,8 +527,8 @@ export function useNativeGithubAuth({
         // leaves a copy behind. Clear it, or the next mount of this page
         // drains a spent token and reports a failure over a good sign-in.
         // The drained copy is discarded: handleCallbackUrl has already acted
-        // on this callback, dropped it unclaimed, or skipped it because
-        // another callback was still being exchanged.
+        // on this callback, kept it until the exchange in progress settles,
+        // or dropped it unclaimed.
         void consumeDesktopAuthCallback();
       });
       void consumeDesktopAuthCallback().then((pending) => {

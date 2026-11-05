@@ -175,7 +175,7 @@ test("runtime image inputs reject the vulnerable Chromium and Go crypto baseline
   assert.match(webrtcSenderModule, /^\s*golang\.org\/x\/net v0\.60\.0 \/\/ indirect$/mu);
 });
 
-test("base runtime explicitly refreshes inherited gzip, PCRE2 and SQLite and rejects obsolete versions", () => {
+test("base runtime explicitly refreshes inherited gzip, PCRE2, SQLite and apt and rejects obsolete versions", () => {
   const source = read("docker/runtime/Dockerfile");
   const defaults = argumentDefaults(source);
   const runtime = dockerfileStage(source, "runtime");
@@ -183,6 +183,8 @@ test("base runtime explicitly refreshes inherited gzip, PCRE2 and SQLite and rej
     ["gzip", "GZIP_MIN_VERSION", "1.13-1+deb13u1"],
     ["libpcre2-8-0", "PCRE2_MIN_VERSION", "10.46-1~deb13u2"],
     ["libsqlite3-0", "SQLITE3_MIN_VERSION", "3.46.1-7+deb13u2"],
+    ["apt", "APT_MIN_VERSION", "3.0.4"],
+    ["libapt-pkg7.0", "APT_MIN_VERSION", "3.0.4"],
   ];
   for (const [name, argument, minimum] of packages) {
     assert.equal(defaults.get(argument), minimum);
@@ -198,12 +200,16 @@ test("every published Debian service refreshes inherited packages at its release
   const bookwormPackages = [
     ["libpcre2-8-0", "PCRE2_MIN_VERSION", "10.42-1+deb12u1"],
     ["perl-base", "PERL_BASE_MIN_VERSION", "5.36.0-7+deb12u4"],
+    ["apt", "APT_MIN_VERSION", "2.6.2"],
+    ["libapt-pkg6.0", "APT_MIN_VERSION", "2.6.2"],
   ];
   const trixiePackages = [
     ["gzip", "GZIP_MIN_VERSION", "1.13-1+deb13u1"],
     ["libpcre2-8-0", "PCRE2_MIN_VERSION", "10.46-1~deb13u2"],
     ["libsqlite3-0", "SQLITE3_MIN_VERSION", "3.46.1-7+deb13u2"],
     ["perl-base", "PERL_BASE_MIN_VERSION", "5.40.1-6+deb13u1"],
+    ["apt", "APT_MIN_VERSION", "3.0.4"],
+    ["libapt-pkg7.0", "APT_MIN_VERSION", "3.0.4"],
   ];
   const expected = new Map([
     ["packages/runtime-controller/Dockerfile", ["bookworm", bookwormPackages]],
@@ -451,6 +457,15 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
     /dpkg-query -W -f='\$\{Version\}' libbrotli1\)" ge "\$\{WEBDEV_BROTLI_MIN_VERSION\}"/u,
     "webdev must verify libbrotli1 reaches the fixed build",
   );
+  // The Playwright base's apt must be upgraded to the build that fixes CVE-2026-109518.
+  assert.equal(argumentDefaults(source).get("WEBDEV_APT_MIN_VERSION"), "2.8.4ubuntu0.1");
+  for (const pkg of ["apt", "libapt-pkg6.0t64"]) {
+    assert.match(
+      webdevStage,
+      new RegExp(`dpkg-query -W -f='\\$\\{Version\\}' ${pkg.replaceAll(".", "\\.")}\\)" ge "\\$\\{WEBDEV_APT_MIN_VERSION\\}"`, "u"),
+      `webdev must verify ${pkg} reaches the fixed apt build`,
+    );
+  }
   // Each flavor fails the build if any vendored copy is left unpatched.
   assert.equal(
     [...source.matchAll(/unpatched npm tar copies/gu)].length,
