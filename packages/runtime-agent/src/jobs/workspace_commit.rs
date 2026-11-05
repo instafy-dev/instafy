@@ -19,6 +19,7 @@ use zip::write::{FileOptions, ZipWriter};
 
 use super::save_report::{OriginSaveResponse, SaveReport};
 use super::{CodexFileDescriptor, FileChangeKind, JobMessage, JobMessageSender};
+use crate::controller::LeaseJob;
 use crate::origin::LocalOriginSync;
 
 #[derive(Debug, Clone)]
@@ -165,6 +166,138 @@ const LEASE_CONFLICT_RETRY_DELAYS: [Duration; 3] = [
 /// How long the refresh before a turn may take before the turn goes ahead
 /// without it.
 const PRE_TURN_REFRESH_TIMEOUT: Duration = Duration::from_secs(45);
+/// The most characters a version's title holds: one short line, as a git
+/// subject is. History cuts it to its row and shows all of it when the row
+/// opens.
+const VERSION_TITLE_MAX_CHARS: usize = 72;
+/// The title of a save no request of the person's names: the plain words an
+/// origin gives a save that comes without one.
+pub(crate) const DEFAULT_VERSION_TITLE: &str = "Save workspace changes";
+
+/// The title of the version a turn's save makes, as History lists it: the
+/// request the turn carried out, in the person's words as the chat showed
+/// them, cut to one short line ([`one_short_line`]). It was "instafy: agent
+/// sync (project <id> )", which named the space and nothing the version did.
+///
+/// - A hand-back's own words are the controller's line to Octo: it takes the
+///   person's message its browser turn carried on (`personRequest`), which
+///   only a message the routing step sent to the browser first has.
+/// - A team plan's helper, and its lead's next step, work from the plan's
+///   words (its first line says "Skill-authored multi-agent plan"), never
+///   the person's.
+/// - An evaluated turn (a scheduled run, a group chat's turn nobody
+///   addressed) starts with the controller's note to Octo in brackets, which
+///   is left out.
+///
+/// Without the person's words the save gets [`DEFAULT_VERSION_TITLE`]. The
+/// title goes only into the space's own history, beside the chat that holds
+/// the words already: no log or record takes it.
+pub(crate) fn version_title(job: &LeaseJob) -> String {
+    request_words(job)
+        .and_then(one_short_line)
+        .unwrap_or_else(|| DEFAULT_VERSION_TITLE.to_string())
+}
+
+/// The person's words a turn carries out ([`version_title`]).
+fn request_words(job: &LeaseJob) -> Option<&str> {
+    let payload = &job.payload;
+    let metadata = payload.get("metadata");
+    if super::browser_hand_back::is_hand_back_job(job) {
+        return super::browser_hand_back::person_request(metadata);
+    }
+    if super::is_multi_agent_worker_payload(payload)
+        || super::is_multi_agent_lead_continuation_payload(payload)
+    {
+        return None;
+    }
+    // What the chat showed, when Studio sent other words to run (an
+    // attachment's note, a goal's command).
+    let shown = metadata
+        .and_then(|metadata| metadata.get("displayContent"))
+        .and_then(JsonValue::as_str)
+        .filter(|words| !words.trim().is_empty());
+    if shown.is_some() {
+        return shown;
+    }
+    let prompt = payload.get("prompt_text").and_then(JsonValue::as_str)?;
+    let participation = &payload["metadata"]["groupParticipation"];
+    let evaluated = participation["decision"].as_str() == Some("agent_evaluation")
+        && participation["enforcedBy"].as_str() == Some("runtime-controller");
+    if evaluated && prompt.starts_with('[') {
+        // runtime-controller `agent.rs`: "{note}\n\n{request}".
+        return prompt.split_once("]\n\n").map(|(_, request)| request);
+    }
+    Some(prompt)
+}
+
+/// `words` as one short line: the first line that says anything, its spaces
+/// collapsed, cut at a word to [`VERSION_TITLE_MAX_CHARS`] with "…". A link
+/// becomes its site's name, so no path, query or sign-in of it is kept, and
+/// a word with `@` (an address, a mention) is left out ([`title_word`]).
+/// None when nothing is left.
+pub(super) fn one_short_line(words: &str) -> Option<String> {
+    let line = words
+        .lines()
+        .map(|line| {
+            line.split_whitespace()
+                .filter_map(title_word)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .find(|line| line.chars().any(char::is_alphanumeric))?;
+    if line.chars().count() <= VERSION_TITLE_MAX_CHARS {
+        return Some(line);
+    }
+    let cut: String = line.chars().take(VERSION_TITLE_MAX_CHARS - 1).collect();
+    let at_word = cut
+        .rfind(' ')
+        .filter(|&space| cut[..space].chars().count() >= VERSION_TITLE_MAX_CHARS / 2)
+        .map_or(cut.as_str(), |space| &cut[..space]);
+    let at_word = at_word.trim_end_matches(|ch: char| ch.is_whitespace() || ",;:".contains(ch));
+    Some(format!("{at_word}…"))
+}
+
+/// One word of a title: a link (a word with `://`, one starting `www.`, or a
+/// site's address with a path after it, `example.com/a`) as its site's name,
+/// lower-case and without `www.`; nothing for a word with `@`; else the word
+/// without control characters.
+fn title_word(word: &str) -> Option<String> {
+    let lower = word.to_lowercase();
+    let head = lower.trim_start_matches(|ch: char| !ch.is_alphanumeric());
+    let address = match lower.find("://") {
+        Some(at) => Some(&lower[at + 3..]),
+        None if head.starts_with("www.") => Some(head),
+        None => head
+            .split_once('/')
+            .filter(|(host, _)| is_site_name(host))
+            .map(|_| head),
+    };
+    if let Some(address) = address {
+        let host = address.split(['/', '?', '#']).next().unwrap_or_default();
+        let host = host.rsplit('@').next().unwrap_or_default();
+        let host = host.split(':').next().unwrap_or_default();
+        let host = host.trim_matches(|ch: char| !ch.is_alphanumeric());
+        let host = host.strip_prefix("www.").unwrap_or(host);
+        return is_site_name(host).then(|| host.to_string());
+    }
+    if word.contains(['@', '\u{FF20}', '\u{FE6B}']) {
+        return None;
+    }
+    let word: String = word.chars().filter(|ch| !ch.is_control()).collect();
+    (!word.is_empty()).then_some(word)
+}
+
+/// A site's name: dotted labels of letters, digits and hyphens, ending in
+/// letters (`visitporto.travel`, never `4.5`).
+fn is_site_name(host: &str) -> bool {
+    host.contains('.')
+        && host.split('.').all(|label| {
+            !label.is_empty() && label.chars().all(|ch| ch.is_alphanumeric() || ch == '-')
+        })
+        && host.rsplit('.').next().is_some_and(|ending| {
+            ending.chars().count() >= 2 && ending.chars().all(char::is_alphabetic)
+        })
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum GitSyncOutcome {
@@ -380,6 +513,7 @@ pub(crate) async fn commit_to_hosted_origin(
     auto_sync_after_apply_override: Option<bool>,
     progress_sender: Option<JobMessageSender>,
     local_origin: Option<LocalOriginSync>,
+    title: &str,
 ) -> Result<Option<CommitToOriginResult>> {
     let mut uploads = BTreeMap::<String, UploadEntry>::new();
     let mut deletes = BTreeSet::<String>::new();
@@ -498,6 +632,7 @@ pub(crate) async fn commit_to_hosted_origin(
         auto_sync_after_apply,
         progress_sender,
         local_origin.as_ref(),
+        title,
     )
     .await;
 
@@ -551,6 +686,8 @@ pub(crate) struct LaneCheckpoint<'a> {
     pub(crate) auto_sync_after_apply_override: Option<bool>,
     pub(crate) progress_sender: Option<JobMessageSender>,
     pub(crate) local_origin: Option<LocalOriginSync>,
+    /// The title of the version the checkpoint saves ([`version_title`]).
+    pub(crate) title: String,
 }
 
 /// A scoped local commit, captured before releasing the workspace mutation lock.
@@ -637,7 +774,7 @@ where
                         &client,
                         &access.endpoint,
                         &access.token.token,
-                        checkpoint.project_id,
+                        &checkpoint.title,
                         &[],
                     )
                     .await
@@ -751,6 +888,7 @@ pub(crate) async fn checkpoint_lane_files_with_report(
         checkpoint.auto_sync_after_apply_override,
         checkpoint.progress_sender.clone(),
         checkpoint.local_origin,
+        &checkpoint.title,
     )
     .await
     {
@@ -1087,6 +1225,7 @@ async fn commit_with_lease(
     auto_sync_after_apply: bool,
     progress_sender: Option<JobMessageSender>,
     local_origin: Option<&LocalOriginSync>,
+    title: &str,
 ) -> Result<CommitToOriginResult> {
     let OriginWriteAccess { token, endpoint } = origin_write_access(
         client,
@@ -1156,7 +1295,7 @@ async fn commit_with_lease(
     let mut save = SaveReport::default();
     if auto_sync_after_apply {
         git_sync_attempted = true;
-        match try_git_sync(client, &endpoint, &token.token, project_id, paths).await {
+        match try_git_sync(client, &endpoint, &token.token, title, paths).await {
             Ok(synced) if synced.is_not_saved() => {
                 // Nothing reached `main`; the report says where it is kept.
                 git_base_rev = synced.base_rev.clone();
@@ -1522,19 +1661,20 @@ fn normalize_upload_archive_path(path: &str) -> Result<String> {
     Ok(normalized)
 }
 
-/// `POST /git/sync {paths}`. A `not_saved` answer (409 or 503 with the
-/// report) is returned as a response, not an error, so the caller can say
-/// where the work is kept.
+/// `POST /git/sync {paths}`, titling the version `title` ([`version_title`]).
+/// The title always goes: an origin older than the plain titles names the
+/// person in a save that comes without one. A `not_saved` answer (409 or 503
+/// with the report) is returned as a response, not an error, so the caller
+/// can say where the work is kept.
 async fn try_git_sync(
     client: &reqwest::Client,
     endpoint: &str,
     origin_token: &str,
-    project_id: Uuid,
+    title: &str,
     paths: &[String],
 ) -> Result<OriginSaveResponse> {
-    let message = format!("instafy: agent sync (project {} )", project_id);
     let body = OriginGitSyncRequest {
-        message: Some(message),
+        message: Some(title.to_string()),
         paths: Some(paths.to_vec()),
         ..Default::default()
     };
@@ -1815,6 +1955,7 @@ mod tests {
             Some(true),
             None,
             None,
+            super::DEFAULT_VERSION_TITLE,
         )
         .await;
         server.abort();
@@ -1868,6 +2009,7 @@ mod tests {
             Some(false),
             None,
             None,
+            super::DEFAULT_VERSION_TITLE,
         )
         .await;
         server.abort();
@@ -1923,6 +2065,7 @@ mod tests {
                 read_only_refresh: None,
                 working_state: None,
             }),
+            super::DEFAULT_VERSION_TITLE,
         )
         .await?
         .context("expected a commit result")?;
@@ -1976,6 +2119,7 @@ mod tests {
                 read_only_refresh: None,
                 working_state: None,
             }),
+            super::DEFAULT_VERSION_TITLE,
         )
         .await?
         .context("expected a commit result")?;
@@ -2032,6 +2176,7 @@ mod tests {
             auto_sync_after_apply_override: Some(true),
             progress_sender: None,
             local_origin: None,
+            title: super::DEFAULT_VERSION_TITLE.to_string(),
         }
     }
 
@@ -3300,9 +3445,106 @@ mod tests {
         result
     }
 
+    fn job(payload: serde_json::Value) -> crate::controller::LeaseJob {
+        serde_json::from_value(serde_json::json!({ "id": Uuid::new_v4(), "payload": payload }))
+            .expect("lease job")
+    }
+
+    /// History lists a turn's save by what the person asked for, in one short
+    /// line, never by the space's id ("instafy: agent sync (project <id> )").
+    #[test]
+    fn a_saves_title_is_the_persons_request_in_one_short_line() {
+        use super::{DEFAULT_VERSION_TITLE, VERSION_TITLE_MAX_CHARS, version_title};
+        use serde_json::json;
+        let title = |payload| version_title(&job(payload));
+
+        let tip = "Add a one-line tip about the best time to visit.";
+        assert_eq!(title(json!({ "prompt_text": tip })), tip);
+        // What the chat showed, when other words ran.
+        assert_eq!(
+            title(json!({
+                "prompt_text": "Add a tip.\n\n[Attached: notes.txt]",
+                "metadata": { "displayContent": "  Add a tip.  " },
+            })),
+            "Add a tip."
+        );
+        // The first line that says anything, its spaces collapsed.
+        assert_eq!(
+            title(json!({ "prompt_text": "```\n  Fix   the\ttitle  \nand more" })),
+            "Fix the title"
+        );
+        // A long request is cut at a word.
+        let long = title(json!({
+            "prompt_text": "Plan 3 days in Seville for a first visit: where to stay, what to see each day, on a map."
+        }));
+        assert_eq!(
+            long,
+            "Plan 3 days in Seville for a first visit: where to stay, what to see…"
+        );
+        assert!(long.chars().count() <= VERSION_TITLE_MAX_CHARS);
+        // A link keeps only its site's name; addresses and mentions stay out.
+        assert_eq!(
+            title(json!({
+                "prompt_text": "Put https://ada:pw@www.Example.com:8443/doc?token=abc and \
+                    docs.example.org/d/1AbC/edit on the page, rated 4.5/5, mail ada@example.com @octo"
+            })),
+            "Put example.com and docs.example.org on the page, rated 4.5/5, mail"
+        );
+
+        // A hand-back carries on the person's message the routing step sent
+        // to the browser; its own words are the controller's.
+        let hand_back = |record: serde_json::Value| {
+            json!({
+                "prompt_text": "Continue building with what the browser turn found.",
+                "metadata": { "browserHandBack": record },
+            })
+        };
+        assert_eq!(
+            title(hand_back(json!({
+                "verified": true,
+                "personRequest": "Compare the three latest Framework laptops on a page.",
+                "request": "Read each laptop's own page.",
+            }))),
+            "Compare the three latest Framework laptops on a page."
+        );
+        // A card's hand-back has only the building turn's words for the browser.
+        assert_eq!(
+            title(hand_back(
+                json!({ "verified": true, "request": "Read each laptop's own page." })
+            )),
+            DEFAULT_VERSION_TITLE
+        );
+        // A team plan's helper works from the plan's words.
+        assert_eq!(
+            title(json!({
+                "prompt_text": "Skill-authored multi-agent plan. Each sibling agent must follow its assigned prompt segment.",
+                "metadata": { "multiAgentPlan": { "role": "worker" } },
+            })),
+            DEFAULT_VERSION_TITLE
+        );
+        // A scheduled run leaves out the controller's note to Octo.
+        assert_eq!(
+            title(json!({
+                "prompt_text": "[Scheduled automation run — carry out the requested task normally.]\n\nRefresh the prices on the comparison page.",
+                "metadata": { "groupParticipation": {
+                    "decision": "agent_evaluation", "enforcedBy": "runtime-controller",
+                } },
+            })),
+            "Refresh the prices on the comparison page."
+        );
+        for empty in [
+            json!({}),
+            json!({ "prompt_text": " \n " }),
+            json!({ "prompt_text": "https://" }),
+        ] {
+            assert_eq!(title(empty), DEFAULT_VERSION_TITLE);
+        }
+    }
+
     /// Selection (a), end to end against a real single-tenant origin: an
     /// ignored path in the checkpoint is reported, never published, and the
-    /// rest of the turn reaches canonical `main`.
+    /// rest of the turn reaches canonical `main`, as a version titled with
+    /// the turn's request.
     #[tokio::test]
     async fn an_ignored_path_in_a_checkpoint_is_reported_by_a_real_origin() -> Result<()> {
         let temp = tempfile::tempdir()?;
@@ -3344,6 +3586,7 @@ mod tests {
         let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
         let mut checkpoint = lane_checkpoint(&controller, Some("workspace-token"), &workspace);
         checkpoint.project_id = project_id;
+        checkpoint.title = "Add a one-line tip about the best time to visit.".to_string();
         let mut server = origin_http_server::server::OriginHttpServer::new(
             origin_http_server::config::ServerConfig {
                 project_id: checkpoint.project_id,
@@ -3400,6 +3643,13 @@ mod tests {
         let tree = git(&remote, &["ls-tree", "-r", "--name-only", "main"]);
         ensure!(!tree.lines().any(|path| path == ".env"), "{tree}");
         ensure!(metadata["gitRev"] == git(&remote, &["rev-parse", "main"]));
+        // History lists the version by the request, saved by the origin.
+        let version = git(&remote, &["log", "-1", "--format=%B%n%an <%ae>", "main"]);
+        ensure!(
+            version
+                == "Add a one-line tip about the best time to visit.\n\nInstafy Origin <origin@instafy.dev>",
+            "{version}"
+        );
         Ok(())
     }
 

@@ -557,6 +557,14 @@ Studio picks its versioning UI per space from the project's default origin:
   Desktop space): saved versions read from the default origin, 20 per page with Show more where
   the origin pages history. Each version can be reviewed or reverted; Revert saves a new version
   that undoes it (`POST /git/revert-commit {commit, base}`) and never rewrites history.
+  A version is titled by what it did. A turn's save takes the person's request, as the chat
+  showed it, in one short line (at most 72 characters, cut at a word): a link keeps only its
+  site's name and a word with `@` is left out; a hand-back takes the message its browser turn
+  carried on, and a save with no request of the person's (a team plan's helper) reads
+  `Save workspace changes`. An Undo or a Revert reads `Undid "<that version's title>"`, with
+  git's `This reverts commit <id>.` line in its body. A new space's first versions (the seed
+  and the first write of its default files) read `Space created`, and a later write of newer
+  default files `Defaults refreshed`.
 - **Unsaved work** (History only): work kept on `refs/instafy/recovery/*`, listed with
   `GET /git/recovery`. It includes what Undo of a stopped turn's unsaved change put back
   (`undone`, from a workspace runtime's or Desktop origin's `POST /git/revert {paths, keep: true,

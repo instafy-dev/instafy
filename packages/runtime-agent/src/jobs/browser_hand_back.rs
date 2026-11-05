@@ -608,6 +608,18 @@ pub(super) fn request_for_skill_selection(metadata: Option<&JsonValue>) -> Optio
     )
 }
 
+/// The person's own words a hand-back carries on (`personRequest`): their
+/// message, when the routing step sent it to the browser first. None for any
+/// other turn, and for a hand-back of a building turn's card, whose browser
+/// turn that building turn asked for in its own words.
+pub(super) fn person_request(metadata: Option<&JsonValue>) -> Option<&str> {
+    verified_hand_back(metadata)?
+        .get("personRequest")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|words| !words.is_empty())
+}
+
 /// Leaves out the last finding of a record over its section: the last page read while another
 /// stays, else the last page that stopped the turn, whose finding is short and says which page and
 /// why. Never the only finding (runtime-controller `browser_hand_back::leave_out_a_finding`).

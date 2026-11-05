@@ -41,21 +41,18 @@ pub fn parse_git_sync_request(prompt_text: &str) -> Option<GitSyncRequest> {
     Some(GitSyncRequest { message })
 }
 
-pub async fn build_git_sync_execution(params: GitSyncExecutionParams<'_>) -> Result<JobExecution> {
-    let message = params
-        .request
+/// The title of the version `/sync <words>` saves, as History lists it: the
+/// words, in one short line, as a turn's save takes its request.
+fn sync_title(request: &GitSyncRequest) -> String {
+    request
         .message
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            if value.to_ascii_lowercase().starts_with("instafy:") {
-                value.to_string()
-            } else {
-                format!("instafy: sync ({value})")
-            }
-        })
-        .unwrap_or_else(|| "instafy: sync (user requested update)".to_string());
+        .and_then(super::workspace_commit::one_short_line)
+        .unwrap_or_else(|| super::workspace_commit::DEFAULT_VERSION_TITLE.to_string())
+}
+
+pub async fn build_git_sync_execution(params: GitSyncExecutionParams<'_>) -> Result<JobExecution> {
+    let message = sync_title(params.request);
 
     let outcome = match git_sync_only(
         params.controller_base_url,
@@ -264,6 +261,19 @@ fn build_messages_from_outcome(outcome: &GitSyncOutcome) -> (String, Vec<JobMess
 mod tests {
     use super::*;
     use crate::jobs::save_report::{RejectedPath, SaveReport};
+
+    /// History lists a `/sync` by the person's words, never "instafy: sync
+    /// (user requested update)".
+    #[test]
+    fn a_syncs_title_is_its_words_or_the_plain_one() {
+        let title = |prompt: &str| sync_title(&parse_git_sync_request(prompt).expect("a /sync"));
+        assert_eq!(title("/sync"), "Save workspace changes");
+        assert_eq!(
+            title("/sync   Keep the new hours\nand more"),
+            "Keep the new hours"
+        );
+        assert_eq!(title("/update the menu page"), "the menu page");
+    }
 
     #[test]
     fn a_partial_sync_names_what_was_not_saved_and_how_to_merge_it() {

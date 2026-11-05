@@ -232,6 +232,40 @@ describe("LegacyChangesDrawer project access", () => {
     expect(container.querySelector('[data-testid="source-control-select-all"]')).not.toBeNull();
   });
 
+  it("marks Instafy's own versions by their address now that their titles are plain words", async () => {
+    mocks.fetchHistory.mockResolvedValue({
+      supported: true,
+      entries: [
+        {
+          commit: "b".repeat(40),
+          shortCommit: "bbbbbbbb",
+          committedAt: new Date().toISOString(),
+          authorName: "instafy-origin",
+          authorEmail: "origin@instafy.dev",
+          subject: "Add a one-line tip about the best time to visit.",
+        },
+        {
+          commit: "c".repeat(40),
+          shortCommit: "cccccccc",
+          committedAt: new Date().toISOString(),
+          authorName: "Ada",
+          authorEmail: "p1-abcdefghijklmnopqrst@users.noreply.instafy.dev",
+          subject: "Undid \"Add a one-line tip about the best time to visit.\"",
+        },
+      ],
+      busy: false,
+      error: null,
+    });
+    await act(async () => root.render(<LegacyChangesDrawer />));
+    await flushAsyncWork();
+    const rows = [...container.querySelectorAll('[data-testid="source-control-history-entry"]')];
+    expect(rows.map((row) => row.textContent)).toEqual([
+      expect.stringMatching(/^InstafyAdd a one-line tip about the best time to visit\./),
+      expect.stringMatching(/^Undid "Add a one-line tip about the best time to visit\."Ada/),
+    ]);
+    expect(rows[0]?.textContent).not.toContain("instafy-origin");
+  });
+
   it("retains changes through an outage, disables writes and refreshes after shared recovery", async () => {
     mocks.canWrite = true;
     await act(async () => root.render(<LegacyChangesDrawer />));

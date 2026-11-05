@@ -49,7 +49,12 @@ const ORIGIN_READ_TIMEOUT_SECS: u64 = 20;
 pub(crate) const INSTAFY_REV_HEADER: &str = "x-instafy-rev";
 /// Git blob id of exactly the bytes a read served.
 pub(crate) const INSTAFY_BLOB_HEADER: &str = "x-instafy-blob";
-const BOOTSTRAP_COMMIT_MESSAGE: &str = "instafy: bootstrap project memory";
+/// The title History lists for a space's first write of its managed files: it
+/// is part of making the space, as the seed is (git-service `repo.rs`).
+pub(crate) const SPACE_CREATED_TITLE: &str = "Space created";
+/// The title of a later write, which brings the defaults' newer versions, in
+/// the words Settings uses for it.
+pub(crate) const DEFAULTS_REFRESHED_TITLE: &str = "Defaults refreshed";
 /// One write, and one more after a conflict.
 const BOOTSTRAP_WRITE_ATTEMPTS: usize = 2;
 /// 409 codes that mean the space moved since the bootstrap read it.
@@ -209,8 +214,10 @@ async fn read_pinned_snapshot(
     Ok(PinnedRead::Snapshot(snapshot))
 }
 
-/// Write what `plan` derives from `first`; on a 409, re-read `paths`
-/// (unpinned, then pinned to the new revision), re-plan and write once more.
+/// Write what `plan` derives from `first`, as a version titled `title`; on a
+/// 409, re-read `paths` (unpinned, then pinned to the new revision), re-plan
+/// and write once more.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn bootstrap_write_via_origin<F>(
     target: &OriginBootstrapTarget<'_>,
     read_token: &str,
@@ -218,6 +225,7 @@ pub(crate) async fn bootstrap_write_via_origin<F>(
     lease_id: Uuid,
     paths: &[String],
     first: OriginReadSnapshot,
+    title: &str,
     plan: F,
 ) -> ApiResult<BootstrapWriteOutcome>
 where
@@ -248,7 +256,8 @@ where
                 rev: snapshot.rev.clone(),
             });
         }
-        match post_bootstrap_apply(target, write_token, lease_id, &snapshot, &writes).await? {
+        match post_bootstrap_apply(target, write_token, lease_id, &snapshot, &writes, title).await?
+        {
             ApplyAttempt::Applied {
                 rev,
                 committed: Some(false),
@@ -302,6 +311,7 @@ async fn post_bootstrap_apply(
     lease_id: Uuid,
     snapshot: &OriginReadSnapshot,
     writes: &[ProjectMemoryWriteFile],
+    title: &str,
 ) -> ApiResult<ApplyAttempt> {
     let (archive, manifest_files) = build_project_memory_archive(writes)
         .map_err(|error| internal_error(format!("failed to build bootstrap archive: {error}")))?;
@@ -311,6 +321,7 @@ async fn post_bootstrap_apply(
         manifest_files,
         snapshot,
         writes,
+        title,
     );
     let manifest_json = serde_json::to_vec(&manifest).map_err(|error| {
         internal_error(format!("failed to serialize bootstrap manifest: {error}"))
@@ -409,6 +420,7 @@ fn bootstrap_manifest(
     manifest_files: Vec<OriginManifestFileEntry>,
     snapshot: &OriginReadSnapshot,
     writes: &[ProjectMemoryWriteFile],
+    title: &str,
 ) -> JsonValue {
     let mut manifest = json!({
         "projectId": project_id.to_string(),
@@ -420,7 +432,7 @@ fn bootstrap_manifest(
         // when we introduce new template files (for example new default
         // skills).
         "autoCommitAfterApply": true,
-        "commitMessage": BOOTSTRAP_COMMIT_MESSAGE,
+        "commitMessage": title,
     });
     if let Some(rev) = snapshot.rev.as_deref() {
         manifest["baseRev"] = json!(rev);
@@ -984,6 +996,7 @@ mod tests {
             Uuid::new_v4(),
             &paths(),
             first.clone(),
+            SPACE_CREATED_TITLE,
             plan,
         )
         .await;

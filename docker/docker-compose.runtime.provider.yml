@@ -38,6 +38,9 @@ services:
     # Hosted/provider launches must select a reviewed OCI manifest by digest.
     # Local development builds docker/runtime/Dockerfile via docker-compose.runtime.yml.
     image: "${RUNTIME_AGENT_IMAGE:?Set RUNTIME_AGENT_IMAGE to an immutable ghcr.io/instafy-dev/instafy-runtime-agent@sha256 digest}"
+    # An init as PID 1 reaps what the agent's tools leave behind (git's helpers,
+    # the browser's); runtime-agent runs under it and still gets the stop signal.
+    init: true
     cpus: ${RUNTIME_CPU_LIMIT:-2}
     mem_limit: ${RUNTIME_MEMORY_LIMIT:-4g}
     cap_drop:

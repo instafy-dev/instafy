@@ -203,6 +203,9 @@ html[data-host-title="shown"] .title {
 .basis { margin-top: var(--if-s1); }
 .stack { display: flex; flex-direction: column; gap: var(--if-s3); }
 .stack.tight { gap: var(--if-s1); }
+/* what a page puts in its list stacks as .stack does, so two cards one under the other never touch (the other
+   starters put one block there) */
+:where(#list) { display: flex; flex-direction: column; gap: var(--if-s3); }
 .notes { display: flex; flex-direction: column; gap: var(--if-s2); }
 .notes ul { padding-left: var(--if-s4); }
 .name { font-size: 14px; line-height: 20px; font-weight: 500; color: var(--if-fg); }

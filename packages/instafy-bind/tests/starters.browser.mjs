@@ -195,6 +195,34 @@ try {
     await page.context().close();
   }
 
+  // ---------- 1b. blank: what a page stacks in its list keeps the theme's gap (two cards never touch) ----------
+  {
+    const dir = makeSite("blank-two-cards", "blank");
+    fs.writeFileSync(path.join(dir, "app.js"), `(function () {
+  site.start({ data: null, render: function () {
+    site.head({ title: "Livraria visit" });
+    var h = site.h;
+    document.getElementById("list").replaceChildren(
+      h("section", { className: "card", id: "card-hours" }, h("h2", { text: "Opening hours" }), h("p", { text: "Daily, 09:00-19:30." })),
+      h("section", { className: "card", id: "card-route" }, h("h2", { text: "Getting there" }), h("p", { text: "A short walk from the station." })),
+      h("p", { className: "cap", id: "list-note", text: "Checked today." }));
+  } });
+})();
+`);
+    const binder = await serve(dir);
+    for (const [width, height, size] of [[390, 844, "phone"], [1280, 800, "laptop"]]) {
+      const page = await open(`${binder.url}/`, { width, height });
+      const gaps = await page.evaluate(() => {
+        const box = (id) => document.getElementById(id).getBoundingClientRect();
+        return [Math.round(box("card-route").top - box("card-hours").bottom), Math.round(box("list-note").top - box("card-route").bottom)];
+      });
+      eq(gaps, [12, 12], `blank ${size}: two cards one under the other, and a line after them, are 12 px apart`);
+      eq(page.errors, [], `blank ${size}: no console errors`);
+      if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `blank-two-cards-${size}.png`), fullPage: true });
+      await page.context().close();
+    }
+  }
+
   // ---------- 2. compare: query state, select, trust states, the row's one action ----------
   const compareDir = makeSite("compare-live", "compare", (data, dir) => {
     data.filter = { key: "price", max: 140, label: "Under $140", rest: "over $140" };
