@@ -82,6 +82,7 @@ export function ChatTranscriptViewport({
         data-testid="chat-message-scroll"
         aria-label={ariaLabel}
         role="log"
+        tabIndex={-1}
         onScroll={onScroll}
         onContextMenu={onContextMenu}
         ref={scrollContainerRef}

@@ -1,3 +1,4 @@
+import type { ImgHTMLAttributes } from "react";
 import { Button, type ButtonProps } from "./Button";
 
 type AttachmentThumbnailSize = "composer" | "message";
@@ -15,10 +16,11 @@ export type AttachmentThumbnailProps = {
   "aria-label"?: string;
   "data-testid"?: string;
   title?: string;
+  onImageError?: ImgHTMLAttributes<HTMLImageElement>["onError"];
 };
 
 /** Image content supplies the preview; shared buttons own focus and interaction. */
-export function AttachmentThumbnail({ src, alt, size, onPress, ...props }: AttachmentThumbnailProps) {
+export function AttachmentThumbnail({ src, alt, size, onPress, onImageError, ...props }: AttachmentThumbnailProps) {
   return (
     <Button
       type="button"
@@ -27,11 +29,16 @@ export function AttachmentThumbnail({ src, alt, size, onPress, ...props }: Attac
       radius="lg"
       elevation="none"
       className={`${SIZE_CLASSES[size]} shrink-0 overflow-hidden`}
-      onPress={onPress}
+      onPress={onPress ? (event) => {
+        // Touch activation may leave focus in the composer. Give the preview
+        // an explicit return target so closing it does not reopen the keyboard.
+        if (event.target instanceof HTMLElement) event.target.focus({ preventScroll: true });
+        onPress(event);
+      } : undefined}
       aria-label={`Open ${alt}`}
       {...props}
     >
-      <img src={src} alt={alt} className="h-full w-full object-cover" />
+      <img src={src} alt={alt} onError={onImageError} className="h-full w-full object-cover" />
     </Button>
   );
 }

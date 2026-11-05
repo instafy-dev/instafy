@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { act } from "react";
+import { Blob as NodeBlob } from "node:buffer";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../../types";
@@ -10,7 +11,27 @@ const mocks = vi.hoisted(() => ({
   downloadChatAttachment: vi.fn(),
   createObjectURL: vi.fn(),
   revokeObjectURL: vi.fn(),
+  authListeners: new Set<(event: string, session: { user: { id: string } } | null) => void>(),
 }));
+
+vi.mock("../../../../lib/supabaseClient", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../../lib/supabaseClient")>();
+  return {
+    ...actual,
+    hasSupabaseConfig: true,
+    supabase: {
+      ...actual.supabase,
+      auth: {
+        ...actual.supabase.auth,
+        onAuthStateChange: (listener: (event: string, session: { user: { id: string } } | null) => void) => {
+          mocks.authListeners.add(listener);
+          listener("INITIAL_SESSION", { user: { id: "reader-one" } });
+          return { data: { subscription: { unsubscribe: () => mocks.authListeners.delete(listener) } } };
+        },
+      },
+    },
+  };
+});
 
 vi.mock("../../../../sdk/instafy", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../../sdk/instafy")>();
@@ -49,6 +70,7 @@ vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus:
 
 import { extractChatAttachments, extractImageAttachments, UserMessageBubble } from "../ChatMessageEntries";
 import { clearChatAttachmentPreviews, seedChatAttachmentPreview } from "../../../../lib/chatAttachmentPreviews";
+import { TEXT_ATTACHMENT_PAGE_BYTES } from "../textAttachmentPage";
 
 const PROJECT = "11111111-2222-4333-8444-555555555555";
 const CONVERSATION = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -322,5 +344,159 @@ describe("chat message attachments", () => {
     await renderBubble(messageWith([{ kind: "file", storagePath: TEXT_PATH, fileName: "App.tsx.base.txt" }]));
     expect(container.querySelector('[data-testid="chat-file-attachment"]')?.textContent).toBe("App.tsx.base.txt");
     expect(mocks.downloadChatAttachment).not.toHaveBeenCalled();
+  });
+
+  it("retries legacy image URL failures and failed image loads", async () => {
+    mocks.getWorkspaceFileRawUrl.mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue("https://controller.example/raw/photo.png");
+    await renderBubble(messageWith([{ kind: "image", workspacePath: "photo.png", fileName: "photo.png" }]));
+    expect(container.querySelector('[data-testid="chat-image-attachment-placeholder"]')).toBeNull();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="chat-image-attachment-retry"]')?.click());
+    const image = container.querySelector<HTMLImageElement>('[data-testid="chat-image-attachment-thumbnail"] img');
+    expect(image?.src).toBe("https://controller.example/raw/photo.png");
+    await act(async () => image?.dispatchEvent(new Event("error")));
+    expect(container.querySelector('[data-testid="chat-image-attachment-retry"]')).not.toBeNull();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="chat-image-attachment-retry"]')?.click());
+    expect(mocks.getWorkspaceFileRawUrl).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not keep a legacy image from the previous space while its replacement is loading", async () => {
+    mocks.getWorkspaceFileRawUrl.mockResolvedValueOnce("https://controller.example/raw/old.png")
+      .mockImplementationOnce(() => new Promise(() => {}));
+    const message = messageWith([{ kind: "image", workspacePath: "photo.png", fileName: "photo.png" }]);
+    await renderBubble(message);
+    await act(async () => root.render(<UserMessageBubble message={message} projectId="another-project" />));
+    expect(container.querySelector('[data-testid="chat-image-attachment-placeholder"]')).not.toBeNull();
+    expect(container.querySelector("img")).toBeNull();
+  });
+
+  it("shows an unavailable tile for image bytes the browser cannot decode", async () => {
+    mocks.downloadChatAttachment.mockResolvedValue({ ok: true, blob: new Blob(["invalid image"]) });
+    await renderBubble(messageWith([{ kind: "image", storagePath: STORAGE_PATH, fileName: "shot.png" }]));
+    await act(async () => container.querySelector("img")?.dispatchEvent(new Event("error")));
+    expect(container.querySelector('[data-testid="chat-image-attachment-unavailable"]')?.textContent).toBe("Image unavailable");
+  });
+
+  it("opens attached text with the session, renders it literally, and returns focus on Escape", async () => {
+    const content = "<script>secret()</script>\n# Notes";
+    const blob = new NodeBlob([content], { type: "text/plain" });
+    mocks.downloadChatAttachment.mockResolvedValue({ ok: true, blob });
+    await renderBubble(messageWith([{ kind: "file", storagePath: TEXT_PATH, fileName: "notes.txt" }]));
+    const trigger = container.querySelector<HTMLButtonElement>('[data-testid="chat-file-attachment"]')!;
+    const draft = document.createElement("input");
+    container.appendChild(draft);
+    draft.value = "Keep this draft";
+    draft.focus();
+    // A touch press can leave the editor focused before the opener handles it.
+    await act(async () => trigger.click());
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 30)); });
+    expect(mocks.downloadChatAttachment).toHaveBeenCalledExactlyOnceWith(TEXT_PATH);
+    const dialog = document.querySelector('[role="dialog"]')!;
+    expect(dialog.getAttribute("aria-label")).toBe("notes.txt");
+    expect(dialog.querySelector('[data-testid="chat-file-attachment-content"]')?.textContent).toBe(content);
+    expect(dialog.querySelector("script")).toBeNull();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    await act(async () => {
+      document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      await new Promise((resolve) => window.setTimeout(resolve, 30));
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    expect(draft.value).toBe("Keep this draft");
+  });
+
+  it("drops a private text viewer when the signed-in person changes", async () => {
+    let settle!: (value: { ok: true; blob: Blob }) => void;
+    mocks.downloadChatAttachment.mockImplementation(() => new Promise((resolve) => { settle = resolve; }));
+    await renderBubble(messageWith([{ kind: "file", storagePath: TEXT_PATH, fileName: "notes.txt" }]));
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="chat-file-attachment"]')?.click());
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    await act(async () => {
+      for (const listener of mocks.authListeners) listener("SIGNED_IN", { user: { id: "reader-two" } });
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    await act(async () => settle({ ok: true, blob: new Blob(["private contents"]) }));
+    expect(document.body.textContent).not.toContain("private contents");
+  });
+
+  it("pages long text without downloading it again and keeps the page through token refresh", async () => {
+    const firstPage = "a".repeat(TEXT_ATTACHMENT_PAGE_BYTES - 1);
+    mocks.downloadChatAttachment.mockResolvedValue({ ok: true, blob: new NodeBlob([`${firstPage}🐙tail`]) });
+    await renderBubble(messageWith([{ kind: "file", storagePath: TEXT_PATH, fileName: "notes.txt" }]));
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="chat-file-attachment"]')?.click());
+    const findButton = (name: string) => Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')).find((button) => button.textContent === name);
+    expect(document.querySelector('[data-testid="chat-file-attachment-content"]')?.textContent).toBe(firstPage);
+    expect(findButton("Previous")?.getAttribute("aria-disabled")).toBe("true");
+    await act(async () => findButton("Next")?.click());
+    expect(document.querySelector('[data-testid="chat-file-attachment-content"]')?.textContent).toBe("🐙tail");
+    expect(findButton("Next")?.getAttribute("aria-disabled")).toBe("true");
+    await act(async () => {
+      for (const listener of mocks.authListeners) listener("TOKEN_REFRESHED", { user: { id: "reader-one" } });
+    });
+    expect(document.querySelector('[data-testid="chat-file-attachment-content"]')?.textContent).toBe("🐙tail");
+    await act(async () => findButton("Previous")?.click());
+    expect(document.querySelector('[data-testid="chat-file-attachment-content"]')?.textContent).toBe(firstPage);
+    expect(mocks.downloadChatAttachment).toHaveBeenCalledExactlyOnceWith(TEXT_PATH);
+  });
+
+  it("keeps focus on paging controls through loading and at either end", async () => {
+    const blob = new NodeBlob(["a".repeat(250 * 1024)]);
+    const originalSlice = blob.slice.bind(blob);
+    let releasePage!: () => void;
+    const pendingPage = new Promise<void>((resolve) => { releasePage = resolve; });
+    vi.spyOn(blob, "slice").mockImplementation((start, end, type) => {
+      const part = originalSlice(start, end, type);
+      if (start === TEXT_ATTACHMENT_PAGE_BYTES) {
+        const read = part.arrayBuffer.bind(part);
+        part.arrayBuffer = async () => { await pendingPage; return read(); };
+      }
+      return part;
+    });
+    mocks.downloadChatAttachment.mockResolvedValue({ ok: true, blob });
+    await renderBubble(messageWith([{ kind: "file", storagePath: TEXT_PATH, fileName: "long-notes.txt" }]));
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="chat-file-attachment"]')?.click());
+    const findButton = (name: string) => Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')).find((button) => button.textContent?.includes(name))!;
+    const next = findButton("Next");
+    const previous = findButton("Previous");
+    const activateFocused = async (button: HTMLButtonElement) => {
+      await act(async () => {
+        button.focus();
+        button.click();
+      });
+    };
+    await activateFocused(next);
+    expect(document.querySelector('[data-testid="chat-file-attachment-content"]') === null).toBe(true);
+    expect(document.activeElement).toBe(next);
+    expect(next.disabled).toBe(false);
+    await act(async () => releasePage());
+    expect(document.activeElement).toBe(next);
+    await activateFocused(next);
+    expect(next.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(next);
+    await activateFocused(next);
+    expect(document.querySelector('[role="status"]')?.textContent).toBe("Page 3");
+    await activateFocused(previous);
+    await activateFocused(previous);
+    expect(previous.getAttribute("aria-disabled")).toBe("true");
+    expect(previous.disabled).toBe(false);
+    expect(document.activeElement).toBe(previous);
+    await activateFocused(previous);
+    expect(document.querySelector('[role="status"]')?.textContent).toBe("Page 1");
+  });
+
+  it("retries a text attachment download and reports a refused read without exposing its details", async () => {
+    mocks.downloadChatAttachment.mockResolvedValueOnce({ ok: false, reason: "transient" })
+      .mockResolvedValueOnce({ ok: false, reason: "refused" });
+    await renderBubble(messageWith([{ kind: "file", storagePath: TEXT_PATH, fileName: "notes.txt" }]));
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="chat-file-attachment"]')?.click());
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("Couldn't load attachment");
+    const retry = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')).find((button) => button.textContent === "Try again");
+    retry?.focus();
+    await act(async () => retry?.click());
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("This attachment is unavailable.");
+    expect(document.activeElement).toBe(document.querySelector('[role="dialog"]'));
+    expect(mocks.downloadChatAttachment).toHaveBeenCalledTimes(2);
+    expect(mocks.getWorkspaceFileRawUrl).not.toHaveBeenCalled();
+    expect(mocks.createObjectURL).not.toHaveBeenCalled();
   });
 });

@@ -73,6 +73,7 @@ describe("StudioDialogModal appearances", () => {
     ["sm", "max-w-sm"],
     ["md", "max-w-lg"],
     ["lg", "max-w-2xl"],
+    ["media", "max-w-[min(90vw,80rem)]"],
   ] as const)("selects one width preset for size %s without leaking it to the overlay", async (size, widthClass) => {
     await act(async () => root.render(
       <StudioDialogModal isOpen size={size} dialogAriaLabel="Sized dialog">Content</StudioDialogModal>,

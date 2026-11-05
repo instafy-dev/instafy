@@ -37,6 +37,7 @@ import { AgentJobThreadPreviewLayout } from "./AgentJobThreadPreviewLayout";
 import { ChatFileChangeList } from "./ChatFileChangeList";
 import { IntegrationRequestEntry, SecretRequestEntry } from "./ChatCredentialRequestEntries";
 import { MessageContent } from "./ChatMessageContent";
+import { ChatTextAttachment } from "./ChatTextAttachment";
 import { ConversationThreadPreviewEntry } from "./ConversationThreadPreviewEntry";
 import { MultiAgentPlanEntry } from "./MultiAgentPlanEntry";
 import { TimelineEntry } from "./ChatTimelineEntry";
@@ -264,12 +265,37 @@ export function extractImageAttachments(message: ChatMessage): ChatImageAttachme
 function ChatAttachmentImageTile({
   imageUrl,
   alt,
+  status,
+  onRetry,
+  onImageError,
   onOpenImage,
 }: {
   imageUrl: string | null;
   alt: string;
+  status?: "loading" | "ready" | "unavailable" | "failed";
+  onRetry?: () => void;
+  onImageError?: () => void;
   onOpenImage?: (src: string, alt: string) => void;
 }) {
+  if (status === "unavailable") {
+    return (
+      <Surface tone="muted" radius="lg" shadow="none" role="img" aria-label={`${alt} is unavailable`} title={alt}
+        className="flex h-24 w-24 items-center justify-center p-2 text-center" data-testid="chat-image-attachment-unavailable">
+        <Text as="span" variant="caption" tone="muted">Image unavailable</Text>
+      </Surface>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <Button type="button" variant="secondary" size="icon" radius="lg" elevation="none" onPress={onRetry}
+        aria-label={`Couldn't load ${alt}. Try again`} title={alt} className="h-24 w-24" data-testid="chat-image-attachment-retry">
+        <span className="flex flex-col items-center gap-1 p-2 text-center">
+          <Text as="span" variant="caption" tone="muted">Couldn't load image</Text>
+          <Text as="span" variant="captionStrong">Try again</Text>
+        </span>
+      </Button>
+    );
+  }
   if (!imageUrl) {
     return (
       <Surface
@@ -291,6 +317,7 @@ function ChatAttachmentImageTile({
       alt={alt}
       size="message"
       onPress={() => onOpenImage?.(imageUrl, alt)}
+      onImageError={onImageError}
       aria-label={`Open ${alt}`}
       data-testid="chat-image-attachment-thumbnail"
     />
@@ -308,54 +335,17 @@ function ChatMessageStorageImage({
 }) {
   const [nearRef, near] = useNearViewport();
   const { state, retry } = useAuthorizedImage(storagePath, () => downloadChatAttachment(storagePath), near);
-  let tile: ReactNode;
-  if (state.status === "unavailable") {
-    tile = (
-      <Surface
-        tone="muted"
-        radius="lg"
-        shadow="none"
-        role="img"
-        aria-label={`${alt} is unavailable`}
-        title={alt}
-        className="flex h-24 w-24 items-center justify-center p-2 text-center"
-        data-testid="chat-image-attachment-unavailable"
-      >
-        <Text as="span" variant="caption" tone="muted">Image unavailable</Text>
-      </Surface>
-    );
-  } else if (state.status === "failed") {
-    tile = (
-      <Button
-        type="button"
-        variant="secondary"
-        size="icon"
-        radius="lg"
-        elevation="none"
-        onPress={retry}
-        aria-label={`Couldn't load ${alt}. Try again`}
-        title={alt}
-        className="h-24 w-24"
-        data-testid="chat-image-attachment-retry"
-      >
-        <span className="flex flex-col items-center gap-1 p-2 text-center">
-          <Text as="span" variant="caption" tone="muted">Couldn't load image</Text>
-          <Text as="span" variant="captionStrong">Try again</Text>
-        </span>
-      </Button>
-    );
-  } else {
-    tile = (
+  const [unreadableUrl, setUnreadableUrl] = useState<string | null>(null);
+  return (
+    <div ref={nearRef} className="h-24 w-24">
       <ChatAttachmentImageTile
         imageUrl={state.status === "ready" ? state.url : null}
+        status={state.status === "ready" && state.url === unreadableUrl ? "unavailable" : state.status}
+        onRetry={retry}
+        onImageError={() => { if (state.status === "ready") setUnreadableUrl(state.url); }}
         alt={alt}
         onOpenImage={onOpenImage}
       />
-    );
-  }
-  return (
-    <div ref={nearRef} className="h-24 w-24">
-      {tile}
     </div>
   );
 }
@@ -373,35 +363,43 @@ function ChatMessageWorkspaceImage({
   runtimeId: string | null | undefined;
   onOpenImage?: (src: string, alt: string) => void;
 }) {
-  const [imageUrl, setImageUrl] = useState<string | null>(() => attachment.previewUrl ?? null);
+  const imageKey = `${projectId ?? ""}:${runtimeId ?? ""}:${attachment.workspacePath ?? ""}:${attachment.previewUrl ?? ""}`;
+  const [state, setState] = useState<{ key: string; status: "loading" | "ready" | "failed" | "unavailable"; url: string | null }>({
+    key: imageKey,
+    status: attachment.previewUrl ? "ready" : "loading",
+    url: attachment.previewUrl,
+  });
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (attachment.previewUrl) {
-      setImageUrl(attachment.previewUrl);
+      setState({ key: imageKey, status: "ready", url: attachment.previewUrl });
       return;
     }
     const path = attachment.workspacePath;
     if (!projectId || !path) {
-      setImageUrl(null);
+      setState({ key: imageKey, status: "unavailable", url: null });
       return;
     }
     let cancelled = false;
+    setState({ key: imageKey, status: "loading", url: null });
     void (async () => {
-      const rawUrl = await getWorkspaceFileRawUrl({
-        projectId,
-        path,
-        runtimeId: runtimeId ?? null,
-      });
-      if (!cancelled) {
-        setImageUrl(rawUrl);
+      try {
+        const rawUrl = await getWorkspaceFileRawUrl({ projectId, path, runtimeId: runtimeId ?? null });
+        if (!cancelled) setState({ key: imageKey, status: rawUrl ? "ready" : "failed", url: rawUrl });
+      } catch {
+        if (!cancelled) setState({ key: imageKey, status: "failed", url: null });
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [attachment.previewUrl, attachment.workspacePath, projectId, runtimeId]);
+  }, [attachment.previewUrl, attachment.workspacePath, projectId, runtimeId, imageKey, attempt]);
 
-  return <ChatAttachmentImageTile imageUrl={imageUrl} alt={alt} onOpenImage={onOpenImage} />;
+  const current = state.key === imageKey ? state : { status: "loading" as const, url: null };
+  return <ChatAttachmentImageTile imageUrl={current.url} status={current.status} alt={alt} onOpenImage={onOpenImage}
+    onRetry={() => setAttempt((value) => value + 1)}
+    onImageError={() => setState({ key: imageKey, status: attachment.previewUrl ? "unavailable" : "failed", url: null })} />;
 }
 
 function ChatMessageImageAttachment({
@@ -438,15 +436,7 @@ function ChatMessageImageAttachment({
 
 function ChatMessageFileAttachment({ attachment }: { attachment: ChatFileAttachmentDescriptor }) {
   const label = attachment.fileName ?? "Attached file";
-  return (
-    <span
-      className="inline-flex max-w-full items-center rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-600 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)] dark:text-slate-300"
-      title={label}
-      data-testid="chat-file-attachment"
-    >
-      <span className="truncate">{label}</span>
-    </span>
-  );
+  return <ChatTextAttachment storagePath={attachment.storagePath} fileName={label} />;
 }
 
 /**

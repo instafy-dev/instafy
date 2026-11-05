@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Text } from "../../../components/Text";
 import "./StudioSearchResultCopy.css";
 
 export interface StudioSearchMessageExcerpt {
@@ -41,19 +42,19 @@ export function StudioSearchResultCopy({ title, description, message }: {
 }) {
   const timestamp = message ? new Date(message.createdAt) : null;
   const date = timestamp && Number.isFinite(timestamp.getTime()) ? timestamp : null;
-  return <span className="studio-search-result-copy">
-    <strong>{title}</strong>
-    <span>{description}</span>
+  return <span className="studio-search-result-copy font-normal">
+    <Text as="strong" variant="bodyStrong" tone="primary">{title}</Text>
+    <Text as="span" variant="caption" tone="muted">{description}</Text>
     {message ? <>
-      <span className="studio-search-message-meta">
+      <Text as="span" variant="caption" tone="muted" className="studio-search-message-meta">
         {message.authorLabel}
         {date ? <> · <time dateTime={message.createdAt}>{date.toLocaleString(undefined, {
           month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit",
         })}</time></> : null}
-      </span>
-      <span className="studio-search-message-excerpt">
+      </Text>
+      <Text as="span" variant="body" tone="secondary" className="studio-search-message-excerpt">
         {highlightStudioSearchExcerpt(message.excerpt, message.matchRanges)}
-      </span>
+      </Text>
     </> : null}
   </span>;
 }

@@ -177,9 +177,18 @@ Do not increase font sizes merely because a screen is wider.
 
 For overlays, let the shared shell own the viewport clearance and use these presets:
 
+- Mounted `StudioDialogModal` content occludes native surfaces such as Electron's
+  Personal Browser, including dialogs opened beside the browser in a split view.
+  Nested dialogs keep the native page covered until every covering modal unmounts.
+  A modal containing the native surface itself uses `occludesNativeSurface={false}`;
+  covering dialogs still occlude that fullscreen surface. Notifications keep their
+  reserved browser row and do not suspend the interactive page.
 - `StudioDialogModal size="sm" | "md" | "lg"` caps width at 384 / 512 / 672px.
   The default remains `md`. Pick the smallest size that fits the form; keep the
   shared safe-area-aware 16px minimum viewport clearance.
+- `size="media"` gives image previews up to 90vw / 1280px while retaining the same
+  safe-area clearance and bounded header/body layout. Use this for visual material
+  that needs desktop reading room, rather than widening ordinary forms.
 - `gutter="responsive"` opts an entire dialog into 16px horizontal padding below
   640px and 20px above it. Header, body and `StudioDialogFooter padding="default"`
   share that inset and use 16px vertical padding. The legacy default stays 20px
@@ -478,6 +487,20 @@ Cmd/Ctrl+K opens or refocuses it; Escape returns
 focus to Search. The shortcut yields to modal dialogs and already-handled editor shortcuts.
 The header clears Electron's window controls once; interactive descendants are excluded from
 the window drag region.
+
+Search uses shared buttons, input typography, scope-chip surfaces and the native scope select.
+Its CSS owns wrapping and result layout; shared controls own pointer sizing, focus, colors and
+corners. Result metadata uses the same secondary text hierarchy as the rest of Studio.
+On short phone viewports, the results title and count share a wrapping row and the heading
+uses tighter vertical spacing. Scope controls retain their touch targets; the results area
+scrolls to reveal recovery actions and keyboard-focused results when space is constrained.
+When reading an older search result, keep **Return to latest** above the composer, reachable
+without scrolling through the loaded history. It replaces the footer action and becomes
+**New messages** only when messages have actually arrived. Returning moves keyboard focus to
+the transcript, preserves the draft and retains the route back to the original search results.
+Image and text attachments use the shared editor dialog shell, with a fixed header/Close,
+scrollable content, Escape/native Back handling and focus restored to the attachment trigger.
+Text files remain plain text; long files page without decoding the whole file into the DOM.
 
 The desktop working-context header owns one continuous divider across the navigation,
 open drawers and workspace. Keep it in both themes and across panel and search changes.

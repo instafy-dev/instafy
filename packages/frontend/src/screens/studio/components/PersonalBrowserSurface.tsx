@@ -34,6 +34,7 @@ import { LoadingStatus } from "../../../components/LoadingStatus";
 import { StatusDock } from "../../../status/StatusDock";
 import { StudioMenuAction, StudioMenuSeparator } from "../../../components/aria/StudioMenu";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { useStudioModalNativeOcclusion } from "../../../components/aria/studioModalOcclusion";
 import { BrowserToolsOverlayContext, BrowserToolsPopover } from "./BrowserToolsPopover";
 import { BrowserExpandButton } from "./BrowserExpandButton";
 import { SendPageToOctoButton } from "./SendPageToOctoButton";
@@ -293,11 +294,13 @@ export function PersonalBrowserSurface({
   const [overlayPreview, setOverlayPreview] = useState<{ identity: string; url: string } | null>(null);
   const boundsRequestRef = useRef(0);
   const [overlayCount, setOverlayCount] = useState(0);
-  const overlayCountRef = useRef(overlayCount);
-  overlayCountRef.current = overlayCount;
+  const modalOccluded = useStudioModalNativeOcclusion();
+  const occluded = overlayCount > 0 || modalOccluded;
+  const occludedRef = useRef(occluded);
+  occludedRef.current = occluded;
   const overlayEpochRef = useRef({ occluded: false, generation: 0 });
-  if (overlayEpochRef.current.occluded !== (overlayCount > 0)) {
-    overlayEpochRef.current = { occluded: overlayCount > 0, generation: overlayEpochRef.current.generation + 1 };
+  if (overlayEpochRef.current.occluded !== occluded) {
+    overlayEpochRef.current = { occluded, generation: overlayEpochRef.current.generation + 1 };
   }
   const acceptedPreviewRequestRef = useRef(0);
   const agentWorkingRef = useRef(agentWorking);
@@ -374,7 +377,7 @@ export function PersonalBrowserSurface({
         };
       }
       const shown = visible && width > 0 && height > 0;
-      const occluded = overlayCountRef.current > 0;
+      const occluded = occludedRef.current;
       const overlayGeneration = overlayEpochRef.current.generation;
       const request = ++boundsRequestRef.current;
       void bridge.personalBrowserSetBounds?.({
@@ -386,7 +389,7 @@ export function PersonalBrowserSurface({
       }).then(result => {
         if (disposed) return;
         const resultIdentity = JSON.stringify([ownerId, result.ownerId, result.activeTabId, result.url, result.state === "ready"]);
-        const sameOverlay = occluded && overlayCountRef.current > 0 && overlayGeneration === overlayEpochRef.current.generation;
+        const sameOverlay = occluded && occludedRef.current && overlayGeneration === overlayEpochRef.current.generation;
         // Native capture happens only when occlusion starts. A later geometry
         // report has no preview and must not invalidate that pending capture.
         if (sameOverlay && request >= acceptedPreviewRequestRef.current && result.previewDataUrl && result.ownerId === ownerId && resultIdentity === previewIdentity) {
@@ -446,7 +449,7 @@ export function PersonalBrowserSurface({
 
   useLayoutEffect(() => {
     reportBoundsRef.current?.();
-  }, [overlayCount, agentWorking]);
+  }, [occluded, agentWorking]);
   useLayoutEffect(() => { setOverlayPreview(null); }, [previewIdentity]);
 
   const navigateToAddress = useCallback(
@@ -832,6 +835,7 @@ export function PersonalBrowserSurface({
         isOpen
         onOpenChange={setFullscreen}
         dialogAriaLabel="Personal Browser"
+        occludesNativeSurface={false}
         className="!items-stretch !justify-stretch !p-0"
         modalClassName="!h-dvh !w-screen !max-w-none !overflow-hidden !rounded-none !border-0"
         dialogClassName="h-full pt-[var(--instafy-safe-area-inset-top)] pb-[var(--instafy-safe-area-inset-bottom)] pl-[var(--instafy-safe-area-inset-left)] pr-[var(--instafy-safe-area-inset-right)]"
