@@ -151,6 +151,11 @@ to the app instead of leaving you in Safari/Chrome. The callback URL is defined 
 (SFSafariViewController on iOS, Custom Tabs on Android), never in an embedded web view, which
 Google refuses.
 
+Any app or page can open `instafy://auth`, so the apps act on it only as what their own PKCE
+sign-ins return: a `code`, or the provider's refusal. A callback that carries session tokens
+instead is ignored, and so is anything in the web view's own address: in the apps the Supabase
+client never reads it.
+
 To make this work end-to-end:
 - Ensure `instafy://auth` is allowlisted in Supabase Auth “Redirect URLs” (local dev is in `supabase/supabase/config.toml`).
 - Ensure the native projects register the `instafy` URL scheme (iOS `Info.plist`, Android `AndroidManifest.xml`).

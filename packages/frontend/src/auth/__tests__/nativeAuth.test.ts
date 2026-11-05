@@ -6,12 +6,16 @@ import {
   clearPendingNativeAuthAttempt,
   createPendingNativeAuthAttempt,
   forgetNativeAuthCallbackClaimsForTests,
+  isNativeAuthCallbackClaimed,
+  isTokenPairNativeAuthCallback,
   nativeAuthAttemptProvider,
   nativeAuthCallbackErrorMessage,
   parseNativeAuthCallbackUrl,
   readNativeAuthCallbackAttemptId,
+  readNativeAuthCallbackParams,
   readSignInReturnPath,
   readPendingNativeAuthAttempt,
+  releaseNativeAuthCallbackUrlClaims,
   writeNativeAuthCallbackAttemptId,
   writeSignInReturnPath,
   writePendingNativeAuthAttempt,
@@ -164,6 +168,119 @@ describe("claimNativeAuthCallback", () => {
     expect(claim("instafy://auth?error=access_denied")).toBe(false);
     expect(claim("instafy://auth?error=server_error")).toBe(true);
   });
+
+  // The handlers exchange the first code that is not blank, the query's before
+  // the fragment's, so a blank query value must not hide the fragment's code
+  // from the claim or from the hash kept for a reloaded page.
+  it("knows a code by the one the handlers exchange, also after a reload", async () => {
+    expect(claim("instafy://auth?code=abc")).toBe(true);
+    expect(claim("instafy://auth?code=%20#code=abc")).toBe(false);
+    expect(claim("instafy://auth?code=%20#code=def")).toBe(true);
+
+    vi.resetModules();
+    const reloaded = await import("../nativeAuth");
+    const claimAfterReload = (url: string) =>
+      reloaded.claimNativeAuthCallback(reloaded.parseNativeAuthCallbackUrl(url)!);
+    expect(claimAfterReload("instafy://auth?code=%20#code=abc")).toBe(false);
+    expect(claimAfterReload("instafy://auth?code=%20#code=def")).toBe(false);
+  });
+});
+
+describe("isNativeAuthCallbackClaimed", () => {
+  const callback = (url: string) => parseNativeAuthCallbackUrl(url)!;
+
+  it("reports a claim without making one", () => {
+    expect(isNativeAuthCallbackClaimed(callback("instafy://auth?code=abc"))).toBe(false);
+    expect(isNativeAuthCallbackClaimed(callback("instafy://auth?code=abc"))).toBe(false);
+    // Asking left it for a handler to claim.
+    expect(claimNativeAuthCallback(callback("instafy://auth?code=abc"))).toBe(true);
+    expect(isNativeAuthCallbackClaimed(callback("instafy://auth?code=abc"))).toBe(true);
+  });
+
+  it("knows a callback by the same key the claim uses", () => {
+    claimNativeAuthCallback(callback("instafy://auth?code=abc"));
+    expect(isNativeAuthCallbackClaimed(callback("instafy://auth#code=abc"))).toBe(true);
+    expect(isNativeAuthCallbackClaimed(callback("instafy://auth?code=def"))).toBe(false);
+
+    claimNativeAuthCallback(callback("instafy://auth?error=access_denied"));
+    expect(isNativeAuthCallbackClaimed(callback("instafy://auth?error=access_denied"))).toBe(true);
+    releaseNativeAuthCallbackUrlClaims();
+    expect(isNativeAuthCallbackClaimed(callback("instafy://auth?error=access_denied"))).toBe(false);
+    expect(isNativeAuthCallbackClaimed(callback("instafy://auth?code=abc"))).toBe(true);
+  });
+
+  // A reloaded page is handed the launch URL again, whose code the page before
+  // the reload claimed. The desktop queue asks this before keeping a callback,
+  // so a spent code must not take the place of a live one there.
+  it("knows a code claimed before a reload, as the claim does", async () => {
+    expect(claimNativeAuthCallback(callback("instafy://auth?code=launch-code"))).toBe(true);
+
+    vi.resetModules();
+    const reloaded = await import("../nativeAuth");
+    const reloadedCallback = (url: string) => reloaded.parseNativeAuthCallbackUrl(url)!;
+    expect(reloaded.isNativeAuthCallbackClaimed(reloadedCallback("instafy://auth?code=launch-code"))).toBe(true);
+    expect(reloaded.isNativeAuthCallbackClaimed(reloadedCallback("instafy://auth#code=launch-code"))).toBe(true);
+    expect(reloaded.claimNativeAuthCallback(reloadedCallback("instafy://auth?code=launch-code"))).toBe(false);
+
+    expect(reloaded.isNativeAuthCallbackClaimed(reloadedCallback("instafy://auth?code=live-code"))).toBe(false);
+    expect(reloaded.claimNativeAuthCallback(reloadedCallback("instafy://auth?code=live-code"))).toBe(true);
+  });
+});
+
+describe("readNativeAuthCallbackParams", () => {
+  const read = (url: string) => readNativeAuthCallbackParams(parseNativeAuthCallbackUrl(url)!);
+
+  it("reads the query before the fragment", () => {
+    expect(read("instafy://auth?code=from-query#code=from-fragment").code).toBe("from-query");
+    expect(read("instafy://auth#access_token=a&refresh_token=r")).toEqual({
+      code: null,
+      accessToken: "a",
+      refreshToken: "r",
+      oauthError: null,
+    });
+  });
+
+  it("trims values and passes over blank ones", () => {
+    expect(read("instafy://auth?code=%20abc%20").code).toBe("abc");
+    // A blank query value does not hide the fragment's.
+    expect(read("instafy://auth?code=%20#code=from-fragment").code).toBe("from-fragment");
+    expect(read("instafy://auth?code=&access_token=%20%20")).toEqual({
+      code: null,
+      accessToken: null,
+      refreshToken: null,
+      oauthError: null,
+    });
+  });
+
+  it("prefers the provider's error_description to its error, wherever each is", () => {
+    expect(read("instafy://auth?error=access_denied&error_description=The+user+denied+access").oauthError).toBe(
+      "The user denied access",
+    );
+    expect(read("instafy://auth?error=access_denied#error_description=denied").oauthError).toBe("denied");
+    expect(read("instafy://auth?error=access_denied").oauthError).toBe("access_denied");
+    expect(read("instafy://auth").oauthError).toBeNull();
+  });
+});
+
+describe("isTokenPairNativeAuthCallback", () => {
+  const isTokenPair = (url: string) =>
+    isTokenPairNativeAuthCallback(readNativeAuthCallbackParams(parseNativeAuthCallbackUrl(url)!));
+
+  // Every sign-in the apps start is PKCE and returns a code, so tokens were
+  // put there by whoever opened the link.
+  it("picks out a callback that carries session tokens instead of a code or a refusal", () => {
+    expect(isTokenPair("instafy://auth#access_token=a&refresh_token=r&expires_in=3600&token_type=bearer")).toBe(true);
+    expect(isTokenPair("instafy://auth?refresh_token=r")).toBe(true);
+    expect(isTokenPair("instafy://auth?access_token=a")).toBe(true);
+  });
+
+  it("leaves a code, a refusal and an empty callback to the handlers", () => {
+    expect(isTokenPair("instafy://auth?code=abc#access_token=a&refresh_token=r")).toBe(false);
+    expect(isTokenPair("instafy://auth?error=access_denied#access_token=a&refresh_token=r")).toBe(false);
+    expect(isTokenPair("instafy://auth?code=abc")).toBe(false);
+    expect(isTokenPair("instafy://auth?error=access_denied")).toBe(false);
+    expect(isTokenPair("instafy://auth")).toBe(false);
+  });
 });
 
 describe("native auth attempt provider", () => {
@@ -226,6 +343,27 @@ describe("OAuth redirect target", () => {
       JSON.stringify({ path: "https://elsewhere.example/", savedAt: new Date().toISOString() }),
     );
     expect(readSignInReturnPath()).toBeNull();
+  });
+
+  // A browser reads /\host as another host, and /<tab>/host too once it drops
+  // the tab; the router refuses to go to either.
+  it("ignores a destination with a backslash or a control character", () => {
+    for (const path of ["/\\evil.example", "/\t/evil.example", "/studio?projectId=p1\u0000"]) {
+      writeSignInReturnPath(path, { durable: true });
+      expect(readSignInReturnPath()).toBeNull();
+    }
+
+    // Kept before this check existed.
+    window.sessionStorage.setItem("instafy.login.returnPath", "/\\evil.example");
+    window.localStorage.setItem(
+      "instafy.login.returnPathDurable",
+      JSON.stringify({ path: "/\n/evil.example", savedAt: new Date().toISOString() }),
+    );
+    expect(readSignInReturnPath()).toBeNull();
+    expect(window.localStorage.getItem("instafy.login.returnPathDurable")).toBeNull();
+
+    writeSignInReturnPath("/studio?projectId=p1&tab=chat#message-1", { durable: true });
+    expect(readSignInReturnPath()).toBe("/studio?projectId=p1&tab=chat#message-1");
   });
 
   // The path can carry an invite's token, so a stale copy does not stay on the device.
