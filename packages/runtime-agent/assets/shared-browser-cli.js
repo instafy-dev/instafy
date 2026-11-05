@@ -60,7 +60,8 @@ const approvalProtocol = globalThis.__instafyCreateSharedBrowserApprovalProtocol
 // details' summary, which opens its section, and the items of tabs, menus,
 // trees and open lists, which pages often take out of the tab order. A
 // control the page turned off is listed too, as `disabled`, so a button that
-// waits for a form's fields never reads as missing.
+// waits for a form's fields never reads as missing. An element is not listed
+// for `aria-expanded` alone: pages set it on the section a toggle opens too.
 const INTERACTIVE_SELECTOR = [
   "a[href]",
   "button",
@@ -80,10 +81,13 @@ const INTERACTIVE_SELECTOR = [
   "[role=menuitemcheckbox]",
   "[role=menuitemradio]",
   "[role=treeitem]",
-  "[aria-expanded]",
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 const MAX_INTERACTIVE_ELEMENTS = 200;
+// How many of a page's controls one reading judges, in page order, so where a
+// page keeps its hidden ones (a closed list's options) never decides what the
+// list holds. Past it, controls are only counted.
+const MAX_JUDGED_CONTROLS = 5_000;
 const MAX_LABEL_CHARS = 240;
 const MAX_VISIBLE_TEXT_CHARS = 12_000;
 const MAX_URL_CHARS = 4_096;
@@ -869,22 +873,31 @@ function shownRuleInPage() {
 // listbox) the options it offers. Field values are never read, and open
 // shadow roots are read where they render. What a reading cannot read is
 // named where it shows: a frame by its site ("[frame not read: <site>]"), a
-// canvas as "[picture with no text]".
+// canvas as "[picture with no text]". A frame's site is an address, not page
+// text: the text holds a placeholder as long as its marker, and the markers
+// come back apart (`markers`), put in only after the page's own text is
+// masked and judged.
 //
 // A page with more text than `request.window` is read from where the person
 // scrolled it to: the window starts at the first line in view after lines
-// scrolled out above it (a header pinned in view does not count), so
-// scrolling reaches every part of a long page. The answer is all the text
-// read (at most `request.limit` characters, from the window's start when that
-// is further), where the window starts and ends in it, how much text is above
-// the window and below it, whether the reading stopped before the page's end,
-// and how far down the first line below the window is.
+// scrolled out above it, so scrolling reaches every part of a long page.
+// Text pinned in view (in a fixed or sticky box, such as a header) moves
+// neither, and a long run of text is kept as lines of at most about
+// SOFT_LINE_CHARS, split between words and joined by a space, each placed
+// where it is drawn, so a long paragraph or a page of plain text is read in
+// parts too. The answer is all the text read (at most `request.limit`
+// characters, from the window's start when that is further), where the window
+// starts and ends in it, how much text is above the window and below it,
+// whether the reading stopped before the page's end, and before the part in
+// view (`beyond`), and how far down the first line below the window is.
 function shownTextInPage(rule, request) {
   const doc = document;
-  const nothing = { text: "", start: 0, end: 0, above: 0, below: 0, more: false, scrollBy: null };
+  const nothing = { text: "", start: 0, end: 0, above: 0, below: 0, more: false, beyond: false, scrollBy: null, markers: [] };
   if (!doc.body) return nothing;
   const limit = Number.isSafeInteger(request && request.limit) ? request.limit : 60_000;
   const windowChars = Number.isSafeInteger(request && request.window) ? Math.min(request.window, limit) : limit;
+  const SOFT_LINE_CHARS = 1_000;
+  const MAX_MARKERS = 50;
   const skipped = new Set([
     "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "TEXTAREA", "INPUT", "VIDEO", "AUDIO",
   ]);
@@ -892,33 +905,63 @@ function shownTextInPage(rule, request) {
   const blockLevel = (display) =>
     display !== "table-cell" && /^(?:block|flex|grid|list-item|table|flow-root|-webkit-box)/.test(display);
   const range = doc.createRange();
-  // Kept lines: their text, the top of their first piece in the viewport, and
-  // whether all of them lies above it.
+  // Whether an element is laid out in a fixed or sticky box: it stays in view
+  // as the page scrolls. One inside a box that scrolls on its own, within
+  // such a box (an app's panel), still moves as that box scrolls.
+  const pinnedBoxes = new Map();
+  const pinnedOf = (element) => {
+    const chain = [];
+    let pinned = false;
+    for (let node = element, depth = 0; rule.isElement(node) && depth < 512; node = rule.flatParent(node), depth += 1) {
+      if (pinnedBoxes.has(node)) {
+        pinned = pinnedBoxes.get(node);
+        break;
+      }
+      chain.push(node);
+      const style = rule.styleOf(node);
+      if (/^(?:auto|scroll|overlay)$/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 1) break;
+      if (style.position === "fixed" || style.position === "sticky") {
+        pinned = true;
+        break;
+      }
+    }
+    for (const node of chain) pinnedBoxes.set(node, pinned);
+    return pinned;
+  };
+  // Kept lines: their text, what joins them to the line before ("\n", or a
+  // space inside a long run of text), whether they lie all above the view,
+  // whether any of them scrolls with the page, and where their first part is
+  // drawn (a box, or a run of a text node, measured when needed).
   const lines = [];
   let line = "";
-  let lineTop = null;
+  let joiner = "\n";
+  let lineAt = null;
   let lineAbove = true;
+  let lineFlows = false;
   let size = 0;
   // Characters walked past and not kept, before the kept lines.
   let dropped = 0;
   let walked = 0;
   // "top" until a line lies above the view, then "above" until one is in it
-  // again: that line starts the window ("view", at `viewLine`).
+  // again: that line starts the window ("view", at `viewLine`). Only lines that
+  // scroll with the page count.
   let state = "top";
   let viewLine = 0;
   // Characters kept from the window's first line on.
   let fromView = 0;
   let stopped = false;
-  const flush = () => {
+  const markers = [];
+  // `next` joins the line after this one: "\n", or " " inside a run of text.
+  const flush = (next = "\n") => {
     const finished = line.replace(/\s+$/, "");
     if (finished.trim()) {
-      const above = lineTop !== null && lineAbove;
-      if (state === "top" && above) state = "above";
-      else if (state === "above" && !above) {
+      const above = lineFlows && lineAbove;
+      if (lineFlows && state === "top" && above) state = "above";
+      else if (lineFlows && state === "above" && !above) {
         state = "view";
         viewLine = lines.length;
       }
-      lines.push({ text: finished, top: lineTop, above });
+      lines.push({ text: finished, joiner, at: lineAt, above, flows: lineFlows });
       size += finished.length + 1;
       walked += finished.length + 1;
       if (state === "view") fromView += finished.length + 1;
@@ -930,21 +973,65 @@ function shownTextInPage(rule, request) {
         dropped += first.text.length + 1;
         if (state === "view") viewLine -= 1;
       }
+      joiner = next;
+    } else if (next === "\n") {
+      joiner = "\n";
     }
     line = "";
-    lineTop = null;
+    lineAt = null;
     lineAbove = true;
+    lineFlows = false;
   };
-  const place = (rect) => {
-    if (lineTop === null) lineTop = rect.top;
-    lineAbove = lineAbove && rect.bottom <= 0;
+  const place = (above, at, pinned) => {
+    if (lineAt === null) lineAt = at;
+    if (!pinned) {
+      lineFlows = true;
+      lineAbove = lineAbove && above;
+    }
+  };
+  const topOf = (at) => {
+    if (!at) return null;
+    if (at.box) return at.box.top;
+    range.setStart(at.node, at.start);
+    range.setEnd(at.node, at.end);
+    return range.getBoundingClientRect().top;
   };
   const add = (value, preserve) => {
-    const next = preserve || (line.trim() && !/\s$/.test(line)) ? value : value.replace(/^ +/, "");
+    // Two noncharacters mark the window and the placeholders; page text holds neither.
+    const clean = value.replace(/[\uFFFE\uFFFF]/g, "");
+    const next = preserve || (line.trim() && !/\s$/.test(line)) ? clean : clean.replace(/^ +/, "");
     line += next;
   };
   const space = () => {
     if (line && !/\s$/.test(line)) line += " ";
+  };
+  const full = () =>
+    (state === "top" && size + line.length >= limit) ||
+    (state === "view" && fromView + line.length >= limit) ||
+    walked >= limit * 20;
+  // Where a long piece of text breaks next: before the space (any white space
+  // when it is not preserved) that starts a run of them, at most
+  // SOFT_LINE_CHARS on, else the first one after that; -1 when there is none.
+  const breakOf = (piece, from, preserve) => {
+    if (piece.length - from <= SOFT_LINE_CHARS) return -1;
+    const blank = preserve ? (character) => character === " " : (character) => /\s/.test(character);
+    let at = -1;
+    for (let index = from + SOFT_LINE_CHARS; index > from; index -= 1) {
+      if (blank(piece[index])) {
+        at = index;
+        break;
+      }
+    }
+    if (at < 0) {
+      for (let index = from + SOFT_LINE_CHARS + 1; index < piece.length; index += 1) {
+        if (blank(piece[index])) {
+          at = index;
+          break;
+        }
+      }
+    }
+    while (at > from && blank(piece[at - 1])) at -= 1;
+    return at > from ? at : -1;
   };
   const text = (node) => {
     const parent = rule.flatParent(node);
@@ -960,13 +1047,41 @@ function shownTextInPage(rule, request) {
     range.selectNodeContents(node);
     const rect = range.getBoundingClientRect();
     if (!rule.reachable(rect, parent, "static", doc)) return;
+    const pinned = pinnedOf(parent);
     const preserve = /^(?:pre|pre-wrap|break-spaces)$/.test(style.whiteSpace);
     const pieces = preserve || style.whiteSpace === "pre-line" ? raw.split("\n") : [raw];
-    pieces.forEach((piece, index) => {
+    // A text across the view's top edge is placed part by part; elsewhere each
+    // part lies where the whole text does.
+    const across = rect.top < 0 && rect.bottom > 0;
+    const aboveView = (start, end) => {
+      if (!across) return rect.bottom <= 0;
+      range.setStart(node, start);
+      range.setEnd(node, end);
+      const box = range.getBoundingClientRect();
+      return box.height > 0 && box.bottom <= 0;
+    };
+    let offset = 0;
+    for (let index = 0; index < pieces.length; index += 1) {
+      const piece = pieces[index];
       if (index > 0) flush();
-      place(rect);
-      add(preserve ? piece : piece.replace(/\s+/g, " "), preserve);
-    });
+      let from = 0;
+      do {
+        if (full()) {
+          stopped = true;
+          return;
+        }
+        const cut = breakOf(piece, from, preserve);
+        const to = cut < 0 ? piece.length : cut;
+        if (from > 0) flush(" ");
+        const value = piece.slice(from, to);
+        if (value.trim()) {
+          place(aboveView(offset + from, offset + to), { node, start: offset + from, end: offset + to }, pinned);
+        }
+        add(preserve ? value : value.replace(/\s+/g, " "), preserve);
+        from = cut < 0 ? piece.length : cut + 1;
+      } while (from < piece.length);
+      offset += piece.length + 1;
+    }
   };
   const select = (element) => {
     const chosen = element.multiple || element.size > 1
@@ -978,7 +1093,8 @@ function shownTextInPage(rule, request) {
       .join(", ");
     if (value && rule.elementShown(element)) {
       space();
-      place(element.getBoundingClientRect());
+      const box = element.getBoundingClientRect();
+      place(box.bottom <= 0, { box }, pinnedOf(element));
       add(value, false);
       space();
     }
@@ -1005,12 +1121,8 @@ function shownTextInPage(rule, request) {
     } catch (_) {
       site = "";
     }
-    return site ? `[frame not read: ${site}]` : "[frame not read]";
+    return site ? `[frame not read: ${site.slice(0, 253)}]` : "[frame not read]";
   };
-  const full = () =>
-    (state === "top" && size + line.length >= limit) ||
-    (state === "view" && fromView + line.length >= limit) ||
-    walked >= limit * 20;
   const walk = (node, depth) => {
     if (stopped || depth > 512) return;
     if (full()) {
@@ -1026,8 +1138,20 @@ function shownTextInPage(rule, request) {
       const part = unreadPart(node);
       if (part) {
         flush();
-        place(node.getBoundingClientRect());
-        add(part, false);
+        const box = node.getBoundingClientRect();
+        place(box.bottom <= 0, { box }, pinnedOf(node));
+        if (node.tagName === "CANVAS" || part === "[frame not read]") {
+          // A canvas's label is page text, masked and judged as the rest is.
+          add(part, false);
+        } else if (markers.length < MAX_MARKERS) {
+          // A frame's site is an address, never page text: a placeholder of
+          // the marker's length holds its place (a noncharacter, the marker's
+          // number, and more noncharacters).
+          line += `\uFFFE${String.fromCharCode(0xE000 + markers.length)}${"\uFFFE".repeat(Math.max(0, part.length - 2))}`;
+          markers.push(part);
+        } else {
+          add("[frame not read]", false);
+        }
         flush();
       }
       return;
@@ -1060,10 +1184,10 @@ function shownTextInPage(rule, request) {
     offsets.push(total);
     total += entry.text.length + 1;
   }
-  const textRead = lines.map((entry) => entry.text).join("\n");
+  const textRead = lines.map((entry, index) => (index ? entry.joiner : "") + entry.text).join("");
   const length = textRead.length;
   if (dropped === 0 && !stopped && length <= windowChars) {
-    return { ...nothing, text: textRead, end: length };
+    return { ...nothing, text: textRead, end: length, markers };
   }
   // The window's first line: the first in view after lines scrolled out
   // above, else the top, else (all of it above the view) the last lines.
@@ -1090,8 +1214,14 @@ function shownTextInPage(rule, request) {
     const cut = textRead.lastIndexOf(" ", end);
     if (cut > start + windowChars / 2) end = cut;
   }
-  const next = last > first ? lines[last] : null;
-  const scrollBy = next && Number.isFinite(next.top) && next.top > 0 ? Math.ceil(next.top) : null;
+  // How far down the next line that scrolls with the page is, when it is below.
+  let scrollBy = null;
+  for (let index = last > first ? last : lines.length; index < lines.length && index < last + 50; index += 1) {
+    if (!lines[index].flows) continue;
+    const top = topOf(lines[index].at);
+    scrollBy = Number.isFinite(top) && top > 0 ? Math.ceil(top) : null;
+    break;
+  }
   return {
     text: textRead,
     start,
@@ -1099,7 +1229,9 @@ function shownTextInPage(rule, request) {
     above: dropped + start,
     below: Math.max(0, length - end),
     more: stopped,
+    beyond: stopped && state === "above",
     scrollBy,
+    markers,
   };
 }
 
@@ -1108,8 +1240,9 @@ function shownTextInPage(rule, request) {
 // never field values; `policy` holds the structural facts the step classifier
 // needs, the same ones the Desktop Personal Browser collects. A control a
 // person cannot see is reported only as `shown: false` with its name, which
-// the secret-screen check still reads.
-function describeInPage(rule, forms, names, element, sources) {
+// the secret-screen check still reads; `mode: "name"` asks for that name alone,
+// for a control the list leaves out (listInPage).
+function describeInPage(rule, forms, names, element, sources, mode) {
   const bounded = (value, max = 2_000) =>
     typeof value === "string"
       ? value.replace(/\s+/g, " ").trim().slice(0, max)
@@ -1154,6 +1287,23 @@ function describeInPage(rule, forms, names, element, sources) {
       .map((id) => ownWords(element.ownerDocument?.getElementById(id)))
       .join(" "),
   );
+  // Every name the control may be known by, its text included, for the
+  // secret-screen check alone.
+  const checkedName = () => {
+    const image = element.querySelector("img[alt]");
+    return bounded(
+      [
+        element.getAttribute("aria-label"), ariaLabelledByText, labels,
+        element.getAttribute("placeholder"), element.getAttribute("title"),
+        element.textContent, element.getAttribute("name"),
+        element.getAttribute("data-bs-original-title"), element.getAttribute("data-original-title"),
+        element.getAttribute("data-tippy-content"), element.getAttribute("data-tooltip"),
+        image ? image.getAttribute("alt") : "",
+      ].filter((value) => typeof value === "string" && value.trim()).join(" "),
+      4_000,
+    );
+  };
+  if (mode === "name") return { name: checkedName() };
   let shown = true;
   try {
     shown = rule.elementShown(element);
@@ -1166,21 +1316,7 @@ function describeInPage(rule, forms, names, element, sources) {
     }
   }
   if (!shown) {
-    const image = element.querySelector("img[alt]");
-    return {
-      shown: false,
-      name: bounded(
-        [
-          element.getAttribute("aria-label"), ariaLabelledByText, labels,
-          element.getAttribute("placeholder"), element.getAttribute("title"),
-          element.textContent, element.getAttribute("name"),
-          element.getAttribute("data-bs-original-title"), element.getAttribute("data-original-title"),
-          element.getAttribute("data-tippy-content"), element.getAttribute("data-tooltip"),
-          image ? image.getAttribute("alt") : "",
-        ].filter((value) => typeof value === "string" && value.trim()).join(" "),
-        4_000,
-      ),
-    };
+    return { shown: false, name: checkedName() };
   }
   const ownForm =
     "form" in element && element.form
@@ -1511,6 +1647,7 @@ function describeInPage(rule, forms, names, element, sources) {
     // The text beside it is read only for a control with no name of its own.
     let nearby = "";
     const ownText = (() => {
+      if (element instanceof HTMLTextAreaElement) return "";
       try {
         return names.shownTextOf(element, 80);
       } catch (_) {
@@ -1600,7 +1737,10 @@ function describeInPage(rule, forms, names, element, sources) {
   // fieldset, or aria-disabled), and whether it is the one of its group the
   // page shows chosen: a box, radio button, switch or pressed toggle that is
   // on (`checked`), or a tab, option or day marked selected (`selected`).
-  // Only these yes or no answers leave the page, never a field's value.
+  // Only these yes or no answers leave the page, never a field's value. In the
+  // list a field opens as a person types (a combobox's suggestions), the one
+  // marked selected is only the one the keys reach, not what the field holds,
+  // so it says nothing.
   let disabled = false;
   let checked = false;
   let selected = false;
@@ -1610,7 +1750,20 @@ function describeInPage(rule, forms, names, element, sources) {
     checked = element instanceof HTMLInputElement && (element.type === "checkbox" || element.type === "radio")
       ? element.checked === true
       : flag("aria-checked") || flag("aria-pressed");
-    selected = flag("aria-selected");
+    const suggestion = () => {
+      const list = element.closest("[role=listbox], [role=tree], [role=grid]");
+      if (!list) return false;
+      if (list.closest("[role=combobox]")) return true;
+      if (!list.id) return false;
+      return Array.from(element.ownerDocument.querySelectorAll(
+        "[role=combobox][aria-controls], [role=combobox][aria-owns], input[aria-controls], input[aria-owns], [aria-autocomplete][aria-controls], [aria-autocomplete][aria-owns]",
+      ))
+        .slice(0, 200)
+        .some((field) => `${field.getAttribute("aria-controls") || ""} ${field.getAttribute("aria-owns") || ""}`
+          .split(/\s+/)
+          .includes(list.id));
+    };
+    selected = flag("aria-selected") && !suggestion();
   } catch (_) {
     disabled = false;
     checked = false;
@@ -1633,17 +1786,8 @@ function describeInPage(rule, forms, names, element, sources) {
     optionCount = null;
   }
 
-  // Whether the control lies above the view, scrolled past.
-  let above = false;
-  try {
-    above = element.getBoundingClientRect().bottom <= 0;
-  } catch (_) {
-    above = false;
-  }
-
   return {
     shown: true,
-    above,
     expanded,
     area,
     optionCount,
@@ -1675,10 +1819,12 @@ function describeInPage(rule, forms, names, element, sources) {
       ? `form ${formMethod} ${formAction} ${formText}`.slice(0, 2_000)
       : "",
     labels,
-    text: bounded(element.textContent || ""),
+    // A text area's text is what it holds, a value, never its name.
+    text: element instanceof HTMLTextAreaElement ? "" : bounded(element.textContent || ""),
     // The text the control draws: what textContent holds, less scripts,
     // styles, an svg's metadata, title and defs, and hidden parts.
     shownText: (() => {
+      if (element instanceof HTMLTextAreaElement) return "";
       try {
         return bounded(names.shownTextOf(element));
       } catch (_) {
@@ -1736,21 +1882,102 @@ const DESCRIBE_IN_PAGE = new Function(
   "...args",
   `return (${describeInPage})((${shownRuleInPage})(), (${formSubmission.formSubmissionRulesInPage})(), (${actionPolicy.controlNameRulesInPage})(), ...args);`,
 );
-// The same describer for every control of a page in one call: its source (over
-// 50 KB with the rules it carries) is sent and compiled once per read of the
-// page, not once per control. Each control is described on its own, as with
-// DESCRIBE_IN_PAGE, and one that cannot be described is null.
-const DESCRIBE_ALL_IN_PAGE = new Function(
-  "request",
-  `const describe = ${DESCRIBE_IN_PAGE};
-  return request.elements.map((element) => {
+// Runs inside the page (DESCRIBE_ALL_IN_PAGE). Which of the page's controls
+// the list holds, judged for all of them first: every one a person can see,
+// up to `request.limit`. When more are shown, those scrolled past, above the
+// view, are left out, and then those the page turned off, so scrolling down a
+// long page reaches every control on it and a page full of taken seats still
+// lists the free ones; past the limit the rest are left out in page order.
+// Neither depends on how many controls lie below the view. Each control the
+// list holds is described on its own (`describe`, DESCRIBE_IN_PAGE); every
+// other one is reported with its name alone, for the secret-screen check, as
+// `shown: false` or, shown and left out, `left: true`. One that cannot be
+// described is null.
+function listInPage(rule, describe, request) {
+  const elements = request.elements;
+  const glances = elements.map((element) => {
+    let shown = true;
     try {
-      return describe(element, request.sources);
+      shown = rule.elementShown(element);
+    } catch (_) {
+      try {
+        shown = element.checkVisibility({ checkVisibilityCSS: true, visibilityProperty: true }) !== false;
+      } catch (_) {
+        shown = true;
+      }
+    }
+    let above = false;
+    let off = false;
+    try {
+      above = element.getBoundingClientRect().bottom <= 0;
+      off = element.matches(":disabled") ||
+        String(element.getAttribute("aria-disabled") || "").trim().toLowerCase() === "true";
+    } catch (_) {
+      above = false;
+      off = false;
+    }
+    return { shown, above, off };
+  });
+  let kept = glances.flatMap((glance, ordinal) => (glance.shown ? [ordinal] : []));
+  if (kept.length > request.limit) kept = kept.filter((ordinal) => !glances[ordinal].above);
+  if (kept.length > request.limit) kept = kept.filter((ordinal) => !glances[ordinal].off);
+  const listed = new Set(kept.slice(0, request.limit));
+  return elements.map((element, ordinal) => {
+    try {
+      if (listed.has(ordinal)) return describe(element, request.sources);
+      const { name } = describe(element, request.sources, "name");
+      return glances[ordinal].shown ? { shown: true, left: true, name } : { shown: false, name };
     } catch (_) {
       return null;
     }
-  });`,
+  });
+}
+// The describer for every control of a page in one call: its source (over 50
+// KB with the rules it carries) is sent and compiled once per read of the
+// page, not once per control.
+const DESCRIBE_ALL_IN_PAGE = new Function(
+  "request",
+  `const describe = ${DESCRIBE_IN_PAGE};
+  return (${listInPage})((${shownRuleInPage})(), describe, request);`,
 );
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Where a click on `element` lands: Playwright clicks the
+// middle of its first part in view, and what is drawn there takes the click.
+// `other` is true when that is inside another control within this one (a
+// form's button in a section, an item of a list or menu it holds), or inside
+// a frame within it, which a reading never reads: the click would act on
+// something the step was not judged for.
+function clickLandingInPage(element, request) {
+  const view = element.ownerDocument.defaultView;
+  let point = null;
+  for (const rect of Array.from(element.getClientRects())) {
+    const left = Math.max(rect.left, 0);
+    const top = Math.max(rect.top, 0);
+    const right = Math.min(rect.right, view.innerWidth);
+    const bottom = Math.min(rect.bottom, view.innerHeight);
+    if (right > left && bottom > top && (right - left) * (bottom - top) > 0.99) {
+      point = { x: (left + right) / 2, y: (top + bottom) / 2 };
+      break;
+    }
+  }
+  if (!point) return { other: false };
+  let hit = element.ownerDocument.elementFromPoint(point.x, point.y);
+  for (let depth = 0; hit && hit.shadowRoot && depth < 32; depth += 1) {
+    const inner = hit.shadowRoot.elementFromPoint(point.x, point.y);
+    if (!inner || inner === hit) break;
+    hit = inner;
+  }
+  for (let node = hit, depth = 0; node && node.nodeType === 1 && depth < 512; depth += 1) {
+    if (node === element) return { other: false };
+    const tag = String(node.tagName).toUpperCase();
+    if (node.matches(request.selector) || ["IFRAME", "FRAME", "OBJECT", "EMBED"].includes(tag) || (tag === "LABEL" && node.control)) {
+      return { other: true };
+    }
+    node = node.assignedSlot || node.parentElement || (node.parentNode && node.parentNode.host) || null;
+  }
+  // Something else covers the control: the click waits for it, as before.
+  return { other: false };
+}
 const SHOWN_TEXT_IN_PAGE = withShownRule(shownTextInPage);
 const AREA_NAMES = new Set(["dialog", "menu", "tabs", "nav", "search", "header", "footer", "aside"]);
 
@@ -2135,61 +2362,43 @@ function choicePromptLabel(description, option) {
 
 // The controls a person can see, in document order. Snapshots and actions
 // both index this list, so an index means the same control in both. The page
-// is asked once for its controls and once to describe them all: asking for
-// each control on its own would send the describer again for every one, which
-// takes seconds on a page with a few hundred links, and a click or a choice
-// reads the page twice (its check, then its result).
-async function collectInteractiveElements(page, hiddenNames = null, left = null) {
-  const handles = (await page.locator(INTERACTIVE_SELECTOR).elementHandles())
-    .slice(0, MAX_INTERACTIVE_ELEMENTS * 3);
+// is asked once for its controls and once to judge and describe them all
+// (listInPage): asking for each control on its own would send the describer
+// again for every one, which takes seconds on a page with a few hundred
+// links, and a click or a choice reads the page twice (its check, then its
+// result). `hiddenNames` collects a name for each control a person cannot
+// see, and `leftNames` one for each control shown but left out, or past the
+// controls judged (empty): neither is in the list, both count for the
+// secret-screen check and in `omittedControls`.
+async function collectInteractiveElements(page, hiddenNames = null, leftNames = null) {
+  const matches = await page.locator(INTERACTIVE_SELECTOR).elementHandles();
+  const handles = matches.slice(0, MAX_JUDGED_CONTROLS);
+  if (leftNames) {
+    for (let ordinal = handles.length; ordinal < matches.length; ordinal += 1) leftNames.push("");
+  }
   const described = await page
-    .evaluate(DESCRIBE_ALL_IN_PAGE, { elements: handles, sources: PAGE_POLICY_SOURCES })
+    .evaluate(DESCRIBE_ALL_IN_PAGE, { elements: handles, sources: PAGE_POLICY_SOURCES, limit: MAX_INTERACTIVE_ELEMENTS })
     .catch(() => null);
   // A page that could not answer for all of them at once is asked for each
-  // control on its own.
+  // control on its own, in page order.
   const together = Array.isArray(described) && described.length === handles.length;
-  // More controls shown than the list holds: those scrolled past, above the
-  // view, are left out first, so scrolling down a long page reaches every
-  // control on it, as it reaches its text (shownTextInPage).
-  const passed = new Set();
-  if (together) {
-    const shown = described.flatMap((entry, ordinal) => (entry && entry.shown !== false ? [ordinal] : []));
-    let excess = shown.length - MAX_INTERACTIVE_ELEMENTS;
-    for (const ordinal of shown) {
-      if (excess <= 0) break;
-      if (described[ordinal].above === true) {
-        passed.add(ordinal);
-        excess -= 1;
-      }
-    }
-  }
   const elements = [];
   for (let ordinal = 0; ordinal < handles.length; ordinal += 1) {
+    const entry = together ? described[ordinal] ?? null : undefined;
+    const name = entry && typeof entry.name === "string" ? entry.name.slice(0, 4_000) : "";
+    if (entry && entry.shown === false) {
+      if (hiddenNames) hiddenNames.push(name);
+      continue;
+    }
+    // The list holds at most MAX_INTERACTIVE_ELEMENTS, whatever the page answered.
+    if ((entry && entry.left === true) || elements.length >= MAX_INTERACTIVE_ELEMENTS) {
+      if (leftNames) leftNames.push(name);
+      continue;
+    }
     const locator = handles[ordinal];
-    // `left` counts the shown controls the list leaves out: those passed,
-    // and those past its end, which are only counted.
-    if (passed.has(ordinal)) {
-      if (left) left.count += 1;
-      continue;
-    }
-    if (elements.length >= MAX_INTERACTIVE_ELEMENTS) {
-      if (!together) break;
-      const entry = described[ordinal];
-      if (entry && entry.shown === false) {
-        if (hiddenNames) hiddenNames.push(typeof entry.name === "string" ? entry.name.slice(0, 4_000) : "");
-      } else if (entry && left) {
-        left.count += 1;
-      }
-      continue;
-    }
     // The shown rule in describeInPage covers what Playwright's isVisible
     // checks (rendered, visibility visible, a box with a size).
-    const description = await describeElement(
-      locator,
-      elements.length,
-      hiddenNames,
-      together ? described[ordinal] ?? null : undefined,
-    );
+    const description = await describeElement(locator, elements.length, hiddenNames, entry);
     if (!description) {
       continue;
     }
@@ -2496,7 +2705,10 @@ const TEXT_WINDOW_CHARS = MAX_VISIBLE_TEXT_CHARS - TEXT_MARKER_CHARS;
 // its own, a noncharacter no page text holds and no rule masks.
 const TEXT_WINDOW_MARK = "\uFFFF\n";
 
-// The page's answer (shownTextInPage), bounded; null when it is not one.
+// The page's answer (shownTextInPage), bounded; null when it is not one. A
+// marker names a frame by its site, an address the page's text never holds.
+const MAX_TEXT_MARKERS = 50;
+const FRAME_MARKER_PATTERN = /^\[frame not read: \S{1,253}\]$/;
 function shownTextOf(raw) {
   if (!raw || typeof raw !== "object" || typeof raw.text !== "string") return null;
   const text = raw.text.slice(0, MAX_VISIBLE_TEXT_CHARS * 5);
@@ -2510,7 +2722,11 @@ function shownTextOf(raw) {
     above: count(raw.above),
     below: count(raw.below),
     more: raw.more === true,
+    beyond: raw.beyond === true,
     scrollBy: Number.isSafeInteger(raw.scrollBy) && raw.scrollBy > 0 ? Math.min(raw.scrollBy, MAX_SCROLL_DELTA) : null,
+    markers: Array.isArray(raw.markers)
+      ? raw.markers.slice(0, MAX_TEXT_MARKERS).map((marker) => (typeof marker === "string" && FRAME_MARKER_PATTERN.test(marker) ? marker : ""))
+      : [],
   };
 }
 
@@ -2519,21 +2735,33 @@ function aboutCharacters(count) {
   return rounded.toLocaleString("en-US");
 }
 
+// The frames' markers, put in where their placeholders hold their place
+// (shownTextInPage), once the text around them is masked; a placeholder cut
+// short, or one with no marker, leaves nothing.
+function withFrameMarkers(text, shown) {
+  const markers = shown ? shown.markers : [];
+  return text.replace(/\uFFFE(?:([\uE000-\uE0FF])\uFFFE*)?/g, (_, mark) =>
+    (mark ? markers[mark.charCodeAt(0) - 0xE000] || "" : ""));
+}
+
 // The text a reading returns: all of it when it fits, else the window the
 // page chose, masked as the whole text was (`masked`), between lines that say
 // how much is left out above and below and how to scroll to it. When the
 // window cannot be masked exactly as the whole text was, the text is read from
-// its top instead.
+// its top instead. A page whose part in view is further down than a reading
+// reaches says so.
 function readingText(masked, shown, mask) {
-  const cutLine = (below, more, scrollBy) =>
-    `[Text cut here: ${
-      below > 0 ? `${more ? "over" : "about"} ${aboutCharacters(below)} more characters` : "more text follows"
-    }.${scrollBy ? ` Scroll down (y: ${scrollBy}) to read on.` : ""}]`;
+  const cutLine = (below, more, scrollBy, beyond) =>
+    beyond
+      ? "[Text cut here: the part of the page in view is further down than a reading reaches.]"
+      : `[Text cut here: ${
+        below > 0 ? `${more ? "over" : "about"} ${aboutCharacters(below)} more characters` : "more text follows"
+      }.${scrollBy ? ` Scroll down (y: ${scrollBy}) to read on.` : ""}]`;
   const fromTop = () => {
     if (masked.length <= MAX_VISIBLE_TEXT_CHARS) return masked;
     const cut = masked.lastIndexOf("\n", TEXT_WINDOW_CHARS);
     const end = cut > TEXT_WINDOW_CHARS / 2 ? cut : TEXT_WINDOW_CHARS;
-    return `${masked.slice(0, end)}\n${cutLine(masked.length - end, shown ? shown.more : false, null)}`;
+    return `${masked.slice(0, end)}\n${cutLine(masked.length - end, shown ? shown.more : false, null, false)}`;
   };
   if (!shown || (shown.start === 0 && shown.end >= shown.text.length && shown.above === 0 && !shown.more)) {
     return fromTop();
@@ -2553,7 +2781,7 @@ function readingText(masked, shown, mask) {
   return [
     ...(shown.above > 0 ? [`[Text above not shown: about ${aboutCharacters(shown.above)} characters. Scroll up to read it.]`] : []),
     shownWindow,
-    ...(shown.below > 0 || shown.more ? [cutLine(shown.below, shown.more, shown.scrollBy)] : []),
+    ...(shown.below > 0 || shown.more ? [cutLine(shown.below, shown.more, shown.scrollBy, shown.beyond)] : []),
   ].join("\n");
 }
 
@@ -2566,8 +2794,8 @@ async function snapshot(page, { withhold = false } = {}) {
   const startUrl = page.url();
   refuseLinkOnlyPage(page);
   const hiddenNames = [];
-  const left = { count: 0 };
-  const interactive = await collectInteractiveElements(page, hiddenNames, left);
+  const leftNames = [];
+  const interactive = await collectInteractiveElements(page, hiddenNames, leftNames);
   const rawUrl = page.url();
   const renderedText = await page
     .locator("body")
@@ -2605,7 +2833,7 @@ async function snapshot(page, { withhold = false } = {}) {
   const observe = (forceWithhold) => {
     const shown = observeText(visibleText, shownNames, forceWithhold);
     if (shown.secretScreen) return shown;
-    const whole = observeText(renderedText, [...shownNames, ...hiddenNames], forceWithhold);
+    const whole = observeText(renderedText, [...shownNames, ...hiddenNames, ...leftNames], forceWithhold);
     return whole.secretScreen ? observeText(visibleText, shownNames, true) : shown;
   };
   let view;
@@ -2651,9 +2879,9 @@ async function snapshot(page, { withhold = false } = {}) {
     title: view.title,
     visibleText: view.secretScreen
       ? ""
-      : readingText(view.text, shownText, (text) => redaction.redactPageObservation({
+      : withFrameMarkers(readingText(view.text, shownText, (text) => redaction.redactPageObservation({
         url: rawUrl, title, text, names: shownNames, signals, withhold: false,
-      }).text),
+      }).text), shownText),
     secretScreen: view.secretScreen,
     ...(view.message ? { message: view.message } : {}),
     interactiveElements: interactive.map(({ description }, index) =>
@@ -2681,7 +2909,7 @@ async function snapshot(page, { withhold = false } = {}) {
     ),
     // How many controls were left out, because a person cannot see them yet
     // or the list is full, so a cut list does not read as the whole page.
-    ...(hiddenNames.length + left.count ? { omittedControls: hiddenNames.length + left.count } : {}),
+    ...(hiddenNames.length + leftNames.length ? { omittedControls: hiddenNames.length + leftNames.length } : {}),
     ...(signInHint ? { signIn: signInHint } : {}),
   };
 }
@@ -2694,8 +2922,9 @@ async function snapshot(page, { withhold = false } = {}) {
 const SIGN_IN_WHEN = "If the person asked to sign in, or a step they asked for needs it,";
 
 function signInHintOf(interactive) {
+  // A field the page turned off is no field a person can fill yet.
   const fields = interactive
-    .filter(({ description }) => actionPolicy.isSignInField(policyTarget(description)))
+    .filter(({ description }) => description.disabled !== true && actionPolicy.isSignInField(policyTarget(description)))
     .map(({ description }) => description.index)
     .slice(0, 8);
   if (fields.length) {
@@ -2906,6 +3135,24 @@ function controlChanged() {
       ? "The page changed after the person said yes, and the control this step was for is not there as it was, so nothing was done. Take a fresh snapshot and do the step again if it still fits the request: it asks the person again."
       : "The page changed before this step ran, and the control it was for is not there as it was, so nothing was done. Take a fresh snapshot and do the step again if it still fits the request.",
   );
+}
+
+// A click lands where a person would click: the middle of the control in view.
+// When another control sits there inside it (a form's button in a section, an
+// item of a menu or tree it holds), or a frame, the click would act on that,
+// which the step was not judged or asked for, so nothing is done.
+async function clickControlItself(target) {
+  await target.locator.scrollIntoViewIfNeeded();
+  const landing = await target.locator
+    .evaluate(clickLandingInPage, { kind: "click-landing", selector: INTERACTIVE_SELECTOR })
+    .catch(() => null);
+  if (!landing || typeof landing.other !== "boolean") throw controlChanged();
+  if (landing.other) {
+    throw new Error(
+      `A click in the middle of ${quotedControlLabel(target.description)} would land on something else inside it (another control, or a frame), so nothing was done. Click that control itself, or another control, from a fresh snapshot.`,
+    );
+  }
+  await target.locator.click();
 }
 
 // A control the page turned off (a reading lists it as `disabled`) takes no
@@ -4767,6 +5014,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     if (selected.some((entry) => !entry || !EDITABLE_FIELD_TAGS.has(entry.description.tag))) {
       throw new Error("Human input targets must be observed editable fields");
     }
+    for (const entry of selected) assertControlOn(entry.description);
     await clearHumanInputHighlights(page);
     try {
       for (const entry of selected) {
@@ -4939,7 +5187,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       ...size,
     });
     const beforeUrl = page.url();
-    await target.locator.click();
+    await clickControlItself(target);
     await settleAfterAction(page);
     page = await resolveExpectedPage(browser);
     await page.bringToFront();

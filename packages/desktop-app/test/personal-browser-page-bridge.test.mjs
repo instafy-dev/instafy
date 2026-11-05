@@ -60,6 +60,14 @@ function createPageHarness() {
     closest(selector) {
       if (selector === "a[href]" && this instanceof HTMLAnchorElement) return this;
       if (selector === "form") return this.ancestorForm;
+      // Role lists ("[role=listbox], [role=tree]"), up the elements a test
+      // set as each one's `parent`.
+      const roles = selector.split(",").map((part) => /^\s*\[role=(\w+)\]\s*$/.exec(part)?.[1]);
+      if (roles.every(Boolean)) {
+        for (let node = this; node; node = node.parent) {
+          if (roles.includes(node.getAttribute("role"))) return node;
+        }
+      }
       return null;
     }
 
@@ -201,7 +209,7 @@ function createPageHarness() {
     scrollX: 0,
     scrollY: 0,
     scrollBy() {},
-    getComputedStyle: () => ({ visibility: "visible", display: "block", pointerEvents: "auto" }),
+    getComputedStyle: (element) => ({ visibility: "visible", display: "block", pointerEvents: "auto", ...element?.style?.computed }),
     Element,
     HTMLElement,
     HTMLButtonElement,
@@ -594,15 +602,17 @@ test("a reading names the frames and pictures it cannot read, keeps its lines, a
   harness.document.unread = [booking, pixel, map, icon];
   harness.document.body = { innerText: "Book your stay\n\nPrice\t120 euros\n" };
   let snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
-  assert.equal(
-    snapshot.text,
-    "Book your stay\nPrice\t120 euros\n[frame not read: booking.example]\n[picture with no text: Map of the route]",
-  );
+  // A canvas's label is page text; a frame's site is an address, kept apart
+  // until the text is masked and judged.
+  assert.equal(snapshot.text, "Book your stay\nPrice\t120 euros\n[picture with no text: Map of the route]");
+  assert.deepEqual(Array.from(snapshot.frames), ["[frame not read: booking.example]"]);
 
   harness.document.unread = [];
   harness.document.body = { innerText: "x".repeat(61_234) };
   snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
-  assert.equal(snapshot.text, `${"x".repeat(60_000)}\n[Text cut here: about 1,200 more characters.]`);
+  assert.equal(snapshot.text, "x".repeat(60_000));
+  assert.equal(snapshot.textCut, 1_234);
+  assert.equal(snapshot.frames, undefined);
 });
 
 test("a reading says which controls are open, chosen or selected, and counts those outside the view", async () => {
@@ -635,4 +645,58 @@ test("a reading says which controls are open, chosen or selected, and counts tho
   large.checked = true;
   const after = await bridge.inspectPersonalBrowserTarget(harness.webContents, { index: 1 });
   assert.equal(security.personalBrowserTargetSecurityFingerprint(after), before);
+});
+
+test("a text area is never named by what it holds", async () => {
+  const harness = createPageHarness();
+  const codes = new harness.HTMLTextAreaElement({ text: "4821 7730 9912 0045" });
+  const note = new harness.HTMLTextAreaElement({ text: "Draft: meet at noon", "aria-label": "Note" });
+  harness.document.elements = [codes, note];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.deepEqual(Array.from(snapshot.interactive, ({ name }) => name), ["textarea", "Note"]);
+  for (const entry of snapshot.interactive) {
+    assert.equal(entry.descriptor.text, "");
+    assert.equal(entry.descriptor.shownText, "");
+  }
+  assert.ok(!JSON.stringify(snapshot).includes("4821"), "A text area's text reached the reading");
+});
+
+test("a suggestion the keys reach in a field's list is not marked selected; a list of its own's is", async () => {
+  const harness = createPageHarness();
+  const field = new harness.HTMLInputElement({ role: "combobox", "aria-controls": "stations", "aria-label": "To" });
+  const suggestions = new harness.Element("ul", { role: "listbox", id: "stations" });
+  const highlighted = new harness.HTMLButtonElement({ type: "button", role: "option", text: "Bolhao", "aria-selected": "true" });
+  highlighted.parent = suggestions;
+  const lines = new harness.Element("ul", { role: "listbox", id: "lines" });
+  const chosen = new harness.HTMLButtonElement({ type: "button", role: "option", text: "Blue line", "aria-selected": "true" });
+  chosen.parent = lines;
+  harness.document.elements = [field, highlighted, chosen];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.deepEqual(
+    Array.from(snapshot.interactive, ({ name, selected }) => ({ name, selected })),
+    [{ name: "To", selected: undefined }, { name: "Bolhao", selected: undefined }, { name: "Blue line", selected: true }],
+  );
+});
+
+test("a control in view that no click reaches is not counted as outside the view", async () => {
+  const harness = createPageHarness();
+  const from = new harness.HTMLInputElement({ "aria-label": "From" });
+  // Turned off the way style sheets draw it: in view, and no click reaches it.
+  const plan = new harness.HTMLButtonElement({ text: "Plan Your Journey" });
+  plan.disabled = true;
+  plan.style.computed = { pointerEvents: "none" };
+  const swap = new harness.HTMLButtonElement({ type: "button", text: "Swap" });
+  // Off to the side, where scrolling never brings it (a closed drawer).
+  const drawer = new harness.HTMLAnchorElement({ href: "https://example.test/menu", text: "Menu" });
+  drawer.rect = { x: -400, y: 10, width: 300, height: 30 };
+  harness.document.elements = [from, plan, swap, drawer];
+  let snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.deepEqual(Array.from(snapshot.interactive, ({ name }) => name), ["From", "Swap"]);
+  assert.equal(snapshot.omittedControls, undefined);
+  // Below the view, which scrolling reaches, it counts.
+  const next = new harness.HTMLAnchorElement({ href: "https://example.test/next", text: "Next page" });
+  next.rect = { x: 10, y: 900, width: 80, height: 30 };
+  harness.document.elements = [from, plan, swap, drawer, next];
+  snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.equal(snapshot.omittedControls, 1);
 });

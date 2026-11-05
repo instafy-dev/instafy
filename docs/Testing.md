@@ -1698,18 +1698,30 @@ After it, `scripts/shared-browser-page-reading-e2e.mjs` reads loopback pages
 whose parts a reading could hide. A details' summary and a tab out of the tab
 order are listed and say whether they are open or selected, and opening one
 reads what it showed, without a prompt; the radio button, box, radio link and
-open list's option shown chosen say so; a planner's list and button waiting
-for its first field are listed as disabled, and a click or a choice on them is
-refused at once with nothing sent or asked. A frame of the page's site and one
+list option shown chosen say so, and a field's highlighted suggestion does
+not; a planner's list and button waiting for its first field are listed as
+disabled, and a click, a choice or a pause for the person on them is refused
+at once with nothing sent or asked, as a sign-in's pause never names its
+password field turned off; a page of 170 taken seats lists its 80 free ones
+and its button; a
+text area is never named by what it holds. A frame of the page's site and one
 of another site are named by their site, canvases as pictures with no text, a
-tracking frame and an icon not at all, and no word of a frame is read. A long
-review reads to its end in parts by following the cut line's scroll, every
-part within the reading's 12,000 characters, and a page of 261 links lists its
-last one once scrolled down, counting those left out. Password, card and code
-fields in a frame or a shadow root carry no value into the reading, and a key
-in a shadow root's read-only field still makes a secret screen. The Personal
-Browser's page bridge and host have unit tests for the same frames, pictures,
-cut line, states and count.
+tracking frame and an icon not at all, and no word of a frame is read; a
+random-looking frame site under a title with a credential word makes no secret
+screen. A long review with a skip link and a pinned header, the same review as
+a plain-text file, and one paragraph longer than a reading each read to their
+end in parts by following the cut line's scroll, every part within the
+reading's 12,000 characters, and a page whose part in view is out of a
+reading's reach says so. A page of 701 links lists its last one once scrolled
+down, counting those left out, and a closed list of 650 options never crowds
+its form's fields out. Password, card and code fields in a frame or a shadow
+root carry no value into the reading, a key in a shadow root's read-only
+field, or in a control's name the list leaves out, still makes a secret
+screen, and a code drawn in boxes of its own is masked. A section a page marks
+open is not listed, and a click whose middle lands on a form's button or a
+frame inside the control is refused with nothing sent or asked. The Personal Browser's page
+bridge, host and redaction have unit tests for the same frames, pictures, cut
+line, states, names, codes and count.
 
 The accompanying UI tests use production React controls with a synthetic native
 host to prove Take over waits for confirmed quiescence, keeps manual state across

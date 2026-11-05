@@ -16,20 +16,33 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // 1. A details' summary is a control that says whether its section is open,
 //    and opening it reads the section; tabs a page takes out of the tab order
 //    are listed, and the one shown says it is selected.
-// 2. The radio button, box, radio link and open list's option the page shows
-//    chosen say so, and only those.
+// 2. The radio button, box, radio link and list option the page shows chosen
+//    say so, and only those: a suggestion the keys reach in a field's list
+//    does not.
 // 3. A control the page turned off is listed as disabled, and a step on it is
-//    refused at once: nothing is sent and nothing is asked.
+//    refused at once: nothing is sent and nothing is asked. A page full of
+//    taken seats still lists the free ones and its button, and a text area is
+//    never named by what it holds.
 // 4. A frame is named by its site where it shows, and a canvas as a picture
 //    with no text; a tracking frame and an icon are nothing, and no word of a
-//    frame's page is read.
+//    frame's page is read. A frame's site is no page text: a random-looking
+//    one under a title with a credential word makes no secret screen.
 // 5. A page longer than the reading says where its text is cut and how far to
-//    scroll, and scrolling reads all of it, within the reading's size; past
-//    the control limit the controls scrolled past go first, so scrolling
-//    reaches the page's last link, and the ones left out are counted.
+//    scroll, and scrolling reads all of it, within the reading's size, past a
+//    skip link and a pinned header, in a long paragraph and on a plain-text
+//    page; one too long to reach where it is scrolled says so. Past the
+//    control limit the controls scrolled past are left out, so scrolling
+//    reaches the page's last link past hundreds of others, a closed list's
+//    options never crowd out a form's fields, and the ones left out are
+//    counted.
 // 6. Password, card and one-time-code fields inside a frame or a shadow root
-//    never reach the reading with what they hold, and a key in a shadow root's
-//    read-only field still makes the page a secret screen.
+//    never reach the reading with what they hold, a key in a shadow root's
+//    read-only field still makes the page a secret screen, as does a key in a
+//    control's name the list leaves out, and a code drawn in boxes of their
+//    own is masked.
+// 7. A click acts on the control itself: a section a page marks open is no
+//    control, and a click whose middle lands on a form's button or a frame
+//    inside the control is refused, sending and asking nothing.
 // Every site is a loopback fixture; Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
@@ -64,6 +77,9 @@ const PASSWORD = ["Inert", "Pass", "word", "4471"].join("");
 const CARD = ["4111", "1111", "1111", "1111"].join(" ");
 const CODE = ["58", "21", "94"].join("");
 const KEY_LIKE = ["a8Fk2LmQ", "9zXw7Rt4", "Yb6Nc1Vd"].join("");
+const RECOVERY_CODES = ["4821 7730", "9912 0045"].join(" ");
+// A random-looking site, as an ad server's frames often have.
+const AD_SITE = `${["5f3c2a1b9e8d7c6b", "5a4f3e2d1c0b9a8f"].join("")}.ads.test`;
 
 function writeProtectedJson(destination, value) {
   const temporary = `${destination}.${randomUUID()}.tmp`;
@@ -116,7 +132,8 @@ const CHOICES = `<h1>Order</h1>
 <a href="/edition/diy" role="radio" aria-checked="true">DIY Edition</a>
 <a href="/edition/prebuilt" role="radio" aria-checked="false">Pre-built</a></div>
 <label for="to">To</label><input id="to" role="combobox" aria-expanded="true" aria-controls="stations">
-<ul id="stations" role="listbox"><li role="option">Aliados</li><li role="option" aria-selected="true">Bolhao</li><li role="option">Campanha</li></ul>`;
+<ul id="stations" role="listbox"><li role="option">Aliados</li><li role="option" aria-selected="true">Bolhao</li><li role="option">Campanha</li></ul>
+<ul role="listbox" aria-label="Line"><li role="option" aria-selected="true">Blue line</li><li role="option">Red line</li></ul>`;
 // A journey planner whose second list and button wait for the first field.
 const PLANNER = `<h1>Journey Planner</h1>
 <form action="/route" method="post">
@@ -125,6 +142,17 @@ const PLANNER = `<h1>Journey Planner</h1>
 <button id="plan" disabled>Plan Your Journey</button>
 <button type="button" aria-disabled="true">Next week</button>
 </form>`;
+// A sign-in form whose password field waits for the account first.
+const SIGN_IN_OFF = `<h1>Sign in</h1><form action="/session" method="post">
+<label>Email <input type="email" name="email"></label><label>Password <input type="password" name="password" disabled></label>
+<button>Sign in</button></form>`;
+// The first 170 seats taken (turned off), then 80 free ones and the page's
+// button, more controls than the list holds.
+const SEATS = `<h1>Seats</h1>${Array.from({ length: 250 }, (_, index) =>
+  `<button${index < 170 ? " disabled" : ""}>Seat ${index + 1}</button>`).join("")}<button>Continue</button>`;
+// Text areas with no name of their own, holding codes.
+const TEXT_AREAS = `<h1>Account</h1><p>Your recovery codes</p><textarea disabled>${RECOVERY_CODES}</textarea>
+<textarea readonly>${RECOVERY_CODES.split(" ").reverse().join(" ")}</textarea>`;
 // What the reading cannot look into: a frame of this site, a booking engine's
 // frame, a tracking frame, a map and a chart drawn on canvases, and an icon.
 const UNREAD = `<h1>Book your stay</h1>
@@ -136,11 +164,31 @@ const UNREAD = `<h1>Book your stay</h1>
 <canvas width="400" height="200"></canvas>
 <canvas width="20" height="20"></canvas>
 <p>After the frames.</p>`;
+const GARDEN = `<h1>The Secret Garden</h1><p>Tickets on sale now.</p>
+<iframe src="http://${AD_SITE}/ad" title="Ad" width="300" height="250"></iframe>`;
 const LONG_SECTIONS = 40;
-const LONG = `<h1>Review</h1>${Array.from({ length: LONG_SECTIONS }, (_, index) =>
+// A skip link a person never sees, which scrolls away, and a header pinned in
+// view as the page scrolls, before a long review.
+const LONG = `<style>.skip{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(1px,1px,1px,1px)}</style>
+<a class="skip" href="#review">Skip to content</a><header style="position:sticky;top:0;background:#fff">Home Laptops</header>
+<h1 id="review">Review</h1>${Array.from({ length: LONG_SECTIONS }, (_, index) =>
   `<p>Section ${index + 1}. ${"The review goes on about battery life and the keyboard. ".repeat(18)}End of section ${index + 1}.</p>`).join("")}
 <p>The verdict: worth it.</p>`;
-const STOPS = 260;
+// The same review as a plain-text file, and one paragraph longer than a reading.
+const PLAIN = `${Array.from({ length: LONG_SECTIONS }, (_, index) =>
+  `Section ${index + 1}.\n${"The review goes on about battery life and the keyboard. ".repeat(18)}\nEnd of section ${index + 1}.\n`).join("\n")}\nThe verdict: worth it.\n`;
+const SENTENCES = 400;
+const ESSAY = `<h1>Essay</h1><p>${Array.from({ length: SENTENCES }, (_, index) =>
+  `Sentence ${index + 1} of the very long paragraph.`).join(" ")}</p><p>After the long paragraph.</p>`;
+// Far more text than a reading walks: the part in view is out of reach.
+const ARCHIVE = Array.from({ length: 30_000 }, (_, index) => `<p>Entry ${index + 1} of the archive, with a few more words.</p>`).join("");
+// More links than a reading judges at first, and a closed list's options
+// ahead of a form's fields.
+const STOPS = 700;
+const ORDER = `<h1>Order</h1><form action="/order" method="post">
+<label for="city">City</label><input id="city" role="combobox" aria-expanded="false" aria-controls="cities">
+<div id="cities" role="listbox" style="display:none">${Array.from({ length: 650 }, (_, index) => `<div role="option">City ${index + 1}</div>`).join("")}</div>
+<label>Email <input name="email"></label><label>Notes <textarea name="notes"></textarea></label><button type="submit">Place order</button></form>`;
 const LINKS = `<h1>Stops</h1>${Array.from({ length: STOPS }, (_, index) =>
   `<p><a href="/stop/${index + 1}">Stop ${index + 1}</a></p>`).join("")}<p><a href="/stops?page=2">Next page</a></p>`;
 // Sign-in, card and code fields inside another site's frame and inside a
@@ -157,6 +205,22 @@ customElements.define("pay-fields", class extends HTMLElement {
   constructor() { super(); this.attachShadow({ mode: "open" }).innerHTML = ${JSON.stringify(SECRET_FIELDS)}; }
 });
 </script>`;
+// A key that only a copy button's name holds, near the page's top, above
+// more links than the list holds.
+const KEY_NAME = `<h1>Deploy settings</h1><p>Project alpha</p><button aria-label="Copy ${KEY_LIKE}">Copy</button>
+${Array.from({ length: 250 }, (_, index) => `<p><a href="/deploy/${index + 1}">Deploy ${index + 1}</a></p>`).join("")}`;
+const CODE_BOXES = `<h1>Sign in</h1><p>Your sign-in code</p>
+<div style="display:flex;gap:8px"><span>${CODE.slice(0, 3)}</span><span>${CODE.slice(3)}</span></div><p>It expires in 10 minutes.</p>`;
+// A section a page marks open as its toggle is, a control around a form's
+// button that fills it, and one around another site's frame.
+const SECTIONS = `<h1>Account</h1>
+<a href="#digest" aria-expanded="true" aria-controls="digest">Weekly digest</a>
+<div id="digest" class="collapse in" aria-expanded="true"><form method="post" action="/account/digest"><input type="hidden" name="on" value="1">
+<button type="submit" aria-label="Turn on" style="display:block;width:100%;height:120px"></button></form></div>
+<div tabindex="0" aria-expanded="true" id="alerts"><form method="post" action="/account/alerts"><input type="hidden" name="on" value="1">
+<button type="submit" style="display:block;width:100%;height:120px"><svg width="16" height="16"><circle cx="8" cy="8" r="6"/></svg></button></form></div>
+<div tabindex="0" id="player" style="width:320px"><iframe src="{frame}/booking" title="Booking" width="300" height="160"></iframe></div>
+<button type="button" onclick="this.textContent = 'More shown'">Show more</button>`;
 const SHADOW_KEY = `<h1>Settings</h1>
 <key-card></key-card>
 <script>
@@ -190,10 +254,21 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/planner": page("Journey Planner", PLANNER),
       "site.test /reading/unread": page("Book your stay", UNREAD),
       "site.test /reading/widget": page("Prices", "<p>Rooms from 120 euros</p><button>Check dates</button>"),
+      "site.test /reading/sign-in-off": page("Sign in", SIGN_IN_OFF),
+      "site.test /reading/seats": page("Seats", SEATS),
+      "site.test /reading/text-areas": page("Account", TEXT_AREAS),
+      "site.test /reading/garden": page("The Secret Garden - tickets", GARDEN),
       "site.test /reading/long": page("Review", LONG),
+      "site.test /reading/plain.txt": { type: "text/plain; charset=utf-8", body: PLAIN },
+      "site.test /reading/essay": page("Essay", ESSAY),
+      "site.test /reading/archive": page("Archive", ARCHIVE),
       "site.test /reading/links": page("Stops", LINKS),
+      "site.test /reading/order": page("Order", ORDER),
       "site.test /reading/secrets": page("Checkout", SECRETS),
       "site.test /reading/shadow-key": page("Settings", SHADOW_KEY),
+      "site.test /reading/key-name": page("API keys", KEY_NAME),
+      "site.test /reading/code-boxes": page("Sign in", CODE_BOXES),
+      "site.test /reading/sections": page("Account", SECTIONS),
       "frame.test /booking": page("Booking", "<h2>Booking engine</h2><label>Check-in <input type=\"date\"></label><button>Search rooms</button><p>Rooms from 140 euros</p>"),
       "frame.test /pixel": page("Pixel", "<p>pixel</p>"),
       "frame.test /fields": page("Payment", SECRET_FIELDS),
@@ -202,12 +277,13 @@ export async function runSharedBrowserPageReadingFixture() {
       const url = new URL(request.url, `http://${request.headers.host}`);
       requests.push(`${request.method} ${url.origin}${url.pathname}`);
       request.resume();
-      const body = pages[`${url.hostname} ${url.pathname}`];
-      if (body === undefined) {
+      const entry = pages[`${url.hostname} ${url.pathname}`];
+      if (entry === undefined) {
         response.writeHead(404, { "content-type": "text/html; charset=utf-8" }).end(page("Not found", "<p>Not found</p>"));
         return;
       }
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      const { type, body } = typeof entry === "string" ? { type: "text/html; charset=utf-8", body: entry } : entry;
+      response.writeHead(200, { "content-type": type, "cache-control": "no-store" });
       response.end(body.replaceAll("{frame}", sites().frame));
     });
     await new Promise((resolve, reject) => {
@@ -356,7 +432,10 @@ export async function runSharedBrowserPageReadingFixture() {
     // 2. What is chosen.
     reading = await read("/reading/choices");
     assert.deepEqual(onLabels(reading, "checked"), ["Medium", "Cheese", "DIY Edition"]);
-    assert.deepEqual(onLabels(reading, "selected"), ["Bolhao"]);
+    // A list of its own says which option it holds; the field's suggestions
+    // say nothing of the one the keys reach.
+    assert.deepEqual(onLabels(reading, "selected"), ["Blue line"]);
+    assert.equal(control(reading, "Bolhao").selected, undefined, "A field's highlighted suggestion read as chosen");
     assert.equal(control(reading, "Aliados").role, "option", "An open list's option was not listed");
     for (const entry of reading.interactiveElements) {
       for (const field of ["checked", "selected", "disabled"]) {
@@ -376,8 +455,28 @@ export async function runSharedBrowserPageReadingFixture() {
     const chose = await runTool("POST", "/v1/choose", { index: control(reading, "To").index, snapshotId: reading.snapshotId, option: "Choose a start first" });
     assert.equal(chose.code, 1, `A choice in a list turned off ran: ${chose.stdout}`);
     assert.match(chose.stderr, /"To" is turned off on the page right now/);
+    // Nor is the person asked to fill a field the page turned off.
+    const paused = await runTool("POST", "/v1/request-human-input", { indices: [control(reading, "To").index], snapshotId: reading.snapshotId });
+    assert.equal(paused.code, 1, `A pause on a field turned off ran: ${paused.stdout}`);
+    assert.match(paused.stderr, /"To" is turned off on the page right now/);
     assert.deepEqual(requests, [], "A step on a control turned off sent something");
     assert.equal(prompts.length, promptsBeforeOff, "A step on a control turned off asked");
+    reading = await read("/reading/sign-in-off");
+    assert.equal(control(reading, "Password").disabled, true);
+    assert.deepEqual(reading.signIn?.fields, [control(reading, "Email").index], "A sign-in pause names a field turned off");
+    // More controls than the list holds: the taken seats make room for the
+    // free ones and the page's button, and are counted.
+    reading = await read("/reading/seats");
+    assert.equal(onLabels(reading, "disabled").length, 0);
+    assert.equal(reading.interactiveElements.filter((entry) => /^Seat \d+$/.test(entry.label)).length, 80, "Free seats were left out");
+    assert.equal(control(reading, "Continue").disabled, undefined);
+    assert.equal(reading.omittedControls, 170);
+    // A text area is named by its label or what is beside it, never by what it holds.
+    reading = await read("/reading/text-areas");
+    const areas = reading.interactiveElements.filter((entry) => entry.tag === "textarea");
+    assert.equal(areas.length, 2);
+    assert.ok([reading.visibleText, ...areas.map((entry) => entry.label)].every((text) => !/\d{4}/.test(text)),
+      `A text area's text reached the reading: ${areas.map((entry) => entry.label)}`);
 
     // 4. Frames and canvases.
     reading = await read("/reading/unread");
@@ -394,42 +493,79 @@ export async function runSharedBrowserPageReadingFixture() {
     for (const unread of ["Rooms from", "Booking engine", "Search rooms", "Check dates", "pixel"]) {
       assert.ok(!JSON.stringify(reading).includes(unread), `A frame's page was read: ${unread}`);
     }
+    // A frame's site is an address, never page text: under a title with a
+    // credential word, a random-looking one makes no secret screen.
+    reading = await read("/reading/garden");
+    assert.equal(reading.secretScreen, false, "A frame's site made a secret screen");
+    assert.equal(reading.visibleText, `The Secret Garden\nTickets on sale now.\n[frame not read: ${AD_SITE}]`);
 
     // 5. A long page, read to its end by scrolling.
-    reading = await read("/reading/long");
-    const windows = [reading];
     const sizes = [];
-    for (let step = 0; step < 10; step += 1) {
-      const current = windows.at(-1);
-      sizes.push(current.visibleText.length);
-      assert.ok(current.visibleText.length <= TEXT_CAP, `The reading's text is over its cap: ${current.visibleText.length}`);
-      const scrollBy = /\[Text cut here: about [\d,]+ more characters\. Scroll down \(y: (\d+)\) to read on\.\]$/.exec(current.visibleText);
-      if (!scrollBy) break;
-      windows.push(await ok("POST", "/v1/scroll", { y: Number(scrollBy[1]) }));
-    }
+    const readToEnd = async (first) => {
+      const parts = [first];
+      for (let step = 0; step < 12; step += 1) {
+        const current = parts.at(-1);
+        sizes.push(current.visibleText.length);
+        assert.ok(current.visibleText.length <= TEXT_CAP, `The reading's text is over its cap: ${current.visibleText.length}`);
+        const scrollBy = /\[Text cut here: about [\d,]+ more characters\. Scroll down \(y: (\d+)\) to read on\.\]$/.exec(current.visibleText);
+        if (!scrollBy) break;
+        parts.push(await ok("POST", "/v1/scroll", { y: Number(scrollBy[1]) }));
+      }
+      return parts;
+    };
+    const numbersRead = (parts, pattern) => new Set(parts.flatMap((entry) => Array.from(entry.visibleText.matchAll(pattern), (match) => Number(match[1]))));
+    const missing = (found, count) => Array.from({ length: count }, (_, index) => index + 1).filter((index) => !found.has(index));
+    const windows = await readToEnd(await read("/reading/long"));
     assert.ok(windows.length >= 3, `A long page read in ${windows.length} parts`);
-    assert.ok(windows[0].visibleText.startsWith("Review\nSection 1."));
+    assert.ok(windows[0].visibleText.startsWith("Skip to content\nHome Laptops\nReview\nSection 1."));
+    // The skip link scrolls away and the header stays pinned: the text goes
+    // on from where the page is scrolled to.
     for (const later of windows.slice(1)) {
       assert.match(later.visibleText, /^\[Text above not shown: about [\d,]+ characters\. Scroll up to read it\.\]\nSection \d+\./);
     }
     assert.ok(windows.at(-1).visibleText.endsWith("The verdict: worth it."), "Scrolling did not reach the page's end");
-    const sectionsRead = new Set(windows.flatMap((entry) => Array.from(entry.visibleText.matchAll(/End of section (\d+)\./g), (match) => Number(match[1]))));
-    assert.equal(sectionsRead.size, LONG_SECTIONS, `Sections never read: ${Array.from({ length: LONG_SECTIONS }, (_, index) => index + 1).filter((index) => !sectionsRead.has(index))}`);
+    let sectionsRead = numbersRead(windows, /End of section (\d+)\./g);
+    assert.equal(sectionsRead.size, LONG_SECTIONS, `Sections never read: ${missing(sectionsRead, LONG_SECTIONS)}`);
     measurements.longPageParts = windows.length;
-    measurements.longPageTextChars = sizes;
+    measurements.longPageTextChars = sizes.slice();
     measurements.longPageReadingBytes = windows.map((entry) => JSON.stringify(entry).length);
     const back = await ok("POST", "/v1/scroll", { y: -10_000 });
-    assert.ok(back.visibleText.startsWith("Review\nSection 1."), "Scrolling back up did not read the page's top");
-    // More controls than the list holds: the ones scrolled past go first.
+    assert.ok(back.visibleText.startsWith("Skip to content\nHome Laptops\nReview\nSection 1."), "Scrolling back up did not read the page's top");
+    // A plain-text page, one block of text, and one paragraph longer than a reading.
+    const plain = await readToEnd(await read("/reading/plain.txt"));
+    sectionsRead = numbersRead(plain, /End of section (\d+)\./g);
+    assert.equal(sectionsRead.size, LONG_SECTIONS, `Plain-text sections never read: ${missing(sectionsRead, LONG_SECTIONS)}`);
+    assert.ok(plain.at(-1).visibleText.endsWith("The verdict: worth it."));
+    const essay = await readToEnd(await read("/reading/essay"));
+    assert.ok(essay[0].visibleText.length > TEXT_CAP / 2, `The first part of a long paragraph read ${essay[0].visibleText.length} characters`);
+    const sentencesRead = numbersRead(essay, /Sentence (\d+) of/g);
+    assert.equal(sentencesRead.size, SENTENCES, `Sentences never read: ${missing(sentencesRead, SENTENCES)}`);
+    assert.ok(essay.at(-1).visibleText.endsWith("After the long paragraph."));
+    // A page whose part in view is further down than a reading walks says so.
+    await runPage.goto(`${sites().site}/reading/archive`);
+    await runPage.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    reading = await ok("GET", "/v1/snapshot");
+    assert.ok(reading.visibleText.length <= TEXT_CAP);
+    assert.ok(
+      reading.visibleText.endsWith("[Text cut here: the part of the page in view is further down than a reading reaches.]"),
+      `The reading did not say its view is out of reach: ${reading.visibleText.slice(-120)}`,
+    );
+    // More controls than the list holds: those scrolled past are left out,
+    // however many the page has.
     reading = await read("/reading/links");
     assert.equal(reading.interactiveElements.length, 200);
     assert.equal(reading.omittedControls, STOPS + 1 - 200, "The controls past the list's end were not counted");
     assert.ok(!reading.interactiveElements.some((entry) => entry.label === "Next page"));
-    const bottom = await ok("POST", "/v1/scroll", { y: 10_000 });
-    assert.equal(bottom.interactiveElements.length, 200);
-    assert.equal(bottom.omittedControls, STOPS + 1 - 200);
+    await runPage.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    const bottom = await ok("GET", "/v1/snapshot");
     assert.equal(bottom.interactiveElements.at(-1).label, "Next page", "Scrolling down did not reach the page's last link");
-    assert.equal(bottom.interactiveElements[0].label, `Stop ${STOPS + 1 - 200 + 1}`, "Controls in view were left out");
+    assert.ok(bottom.interactiveElements.every((entry) => entry.label === "Next page" || Number(/^Stop (\d+)$/.exec(entry.label)?.[1]) > 600),
+      `Controls scrolled past were listed: ${bottom.interactiveElements[0].label}`);
+    assert.equal(bottom.omittedControls, STOPS + 1 - bottom.interactiveElements.length);
+    // A closed list's options never crowd a form's fields out of the list.
+    reading = await read("/reading/order");
+    assert.deepEqual(reading.interactiveElements.map((entry) => entry.label), ["City", "Email", "Notes", "Place order"]);
+    assert.equal(reading.omittedControls, 650);
 
     // 6. Secrets in frames and shadow roots.
     reading = await read("/reading/secrets");
@@ -451,6 +587,39 @@ export async function runSharedBrowserPageReadingFixture() {
     assert.equal(reading.secretScreen, true, "A key in a shadow root's read-only field is no secret screen");
     assert.equal(reading.visibleText, "");
     assert.ok(!JSON.stringify(reading).includes(KEY_LIKE), "The key reached the reading");
+    // A key only a control's name holds, first read with that control
+    // scrolled past and left out of the list, still makes a secret screen.
+    await runPage.goto(`${sites().site}/reading/key-name`);
+    await runPage.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    reading = await ok("GET", "/v1/snapshot");
+    assert.equal(reading.secretScreen, true, "A key in a name the list left out made no secret screen");
+    assert.equal(reading.visibleText, "");
+    assert.ok(!JSON.stringify(reading).includes(KEY_LIKE), "The key reached the reading");
+    // A code drawn in boxes of its own reads with a line break between its
+    // groups, and is masked as one.
+    reading = await read("/reading/code-boxes");
+    assert.ok(reading.visibleText.includes("Your sign-in code\n[redacted secret]\nIt expires"), reading.visibleText);
+    assert.ok(!reading.visibleText.includes(CODE.slice(0, 3)), "A code in boxes of its own was read");
+
+    // 7. A click acts on the control itself.
+    reading = await read("/reading/sections");
+    assert.deepEqual(
+      reading.interactiveElements.map((entry) => entry.tag),
+      ["a", "button", "div", "button", "div", "button"],
+      "A section marked open was listed as a control",
+    );
+    requests.length = 0;
+    const promptsBeforeClick = prompts.length;
+    for (const ordinal of [0, 1]) {
+      const index = reading.interactiveElements.map((entry, place) => [entry.tag, place]).filter(([tag]) => tag === "div")[ordinal][1];
+      const landed = await runTool("POST", "/v1/click", { index, snapshotId: reading.snapshotId });
+      assert.equal(landed.code, 1, `A click that lands on a form's button or a frame inside the control ran: ${landed.stdout}`);
+      assert.match(landed.stderr, /would land on something else inside it \(another control, or a frame\), so nothing was done/);
+    }
+    assert.deepEqual(requests, [], "A click that landed on another control sent something");
+    assert.equal(prompts.length, promptsBeforeClick, "A click that landed on another control asked");
+    const shown = await ok("POST", "/v1/click", { index: control(reading, "Show more").index, snapshotId: reading.snapshotId });
+    assert.ok(shown.interactiveElements.some((entry) => entry.label === "More shown"), "A click on a plain button did nothing");
 
     const result = {
       status: "passed", fixtureVersion: 1, browserVersion: context.browser()?.version() ?? "unknown",
@@ -458,11 +627,12 @@ export async function runSharedBrowserPageReadingFixture() {
       measurements,
       assertions: [
         "a details' summary is listed with whether it is open, and opening it reads its section; a tab out of the tab order is listed, and the tab shown says it is selected",
-        "the radio button, box, radio link and open list's option shown chosen say so, and nothing else does",
-        "a control turned off is listed as disabled, and a click or a choice on it is refused at once, sending and asking nothing",
-        "a frame is named by its site and a canvas as a picture with no text, where they show; a tracking frame and an icon are nothing; no word of a frame is read",
-        "a long page's text says where it is cut and how far to scroll, and scrolling reads every section within the reading's cap; past 200 controls the ones scrolled past go first and the rest are counted",
-        "password, card and code fields in a frame or a shadow root carry no value into the reading, a frame's fields are never listed, and a key in a shadow root's read-only field still makes a secret screen",
+        "the radio button, box, radio link and list option shown chosen say so, and nothing else does: not a field's highlighted suggestion",
+        "a control turned off is listed as disabled, and a click or a choice on it is refused at once, sending and asking nothing; taken seats make room for the free ones; a text area is never named by what it holds",
+        "a frame is named by its site and a canvas as a picture with no text, where they show; a tracking frame and an icon are nothing; no word of a frame is read; a frame's site makes no secret screen",
+        "a long page's text says where it is cut and how far to scroll, and scrolling reads all of it within the reading's cap, past a skip link and a pinned header, on a plain-text page and in a long paragraph; a view out of reach says so; past 200 controls those scrolled past are left out and counted, past 600 matches too, and a closed list's options never crowd out a form",
+        "password, card and code fields in a frame or a shadow root carry no value into the reading, a frame's fields are never listed, a key in a shadow root's read-only field or in a control's name the list leaves out still makes a secret screen, and a code in boxes of its own is masked",
+        "a section marked open is no control, and a click whose middle lands on a form's button or a frame inside the control is refused, sending and asking nothing",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",

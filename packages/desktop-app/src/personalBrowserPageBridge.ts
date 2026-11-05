@@ -56,8 +56,16 @@ export type PersonalBrowserPageSnapshot = {
   title: string;
   text: string;
   interactive: PersonalBrowserInteractiveElement[];
-  /** Controls left out of `interactive`: outside the view, which scrolling reaches, or past its 500. */
+  /** Controls left out of `interactive`: above or below the view, which scrolling reaches, or past its 500. */
   omittedControls?: number;
+  /**
+   * The frames the text cannot read, each named by its site ("[frame not read:
+   * <site>]"). A site is an address, never page text, so these are kept apart
+   * from `text` and added to it only after it is masked and judged.
+   */
+  frames?: string[];
+  /** How many characters of the page's text are past the 60,000 `text` holds. */
+  textCut?: number;
   documentToken: string;
   signals?: PersonalBrowserPageSecretSignals;
   /** The page's web links, raw, when the snapshot asked for them (Send page to Octo). */
@@ -620,9 +628,10 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
         value: element.matches("button, input[type='button'], input[type='submit']")
           ? clean(element.value)
           : "",
-        text: clean(element.innerText || element.textContent),
+        // A text area's text is what it holds, a value, never its name.
+        text: element instanceof HTMLTextAreaElement ? "" : clean(element.innerText || element.textContent),
         // The visible label prompts show; risk words still read \`text\`.
-        shownText: shownTextOf(element),
+        shownText: element instanceof HTMLTextAreaElement ? "" : shownTextOf(element),
         href: link instanceof HTMLAnchorElement ? clean(link.href, 4096) : "",
         // Bind approvals to the actual form owner independently of its label.
         formOwnerIdentity: form ? targetIdentity(form) : "",
@@ -712,8 +721,23 @@ export async function snapshotPersonalBrowserPage(
     buildPageScript({ links }, `
       // A control's state, read as the Shared Browser reads it: whether a
       // toggle is open, and, only when true, whether it is the one of its
-      // group the page shows chosen. Never a field's value.
+      // group the page shows chosen. Never a field's value. In the list a
+      // field opens as a person types (a combobox's suggestions), the one
+      // marked selected is only the one the keys reach, so it says nothing.
       const flag = (element, name) => clean(element.getAttribute(name), 16).toLowerCase();
+      const suggestion = (element) => {
+        const list = element.closest("[role=listbox], [role=tree], [role=grid]");
+        if (!list) return false;
+        if (list.closest("[role=combobox]")) return true;
+        if (!list.id) return false;
+        return Array.from(document.querySelectorAll(
+          "[role=combobox][aria-controls], [role=combobox][aria-owns], input[aria-controls], input[aria-owns], [aria-autocomplete][aria-controls], [aria-autocomplete][aria-owns]",
+        ))
+          .slice(0, 200)
+          .some((field) => ((field.getAttribute("aria-controls") || "") + " " + (field.getAttribute("aria-owns") || ""))
+            .split(/\\s+/)
+            .includes(list.id));
+      };
       const stateOf = (element) => {
         const open = flag(element, "aria-expanded");
         const expanded = open === "true" || open === "false"
@@ -727,7 +751,7 @@ export async function snapshotPersonalBrowserPage(
         return {
           ...(typeof expanded === "boolean" ? { expanded } : {}),
           ...(checked ? { checked: true } : {}),
-          ...(flag(element, "aria-selected") === "true" ? { selected: true } : {}),
+          ...(flag(element, "aria-selected") === "true" && !suggestion(element) ? { selected: true } : {}),
         };
       };
       const listed = candidates();
@@ -747,34 +771,42 @@ export async function snapshotPersonalBrowserPage(
           descriptor: item,
         };
       }).filter(Boolean);
-      // Controls drawn outside the view are not listed until it is scrolled
-      // to them; they are counted, so the list never reads as the whole page.
+      // Controls drawn above or below the view are not listed until it is
+      // scrolled to them; they are counted, so the list never reads as the
+      // whole page. One in view the page lets no click reach, or one off to
+      // a side scrolling never shows (a closed drawer, a skip link), is not.
       const drawn = (element) => {
         const rect = element.getBoundingClientRect();
         const style = globalThis.getComputedStyle(element);
         return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
       };
+      const scrolledTo = (element) => {
+        const rect = element.getBoundingClientRect();
+        const across = rect.right > 0 && rect.left < globalThis.innerWidth;
+        const above = rect.bottom <= 0 && rect.bottom + globalThis.scrollY > 0;
+        return across && (above || rect.top >= globalThis.innerHeight);
+      };
       const outside = Array.from(document.querySelectorAll(interactiveSelector)).slice(0, 5_000)
-        .filter((element) => element.ownerDocument === document && !forbiddenTarget(element) && !visible(element) && drawn(element))
+        .filter((element) => element.ownerDocument === document && !forbiddenTarget(element) && drawn(element) && scrolledTo(element))
         .length;
       const omittedControls = outside + Math.max(0, listed.length - 500);
       // What a person sees that the text cannot hold, in the words the
-      // Shared Browser's reading uses where it shows them: a frame, named by
-      // its site, and a canvas, a picture with no text. Too small to see (a
-      // tracking frame) is nothing.
-      const aboutCharacters = (count) => (count >= 1_000 ? Math.round(count / 100) * 100 : count).toLocaleString("en-US");
-      const unread = [];
+      // Shared Browser's reading uses where it shows them: a canvas, a
+      // picture with no text, after the page's text, and a frame, named by its
+      // site, kept apart (\`frames\`): a site is an address, never page text.
+      // Too small to see (a tracking frame) is nothing.
+      const pictures = [];
+      const frames = [];
       for (const element of Array.from(document.querySelectorAll("iframe, frame, object, embed, canvas")).slice(0, 200)) {
         const tag = String(element.tagName || "").toUpperCase();
         if (!["IFRAME", "FRAME", "OBJECT", "EMBED", "CANVAS"].includes(tag) || element.ownerDocument !== document) continue;
         if (!drawn(element) || element.closest?.("[aria-hidden='true'], [inert]")) continue;
         if (typeof element.checkVisibility === "function" && !element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) continue;
         const rect = element.getBoundingClientRect();
-        let part = "";
         if (tag === "CANVAS") {
           if (rect.width < 40 || rect.height < 40) continue;
           const label = clean(element.getAttribute("aria-label"), 80);
-          part = label ? "[picture with no text: " + label + "]" : "[picture with no text]";
+          if (pictures.length < 20) pictures.push(label ? "[picture with no text: " + label + "]" : "[picture with no text]");
         } else {
           if (rect.width < 16 || rect.height < 16) continue;
           let site = "";
@@ -786,30 +818,26 @@ export async function snapshotPersonalBrowserPage(
           } catch {
             site = "";
           }
-          part = site ? "[frame not read: " + site + "]" : "[frame not read]";
+          if (frames.length < 20) frames.push(site ? "[frame not read: " + site.slice(0, 253) + "]" : "[frame not read]");
         }
-        if (unread.length < 20) unread.push(part);
       }
       // The page's rendered text with its line breaks and table cells kept,
-      // as the Shared Browser keeps them; past 60,000 characters it says how
-      // much more there is.
+      // as the Shared Browser keeps them, up to 60,000 characters.
       const whole = String(document.body?.innerText ?? "")
         .replace(/\\r\\n?/g, "\\n")
         .replace(/[^\\S\\n\\t]+/g, " ")
         .replace(/ *([\\n\\t]) */g, "$1")
         .replace(/\\n{2,}/g, "\\n")
         .trim();
-      const text = [
-        whole.slice(0, 60_000),
-        ...unread,
-        ...(whole.length > 60_000 ? ["[Text cut here: about " + aboutCharacters(whole.length - 60_000) + " more characters.]"] : []),
-      ].filter(Boolean).join("\\n");
+      const text = [whole.slice(0, 60_000), ...pictures].filter(Boolean).join("\\n");
       return {
         url: globalThis.location.href,
         title: clean(document.title, 1_000),
         text,
         interactive,
         ...(omittedControls > 0 ? { omittedControls } : {}),
+        ...(frames.length ? { frames } : {}),
+        ...(whole.length > 60_000 ? { textCut: whole.length - 60_000 } : {}),
         documentToken: registry.documentToken,
         signals: pageSecretSignals(),
         ...(args.links > 0 ? { links: (${PAGE_LINKS_IN_PAGE_SOURCE})(args.links) } : {}),

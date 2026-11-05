@@ -373,6 +373,34 @@ test("a reading's control states and the controls it leaves out reach the agent;
   assert.equal(result.snapshot.omittedControls, 3);
 });
 
+test("a reading names its frames and where its text is cut after the page's text is masked and judged", async () => {
+  const site = ["5f3c2a1b9e8d7c6b", "5a4f3e2d1c0b9a8f", ".ads.example"].join("");
+  let page = {
+    ...snapshotPage({ title: "The Secret Garden - tickets", text: "The Secret Garden\nTickets on sale now." }),
+    frames: [`[frame not read: ${site}]`, "not a marker"],
+    textCut: 1_234,
+  };
+  const { host } = fixture(undefined, { snapshotPersonalBrowserPage: async () => page });
+  host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
+  let result = await host.handleControlOperation("snapshot", {});
+  // A random-looking site under a title with a credential word is an
+  // address, not a key on the page.
+  assert.equal(result.snapshot.secretScreen, undefined);
+  assert.equal(
+    result.snapshot.text,
+    `The Secret Garden\nTickets on sale now.\n[frame not read: ${site}]\n[Text cut here: about 1,200 more characters.]`,
+  );
+
+  page = {
+    ...snapshotPage({ documentToken: "doc-b", text: "API-Schlüssel", signals: { ...NO_SECRET_SIGNALS, secretField: true } }),
+    frames: ["[frame not read: billing.example]"],
+    textCut: 10,
+  };
+  result = await host.handleControlOperation("snapshot", {});
+  assert.equal(result.snapshot.secretScreen, true);
+  assert.equal(result.snapshot.text, "");
+});
+
 test("a page whose secret signals are missing is withheld", async () => {
   const page = snapshotPage({ text: "Unchecked text", names: ["Continue"] });
   delete page.signals;
