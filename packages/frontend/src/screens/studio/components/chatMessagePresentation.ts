@@ -723,6 +723,30 @@ export function readTurnJobIds(message: Pick<ChatMessage, "metadata">): string[]
 }
 
 /**
+ * What a row's run is read from: in a row of more than one turn, its newest
+ * turn's messages alone, with any failure posted for that turn's run alone.
+ * The turns before it are over, and the reply one of them ended on says
+ * nothing of the newest: read as the row's, the row said it was done between
+ * the building turn's steps, and a Stop then never read "Stopped".
+ */
+export function newestTurnMessages<T extends ChatMessage>(threadMessages: T[], turnJobIds: readonly string[]): T[] {
+  if (turnJobIds.length < 2) return threadMessages;
+  const newestJobId = turnJobIds[turnJobIds.length - 1];
+  const newestRunIds = new Set(
+    threadMessages
+      .filter((candidate) => extractAgentJobId(candidate) === newestJobId)
+      .map(extractRunId)
+      .filter((runId): runId is string => runId !== null),
+  );
+  return threadMessages.filter((candidate) => {
+    const jobId = extractAgentJobId(candidate);
+    if (jobId) return jobId === newestJobId;
+    const runId = extractRunId(candidate);
+    return runId !== null && newestRunIds.has(runId);
+  });
+}
+
+/**
  * A browser turn's row whose hand-back was sent and has shown nothing yet:
  * the row stands for that hand-back's turn (its run, once known).
  */

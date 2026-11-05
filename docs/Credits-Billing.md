@@ -392,7 +392,7 @@ charged for. There are three:
   the two apart, and both ask only what Octo asked.
 
 **Try again** on a hand-back whose turn failed sends that hand-back again (its claim on the
-browser turn, never the notice the chat shows for it), so it is a hand-back too, charged as one.
+browser turn, never the words its prompt is stored with), so it is a hand-back too, charged as one.
 
 Each kind reserves its credit at dispatch like any other. A hand-back or an automatic retry is
 charged when it ends with a reply (it succeeded and posted something that is not empty), and its

@@ -157,5 +157,12 @@ describe("a chat's Browser view, back in a chat where nothing runs", () => {
     await render(space, { openedByPerson: true });
     await advance(0);
     expect(said().opening).toBe(true);
+
+    // A turn of this chat is on its way to a site: so does it.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render(space, { openedByPerson: false, arrivalSite: "visitasevilla.es" });
+    await advance(0);
+    expect(said().opening).toBe(true);
   });
 });

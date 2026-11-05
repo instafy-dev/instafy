@@ -2614,7 +2614,7 @@ unless the policy is `"covered"`.
   for a card the routing step posted; it stamps `buildRequest` with the
   message's own words as `personRequest`, an empty reply and no findings. The
   chat shows neither the card nor, once the hand-back is in it, the browser
-  turn or the hand-back's notice: the person reads their message and then the
+  turn or the hand-back's prompt: the person reads their message and then the
   building turn. The building turn reads those words as the person's request
   and makes what they ask, reading any public page it needs itself. A refusal
   because the conversation moved on (someone wrote after the browser turn, or

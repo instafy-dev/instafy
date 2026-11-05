@@ -21,9 +21,9 @@
 // back without opening a page (the runtime's build request note), reads as
 // the building turn alone: the card goes as soon as that note arrives, and
 // once the hand-back the controller sends for it is in the chat, the browser
-// turn and the hand-back's notice go too. Until then, or when that hand-back
-// was refused, the browser turn shows what it has (the controller leaves a
-// refusal's reason as its reply).
+// turn goes too, and the hand-back's prompt never shows. Until then, or when
+// that hand-back was refused, the browser turn shows what it has (the
+// controller leaves a refusal's reason as its reply).
 //
 // A browser turn whose findings a hand-back took back to the building turn
 // reads as one answer with it: one Octo row, with one line, one reply and the
@@ -80,7 +80,7 @@ export type RoutedBrowserFold = {
   buildRequestJobIds: ReadonlySet<string>;
   /**
    * Those of {@link buildRequestJobIds} whose hand-back is in the chat: the
-   * browser turn and the hand-back's notice show nothing either.
+   * browser turn and the hand-back's prompt show nothing either.
    */
   handedBackBuildRequestJobIds: ReadonlySet<string>;
   /**

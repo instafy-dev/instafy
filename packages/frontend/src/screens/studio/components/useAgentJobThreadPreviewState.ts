@@ -6,6 +6,7 @@ import type { ChatMessage } from "../types";
 import type { AgentJobThreadPreviewLayoutProps } from "./AgentJobThreadPreviewLayout";
 import {
   isAgentStatusMessage,
+  newestTurnMessages,
   readPendingHandBack,
   readTurnJobIds,
   runMatchesThreadJobId,
@@ -337,12 +338,15 @@ export function useAgentJobThreadPreviewState({
     });
   }, [activeConversation?.messages, message.id, message.timestamp]);
 
+  // The row's run is its newest turn's: the reply a browser turn ended on
+  // never ends the building turn that went on from it.
+  const runMessages = useMemo(() => newestTurnMessages(threadMessages, turnJobIds), [threadMessages, turnJobIds]);
   const runStatus = useMemo(
     () =>
       handBackPending
         ? { phase: "running" as const, status: "in_progress" }
-        : resolveThreadRunStatusFromMessages(threadMessages),
-    [handBackPending, threadMessages],
+        : resolveThreadRunStatusFromMessages(runMessages),
+    [handBackPending, runMessages],
   );
   const isThreadRunInFlight = useMemo(() => {
     const pendingRunIds = owningConversation?.pendingRunIds ?? [];

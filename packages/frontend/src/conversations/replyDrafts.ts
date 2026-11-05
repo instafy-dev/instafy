@@ -220,14 +220,8 @@ export function placeReplyDrafts(messages: ChatMessage[], drafts: readonly ChatM
     if ((getMessageType(message) ?? "").trim().toLowerCase() !== "agent_job_thread") return;
     const jobId = readString(message.metadata?.jobId);
     if (jobId) turnRowByJobId.set(jobId, index);
-    // A row of more than one turn (a browser turn and its hand-back) holds each one's draft.
-    const turnJobIds = message.metadata?.turnJobIds;
-    if (Array.isArray(turnJobIds)) {
-      for (const turnJobId of turnJobIds) {
-        const id = readString(turnJobId);
-        if (id) turnRowByJobId.set(id, index);
-      }
-    }
+    // A browser turn's row whose hand-back has shown nothing yet knows that
+    // turn by its run alone; once it shows something, the row's job is its.
     const handBackRunId = message.metadata?.handBackPending === true ? readString(message.metadata?.handBackRunId) : null;
     if (handBackRunId) retryRowByRunId.set(handBackRunId, index);
     if (message.metadata?.autoRetryPending !== true) return;

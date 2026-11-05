@@ -38,14 +38,19 @@ import storedChats from "./fixtures/browserHandBackChats.json";
 // card. Below are those chats' stored rows (their ids, order, roles, times and
 // what Studio reads of their metadata), and their runs as their rows date them.
 
-const mocks = vi.hoisted(() => ({ runs: {} as Record<string, unknown> }));
+const mocks = vi.hoisted(() => ({
+  runs: {} as Record<string, unknown>,
+  // The chat as ChatPanel's provider holds it, for what a turn's row reads of
+  // it (a stop notice, the runs it waits on); none unless a test says so.
+  activeConversation: null as Record<string, unknown> | null,
+}));
 
 vi.mock("../../../../services/runtimeController/userInputRequests", () => ({
   getUserInputRequest: vi.fn(),
   answerUserInputRequest: vi.fn(),
 }));
 vi.mock("../../../../conversations/ConversationsProvider", () => ({
-  useConversations: () => ({ activeConversation: null, conversations: [] }),
+  useConversations: () => ({ activeConversation: mocks.activeConversation, conversations: [] }),
 }));
 vi.mock("../../../../projects/useProject", () => ({
   useProject: () => ({ activeProjectId: "project-1" }),
@@ -70,6 +75,8 @@ const CONVERSATION = "cd37f74a-8b1e-4fb8-9dc6-75989a1cf05d";
 const PERSON = "person-1";
 const OCTO = { id: "786d5f34-547e-4ca7-8a85-4e1dedec2401", handle: "octo", avatarSeed: "octo", displayName: "Octo" };
 const HAND_BACK_NOTICE = "Octo continued with what it found in the browser";
+/** The Seville map's building turn: the hand-back's run and the job that ran it. */
+const SEVILLE_BUILD = { jobId: "4e9714c9-3bf5-4695-8611-6a58fb38cff0", runId: "a64022f9-e961-4e00-a854-3a7499157929" };
 
 function chatOf(rows: StoredRow[]): ChatMessage[] {
   return rows.map((row) => mapControllerMessageToChat({
@@ -143,6 +150,7 @@ describe("a message Octo answers in its browser and then builds from what it fou
     vi.useRealTimers();
     container.remove();
     mocks.runs = {};
+    mocks.activeConversation = null;
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -151,10 +159,10 @@ describe("a message Octo answers in its browser and then builds from what it fou
    * (collapse, display, job threads and folds), the reply drafts placed in
    * their turns, and the typing row under it, with the inputs ChatPanel gives each.
    */
-  async function show(chat: ChatMessage[], now: number, drafts: ReplyDraft[] = []) {
+  async function show(chat: ChatMessage[], now: number, drafts: ReplyDraft[] = [], given?: { runs: RunRecord[] }) {
     vi.setSystemTime(now);
     const messages = chat.filter((message) => message.timestamp <= now);
-    const runs = runsAt(chat, now);
+    const runs = given?.runs ?? runsAt(chat, now);
     mocks.runs = Object.fromEntries(runs.map((run) => [run.id, run]));
     const collapsed = collapseLifecycleMessages(messages);
     const displayed = synthesizeAgentJobThreadMessages(collapsed, collapsed.filter(shouldDisplayChatMessage));
@@ -162,7 +170,8 @@ describe("a message Octo answers in its browser and then builds from what it fou
       .map(replyDraftChatMessage);
     const tail = displayed.at(-1);
     const isAssistantTyping = runs.length > 0;
-    const covered = isAssistantTyping && resolveJobThreadTypingCoverage(tail, runs, messages) !== "none";
+    const coverage = resolveJobThreadTypingCoverage(tail, runs, messages);
+    const covered = isAssistantTyping && coverage !== "none";
     const lanes = resolveTypingAgentLanes(runs, new Map());
     const lead = lanes.agents[0] ?? { handle: "octo", avatarSeed: "octo", displayName: "Octo", isThinking: false };
     const host: BrowserRequestHost = {
@@ -230,6 +239,11 @@ describe("a message Octo answers in its browser and then builds from what it fou
       notice: container.textContent?.includes(HAND_BACK_NOTICE) ?? false,
       lines: Array.from(container.querySelectorAll<HTMLElement>('[data-testid="turn-activity-line"] [data-sweep-text]'))
         .map((element) => element.dataset.sweepText ?? ""),
+      // Each turn row's line is a running one (it announces its changes), not what the turn did.
+      live: Array.from(container.querySelectorAll<HTMLElement>('[data-testid="turn-activity"]'))
+        .map((line) => line.querySelector('[data-testid="turn-activity-announcement"]') !== null),
+      // How the newest row covers the typing row: "live" while it is a turn at work.
+      coverage,
       turns: Array.from(container.querySelectorAll<HTMLElement>('[data-testid="agent-job-thread-preview"]')),
     };
   }
@@ -306,6 +320,91 @@ describe("a message Octo answers in its browser and then builds from what it fou
     expect(done.turns[1]!.textContent).toContain("Updated the comparison page");
   });
 
+  // Played on the same stored rows: between the building turn's steps, the
+  // one row read as done ("Opened 4 pages on visitasevilla.es, ran 2
+  // commands") while that turn went on, the browser turn's reply being the
+  // newest end of a turn it held; and a Stop then never read "Stopped".
+  it("reads as at work from the hand-back until the building turn ends, never as done", async () => {
+    const builds = [
+      { chat: chatOf(CHATS.seville), from: "08:11:53.593", to: "08:13:48.358" },
+      { chat: chatOf(CHATS.framework), from: "08:18:28.378", to: "08:19:45.550" },
+      { chat: chatOf(CHATS.framework), from: "08:26:15.441", to: "08:27:14.166" },
+    ];
+    const notAtWork: string[] = [];
+    for (const { chat, from, to } of builds) {
+      for (const now of moments(chat)) {
+        const at = new Date(now).toISOString().slice(11, 23);
+        if (at < from || at >= to) continue;
+        const view = await show(chat, now);
+        const line = view.lines.at(-1) ?? "";
+        if (!view.live.at(-1) || !line.endsWith("…") || view.coverage !== "live") {
+          notAtWork.push(`${at} ${line} (${view.coverage})`);
+        }
+      }
+    }
+    expect(notAtWork).toEqual([]);
+  });
+
+  it("reads as stopped when the person stops the building turn between its steps", async () => {
+    const stoppedAt = Date.parse("2026-11-04T08:12:15.000Z");
+    // The controller's notice of the stop (conversations.rs build_interruption_notice).
+    const notice: ChatMessage = {
+      id: "stop-notice",
+      role: "assistant",
+      authorId: null,
+      content: "Run stopped.",
+      timestamp: stoppedAt,
+      files: null,
+      messageType: "run_cancellation",
+      metadata: {
+        source: "controller",
+        kind: "run_cancellation",
+        details: {
+          stopRequested: true,
+          actorUserId: PERSON,
+          agentHandles: ["octo"],
+          jobIds: [SEVILLE_BUILD.jobId],
+          runIds: [SEVILLE_BUILD.runId],
+          runStatus: "canceled",
+        },
+      },
+    };
+    const chat = [...chatOf(CHATS.seville).filter((message) => message.timestamp < stoppedAt), notice];
+    mocks.activeConversation = { controllerId: CONVERSATION, messages: chat };
+    const view = await show(chat, stoppedAt + 1_000);
+    expect(view.turns).toHaveLength(1);
+    expect(view.lines).toEqual(["Stopped · opened 4 pages on visitasevilla.es, ran 2 commands"]);
+  });
+
+  it("shows the building turn's failure in the row, also one posted for its run alone", async () => {
+    const failedAt = Date.parse("2026-11-04T08:12:21.000Z");
+    const failure = (jobId: string | null): ChatMessage => ({
+      id: "build-failed",
+      role: "assistant",
+      authorId: null,
+      content: "Instafy AI isn't answering right now.",
+      timestamp: failedAt,
+      files: null,
+      messageType: "error",
+      metadata: {
+        ...(jobId ? { jobId } : {}),
+        runId: SEVILLE_BUILD.runId,
+        source: "agent",
+        outcome: "failed",
+        messageType: "error",
+      },
+    });
+    for (const jobId of [SEVILLE_BUILD.jobId, null]) {
+      const chat = [...chatOf(CHATS.seville).filter((message) => message.timestamp < failedAt), failure(jobId)];
+      const view = await show(chat, failedAt + 1_000);
+      expect(view.turns).toHaveLength(1);
+      // The turn's failure block, in place of its line.
+      expect(view.turns[0]!.querySelector('[data-testid="run-failure-body"]')?.textContent)
+        .toContain("Instafy AI isn't answering right now.");
+      expect(view.lines).toEqual([]);
+    }
+  });
+
   /** The rows of the turn's Details, opened from its line: each label with its second line, or the answer's words. */
   async function details(turn: HTMLElement): Promise<string[]> {
     const line = turn.querySelector<HTMLButtonElement>('button[data-testid="turn-activity-line"]');
@@ -379,23 +478,62 @@ describe("a message Octo answers in its browser and then builds from what it fou
     });
   });
 
+  /** What the Seville map's building turn drafts of its reply, at `now`. */
+  const buildDraft = (now: number, text: string): ReplyDraft => ({
+    conversationId: CONVERSATION,
+    jobId: SEVILLE_BUILD.jobId,
+    runId: SEVILLE_BUILD.runId,
+    attempt: 0,
+    segment: 1,
+    seq: 3,
+    text,
+    startedAt: now,
+    updatedAt: now,
+  });
+
   it("grows the building turn's reply in the browser turn's row", async () => {
     const chat = chatOf(CHATS.seville);
     const now = Date.parse("2026-11-04T08:13:44.500Z");
-    const draft: ReplyDraft = {
-      conversationId: CONVERSATION,
-      jobId: "4e9714c9-3bf5-4695-8611-6a58fb38cff0",
-      runId: "a64022f9-e961-4e00-a854-3a7499157929",
-      attempt: 0,
-      segment: 1,
-      seq: 3,
-      text: "I built a three-day Seville map",
-      startedAt: now,
-      updatedAt: now,
-    };
-    const view = await show(chat, now, [draft]);
+    const view = await show(chat, now, [buildDraft(now, "I built a three-day Seville map")]);
     expect(view).toMatchObject({ octoRows: 1, typingRow: false });
     expect(view.turns).toHaveLength(1);
     expect(view.turns[0]!.querySelector('[data-testid="chat-reply-draft"]')?.textContent).toBe("I built a three-day Seville map");
+  });
+
+  // Its words before its first step come while its job has written nothing
+  // the chat keeps: the row knows that turn only by its run.
+  it("grows what the building turn writes before its first step in the browser turn's row", async () => {
+    const chat = chatOf(CHATS.seville);
+    const now = Date.parse("2026-11-04T08:11:55.000Z");
+    const view = await show(chat, now, [buildDraft(now, "I am building the Seville map")]);
+    expect(view).toMatchObject({ octoRows: 1, typingRow: false });
+    expect(view.turns).toHaveLength(1);
+    expect(view.turns[0]!.querySelector('[data-testid="chat-reply-draft"]')?.textContent).toBe("I am building the Seville map");
+  });
+
+  it("keeps the row's Details open as the building turn starts", async () => {
+    const chat = chatOf(CHATS.seville);
+    const handedBack = await show(chat, Date.parse("2026-11-04T08:11:55.000Z"));
+    await act(async () => {
+      handedBack.turns[0]!.querySelector<HTMLButtonElement>('button[data-testid="turn-activity-line"]')?.click();
+    });
+    expect(container.querySelector('[data-testid="turn-activity-details"]')).not.toBeNull();
+    const started = await show(chat, Date.parse("2026-11-04T08:11:59.300Z"));
+    expect(started.turns).toHaveLength(1);
+    expect(container.querySelector('[data-testid="turn-activity-details"]')).not.toBeNull();
+  });
+
+  it("goes on saying Octo is at work while the building turn waits for its machine", async () => {
+    const sent = Date.parse("2026-11-04T08:11:53.600Z");
+    const chat = chatOf(CHATS.seville).filter((message) => message.timestamp <= sent);
+    mocks.activeConversation = { controllerId: CONVERSATION, messages: chat };
+    // A minute on, its run still waits for a machine, and its job has written nothing.
+    const waiting: RunRecord = {
+      id: SEVILLE_BUILD.runId, status: "queued", projectId: "project-1", conversationId: CONVERSATION, sessionId: null,
+      promptId: null, runType: "prompt", progress: 0, progressStage: null, previewUrl: null, lastMessage: null,
+      createdAt: new Date(sent).toISOString(), updatedAt: new Date(sent).toISOString(), metadata: { agent: OCTO },
+    };
+    const view = await show(chat, sent + 60_000, [], { runs: [waiting] });
+    expect(view).toMatchObject({ octoRows: 1, typingRow: false, lines: ["Thinking…"] });
   });
 });
