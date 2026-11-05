@@ -392,7 +392,7 @@ charged for. There are three:
   the two apart, and both ask only what Octo asked.
 
 **Try again** on a hand-back whose turn failed sends that hand-back again (its claim on the
-browser turn, never the notice the chat shows for it), so it is a hand-back too, charged as one.
+browser turn, never the words its prompt is stored with), so it is a hand-back too, charged as one.
 
 Each kind reserves its credit at dispatch like any other. A hand-back or an automatic retry is
 charged when it ends with a reply (it succeeded and posted something that is not empty), and its
@@ -708,7 +708,10 @@ Required envs (GitHub secrets/vars or local env):
   two spaces can share a name. A turn that cost nothing in the end, refunded in full, has no row. Every other ledger row
   is a row of its own ("Daily top-up", "Starting balance", "Hosted runtime"). A row shows its name,
   its time and its amount ("1 credit", "14 credits"), never the model, the AI vendor, a token count
-  or an id: the ledger keeps those in each row's metadata, and the Usage section shows the rates.
+  or an id: the ledger keeps those in each row's metadata. The Usage section says what a message
+  costs in credits ("From 1 credit a message", then what it used) and lists only a service that
+  costs something while it runs, with how long the balance runs one; never a price per million
+  tokens, a service at 0 credits a minute, or what an operator might plan for.
 - The log shows the newest 8 rows; Show more reveals the rest of the 100 ledger rows the panel
   loads, 20 at a time, and moves focus to the first row it revealed. A turn whose reserve is
   older than those 100 rows has no row either: its later rows alone would show the wrong amount

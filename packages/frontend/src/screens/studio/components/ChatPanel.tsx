@@ -4982,8 +4982,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     onError: (message) => showStatus(message, "error", 6000),
     auto: browserAutoStart,
   });
-  // A hand-back goes to the building lane as an ordinary turn, shown as its
-  // one-line notice (useBrowserHandBack).
+  // A hand-back goes to the building lane as an ordinary turn, which the chat
+  // draws in the browser turn's row (useBrowserHandBack, routedBrowserFold.ts).
   const sendBrowserHandBack = browserHandBackSender({
     submit: onSubmit,
     conversationId: activeConversationId,

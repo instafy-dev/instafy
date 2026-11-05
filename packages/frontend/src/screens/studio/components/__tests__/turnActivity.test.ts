@@ -359,10 +359,37 @@ describe("summarizeTurnActivity", () => {
       const failed = summarize([command(reads, { exitCode: 1 })]);
       expect(rows(failed)).toEqual([["failed", "Tried looking up places"]]);
       expect(failed.summary).toBe("Tried looking up places");
-      // uw cite A; uw cite B: only the last read is known, worked or not.
+      // uw cite A; uw cite B: only the last read is known. When it worked,
+      // the step read more than one source, with no number: the first read's
+      // own result is not known. When it failed, nothing counts.
       const twoReads = stepOf(before(CITE), entryOf(CITE));
-      expect(summarize([command(twoReads)]).summary).toBe("Read a source");
+      const bothRead = summarize([command(twoReads)]);
+      expect(rows(bothRead)).toEqual([["done", "Read sources"]]);
+      expect(bothRead.summary).toBe("Read sources");
       expect(rows(summarize([command(twoReads, { exitCode: 1 })]))).toEqual([["failed", "Tried reading a source"]]);
+    });
+
+    // A local test, Nov 4: a map turn pinned 8 places, six of them in one
+    // loop (`for item in …; do uw add-point …; done`, then `uw fit`, then
+    // `uw validate`), and its line read "Built the map, edited a file, looked
+    // up a place": the loop counted for nothing, and a step of two add-points
+    // read "Looked up a place".
+    it("counts a loop of a command, and the same command before the last, without a number when the step worked", () => {
+      const loop = { ...entryOf(ADD_POINT), count: null, result: "unknown" };
+      const FIT = { ...SET, key: "pack/interactive-map/uw/fit" };
+      const loopThenCheck = stepOf(loop, before(FIT), entryOf(VALIDATE));
+      const worked = summarize([command(loopThenCheck)]);
+      expect(rows(worked)).toEqual([["done", "Built the map"]]);
+      expect(worked.summary).toBe("Built the map, looked up places");
+      // A step that failed counts nothing of it.
+      expect(summarize([command(loopThenCheck, { exitCode: 1 })]).summary).toBe("Tried checking the map");
+      // cat a guide; uw add-point A; uw add-point B: the step looked up more
+      // than one place, not "a place".
+      const twoPlaces = stepOf(before(ADD_POINT), entryOf(ADD_POINT));
+      expect(rows(summarize([command(twoPlaces)]))).toEqual([["done", "Looked up places"]]);
+      expect(summarize([command(twoPlaces), command(loopThenCheck)]).summary).toBe("Built the map, looked up places");
+      // A command of another kind before the last still counts for nothing.
+      expect(summarize([command(stepOf(before(CITE), entryOf(ADD_POINT)))]).summary).toBe("Looked up a place");
     });
 
     it("counts a chain joined with && when it worked, and nothing in it when it failed (`a && b`)", () => {
@@ -1001,10 +1028,16 @@ describe("browser steps", () => {
       browserStep(BROWSER_BROWSE, { host: "tomshardware.com", step: "navigate" }),
       open("gizmodo.com", 30),
     ];
-    expect(summarize(messages).summary).toBe("Opened 6 pages on frame.work, opened 2 pages on phoronix.com");
-    // The last site leads when it is one of the two the turn did most.
+    // Opened on more than two sites: the pages counted across them.
+    expect(summarize(messages).summary).toBe("Opened 10 pages on 4 sites, read a page on frame.work");
     expect(summarize([...messages, open("gizmodo.com", 31), open("gizmodo.com", 32)]).summary)
-      .toBe("Opened 3 pages on gizmodo.com, opened 6 pages on frame.work");
+      .toBe("Opened 12 pages on 4 sites, read a page on frame.work");
+    // On two sites the line names both, the bigger first, and the last site
+    // leads when it is one of them.
+    const twoSites = messages.slice(0, 11);
+    expect(summarize(twoSites).summary).toBe("Opened 6 pages on frame.work, opened 2 pages on phoronix.com");
+    expect(summarize([...twoSites, open("phoronix.com", 12), open("phoronix.com", 13), open("phoronix.com", 14), open("phoronix.com", 15), open("phoronix.com", 16)]).summary)
+      .toBe("Opened 7 pages on phoronix.com, opened 6 pages on frame.work");
     // Details keeps every site.
     const labels = summarize(messages).details.map((item) => item.kind === "step" && item.step.label);
     for (const host of ["frame.work", "phoronix.com", "pcworld.com", "tomshardware.com", "gizmodo.com"]) {
@@ -1024,8 +1057,16 @@ describe("browser steps", () => {
       browserStep(BROWSER_BROWSE, { host: "frame.work", step: "click" }),
       open("frame.work", 1), open("frame.work", 2), open("frame.work", 3), open("frame.work", 4),
     ];
+    // Opened on three sites: the pages counted across them.
     expect(summarize([...frame, open("phoronix.com", 10), open("pcworld.com", 20)]).summary)
-      .toBe("Opened phoronix.com and pcworld.com, opened 4 pages on frame.work");
+      .toBe("Opened 6 pages on 3 sites");
+    // Opened on two sites, beside pages read on a third: both are named.
+    const readFrame = [
+      browserStep(BROWSER_BROWSE, { host: "frame.work", step: "click" }),
+      read("frame.work", 1), read("frame.work", 2), read("frame.work", 3), read("frame.work", 4),
+    ];
+    expect(summarize([...readFrame, open("phoronix.com", 10), open("pcworld.com", 20)]).summary)
+      .toBe("Opened phoronix.com and pcworld.com, read 4 pages on frame.work");
     // Words that would read as one page on both sites stay apart.
     expect(summarize([...frame, read("phoronix.com", 10), read("pcworld.com", 20)]).summary)
       .toBe("Read a page on phoronix.com, read a page on pcworld.com, opened 4 pages on frame.work");
@@ -1034,8 +1075,8 @@ describe("browser steps", () => {
     expect(summarize([...frame, searched, open("pcworld.com", 20)]).summary)
       .toBe("Searched phoronix.com, opened pcworld.com, opened 4 pages on frame.work");
     // With more than one site tied for that place, none is picked over the others.
-    expect(summarize([...frame, open("phoronix.com", 10), open("gizmodo.com", 30), open("pcworld.com", 20)]).summary)
-      .toBe("Opened pcworld.com, opened 4 pages on frame.work");
+    expect(summarize([...readFrame, open("phoronix.com", 10), open("gizmodo.com", 30), read("pcworld.com", 20)]).summary)
+      .toBe("Read a page on pcworld.com, read 4 pages on frame.work");
   });
 
   it("name the site while a step runs, and the browser before any site is known", () => {
@@ -1256,8 +1297,7 @@ describe("a look at the page a failed open left", () => {
       browserStep(BROWSER_READ, { host: "carris.pt", pageKey: PAGE_B, step: "snapshot" }),
     ];
     expect(rows(declined).slice(1)).toEqual([
-      ["failed", "Tried opening carris.pt"],
-      // The answer's own row.
+      // The answer's own row, and no row for a step that never happened.
       null,
       ["done", "Read a page on carris.pt"],
     ]);
