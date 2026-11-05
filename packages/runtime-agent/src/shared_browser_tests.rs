@@ -158,6 +158,8 @@ const special = {
   "invite-button": { description: control("Invite member") },
   "generate-key": { description: control("Generate API key") },
   "plain-button": { description: control("Show details") },
+  // The same button, with another control in its middle, where a click lands.
+  "click-lands-inside": { description: control("Show details") },
   // A cookie banner's refusal, and the same words where no banner is.
   "cookie-reject": { description: control("Reject all"), policy: { consentContext: true, areas: "dialog" } },
   "cookie-reject-pt": { description: control("Rejeitar todos"), policy: { consentContext: true, areas: "dialog" } },
@@ -715,6 +717,7 @@ const makePage = (targetId, opened = null) => {
   const mainFrame = { url: () => currentUrl };
   const handle = {
     isVisible: async () => true,
+    scrollIntoViewIfNeeded: async () => {},
     boundingBox: async () => ({ x: 10, y: 20, width: 120, height: 32 }),
     evaluate: async () => {
       return descriptionFor(targetId);
@@ -829,6 +832,10 @@ const makePage = (targetId, opened = null) => {
         ? sentFieldsFor(arg)
         : arg && arg.kind === "select-options"
           ? selectOptionsFor(arg)
+        : arg && arg.kind === "click-landing"
+          // Where a click lands: "click-lands-inside" is a control whose
+          // middle holds another control.
+          ? { other: mode === "click-lands-inside" }
         : arg && arg.kind === "around-text"
           // The control's card: "around-changed-after-allow" shows another
           // product beside the same control once the person said yes.
@@ -874,7 +881,11 @@ const makePage = (targetId, opened = null) => {
       if (arg && Array.isArray(arg.elements) && arg.sources && arg.sources.kind === "page-policy") {
         return Promise.all(arg.elements.map((element) => element.evaluate(undefined, arg.sources)));
       }
-      if (arg && arg.kind === "shown-text") return shownTextFor(currentUrl, targetId);
+      // The walker's answer: the text read, all of it in the window.
+      if (arg && arg.kind === "shown-text") {
+        const text = shownTextFor(currentUrl, targetId);
+        return { text, start: 0, end: text.length, above: 0, below: 0, more: false, scrollBy: null };
+      }
       if (arg && arg.kind === "page-policy") return signalsFor();
       if (arg && arg.kind === "withheld-read") return Boolean(markPath && fs.existsSync(markPath));
       if (arg && arg.kind === "withheld-mark") {
@@ -4432,16 +4443,14 @@ fn a_type_step_names_the_field_and_how_many_characters_went_in_never_the_text() 
     }
 }
 
-// A click on a checkbox says whether it is checked now: the reading never shows that either.
-// Any other click says nothing more than its reading.
+// A click on a checkbox says whether it is checked now. Any other click says nothing more than
+// its reading.
 #[test]
 fn a_click_on_a_checkbox_says_whether_it_is_checked_now() {
     for (mode, done) in [
         (
             "topping-checkbox",
-            Some(
-                "Clicked \"Extra Cheese\", and it is checked now. A page's reading never shows whether a box is checked.",
-            ),
+            Some("Clicked \"Extra Cheese\", and it is checked now."),
         ),
         ("plain-button", None),
     ] {
@@ -4460,6 +4469,29 @@ fn a_click_on_a_checkbox_says_whether_it_is_checked_now() {
             "{mode}"
         );
     }
+}
+
+// A click lands in the middle of its control. When another control sits there inside it (a
+// form's button in a section), the click would act on that one, which the step was not judged
+// or asked for: nothing is clicked.
+#[test]
+fn a_click_that_would_land_on_another_control_inside_it_clicks_nothing() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    let snapshot_id = fixture.snapshot_id_in("click-lands-inside");
+    let error = failure_of(&fixture.call(
+        "click-lands-inside",
+        "POST",
+        "/v1/click",
+        Some(&json!({"index": 0, "snapshotId": snapshot_id}).to_string()),
+    ));
+    assert!(
+        error.contains(
+            "A click in the middle of \"Show details\" would land on something else inside it (another control, or a frame), so nothing was done."
+        ),
+        "{error}"
+    );
+    assert!(!fixture.click_log.exists(), "the control was clicked");
 }
 
 #[test]

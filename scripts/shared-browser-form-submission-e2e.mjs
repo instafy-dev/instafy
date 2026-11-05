@@ -560,14 +560,19 @@ export async function runSharedBrowserFormSubmissionFixture() {
     await delay(300);
     assert.deepEqual(sentTo(collect), [], "The moved form was stopped");
     // A routine click on a control whose click reaches a submit button the
-    // describer cannot see: one in a closed shadow tree, one laid over it.
-    for (const label of ["Reviews", "Specials"]) {
+    // describer cannot see: one in a closed shadow tree, whose form's post is
+    // stopped, and one laid over it, where the click would land on that
+    // button, so it is not made.
+    for (const [label, refusal] of [
+      ["Reviews", /sent a form to http:\/\/other\.test:\d+/],
+      ["Specials", /"Specials" would land on something else inside it/],
+    ]) {
       await runPage.goto(strayPage);
       snapshot = await ok("GET", "/v1/snapshot");
       const hidden = control(snapshot, label);
       start = prompts.length;
       requests.length = 0;
-      await refused(/sent a form to http:\/\/other\.test:\d+/, "POST", "/v1/click", { index: hidden.index, snapshotId: snapshot.snapshotId });
+      await refused(refusal, "POST", "/v1/click", { index: hidden.index, snapshotId: snapshot.snapshotId });
       assert.deepEqual(promptsSince(start), [], `${label}: routine, so nothing asked`);
       await delay(300);
       assert.deepEqual(sentTo(collect), [], `${label}: nothing was sent to the other site`);

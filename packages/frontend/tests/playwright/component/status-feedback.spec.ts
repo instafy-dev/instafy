@@ -146,7 +146,9 @@ test("informational time pauses while a short viewport clips the notice", async 
   await page.clock.fastForward(6000);
   await expect(toast).toBeVisible();
   await page.setViewportSize({ width: 320, height: 844 });
-  await inViewport(page, toast);
+  // Await native intersection delivery before advancing the mocked reading
+  // timer; bounding boxes and virtual time do not flush browser resize work.
+  await expect(toast).toBeInViewport({ ratio: 1 });
   await page.clock.runFor(150);
   await page.clock.fastForward(5100);
   await expect(toast).toHaveCount(0);

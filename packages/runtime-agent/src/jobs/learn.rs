@@ -1097,14 +1097,17 @@ fn maybe_commit_project_memory_scaffold(workspace_dir: &Path, _wrote_any: bool) 
 
     let _ = run_git(
         workspace_dir,
-        &[
-            "commit",
-            "--no-gpg-sign",
-            "-m",
-            "instafy: bootstrap workspace memory",
-        ],
+        &["commit", "--no-gpg-sign", "-m", SPACE_CREATED_TITLE],
     );
 }
+
+/// The title of a space's first versions, as History lists them: the seed
+/// commit git-service makes (`INIT_COMMIT_MESSAGE`), the controller's first
+/// write of the managed files and this scaffold's commit.
+const SPACE_CREATED_TITLE: &str = "Space created";
+/// The seed commit's title before it read [`SPACE_CREATED_TITLE`]: spaces
+/// made then still start from it.
+const LEGACY_SEED_TITLE: &str = "instafy: init";
 
 fn git_stdout_trimmed(workspace_dir: &Path, args: &[&str]) -> Option<String> {
     let output = run_git(workspace_dir, args)?;
@@ -1115,23 +1118,18 @@ fn git_stdout_trimmed(workspace_dir: &Path, args: &[&str]) -> Option<String> {
     Some(text.trim().to_string())
 }
 
+/// Whether HEAD is the one commit git-service seeds a new space with, under
+/// either of its titles.
 fn is_instafy_seed_repo(workspace_dir: &Path) -> bool {
     let subject = git_stdout_trimmed(workspace_dir, &["log", "-1", "--pretty=%s"]);
     let author_email = git_stdout_trimmed(workspace_dir, &["log", "-1", "--pretty=%ae"]);
     let commit_count = git_stdout_trimmed(workspace_dir, &["rev-list", "--count", "HEAD"]);
 
     matches!(
-        (
-            subject.as_deref(),
-            author_email.as_deref(),
-            commit_count.as_deref()
-        ),
-        (
-            Some("instafy: init"),
-            Some("service-runtime@instafy.dev"),
-            Some("1")
-        )
-    )
+        subject.as_deref(),
+        Some(SPACE_CREATED_TITLE | LEGACY_SEED_TITLE)
+    ) && author_email.as_deref() == Some("service-runtime@instafy.dev")
+        && commit_count.as_deref() == Some("1")
 }
 
 /// Whether the folder's `.instafy` repository holds a history of its own: a
@@ -2579,37 +2577,42 @@ mod tests {
 
     #[test]
     fn a_canonical_seed_repo_is_scaffolded_and_committed() {
-        let workspace = tempdir().expect("workspace");
-        let folder = workspace.path();
-        commit_test_checkout(
-            folder,
-            "instafy: init",
-            "service-runtime@instafy.dev",
-            &[("README.md", "# A new space\n")],
-        );
-
-        ensure_project_memory_scaffold_in(folder, ScaffoldScope::Canonical);
-
-        assert_eq!(
-            git_stdout_trimmed(folder, &["log", "-1", "--pretty=%s"]).as_deref(),
-            Some("instafy: bootstrap workspace memory")
-        );
-        let committed =
-            git_stdout_trimmed(folder, &["show", "--name-only", "--pretty=format:", "HEAD"])
-                .expect("committed paths");
-        for path in [
-            INSTAFY_FILENAME,
-            AGENTS_DOC_FILENAME,
-            COLLABORATION_RELATIVE_PATH,
-            BOUND_SITES_RELATIVE_PATH,
-            BOUND_SITES_CHEATSHEET_RELATIVE_PATH,
-        ] {
-            assert!(
-                committed.lines().any(|line| line == path),
-                "{path} committed"
+        // A space seeded before its first version read "Space created", and one since.
+        for seed_title in [LEGACY_SEED_TITLE, "Space created"] {
+            let workspace = tempdir().expect("workspace");
+            let folder = workspace.path();
+            commit_test_checkout(
+                folder,
+                seed_title,
+                "service-runtime@instafy.dev",
+                &[("README.md", "# A new space\n")],
             );
+
+            ensure_project_memory_scaffold_in(folder, ScaffoldScope::Canonical);
+
+            // History names the scaffold's version as it names the seed.
+            assert_eq!(
+                git_stdout_trimmed(folder, &["log", "-1", "--pretty=%s"]).as_deref(),
+                Some("Space created"),
+                "{seed_title}"
+            );
+            let committed =
+                git_stdout_trimmed(folder, &["show", "--name-only", "--pretty=format:", "HEAD"])
+                    .expect("committed paths");
+            for path in [
+                INSTAFY_FILENAME,
+                AGENTS_DOC_FILENAME,
+                COLLABORATION_RELATIVE_PATH,
+                BOUND_SITES_RELATIVE_PATH,
+                BOUND_SITES_CHEATSHEET_RELATIVE_PATH,
+            ] {
+                assert!(
+                    committed.lines().any(|line| line == path),
+                    "{seed_title}: {path} committed"
+                );
+            }
+            assert_eq!(test_checkout_status(folder), "", "{seed_title}");
         }
-        assert_eq!(test_checkout_status(folder), "");
     }
 
     #[test]

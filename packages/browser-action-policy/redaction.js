@@ -78,7 +78,9 @@
   const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const longHexPattern = /^(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})$/i;
   const opaqueCandidatePattern = /[A-Za-z0-9][A-Za-z0-9_\-+/=~]{18,}[A-Za-z0-9=]/g;
-  const digitCodePattern = /(?<![\d.,][ \u00a0]?)(?:\d{6,8}|\d{3}[ \u00a0]\d{3}|\d{4}[ \u00a0]\d{4})(?![\d]|[.,]\d)/g;
+  // A code's groups may sit apart by a space, or by one line break or tab
+  // when a page draws each group in a box or cell of its own.
+  const digitCodePattern = /(?<![\d.,](?:[ \u00a0\t]|\r?\n)?)(?:\d{6,8}|\d{3}(?:[ \u00a0\t]|\r?\n)\d{3}|\d{4}(?:[ \u00a0\t]|\r?\n)\d{4})(?![\d]|[.,]\d)/g;
   // Whole words only, plus the usual compounds, so Postcode, Steuercode or
   // Barcode do not make an ordinary number a code.
   const codeWordPattern =

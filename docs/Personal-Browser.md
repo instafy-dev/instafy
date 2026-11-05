@@ -425,8 +425,10 @@ title and load error, and Desktop's own log messages.
   masked on a credential page or within about 32 characters of such a word,
   unless they are labelled as an id or commit ("Token id …").
 - **Codes:** six to eight digits, or two groups of three or four, right after a
-  code word such as code, PIN, TAN, OTP or Bestätigungscode are masked. Words
-  that only contain "code", such as Postcode or Steuercode, do not count.
+  code word such as code, PIN, TAN, OTP or Bestätigungscode are masked. The
+  groups may sit apart by a space, or by one line break or tab, as a page's
+  text reads a code drawn in boxes or cells of its own. Words that only
+  contain "code", such as Postcode or Steuercode, do not count.
 - **Addresses** stay navigable. Fragments and ordinary paths are kept; a query
   value on a key such as `token`, `code`, `key` or `state` is masked only when it
   is long and random, and a path segment only after an action word such as
@@ -507,6 +509,21 @@ instafy_personal_browser.list_tabs / open_tab / select_tab / close_tab
 | `open_tab` | Open one public HTTP(S) page, never a link-only site, in a new visible tab and show it (at most three agent tabs) |
 | `select_tab` | Show one open tab; every other tool acts on the tab on screen |
 | `close_tab` | Close a tab the agent opened; the person's own tab cannot be closed |
+
+A snapshot's text keeps the page's line breaks and table cells, as the Shared
+Browser's does, and names what it cannot hold in the same words: a canvas as
+"[picture with no text]" (its label is page text, masked as the rest is) and a
+frame as "[frame not read: <site>]", after the page's text; a frame's page is
+never read. A frame's site is an address, never page text, so it is added only
+after the text is masked and judged, and a random-looking ad server's name
+makes no secret screen. Past 60,000 characters the text ends with "[Text cut
+here: about N more characters.]". A control lists `expanded` for a toggle, and
+`checked` or `selected` only when the page shows it chosen (never on a secret
+screen, and never for the suggestion a field's list highlights as a person
+types). A text area is never named by what it holds. The list holds the
+controls in view; `omittedControls` counts those drawn above or below it,
+which scrolling reaches, and any past 500, never one in view that no click
+reaches or one off to a side scrolling never shows.
 
 ### Agent tabs
 

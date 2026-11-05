@@ -6,10 +6,13 @@ import type { ChatMessage } from "../types";
 import type { AgentJobThreadPreviewLayoutProps } from "./AgentJobThreadPreviewLayout";
 import {
   isAgentStatusMessage,
+  newestTurnMessages,
+  readPendingHandBack,
+  readTurnJobIds,
   runMatchesThreadJobId,
   shouldDisplayChatMessage,
 } from "./chatMessagePresentation";
-import { getMessageType } from "./chatMessageMetadata";
+import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { readChatRunStopNotice } from "./ChatRunStopNotice";
 import { getControllerConversationNoticeKind } from "./controllerConversationNotice";
 import { normalizeAssistantStatusText } from "./assistantStatusHeuristics";
@@ -132,6 +135,20 @@ function jobIdOf(message: ChatMessage): string | null {
   return typeof jobId === "string" && jobId.trim() ? jobId.trim() : null;
 }
 
+/**
+ * A browser step whose result ended its run on the approval lane
+ * (`terminalConsent` blocked: a step the person said no to or left, or a
+ * page that waits for their input). The runtime then replaces the turn's
+ * reply with its own sentence.
+ */
+function endsTheRunOnItsApprovalLane(message: ChatMessage): boolean {
+  if (message.role !== "assistant" || messageType(message) !== "mcp_tool_call") {
+    return false;
+  }
+  const consent = extractMessageDetails(isRecord(message.metadata) ? message.metadata : null)?.terminalConsent;
+  return isRecord(consent) && consent.state === "blocked";
+}
+
 /** A failed attempt this turn replaced, as its Details list it: its steps and notes, then why it failed. */
 function earlierAttemptDetails(attemptMessages: readonly ChatMessage[], index: number): EarlierAttemptDetails {
   const attemptJobId = attemptMessages.map(jobIdOf).find((id): id is string => id !== null) ?? null;
@@ -181,6 +198,15 @@ export function useAgentJobThreadPreviewState({
   const { runs } = useRuntime();
   const metadata = message.metadata && isRecord(message.metadata) ? message.metadata : null;
   const jobId = typeof metadata?.jobId === "string" ? metadata.jobId.trim() : "";
+  // A browser turn and the hand-back that went on from it are one row: its
+  // line names each one's part, and its Details lists both turns' steps.
+  const turnJobIdsKey = readTurnJobIds(message).join(",");
+  const turnJobIds = useMemo(() => (turnJobIdsKey ? turnJobIdsKey.split(",") : []), [turnJobIdsKey]);
+  // That hand-back was sent and its turn has shown nothing yet: the row is
+  // that turn's, starting.
+  const pendingHandBack = readPendingHandBack(message);
+  const handBackPending = pendingHandBack !== null;
+  const pendingHandBackRunId = pendingHandBack?.runId ?? "";
   const threadLocalId = typeof metadata?.threadLocalId === "string" ? metadata.threadLocalId.trim() : "";
   const rawThreadMessages = metadata?.threadMessages;
   const fallbackThreadMessages = useMemo(() => coerceThreadMessages(rawThreadMessages), [rawThreadMessages]);
@@ -312,7 +338,16 @@ export function useAgentJobThreadPreviewState({
     });
   }, [activeConversation?.messages, message.id, message.timestamp]);
 
-  const runStatus = useMemo(() => resolveThreadRunStatusFromMessages(threadMessages), [threadMessages]);
+  // The row's run is its newest turn's: the reply a browser turn ended on
+  // never ends the building turn that went on from it.
+  const runMessages = useMemo(() => newestTurnMessages(threadMessages, turnJobIds), [threadMessages, turnJobIds]);
+  const runStatus = useMemo(
+    () =>
+      handBackPending
+        ? { phase: "running" as const, status: "in_progress" }
+        : resolveThreadRunStatusFromMessages(runMessages),
+    [handBackPending, runMessages],
+  );
   const isThreadRunInFlight = useMemo(() => {
     const pendingRunIds = owningConversation?.pendingRunIds ?? [];
     const pendingRunSubmittedAt = owningConversation?.pendingRunSubmittedAt ?? {};
@@ -320,7 +355,9 @@ export function useAgentJobThreadPreviewState({
       return false;
     }
     return isThreadPreviewRunInFlight({
-      jobId,
+      // A hand-back on its way is in flight by its run: any of the chat's
+      // until the chat has its stored prompt, which names its run.
+      jobId: handBackPending ? pendingHandBackRunId : jobId,
       pendingRunIds,
       awaitingLeaseRunIds: owningConversation?.awaitingLeaseRunIds ?? [],
       pendingRunSubmittedAt,
@@ -329,11 +366,13 @@ export function useAgentJobThreadPreviewState({
       matchesRunToJobId: runMatchesThreadJobId,
     });
   }, [
+    handBackPending,
     jobId,
     owningConversation?.awaitingLeaseRunIds,
     owningConversation?.controllerId,
     owningConversation?.pendingRunIds,
     owningConversation?.pendingRunSubmittedAt,
+    pendingHandBackRunId,
     runs,
   ]);
 
@@ -506,9 +545,11 @@ export function useAgentJobThreadPreviewState({
     }));
   }, []);
 
+  // Another row in this place closes Details; the hand-back joining the
+  // browser turn's row keeps it as it is.
   useEffect(() => {
     setDetailsOpen(false);
-  }, [jobId]);
+  }, [message.id]);
 
   const intermediateUpdates = useMemo(() => {
     const excludedIds = new Set<string>();
@@ -566,17 +607,24 @@ export function useAgentJobThreadPreviewState({
   // The steps the controller stored with the turn's reply: all of them, also
   // when this page of history starts in the middle of the turn, and also when
   // that reply has no words (a browser turn whose findings went back to a
-  // build), which the summary above passes over.
+  // build), which the summary above passes over. A row of two turns needs
+  // both turns' stored steps, else it reads the loaded ones.
   const recordedSteps = useMemo(() => {
-    for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
-      const steps = readTurnStepsRecord(threadMessages[index]!, jobId || null);
-      if (steps) return steps;
+    const recorded: ChatMessage[] = [];
+    for (const turnJobId of turnJobIds.length > 0 ? turnJobIds : [jobId]) {
+      let steps: ChatMessage[] | null = null;
+      for (let index = threadMessages.length - 1; index >= 0 && steps === null; index -= 1) {
+        steps = readTurnStepsRecord(threadMessages[index]!, turnJobId || null);
+      }
+      if (!steps) return null;
+      recorded.push(...steps);
     }
-    return null;
-  }, [jobId, threadMessages]);
+    return recorded.length > 0 ? recorded : null;
+  }, [jobId, threadMessages, turnJobIds]);
   const activity = useMemo(() => {
     const options = {
       jobId: jobId || null,
+      ...(turnJobIds.length > 1 ? { turnJobIds } : {}),
       phase: activityPhase,
       updates: detailUpdates,
       viewerCanAnswer: browserApproval.viewerCanAnswer,
@@ -598,7 +646,13 @@ export function useAgentJobThreadPreviewState({
     jobId,
     recordedSteps,
     threadMessages,
+    turnJobIds,
   ]);
+  // A browser step that ended the run on its approval lane (the person said
+  // no, or left it, or the page asked for their input): the runtime answers
+  // with its own sentence ("You said no, so that step didn't happen…"), so
+  // what the model drafts until then is never the reply.
+  const replyIsTheRuntimes = useMemo(() => threadMessages.some(endsTheRunOnItsApprovalLane), [threadMessages]);
 
   useEffect(() => {
     const allowed = new Set(detailUpdates.map((entry) => entry.id));
@@ -745,7 +799,7 @@ export function useAgentJobThreadPreviewState({
     expandedUpdateIds,
     finalSummaryMessage,
     // The reply the model is writing, shown where the reply lands until it does.
-    replyDraft: readTurnReplyDraft(metadata),
+    replyDraft: replyIsTheRuntimes ? null : readTurnReplyDraft(metadata),
     hasPreview: Boolean(preview),
     previewText: preview || (isCompleted ? (isStoppedRun && terminalProxyErrorMessage === null ? "Stopped." : "Completed.") : ""),
     isCompleted,

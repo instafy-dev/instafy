@@ -305,6 +305,7 @@ impl JobProcessor {
                 auto_sync_after_apply_override: None,
                 progress_sender: progress.as_ref().map(|progress| progress.sender.clone()),
                 local_origin: self.local_origin_sync(),
+                title: workspace_commit::version_title(job),
             };
             let apply_workspace = workspace_dir.clone();
             let publication = workspace_commit::checkpoint_isolated_scope(

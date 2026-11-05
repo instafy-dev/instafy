@@ -13,7 +13,6 @@ interface CreditsUsageRatesProps {
   usageRateRows: CreditsUsageRateRow[];
   managedAiUsage: ManagedAiUsageRate | null;
   unitLabel: string;
-  displayCurrency: string;
 }
 
 export function formatIntervalSeconds(seconds: number): string {
@@ -44,19 +43,6 @@ export function formatUnits(value: number, unitLabel: string): string {
   return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value)} ${unitFor(value, unitLabel)}`;
 }
 
-function formatUsdAmount(value: number, currency: string): string {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: currency || "USD",
-    minimumFractionDigits: value >= 10 ? 0 : 2,
-    maximumFractionDigits: 2,
-  }).format(value);
-}
-
-function formatUsdMicros(value: number, currency: string): string {
-  return formatUsdAmount(value / 1_000_000, currency);
-}
-
 export function formatProviderLabel(provider: string | null | undefined): string | null {
   const trimmed = provider?.trim();
   if (!trimmed) {
@@ -75,17 +61,22 @@ function UsageStatus({ enabled, disabledLabel }: { enabled: boolean; disabledLab
   );
 }
 
+/**
+ * What a message and a running service cost, in the person's units. Prices
+ * per million tokens are the operator's, and a service that costs nothing a
+ * minute is no rate: neither shows.
+ */
 export function CreditsUsageRates({
   usageRateRows,
   managedAiUsage,
   unitLabel,
-  displayCurrency,
 }: CreditsUsageRatesProps) {
   const managedAiProviderLabel = formatProviderLabel(managedAiUsage?.provider);
+  const meteredRows = usageRateRows.filter(({ rate }) => rate.enabled && rate.creditsPerMinute > 0);
 
   return (
     <div className="@container space-y-2" data-testid="credits-usage-rates">
-      <div className="space-y-2">
+      {meteredRows.length > 0 ? <div className="space-y-2">
         <Heading level={4} variant="caption">
           Active services
         </Heading>
@@ -94,7 +85,7 @@ export function CreditsUsageRates({
           className="divide-y divide-slate-200 overflow-hidden rounded-2xl border border-slate-200 @sm:hidden dark:divide-slate-800 dark:border-slate-800"
           data-testid="credits-active-services-mobile"
         >
-          {usageRateRows.map(({ key, label, rate }) => (
+          {meteredRows.map(({ key, label, rate }) => (
             <div className="min-w-0 space-y-3 px-3 py-3" key={key}>
               <div className="flex min-w-0 items-start justify-between gap-3">
                 <span className="min-w-0 break-words text-sm font-medium text-slate-700 dark:text-slate-200">
@@ -132,7 +123,7 @@ export function CreditsUsageRates({
             <span>Billing interval</span>
             <span>Status</span>
           </div>
-          {usageRateRows.map(({ key, label, rate }) => (
+          {meteredRows.map(({ key, label, rate }) => (
             <div
               key={key}
               className="grid grid-cols-4 items-center gap-2 border-t border-slate-200 px-3 py-2 text-sm text-slate-700 dark:border-slate-800 dark:text-slate-200"
@@ -146,7 +137,7 @@ export function CreditsUsageRates({
             </div>
           ))}
         </div>
-      </div>
+      </div> : null}
 
       {managedAiUsage ? (
         <div className="space-y-2">
@@ -188,25 +179,6 @@ export function CreditsUsageRates({
                     : "No daily cap"}
                 </dd>
               </div>
-              <div className="col-span-2 min-w-0">
-                <dt className="text-xs font-medium text-slate-500 dark:text-slate-400">Token pricing</dt>
-                <dd className="mt-1 grid min-w-0 grid-cols-1 gap-1 text-xs leading-5 text-slate-600 dark:text-slate-300">
-                  <span className="min-w-0 break-words">
-                    Input {formatUsdMicros(managedAiUsage.inputUsdMicrosPer1k * 1000, displayCurrency)}/1M
-                  </span>
-                  <span className="min-w-0 break-words">
-                    Cached{" "}
-                    {formatUsdMicros(
-                      managedAiUsage.cachedInputUsdMicrosPer1k * 1000,
-                      displayCurrency,
-                    )}
-                    /1M
-                  </span>
-                  <span className="min-w-0 break-words">
-                    Output {formatUsdMicros(managedAiUsage.outputUsdMicrosPer1k * 1000, displayCurrency)}/1M
-                  </span>
-                </dd>
-              </div>
             </dl>
           </div>
 
@@ -214,14 +186,13 @@ export function CreditsUsageRates({
             className="hidden overflow-hidden rounded-2xl border border-slate-200 @sm:block dark:border-slate-800"
             data-testid="credits-prompt-usage-table"
           >
-            <div className="grid grid-cols-5 gap-2 bg-slate-50/70 px-3 py-2 text-xs font-semibold text-slate-600 dark:bg-slate-900/40 dark:text-slate-300">
+            <div className="grid grid-cols-4 gap-2 bg-slate-50/70 px-3 py-2 text-xs font-semibold text-slate-600 dark:bg-slate-900/40 dark:text-slate-300">
               <span>Service</span>
               <span>Reserve</span>
-              <span>Token pricing</span>
               <span>Daily cap</span>
               <span>Status</span>
             </div>
-            <div className="grid grid-cols-5 items-center gap-2 border-t border-slate-200 px-3 py-2 text-sm text-slate-700 dark:border-slate-800 dark:text-slate-200">
+            <div className="grid grid-cols-4 items-center gap-2 border-t border-slate-200 px-3 py-2 text-sm text-slate-700 dark:border-slate-800 dark:text-slate-200">
               <span className="font-medium">
                 {managedAiUsage.label}
                 <span className="mt-0.5 block text-xs font-normal text-slate-500 dark:text-slate-400">
@@ -230,18 +201,6 @@ export function CreditsUsageRates({
                 </span>
               </span>
               <span>From {formatUnits(managedAiUsage.creditsPerPrompt, unitLabel)} a message</span>
-              <span className="text-xs leading-5 text-slate-500 dark:text-slate-400">
-                In {formatUsdMicros(managedAiUsage.inputUsdMicrosPer1k * 1000, displayCurrency)}/1M
-                <br />
-                Cached{" "}
-                {formatUsdMicros(
-                  managedAiUsage.cachedInputUsdMicrosPer1k * 1000,
-                  displayCurrency,
-                )}
-                /1M
-                <br />
-                Out {formatUsdMicros(managedAiUsage.outputUsdMicrosPer1k * 1000, displayCurrency)}/1M
-              </span>
               <span>
                 {managedAiUsage.dailyPromptLimit > 0
                   ? `${managedAiUsage.dailyPromptLimit} prompts/day`

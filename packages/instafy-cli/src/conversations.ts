@@ -473,7 +473,8 @@ async function buildSearchMatches(
   }
 
   return baseMatches
-    .filter((match) => match.score > 0)
+    // Recency affects ranking, but cannot make an unrelated conversation a match.
+    .filter((match) => match.matchedIn.length > 0)
     .sort((left, right) => {
       if (right.score !== left.score) {
         return right.score - left.score;

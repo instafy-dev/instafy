@@ -917,11 +917,11 @@ export function CreditsPanel() {
                 usageRateRows={usageRateRows}
                 managedAiUsage={managedAiUsage}
                 unitLabel={unitLabel}
-                displayCurrency={displayCurrency}
               />
-              <Text variant="caption" tone="muted">
-                {hostedRuntimeEstimate.enabled
-                  ? `At ${formatCreditsPerMinute(hostedRuntimeEstimate.creditsPerMinute)} credits/min per hosted runtime` +
+              {/* How long the balance runs a hosted machine, only when one costs something. */}
+              {hostedRuntimeEstimate.enabled ? (
+                <Text variant="caption" tone="muted">
+                  {`At ${formatCreditsPerMinute(hostedRuntimeEstimate.creditsPerMinute)} credits/min per hosted runtime` +
                     (hostedRuntimeEstimate.range
                       ? ` (varies by type: ${formatCreditsPerMinute(hostedRuntimeEstimate.range[0])}–${formatCreditsPerMinute(
                           hostedRuntimeEstimate.range[1],
@@ -929,12 +929,9 @@ export function CreditsPanel() {
                       : ", ") +
                     `your current balance covers ~${formatEstimateSeconds(
                       (creditBalance / hostedRuntimeEstimate.creditsPerMinute) * 60,
-                    )} for one active hosted runtime.`
-                  : `Hosted runtime metering is currently disabled (0 credits/min). ` +
-                    `If you plan for 1 credit/min, your current balance covers ~${formatEstimateSeconds(
-                      creditBalance * 60,
-                    )} for one hosted runtime.`}
-              </Text>
+                    )} for one active hosted runtime.`}
+                </Text>
+              ) : null}
             </div>
           ) : (
             <div className="space-y-2">

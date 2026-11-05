@@ -557,6 +557,19 @@ Studio picks its versioning UI per space from the project's default origin:
   Desktop space): saved versions read from the default origin, 20 per page with Show more where
   the origin pages history. Each version can be reviewed or reverted; Revert saves a new version
   that undoes it (`POST /git/revert-commit {commit, base}`) and never rewrites history.
+  A version is titled by what it did. A turn's save takes the person's request, as the chat
+  showed it, in one short line (at most 72 characters, cut at a word): a link, typed with its
+  scheme or without, keeps only its site's name (no path, query, port or sign-in), a word with
+  `@` is left out, and so is the note to Octo in front of a scheduled run's or an unaddressed
+  group turn's request; a hand-back takes the message its browser turn carried on. History is
+  the whole space's, so only a chat everyone in the space can read gives its words: dispatch
+  says on each job who can read its chat (`metadata.conversationVisibility`, `private` when the
+  chat or a chat it is a thread of is private), and a private chat's save, a team plan's
+  helper's and any other save without the person's words read `Save workspace changes`, as does
+  a job that does not say. An Undo or a Revert reads `Undid "<that version's title>"`, with
+  git's `This reverts commit <id>.` line in its body. A new space's first versions (the seed
+  and the first write of its default files) read `Space created`, and a later write of newer
+  default files `Defaults refreshed`.
 - **Unsaved work** (History only): work kept on `refs/instafy/recovery/*`, listed with
   `GET /git/recovery`. It includes what Undo of a stopped turn's unsaved change put back
   (`undone`, from a workspace runtime's or Desktop origin's `POST /git/revert {paths, keep: true,

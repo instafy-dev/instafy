@@ -2786,7 +2786,7 @@ impl<'a> Publisher<'a> {
                 .git
                 .stdout(&["log", "-1", "--format=%s", &commit])
                 .map_err(internal)?;
-            let message = format!("Revert \"{subject}\"\n\nThis reverts commit {commit}.\n");
+            let message = crate::recovery_view::revert_commit_message(&subject, &commit);
             let author = author.unwrap_or_else(|| self.identity.clone());
             let reverted = self
                 .git

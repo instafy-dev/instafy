@@ -56,6 +56,7 @@ pub(crate) use chat_attachments::TurnAttachments;
 mod conversation_context;
 mod git_sync;
 mod known_safe_command;
+pub mod routing_check;
 mod routing_evidence;
 mod routing_recovery;
 mod save_report;
@@ -5806,6 +5807,7 @@ impl JobProcessor {
             auto_sync_after_apply_override: None,
             progress_sender: progress.as_ref().map(|progress| progress.sender.clone()),
             local_origin: self.local_origin_sync(),
+            title: workspace_commit::version_title(job),
         };
         Ok(checkpoint_write_scoped_worker(execution, checkpoint, &files).await)
     }
@@ -6809,16 +6811,8 @@ impl JobProcessor {
             job_id: Some(job.id),
             run_timeout: turn_files.limit(),
             run_deadline: turn_files.deadline(),
-            disable_shell_tool: true,
-            final_output_schema: CodexFinalOutputSchema::RoutingPreflight,
-            suppress_contextual_instructions: true,
-            routing_scoped_worker_execution: Some(if self.isolated_workers.enabled {
-                ScopedWorkerExecution::IsolatedTools
-            } else {
-                ScopedWorkerExecution::FileGeneration
-            }),
             cancel_signal,
-            ..CodexRunOptions::default()
+            ..routing_preflight_run_options(self.isolated_workers.enabled)
         }
     }
 
@@ -7160,6 +7154,7 @@ impl JobProcessor {
                     .as_ref()
                     .map(|progress| progress.sender.clone()),
                 local_origin: self.local_origin_sync(),
+                title: workspace_commit::version_title(job),
             };
             let outcome = skills::resolve_skills_lane(request, &workspace_dir).await;
             match settle_skills_lane_outcome(outcome, lane_checkpoint).await {
@@ -7268,26 +7263,19 @@ impl JobProcessor {
         let routing_preflight = if skills_kickoff.is_none()
             && should_run_agent_routing_preflight_for_execution(job, prompt_text)
         {
-            let active_plan_group_id = latest_plan_group_id_from_payload(&job.payload);
-            browser_routes = pending_worker_input
-                .is_none()
-                .then(|| browser_routing_snapshot_for_job(job, &workspace_dir, prompt_text))
-                .flatten();
-            let preflight_prompt = build_agent_routing_preflight_prompt_with_browser_routes(
+            let request = routing_preflight_request(
+                job,
                 &workspace_dir,
                 prompt_text,
-                active_plan_group_id.as_deref(),
                 pending_worker_input.as_ref(),
-                browser_routes.as_deref(),
             );
-            let (preflight_prompt, primary_context) =
-                agent_routing_primary_prompt(&preflight_prompt, &job.payload);
-            tracing::info!(job_id = %job.id, context = %primary_context, "routing preflight history projection");
+            browser_routes = request.browser_routes;
+            tracing::info!(job_id = %job.id, context = %request.history_metrics, "routing preflight history projection");
             let preflight_options =
                 self.routing_preflight_options(job, task_usage, turn_files, cancel_signal.clone());
             let _codex_guard = CODEX_EXECUTION_LOCK.lock().await;
             match codex
-                .execute_with_options(&preflight_prompt, None, preflight_options)
+                .execute_with_options(&request.prompt, None, preflight_options)
                 .await
             {
                 Ok(output) => {
@@ -7754,6 +7742,7 @@ impl JobProcessor {
                     .as_ref()
                     .map(|progress| progress.sender.clone()),
                 local_origin: self.local_origin_sync(),
+                title: workspace_commit::version_title(job),
             };
             return Ok(Box::pin(checkpoint_write_scoped_worker(
                 execution, checkpoint, &files,
@@ -9445,6 +9434,7 @@ impl JobProcessor {
                                 .as_ref()
                                 .map(|progress| progress.sender.clone()),
                             self.local_origin_sync(),
+                            &workspace_commit::version_title(job),
                         )
                         .await
                         {
@@ -9729,6 +9719,7 @@ impl JobProcessor {
                             .as_ref()
                             .map(|progress| progress.sender.clone()),
                         self.local_origin_sync(),
+                        &workspace_commit::version_title(job),
                     )
                     .await
                     {
@@ -16706,6 +16697,58 @@ fn agent_routing_primary_prompt(base: &str, payload: &JsonValue) -> (String, Jso
         format!("{}{}{}", &base[..insertion], addition, &base[insertion..]),
         context.metrics,
     )
+}
+
+/// What a job's routing step sends the model, built here for the job and for the routing check
+/// (`routing_check`), so the check reads exactly what a turn's routing step reads.
+pub(crate) struct RoutingPreflightRequest {
+    pub(crate) prompt: String,
+    /// The browser skill's routing section, when the browser routes are offered.
+    pub(crate) browser_routes: Option<String>,
+    /// The history projection's counts.
+    pub(crate) history_metrics: JsonValue,
+}
+
+fn routing_preflight_request(
+    job: &LeaseJob,
+    workspace_dir: &Path,
+    prompt_text: &str,
+    pending: Option<&worker_input_routing::PendingContext>,
+) -> RoutingPreflightRequest {
+    let active_plan_group_id = latest_plan_group_id_from_payload(&job.payload);
+    let browser_routes = pending
+        .is_none()
+        .then(|| browser_routing_snapshot_for_job(job, workspace_dir, prompt_text))
+        .flatten();
+    let prompt = build_agent_routing_preflight_prompt_with_browser_routes(
+        workspace_dir,
+        prompt_text,
+        active_plan_group_id.as_deref(),
+        pending,
+        browser_routes.as_deref(),
+    );
+    let (prompt, history_metrics) = agent_routing_primary_prompt(&prompt, &job.payload);
+    RoutingPreflightRequest {
+        prompt,
+        browser_routes,
+        history_metrics,
+    }
+}
+
+/// How a routing step runs: no tools of its own, the routing answer's schema, and none of the
+/// space's broad instructions.
+fn routing_preflight_run_options(isolated_tool_workers: bool) -> CodexRunOptions {
+    CodexRunOptions {
+        disable_shell_tool: true,
+        final_output_schema: CodexFinalOutputSchema::RoutingPreflight,
+        suppress_contextual_instructions: true,
+        routing_scoped_worker_execution: Some(if isolated_tool_workers {
+            ScopedWorkerExecution::IsolatedTools
+        } else {
+            ScopedWorkerExecution::FileGeneration
+        }),
+        ..CodexRunOptions::default()
+    }
 }
 
 fn extract_markdown_h2_section(content: &str, heading: &str) -> Option<String> {

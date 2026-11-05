@@ -1,4 +1,5 @@
 import { resolveLocalCapabilityArtifact } from "../../../capabilities/localCapabilityArtifactRegistry";
+import { hasFailedRunMetadata } from "../../../conversations/runFailurePresentation";
 import type { RunRecord } from "../../../types";
 import type { ChatMessage } from "../types";
 import { isUUID } from "../../../utils/uuid";
@@ -509,6 +510,47 @@ export function synthesizeAgentJobThreadMessages(
     }
   }
 
+  // A browser turn and each hand-back that took what it found back to the
+  // building turn are one answer: the browser turn's row holds the
+  // hand-back's messages too, so the person reads one line, one reply and
+  // the card (routedBrowserFold.ts). A hand-back tried again lives in its
+  // retry's Details, as any turn does, so only the try that replaced it
+  // joins; a failure posted for a hand-back's run alone joins too, with its
+  // Try again. A browser turn with no row (no step of it is loaded) leaves
+  // its hand-back a row of its own.
+  const rowJobIdByJoinedJobId = new Map<string, string>();
+  const turnJobIdsByRowJobId = new Map<string, string[]>();
+  const rowJobIdByJoinedFailureId = new Map<string, string>();
+  const pendingHandBackByRowJobId = new Map<string, { runId: string | null }>();
+  for (const [browserJobId, handBacks] of routedFold.handBacksByBrowserJobId) {
+    if (!threadStartMessageIdByJobId.has(browserJobId) || rowJobIdByJoinedJobId.has(browserJobId)) continue;
+    const turnJobIds = [browserJobId];
+    const handBackRunIds = new Set<string>();
+    for (const handBack of handBacks) {
+      if (handBack.runId) handBackRunIds.add(handBack.runId);
+      if (!handBack.jobId || foldedJobIds.has(handBack.jobId) || turnJobIds.includes(handBack.jobId)) continue;
+      turnJobIds.push(handBack.jobId);
+      rowJobIdByJoinedJobId.set(handBack.jobId, browserJobId);
+      threadStartMessageIdByJobId.delete(handBack.jobId);
+    }
+    turnJobIdsByRowJobId.set(browserJobId, turnJobIds);
+    for (const message of collapsedAll) {
+      const runId = extractRunId(message);
+      if (runId && handBackRunIds.has(runId) && isFailureWithoutJob(message) && !foldedFailureIds.has(message.id)) {
+        rowJobIdByJoinedFailureId.set(message.id, browserJobId);
+      }
+    }
+    // Sent, and its turn has shown nothing yet: the row stands for it. A
+    // resend of a failed one is the retry's to show ("Trying again…").
+    const newest = handBacks.at(-1);
+    if (
+      newest && !newest.jobId && !retryFold.hiddenPromptIds.has(newest.promptId) &&
+      !(newest.runId && routedFold.handBackRunsEndedWithoutAJob.has(newest.runId))
+    ) {
+      pendingHandBackByRowJobId.set(browserJobId, { runId: newest.runId });
+    }
+  }
+
   if (threadStartMessageIdByJobId.size === 0 && multiAgentWorkerJobIds.size === 0) {
     return visible;
   }
@@ -521,7 +563,10 @@ export function synthesizeAgentJobThreadMessages(
     if (isWorkerInputQuestion(message)) return;
     // A browser card that left the chat leaves its turn too.
     if (routedFold.settledCardIds.has(message.id)) return;
-    const jobId = extractAgentJobId(message);
+    const ownJobId = extractAgentJobId(message);
+    const jobId = ownJobId
+      ? (rowJobIdByJoinedJobId.get(ownJobId) ?? ownJobId)
+      : rowJobIdByJoinedFailureId.get(message.id);
     if (!jobId) {
       return;
     }
@@ -544,12 +589,16 @@ export function synthesizeAgentJobThreadMessages(
       output.push(message);
       return;
     }
-    if (foldedFailureIds.has(message.id)) {
+    if (foldedFailureIds.has(message.id) || rowJobIdByJoinedFailureId.has(message.id)) {
       return;
     }
     const jobId = extractAgentJobId(message);
     if (!jobId) {
       output.push(message);
+      return;
+    }
+    // A hand-back's messages are in the row of the browser turn it continues.
+    if (rowJobIdByJoinedJobId.has(jobId)) {
       return;
     }
     if (foldedJobIds.has(jobId)) {
@@ -591,25 +640,37 @@ export function synthesizeAgentJobThreadMessages(
       }
       return Math.min(minTimestamp, candidate.timestamp);
     }, message.timestamp);
+    // The turns this row shows, oldest first: a browser turn and the
+    // hand-back that went on from it, or the one turn.
+    const turnJobIds = turnJobIdsByRowJobId.get(jobId) ?? [jobId];
 
     // Every try this turn replaced, oldest first: a retry that failed and was
     // tried again carries the tries before it too.
     const earlierAttempts: ChatMessage[][] = [];
-    const walked = new Set<string>([jobId]);
-    for (let earlier = retryFold.earlierAttemptByJobId.get(jobId); earlier; ) {
-      const failureId = earlier.failureId;
-      const attempt = earlier.jobId
-        ? (threadMessagesByJobId.get(earlier.jobId) ?? [])
-        : collapsedAll.filter((candidate) => candidate.id === failureId);
-      if (attempt.length > 0) {
-        earlierAttempts.unshift(attempt);
+    for (const turnJobId of turnJobIds) {
+      const tries: ChatMessage[][] = [];
+      const walked = new Set<string>([turnJobId]);
+      for (let earlier = retryFold.earlierAttemptByJobId.get(turnJobId); earlier; ) {
+        const failureId = earlier.failureId;
+        const attempt = earlier.jobId
+          ? (threadMessagesByJobId.get(earlier.jobId) ?? [])
+          : collapsedAll.filter((candidate) => candidate.id === failureId);
+        if (attempt.length > 0) {
+          tries.unshift(attempt);
+        }
+        if (!earlier.jobId || walked.has(earlier.jobId)) {
+          break;
+        }
+        walked.add(earlier.jobId);
+        earlier = retryFold.earlierAttemptByJobId.get(earlier.jobId);
       }
-      if (!earlier.jobId || walked.has(earlier.jobId)) {
-        break;
-      }
-      walked.add(earlier.jobId);
-      earlier = retryFold.earlierAttemptByJobId.get(earlier.jobId);
+      earlierAttempts.push(...tries);
     }
+    // The row follows the newest of its turns: its live words, its run and
+    // its Stop are that turn's.
+    const newestJobId = turnJobIds.at(-1) ?? jobId;
+    const retryPendingJobId = turnJobIds.find((turnJobId) => pendingJobIds.has(turnJobId));
+    const pendingHandBack = pendingHandBackByRowJobId.get(jobId);
     output.push({
       id: `agent-job-thread:${jobId}`,
       role: "assistant",
@@ -618,15 +679,91 @@ export function synthesizeAgentJobThreadMessages(
       messageType: "agent_job_thread",
       metadata: {
         messageType: "agent_job_thread",
-        jobId,
+        jobId: newestJobId,
         threadMessages,
+        ...(turnJobIds.length > 1 ? { [TURN_JOB_IDS_METADATA_KEY]: turnJobIds } : {}),
         ...(earlierAttempts.length > 0 ? { earlierAttempts } : {}),
-        ...(pendingJobIds.has(jobId) ? { autoRetryPending: true, ...pendingRetryByJobId.get(jobId) } : {}),
+        ...(retryPendingJobId
+          ? { autoRetryPending: true, ...pendingRetryByJobId.get(retryPendingJobId) }
+          : {}),
+        ...(pendingHandBack
+          ? {
+              [HAND_BACK_PENDING_METADATA_KEY]: true,
+              ...(pendingHandBack.runId ? { [HAND_BACK_RUN_ID_METADATA_KEY]: pendingHandBack.runId } : {}),
+            }
+          : {}),
       },
     });
   });
 
   return output;
+}
+
+/**
+ * Metadata on a turn's row (`agent_job_thread`) that shows more than one turn:
+ * a browser turn and the hand-back that went on from it, oldest first. The
+ * row's `jobId` is the newest of them.
+ */
+export const TURN_JOB_IDS_METADATA_KEY = "turnJobIds";
+/** Metadata on a browser turn's row whose hand-back was sent and has shown nothing yet. */
+export const HAND_BACK_PENDING_METADATA_KEY = "handBackPending";
+/** The run of that hand-back, once the chat has its stored prompt. */
+export const HAND_BACK_RUN_ID_METADATA_KEY = "handBackRunId";
+
+/** The turns a row shows, oldest first: its `turnJobIds`, else its one job. */
+export function readTurnJobIds(message: Pick<ChatMessage, "metadata">): string[] {
+  const metadata = message.metadata && isRecord(message.metadata) ? message.metadata : null;
+  const listed = metadata?.[TURN_JOB_IDS_METADATA_KEY];
+  if (Array.isArray(listed)) {
+    const ids = listed.filter((id): id is string => typeof id === "string" && id.trim().length > 0);
+    if (ids.length > 0) return ids;
+  }
+  const jobId = extractAgentJobId(message as ChatMessage);
+  return jobId ? [jobId] : [];
+}
+
+/**
+ * What a row's run is read from: in a row of more than one turn, its newest
+ * turn's messages alone, with any failure posted for that turn's run alone.
+ * The turns before it are over, and the reply one of them ended on says
+ * nothing of the newest: read as the row's, the row said it was done between
+ * the building turn's steps, and a Stop then never read "Stopped".
+ */
+export function newestTurnMessages<T extends ChatMessage>(threadMessages: T[], turnJobIds: readonly string[]): T[] {
+  if (turnJobIds.length < 2) return threadMessages;
+  const newestJobId = turnJobIds[turnJobIds.length - 1];
+  const newestRunIds = new Set(
+    threadMessages
+      .filter((candidate) => extractAgentJobId(candidate) === newestJobId)
+      .map(extractRunId)
+      .filter((runId): runId is string => runId !== null),
+  );
+  return threadMessages.filter((candidate) => {
+    const jobId = extractAgentJobId(candidate);
+    if (jobId) return jobId === newestJobId;
+    const runId = extractRunId(candidate);
+    return runId !== null && newestRunIds.has(runId);
+  });
+}
+
+/**
+ * A browser turn's row whose hand-back was sent and has shown nothing yet:
+ * the row stands for that hand-back's turn (its run, once known).
+ */
+export function readPendingHandBack(message: Pick<ChatMessage, "metadata">): { runId: string | null } | null {
+  const metadata = message.metadata && isRecord(message.metadata) ? message.metadata : null;
+  if (metadata?.[HAND_BACK_PENDING_METADATA_KEY] !== true) return null;
+  const runId = metadata[HAND_BACK_RUN_ID_METADATA_KEY];
+  return { runId: typeof runId === "string" && runId.trim() ? runId.trim() : null };
+}
+
+/** A failure posted for a run whose job never ran it. */
+function isFailureWithoutJob(message: ChatMessage): boolean {
+  return (
+    message.role === "assistant" &&
+    !extractAgentJobId(message) &&
+    ((getMessageType(message) ?? "").trim().toLowerCase() === "error" || hasFailedRunMetadata(message.metadata))
+  );
 }
 
 // Timeline rows never carry a conversation.reply notification (see the

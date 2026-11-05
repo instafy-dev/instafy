@@ -534,7 +534,7 @@ pub(super) async fn handle_git_revert_commit(
     .await?;
     drop(lease);
 
-    let message = format!("Revert \"{subject}\"\n\nThis reverts commit {commit}.");
+    let message = crate::recovery_view::revert_commit_message(&subject, &commit);
     let author = save_author(&claims, &gateway_identity(&state));
     let (outcome, _) = commit_change(
         &state,
