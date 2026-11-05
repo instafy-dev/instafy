@@ -2183,12 +2183,33 @@ fn workspace_file_section(
         &workspace_dir.join(relative_path),
         PROJECT_MEMORY_MAX_FILE_BYTES,
     )?;
+    markdown_section(&text, heading)
+}
+
+/// The section of `text` under `heading`, a line of its own, up to the next `## ` heading.
+fn markdown_section(text: &str, heading: &str) -> Option<String> {
     let start = text.match_indices(heading).map(|(at, _)| at).find(|&at| {
         (at == 0 || text[..at].ends_with('\n')) && text[at + heading.len()..].starts_with('\n')
     })?;
     let body = &text[start + heading.len()..];
     let end = body.find("\n## ").unwrap_or(body.len());
     Some(format!("{heading}{}", body[..end].trim_end()))
+}
+
+/// `AGENTS.md`'s replies guide for a turn with no shell, when the space's copy is one Instafy
+/// ships, the current one or an earlier one: the rest of it says how to run commands. None for a
+/// copy the space edited or wrote, whose own rules may be for every turn, and for one with no
+/// such section; those are carried whole, as a building turn carries them.
+fn bundled_agents_doc_replies(workspace_dir: &Path) -> Option<String> {
+    let (text, truncated) = read_text_file_lossy_truncated(
+        workspace_dir,
+        &workspace_dir.join(learn::AGENTS_DOC_FILENAME),
+        PROJECT_MEMORY_MAX_FILE_BYTES,
+    )?;
+    if truncated || !learn::is_bundled_agents_doc(&text) {
+        return None;
+    }
+    markdown_section(&text, BROWSER_TURN_REPLIES_SECTION)
 }
 
 /// `left_out` names skills this turn's snapshot does not carry, whatever its words.
@@ -2290,17 +2311,12 @@ fn format_project_memory_snapshot_with_preferences(
     };
 
     // A turn with no shell reads `AGENTS.md`'s replies guide, as it does on a restored thread
-    // (`pinned_replies_section`): the rest says how to run commands. A copy with no such section
-    // is carried whole.
+    // (`pinned_replies_section`), when the space's copy is one Instafy ships: the rest says how
+    // to run commands. A copy the space edited, or one with no such section, is carried whole: a
+    // team's own section ("Never open example.com in the browser.") is for every turn.
     match pinned
         .is_some()
-        .then(|| {
-            workspace_file_section(
-                workspace_dir,
-                learn::AGENTS_DOC_FILENAME,
-                BROWSER_TURN_REPLIES_SECTION,
-            )
-        })
+        .then(|| bundled_agents_doc_replies(workspace_dir))
         .flatten()
     {
         Some(replies) if remaining > 0 => {

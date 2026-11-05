@@ -1231,7 +1231,7 @@ fn a_turn_prints_a_pages_links_with_its_text() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(
-        "- Open an address the person, a skill or a search result gave, a link on a page you read (print a page's links with its text), or the home page of the official site the task is about. Never a search engine or a guessed path."
+        "- Open an address the person, a skill or a search result gave, a link on a page you read (print a page's links with its text), or the home page of the official site the task is about (for reviews, a reviewer's own site). Never a search engine or a guessed path."
     ));
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
 
@@ -1385,7 +1385,7 @@ fn the_research_skill_has_kinds_of_link_only_site_and_a_guided_mode() {
         "`no-reuse` (terms bar copying, not reading): read it like any page; `instafy web read` marks it `noReuse`.",
         "Summarize it in your own words, cite \"seen <date> on <host>\" and link back (to its `home` when `deepLinks` is false).",
         "Never copy its reviews, photos or price lists, and keep its content out of anything published or shared by public link: links only there.",
-        "### Guided mode",
+        "## Guided mode",
         "Run `instafy web link <site> query=<…> checkin=<YYYY-MM-DD> …`",
         "the site's home page plus `typeIn` (what to type there) when the site bars deep links or has no search link",
         "Reply with short numbered steps for the person: open the link in their own tab",
@@ -1748,7 +1748,7 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
     for needle in [
         "## Finding a page",
         "For every reader, browser or not:",
-        "Open an address the person, a skill or a search result gave, a link on a page you read (print a page's links with its text), or the home page of the official site the task is about.",
+        "Open an address the person, a skill or a search result gave, a link on a page you read (print a page's links with its text), or the home page of the official site the task is about (for reviews, a reviewer's own site).",
         "Never a search engine or a guessed path.",
         "A page that says it is missing (\"not found\", \"are you lost?\"): use that site's own search box or menu.",
         "A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.",

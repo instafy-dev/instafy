@@ -819,10 +819,13 @@ and whole, but for its "Routing preflight", which only the routing step reads
 names for a turn with no shell (`no_shell_omits`: the card a building turn hands
 the person, what the skill is for, the browsers' names, and where a turn with a
 shell reads more). Every skill a browser turn loads leaves out the sections it
-names the same way, so a browser turn never reads of commands it does not have:
-the `instafy-web-research` skill's readers, searches and rules for building
-pages, for one. Of the space's `AGENTS.md`, a browser turn reads its "Replies",
-as a restored one does (a copy with no such section comes whole). Besides it
+names the same way, so a browser turn is given no step it cannot take: the
+`instafy-web-research` skill's readers, searches, guided links and rules for
+building pages and datasets, for one, while its rules for what a page's text
+may start and what a search may hold reach every reader. Of the space's
+`AGENTS.md`, a browser turn reads its "Replies", as a restored one does, when
+the file is a copy Instafy ships; a copy the space edited, or one with no such
+section, comes whole. Besides it
 the turn is told of, and loads when its words route them, only the
 skills it can use with no shell (runtime-agent `usable_with_no_shell`): not the
 space's memory, routing and team skills (`context_kind` `root`, `meta` or
@@ -860,8 +863,9 @@ a fact no page read this turn states, and only steps the turn started). The
 `instafy-web-research` skill points to (a research turn without the browser
 skill prints just that section with one command), says how every reader finds a
 page: an address the person, a skill or a search result gave, a link on a page
-read (its links printed with its text), or the official site's home page, never
-a search engine or a guessed path; a missing page's own site search; a page
+read (its links printed with its text), or the official site's home page (for
+reviews, a reviewer's own site), never a search engine or a guessed path; a
+missing page's own site search; a page
 that fails (busy, blank or an
 error page such as a 504) sends the turn to the place's own site at once, in the
 same turn, and then to another official source; facts from a place's
@@ -2607,11 +2611,11 @@ unless the policy is `"covered"`.
   as a desktop app's own runtime ahead of its controller, posts "Finished in
   the browser." in place of the words, as earlier runtimes did. So does a turn
   whose every page stopped it and that wrote no words of its own: no hand-back
-  follows a turn that read no page. The browser turn is told that the
-  building turn cannot open the browser, so it reads what the request needs
-  before it ends:
+  follows a turn that read no page. The building turn cannot open the
+  browser, so the browser turn reads what the request needs before it ends:
   each item's own page and, for reviews, the review pages a page it read links
-  to, else a reviewer's own site. Right before the request it reads its part
+  to, else a reviewer's own site, as "Finding a page" says for every reader.
+  Right before the request it reads its part
   of it in plain words: the reading, every page the request needs, while what
   the request asks Octo to make is the building turn's part, from its finding
   lines, so it never stops because it cannot make that, and it says nothing

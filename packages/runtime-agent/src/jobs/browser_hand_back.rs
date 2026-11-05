@@ -106,9 +106,11 @@ If a page stopped you (a manual step, a refused or challenge page), say so in yo
 /// and ended: the page was built with four of its fifteen facts (a local test, Nov 4). It says
 /// nothing about making the thing in its reply, and is never told that the thing is made after
 /// it: when every page stopped it, no hand-back follows and [`move_findings_into_details`] posts
-/// its words, so a promise to make the thing would be kept by nothing.
+/// its words, so a promise to make the thing would be kept by nothing. A review no page links to
+/// comes from a reviewer's own site, as the browser skill's "Finding a page" says for every
+/// reader: said here only, a browser turn that answers in words lost it.
 const READING_PART: &str = "\n\nYour part of this request is the reading: read every page it needs before you end \
-(each item's own page and, for reviews, review pages a page you read links to, else a reviewer's own site). \
+(each item's own page and, for reviews, review pages a page you read links to). \
 What it asks Octo to make is the building turn's part, from your finding lines, \
 so never stop because this turn can't make it, and say nothing about making it in your reply.";
 
@@ -953,10 +955,9 @@ mod tests {
                 section.ends_with(
                     "say so in your first line.\n\nYour part of this request is the reading: \
                      read every page it needs before you end (each item's own page and, for \
-                     reviews, review pages a page you read links to, else a reviewer's own site). \
-                     What it asks Octo to make is the building turn's part, from your finding \
-                     lines, so never stop because this turn can't make it, and say nothing about \
-                     making it in your reply."
+                     reviews, review pages a page you read links to). What it asks Octo to make \
+                     is the building turn's part, from your finding lines, so never stop because \
+                     this turn can't make it, and say nothing about making it in your reply."
                 ),
                 "{section}"
             );
@@ -1028,7 +1029,7 @@ mod tests {
         for line in [
             "\nFindings for the building turn:\nEnd your reply",
             "read every page it needs before you end (each item's own page and, for reviews, \
-             review pages a page you read links to, else a reviewer's own site). ",
+             review pages a page you read links to). ",
             "Say what you read (\"Read 6 pages on <site>\"), never \"I couldn't finish\". ",
         ] {
             assert!(section.contains(line), "{line}: {section}");
@@ -1067,10 +1068,10 @@ mod tests {
         assert_eq!(
             part,
             "Your part of this request is the reading: read every page it needs before you end \
-             (each item's own page and, for reviews, review pages a page you read links to, else \
-             a reviewer's own site). What it asks Octo to make is the building turn's part, from \
-             your finding lines, so never stop because this turn can't make it, and say nothing \
-             about making it in your reply."
+             (each item's own page and, for reviews, review pages a page you read links to). \
+             What it asks Octo to make is the building turn's part, from your finding lines, so \
+             never stop because this turn can't make it, and say nothing about making it in your \
+             reply."
         );
         for promise in ["is made", "right after", "never say that it can't"] {
             assert!(!section.contains(promise), "{promise}: {section}");

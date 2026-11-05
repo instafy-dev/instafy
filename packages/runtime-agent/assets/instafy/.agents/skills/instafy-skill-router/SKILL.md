@@ -30,16 +30,6 @@ Notes:
   not answer) is not "not found": never retry it with another query or call the thing missing. Use what was found,
   say plainly what could not be looked up, and offer to try again.
 
-## Learned blocks (/learn)
-
-If the project contains `instafy-learned` (the learned blocks index):
-
-1. Open `instafy-learned` first (it should be small).
-2. If any learned block matches the user’s request, include it in your selected skills.
-3. Open at most **2** learned blocks for a given user request.
-
-Do not load learned blocks “just in case”. Only load what clearly applies.
-
 ## Routing rules (default)
 
 Use these mappings unless a project-specific skill overrides them.

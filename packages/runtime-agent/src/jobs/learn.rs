@@ -93,6 +93,17 @@ const INSTAFY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/INSTAFY.md"
 ));
+/// Earlier bundled copies of `INSTAFY.md` a scaffold may replace. A space's own memory (its
+/// snapshot, constants, workflows or preferences filled in) is an edited copy, and is kept.
+const LEGACY_INSTAFY_TEMPLATES: &[&str] = &[
+    // The first bundled copy.
+    include_str!("legacy/instafy-doc-v1.md"),
+    // From before it stopped telling every turn to load the memory its prompt already holds (a
+    // "Start-of-task ritual" that preferred `python AGENTS.py`, and "first discover what
+    // skills/tools are available"). It was written only into a space that had none, so a space
+    // whose files this runtime keeps (a Desktop folder) kept it in every turn's snapshot.
+    include_str!("legacy/instafy-doc-v2.md"),
+];
 const AGENTS_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/AGENTS.md"
@@ -129,6 +140,11 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     // (`python AGENTS.py`, a "fast context load" and a `/learn` section).
     include_str!("legacy/agents-doc-v12.md"),
 ];
+/// Whether `text` is a copy of `AGENTS.md` Instafy ships, the current one or an earlier one. A
+/// copy a space edited, or a team's own, is not: its rules are the space's.
+pub(super) fn is_bundled_agents_doc(text: &str) -> bool {
+    text == AGENTS_DOC_TEMPLATE || LEGACY_AGENTS_DOC_TEMPLATES.contains(&text)
+}
 const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/CLAUDE.md"
@@ -137,6 +153,13 @@ const AGENTS_SCRIPT_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/AGENTS.py"
 ));
+/// Earlier bundled copies of the learning policy a scaffold may replace.
+const LEGACY_LEARNING_POLICY_TEMPLATES: &[&str] = &[
+    // From before it dropped its "Start-of-task ritual" (load the snapshot again, "Prefer
+    // `python AGENTS.py`"), which a turn whose words route the policy read beside the snapshot
+    // its prompt already holds. `/learn`'s own prompt still runs the script.
+    include_str!("legacy/learning-policy-v1.md"),
+];
 const LEARNING_POLICY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-learning-policy/SKILL.md"
@@ -365,6 +388,9 @@ const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v2.md"),
     // From before the card came before the reconcile with `Expect:` ("Reconcile with `Expect:` before the card").
     include_str!("legacy/research-team-v3.md"),
+    // From before a reply offered to add an item the page leaves out, not "among the 2-3
+    // suggested replies", which the hub no longer asks for and Studio never shows.
+    include_str!("legacy/research-team-v4.md"),
 ];
 const LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES: &[&str] = &[
     // From before a lane read with the research skill and compared a product by its "Comparing items".
@@ -690,7 +716,12 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
         return;
     }
 
-    if write_missing_memory_file(workspace_dir, &instafy_path, INSTAFY_TEMPLATE) {
+    if upgrade_bundled_skill(
+        workspace_dir,
+        &instafy_path,
+        LEGACY_INSTAFY_TEMPLATES,
+        INSTAFY_TEMPLATE,
+    ) {
         wrote_any = true;
     }
 
@@ -711,7 +742,12 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
         wrote_any = true;
     }
 
-    if write_missing_memory_file(workspace_dir, &policy_path, LEARNING_POLICY_TEMPLATE) {
+    if upgrade_bundled_skill(
+        workspace_dir,
+        &policy_path,
+        LEGACY_LEARNING_POLICY_TEMPLATES,
+        LEARNING_POLICY_TEMPLATE,
+    ) {
         wrote_any = true;
     }
 
@@ -2350,6 +2386,12 @@ mod tests {
                 LEGACY_SKILL_READING_TEMPLATES,
                 SKILL_READING_TEMPLATE,
             ),
+            ("INSTAFY.md", LEGACY_INSTAFY_TEMPLATES, INSTAFY_TEMPLATE),
+            (
+                "learning policy",
+                LEGACY_LEARNING_POLICY_TEMPLATES,
+                LEARNING_POLICY_TEMPLATE,
+            ),
         ] {
             for (index, copy) in earlier.iter().enumerate() {
                 assert_ne!(
@@ -2909,7 +2951,9 @@ mod tests {
     /// "Assumed: you wanted a simple visit-info page, not a public link." and never said either (a
     /// local test, Nov 4); others said "Built and opened…" (nothing was opened), "the provided
     /// read" and "updated for viewers". A vague ask's defaults keep their one `Assumed:` line. The
-    /// replies to send as-is, which Studio never shows, go. An unedited earlier copy is upgraded.
+    /// replies to send as-is, which Studio never shows, go, from the research team's final reply
+    /// too, which follows the hub's step 4 and offers to add an item the page leaves out. Unedited
+    /// earlier copies are upgraded.
     #[test]
     fn a_shared_pages_reply_says_who_can_open_it_and_how_to_get_a_link() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2938,6 +2982,16 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             INTERACTIVE_ARTIFACTS_TEMPLATE
         );
+
+        let team = flat(RESEARCH_TEAM_TEMPLATE);
+        assert!(team.contains("Reply per the hub's step 4. An item the page leaves out is said plainly, never a shorter list presented as the answer, and offer to add it."));
+        assert!(!team.contains("suggested replies"));
+        let previous = include_str!("legacy/research-team-v4.md");
+        assert!(previous.contains("among the 2-3 suggested replies"));
+        let path = workspace.path().join(RESEARCH_TEAM_RELATIVE_PATH);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), RESEARCH_TEAM_TEMPLATE);
     }
 
     /// Until Oct 19 the bundled browser guidance asked before opening a
