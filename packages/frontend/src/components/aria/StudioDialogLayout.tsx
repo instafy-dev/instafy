@@ -3,6 +3,7 @@ import { Xmark } from "iconoir-react";
 import { IconButton } from "../Button";
 import { Text } from "../Text";
 import { useStudioDialogGutterClass } from "./StudioDialogSpacing";
+import { useStudioMediaImmersive } from "./studioMediaLayout";
 
 type StudioDialogHeaderProps = {
   title: ReactNode;
@@ -12,6 +13,8 @@ type StudioDialogHeaderProps = {
   onClose?: (() => void) | null;
   closeLabel?: string;
   closeButtonDisabled?: boolean;
+  /** Media keeps its controls mounted while floating them over the mobile image. */
+  layout?: "default" | "media";
   className?: string;
   titleClassName?: string;
   descriptionClassName?: string;
@@ -25,25 +28,28 @@ export function StudioDialogHeader({
   onClose = null,
   closeLabel = "Close dialog",
   closeButtonDisabled = false,
+  layout = "default",
   className,
   titleClassName,
   descriptionClassName,
 }: StudioDialogHeaderProps) {
   const gutterClass = useStudioDialogGutterClass();
+  const immersive = useStudioMediaImmersive(layout === "media");
   const leftClassName = leading ? "flex min-w-0 items-start gap-2" : "min-w-0";
 
   return (
     <div
       className={[
-        "shrink-0 border-b border-slate-200/70 py-4 dark:border-[color:var(--color-studio-dark-divider)]",
-        gutterClass,
+        immersive
+          ? "absolute right-[var(--studio-media-safe-right)] top-[var(--studio-media-safe-top)] z-10"
+          : `shrink-0 border-b border-slate-200/70 py-4 dark:border-[color:var(--color-studio-dark-divider)] ${gutterClass}`,
         className,
       ]
         .filter(Boolean)
         .join(" ")}
     >
       <div className="flex items-start justify-between gap-4">
-        <div className={leftClassName}>
+        <div className={immersive ? "sr-only" : leftClassName}>
           {leading}
           <div className="min-w-0">
             <Text

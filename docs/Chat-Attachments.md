@@ -86,6 +86,33 @@ it goes only with its space or its team, whose purge covers it.
   is gone shows a plain "Image unavailable" placeholder. A download that could not reach
   Storage shows "Couldn't load image" with a "Try again" button. Unreadable image bytes show
   "Image unavailable" rather than a broken thumbnail.
+- Opening an image uses the shared media dialog: a bounded desktop viewer or a
+  frameless, opaque dark viewer on narrow screens and short touch-screen landscapes.
+  Close stays at the safe top-right edge. **Fit** shows the entire image without upscaling;
+  **Width** starts a long screenshot at its top and lets the reader pan through it.
+  Fit and Width are quiet, repeatable actions using the shared labelled-toolbar preset;
+  pressing Width again after panning returns to the top. They do not use a selected tile.
+  The percentage control shows the current scale and selects actual size (100%).
+  Plus/minus and pinch zoom the image itself; dragging pans enlarged content. On mobile,
+  double-tap switches from the whole image to **Width**, starting at the top of a tall image;
+  double-tap again from any inspection zoom returns to the whole image.
+  On desktop, double-click toggles inspection, the wheel pans, and Ctrl/Cmd-wheel zooms.
+  Focus the image region for arrow-key panning, `+`/`-` zoom, `0` Fit and `1` actual size.
+  Mobile opens with the zoom toolbar hidden and Close visible. A single image tap toggles
+  the toolbar; a double-tap changes the image fit without toggling it. The toolbar overlays
+  the bottom edge, so showing it never shifts the image. Keyboard focus or assistive activation reveals it;
+  Space or Enter on the image region toggles it without hiding a focused toolbar button.
+  There is no automatic hide timer. Desktop keeps the toolbar visible.
+  Zoom controls stay outside the transformed image. Rotation refits an overview;
+  while inspecting, it preserves the source point at the viewport center where image bounds
+  allow. Width mode recalculates to the new width and retains the reading position after panning.
+- In the mobile **Fit** overview, tapping empty space or a deliberate downward one-finger
+  swipe dismisses on release. Short, sideways, upward, cancelled and multi-finger gestures
+  leave it open. Enlarged and Width modes pan instead of dismissing, including the finger
+  remaining after a pinch. Browser accessibility zoom remains available outside the image;
+  when the browser page is already zoomed, image gestures yield to native page movement.
+  Closing restores focus to the image thumbnail without focusing the composer. Inspection
+  never changes attachment bytes. Drawing and annotation are not provided by this viewer.
 - Text attachments are named buttons. Opening one downloads it with the person's session
   into a read-only dialog, displayed as literal text. The preview reads up to
   100 KiB per page, with **Previous** and **Next** keeping every character readable. Web

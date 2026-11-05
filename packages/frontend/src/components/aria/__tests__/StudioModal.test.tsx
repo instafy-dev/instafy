@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StudioDialogModal } from "../StudioModal";
 import { StudioDialogBody, StudioDialogFooter, StudioDialogHeader } from "../StudioDialogLayout";
+import { STUDIO_MEDIA_IMMERSIVE_QUERY } from "../studioMediaLayout";
 
 describe("StudioDialogModal appearances", () => {
   let container: HTMLDivElement;
@@ -160,6 +161,113 @@ describe("StudioDialogModal appearances", () => {
       expect(section.classList.contains("px-5")).toBe(false);
     }
     expect(dialog.parentElement!.parentElement!.hasAttribute("gutter")).toBe(false);
+  });
+});
+
+describe("StudioDialogModal media presentation", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let immersive: boolean;
+  let listeners: Set<() => void>;
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    immersive = false;
+    listeners = new Set();
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+      get matches() { return query === STUDIO_MEDIA_IMMERSIVE_QUERY && immersive; },
+      media: query,
+      addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+    })));
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    expect(listeners.size).toBe(0);
+    container.remove();
+    document.body.replaceChildren();
+    vi.unstubAllGlobals();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("changes the frame without remounting content or moving focus during rotation", async () => {
+    await act(async () => root.render(
+      <StudioDialogModal isOpen layout="media" dialogAriaLabel="Media">
+        <StudioDialogHeader layout="media" title="Attachment" description="Image details"
+          leading={<span>Image</span>} trailing={<button>Download</button>} onClose={() => {}} />
+      </StudioDialogModal>,
+    ));
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    const modal = dialog.parentElement!;
+    const overlay = modal.parentElement!;
+    const header = dialog.firstElementChild!;
+    const button = dialog.querySelector<HTMLButtonElement>('[aria-label="Close dialog"]')!;
+    const controls = button.parentElement!;
+    const title = dialog.querySelector("h2")!;
+    expect(dialog.dataset.mediaImmersive).toBe("false");
+    expect(modal.classList.contains("max-w-[min(90vw,80rem)]")).toBe(true);
+    expect(modal.classList.contains("rounded-2xl")).toBe(true);
+    expect(modal.className).toContain("100dvh-max(");
+    expect(listeners.size).toBe(2);
+    expect(header.classList.contains("border-b")).toBe(true);
+    button.focus();
+
+    await act(async () => {
+      immersive = true;
+      listeners.forEach(listener => listener());
+    });
+    expect(document.querySelector('[role="dialog"]')).toBe(dialog);
+    expect(document.activeElement).toBe(button);
+    expect(dialog.firstElementChild).toBe(header);
+    expect(button.parentElement).toBe(controls);
+    expect(dialog.querySelector("h2")).toBe(title);
+    expect(title.parentElement!.parentElement!.className).toBe("sr-only");
+    expect(header.classList.contains("absolute")).toBe(true);
+    expect(header.classList.contains("border-b")).toBe(false);
+    expect(header.classList.contains("right-[var(--studio-media-safe-right)]")).toBe(true);
+    expect(dialog.dataset.mediaImmersive).toBe("true");
+    expect(dialog.classList.contains("relative")).toBe(true);
+    expect(modal.classList.contains("h-dvh")).toBe(true);
+    expect(modal.classList.contains("max-w-none")).toBe(true);
+    for (const cardClass of ["rounded-2xl", "border", "shadow-xl", "bg-white", "max-w-[min(90vw,80rem)]"]) {
+      expect(modal.classList.contains(cardClass)).toBe(false);
+    }
+    expect(overlay.classList.contains("bg-zinc-950")).toBe(true);
+    expect(overlay.className).not.toContain("safe-area");
+    for (const edge of ["top", "right", "bottom", "left"]) {
+      expect(dialog.style.getPropertyValue(`--studio-media-safe-${edge}`)).toBe(`max(var(--instafy-safe-area-inset-${edge}, 0px), 1rem)`);
+    }
+
+    await act(async () => {
+      immersive = false;
+      listeners.forEach(listener => listener());
+    });
+    expect(document.querySelector('[role="dialog"]')).toBe(dialog);
+    expect(document.activeElement).toBe(button);
+    expect(dialog.firstElementChild).toBe(header);
+    expect(button.parentElement).toBe(controls);
+    expect(title.parentElement!.parentElement!.className).not.toBe("sr-only");
+    expect(header.classList.contains("border-b")).toBe(true);
+    expect(header.classList.contains("absolute")).toBe(false);
+    expect(modal.classList.contains("rounded-2xl")).toBe(true);
+    expect(modal.classList.contains("h-dvh")).toBe(false);
+  });
+
+  it("leaves editor dialogs and their subscriptions unchanged in an immersive viewport", async () => {
+    immersive = true;
+    await act(async () => root.render(
+      <StudioDialogModal isOpen layout="editor" dialogAriaLabel="Text attachment">
+        <StudioDialogHeader title="Text attachment" onClose={() => {}} />
+      </StudioDialogModal>,
+    ));
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.dataset.mediaImmersive).toBeUndefined();
+    expect(dialog.parentElement!.classList.contains("rounded-2xl")).toBe(true);
+    expect(listeners.size).toBe(0);
   });
 });
 

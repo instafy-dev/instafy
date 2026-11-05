@@ -13,7 +13,7 @@ type ButtonTone = "neutral" | "muted" | "danger" | "accent";
 type ButtonSize = "xs" | "sm" | "md" | "lg" | "icon";
 type ButtonRadius = "none" | "md" | "lg" | "xl" | "2xl" | "full" | "aiTile";
 type ButtonElevation = "none" | "raised";
-export type ButtonPreset = "inline" | "form" | "toolbar";
+export type ButtonPreset = "inline" | "form" | "toolbar" | "toolbarLabel";
 
 // Task-level presets own geometry and elevation; callers still choose importance
 // with variant/tone. Pointer adaptation remains shared by every button.
@@ -21,6 +21,7 @@ const BUTTON_PRESETS = {
   inline: { size: "sm", radius: "xl", elevation: "none" },
   form: { size: "md", radius: "xl", elevation: "none" },
   toolbar: { size: "sm", radius: "lg", elevation: "none" },
+  toolbarLabel: { size: "sm", radius: "lg", elevation: "none" },
 } as const satisfies Record<ButtonPreset, { size: ButtonSize; radius: ButtonRadius; elevation: ButtonElevation }>;
 
 // The press nudge is a translate. Tailwind v4 translate utilities share one
@@ -98,14 +99,17 @@ const PRESET_OUTLINE_SIZE_CLASSES: Record<ButtonPreset, string> = {
   inline: "px-2.5 py-[calc(0.375rem-1px)] text-sm",
   form: "px-3.5 py-[calc(0.5rem-1px)] text-sm",
   toolbar: "min-h-8 min-w-8 px-[calc(0.25rem-1px)] py-[calc(0.25rem-1px)] text-sm",
+  toolbarLabel: "min-h-8 min-w-8 px-[calc(0.625rem-1px)] py-[calc(0.25rem-1px)] text-sm",
 };
 
 // Compound utilities (avatar stacks, icon + chevron) share icon-button density
-// while allowing their width to grow. Keep the coarse target in TARGET_CLASSES.
+// while allowing their width to grow. Visible word labels get more horizontal
+// room without changing toolbar height. Keep coarse targets in TARGET_CLASSES.
 const PRESET_SIZE_CLASSES: Record<ButtonPreset, string> = {
   inline: SIZE_CLASSES.sm,
   form: SIZE_CLASSES.md,
   toolbar: "min-h-8 min-w-8 p-1 text-sm",
+  toolbarLabel: "min-h-8 min-w-8 px-2.5 py-1 text-sm",
 };
 
 const RADIUS_CLASSES: Record<ButtonRadius, string> = {
@@ -171,7 +175,7 @@ export type ButtonProps = Omit<AriaButtonProps, "className"> & {
   title?: string;
 } & (
   | {
-      /** Shared geometry for contextual actions, forms and compound toolbar controls. */
+      /** Shared geometry for contextual actions, forms, and labelled or compound toolbar controls. */
       preset: ButtonPreset;
       size?: never;
       radius?: never;

@@ -1,12 +1,9 @@
-import { Xmark } from "iconoir-react";
 import { Dialog, Modal, ModalOverlay } from "react-aria-components";
 import { Badge } from "../../../components/Badge";
-import { Button, IconButton } from "../../../components/Button";
+import { Button } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
-import { StudioDialogModal } from "../../../components/aria/StudioModal";
-import { StudioDialogBody, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { formatPromptContextModeLabel, formatTokenCountLabel, resolveTokenUsageForMessage } from "./chatMessageDetailHelpers";
 import { formatSpeakerTimestamp } from "./chatSpeakerTimestamp";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
@@ -18,11 +15,6 @@ type MessageMenuLike = {
   y: number;
   maxHeight: number;
   view: "actions" | "token_usage";
-};
-
-type ImageLightboxLike = {
-  src: string;
-  alt: string;
 };
 
 type InvitePromptLike = {
@@ -297,52 +289,7 @@ export function ChatMessageMenuOverlay({
   );
 }
 
-export function ChatImageLightboxOverlay({
-  imageLightbox,
-  onClose,
-}: {
-  imageLightbox: ImageLightboxLike | null;
-  onClose: () => void;
-}) {
-  if (!imageLightbox) {
-    return null;
-  }
-
-  return (
-    <StudioDialogModal
-      isOpen
-      isDismissable
-      onOpenChange={(open) => { if (!open) onClose(); }}
-      size="media"
-      layout="editor"
-      gutter="responsive"
-      dialogAriaLabel="Image preview"
-      data-testid="chat-image-lightbox"
-    >
-      <StudioDialogHeader title={imageLightbox.alt || "Image preview"} trailing={
-        <IconButton
-          type="button"
-          variant="ghost"
-          tone="muted"
-          size="sm"
-          onPress={onClose}
-          aria-label="Close image preview"
-          data-testid="chat-image-lightbox-close"
-        >
-          <Xmark className="h-4 w-4" aria-hidden="true" />
-        </IconButton>
-      } />
-      <StudioDialogBody scrollable>
-        <img
-          src={imageLightbox.src}
-          alt={imageLightbox.alt}
-          className="mx-auto block max-h-[70dvh] max-w-full object-contain"
-          data-testid="chat-image-lightbox-image"
-        />
-      </StudioDialogBody>
-    </StudioDialogModal>
-  );
-}
+export { ChatImageLightboxOverlay } from "./ChatImageLightbox";
 
 export function ChatInvitePromptOverlay({
   invitePrompt,

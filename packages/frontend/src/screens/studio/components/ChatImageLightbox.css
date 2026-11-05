@@ -1,0 +1,70 @@
+.chat-image-preview-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.chat-image-preview-body[data-immersive="true"] {
+  padding: calc(var(--studio-media-safe-top) + 3.5rem) var(--studio-media-safe-right)
+    var(--studio-media-safe-bottom) var(--studio-media-safe-left);
+}
+
+.chat-image-preview-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  overscroll-behavior: contain;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+}
+
+.chat-image-preview-stage:focus-visible {
+  outline: 2px solid var(--color-primary-500);
+  outline-offset: 2px;
+}
+
+.chat-image-preview-stage[data-zoomed="true"] { cursor: grab; }
+.chat-image-preview-stage[data-zoomed="true"][data-interacting="true"] { cursor: grabbing; }
+.chat-image-preview-stage[data-page-zoomed="true"] { touch-action: auto; }
+
+.chat-image-preview-image {
+  display: block;
+  max-width: none;
+  max-height: none;
+}
+
+.chat-image-preview-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.chat-image-preview-mobile-footer {
+  padding-right: var(--studio-media-safe-right);
+  padding-bottom: var(--studio-media-safe-bottom);
+  padding-left: var(--studio-media-safe-left);
+}
+
+/* Overlaying the optional mobile tools preserves the image transform between
+   taps. Hidden tools stay in the keyboard/assistive order and reveal on focus. */
+.chat-image-preview-tools { flex-shrink: 0; }
+.chat-image-preview-tools[data-immersive="true"] {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: 1;
+}
+.chat-image-preview-tools[data-visible="false"] {
+  opacity: 0;
+  pointer-events: none;
+}
+.chat-image-preview-tools:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}

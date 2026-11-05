@@ -62,6 +62,11 @@ determines the winner. Arbitrary layout classes remain supported.
   contents instead of forcing a stack into a square. Use the quiet variant for
   these triggers. People's avatars and ownership rings inside remain circular, AI
   faces keep their rounded square tiles, and status badges remain informational.
+  Toolbar actions with visible words, such as image Fit and Width, use
+  `Button preset="toolbarLabel"`: the same flat 8px corners and 32px mouse / 44px
+  touch minimum, with 10px horizontal and 4px vertical padding. Use `variant="ghost"`
+  for quiet, repeatable actions; callers do not override their padding or radius.
+  The compact `toolbar` preset stays appropriate for icon/chevron and count utilities.
   Take/Request/Give/Release control use the inline action preset; browser approval
   Allow/Deny use the form preset.
   Browser participant popovers use `Text bodyCompact` with primary contrast for
@@ -189,6 +194,20 @@ For overlays, let the shared shell own the viewport clearance and use these pres
 - `size="media"` gives image previews up to 90vw / 1280px while retaining the same
   safe-area clearance and bounded header/body layout. Use this for visual material
   that needs desktop reading room, rather than widening ordinary forms.
+- `layout="media"` defaults to that media width and the bounded editor frame on
+  desktop, filling its bounded height so the image canvas has a stable viewport. At
+  widths up to 767px, or with a coarse pointer and a viewport up to 500px tall, it
+  becomes a fullscreen transparent surface over an opaque dark backdrop.
+  The shared preset selects one set of frame classes; callers do not undo card
+  borders, shadows or gutters with overrides. `useStudioMediaImmersive()` reads
+  the same query for gesture behavior. The dialog's `data-media-immersive`
+  attribute selects its inner presentation without duplicating breakpoints.
+  Use its `--studio-media-safe-top/right/bottom/left` properties for content and
+  Close clearance; each keeps at least 16px and respects the native safe area.
+  Pair it with `StudioDialogHeader layout="media"`: the title remains available
+  to assistive technology while its controls float at the mobile top-right safe
+  area. The header and its controls stay mounted across rotation, preserving focus.
+  Focus containment, Escape/native Back and native-surface occlusion stay shared.
 - `gutter="responsive"` opts an entire dialog into 16px horizontal padding below
   640px and 20px above it. Header, body and `StudioDialogFooter padding="default"`
   share that inset and use 16px vertical padding. The legacy default stays 20px
@@ -498,8 +517,18 @@ When reading an older search result, keep **Return to latest** above the compose
 without scrolling through the loaded history. It replaces the footer action and becomes
 **New messages** only when messages have actually arrived. Returning moves keyboard focus to
 the transcript, preserves the draft and retains the route back to the original search results.
-Image and text attachments use the shared editor dialog shell, with a fixed header/Close,
-scrollable content, Escape/native Back handling and focus restored to the attachment trigger.
+Image attachments use the shared media dialog shell: a desktop card and an immersive
+mobile surface with Close at the screen's top-right safe area. Its shared footer controls
+stay outside the image transform. Mobile tools start visually hidden, overlay the bottom
+edge on a single image tap, and reveal for keyboard focus or assistive activation. Keep
+those controls in the accessibility order; do not use `aria-hidden` or `inert`. Image-region
+Space/Enter toggles them, while a focused tool stays visible. No timer hides them, and their
+visibility never resizes the image canvas. Desktop tools stay visible. Local pinch/double-tap
+zoom and pan, Fit, Width, and
+actual-size inspection do not move Close or the toolbar. Rotation preserves the inspected
+source position within the image bounds. Text attachments keep the
+editor shell with a fixed header/Close and scrollable content. Both preserve Escape/native
+Back handling and restore focus to the attachment trigger.
 Text files remain plain text; long files page without decoding the whole file into the DOM.
 
 The desktop working-context header owns one continuous divider across the navigation,

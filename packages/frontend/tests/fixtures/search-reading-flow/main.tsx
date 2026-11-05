@@ -33,6 +33,9 @@ import "./review.css";
 declare const __SEARCH_READING_BASELINE__: boolean;
 
 const params = new URLSearchParams(location.search);
+// The image review's frozen source already has the above-composer latest action.
+// Preserve the original search review's older baseline composition separately.
+const legacyHistoryLayout = __SEARCH_READING_BASELINE__ && params.get("review") !== "image";
 const theme = params.get("theme") === "dark" ? "dark" : "light";
 document.documentElement.classList.toggle("dark", theme === "dark");
 document.documentElement.style.colorScheme = theme;
@@ -94,12 +97,12 @@ function Conversation({ onReturnToLatest }: { onReturnToLatest: () => void }) {
             onOpenImage={(src, alt) => setLightbox({ src, alt })}
             onRequestActions={noop} onRequestActionsAtPoint={noop} onMessageContextMenu={noop} />
           <ChatMessageHistoryControls messageTargetActive={Boolean(target)} loadingNewer={loading} newerError={error}
-            canReturnToLatest onLoadNewer={loadNewer} onReturnToLatest={returnLatest} hideLatest={!__SEARCH_READING_BASELINE__} />
+            canReturnToLatest onLoadNewer={loadNewer} onReturnToLatest={returnLatest} hideLatest={!legacyHistoryLayout} />
         </ChatColumn>
       </div>
     </ChatTranscriptViewport>
     <Composer controller={controller} scrollbarInset={scrollbarInset}
-      aboveComposer={target && !__SEARCH_READING_BASELINE__ ? <ChatNewMessagesButton {...{ hasNewMessages: false, readingRegionRef: scroll.scrollContainerRef }} onPress={returnLatest} /> : null} />
+      aboveComposer={target && !legacyHistoryLayout ? <ChatNewMessagesButton {...{ hasNewMessages: false, readingRegionRef: scroll.scrollContainerRef }} onPress={returnLatest} /> : null} />
     <ChatImageLightboxOverlay imageLightbox={lightbox} onClose={() => setLightbox(null)} />
   </div>;
 }
