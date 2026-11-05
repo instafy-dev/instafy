@@ -72,8 +72,9 @@ export function readBrowserHandBackOf(message: Pick<ChatMessage, "role" | "metad
 
 /**
  * A prompt Studio sent for Octo rather than words the person wrote: a
- * continuation of a browser card, or a hand-back. The chat shows it as a
- * one-line notice.
+ * continuation of a browser card, or a hand-back. Never a bubble of the
+ * person's: a continuation reads as a one-line notice, and a hand-back shows
+ * nothing, its turn being part of the browser turn's row (routedBrowserFold.ts).
  */
 export function isBrowserNoticePrompt(message: Pick<ChatMessage, "role" | "metadata">): boolean {
   return readBrowserRequestOf(message) !== null || readBrowserHandBackOf(message) !== null;
@@ -90,8 +91,10 @@ export function isUnsentBrowserNoticePrompt(message: Pick<ChatMessage, "id" | "r
 }
 
 /**
- * The one-line record a hand-back leaves in the chat in place of its prompt:
- * "Octo continued with what it found in the browser".
+ * The words a hand-back's prompt is stored with, in place of Studio's own:
+ * "Octo continued with what it found in the browser". The chat draws none of
+ * them (the hand-back's turn joins the browser turn's row), so the person reads
+ * one answer to their message, never a line across the chat between two.
  */
 export function browserHandBackNotice(agentName: string): string {
   return `${agentName.trim() || "Octo"} continued with what it found in the browser`;
