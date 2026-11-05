@@ -301,7 +301,8 @@ const LOOK_PROGRAMS: &[&str] = &[
     "test", "[", "sleep", "which", "stat", "realpath", "dirname", "basename",
 ];
 /// Programs that run the runtime's own memory script (`python AGENTS.py`), which only prints
-/// the workspace's memory: the start of a turn, as INSTAFY.md and `/learn` tell the model.
+/// the workspace's memory: the start of a `/learn` turn, as its prompt tells the model, or of a
+/// turn whose space still holds an edited memory file that says so.
 const MEMORY_SCRIPT_PROGRAMS: &[&str] = &["python", "python3"];
 /// `find` options that act on what it finds: deleting, running a command, writing a file.
 const FIND_ACTIONS: &[&str] = &[
@@ -2292,7 +2293,8 @@ mod tests {
     }
 
     // A local test: a turn that only posted a browser card read "Ran a command" for
-    // `python AGENTS.py`, the runtime's own memory script, which INSTAFY.md tells the model to run.
+    // `python AGENTS.py`, the runtime's own memory script, which `INSTAFY.md` told the model to run
+    // (`/learn`'s prompt still does).
     #[test]
     fn the_memory_script_is_a_look() {
         let root = tempfile::tempdir().expect("tmp");

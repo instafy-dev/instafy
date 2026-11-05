@@ -11,13 +11,6 @@ This skill defines when the Agent should create learnings and how `/learn` shoul
 
 This policy is generic. Workflow-specific behavior belongs in pinned workflow skills; learned memory should capture only the reusable delta that remains after those skills are assumed.
 
-## Start-of-task ritual
-
-- Load the project-memory snapshot once. Prefer `python AGENTS.py` if present.
-- Use `instafy-skill-reading` and `instafy-skill-router` to choose the smallest relevant skill set.
-- Skim legacy `learnings/` only when relevant to the request or before non-trivial workspace changes.
-- For trivial questions that do not require workspace context, answer immediately.
-
 ## When to write a learning
 
 Write a learning when:

@@ -5,20 +5,6 @@ This workspace uses Instafy’s skill-based knowledge files:
 - `.agents/skills/*/SKILL.md` (procedures, policies, and learned memory skills)
 - `learnings/*` (legacy compatibility only; avoid new writes here)
 
-## Fast context load (preferred)
-
-To load workspace knowledge in a single tool call, run:
-- `python AGENTS.py`
-
-It prints a compact snapshot of `INSTAFY.md` + `.agents/skills` + a legacy learnings index when present.
-
-## Learn / self-improving runs
-
-If you are doing `/learn` or a self-improving loop, prefer:
-- `python AGENTS.py`
-
-Use that output as your primary memory snapshot instead of scanning directories; it is faster and budgeted.
-
 ## Responsiveness
 
 - If the user asks a *general* question that does not require workspace context (e.g. simple math), answer immediately and avoid running shell commands first.

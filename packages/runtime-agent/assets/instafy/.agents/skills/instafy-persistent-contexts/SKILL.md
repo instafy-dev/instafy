@@ -30,7 +30,6 @@ Use a bounded tree, not a flat dump:
 1. Load the root context rules first.
 2. Load the smallest workflow context(s) that match the request.
 3. Load learned child contexts only when they clearly apply.
-4. Stop when you can act safely.
 
 Specific contexts are acceptable when their scope is clear. A narrow context is not bad by itself; it becomes bad when it leaks into unrelated tasks.
 
@@ -86,19 +85,6 @@ For multi-site browser work or monitoring automations:
 - store one child context per site/domain/session label
 - keep each child's worked cues isolated
 - do not collapse two sibling sites into one mixed browser memory block
-
-For browser context routing, keep the scope terms distinct:
-
-- `page` contexts: one site/page/tab inside the current shared session
-- `isolated session` contexts: same runtime, separate browser context because login/account state must not mix
-- `runtime-backed session` contexts: a separate visible browser runtime/surface
-
-Default learned memory should attach to `page` contexts first. Only promote memory to an `isolated session` or `runtime-backed session` scope when the separation itself is the durable lesson.
-
-When the UI already exposes multiple browser page/session cards, treat those as the preferred routing surface:
-
-- default to the currently active card unless the user names another one
-- if the user asks to keep multiple sites alive at once, attach a new sibling `page` context before escalating to isolated or runtime-backed scopes
 
 ## Loading discipline
 

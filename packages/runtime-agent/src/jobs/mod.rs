@@ -97,6 +97,8 @@ mod skills;
 pub(crate) mod stopped_turn;
 mod turn_baseline;
 mod turn_continuation;
+#[cfg(test)]
+mod turn_reading_tests;
 pub(crate) mod user_input_request;
 #[cfg(test)]
 mod web_research_routing_tests;
@@ -156,6 +158,8 @@ const ROUTED_BROWSER_TASK_MAX_UTF16_UNITS: usize = 8_000;
 const COLLABORATION_SKILL_DELEGATION_MAX_CHARS: usize = 1_600;
 const COLLABORATION_RESULT_POLICY_MAX_CHARS: usize = 1_200;
 const COLLABORATION_SKILL_PATH: &str = ".agents/skills/instafy-agent-collaboration/SKILL.md";
+/// The collaboration skill's folder under `.agents/skills`.
+const COLLABORATION_SKILL_ID: &str = "instafy-agent-collaboration";
 const ROUTING_PRE_OBSERVATION_OUTPUT_MAX_CHARS: usize = 4_000;
 const ROUTING_PRE_OBSERVATION_TIMEOUT_SECS: u64 = 10;
 const WORKSPACE_LEASE_WRITE_SCOPE: &str = "workspace.lease.write";
@@ -981,6 +985,9 @@ struct SkillMetadata {
     context_parents: Vec<String>,
     context_children: Vec<String>,
     routing_keywords: Vec<String>,
+    /// The `## ` sections of the skill a turn with no shell leaves out (`no_shell_omits`): what
+    /// only a turn that runs commands can use. The skill says which; the turn reads the rest.
+    no_shell_omits: Vec<String>,
     always_include: bool,
     max_children: Option<usize>,
 }
@@ -1004,6 +1011,9 @@ impl SkillMetadata {
         }
         if self.routing_keywords.is_empty() {
             self.routing_keywords = defaults.routing_keywords;
+        }
+        if self.no_shell_omits.is_empty() {
+            self.no_shell_omits = defaults.no_shell_omits;
         }
         if !self.always_include {
             self.always_include = defaults.always_include;
@@ -1087,6 +1097,7 @@ fn apply_skill_metadata_field(out: &mut SkillMetadata, key: &str, value: &str) {
         "routingkeywords" | "keywords" | "routingterms" => {
             out.routing_keywords = parse_skill_metadata_list(normalized_value.as_str())
         }
+        "noshellomits" => out.no_shell_omits = parse_skill_metadata_list(normalized_value.as_str()),
         "alwaysinclude" | "contextalwaysinclude" => {
             if let Some(value) = parse_skill_metadata_bool(normalized_value.as_str()) {
                 out.always_include = value;
@@ -1117,6 +1128,7 @@ fn default_skill_metadata_for_dir(dir_name: &str) -> SkillMetadata {
                 context_parents: Vec::new(),
                 context_children: Vec::new(),
                 routing_keywords: Vec::new(),
+                no_shell_omits: Vec::new(),
                 always_include: false,
                 max_children: None,
             }
@@ -1132,6 +1144,7 @@ fn default_skill_metadata_for_dir(dir_name: &str) -> SkillMetadata {
                 context_parents: Vec::new(),
                 context_children: Vec::new(),
                 routing_keywords: Vec::new(),
+                no_shell_omits: Vec::new(),
                 always_include: false,
                 max_children: None,
             }
@@ -1165,6 +1178,7 @@ fn default_skill_metadata_for_dir(dir_name: &str) -> SkillMetadata {
                 context_parents: Vec::new(),
                 context_children: Vec::new(),
                 routing_keywords: Vec::new(),
+                no_shell_omits: Vec::new(),
                 always_include: false,
                 max_children: None,
             }
@@ -1181,6 +1195,7 @@ fn default_skill_metadata_for_dir(dir_name: &str) -> SkillMetadata {
                 context_parents: Vec::new(),
                 context_children: Vec::new(),
                 routing_keywords: Vec::new(),
+                no_shell_omits: Vec::new(),
                 always_include: false,
                 max_children: None,
             }
@@ -1192,6 +1207,7 @@ fn default_skill_metadata_for_dir(dir_name: &str) -> SkillMetadata {
             context_parents: vec!["instafy-skill-router".to_string()],
             context_children: Vec::new(),
             routing_keywords: Vec::new(),
+            no_shell_omits: Vec::new(),
             always_include: false,
             max_children: Some(2),
         },
@@ -1206,6 +1222,7 @@ fn parse_skill_front_matter(raw: &str) -> SkillMetadata {
         context_parents: Vec::new(),
         context_children: Vec::new(),
         routing_keywords: Vec::new(),
+        no_shell_omits: Vec::new(),
         always_include: false,
         max_children: None,
     };
@@ -1242,6 +1259,7 @@ fn parse_skill_header_kv(raw: &str) -> SkillMetadata {
         context_parents: Vec::new(),
         context_children: Vec::new(),
         routing_keywords: Vec::new(),
+        no_shell_omits: Vec::new(),
         always_include: false,
         max_children: None,
     };
@@ -1993,7 +2011,13 @@ fn format_project_memory_snapshot(
     prompt_text: &str,
 ) -> Option<ProjectMemorySnapshot> {
     let preferences = ProjectPreferencesSnapshot::load(workspace_dir);
-    format_project_memory_snapshot_with_preferences(workspace_dir, prompt_text, &preferences, None)
+    format_project_memory_snapshot_with_preferences(
+        workspace_dir,
+        prompt_text,
+        &preferences,
+        None,
+        &[],
+    )
 }
 
 /// A skill a turn carries whatever its words, whole, and the section of it a turn on a
@@ -2071,12 +2095,13 @@ fn usable_with_no_shell(context: &ContextNode) -> bool {
 }
 
 /// The section of a skill only the routing step reads ([`format_browser_routing_preflight_snapshot`]):
-/// a turn that carries the skill whole leaves it out.
+/// no turn's memory snapshot carries it.
 const ROUTING_PREFLIGHT_SECTION: &str = "Routing preflight";
 
-/// `AGENTS.md`'s replies guide. Codex withdraws the space's `AGENTS.md` from a turn without the
-/// workspace ("The previously provided AGENTS.md instructions no longer apply"), so a browser
-/// turn on a restored thread is given this section with the browser skill's.
+/// `AGENTS.md`'s replies guide, all of `AGENTS.md` a browser turn reads: the rest says how to run
+/// commands. Codex withdraws the space's `AGENTS.md` from a turn without the workspace ("The
+/// previously provided AGENTS.md instructions no longer apply"), so a browser turn on a restored
+/// thread is given this section again with the browser skill's.
 const BROWSER_TURN_REPLIES_SECTION: &str = "## Replies";
 
 /// A Personal or Shared Browser turn: its only tools are its browser's. It has no shell, so it
@@ -2158,6 +2183,11 @@ fn workspace_file_section(
         &workspace_dir.join(relative_path),
         PROJECT_MEMORY_MAX_FILE_BYTES,
     )?;
+    markdown_section(&text, heading)
+}
+
+/// The section of `text` under `heading`, a line of its own, up to the next `## ` heading.
+fn markdown_section(text: &str, heading: &str) -> Option<String> {
     let start = text.match_indices(heading).map(|(at, _)| at).find(|&at| {
         (at == 0 || text[..at].ends_with('\n')) && text[at + heading.len()..].starts_with('\n')
     })?;
@@ -2166,11 +2196,29 @@ fn workspace_file_section(
     Some(format!("{heading}{}", body[..end].trim_end()))
 }
 
+/// `AGENTS.md`'s replies guide for a turn with no shell, when the space's copy is one Instafy
+/// ships, the current one or an earlier one: the rest of it says how to run commands. None for a
+/// copy the space edited or wrote, whose own rules may be for every turn, and for one with no
+/// such section; those are carried whole, as a building turn carries them.
+fn bundled_agents_doc_replies(workspace_dir: &Path) -> Option<String> {
+    let (text, truncated) = read_text_file_lossy_truncated(
+        workspace_dir,
+        &workspace_dir.join(learn::AGENTS_DOC_FILENAME),
+        PROJECT_MEMORY_MAX_FILE_BYTES,
+    )?;
+    if truncated || !learn::is_bundled_agents_doc(&text) {
+        return None;
+    }
+    markdown_section(&text, BROWSER_TURN_REPLIES_SECTION)
+}
+
+/// `left_out` names skills this turn's snapshot does not carry, whatever its words.
 fn format_project_memory_snapshot_with_preferences(
     workspace_dir: &Path,
     prompt_text: &str,
     preferences: &ProjectPreferencesSnapshot,
     pinned: Option<&PinnedSkill>,
+    left_out: &[&str],
 ) -> Option<ProjectMemorySnapshot> {
     let pinned_skill = pinned.map(|pinned| pinned.id);
     let mut remaining = PROJECT_MEMORY_MAX_TOTAL_BYTES;
@@ -2195,13 +2243,30 @@ fn format_project_memory_snapshot_with_preferences(
     out.push_str("\nProject memory snapshot (from workspace; already loaded):\n");
     let mut loaded_learned_blocks: Vec<LoadedLearnedBlock> = Vec::new();
 
-    let append_file = |label: &str, path: &Path, remaining: &mut usize, out: &mut String| {
+    // What a turn's copy of a skill leaves out: the section only the routing step reads, and,
+    // in a turn with no shell, the sections the skill names as what only a turn that runs
+    // commands can use (`no_shell_omits`). Nothing else of the file takes their place.
+    let without_omitted_sections = |text: &str, no_shell_omits: &[String]| -> String {
+        let mut text = without_markdown_h2_section(text, ROUTING_PREFLIGHT_SECTION).into_owned();
+        if pinned.is_some() {
+            for heading in no_shell_omits {
+                text = without_markdown_h2_section(&text, heading).into_owned();
+            }
+        }
+        text
+    };
+    let append_file = |label: &str,
+                       path: &Path,
+                       no_shell_omits: &[String],
+                       remaining: &mut usize,
+                       out: &mut String| {
         if *remaining == 0 || !path.exists() {
             return;
         }
         let budget = PROJECT_MEMORY_MAX_FILE_BYTES.min(*remaining);
         if let Some((text, truncated)) = read_text_file_lossy_truncated(workspace_dir, path, budget)
         {
+            let text = without_omitted_sections(&text, no_shell_omits);
             let rel = path.strip_prefix(workspace_dir).unwrap_or(path);
             let _ = writeln!(out, "\n## {} ({})", label, rel.display());
             out.push_str("```markdown\n");
@@ -2214,35 +2279,56 @@ fn format_project_memory_snapshot_with_preferences(
         }
     };
     // A turn's pinned skill is carried whole, up to `PINNED_SKILL_MAX_BYTES`, but for the
-    // section only the routing step reads: the turn cannot open the file for the rest. It takes
-    // as much of the budget as a skill its words route would, so those keep their room.
-    let append_pinned_skill =
-        |label: &str, path: &Path, remaining: &mut usize, out: &mut String| {
-            if *remaining == 0 || !path.exists() {
-                return;
-            }
-            let Some((text, cut)) =
-                read_text_file_lossy_truncated(workspace_dir, path, PROJECT_MEMORY_MAX_TOTAL_BYTES)
-            else {
-                return;
-            };
-            let text = without_markdown_h2_section(&text, ROUTING_PREFLIGHT_SECTION);
-            let mut end = text.len().min(PINNED_SKILL_MAX_BYTES);
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            let rel = path.strip_prefix(workspace_dir).unwrap_or(path);
-            let _ = writeln!(out, "\n## {} ({})", label, rel.display());
-            out.push_str("```markdown\n");
-            out.push_str(text[..end].trim_end());
-            out.push_str("\n```\n");
-            if cut || end < text.len() {
-                out.push_str("[truncated]\n");
-            }
-            *remaining = remaining.saturating_sub(end.min(PROJECT_MEMORY_MAX_FILE_BYTES));
+    // sections it leaves out: the turn cannot open the file for the rest. It takes as much of the
+    // budget as a skill its words route would, so those keep their room.
+    let append_pinned_skill = |label: &str,
+                               path: &Path,
+                               no_shell_omits: &[String],
+                               remaining: &mut usize,
+                               out: &mut String| {
+        if *remaining == 0 || !path.exists() {
+            return;
+        }
+        let Some((text, cut)) =
+            read_text_file_lossy_truncated(workspace_dir, path, PROJECT_MEMORY_MAX_TOTAL_BYTES)
+        else {
+            return;
         };
+        let text = without_omitted_sections(&text, no_shell_omits);
+        let mut end = text.len().min(PINNED_SKILL_MAX_BYTES);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let rel = path.strip_prefix(workspace_dir).unwrap_or(path);
+        let _ = writeln!(out, "\n## {} ({})", label, rel.display());
+        out.push_str("```markdown\n");
+        out.push_str(text[..end].trim_end());
+        out.push_str("\n```\n");
+        if cut || end < text.len() {
+            out.push_str("[truncated]\n");
+        }
+        *remaining = remaining.saturating_sub(end.min(PROJECT_MEMORY_MAX_FILE_BYTES));
+    };
 
-    append_file("AGENTS.md", &agents_doc_path, &mut remaining, &mut out);
+    // A turn with no shell reads `AGENTS.md`'s replies guide, as it does on a restored thread
+    // (`pinned_replies_section`), when the space's copy is one Instafy ships: the rest says how
+    // to run commands. A copy the space edited, or one with no such section, is carried whole: a
+    // team's own section ("Never open example.com in the browser.") is for every turn.
+    match pinned
+        .is_some()
+        .then(|| bundled_agents_doc_replies(workspace_dir))
+        .flatten()
+    {
+        Some(replies) if remaining > 0 => {
+            let _ = writeln!(out, "\n## AGENTS.md ({})", learn::AGENTS_DOC_FILENAME);
+            out.push_str("```markdown\n");
+            out.push_str(replies.trim_end());
+            out.push_str("\n```\n");
+            remaining = remaining.saturating_sub(replies.len());
+        }
+        Some(_) => {}
+        None => append_file("AGENTS.md", &agents_doc_path, &[], &mut remaining, &mut out),
+    }
     // Use the same read as the narrow preference snapshot. Do not project a
     // second copy (or a partially read/invalid preference) into broad memory.
     if let Some(memory) = preferences.memory_without_preferences() {
@@ -2342,6 +2428,25 @@ fn format_project_memory_snapshot_with_preferences(
             } else {
                 Vec::new()
             };
+            // A skill this turn leaves out, and the index of learned blocks while the space has
+            // none (it says only how to open them), take no place either.
+            let has_learned_blocks = workspace_memory_io::child_directories(
+                workspace_dir,
+                learn::LEARNED_BLOCKS_DIR_RELATIVE_PATH,
+            )
+            .into_iter()
+            .any(|block| read_skill_metadata(workspace_dir, &block.join("SKILL.md")).is_some());
+            selected_contexts.retain(|context| {
+                let learned_index = contexts.iter().any(|node| {
+                    node.id == context.id
+                        && node
+                            .metadata
+                            .context_kind
+                            .as_deref()
+                            .is_some_and(|kind| kind.eq_ignore_ascii_case("learned_index"))
+                });
+                !left_out.contains(&context.id.as_str()) && (has_learned_blocks || !learned_index)
+            });
             // A turn with a pinned skill loads, besides it, only the skills it can use; the
             // learned blocks its words route still come.
             if pinned.is_some() {
@@ -2394,10 +2499,26 @@ fn format_project_memory_snapshot_with_preferences(
                     break;
                 }
                 let label = format!("Context: {}", context.label);
+                let no_shell_omits = contexts
+                    .iter()
+                    .find(|node| node.id == context.id)
+                    .map_or(&[][..], |node| node.metadata.no_shell_omits.as_slice());
                 if Some(context.id.as_str()) == pinned_skill {
-                    append_pinned_skill(&label, &context.path, &mut remaining, &mut out);
+                    append_pinned_skill(
+                        &label,
+                        &context.path,
+                        no_shell_omits,
+                        &mut remaining,
+                        &mut out,
+                    );
                 } else {
-                    append_file(&label, &context.path, &mut remaining, &mut out);
+                    append_file(
+                        &label,
+                        &context.path,
+                        no_shell_omits,
+                        &mut remaining,
+                        &mut out,
+                    );
                 }
             }
 
@@ -10161,11 +10282,21 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "\nWorkspace memory snapshot skipped for this cross-chat context recovery turn. Use relevant context cards and bounded Instafy CLI conversation lookup instead of loading broad project memory.\n",
             );
         } else if include_workspace_memory && !stateful_thread_restored {
+            // A turn in the write lane emits no team plan (its contract says so) and reads the
+            // collaboration skill's delegation choice in its own section below: the rest of that
+            // skill (team plans, worker scopes, advisory locks) is a planning turn's, and its
+            // write scope is the guardrail section's.
+            let left_out: &[&str] = if workspace_write_response {
+                &[COLLABORATION_SKILL_ID]
+            } else {
+                &[]
+            };
             if let Some(snapshot) = format_project_memory_snapshot_with_preferences(
                 workspace_dir,
                 request_for_skills,
                 preferences,
                 pinned_skill_for_turn(job),
+                left_out,
             ) {
                 append_prompt_section(
                     &mut prompt,
@@ -10623,18 +10754,23 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - Avoid exploratory commands (especially `--help` output dumps). Only run commands that are needed to complete the task or to resolve a concrete error. When an Instafy capability you need seems missing, `instafy <group> --help` counts as needed.\n\
             - When the user asks about metadata the prompt doesn’t include (e.g. token usage), do not guess; retrieve it via the Instafy CLI (`instafy history ...` first, `instafy api get` as advanced fallback), not raw HTTP (curl/wget).\n\
             - Do not call controller APIs with curl/wget; use `instafy history` / `instafy api get` so auth works consistently and the command is logged.\n"),
-            "- For integration workflows, do a capability preflight before claiming success. Emit `request_integration` or `request_secret` only when evidence identifies missing third-party credentials or account scopes that the person can supply through that integration. A first-party Instafy operation denied by the current job's scope is not evidence that the person is signed out or missing a secret: report that the operation could not be saved or performed, without requesting credentials, reconnecting, or trying another identity.\n\
-            - For integration requests (for example \"connect <provider>\"), if runtime/tool capability is unclear, do a skills preflight: check installed skills first, and if no clear match exists, use skill discovery/import before concluding unsupported.\n",
+            "- For integration workflows, do a capability preflight before claiming success. Emit `request_integration` or `request_secret` only when evidence identifies missing third-party credentials or account scopes that the person can supply through that integration. A first-party Instafy operation denied by the current job's scope is not evidence that the person is signed out or missing a secret: report that the operation could not be saved or performed, without requesting credentials, reconnecting, or trying another identity.\n",
+            workspace_tools("- For integration requests (for example \"connect <provider>\"), if runtime/tool capability is unclear, do a skills preflight: check installed skills first, and if no clear match exists, use skill discovery/import before concluding unsupported.\n"),
             ]
             .concat());
             prompt.push_str(SECRET_REJECTION_CONTRACT);
             prompt.push_str(
             "- The skill's own check rejects a held value when its token request answers 401 or its status says the credential is wrong. When the provider's answer does not say which value it rejected, ask again for all of them, so the person gets the fields back in the chat instead of a detour to settings. Say in one sentence that the provider did not accept the values, quote the provider's own reason when it gives one, and give the skill's copy hints for those values.\n\
-            - Missing secret/env UX: emit the relevant `request_secret`/`request_integration` action immediately, then ask one short follow-up question: whether the user already has the credential and whether they want help finding/creating it.\n\
-            - For auth/integration tasks, check which values the space already has before requesting a new secret. The inventory is already in your environment as `INSTAFY_PROJECT_SECRET_INVENTORY`; read that rather than shelling out for it, and never run a command to list secrets during first-run skill setup. When the person says they saved a value, the environment is the answer to what is present, not the wording of their message: check it, or run the skill's status check, before saying any value is still missing.\n\
-            - A conversation that began with a skill setup (`/skills import ... --start` or `/skills start`) stays that setup until the skill's \"## Getting started\" is done. On every later turn, including the one a saved card continues, first pick the setup up at its next unanswered step, re-reading that SKILL.md if you need to (confirm what it asks you to confirm, write the files it names, offer its schedule), and only then take up anything new. While the setup lasts, write to the person in plain sentences: no \"please\", no em dashes, no exclamation marks, no jokes.\n",
+            - Missing secret/env UX: emit the relevant `request_secret`/`request_integration` action immediately, then ask one short follow-up question: whether the user already has the credential and whether they want help finding/creating it.\n",
             );
-            prompt.push_str(WORKSPACE_IS_CURRENT_RULE);
+            // A browser turn has no environment to read the inventory from, and no workspace.
+            prompt.push_str(workspace_tools(
+            "- For auth/integration tasks, check which values the space already has before requesting a new secret. The inventory is already in your environment as `INSTAFY_PROJECT_SECRET_INVENTORY`; read that rather than shelling out for it, and never run a command to list secrets during first-run skill setup. When the person says they saved a value, the environment is the answer to what is present, not the wording of their message: check it, or run the skill's status check, before saying any value is still missing.\n",
+            ));
+            prompt.push_str(
+            "- A conversation that began with a skill setup (`/skills import ... --start` or `/skills start`) stays that setup until the skill's \"## Getting started\" is done. On every later turn, including the one a saved card continues, first pick the setup up at its next unanswered step, re-reading that SKILL.md if you need to (confirm what it asks you to confirm, write the files it names, offer its schedule), and only then take up anything new. While the setup lasts, write to the person in plain sentences: no \"please\", no em dashes, no exclamation marks, no jokes.\n",
+            );
+            prompt.push_str(workspace_tools(WORKSPACE_IS_CURRENT_RULE));
             // A turn that may not ask for the browser is not offered its card, here as in a
             // restored thread's reminder. A chat keeps one browser thread, so what its first turn
             // is offered stays in every later browser turn's history.
@@ -10721,18 +10857,9 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             } else {
                 "- For browser/UI tasks, use this turn's browser tools when it has them and report observed page output.\n"
             },
-            "- For nearby/location-dependent browsing requests (for example \"good coffee nearby\"), do not stop at a generic search-results page if the user asked for a recommendation. Continue until you can report at least one concrete candidate or the exact blocker.\n\
-            - For recommendation-seeking browser tasks, prefer map/listing/review pages over repeating search-result links. If needed, inspect a few likely candidates and summarize the strongest observed option with concrete details.\n\
-            - Use loaded skills and learned blocks for workflow behavior. Treat Rust/runtime prompts as execution invariants only, not as the source of task-specific strategy.\n\
-            - If a browser tool fails or refuses a page, that ends that page, not the task: go on to the next source in this turn. When nothing is left to try, say in plain words what did not work (never paste raw error codes such as `net::ERR_…`); do not claim success without real execution.",
-            if offers_browser_card {
-                " No browser tools on this turn is not a failure: emit `request_browser`."
-            } else {
-                ""
-            },
-            "\n\
-            - Ask for clarification if you lack enough information to act.
-            ",
+            // How a browser turn finds pages, reads a recommendation and goes on past a failed page
+            // is its browser skill's and its run instructions'. A reading turn asks nothing first.
+            workspace_tools("- Ask for clarification if you lack enough information to act.\n"),
             ]
             .concat());
             record_prompt_section_metric(
@@ -19146,15 +19273,14 @@ fn resolve_exact_owned_write_scope_path(workspace_dir: &Path, raw: &str) -> Opti
 /// task that ended "then build a comparison page", a comparison's browser turn
 /// read one page and stopped "because this turn is read-only", and a browser
 /// turn asked for a page told the person "in this run: it's read-only" (local
-/// tests, Oct 31). A browser turn that hands back is told that reading what the
-/// request needs is why it changes no files, and that the building turn right
-/// after it makes what the person asked for: told only that it reads pages and
-/// that the building turn after it makes the page, a comparison's browser turn
-/// read one page and answered that it could not create the page "in this
-/// read-only turn" (a local test, Nov 4). Any other read-only job is told it is
-/// read-only. A browser turn that carries on the person's own message and hands
-/// nothing back is also told how to hand a message that asks Octo to make
-/// something to the building turn
+/// tests, Oct 31). A browser turn that hands back reads only that it changes no
+/// files: its part (the reading) and who makes what the person asked for are said
+/// once, right before the request (`browser_hand_back::READING_PART`). Told who
+/// builds here too, and twice more, a comparison's browser turn read one page and
+/// answered that it could not create the page "in this read-only turn" (a local
+/// test, Nov 4). Any other read-only job is told it is read-only. A browser turn
+/// that carries on the person's own message and hands nothing back is also told
+/// how to hand a message that asks Octo to make something to the building turn
 /// ([`browser_hand_back::offers_the_build_request`]).
 fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> String {
     let browser = metadata
@@ -19166,7 +19292,7 @@ fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> String {
         .and_then(JsonValue::as_str)
         .map(|transport| transport.trim().to_ascii_lowercase().replace('_', "-"));
     let line = if metadata.is_some_and(browser_hand_back::hands_back) {
-        "- This turn reads what the request needs, so it changes no files; the building turn right after it makes what the person asked for from your finding lines.\n"
+        "- This turn changes no files.\n"
     } else if browser.as_deref() == Some("shared") {
         "- This turn reads pages in Instafy's browser; Octo builds in the chat.\n"
     } else if browser.as_deref() == Some("desktop-personal") {
@@ -26968,10 +27094,13 @@ mod tests {
                 "- { type: 'request_location', optional precision: 'approximate' | 'precise', optional description: string }\n- If you emit `request_integration`,",
                 "never offer two candidate addresses: a guessed address is a link the person will trust because it is yours.\n",
                 "- For browser/UI tasks, use this turn's browser tools when it has them and report observed page output.\n",
-                "do not claim success without real execution.\n- Ask for clarification",
             ] {
                 assert!(contract.contains(kept), "{metadata}: {kept}");
             }
+            assert!(
+                contract.ends_with("- For browser/UI tasks, use this turn's browser tools when it has them and report observed page output.\n"),
+                "{metadata}: {contract}"
+            );
         }
         // A building turn is still offered the card in each of those places.
         let building = contract(json!({}), None);
@@ -26980,7 +27109,6 @@ mod tests {
             "- { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }\n",
             "Outside a skill setup, a `request_browser` task never carries an address read only from page or tool content.\n",
             "Without them, emit `request_browser`: it is a handoff to Instafy's browser, not evidence that a page was opened or a task completed.\n",
-            "No browser tools on this turn is not a failure: emit `request_browser`.\n",
         ] {
             assert!(building.contains(offer), "{offer}");
         }
@@ -33621,12 +33749,12 @@ mod tests {
     /// "because this turn is read-only", and a browser turn asked for a page
     /// told the person "in this run: it's read-only" (local tests, Oct 31).
     /// Every browser turn stays read-only: one that hands back is told that it
-    /// reads what the request needs, which is why it changes no files, and that
-    /// the building turn right after it makes what the person asked for, any
-    /// other that Octo builds in the chat. Told that it reads pages and that the
-    /// building turn after it makes the page, a comparison's routed turn read
-    /// one page and answered that it could not create the page "in this
-    /// read-only turn" (a local test, Nov 4). A browser turn reads that line
+    /// changes no files (its part, the reading, and who makes what the person
+    /// asked for are said once, right before its request), any other that Octo
+    /// builds in the chat. Told that it reads pages and that the building turn
+    /// after it makes the page, a comparison's routed turn read one page and
+    /// answered that it could not create the page "in this read-only turn" (a
+    /// local test, Nov 4). A browser turn reads that line
     /// alone, with no guardrail heading, mode or rationale above it. A
     /// read-only job outside the browser is told it is read-only, under its
     /// guardrail.
@@ -33666,9 +33794,7 @@ mod tests {
             for transport in ["shared", "desktop-personal"] {
                 let section = line(&browser_turn(transport, true, true, &scope));
                 assert!(
-                    section.contains(
-                        "- This turn reads what the request needs, so it changes no files; the building turn right after it makes what the person asked for from your finding lines.\n"
-                    ),
+                    section.contains("- This turn changes no files.\n"),
                     "{section}"
                 );
                 assert!(!section.contains("read-only."), "{section}");
@@ -33750,15 +33876,14 @@ mod tests {
                 assert!(!section.contains("request_build"), "{section}");
             }
         }
-        // A routed turn whose findings go back to the building turn: told which turn makes what
-        // the person asked for, and never offered a build request.
+        // A routed turn whose findings go back to the building turn: told that it changes no
+        // files (its part says which turn makes what the person asked for), and never offered a
+        // build request.
         for transport in ["shared", "desktop-personal"] {
             for stamp in [json!(true), json!(false)] {
                 let section = section(&routed(transport, true, stamp));
                 assert!(
-                    section.contains(
-                        "- This turn reads what the request needs, so it changes no files; the building turn right after it makes what the person asked for from your finding lines.\n"
-                    ),
+                    section.contains("- This turn changes no files.\n"),
                     "{section}"
                 );
                 assert!(!section.contains("request_build"), "{section}");

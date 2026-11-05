@@ -35,6 +35,7 @@ before(async () => {
 after(() => web.close());
 
 const BROWSER_SKILL = fs.readFileSync(new URL("../../runtime-agent/assets/instafy/.agents/skills/instafy-browser-automation/SKILL.md", import.meta.url), "utf8");
+const AGENTS_DOC = fs.readFileSync(new URL("../../runtime-agent/assets/instafy/AGENTS.md", import.meta.url), "utf8");
 const flat = (s) => s.replace(/\s+/g, " ");
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const failed = (checks) => checks.filter((c) => !c.pass).map((c) => c.id).sort();
@@ -249,16 +250,19 @@ test("every rule the eval grades is a rule the skills state", () => {
   // "Finding a page" is the browser skill's, and the research skill points to it.
   const browser = flat(BROWSER_SKILL);
   const finding = {
-    no_guessed_paths: ["Open an address the person, a skill or a search result gave, a link on a page you read (print a page's links with its text), or the home page of the official site the task is about.", "Never a search engine or a guessed path."],
+    no_guessed_paths: ["Open an address the person, a skill or a search result gave, a link on a page you read (print a page's links with its text), or the home page of the official site the task is about (for reviews, a reviewer's own site).", "Never a search engine or a guessed path."],
     missing_page_searched: ["A page that says it is missing (\"not found\", \"are you lost?\"): use that site's own search box or menu."],
     no_search_engine: ["Never a search engine or a guessed path."],
-    facts_from_own_page: ["comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: choose its stations, set the day and a daytime hour, press its button and read the route off the page it shows), not a listing or a kiosk page: those only lead to it."],
-    unchecked_said: ["Anything not read on a page this turn (from memory or a search result: how far, how to get there, what is best) says \"not checked\", or stays out."],
+    facts_from_own_page: ["comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: choose its stations and the day and time the person travels (a daytime hour when they gave none), press its button and read the route off the page it shows, saying which day and time it is for), not a listing or a kiosk page: those only lead to it."],
   };
   for (const [id, needles] of Object.entries(finding)) for (const needle of needles) assert.ok(browser.includes(needle), `${id}: ${needle}`);
   assert.ok(skill.includes('as "Finding a page" in `instafy-browser-automation` says'));
-  // The browser turn returns findings in the shape the eval grades.
-  for (const key of ['"url"', '"title"', '"readAt"', '"viewer"', '"facts"', '"stopped"']) assert.ok(browser.includes(key), key);
+  // "Not checked" is the replies guide's, which every turn reads, a browser turn its "Replies".
+  assert.ok(flat(AGENTS_DOC).includes('A fact no page you read this turn states says "not checked", or stays out.'), "unchecked_said");
+  // A browser turn writes its finding lines as its prompt's findings section says (`{url, title, facts}` or
+  // `{url, stopped}`), and Instafy adds when and in which browser each page was read: the fields the eval grades
+  // are the ones citing names (`findings_labelled` above). The browser skill states no second format.
+  assert.ok(!browser.includes("End with one finding per page"));
   assert.match(browser, /One `request_browser` card may carry up to 6 related reads/);
 });
 

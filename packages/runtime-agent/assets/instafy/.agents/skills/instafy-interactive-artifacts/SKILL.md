@@ -68,11 +68,13 @@ own kind of page.
    the phone screenshot.
 3. Never post preview, tunnel or localhost URLs. A public link only when the user asks for one:
    `instafy-frontend-previews`.
-4. After an edit no new card is needed; reload open viewers if the builder can (`instafy bind command <dir>
+4. After an edit no new card is needed; reload the open page if the builder can (`instafy bind command <dir>
    reload '{}'`). If the server stopped, rerun the same `instafy preview open`.
 
 ## 4. Reply
 
 2-5 lines in the user's terms: the verdict, what the page lets them do, what is unverified, and ONE `Assumed:` line
-for the defaults you chose. End with 2-3 short suggested replies they can send as-is (adjustments of what you
-assumed). The card speaks for itself: never point them to it. No file paths, commands or "validation passed".
+for the defaults you chose. A page they want to share says in one line who can open it (people in this space) and
+how to get a link anyone can open (ask for a public link), not as an assumption. The card speaks for itself: never
+point them to it or say it opened. No file paths, commands, "validation passed", "the provided read" or "updated for
+viewers".
