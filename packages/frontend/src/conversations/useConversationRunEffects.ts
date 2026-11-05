@@ -2,10 +2,6 @@ import { useEffect, type Dispatch, type MutableRefObject } from "react";
 import type { RunRecord } from "../types";
 import { controllerClient } from "../sdk/instafy";
 import {
-  createConversationGoalMetadataPatch,
-  settleGoalAfterTerminalRun,
-} from "./conversationGoals";
-import {
   isAwaitingLeaseRunStale,
   isQueuedRunStale,
   resolveAwaitingLeaseRunExpiresAt,
@@ -24,12 +20,7 @@ interface ConversationRunEffectsArgs {
   pendingLeaseSweepEpoch: number;
   bumpPendingLeaseSweepEpoch: () => void;
   pendingLeaseSweepTimeoutRef: MutableRefObject<ReturnType<typeof setTimeout> | null>;
-  currentUserId: string | null;
   dispatch: Dispatch<ConversationsAction>;
-  updateControllerConversationMetadata?: (params: {
-    conversationId: string;
-    metadata: Record<string, unknown>;
-  }) => Promise<unknown>;
 }
 
 export function useConversationRunEffects({
@@ -42,9 +33,7 @@ export function useConversationRunEffects({
   pendingLeaseSweepEpoch,
   bumpPendingLeaseSweepEpoch,
   pendingLeaseSweepTimeoutRef,
-  currentUserId,
   dispatch,
-  updateControllerConversationMetadata,
 }: ConversationRunEffectsArgs) {
   useEffect(() => {
     if (conversations.length === 0) {
@@ -99,27 +88,6 @@ export function useConversationRunEffects({
         run.status === "canceled" ||
         isQueuedRunStale(run, nowMs)
       ) {
-        const goalResult = settleGoalAfterTerminalRun(
-          conversation.activeGoal,
-          run.metadata,
-          run.status,
-          currentUserId,
-        );
-        if (goalResult.changed) {
-          dispatch({
-            type: "SET_GOAL",
-            id: conversation.localId,
-            goal: goalResult.goal,
-          });
-          if (conversation.controllerId && updateControllerConversationMetadata) {
-            void updateControllerConversationMetadata({
-              conversationId: conversation.controllerId,
-              metadata: createConversationGoalMetadataPatch(goalResult.goal),
-            }).catch((error) => {
-              console.warn("Failed to persist terminal goal state", error);
-            });
-          }
-        }
         staleRunIdsToUnlink.add(run.id);
       }
     });
@@ -130,11 +98,9 @@ export function useConversationRunEffects({
     }
   }, [
     conversations,
-    currentUserId,
     dispatch,
     processedRunMessagesRef,
     runs,
-    updateControllerConversationMetadata,
   ]);
 
   useEffect(() => {

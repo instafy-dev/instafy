@@ -1,5 +1,6 @@
 //! Human Stop cancels only the jobs visible in the caller's snapshot. It does
 //! not trigger a queue drain or turn a stopped plan into a new lead checkpoint.
+//! An active goal is paused so automatic continuation cannot restart the work.
 //! Separately queued messages remain eligible for normal queue scheduling.
 use std::collections::BTreeSet;
 
@@ -63,7 +64,7 @@ pub(crate) async fn stop_conversation_jobs(
         .transaction()
         .await
         .map_err(|error| crate::internal_error(format!("failed to start transaction: {error}")))?;
-    let (response, cancellation, paused) =
+    let (response, cancellation, paused, goal_update) =
         stop_jobs_in_transaction(&state.config, &transaction, &context, conversation_id, &ids)
             .await?;
     transaction
@@ -71,6 +72,9 @@ pub(crate) async fn stop_conversation_jobs(
         .await
         .map_err(|error| crate::internal_error(format!("failed to commit Stop: {error}")))?;
     crate::provider_requests::publish_canceled_provider_requests(&state, &paused);
+    if let Some(conversation) = goal_update.as_ref() {
+        crate::conversation_goals::state::publish_update(&state, conversation);
+    }
 
     if let Some((conversation, cancellation)) = cancellation {
         // The durable cancellation is already accepted. A notification failure
@@ -104,6 +108,7 @@ async fn stop_jobs_in_transaction(
             conversations::JobCancellationSet,
         )>,
         Vec<crate::provider_requests::ProviderRequestRecord>,
+        Option<conversations::ConversationRecord>,
     ),
     (StatusCode, Json<ApiError>),
 > {
@@ -209,7 +214,13 @@ async fn stop_jobs_in_transaction(
         let paused =
             crate::device_grants::pause_conversation_grants(config, transaction, &conversation_id)
                 .await?;
-        return Ok((response, None, paused));
+        let goal_update = crate::conversation_goals::state::pause_for_user_stop(
+            transaction,
+            conversation_id,
+            actor_id,
+        )
+        .await?;
+        return Ok((response, None, paused, goal_update));
     }
 
     let mut suppressed_groups = Vec::new();
@@ -256,7 +267,18 @@ async fn stop_jobs_in_transaction(
         Some(notice),
     )
     .await?;
-    Ok((response, Some((conversation, cancellation)), Vec::new()))
+    let goal_update = crate::conversation_goals::state::pause_for_user_stop(
+        transaction,
+        conversation_id,
+        actor_id,
+    )
+    .await?;
+    Ok((
+        response,
+        Some((conversation, cancellation)),
+        Vec::new(),
+        goal_update,
+    ))
 }
 
 #[cfg(test)]
@@ -387,7 +409,7 @@ mod tests {
                 .get::<_, String>(0),
             "leased"
         );
-        let (response, cancellation, _) = stop_jobs_in_transaction(
+        let (response, cancellation, _, goal_update) = stop_jobs_in_transaction(
             &config,
             &tx,
             &context(owner),
@@ -399,6 +421,10 @@ mod tests {
         assert_eq!(response.canceled_job_ids, vec![jobs[0]]);
         assert_eq!(response.canceled_run_ids, vec![runs[0]]);
         assert_eq!(response.already_finished_job_ids, vec![jobs[3]]);
+        assert!(
+            goal_update.is_none(),
+            "ordinary chats have no goal mutation"
+        );
         // The stopped run's end on Home: one row that says it stopped.
         async fn stopped_rows(
             tx: &tokio_postgres::Transaction<'_>,
@@ -441,7 +467,7 @@ mod tests {
         )
         .await
         .map_err(api_error)?);
-        let (repeat, cancellation, _) =
+        let (repeat, cancellation, _, _) =
             stop_jobs_in_transaction(&config, &tx, &context(owner), conversation, &[jobs[0]])
                 .await
                 .map_err(api_error)?;
@@ -469,7 +495,7 @@ mod tests {
                 .get::<_, String>(0),
             "leased"
         );
-        let (response, _, _) =
+        let (response, _, _, _) =
             stop_jobs_in_transaction(&config, &tx, &context(owner), conversation, &[jobs[1]])
                 .await
                 .map_err(api_error)?;
@@ -506,7 +532,7 @@ mod tests {
             )
             .await?
             .get::<_, bool>(0));
-        let (batch, _, _) = stop_jobs_in_transaction(
+        let (batch, _, _, _) = stop_jobs_in_transaction(
             &config,
             &tx,
             &context(owner),
@@ -526,6 +552,43 @@ mod tests {
         )
         .await
         .map_err(api_error)?);
+        // A Stop can arrive after its final job completed but before the next
+        // automatic turn is dispatched. Its goal must still be paused/fenced.
+        let revision = Uuid::new_v4();
+        let metadata = json!({
+            "instafyGoal":{"id":"stop-goal", "objective":"Finish verification", "status":"active", "progressSummary":"API checked; UI remains"},
+            "_goalController":{"revision":revision,"ownerUserId":owner}
+        });
+        tx.execute(
+            "update conversations set metadata=$2 where id=$1",
+            &[&conversation, &metadata],
+        )
+        .await?;
+        let (finished, cancellation, _, goal_update) =
+            stop_jobs_in_transaction(&config, &tx, &context(owner), conversation, &[jobs[3]])
+                .await
+                .map_err(api_error)?;
+        assert!(finished.canceled_job_ids.is_empty());
+        assert!(cancellation.is_none());
+        let updated = goal_update
+            .expect("Stop pauses the goal between jobs")
+            .metadata
+            .unwrap();
+        assert_eq!(updated["instafyGoal"]["status"], "paused");
+        assert_eq!(
+            updated["instafyGoal"]["progressSummary"],
+            "API checked; UI remains"
+        );
+        assert_eq!(updated["instafyGoal"]["updatedBy"], json!(owner));
+        assert_ne!(updated["_goalController"]["revision"], json!(revision));
+        let (_, _, _, repeated_update) =
+            stop_jobs_in_transaction(&config, &tx, &context(owner), conversation, &[jobs[3]])
+                .await
+                .map_err(api_error)?;
+        assert!(
+            repeated_update.is_none(),
+            "repeated Stop preserves the paused goal"
+        );
         tx.rollback().await?;
         Ok(())
     }

@@ -45,7 +45,6 @@ vi.mock("../useConversationSubmitFlow", () => ({
     stickyMentionedAgentByConversationRef: { current: new Map<string, string>() },
   }),
 }));
-vi.mock("../useConversationGoalContinuationEffects", () => ({ useConversationGoalContinuationEffects: () => undefined }));
 vi.mock("../../status/useStatus", () => ({ useStatus: () => ({ showStatus: vi.fn() }) }));
 vi.mock("../../projects/useProject", () => ({ useProject: () => ({ activeProjectId: "space-1" }) }));
 vi.mock("../../providers/AuthProvider", () => ({ useAuth: () => ({ user: { id: "user-a" } }) }));

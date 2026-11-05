@@ -485,11 +485,17 @@ export function useConversationSubmitFlow({
               projectId,
               conversationWithGoal,
             );
-            if (controllerConversationId && result.changed) {
+            const saved = controllerConversationId && (!result.changed ||
               await updateControllerConversationMetadata({
                 conversationId: controllerConversationId,
                 metadata: createConversationGoalMetadataPatch(result.goal),
-              });
+              }));
+            if (!saved) {
+              if (result.changed) {
+                setConversationGoal(sourceConversation.localId, sourceConversation.activeGoal);
+              }
+              showStatus("Couldn't save the goal. Try again.", "error", 4500);
+              return;
             }
             if (goalCommandDispatchInput) {
               const dispatchResult = await dispatch(

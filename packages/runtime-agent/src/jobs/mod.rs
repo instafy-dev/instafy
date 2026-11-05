@@ -11449,7 +11449,11 @@ fn tracks_workspace_file_changes(
 ) -> bool {
     commit_to_workspace
         && !read_only_workspace
-        && (required || mode == RuntimeFinalOutputMode::PlainTextWrite)
+        && (required
+            || matches!(
+                mode,
+                RuntimeFinalOutputMode::PlainTextWrite | RuntimeFinalOutputMode::StructuredWrite
+            ))
 }
 
 /// Whether a turn lists the files it changed on disk among its receipts. Every
@@ -15450,6 +15454,9 @@ fn reasoning_effort_for_runtime_job(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeFinalOutputMode {
     StrictStructured,
+    // Workspace edits still need the goal_update action to finish or block a
+    // durable goal. Keep write tracking while using the structured channel.
+    StructuredWrite,
     SchemaFreeStructured,
     PlainTextReport,
     // Workspace-change turns: the model works with tools (apply_patch) and ends with a
@@ -15463,6 +15470,7 @@ impl RuntimeFinalOutputMode {
     fn label(self) -> &'static str {
         match self {
             Self::StrictStructured => "strict_structured",
+            Self::StructuredWrite => "structured_write",
             Self::SchemaFreeStructured => "schema_free_structured",
             Self::PlainTextReport => "plain_text_report",
             Self::PlainTextWrite => "plain_text_write",
@@ -15473,6 +15481,9 @@ impl RuntimeFinalOutputMode {
         match self {
             Self::StrictStructured => {
                 "runtime needs machine-readable summary/files/actions contract"
+            }
+            Self::StructuredWrite => {
+                "workspace-change turn with an active goal needs structured status actions"
             }
             Self::SchemaFreeStructured => {
                 "turn still needs parseable files/actions but API schema is brittle"
@@ -15487,7 +15498,7 @@ impl RuntimeFinalOutputMode {
     }
 
     fn disable_final_output_json_schema(self) -> bool {
-        !matches!(self, Self::StrictStructured)
+        !matches!(self, Self::StrictStructured | Self::StructuredWrite)
     }
 
     fn allow_plain_text_final_fallback(self) -> bool {
@@ -15502,6 +15513,22 @@ impl RuntimeFinalOutputMode {
     }
 }
 
+fn ordinary_job_requires_goal_actions(job: &LeaseJob) -> bool {
+    !is_browser_turn(job)
+        && !is_multi_agent_worker_job(job)
+        && !is_explicit_team_planning_job(job)
+        && !is_multi_agent_lead_continuation_job(job)
+        && active_goal_metadata(job.payload.get("metadata")).is_some_and(|goal| {
+            goal_metadata_string(goal, &["objective"]).is_some()
+                && (goal_metadata_string(goal, &["status"]).unwrap_or("active") == "active"
+                    || job
+                        .payload
+                        .pointer("/metadata/_controllerGoal/userTurn")
+                        .and_then(JsonValue::as_bool)
+                        == Some(true))
+        })
+}
+
 fn final_output_mode_for_runtime_job(
     job: &LeaseJob,
     read_only_scoped_worker_preobserved: bool,
@@ -15511,7 +15538,9 @@ fn final_output_mode_for_runtime_job(
     // its metadata asks, such as web chat's Summarize or Explain more on a selection.
     if !job.grants.is_empty() {
         RuntimeFinalOutputMode::StrictStructured
-    } else if metadata_requests_plain_text_report(job.payload.get("metadata")) {
+    } else if metadata_requests_plain_text_report(job.payload.get("metadata"))
+        && !ordinary_job_requires_goal_actions(job)
+    {
         RuntimeFinalOutputMode::PlainTextReport
     } else if read_only_scoped_worker_preobserved && is_multi_agent_worker_job(job) {
         RuntimeFinalOutputMode::PlainTextReport
@@ -15542,9 +15571,14 @@ fn final_output_mode_for_runtime_job(
         || browser_hand_back::is_hand_back_job(job))
         && !metadata_requests_read_only_workspace(job.payload.get("metadata"))
     {
-        // Workspace-write jobs run the natural agentic loop: edit via tools, finish with a
-        // plain summary. Files come from the git-status delta, so no JSON contract is imposed.
-        RuntimeFinalOutputMode::PlainTextWrite
+        // A goal needs the existing structured action channel to report its
+        // state. Ordinary writes keep natural finals; both modes retain actual
+        // workspace-change tracking and the same tool/scope permissions.
+        if ordinary_job_requires_goal_actions(job) {
+            RuntimeFinalOutputMode::StructuredWrite
+        } else {
+            RuntimeFinalOutputMode::PlainTextWrite
+        }
     } else {
         RuntimeFinalOutputMode::StrictStructured
     }
@@ -32158,6 +32192,214 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn active_goal_writes_keep_change_tracking_and_can_emit_a_completion_action() {
+        let tmp = tempdir().unwrap();
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        for requirement in [
+            WorkspaceFileChangeRequirement::Required,
+            WorkspaceFileChangeRequirement::Conditional,
+        ] {
+            for restored in [false, true] {
+                let scope = json!({"mode":"owned","ownedPaths":["src/widget.rs"],"readOnlyPaths":["tests"]});
+                let mut job = test_lease_job(
+                    Some("feature"),
+                    json!({"metadata":{
+                        "goal":{"id":"goal-1","objective":"Verify the widget fix","status":"active"},
+                        "writeIntent":true,"writeScope":scope,
+                    }}),
+                );
+                job.project_id = Some(project_id);
+                let mut preflight =
+                    test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, false, true);
+                preflight.workspace_file_change_requirement = requirement;
+                let job = job_with_agent_routing_preflight(&job, &preflight);
+                let expectations = runtime_job_expectations(&job.payload);
+                let mode = final_output_mode_for_runtime_job(&job, false, expectations);
+                assert_eq!(mode, RuntimeFinalOutputMode::StructuredWrite);
+                assert!(!mode.disable_final_output_json_schema());
+                assert!(!mode.allow_plain_text_final_fallback());
+                assert!(tracks_workspace_file_changes(
+                    true,
+                    false,
+                    expectations.workspace_file_changes,
+                    mode,
+                ));
+                assert!(!tracks_workspace_file_changes(true, true, true, mode));
+                assert!(routing_evidence_requirements(&job, expectations).command_observation);
+                assert_eq!(job.payload["metadata"]["writeScope"], scope);
+                let provider_state =
+                    json!({"defaultThreadId":"existing-thread","historyReplayRequired":false});
+                let (prompt, _, metrics) = processor
+                    .build_prompt_with_text(
+                        &project_id,
+                        &job,
+                        tmp.path(),
+                        "Verify and finish the widget fix.",
+                        true,
+                        restored.then_some(&provider_state),
+                        &[],
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                assert!(prompt.contains("Owned paths: src/widget.rs"));
+                assert!(prompt.contains("include one `goal_update` action in the final JSON"));
+                assert!(!prompt.contains("Do not emit `multi_agent_plan`, goals"));
+                assert!(!prompt.contains(WRITE_LANE_REPLY_LINE));
+                assert!(metrics["promptSections"].get("activeGoal").is_some());
+            }
+        }
+        let outcome = extract_codex_outcome(&json!({
+            "summary":"The widget fix is verified.","files":[],
+            "actions":[{"type":"goal_update","status":"completed","progressSummary":"Regression passed"}],
+        })).unwrap();
+        let messages = build_final_messages_from_outcome(&outcome, Some(tmp.path()));
+        assert!(messages.iter().any(|message| {
+            message.message_type.as_deref() == Some("goal_update")
+                && message
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata["details"]["status"] == "completed")
+        }));
+    }
+
+    #[test]
+    fn active_goal_selection_reports_keep_the_structured_completion_channel() {
+        let tmp = tempdir().unwrap();
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        for action in ["summarize", "explain_more"] {
+            let mut job = test_lease_job(
+                Some("feature"),
+                json!({"metadata":{
+                    "goal":{"id":"goal-1","objective":"Explain the reviewed design","status":"active"},
+                    "writeScope":{"mode":"read_only","ownedPaths":[],"readOnlyPaths":["src"]},
+                    "replyContext":{"kind":"message_selection","action":action,
+                        "messageId":"message-1","selectedText":"Option 2"},
+                }}),
+            );
+            job.project_id = Some(project_id);
+            let mode =
+                final_output_mode_for_runtime_job(&job, false, RuntimeJobExpectations::default());
+            assert_eq!(mode, RuntimeFinalOutputMode::StrictStructured);
+            assert!(!mode.disable_final_output_json_schema());
+            assert!(!mode.allow_plain_text_final_fallback());
+            assert_eq!(
+                final_output_schema_for_job(&job, false),
+                CodexFinalOutputSchema::Default
+            );
+            let (prompt, _, _) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "Explain the selected design.",
+                    true,
+                    None,
+                    &[],
+                    None,
+                    None,
+                )
+                .unwrap();
+            assert!(prompt.contains("include one `goal_update` action in the final JSON"));
+            assert!(prompt.contains("Respond with a single JSON object shaped as"));
+            assert!(prompt.contains(
+                "This job is read-only. Do not create, edit, move, delete, or return workspace file changes."
+            ));
+
+            // A worker reports to its lead; browser control retains its own
+            // response contract. Neither owns the ordinary goal status channel.
+            for metadata in [
+                json!({"multiAgentPlan":{"role":"worker","groupId":"group-1"}}),
+                json!({"browserTransport":"shared"}),
+            ] {
+                let mut special_job = job.clone();
+                special_job.payload["metadata"]
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(metadata.as_object().unwrap().clone());
+                assert_eq!(
+                    final_output_mode_for_runtime_job(
+                        &special_job,
+                        false,
+                        RuntimeJobExpectations::default(),
+                    ),
+                    RuntimeFinalOutputMode::PlainTextReport
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fresh_human_turn_can_resume_a_paused_goal_through_the_structured_channel() {
+        let job = test_lease_job(
+            Some("feature"),
+            json!({"metadata":{
+                "goal":{"id":"goal-1","objective":"Verify the widget fix","status":"paused"},
+                "_controllerGoal":{"userTurn":true},
+            }}),
+        );
+        let mode = final_output_mode_for_runtime_job(
+            &job,
+            false,
+            RuntimeJobExpectations {
+                workspace_file_changes: true,
+                ..RuntimeJobExpectations::default()
+            },
+        );
+        assert_eq!(mode, RuntimeFinalOutputMode::StructuredWrite);
+        assert!(!mode.disable_final_output_json_schema());
+        let outcome = extract_codex_outcome(&json!({
+            "summary":"Resuming the widget verification.","files":[],
+            "actions":[{"type":"goal_update","status":"active"}],
+        }))
+        .unwrap();
+        let messages = build_final_messages_from_outcome(&outcome, None);
+        assert!(messages.iter().any(|message| {
+            message.message_type.as_deref() == Some("goal_update")
+                && message
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata["details"]["status"] == "active")
+        }));
+    }
+
+    #[test]
+    fn inactive_goals_and_browser_turns_keep_their_existing_output_contract() {
+        let expectations = RuntimeJobExpectations {
+            workspace_file_changes: true,
+            ..RuntimeJobExpectations::default()
+        };
+        for status in ["paused", "completed", "blocked", "canceled"] {
+            let job = test_lease_job(
+                Some("feature"),
+                json!({"metadata":{
+                    "goal":{"id":"goal-1","objective":"Review","status":status},
+                }}),
+            );
+            assert_eq!(
+                final_output_mode_for_runtime_job(&job, false, expectations),
+                RuntimeFinalOutputMode::PlainTextWrite
+            );
+        }
+        for transport in ["shared", "desktop-personal"] {
+            let mut job = test_lease_job(
+                Some("feature"),
+                json!({"metadata":{"browserTransport":transport}}),
+            );
+            let original =
+                final_output_mode_for_runtime_job(&job, false, RuntimeJobExpectations::default());
+            job.payload["metadata"]["goal"] =
+                json!({"id":"goal-1","objective":"Review","status":"active"});
+            assert_eq!(
+                final_output_mode_for_runtime_job(&job, false, RuntimeJobExpectations::default()),
+                original
+            );
         }
     }
 

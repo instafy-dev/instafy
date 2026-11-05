@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { createInitialConversation, type ConversationState } from "../conversationState";
+import { createConversationGoal } from "../conversationGoals";
 import {
   didSendFailForPromptSentFromThisPage,
   forgetPromptsSentFromThisPageForTests,
@@ -14,6 +15,9 @@ const resolveParticipationMock = vi.hoisted(() => vi.fn());
 const ensureControllerConversationIdMock = vi.hoisted(() => vi.fn());
 const recordMessageToControllerMock = vi.hoisted(() => vi.fn());
 const sendPromptToControllerMock = vi.hoisted(() => vi.fn());
+const updateMetadataMock = vi.hoisted(() => vi.fn());
+const setConversationGoalMock = vi.hoisted(() => vi.fn());
+const showStatusMock = vi.hoisted(() => vi.fn());
 const queueAutoTitleConversationMock = vi.hoisted(() => vi.fn());
 const resolveLocalCapabilityHandleMock = vi.hoisted(() => vi.fn());
 const runLocalCapabilityConversationFlowMock = vi.hoisted(() => vi.fn());
@@ -38,6 +42,7 @@ vi.mock("../../sdk/instafy", async () => {
       conversations: {
         ...actual.controllerClient.conversations,
         resolveParticipation: resolveParticipationMock,
+        updateMetadata: updateMetadataMock,
       },
     },
   };
@@ -102,14 +107,14 @@ function HookHarness({
     runtimeStatuses: [],
     effectiveRuntimeId: null,
     effectiveRuntimeSource: "auto",
-    showStatus: vi.fn(),
+    showStatus: showStatusMock,
     createConversation: vi.fn(),
     selectConversation: vi.fn(),
     markConversationRead: vi.fn(),
     setConversationDraft: vi.fn(),
     setConversationControllerId: vi.fn(),
     setConversationTitle: vi.fn(),
-    setConversationGoal: vi.fn(),
+    setConversationGoal: setConversationGoalMock,
     appendMessages,
     updateMessage,
     linkRunToConversation: vi.fn(),
@@ -118,7 +123,7 @@ function HookHarness({
   return null;
 }
 
-describe("useConversationSubmitFlow group participation", () => {
+describe("useConversationSubmitFlow", () => {
   let container: HTMLDivElement;
   let root: Root;
   let flow: SubmitFlow | null;
@@ -143,6 +148,9 @@ describe("useConversationSubmitFlow group participation", () => {
     ensureControllerConversationIdMock.mockReset();
     recordMessageToControllerMock.mockReset();
     sendPromptToControllerMock.mockReset();
+    updateMetadataMock.mockReset().mockResolvedValue(true);
+    setConversationGoalMock.mockReset();
+    showStatusMock.mockReset();
     queueAutoTitleConversationMock.mockReset();
     resolveLocalCapabilityHandleMock.mockReset();
     runLocalCapabilityConversationFlowMock.mockReset();
@@ -186,6 +194,52 @@ describe("useConversationSubmitFlow group participation", () => {
     });
     container.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it.each([
+    ["/goal Review the changes", null, "active", true],
+    ["/goal edit Review the UI", "active", "active", true],
+    ["/goal pause", "active", "paused", false],
+    ["/goal resume", "paused", "active", true],
+    ["/goal clear", "paused", null, false],
+  ] as const)("persists explicit %s and dispatches only when requested", async (command, priorStatus, nextStatus, shouldDispatch) => {
+    conversation.activeGoal = priorStatus ? {
+      ...createConversationGoal("Review the changes", USER_ID), status: priorStatus,
+    } : null;
+    await act(async () => { await flow!.handleSubmit("conversation-local", command); });
+    const expectedGoal = nextStatus ? expect.objectContaining({ status: nextStatus }) : null;
+    expect(setConversationGoalMock).toHaveBeenCalledWith("conversation-local", expectedGoal);
+    expect(updateMetadataMock).toHaveBeenCalledTimes(1);
+    expect(updateMetadataMock).toHaveBeenCalledWith({
+      conversationId: CONTROLLER_ID, metadata: { instafyGoal: expectedGoal },
+    });
+    expect(sendPromptToControllerMock).toHaveBeenCalledTimes(shouldDispatch ? 1 : 0);
+    if (shouldDispatch) {
+      expect(sendPromptToControllerMock.mock.calls[0][2]).toMatchObject({
+        goal: { id: expect.any(String), status: "active" }, displayContent: command,
+      });
+    }
+  });
+
+  it("waits for the goal metadata write before starting its run", async () => {
+    let finishWrite!: () => void;
+    updateMetadataMock.mockReturnValue(new Promise<boolean>((resolve) => { finishWrite = () => resolve(true); }));
+    await act(async () => { await flow!.handleSubmit("conversation-local", "/goal Verify the change"); });
+    expect(updateMetadataMock).toHaveBeenCalledTimes(1);
+    expect(sendPromptToControllerMock).not.toHaveBeenCalled();
+    await act(async () => { finishWrite(); });
+    expect(sendPromptToControllerMock).toHaveBeenCalledTimes(1);
+    expect(updateMetadataMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["conversation", "metadata"] as const)("does not dispatch when %s persistence fails and restores the previous goal", async (failure) => {
+    conversation.activeGoal = createConversationGoal("Previous objective", USER_ID);
+    if (failure === "conversation") ensureControllerConversationIdMock.mockResolvedValue(null);
+    else updateMetadataMock.mockResolvedValue(null);
+    await act(async () => { await flow!.handleSubmit("conversation-local", "/goal edit New objective"); });
+    expect(sendPromptToControllerMock).not.toHaveBeenCalled();
+    expect(setConversationGoalMock).toHaveBeenLastCalledWith("conversation-local", conversation.activeGoal);
+    expect(showStatusMock).toHaveBeenCalledWith("Couldn't save the goal. Try again.", "error", 4500);
   });
 
   it("records a silent human turn without dispatching or starting a runtime", async () => {

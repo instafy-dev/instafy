@@ -5,10 +5,6 @@ import {
   type ConversationRoutingPreferences,
 } from "./conversationRoutingMetadata";
 import {
-  createConversationGoalMetadataPatch,
-  type ConversationGoal,
-} from "./conversationGoals";
-import {
   getConversationLifecycleMetadataKey,
   type ConversationLifecycleStatus,
 } from "./conversationMetadata";
@@ -83,29 +79,8 @@ export function useConversationMetadataPersistence({
     [currentUserId, latestStateRef, updateControllerConversationMetadata],
   );
 
-  const persistConversationGoal = useCallback(
-    (conversationId: string, goal: ConversationGoal | null) => {
-      if (!runtimeControllerEnabled || !currentUserId) {
-        return;
-      }
-      const conversation =
-        latestStateRef.current.conversations.find(
-          (entry) => entry.localId === conversationId,
-        ) ?? null;
-      if (!conversation?.controllerId) {
-        return;
-      }
-      void updateControllerConversationMetadata({
-        conversationId: conversation.controllerId,
-        metadata: createConversationGoalMetadataPatch(goal),
-      });
-    },
-    [currentUserId, latestStateRef, updateControllerConversationMetadata],
-  );
-
   return {
     setConversationLifecycleStatus,
     persistConversationRoutingPreferences,
-    persistConversationGoal,
   };
 }

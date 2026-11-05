@@ -13,7 +13,6 @@ import type { ChatMessage } from "../screens/studio/types";
 import { useRuntime } from "../runtime/useRuntime";
 import { useProject } from "../projects/useProject";
 import { useAuth } from "../providers/AuthProvider";
-import { useStatus } from "../status/useStatus";
 import { controllerClient } from "../sdk/instafy";
 import { isAppInForeground } from "../notifications/assistantMessageNotifications";
 import { isUuid } from "./conversationMessageUtils";
@@ -44,8 +43,6 @@ import {
   useConversationRunEffects,
   usePendingConversationEffects,
 } from "./useConversationProviderEffects";
-import { useConversationControllerDispatch } from "./useConversationControllerDispatch";
-import { useConversationGoalContinuationEffects } from "./useConversationGoalContinuationEffects";
 import { ConversationMessageMetadataProvider } from "./ConversationMessageMetadata";
 import { studioPerformance } from "../telemetry/studioPerformance";
 import { restoreConversationDrafts, saveConversationDrafts } from "./conversationDraftStorage";
@@ -154,7 +151,6 @@ const AccountConversationsProvider = ({ children }: PropsWithChildren) => {
   const pendingLeaseSweepTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { activeProjectId, projectAccessPending, projectAccessBlocked } = useProject();
   const { user } = useAuth();
-  const { showStatus } = useStatus();
   const runtimeContext = useRuntime();
   const {
     runs,
@@ -277,9 +273,7 @@ const AccountConversationsProvider = ({ children }: PropsWithChildren) => {
     pendingLeaseSweepEpoch,
     bumpPendingLeaseSweepEpoch,
     pendingLeaseSweepTimeoutRef,
-    currentUserId,
     dispatch,
-    updateControllerConversationMetadata,
   });
 
   usePendingConversationEffects({
@@ -296,13 +290,11 @@ const AccountConversationsProvider = ({ children }: PropsWithChildren) => {
     lastBackgroundAtRef,
     notifiedMessageIdsRef,
     dispatch,
-    updateControllerConversationMetadata,
   });
 
   const {
     setConversationLifecycleStatus,
     persistConversationRoutingPreferences,
-    persistConversationGoal,
   } =
     useConversationMetadataPersistence({
       latestStateRef,
@@ -434,10 +426,11 @@ const AccountConversationsProvider = ({ children }: PropsWithChildren) => {
 
   const setConversationGoal = useCallback(
     (conversationId: string, goal: ConversationGoal | null) => {
+      // Explicit goal commands own the awaited controller write before dispatch.
+      // A second background PATCH could arrive after dispatch and invalidate it.
       dispatch({ type: "SET_GOAL", id: conversationId, goal });
-      persistConversationGoal(conversationId, goal);
     },
-    [persistConversationGoal],
+    [],
   );
 
   const markConversationRead = useCallback((conversationId: string) => {
@@ -516,35 +509,6 @@ const AccountConversationsProvider = ({ children }: PropsWithChildren) => {
   const activeConversation = useMemo(() => {
     return state.conversations.find((conversation) => conversation.localId === state.activeId) ?? null;
   }, [state.activeId, state.conversations]);
-
-  const { sendPromptToController } = useConversationControllerDispatch({
-    conversations: state.conversations,
-    activeConversation,
-    activeProjectId,
-    currentUserId,
-    preferredRuntimeId: runtimeContext.preferredRuntimeId,
-    runtimeStatuses: runtimeContext.runtimeStatuses,
-    effectiveRuntimeId: runtimeContext.effectiveRuntimeId,
-    effectiveRuntimeSource: runtimeContext.effectiveRuntimeSource,
-    showStatus,
-    createConversation,
-    selectConversation,
-    markConversationRead,
-    setConversationDraft,
-    setConversationControllerId,
-    appendMessages,
-    linkRunToConversation,
-  });
-
-  useConversationGoalContinuationEffects({
-    conversations: state.conversations,
-    runs,
-    currentUserId,
-    setConversationGoal,
-    appendMessages,
-    sendPromptToController,
-    updateControllerConversationMetadata,
-  });
 
   const value = useMemo<ConversationsContextValue>(
     () => ({

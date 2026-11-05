@@ -163,6 +163,52 @@ while holding that lock to order drafts before completion or cancellation. Old c
 do not have the route cause draft delivery to stop without interrupting the job. Draft traffic
 does not wake idle lease polls.
 
+## Conversation goals
+
+A conversation goal is persisted in `conversations.metadata.instafyGoal`. Studio
+shows that state and sends explicit `/goal` edits; it does not schedule follow-up
+turns or apply the runtime's goal updates locally. An explicit start or resume
+persists the goal before dispatching its first turn.
+
+The controller binds a user turn to a private goal revision. User edits, new user
+turns and Stop invalidate older continuations; Stop pauses the goal even between
+jobs. Runtime goal updates require the source job's authenticated owner and exact
+revision. Only a fresh user turn may reactivate an inactive goal through a goal
+update; automatic continuations cannot resume themselves. Workers cannot change
+the parent goal. A final team checkpoint can
+inherit its planning job's binding; a planning receipt cannot continue the goal
+before that checkpoint.
+
+A successful goal turn records one durable wakeup in
+`conversation_goal_continuations`, in the completion transaction. Completion
+normally wakes it immediately; a staggered 30-second sweep recovers interrupted
+work. Claims expire after five minutes. Ordinary dispatch rechecks conversation
+and project access, credits, current goal revision, pending user questions and
+queued work. It commits the successor and wakeup result together. Stable message
+IDs and claim tokens prevent replayed callbacks or controller restarts from
+creating duplicate turns. No controller pool connection is held across dispatch.
+
+A continuation retains the source's write scope, tool limits and runtime
+configuration, and selects its agent profile through normal dispatch. Current
+profile model, reasoning and credential settings still apply. It does not replay
+one-turn approvals or the previous turn's mandatory edit/tool observations.
+Routing determines what evidence the next step needs. Browser-control goals require an explicit resume from the
+browser so the current page and permissions can be selected. Device grants retain
+their existing rule that only the person's own input starts a turn.
+
+Stopping policy remains deliberately simple: an explicit terminal goal update,
+a failed or canceled run, the existing 100-continuation limit, or repeated final
+output. Tool activity is evidence of activity, not proof of quality. Skills and
+the agent decide what work remains; there is no learned quality judge or
+unconditional extra review round. Transient dispatch failures get at most three
+attempts; permission or configuration refusals leave the goal visibly blocked.
+
+Deploy the migration and controller before the updated frontend. Older clients'
+automatic continuation requests are rejected with a refresh message. Jobs that
+predate controller goal bindings are not retroactively enrolled: resume an
+existing goal explicitly after upgrading. Goal state survives closing Studio;
+permissions, cancellation and bounded stopping still govern subsequent turns.
+
 ## Agent Job Trigger
 
 Each agent job records when the controller received what started it, on the database clock, and
