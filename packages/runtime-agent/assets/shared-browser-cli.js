@@ -2526,9 +2526,9 @@ function aboutCharacters(count) {
 // its top instead.
 function readingText(masked, shown, mask) {
   const cutLine = (below, more, scrollBy) =>
-    `[Text cut here: ${more ? "over" : "about"} ${aboutCharacters(below)} more characters.${
-      scrollBy ? ` Scroll down (y: ${scrollBy}) to read on.` : ""
-    }]`;
+    `[Text cut here: ${
+      below > 0 ? `${more ? "over" : "about"} ${aboutCharacters(below)} more characters` : "more text follows"
+    }.${scrollBy ? ` Scroll down (y: ${scrollBy}) to read on.` : ""}]`;
   const fromTop = () => {
     if (masked.length <= MAX_VISIBLE_TEXT_CHARS) return masked;
     const cut = masked.lastIndexOf("\n", TEXT_WINDOW_CHARS);
