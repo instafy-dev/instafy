@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import type { AuthChangeEvent, Session, User } from "@supabase/supabase-js";
 import { Capacitor } from "@capacitor/core";
 import { hasSupabaseConfig, supabase, supabaseAnonKey, supabaseUrl } from "../lib/supabaseClient";
+import { dropOtherAccountLink } from "../auth/otherAccountLink";
 import {
   describeExchangeError,
   loginEmailRedirectTo,
@@ -14,12 +15,14 @@ import {
   clearNativeAuthCallbackAttemptId,
   clearSignInReturnPath,
   clearPendingNativeAuthAttempt,
+  isTokenPairNativeAuthCallback,
   NATIVE_AUTH_ERROR_EVENT,
   NATIVE_AUTH_PROVIDER_LABELS,
   NATIVE_AUTH_SUCCESS_EVENT,
   nativeAuthAttemptProvider,
   nativeAuthCallbackErrorMessage,
   parseNativeAuthCallbackUrl,
+  readNativeAuthCallbackParams,
   readPendingNativeAuthAttempt,
   writeNativeAuthCallbackAttemptId,
   writeNativeAuthError,
@@ -312,22 +315,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let inFlight = false;
     let resumeCheckTimeout: number | null = null;
 
-    const extractAuthParam = (
-      url: URL,
-      hashParams: URLSearchParams,
-      key: string,
-    ): string | null => {
-      const fromSearch = url.searchParams.get(key);
-      if (typeof fromSearch === "string" && fromSearch.trim().length > 0) {
-        return fromSearch.trim();
-      }
-      const fromHash = hashParams.get(key);
-      if (typeof fromHash === "string" && fromHash.trim().length > 0) {
-        return fromHash.trim();
-      }
-      return null;
-    };
-
     const closeAuthBrowser = async () => {
       try {
         const { Browser } = await import("@capacitor/browser");
@@ -390,7 +377,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
 
     const completeNativeAuthAttempt = async (
-      completionMethod: "exchange_code_for_session" | "set_session",
+      completionMethod: "exchange_code_for_session",
       nextSession: Session | null,
       nextUser: User | null,
     ) => {
@@ -420,7 +407,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       const parsed = parseNativeAuthCallbackUrl(trimmed);
-      if (!parsed || !claimNativeAuthCallback(parsed)) {
+      if (!parsed) {
+        return;
+      }
+      const { code, accessToken, refreshToken, oauthError } = readNativeAuthCallbackParams(parsed);
+      // Session tokens instead of a code: see isTokenPairNativeAuthCallback.
+      // Checked before the claim, so neither handler acts on it.
+      if (isTokenPairNativeAuthCallback({ code, accessToken, refreshToken, oauthError })) {
+        return;
+      }
+      if (!claimNativeAuthCallback(parsed)) {
         return;
       }
 
@@ -433,17 +429,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       inFlight = true;
       try {
-        const hash = parsed.hash.startsWith("#") ? parsed.hash.slice(1) : parsed.hash;
-        const hashParams = new URLSearchParams(hash);
-        const code = extractAuthParam(parsed, hashParams, "code");
-        const accessToken = extractAuthParam(parsed, hashParams, "access_token");
-        const refreshToken = extractAuthParam(parsed, hashParams, "refresh_token");
-
-        const oauthError =
-          extractAuthParam(parsed, hashParams, "error_description") ??
-          extractAuthParam(parsed, hashParams, "error") ??
-          null;
-
         postNativeAuthTelemetry(kind("callback_received"), "info", null, {
           hasCode: Boolean(code),
           hasAccessToken: Boolean(accessToken),
@@ -490,31 +475,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             result.data.session ?? null,
             result.data.user ?? null,
           );
-          return;
-        }
-
-        if (accessToken && refreshToken) {
-          let result: Awaited<ReturnType<typeof supabase.auth.setSession>>;
-          try {
-            result = await supabase.auth.setSession({
-              access_token: accessToken,
-              refresh_token: refreshToken,
-            });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            await failNativeAuthAttempt(kind("session_failed"), "error", message, {
-              phase: "set_session",
-              thrown: true,
-            });
-            return;
-          }
-          if (result.error) {
-            await failNativeAuthAttempt(kind("session_failed"), "error", result.error.message, {
-              phase: "set_session",
-            });
-            return;
-          }
-          await completeNativeAuthAttempt("set_session", result.data.session ?? null, result.data.user ?? null);
           return;
         }
 
@@ -892,6 +852,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUser(data?.user ?? null);
       },
       async signOut() {
+        // A link held for another account belongs to the moment it was
+        // opened; it must not greet whoever signs in next on this page.
+        dropOtherAccountLink();
         await releaseNotificationSession();
         if (baseFallback || devGuestFallbackEnabled) {
           clearDevGuestFallbackState();
