@@ -3267,7 +3267,10 @@ fn outside_page_data(text: &str) -> String {
 }
 
 /// The start a turn's first request shares with its thread's latest earlier request on the same
-/// instructions, tools and output format: that request's turn and the share of the input.
+/// instructions, tools and output format: that request's turn and the share of that request's
+/// input this one starts with. Measured against the later request instead, the share fell with a
+/// shorter first request although the later one still started with all of it (a browser turn's
+/// first request a third shorter: its next turn started with every token of it, 81% of its own).
 fn start_share<'a>(harness: &'a Harness, label: &str) -> Option<(&'a str, usize)> {
     let turn = harness.turn(label);
     let request = first_sampling_request(turn);
@@ -3294,7 +3297,7 @@ fn start_share<'a>(harness: &'a Harness, label: &str) -> Option<(&'a str, usize)
         .count();
     Some((
         earlier_label,
-        100 * input_bytes(&input[..shared]) / input_bytes(&input).max(1),
+        100 * input_bytes(&input[..shared]) / input_bytes(&earlier_input).max(1),
     ))
 }
 
