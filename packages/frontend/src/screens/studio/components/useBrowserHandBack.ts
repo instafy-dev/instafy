@@ -12,9 +12,9 @@ import {
   readBrowserHandBackOf,
 } from "./browserHandBack";
 
-/** How a hand-back is shown and recorded. */
+/** How a hand-back is recorded. */
 export type BrowserHandBackExtras = {
-  /** What the chat shows in place of the prompt: a one-line notice. */
+  /** The words its prompt is stored with in place of Studio's own; the chat draws none of them. */
   display: string;
   /** Prompt metadata naming the browser job (the controller checks it). */
   metadata: Record<string, unknown>;
@@ -22,8 +22,8 @@ export type BrowserHandBackExtras = {
 
 /**
  * Try again on a hand-back whose turn failed: the same hand-back, sent again.
- * Its claim on the browser turn and Studio's words go out, never the notice
- * the chat shows for it ("Octo continued in the chat"), which alone would
+ * Its claim on the browser turn and Studio's words go out, never the words
+ * its prompt is stored with ("Octo continued in the chat"), which alone would
  * reach Octo as the person's request, with nothing of what the browser turn
  * found or what they asked. It carries the retry's metadata, and goes, as any
  * hand-back does, to the agent whose card the browser turn carried on (the
@@ -47,8 +47,8 @@ export function browserHandBackRetry(
 
 /**
  * The panel's send of a hand-back, given its submit: an ordinary turn of the
- * building lane, shown as its one-line notice, that resumes an idle lane or
- * is refused. A refusal adds no row of its own to the chat (the browser turn
+ * building lane, part of the browser turn's row in the chat, that resumes an
+ * idle lane or is refused. A refusal adds no row of its own to the chat (the browser turn
  * stays the last word); the send resolves to whether it went out.
  */
 export function browserHandBackSender({
@@ -97,7 +97,7 @@ type Options = {
    * send in the meantime replaces it.
    */
   held: boolean;
-  /** The agent the notice names, as in "Octo continued with what it found in the browser". */
+  /** The agent its stored words name, as in "Octo continued with what it found in the browser". */
   agentName?: string;
   /** Sends the hand-back as an ordinary turn of the building lane; resolves to whether it went out. */
   send: (message: string, extras: BrowserHandBackExtras) => Promise<boolean>;

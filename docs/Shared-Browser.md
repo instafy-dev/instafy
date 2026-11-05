@@ -2486,9 +2486,11 @@ unless the policy is `"covered"`.
   and the browser turn's reply is the answer. When a browser turn that
   continued a building card finishes and read at least one page, Studio sends
   one ordinary turn back to the building lane, "Continue building
-  with what the browser turn found.", shown as the notice "Octo continued with
-  what it found in the browser" and naming the browser job in
-  `continuesFromBrowserJob`. It does so only in the tab that sent both the
+  with what the browser turn found.", stored with the words "Octo continued
+  with what it found in the browser" and naming the browser job in
+  `continuesFromBrowserJob`. The chat draws none of it: the hand-back's turn
+  joins the browser turn's row, so the person's message gets one answer, with
+  one line, one reply and the card ([Chat activity](Chat-Activity.md)). It does so only in the tab that sent both the
   card's prompt and the browser continuation, when nobody wrote after the
   browser turn, the turn succeeded within the last ten minutes and did not
   stop for the person (`request_human_input`, or a step whose approval ended
@@ -2529,8 +2531,8 @@ unless the policy is `"covered"`.
   never as a send-queue entry. An earlier hand-back of the same browser turn
   that failed, was stopped or expired neither counts as Octo having continued
   nor as a prompt sent after the browser turn: "Try again" on a failed one
-  sends the hand-back again, its claim and Studio's words, never the notice
-  the chat shows for it. A hand-back resumes the building lane of the turn
+  sends the hand-back again, its claim and Studio's words, never the words
+  its prompt is stored with. A hand-back resumes the building lane of the turn
   whose card the browser turn carried on: it goes to that turn's agent alone,
   whichever agents its send names, and writes no more than that turn could,
   with no write intent when that turn had none and only its owned paths when
@@ -2666,7 +2668,7 @@ unless the policy is `"covered"`.
   for a card the routing step posted; it stamps `buildRequest` with the
   message's own words as `personRequest`, an empty reply and no findings. The
   chat shows neither the card nor, once the hand-back is in it, the browser
-  turn or the hand-back's notice: the person reads their message and then the
+  turn or the hand-back's prompt: the person reads their message and then the
   building turn. The building turn reads those words as the person's request
   and makes what they ask, reading any public page it needs itself. A refusal
   because the conversation moved on (someone wrote after the browser turn, or
@@ -2691,7 +2693,11 @@ The view shows one state at a time, derived from its status and the kind of
 failure it stored with its error (`hostedBrowserViewState`): one sentence,
 at most one button, and a neutral status pill. While opening, the view's
 sentence is the one loading signal on screen; the pill says **Starting…** only
-to screen readers (`startingShownInView`).
+to screen readers (`startingShownInView`). Back in a chat whose browser this
+page showed before, restored rather than opened by a press and with no turn of
+the chat on its way, nothing is starting: the view finds that browser again
+and says nothing while it does, neither the sentence nor the pill, unless that
+takes longer than the grace a picture on its way has (1.5 s).
 
 | State | Sentence | Button | Pill |
 |---|---|---|---|

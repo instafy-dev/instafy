@@ -3,7 +3,13 @@ import { resolveRetryingStatusPresentation } from "../../../conversations/runFai
 import type { ChatMessage } from "../types";
 import type { RunRecord } from "../../../types";
 import { extractRunIdFromMetadata } from "./chatAssistantIdentity";
-import { extractAgentJobId, runMatchesThreadJobId } from "./chatMessagePresentation";
+import {
+  extractAgentJobId,
+  newestTurnMessages,
+  readPendingHandBack,
+  readTurnJobIds,
+  runMatchesThreadJobId,
+} from "./chatMessagePresentation";
 import {
   isCompactionStatusText,
   resolveAssistantStatusHeadline,
@@ -161,6 +167,11 @@ function isJobThreadRow(message: ChatMessage): boolean {
   return (getMessageType(message) ?? "").trim().toLowerCase() === "agent_job_thread";
 }
 
+/** Where a turn's row stands: its newest turn's run, as the row shows it (newestTurnMessages). */
+function readJobThreadRunPhase(row: ChatMessage, threadMessages: ChatMessage[]) {
+  return resolveThreadRunStatusFromMessages(newestTurnMessages(threadMessages, readTurnJobIds(row))).phase;
+}
+
 /**
  * The runs the typing row speaks for: the same set isAssistantTyping counts,
  * which leaves out a silent skill-mode evaluation until it says something.
@@ -190,7 +201,7 @@ function isRoutedBrowserCard(message: ChatMessage): boolean {
 function resolveTurnOutcomeIds(latestDisplayedMessage: ChatMessage): string[] | null {
   if (isJobThreadRow(latestDisplayedMessage)) {
     const threadMessages = readJobThreadMessages(latestDisplayedMessage);
-    if (threadMessages.length === 0 || resolveThreadRunStatusFromMessages(threadMessages).phase !== "completed") {
+    if (threadMessages.length === 0 || readJobThreadRunPhase(latestDisplayedMessage, threadMessages) !== "completed") {
       return null;
     }
   } else if (!isFinalAgentOutcomeMessage(latestDisplayedMessage) && !isRoutedBrowserCard(latestDisplayedMessage)) {
@@ -222,7 +233,9 @@ function isRoutedCardStandingIn(card: ChatMessage, messages: readonly ChatMessag
  * - `live`: the row is a job thread still running. It shows the run's state
  *   itself (rail and caption), so a typing row under it would say it twice.
  *   So is a failed turn Instafy is trying again by itself whose retry has
- *   shown nothing yet: it reads "Trying again…". So is a routed card whose
+ *   shown nothing yet: it reads "Trying again…". So is a browser turn whose
+ *   hand-back has shown nothing yet: that hand-back's turn is the same row's
+ *   (routedBrowserFold.ts), never a "Starting…" under it. So is a routed card whose
  *   browser turn is on its way: it is that turn's one line, "Opening
  *   Instafy's browser…", until the turn shows something (routedBrowserFold.ts),
  *   and covers the typing row as that turn's own row then does, whatever else
@@ -248,14 +261,14 @@ export function resolveJobThreadTypingCoverage(
     return "none";
   }
   if (isJobThreadRow(latestDisplayedMessage)) {
-    if (isAutomaticRetryPending(latestDisplayedMessage)) {
+    if (isAutomaticRetryPending(latestDisplayedMessage) || readPendingHandBack(latestDisplayedMessage)) {
       return "live";
     }
     const threadMessages = readJobThreadMessages(latestDisplayedMessage);
     if (threadMessages.length === 0) {
       return "none";
     }
-    if (resolveThreadRunStatusFromMessages(threadMessages).phase !== "completed") {
+    if (readJobThreadRunPhase(latestDisplayedMessage, threadMessages) !== "completed") {
       return "live";
     }
   }
