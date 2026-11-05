@@ -54,6 +54,11 @@ const SHARED_BROWSER_PAGE_REQUIRED_CODE: &str = "shared_browser_page_required";
 /// A dispatch sends work straight to a ready runtime only when its last
 /// heartbeat is at most this old.
 const DISPATCHABLE_RUNTIME_HEARTBEAT_MAX_AGE_SECONDS: i64 = 90;
+/// The job metadata that says who can read the chat a job runs in
+/// ([`conversations::effective_visibility`]): the runtime titles a version in
+/// History, which the whole space reads, with the person's words only when it
+/// says `"public"`.
+const CONVERSATION_VISIBILITY_KEY: &str = "conversationVisibility";
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -1211,6 +1216,11 @@ pub(crate) async fn process_dispatch_prompt_timed(
     if request.allow_internal_review {
         request.metadata["internalPurpose"] = json!("space_review");
     }
+    // Who can read this chat, for what its jobs put where the whole space
+    // reads it: a version's title in History (runtime-agent
+    // `workspace_commit::version_title`).
+    let conversation_visibility =
+        conversations::effective_visibility(&transaction, &conversation.id).await?;
 
     // Every dispatch that can create an agent job crosses this fence. Most
     // internal callers intentionally retain their existing overlap policy,
@@ -2461,6 +2471,11 @@ pub(crate) async fn process_dispatch_prompt_timed(
         let mut agent_request = request.clone();
         apply_agent_prompt_segment(&mut agent_request, &prompt_segments, target);
         inject_agent_target_metadata(&mut agent_request.metadata, target);
+        // Job-payload-only, and never the sender's word for it.
+        ensure_object(&mut agent_request.metadata).insert(
+            CONVERSATION_VISIBILITY_KEY.to_string(),
+            json!(conversation_visibility),
+        );
         crate::multi_agent_plan::apply_worker_tool_requirement(
             &mut agent_request.metadata,
             &target.handle,

@@ -173,21 +173,28 @@ const VERSION_TITLE_MAX_CHARS: usize = 72;
 /// The title of a save no request of the person's names: the plain words an
 /// origin gives a save that comes without one.
 pub(crate) const DEFAULT_VERSION_TITLE: &str = "Save workspace changes";
+/// Where a job's metadata says who can read the chat it runs in: `"public"`
+/// when everyone in the space can, the chats it is a thread of included,
+/// else `"private"` (runtime-controller `dispatch.rs`).
+const CONVERSATION_VISIBILITY_KEY: &str = "conversationVisibility";
 
 /// The title of the version a turn's save makes, as History lists it: the
 /// request the turn carried out, in the person's words as the chat showed
 /// them, cut to one short line ([`one_short_line`]). It was "instafy: agent
 /// sync (project <id> )", which named the space and nothing the version did.
 ///
+/// - History is the whole space's and is never rewritten, so only a chat
+///   everyone in the space can read gives its words: a private chat's save,
+///   and one whose job does not say (from an older controller), gets the
+///   plain title, as Studio names a space only from a shared chat.
 /// - A hand-back's own words are the controller's line to Octo: it takes the
 ///   person's message its browser turn carried on (`personRequest`), which
 ///   only a message the routing step sent to the browser first has.
 /// - A team plan's helper, and its lead's next step, work from the plan's
 ///   words (its first line says "Skill-authored multi-agent plan"), never
 ///   the person's.
-/// - An evaluated turn (a scheduled run, a group chat's turn nobody
-///   addressed) starts with the controller's note to Octo in brackets, which
-///   is left out.
+/// - The controller's note to Octo in front of an evaluated turn's request
+///   is left out ([`after_note`]).
 ///
 /// Without the person's words the save gets [`DEFAULT_VERSION_TITLE`]. The
 /// title goes only into the space's own history, beside the chat that holds
@@ -202,8 +209,15 @@ pub(crate) fn version_title(job: &LeaseJob) -> String {
 fn request_words(job: &LeaseJob) -> Option<&str> {
     let payload = &job.payload;
     let metadata = payload.get("metadata");
+    let read_by_the_whole_space = metadata
+        .and_then(|metadata| metadata.get(CONVERSATION_VISIBILITY_KEY))
+        .and_then(JsonValue::as_str)
+        == Some("public");
+    if !read_by_the_whole_space {
+        return None;
+    }
     if super::browser_hand_back::is_hand_back_job(job) {
-        return super::browser_hand_back::person_request(metadata);
+        return super::browser_hand_back::person_request(metadata).map(after_note);
     }
     if super::is_multi_agent_worker_payload(payload)
         || super::is_multi_agent_lead_continuation_payload(payload)
@@ -219,15 +233,23 @@ fn request_words(job: &LeaseJob) -> Option<&str> {
     if shown.is_some() {
         return shown;
     }
-    let prompt = payload.get("prompt_text").and_then(JsonValue::as_str)?;
-    let participation = &payload["metadata"]["groupParticipation"];
-    let evaluated = participation["decision"].as_str() == Some("agent_evaluation")
-        && participation["enforcedBy"].as_str() == Some("runtime-controller");
-    if evaluated && prompt.starts_with('[') {
-        // runtime-controller `agent.rs`: "{note}\n\n{request}".
-        return prompt.split_once("]\n\n").map(|(_, request)| request);
+    payload
+        .get("prompt_text")
+        .and_then(JsonValue::as_str)
+        .map(after_note)
+}
+
+/// `words` without the note to Octo in brackets that the controller puts in
+/// front of an evaluated turn's request (a scheduled run, a group chat's turn
+/// nobody addressed: runtime-controller `agent.rs`, "[{note}]\n\n{request}").
+/// A hand-back carries its message's words as that message's turn got them,
+/// and its job does not say whether that turn was evaluated, so a leading
+/// paragraph in brackets goes wherever it comes from.
+fn after_note(words: &str) -> &str {
+    match words.split_once("]\n\n") {
+        Some((note, request)) if note.starts_with('[') => request,
+        _ => words,
     }
-    Some(prompt)
 }
 
 /// `words` as one short line: the first line that says anything, its spaces
@@ -257,22 +279,15 @@ pub(super) fn one_short_line(words: &str) -> Option<String> {
     Some(format!("{at_word}…"))
 }
 
-/// One word of a title: a link (a word with `://`, one starting `www.`, or a
-/// site's address with a path after it, `example.com/a`) as its site's name,
-/// lower-case and without `www.`; nothing for a word with `@`; else the word
-/// without control characters.
+/// One word of a title: a link ([`link_address`]) as its site's name,
+/// lower-case and without `www.`, or nothing when it names no site
+/// (`localhost:3000/admin`), so no path, query, port or sign-in of a link is
+/// kept; nothing for a word with `@`; else the word without control
+/// characters.
 fn title_word(word: &str) -> Option<String> {
     let lower = word.to_lowercase();
     let head = lower.trim_start_matches(|ch: char| !ch.is_alphanumeric());
-    let address = match lower.find("://") {
-        Some(at) => Some(&lower[at + 3..]),
-        None if head.starts_with("www.") => Some(head),
-        None => head
-            .split_once('/')
-            .filter(|(host, _)| is_site_name(host))
-            .map(|_| head),
-    };
-    if let Some(address) = address {
+    if let Some(address) = link_address(head) {
         let host = address.split(['/', '?', '#']).next().unwrap_or_default();
         let host = host.rsplit('@').next().unwrap_or_default();
         let host = host.split(':').next().unwrap_or_default();
@@ -285,6 +300,46 @@ fn title_word(word: &str) -> Option<String> {
     }
     let word: String = word.chars().filter(|ch| !ch.is_control()).collect();
     (!word.is_empty()).then_some(word)
+}
+
+/// What a word that is a link points at, from its host on; None for any
+/// other word. A link has a scheme (`https://`, or `https:/` typed with one
+/// slash), starts `www.`, or is a host with a path, query or fragment after
+/// it (`example.com/a`, `example.com?invite=…`, `localhost:3000/admin`): a
+/// site's name with nothing after its `?` ends a question.
+fn link_address(word: &str) -> Option<&str> {
+    for (at, _) in word.match_indices(":/") {
+        let scheme = word[..at]
+            .rsplit(|ch: char| !ch.is_ascii_alphabetic())
+            .next()
+            .unwrap_or_default();
+        // Two letters at least: `c:/Users` is a folder, not a scheme.
+        if scheme.len() >= 2 {
+            return Some(word[at + 1..].trim_start_matches('/'));
+        }
+    }
+    if word.starts_with("www.") {
+        return Some(word);
+    }
+    let (host, rest) = word.split_once(['/', '?', '#'])?;
+    let host = match host.rsplit_once(':') {
+        Some((name, port)) if !port.is_empty() && port.chars().all(|ch| ch.is_ascii_digit()) => {
+            name
+        }
+        _ => host,
+    };
+    (is_host(host) && rest.chars().any(char::is_alphanumeric)).then_some(word)
+}
+
+/// A host a link can name: a site's name ([`is_site_name`]), `localhost`, or
+/// an IPv4 address.
+fn is_host(host: &str) -> bool {
+    is_site_name(host)
+        || host == "localhost"
+        || (host.split('.').count() == 4
+            && host.split('.').all(|part| {
+                (1..=3).contains(&part.len()) && part.chars().all(|ch| ch.is_ascii_digit())
+            }))
 }
 
 /// A site's name: dotted labels of letters, digits and hyphens, ending in
@@ -3450,13 +3505,19 @@ mod tests {
             .expect("lease job")
     }
 
+    /// `payload` as dispatch sends it from a chat everyone in the space reads.
+    fn in_a_shared_chat(mut payload: serde_json::Value) -> serde_json::Value {
+        payload["metadata"]["conversationVisibility"] = serde_json::json!("public");
+        payload
+    }
+
     /// History lists a turn's save by what the person asked for, in one short
     /// line, never by the space's id ("instafy: agent sync (project <id> )").
     #[test]
     fn a_saves_title_is_the_persons_request_in_one_short_line() {
         use super::{DEFAULT_VERSION_TITLE, VERSION_TITLE_MAX_CHARS, version_title};
         use serde_json::json;
-        let title = |payload| version_title(&job(payload));
+        let title = |payload| version_title(&job(in_a_shared_chat(payload)));
 
         let tip = "Add a one-line tip about the best time to visit.";
         assert_eq!(title(json!({ "prompt_text": tip })), tip);
@@ -3539,6 +3600,114 @@ mod tests {
         ] {
             assert_eq!(title(empty), DEFAULT_VERSION_TITLE);
         }
+    }
+
+    /// History is the whole space's and is never rewritten: a private chat's
+    /// words never title a version, and nor do those of a job that does not
+    /// say who reads its chat (one from an older controller).
+    #[test]
+    fn a_private_chats_words_never_title_a_version() {
+        use super::{DEFAULT_VERSION_TITLE, version_title};
+        use serde_json::json;
+        let title = |payload| version_title(&job(payload));
+        let tip = "Add a one-line tip about the best time to visit.";
+
+        assert_eq!(
+            title(
+                json!({ "prompt_text": tip, "metadata": { "conversationVisibility": "public" } })
+            ),
+            tip
+        );
+        for metadata in [
+            json!({ "conversationVisibility": "private" }),
+            json!({ "conversationVisibility": "team" }),
+            json!({}),
+            json!({ "conversationVisibility": "private", "displayContent": tip }),
+            json!({
+                "conversationVisibility": "private",
+                "browserHandBack": { "verified": true, "personRequest": tip },
+            }),
+        ] {
+            assert_eq!(
+                title(json!({ "prompt_text": tip, "metadata": metadata })),
+                DEFAULT_VERSION_TITLE,
+                "{metadata}"
+            );
+        }
+        assert_eq!(title(json!({ "prompt_text": tip })), DEFAULT_VERSION_TITLE);
+    }
+
+    /// A link keeps only its site's name however it is typed: without its
+    /// scheme, with a query or fragment and no path, on a port, or with one
+    /// slash after its scheme. A host that is no site's name goes.
+    #[test]
+    fn a_link_typed_without_its_scheme_keeps_only_its_site() {
+        use super::one_short_line;
+        for (words, title) in [
+            (
+                "Link example.com?invite=SECRET123 on the page",
+                "Link example.com on the page",
+            ),
+            (
+                "Share Example.org#access_token=abc with the team",
+                "Share example.org with the team",
+            ),
+            (
+                "Open localhost:3000/admin?token=abc123 and fix the header",
+                "Open and fix the header",
+            ),
+            (
+                "Use https:/example.com/x?token=abc123 here",
+                "Use example.com here",
+            ),
+            ("See 192.168.1.20:8080/setup?key=abc first", "See first"),
+            (
+                "Check shop.example.co.uk:8443/cart?session=abc now",
+                "Check shop.example.co.uk now",
+            ),
+            // Not links: a question about a site, a rating, times, a folder.
+            (
+                "Is it on example.com? Rated 4.5/5 at 10:30/11:00, files in c:/Users",
+                "Is it on example.com? Rated 4.5/5 at 10:30/11:00, files in c:/Users",
+            ),
+        ] {
+            assert_eq!(one_short_line(words).as_deref(), Some(title), "{words}");
+        }
+    }
+
+    /// A hand-back carries its message's words as that message's turn got
+    /// them: a scheduled run's, or a group turn's nobody addressed, start
+    /// with the controller's note to Octo, which no title keeps.
+    #[test]
+    fn a_hand_back_of_an_evaluated_turn_is_titled_by_its_request() {
+        use super::version_title;
+        use serde_json::json;
+        let request = "Refresh the prices on the comparison page.";
+        let title = |person_request: String| {
+            version_title(&job(json!({
+                "prompt_text": "Continue building with what the browser turn found.",
+                "metadata": {
+                    "conversationVisibility": "public",
+                    "browserHandBack": { "verified": true, "personRequest": person_request },
+                },
+            })))
+        };
+        for note in [
+            "[Scheduled automation run — carry out the requested task normally. If and only if \
+             the task succeeds and there is nothing worth reporting, reply with exactly \
+             NO_RESPONSE and nothing else. Never use NO_RESPONSE for an error or an incomplete \
+             check.]",
+            "[Ambient group turn — nobody addressed you (Octo, @octo) directly. Decide \
+             participation first per the instafy-group-participation skill.]",
+        ] {
+            assert_eq!(title(format!("{note}\n\n{request}")), request, "{note}");
+        }
+        assert_eq!(title(request.to_string()), request);
+        // Brackets that are the person's own stay.
+        assert_eq!(
+            title("Fix [the header] and the menu\n\nthen check".to_string()),
+            "Fix [the header] and the menu"
+        );
     }
 
     /// Selection (a), end to end against a real single-tenant origin: an
