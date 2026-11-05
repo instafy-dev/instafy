@@ -3,7 +3,7 @@ import { resolveRetryingStatusPresentation } from "../../../conversations/runFai
 import type { ChatMessage } from "../types";
 import type { RunRecord } from "../../../types";
 import { extractRunIdFromMetadata } from "./chatAssistantIdentity";
-import { extractAgentJobId, runMatchesThreadJobId } from "./chatMessagePresentation";
+import { extractAgentJobId, readPendingHandBack, runMatchesThreadJobId } from "./chatMessagePresentation";
 import {
   isCompactionStatusText,
   resolveAssistantStatusHeadline,
@@ -222,7 +222,9 @@ function isRoutedCardStandingIn(card: ChatMessage, messages: readonly ChatMessag
  * - `live`: the row is a job thread still running. It shows the run's state
  *   itself (rail and caption), so a typing row under it would say it twice.
  *   So is a failed turn Instafy is trying again by itself whose retry has
- *   shown nothing yet: it reads "Trying again…". So is a routed card whose
+ *   shown nothing yet: it reads "Trying again…". So is a browser turn whose
+ *   hand-back has shown nothing yet: that hand-back's turn is the same row's
+ *   (routedBrowserFold.ts), never a "Starting…" under it. So is a routed card whose
  *   browser turn is on its way: it is that turn's one line, "Opening
  *   Instafy's browser…", until the turn shows something (routedBrowserFold.ts),
  *   and covers the typing row as that turn's own row then does, whatever else
@@ -248,7 +250,7 @@ export function resolveJobThreadTypingCoverage(
     return "none";
   }
   if (isJobThreadRow(latestDisplayedMessage)) {
-    if (isAutomaticRetryPending(latestDisplayedMessage)) {
+    if (isAutomaticRetryPending(latestDisplayedMessage) || readPendingHandBack(latestDisplayedMessage)) {
       return "live";
     }
     const threadMessages = readJobThreadMessages(latestDisplayedMessage);

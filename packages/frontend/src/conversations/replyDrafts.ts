@@ -208,8 +208,9 @@ export function readTurnReplyDraft(metadata: Record<string, unknown> | null | un
  * activity line) carries the draft in that row, in the place its reply takes,
  * so the turn stays one Octo row and the reply lands where its draft grew. A
  * retry that has shown nothing yet is shown by the row of the turn it tries
- * again ("Trying again…"), so its draft grows there. A draft whose turn has
- * no row yet is a row of its own, after the transcript.
+ * again ("Trying again…"), so its draft grows there; so does a hand-back's,
+ * in the row of the browser turn it went on from. A draft whose turn has no
+ * row yet is a row of its own, after the transcript.
  */
 export function placeReplyDrafts(messages: ChatMessage[], drafts: readonly ChatMessage[]): ChatMessage[] {
   if (drafts.length === 0) return messages;
@@ -219,6 +220,16 @@ export function placeReplyDrafts(messages: ChatMessage[], drafts: readonly ChatM
     if ((getMessageType(message) ?? "").trim().toLowerCase() !== "agent_job_thread") return;
     const jobId = readString(message.metadata?.jobId);
     if (jobId) turnRowByJobId.set(jobId, index);
+    // A row of more than one turn (a browser turn and its hand-back) holds each one's draft.
+    const turnJobIds = message.metadata?.turnJobIds;
+    if (Array.isArray(turnJobIds)) {
+      for (const turnJobId of turnJobIds) {
+        const id = readString(turnJobId);
+        if (id) turnRowByJobId.set(id, index);
+      }
+    }
+    const handBackRunId = message.metadata?.handBackPending === true ? readString(message.metadata?.handBackRunId) : null;
+    if (handBackRunId) retryRowByRunId.set(handBackRunId, index);
     if (message.metadata?.autoRetryPending !== true) return;
     const retryJobId = readString(message.metadata?.autoRetryJobId);
     const retryRunId = readString(message.metadata?.autoRetryRunId);

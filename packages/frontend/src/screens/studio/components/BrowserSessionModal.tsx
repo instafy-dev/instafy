@@ -1218,6 +1218,16 @@ export function BrowserSessionModal({
   const viewLive = viewState.kind === "live";
   const viewKindRef = useRef(viewState.kind);
   viewKindRef.current = viewState.kind;
+  // Back in a chat whose browser this page showed before, restored rather
+  // than opened by a press, with no turn of the chat on its way: the view
+  // finds that browser again in a moment. For that moment it says nothing,
+  // neither "Opening Instafy's browser…" nor "Starting…", as nothing is
+  // starting; only when finding it takes longer does it say it is opening,
+  // as a picture on its way does (RECONNECTING_GRACE_MS).
+  const reattaching = isOpen && !openedByPerson && hasConnectedHint && agentArrival === null &&
+    failure === null && viewState.kind === "opening" && !machineStartSlow && !browserRestarting;
+  const reattachTakesLong = useSustainedFlag(reattaching, RECONNECTING_GRACE_MS);
+  const quietReattach = reattaching && !reattachTakesLong;
   const shouldCollapseDocked =
     displayStatus !== "selecting" &&
     (shouldUseDesktopDockedCard || (shouldViewportCollapseDocked && displayStatus !== "connected"));
@@ -3593,7 +3603,7 @@ export function BrowserSessionModal({
             ) : null}
             {effectiveAgentControlOwner ? (
               <SharedBrowserControlOwnerPill controlOwner={effectiveAgentControlOwner} />
-            ) : (
+            ) : quietReattach ? null : (
               <BrowserSessionStatusPill status={displayStatus} view={viewState} />
             )}
             {toolbarLeading || locationOptions ? null : (
@@ -3655,11 +3665,11 @@ export function BrowserSessionModal({
             </>
           )}
           toolbarLeading={toolbarLeading}
-          toolbarStatus={
+          toolbarStatus={quietReattach ? null : (
             <span className={sharedBrowserChrome.compact ? "sr-only" : undefined}>
               <BrowserSessionStatusPill status={displayStatus} view={viewState} />
             </span>
-          }
+          )}
         />
       ) : null}
 
@@ -3869,7 +3879,7 @@ export function BrowserSessionModal({
               viewState={hostedBrowserViewState({ status: "connecting", failure: null, hasConnection: true, machineStartSlow, browserRestarting })} />
           ) : null}
           {compactCardBody}
-          {!shouldCollapseDocked && displayStatus !== "selecting" && !viewLive ? (
+          {!shouldCollapseDocked && displayStatus !== "selecting" && !viewLive && !quietReattach ? (
             <BrowserSessionRecovery viewState={viewState} reason={error}
               runtimeLimit={recoveryRuntimeLimit} onRetry={retryConnection} />
           ) : null}
