@@ -1,7 +1,4 @@
 .studio-search-result .studio-search-result-copy > .studio-search-message-excerpt {
-  color: var(--color-slate-700);
-  font-size: 14px;
-  line-height: 1.6;
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -11,10 +8,6 @@
   background: var(--color-amber-100);
   color: inherit;
   font-weight: 600;
-}
-
-.dark .studio-search-result .studio-search-result-copy > .studio-search-message-excerpt {
-  color: var(--color-slate-200);
 }
 
 .dark .studio-search-message-excerpt mark {

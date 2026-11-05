@@ -1,0 +1,15 @@
+html, body, #root { height: 100%; margin: 0; }
+.reading-review { display: flex; flex-direction: column; height: 100dvh; min-height: 0; overflow: hidden; background: #fff; color: #292824; }
+.dark .reading-review { background: var(--color-studio-dark-panel); color: #e8e6e3; }
+.reading-chat-shell { height: 100%; min-width: 0; display: flex; flex-direction: column; }
+.reading-chat-header { min-height: 56px; display: flex; align-items: center; gap: 12px; padding: 0 16px 0 4px; border-bottom: 1px solid #e9e7e4; }
+.reading-chat-header > span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 14px; font-weight: 600; }
+.dark .reading-chat-header { border-color: var(--color-studio-dark-divider); }
+.reading-chat { position: relative; display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; }
+.reading-chat > [data-testid="composer-preview"] { min-height: 0; }
+.reading-reference { height: 100%; overflow: auto; padding: 44px 32px; background: #f1ede6; color: #35322c; }
+.reading-reference h1 { font-size: clamp(28px, 3vw, 44px); line-height: 1.1; letter-spacing: -.035em; font-weight: 600; margin: 20px 0; }
+.reading-reference p { font-size: 16px; line-height: 1.6; margin: 20px 0; }
+.reading-reference img { width: 100%; border-radius: 16px; margin-top: 32px; }
+.reading-reference .reading-local-note { font-size: 12px; opacity: .6; }
+.dark .reading-reference { background: #2b2925; color: #e8e4dc; }

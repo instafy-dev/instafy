@@ -6,7 +6,9 @@ organizations, and a selected team starts within that team, without a space
 restriction. The retained chat breadcrumb does not limit Home search. Removing the space
 chip broadens the query to its organization; removing the organization chip
 searches all accessible organizations and Personal spaces. Backspace removes
-the last scope chip when the query is empty.
+the last scope chip when the query is empty. While composing text with an input
+method, Backspace, arrow keys and Escape stay with the input method; they do not
+change scope, move into results or close search.
 
 Results include chats, matching messages, known file names, settings and actions.
 Message search uses a case-insensitive literal substring of 2–200 characters. It
@@ -25,7 +27,11 @@ ranking yet.
 Search keeps the query and scope controls above one scrolling results area. Index
 coverage and keyboard help follow the results inside that area, so explanatory
 copy does not reserve space above the mobile keyboard. Loading, errors and retry
-actions remain in the same scroll area.
+actions remain in the same scroll area. Search actions use the shared button
+controls and scope keeps the operating system's native picker, with the shared
+form-control appearance. Removing a scope chip retains the query and returns
+focus to the input. Pagination actions retain focus while a request is pending
+and ignore additional presses until that request settles.
 
 Selecting a chat in the **Chats** explorer opens or focuses its conversation
 workspace, including after the last tab was closed. Closing a tab keeps the chat

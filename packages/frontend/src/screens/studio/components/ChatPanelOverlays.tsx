@@ -5,6 +5,8 @@ import { Button, IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
+import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { StudioDialogBody, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { formatPromptContextModeLabel, formatTokenCountLabel, resolveTokenUsageForMessage } from "./chatMessageDetailHelpers";
 import { formatSpeakerTimestamp } from "./chatSpeakerTimestamp";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
@@ -307,44 +309,38 @@ export function ChatImageLightboxOverlay({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/70 p-4"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Image preview"
+    <StudioDialogModal
+      isOpen
+      isDismissable
+      onOpenChange={(open) => { if (!open) onClose(); }}
+      size="media"
+      layout="editor"
+      gutter="responsive"
+      dialogAriaLabel="Image preview"
       data-testid="chat-image-lightbox"
-      style={{
-        paddingBottom: "max(var(--instafy-safe-area-inset-bottom), 1rem)",
-        paddingLeft: "max(var(--instafy-safe-area-inset-left), 1rem)",
-        paddingRight: "max(var(--instafy-safe-area-inset-right), 1rem)",
-        paddingTop: "max(var(--instafy-safe-area-inset-top), 1rem)",
-      }}
     >
-      <div
-        className="relative max-h-full max-w-full"
-        onClick={(event) => event.stopPropagation()}
-      >
+      <StudioDialogHeader title={imageLightbox.alt || "Image preview"} trailing={
         <IconButton
           type="button"
-          variant="secondary"
+          variant="ghost"
+          tone="muted"
           size="sm"
-          radius="full"
           onPress={onClose}
           aria-label="Close image preview"
           data-testid="chat-image-lightbox-close"
-          className="absolute right-2 top-2 z-10"
         >
           <Xmark className="h-4 w-4" aria-hidden="true" />
         </IconButton>
+      } />
+      <StudioDialogBody scrollable>
         <img
           src={imageLightbox.src}
           alt={imageLightbox.alt}
-          className="max-h-[80vh] max-w-[90vw] rounded-2xl border border-slate-200 bg-white shadow-lg dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)]"
+          className="mx-auto block max-h-[70dvh] max-w-full object-contain"
           data-testid="chat-image-lightbox-image"
         />
-      </div>
-    </div>
+      </StudioDialogBody>
+    </StudioDialogModal>
   );
 }
 

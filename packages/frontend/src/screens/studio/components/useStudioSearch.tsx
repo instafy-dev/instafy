@@ -1,5 +1,12 @@
 import { useEffect, useLayoutEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
 import { ChatLines, Clock, Page, Search, Settings, Xmark } from 'iconoir-react';
+import { Button, IconButton, type ButtonProps } from '../../../components/Button';
+import { Input } from '../../../components/Input';
+import { Select } from '../../../components/Select';
+import { Text } from '../../../components/Text';
+import { CONTROL_RADIUS_CLASSES, CONTROL_TEXT_SIZE_CLASSES, CONTROL_TONE_CLASSES } from '../../../components/controlStyles';
+import { textTones } from '../../../styles/typography';
+import { StudioSearchScopeChip } from './StudioSearchScopeChip';
 import { StudioSearchResultCopy, type StudioSearchMessageExcerpt } from './StudioSearchResultCopy';
 import './StudioSearch.css';
 
@@ -157,7 +164,7 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
     if (focusInput) inputRef.current?.focus();
   };
   const onSearchKeyDown = (event: KeyboardEvent<HTMLElement>) => {
-    if (event.key !== 'Escape' || persistentControl && !open) return;
+    if (event.defaultPrevented || event.nativeEvent.isComposing || event.key !== 'Escape' || persistentControl && !open) return;
     event.preventDefault();
     event.stopPropagation();
     closeSearch();
@@ -205,45 +212,46 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
     target?.focus();
     target?.scrollIntoView({ block: 'nearest' });
   };
-  const onResultKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+  const onResultKeyDown = (event: Parameters<NonNullable<ButtonProps['onKeyDown']>>[0], index: number) => {
     if (event.key === 'ArrowDown') {
       event.preventDefault();
-      event.stopPropagation();
       focusResult((index + 1) % visibleMatches.length);
     } else if (event.key === 'ArrowUp') {
       event.preventDefault();
-      event.stopPropagation();
       if (index === 0) inputRef.current?.focus();
       else focusResult(index - 1);
     } else if (event.key === 'Home' || event.key === 'End') {
       event.preventDefault();
-      event.stopPropagation();
       focusResult(event.key === 'Home' ? 0 : visibleMatches.length - 1);
+    } else {
+      // Shared buttons contain custom key handlers by default. Let Escape and
+      // other unhandled keys reach the search surface and workspace shortcuts.
+      event.continuePropagation();
     }
   };
   const renderControl = (iconOnly = false, tokensOverride?: ReactNode): ReactNode => open || persistentControl ? (
     <div className="studio-search-control" data-search-persistent={persistentControl || undefined} data-search-open={open} onKeyDown={onSearchKeyDown}>
-      <div className="studio-search-field" onClick={event => {
+      <div className={`studio-search-field border ${CONTROL_RADIUS_CLASSES.xl} ${CONTROL_TONE_CLASSES[persistentControl ? 'ghost' : 'default']}`} onClick={event => {
         if (event.target instanceof Element && !event.target.closest('button, input, select, a')) {
           if (persistentControl && !openRequestedRef.current) openSearch();
           inputRef.current?.focus({ preventScroll: true });
         }
       }}>
-        <Search className="studio-search-leading-icon" aria-hidden="true" />
+        <Search className={`studio-search-leading-icon ${textTones.muted}`} aria-hidden="true" />
         <div className="studio-search-tokens" aria-label="Search scope">
-          {tokensOverride === undefined ? <>{scope !== 'all' && org ? <span className="studio-search-chip" title={org.name}>
-            <span>{org.name}</span><button type="button" aria-label="Search all orgs" title="Search all orgs" onClick={() => changeScope('all', true)}><Xmark aria-hidden="true" /></button>
-          </span> : null}
+          {tokensOverride === undefined ? <>{scope !== 'all' && org ? <StudioSearchScopeChip className="studio-search-chip" title={org.name}>
+            <Text as="span" variant="captionStrong" tone="secondary">{org.name}</Text><IconButton variant="ghost" tone="muted" size="xs" aria-label="Search all orgs" title="Search all orgs" onPress={() => changeScope('all', true)}><Xmark aria-hidden="true" /></IconButton>
+          </StudioSearchScopeChip> : null}
           {scope === 'space' && space ? <>
-            {org ? <span className="studio-search-separator" aria-hidden="true">/</span> : null}
-            <span className="studio-search-chip" title={space.name}>
-              <span>{space.name}</span><button type="button" aria-label={org ? `Search within ${org.name}` : 'Search all orgs'} title={org ? `Search within ${org.name}` : 'Search all orgs'} onClick={() => changeScope(org ? 'org' : 'all', true)}><Xmark aria-hidden="true" /></button>
-            </span>
+            {org ? <Text as="span" variant="caption" tone="subtle" className="studio-search-separator" aria-hidden="true">/</Text> : null}
+            <StudioSearchScopeChip className="studio-search-chip" title={space.name}>
+              <Text as="span" variant="captionStrong" tone="secondary">{space.name}</Text><IconButton variant="ghost" tone="muted" size="xs" aria-label={org ? `Search within ${org.name}` : 'Search all orgs'} title={org ? `Search within ${org.name}` : 'Search all orgs'} onPress={() => changeScope(org ? 'org' : 'all', true)}><Xmark aria-hidden="true" /></IconButton>
+            </StudioSearchScopeChip>
           </> : null}
-          {scope === 'all' ? <span className="studio-search-all">All orgs</span> : null}</> : tokensOverride}
+          {scope === 'all' ? <StudioSearchScopeChip className="studio-search-all"><Text as="span" variant="captionStrong" tone="muted">All orgs</Text></StudioSearchScopeChip> : null}</> : tokensOverride}
         </div>
         <div className="studio-search-entry">
-          <input ref={inputRef} type="search" autoFocus={!persistentControl} value={query} maxLength={200}
+          <Input ref={inputRef} unstyled className={CONTROL_TEXT_SIZE_CLASSES.sm} type="search" autoFocus={!persistentControl} value={query} maxLength={200}
             aria-label={`Search chats, files, settings in ${scopeName}`} aria-controls={open ? resultsId : undefined} aria-describedby={open ? scopeHintId : undefined}
             placeholder="Search…" data-testid="studio-search-input"
             onFocus={() => {
@@ -261,7 +269,8 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
               if (shouldOpen) onOpen?.();
             }}
             onKeyDown={event => {
-              if (event.key === 'Backspace' && query.length === 0 && !event.repeat && !event.nativeEvent.isComposing && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && scope !== 'all') {
+              if (event.nativeEvent.isComposing) return;
+              if (event.key === 'Backspace' && query.length === 0 && !event.repeat && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && scope !== 'all') {
                 event.preventDefault();
                 event.stopPropagation();
                 changeScope(scope === 'space' && org ? 'org' : 'all');
@@ -273,39 +282,43 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
             }} />
         </div>
       </div>
-      <button type="button" className="studio-search-close" aria-label="Close search" title="Close search" data-search-closed={!open || undefined}
-        inert={!open || undefined} aria-hidden={!open || undefined} disabled={!open} tabIndex={!open ? -1 : undefined} onClick={() => closeSearch()}>
-        <Xmark aria-hidden="true" /><span className="studio-search-done" aria-hidden="true">Done</span>
-      </button>
+      <span className="studio-search-close-slot" data-search-closed={!open || undefined} inert={!open || undefined} aria-hidden={!open || undefined}>
+        <Button preset="toolbar" variant="ghost" tone="muted" className="studio-search-close" aria-label="Close search" title="Close search"
+          isDisabled={!open} onPress={() => closeSearch()}>
+          <Xmark aria-hidden="true" /><span className="studio-search-done" aria-hidden="true">Done</span>
+        </Button>
+      </span>
     </div>
   ) : (
-    <button ref={triggerRef} type="button"
-      className={`studio-search-trigger${iconOnly ? ' studio-search-trigger-icon' : ''}`}
-      aria-label={`Search ${scopeName}`} title={`Search ${scopeName}`} aria-expanded={false}
-      data-testid="studio-search-trigger"
-      onClick={event => { event.currentTarget.focus(); openSearch(); }}>
-      <Search aria-hidden="true" />{!iconOnly ? <span>Search…</span> : null}
-    </button>
+    iconOnly ? <IconButton ref={triggerRef} variant="ghost" tone="muted"
+      className="studio-search-trigger-icon" aria-label={`Search ${scopeName}`} title={`Search ${scopeName}`}
+      aria-expanded={false} data-testid="studio-search-trigger" onPress={openSearch}>
+      <Search aria-hidden="true" />
+    </IconButton> : <Button ref={triggerRef} preset="inline" variant="ghost" tone="muted"
+      className="studio-search-trigger" aria-label={`Search ${scopeName}`} title={`Search ${scopeName}`}
+      aria-expanded={false} data-testid="studio-search-trigger" icon={<Search aria-hidden="true" />} onPress={openSearch}>
+      Search…
+    </Button>
   );
   const results: ReactNode = open ? (
     <section className={`studio-search-panel${fullPage ? ' studio-search-page' : ''}`} aria-labelledby={titleId} onKeyDown={onSearchKeyDown}>
       <div className="studio-search-scope-header">
         <div className="studio-search-heading">
-          <h2 id={titleId} className="studio-search-scope">{fullPage ? 'Search results' : scope === 'all' ? 'Search across all orgs' : `Search in ${scopeName}`}</h2>
-          {fullPage ? <span className="studio-search-count">{matches.length} {matches.length === 1 ? 'result' : 'results'}</span> : null}
+          <Text as="h2" variant={fullPage ? "title" : "captionStrong"} tone={fullPage ? "primary" : "muted"} id={titleId} className="studio-search-scope">{fullPage ? 'Search results' : scope === 'all' ? 'Search across all orgs' : `Search in ${scopeName}`}</Text>
+          {fullPage ? <Text as="span" variant="caption" tone="muted" className="studio-search-count">{matches.length} {matches.length === 1 ? 'result' : 'results'}</Text> : null}
         </div>
-        <label className="studio-search-scope-select"><span>Scope</span><select aria-label="Search scope" value={scope} onChange={event => changeScope(event.target.value as StudioSearchScope)}>
+        <div className="studio-search-scope-select"><Text as="span" variant="caption" tone="muted">Scope</Text><Select native size="xs" tone="muted" fullWidth={false} aria-label="Search scope" value={scope} onChange={event => changeScope(event.target.value as StudioSearchScope)}>
           {space ? <option value="space">Current space</option> : null}
           {org ? <option value="org">Current org</option> : null}
           <option value="all">All orgs</option>
-        </select></label>
+        </Select></div>
       </div>
-      <p id={scopeHintId} className="studio-search-hint">Backspace with an empty query broadens scope.</p>
+      <Text variant="captionSmall" tone="muted" id={scopeHintId} className="studio-search-hint">Backspace with an empty query broadens scope.</Text>
       <div ref={resultsScrollRef} id={resultsId} className="studio-search-results" data-testid="studio-search-results" aria-busy={loading || Boolean(loadingMoreMessages)}>
-        {loading ? <p className="studio-search-status" role="status">Searching…</p> : null}
+        {loading ? <Text variant="bodyCompact" tone="muted" className="studio-search-status" role="status">Searching…</Text> : null}
         {error ? <div className="studio-search-status studio-search-error" role="alert">
-          <p>{error}</p>
-          {onRetry ? <button type="button" onClick={onRetry}>Retry search</button> : null}
+          <Text variant="bodyCompact" tone="muted">{error}</Text>
+          {onRetry ? <Button preset="inline" variant="outline" onPress={onRetry}>Retry search</Button> : null}
         </div> : null}
         <span className="studio-search-sr-only" role={loading ? undefined : "status"}>{matches.length} {matches.length === 1 ? 'result' : 'results'}</span>
         {GROUPS.map(group => {
@@ -314,18 +327,18 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
           const Icon = GROUP_ICONS[group];
           const headingId = `${resultsId}-${group.toLowerCase()}`;
           return <section key={group} aria-labelledby={headingId}>
-            <h3 id={headingId}>{group}{' '}
-              {group === 'Messages' ? <span className="studio-search-order">Newest first</span>
-                : group === 'Chats' ? <span className="studio-search-order">Recent activity</span> : null}
-            </h3>
-            {groupResults.map(result => <button type="button" key={result.id}
+            <Text as="h3" variant="caption" tone="muted" id={headingId}><Text as="span" variant="captionStrong" tone="muted">{group}</Text>{' '}
+              {group === 'Messages' ? <Text as="span" variant="caption" tone="muted">Newest first</Text>
+                : group === 'Chats' ? <Text as="span" variant="caption" tone="muted">Recent activity</Text> : null}
+            </Text>
+            {groupResults.map(result => <Button preset="inline" variant="ghost" key={result.id}
               ref={element => {
                 if (element) resultRefs.current.set(result.id, element);
                 else resultRefs.current.delete(result.id);
               }}
               className="studio-search-result" data-testid={`studio-search-result-${result.id}`}
               onKeyDown={event => onResultKeyDown(event, visibleMatches.indexOf(result))}
-              onClick={() => {
+              onPress={() => {
                 onBeforeResultActivate?.({ query, scope, scrollTop: resultsScrollRef.current?.scrollTop ?? 0,
                   resultId: result.id, resultLimit, messagePageCount, spacePageCount });
                 closeSearch(false);
@@ -333,20 +346,20 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
               }}>
               <Icon aria-hidden="true" />
               <StudioSearchResultCopy title={result.title} description={result.description} message={result.message} />
-            </button>)}
+            </Button>)}
           </section>;
         })}
-        {visibleMatches.length < matches.length ? <button type="button" className="studio-search-more" onClick={() => setResultPage({ key: resultPageKey, limit: resultLimit + 100 })}>
+        {visibleMatches.length < matches.length ? <Button preset="inline" variant="ghost" tone="accent" className="studio-search-more" onPress={() => setResultPage({ key: resultPageKey, limit: resultLimit + 100 })}>
           Show {Math.min(100, matches.length - visibleMatches.length)} more results ({visibleMatches.length} of {matches.length} shown)
-        </button> : null}
-        {remainingSpaces > 0 ? <button type="button" className="studio-search-more" disabled={loading} onClick={onLoadMoreSpaces}>
+        </Button> : null}
+        {remainingSpaces > 0 ? <Button preset="inline" variant="ghost" tone="accent" className="studio-search-more" isPending={loading} onPress={onLoadMoreSpaces}>
           {loading ? 'Searching spaces…' : `Search more spaces (${remainingSpaces} remaining)`}
-        </button> : null}
-        {hasMoreMessages ? <button type="button" className="studio-search-more" disabled={loadingMoreMessages} onClick={onLoadMoreMessages}>
+        </Button> : null}
+        {hasMoreMessages ? <Button preset="inline" variant="ghost" tone="accent" className="studio-search-more" isPending={loadingMoreMessages} onPress={onLoadMoreMessages}>
           {loadingMoreMessages ? 'Loading more messages…' : 'Load more message results'}
-        </button> : null}
-        {!matches.length && !loading && !error ? <p className="studio-search-empty">{remainingSpaces > 0 ? "No results in the spaces searched so far. Search more spaces to continue." : "No results in this scope. Try another query or a wider scope."}</p> : null}
-        <footer className="studio-search-footer">{notice ? <span>{notice}</span> : null}<span>↑ ↓ to move · Enter to open</span></footer>
+        </Button> : null}
+        {!matches.length && !loading && !error ? <Text variant="body" tone="muted" className="studio-search-empty">{remainingSpaces > 0 ? "No results in the spaces searched so far. Search more spaces to continue." : "No results in this scope. Try another query or a wider scope."}</Text> : null}
+        <Text as="footer" variant="captionSmall" tone="muted" className="studio-search-footer">{notice ? <span>{notice}</span> : null}<span>↑ ↓ to move · Enter to open</span></Text>
       </div>
     </section>
   ) : null;

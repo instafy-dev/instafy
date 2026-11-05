@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useState } from "react";
+import { DialogTrigger } from "react-aria-components";
+import { Button } from "../../../../components/Button";
+import { StudioDialogModal } from "../../../../components/aria/StudioModal";
+import { ChatImageLightboxOverlay } from "../ChatPanelOverlays";
+import { ChatTextAttachment } from "../ChatTextAttachment";
+import * as chatAttachments from "../../../../lib/chatAttachments";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -197,6 +203,87 @@ describe("PersonalBrowserSurface", () => {
     await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Browser settings"]')!.click());
     expect(setBounds.mock.calls.at(-1)).toEqual(original);
     expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBeNull();
+    expect(model.close).not.toHaveBeenCalled();
+    expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
+  });
+
+  it.each(["image", "text"] as const)("occludes the native page for a sibling %s attachment dialog and restores it on close", async kind => {
+    const model = createModel();
+    const setBounds = vi.fn(async (bounds: InstafyDesktopPersonalBrowserBounds) => ({
+      ...model.status!, ...(bounds.occluded ? { previewDataUrl: "data:image/jpeg;base64,AQID" } : {}),
+    }));
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: setBounds };
+    vi.spyOn(chatAttachments, "downloadChatAttachment").mockResolvedValue({ ok: false, reason: "refused" });
+    function Harness() {
+      const [imageOpen, setImageOpen] = useState(false);
+      return <>
+        <PersonalBrowserSurface active model={model} />
+        <Button onPress={() => setImageOpen(true)}>Open chat image</Button>
+        <ChatImageLightboxOverlay imageLightbox={imageOpen ? { src: "/preview.png", alt: "Reference" } : null}
+          onClose={() => setImageOpen(false)} />
+        <ChatTextAttachment storagePath="11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222/33333333-3333-4333-8333-333333333333.txt" fileName="notes.txt" />
+      </>;
+    }
+    await act(async () => root.render(<Harness />));
+    const original = setBounds.mock.calls.at(-1)![0];
+    const open = kind === "image"
+      ? [...container.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "Open chat image")!
+      : container.querySelector<HTMLButtonElement>('[aria-label="Open notes.txt"]')!;
+    await act(async () => open.click());
+    expect(setBounds).toHaveBeenLastCalledWith({ ...original, occluded: true });
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).not.toBeNull();
+    const close = document.querySelector<HTMLButtonElement>(`[aria-label="${kind === "image" ? "Close image preview" : "Close attachment"}"]`)!;
+    await act(async () => close.click());
+    expect(setBounds).toHaveBeenLastCalledWith(original);
+    expect(document.querySelector('[data-testid="personal-browser-overlay-preview"]')).toBeNull();
+    expect(model.close).not.toHaveBeenCalled();
+    expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
+  });
+
+  it("registers an uncontrolled shared dialog only while its portal is mounted", async () => {
+    const model = createModel();
+    const setBounds = vi.fn(async (bounds: InstafyDesktopPersonalBrowserBounds) => ({ ...model.status!, visible: bounds.visible ?? true }));
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: setBounds };
+    await act(async () => root.render(<>
+      <PersonalBrowserSurface active model={model} />
+      <DialogTrigger>
+        <Button>Open account</Button>
+        <StudioDialogModal dialogAriaLabel="Account"><Button slot="close">Close account</Button></StudioDialogModal>
+      </DialogTrigger>
+    </>));
+    expect(setBounds.mock.calls.at(-1)?.[0]).toMatchObject({ occluded: false });
+    await act(async () => [...container.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "Open account")!.click());
+    expect(setBounds.mock.calls.at(-1)?.[0]).toMatchObject({ occluded: true });
+    await act(async () => document.querySelector<HTMLButtonElement>('[role="dialog"][aria-label="Account"] button')!.click());
+    expect(setBounds.mock.calls.at(-1)?.[0]).toMatchObject({ occluded: false });
+  });
+
+  it("keeps fullscreen native content live until every covering modal closes", async () => {
+    const model = createModel();
+    const setBounds = vi.fn(async (bounds: InstafyDesktopPersonalBrowserBounds) => ({ ...model.status!, visible: bounds.visible ?? true }));
+    window.instafyDesktop = { notify: vi.fn(), personalBrowserSetBounds: setBounds };
+    const render = async (outer: boolean, inner: boolean) => {
+      await act(async () => root.render(<>
+        <PersonalBrowserSurface active model={model} />
+        <StudioDialogModal isOpen={outer} dialogAriaLabel="Outer modal">
+          Outer
+          <StudioDialogModal isOpen={inner} dialogAriaLabel="Inner modal">Inner</StudioDialogModal>
+        </StudioDialogModal>
+      </>));
+    };
+    await render(false, false);
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="personal-browser-fullscreen-toggle"]')!.click());
+    expect(document.querySelector('[data-testid="personal-browser-expanded"]')).not.toBeNull();
+    expect(setBounds.mock.calls.at(-1)?.[0]).toMatchObject({ visible: true, occluded: false });
+    await render(true, true);
+    expect(setBounds.mock.calls.at(-1)?.[0]).toMatchObject({ visible: true, occluded: true });
+    const callsBeforeInnerClose = setBounds.mock.calls.length;
+    await render(true, false);
+    expect(setBounds.mock.calls.slice(callsBeforeInnerClose).every(([bounds]) => bounds.occluded)).toBe(true);
+    expect(setBounds.mock.calls.at(-1)?.[0]).toMatchObject({ visible: true, occluded: true });
+    await render(false, false);
+    expect(setBounds.mock.calls.at(-1)?.[0]).toMatchObject({ visible: true, occluded: false });
+    expect(document.querySelector('[data-testid="personal-browser-expanded"]')).not.toBeNull();
     expect(model.close).not.toHaveBeenCalled();
     expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
   });

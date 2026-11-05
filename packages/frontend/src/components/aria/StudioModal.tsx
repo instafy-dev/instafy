@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, type CSSProperties, type ReactNode, type Ref } from "react";
 import { useNativeBackButtonAction } from "../../native/useNativeBackButtonAction";
 import { StudioDialogGutterContext, type StudioDialogGutter } from "./StudioDialogSpacing";
+import { StudioModalNativeOcclusion } from "./studioModalOcclusion";
 import {
   Dialog,
   Modal,
@@ -15,12 +16,13 @@ const OVERLAY_BASE =
 const MODAL_BASE =
   "w-full rounded-2xl border shadow-xl outline-none";
 
-export type StudioDialogSize = "sm" | "md" | "lg";
+export type StudioDialogSize = "sm" | "md" | "lg" | "media";
 
 const MODAL_SIZE_CLASSES: Record<StudioDialogSize, string> = {
   sm: "max-w-sm",
   md: "max-w-lg",
   lg: "max-w-2xl",
+  media: "max-w-[min(90vw,80rem)]",
 };
 
 export type StudioDialogAppearance = "default" | "dark";
@@ -49,12 +51,14 @@ interface StudioDialogModalProps extends ModalOverlayProps {
   onNativeBack?: () => void;
   appearance?: StudioDialogAppearance;
   backdrop?: StudioDialogBackdrop;
-  /** Maximum width: 24rem, 32rem or 42rem. Viewport clearance still applies. */
+  /** Form widths: 24/32/42rem; media uses up to 90vw/80rem. Safe-area clearance still applies. */
   size?: StudioDialogSize;
   /** Shared section gutters. Responsive is 16px narrow / 20px at sm and above. */
   gutter?: StudioDialogGutter;
   /** Bounded header/body/footer layout. Pair with a scrollable StudioDialogBody. */
   layout?: StudioDialogLayout;
+  /** False only when the modal contains the native surface itself, such as fullscreen. */
+  occludesNativeSurface?: boolean;
   modalClassName?: ModalOverlayProps["className"];
   modalStyle?: CSSProperties;
   dialogClassName?: string;
@@ -118,6 +122,7 @@ export function StudioDialogModal({
   size = "md",
   gutter = "default",
   layout = "default",
+  occludesNativeSurface = true,
   className,
   modalClassName,
   modalStyle,
@@ -172,6 +177,7 @@ export function StudioDialogModal({
           aria-label={normalizedDialogLabel}
           aria-labelledby={normalizedDialogLabelledBy}
         >
+          <StudioModalNativeOcclusion enabled={occludesNativeSurface} />
           <StudioDialogGutterContext.Provider value={gutter}>{children}</StudioDialogGutterContext.Provider>
         </Dialog>
       </Modal>

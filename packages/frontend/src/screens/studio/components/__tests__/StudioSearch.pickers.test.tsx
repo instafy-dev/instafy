@@ -90,6 +90,31 @@ describe("Studio search with the real navigation pickers", () => {
     expect(input()).toBe(originalInput);
   });
 
+  it("broadens from each scope chip without activating its navigation picker", async () => {
+    const originalInput = input();
+    await act(async () => originalInput.focus());
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(originalInput, "older message");
+      originalInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const remove = (label: string) => container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
+    await act(async () => remove("Search within Workshop").click());
+    expect(originalInput.value).toBe("older message");
+    expect(originalInput.getAttribute("aria-label")).toContain("in Workshop");
+    expect(document.activeElement).toBe(originalInput);
+    expect(container.querySelector('[data-testid="sidebar-space-button"]')).toBeNull();
+
+    await act(async () => remove("Search all orgs").click());
+    expect(input()).toBe(originalInput);
+    expect(originalInput.value).toBe("older message");
+    expect(originalInput.getAttribute("aria-label")).toContain("in all orgs");
+    expect(document.activeElement).toBe(originalInput);
+    expect(container.querySelector('button[aria-label="Choose team or space"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="sidebar-team-menu"]')).toBeNull();
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).toBeNull();
+    expect(selectSpace).not.toHaveBeenCalled();
+  });
+
   it("closes search when the real space picker activates a destination", async () => {
     await act(async () => input().focus());
     await click("sidebar-space-button");
