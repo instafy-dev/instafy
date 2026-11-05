@@ -143,6 +143,9 @@ services:
       dockerfile: docker/runtime/Dockerfile
       target: ${RUNTIME_AGENT_BUILD_TARGET:-runtime-webdev}
     image: ${RUNTIME_AGENT_IMAGE:-instafy-runtime-agent:webdev-local}
+    # An init as PID 1 reaps what the agent's tools leave behind (git's helpers,
+    # the browser's); runtime-agent runs under it and still gets the stop signal.
+    init: true
     cpus: ${RUNTIME_CPU_LIMIT:-2}
     mem_limit: ${RUNTIME_MEMORY_LIMIT:-4g}
     cap_drop:

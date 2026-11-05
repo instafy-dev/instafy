@@ -5701,6 +5701,7 @@ impl JobProcessor {
             auto_sync_after_apply_override: None,
             progress_sender: progress.as_ref().map(|progress| progress.sender.clone()),
             local_origin: self.local_origin_sync(),
+            title: workspace_commit::version_title(job),
         };
         Ok(checkpoint_write_scoped_worker(execution, checkpoint, &files).await)
     }
@@ -7055,6 +7056,7 @@ impl JobProcessor {
                     .as_ref()
                     .map(|progress| progress.sender.clone()),
                 local_origin: self.local_origin_sync(),
+                title: workspace_commit::version_title(job),
             };
             let outcome = skills::resolve_skills_lane(request, &workspace_dir).await;
             match settle_skills_lane_outcome(outcome, lane_checkpoint).await {
@@ -7649,6 +7651,7 @@ impl JobProcessor {
                     .as_ref()
                     .map(|progress| progress.sender.clone()),
                 local_origin: self.local_origin_sync(),
+                title: workspace_commit::version_title(job),
             };
             return Ok(Box::pin(checkpoint_write_scoped_worker(
                 execution, checkpoint, &files,
@@ -9340,6 +9343,7 @@ impl JobProcessor {
                                 .as_ref()
                                 .map(|progress| progress.sender.clone()),
                             self.local_origin_sync(),
+                            &workspace_commit::version_title(job),
                         )
                         .await
                         {
@@ -9624,6 +9628,7 @@ impl JobProcessor {
                             .as_ref()
                             .map(|progress| progress.sender.clone()),
                         self.local_origin_sync(),
+                        &workspace_commit::version_title(job),
                     )
                     .await
                     {

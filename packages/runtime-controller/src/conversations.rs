@@ -449,6 +449,42 @@ pub(crate) async fn ensure_conversation_access(
     ))
 }
 
+/// Who can read a conversation: `"private"` when it or any conversation it
+/// is a thread of is private, since a thread takes no visibility from its
+/// parent, or when it is not found; else `"public"` (everyone in the space).
+pub(crate) async fn effective_visibility(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: &Uuid,
+) -> Result<&'static str, (StatusCode, Json<ApiError>)> {
+    let private = transaction
+        .query_one(
+            "with recursive chain (id, parent_conversation_id, visibility, depth) as (
+                 select id, parent_conversation_id, visibility, 0
+                   from conversations
+                  where id = $1
+                 union all
+                 select parent.id, parent.parent_conversation_id, parent.visibility, chain.depth + 1
+                   from conversations parent
+                   join chain on parent.id = chain.parent_conversation_id
+                  where chain.depth < 64
+             )
+             select coalesce(bool_or(lower(visibility) = 'private'), true) from chain",
+            &[conversation_id],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to read who can read the conversation: {error}"
+            ))
+        })?
+        .get::<_, bool>(0);
+    Ok(if private {
+        CONVERSATION_VISIBILITY_PRIVATE
+    } else {
+        CONVERSATION_VISIBILITY_PUBLIC
+    })
+}
+
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route(

@@ -1601,6 +1601,11 @@ fn single_tenant_revert_goes_through_the_index_and_stays_reverted() {
     assert_eq!(reverted.git_sync_status, SyncStatus::Published);
     assert_eq!(sc.remote_file("README.md").as_deref(), Some(README));
     assert_eq!(sc.disk("README.md").as_deref(), Some(README));
+    // History lists the Undo by the title of the version it undid.
+    assert_eq!(
+        git_in(&sc.remote, &["log", "-1", "--format=%B", "main"]).trim_end(),
+        format!("Undid \"instafy: agent sync\"\n\nThis reverts commit {commit}.")
+    );
     sc.publish(Selection::AllDirty);
     assert_eq!(sc.remote_file("README.md").as_deref(), Some(README));
     assert_eq!(

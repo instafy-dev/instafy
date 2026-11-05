@@ -213,19 +213,25 @@ function allocatorManagedEnvAllowlist() {
   return [...withoutComments.matchAll(/"([A-Za-z_][A-Za-z0-9_]*)"/g)].map((match) => match[1]);
 }
 
-// The provider Compose file's runtime service as text, plus the variables its
-// `environment:` map sets. Parsed by hand so the check needs no Docker.
-function providerRuntimeService() {
+// A Compose file's runtime service, line by line. Parsed by hand so the
+// checks need no Docker.
+function runtimeServiceLines(composeFile) {
   const lines = fs
-    .readFileSync(path.join(REPO_ROOT, PROVIDER_COMPOSE_FILE), "utf8")
+    .readFileSync(path.join(REPO_ROOT, composeFile), "utf8")
     .split("\n");
   const start = lines.indexOf("  runtime:");
-  assert.notEqual(start, -1, `${PROVIDER_COMPOSE_FILE}: runtime service not found`);
+  assert.notEqual(start, -1, `${composeFile}: runtime service not found`);
   let end = lines.findIndex((line, index) => index > start && /^ {0,2}\S/.test(line));
   if (end === -1) {
     end = lines.length;
   }
-  const service = lines.slice(start, end);
+  return lines.slice(start, end);
+}
+
+// The provider Compose file's runtime service as text, plus the variables its
+// `environment:` map sets.
+function providerRuntimeService() {
+  const service = runtimeServiceLines(PROVIDER_COMPOSE_FILE);
   const environmentStart = service.indexOf("    environment:");
   assert.notEqual(environmentStart, -1, `${PROVIDER_COMPOSE_FILE}: runtime environment not found`);
   const environment = new Map();
@@ -291,4 +297,17 @@ test("the provider runtime forwards an unset git remote as empty", () => {
     providerRuntimeService().environment.get("ORIGIN_GIT_REMOTE_URL"),
     "${ORIGIN_GIT_REMOTE_URL:-}",
   );
+});
+
+// runtime-agent runs as the container's first process, and nothing else
+// there reaps the processes its tools leave behind: a machine kept 145
+// finished ones (git, Chromium and its crash handler) after 52 minutes. An
+// init as PID 1 reaps them, as the origin gateway's does.
+test("the runtime runs under an init in both Compose files", () => {
+  for (const composeFile of [COMPOSE_FILE, PROVIDER_COMPOSE_FILE]) {
+    assert.ok(
+      runtimeServiceLines(composeFile).includes("    init: true"),
+      `${composeFile}: the runtime service needs init: true`,
+    );
+  }
 });

@@ -35,7 +35,10 @@ localStorage) with a picker in the runtime menu; it applies on next start.
 ## Container hardening
 
 Runtime containers started from the runtime compose files and by
-`instafy runtime start` drop the `SYS_PTRACE` and `NET_RAW` capabilities. The
+`instafy runtime start` drop the `SYS_PTRACE` and `NET_RAW` capabilities, and
+run under an init as PID 1 (`init: true`, `docker run --init`), which reaps the
+processes the agent's tools leave behind (git's helpers, the browser's) and
+passes the stop's signal on to the runtime agent. The
 runtime agent reads `RUNTIME_ACCESS_TOKEN`, `ORIGIN_INTERNAL_TOKEN` and the
 launch metadata `RUNTIME_METADATA` into its configuration at startup. It then
 clears those and the other launch credentials (`RUNTIME_TOKEN`,

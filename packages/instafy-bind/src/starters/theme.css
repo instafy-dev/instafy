@@ -383,6 +383,12 @@ html[data-host-title="shown"] .title {
 .seg input:checked + span { background: var(--if-seg-on); border-color: var(--if-seg-on-line); color: var(--if-fg); box-shadow: var(--if-shadow-card); }
 .seg input:focus-visible + span { outline: 2px solid var(--if-focus); outline-offset: -2px; }
 
+/* ---------- what a page puts straight in its list ---------- */
+/* each block after the first keeps the theme's gap above it, so two cards one under the other never touch, and a
+   button, a picture or a line of text keeps its own size and place (after .list and .seg, whose margin: 0 it wins
+   over; the other starters put one block there) */
+:where(#list) > :not(:first-child) { margin-top: var(--if-s3); }
+
 /* ---------- inputs ---------- */
 .field { display: flex; flex-direction: column; gap: var(--if-s2); min-width: 0; }
 .field.inline { flex-direction: row; align-items: center; }
