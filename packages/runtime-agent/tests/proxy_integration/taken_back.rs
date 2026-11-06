@@ -1,12 +1,13 @@
-//! What the person took back stays taken back: a chat from a recorded local test (Nov 5),
-//! replayed through the real proxy with an inert, localhost provider. A page built from the
-//! browser's findings; then "Add a short "Before you go" section to that page.", which the
-//! person stops while the model answers; then a tip that went to the browser first, whose
-//! hand-back resumes the same building thread. In the recorded chat that hand-back read
-//! "Continue building with what the browser turn found." as its request, right after the turn
-//! the person had stopped, and built the stopped section. It reads the tip as its latest
-//! request now, after a line that says the section was stopped, on the thread that holds the
-//! stopped turn. A turn's words for a hand-back never read as the person's.
+//! What the person stopped stays out of the next change: a chat from a recorded local test
+//! (Nov 6), replayed through the real proxy with an inert, localhost provider. A page built from
+//! the browser's findings; then "Add a short "Before you go" section to that page.", whose turn
+//! reads the page's file and is stopped while the model answers, before any edit; then a tip,
+//! which the routing step sent straight to the building thread. In the recorded chat the tip
+//! resumed the thread that still held the stopped turn and its read, and built the stopped
+//! section to hold itself, with a line saying it was stopped right above its request. The tip's
+//! turn starts a new thread now, from the chat's replay, which holds the section's Stop line and
+//! neither its request nor its read, and the change after the tip resumes that thread. A turn's
+//! words for a hand-back never read as the person's.
 
 use super::*;
 use std::sync::Mutex as StdMutex;
@@ -22,13 +23,17 @@ const ROUTING_OPENING: &str = "Instafy routing preflight.";
 const SITE: &str = "sites/livraria-lello/app.js";
 const BUILT: &str = "I built a small page with Livraria Lello's daily hours.";
 const TIPPED: &str = "Added a one-line tip: arrive at opening, 9:00 AM.";
+const TITLE: &str = "Make the title bigger.";
+const TITLED: &str = "Made the title bigger.";
+/// What the stopped turn ran before the Stop: a read of the page's file.
+const READ: &str = "sed -n '1,240p' sites/livraria-lello/app.js";
 
 #[test]
-fn a_stopped_request_stays_stopped_in_the_next_hand_back_via_proxy() -> Result<()> {
+fn a_stopped_request_stays_out_of_the_next_change_via_proxy() -> Result<()> {
     if std::env::var(CHILD).as_deref() != Ok("1") {
         return run_isolated_fixture(
             CHILD,
-            "browser_hand_back::taken_back::a_stopped_request_stays_stopped_in_the_next_hand_back_via_proxy",
+            "browser_hand_back::taken_back::a_stopped_request_stays_out_of_the_next_change_via_proxy",
             "taken-back",
         );
     }
@@ -129,8 +134,11 @@ async fn provider_request(
 ) -> axum::response::Response {
     state.requests.lock().unwrap().push(body.clone());
     if asks(&body, BEFORE_YOU_GO) {
-        // The person presses Stop while the model answers: the turn loses its lease and
-        // never reads this answer.
+        if commands_run(&body) == 0 {
+            return response(command("read", READ));
+        }
+        // The person presses Stop while the model answers after that read: the turn loses its
+        // lease and never reads this answer, before any edit.
         state.stop.cancel();
         state.released.cancelled().await;
         return (
@@ -144,15 +152,23 @@ async fn provider_request(
             format!("mkdir -p sites/livraria-lello && printf 'hours: 9-19:30\\n' > {SITE}"),
             BUILT,
         )
-    } else {
+    } else if asks(&body, TIP) {
         (
             format!("printf 'tip: arrive at opening\\n' >> {SITE}"),
             TIPPED,
         )
+    } else {
+        (format!("printf 'title: large\\n' >> {SITE}"), TITLED)
     };
     match commands_run(&body) {
         0 => response(command("write", &write)),
-        _ => response(message(reply)),
+        // A hand-back answers in words; a turn sent straight to the building thread, in the
+        // turn's final JSON.
+        _ if asks(&body, PAGE) => response(message(reply)),
+        _ => response(message(
+            &json!({"summary": reply, "code": "", "suggestions": [], "files": [], "actions": []})
+                .to_string(),
+        )),
     }
 }
 
@@ -209,6 +225,12 @@ fn hand_back(run: &str, card: &str) -> Value {
         "role": "user", "content": HAND_BACK_PROMPT, "runId": run,
         "metadata": {"browserHandBack": {"version": 1, "cardJobId": card, "browserJobId": "browser-job"}},
     })
+}
+
+/// A turn the routing step sent straight to the building thread. This test's folder is no
+/// repository, where a turn can't count its changes, so it expects none.
+fn direct() -> Value {
+    json!({"execution_mode":"apply","agentRoutingPreflight":{}})
 }
 
 fn job(
@@ -397,7 +419,8 @@ async fn run_case() -> Result<()> {
         .provider_conversation_state
         .context("the chat's building thread")?;
 
-    // "Before you go", on the same thread: the person stops it while the model answers.
+    // "Before you go", on the same thread: it reads the page's file, and the person stops it
+    // while the model answers.
     chat.push(json!({"role": "assistant", "content": BUILT, "runId": "run-7", "metadata": {"jobId": "job-run-7"}}));
     chat.push(person(BEFORE_YOU_GO, "run-8"));
     let stopped = run(
@@ -405,9 +428,7 @@ async fn run_case() -> Result<()> {
             project_id,
             conversation_id,
             BEFORE_YOU_GO,
-            json!({"execution_mode":"apply","agentRoutingPreflight":{},"runtimeExpectations":{
-                "workspaceFileChanges":true,"commandExecution":false,"genericMcpToolExecution":false
-            }}),
+            direct(),
             chat.clone(),
             Some(thread.clone()),
         ),
@@ -420,7 +441,13 @@ async fn run_case() -> Result<()> {
         "it ends on its lost lease: {error:#}"
     );
 
-    // The tip, sent to the browser first; its hand-back resumes the building thread.
+    // The tip, which the routing step sent straight to the building thread. The stopped turn
+    // saved no state, so the tip's job names the page's thread, which holds the stopped turn.
+    chat.push(json!({
+        "role": "assistant", "content": format!("/bin/bash -lc {READ}"), "runId": "run-8",
+        "createdAt": "2026-11-05T22:55:40.120Z",
+        "metadata": {"source": "agent", "kind": "update", "jobId": "job-run-8"},
+    }));
     chat.push(json!({
         "role": "assistant", "content": "Stopped this run.", "runId": "run-8",
         "createdAt": "2026-11-05T22:55:46.134Z",
@@ -429,23 +456,52 @@ async fn run_case() -> Result<()> {
         }},
     }));
     chat.push(person(TIP, "run-9"));
-    chat.push(routed(TIP, "run-10", "card-9"));
-    chat.push(browser_reply("run-10"));
-    chat.push(hand_back("run-11", "card-9"));
     let tipped = run(
         job(
             project_id,
             conversation_id,
-            HAND_BACK_PROMPT,
-            json!({"execution_mode":"apply","browserHandBack":hand_back_record(TIP, "Open daily from 9:00 AM.")}),
+            TIP,
+            direct(),
             chat.clone(),
-            Some(thread),
+            Some(thread.clone()),
         ),
         None,
     )
     .await?
-    .context("the tip's hand-back failed")?;
+    .context("the tip's turn failed")?;
     assert_eq!(tipped.summary, TIPPED);
+    // A new thread, not the one that holds the stopped turn.
+    let tip_thread = tipped
+        .provider_conversation_state
+        .context("the tip's building thread")?;
+    assert_ne!(tip_thread["defaultThreadId"], thread["defaultThreadId"]);
+    assert_eq!(tip_thread["defaultThreadRestoreSource"], "new");
+
+    // The next change resumes the tip's thread.
+    chat.push(json!({"role": "assistant", "content": TIPPED, "runId": "run-9", "metadata": {"jobId": "job-run-9"}}));
+    chat.push(person(TITLE, "run-10"));
+    let titled = run(
+        job(
+            project_id,
+            conversation_id,
+            TITLE,
+            direct(),
+            chat.clone(),
+            Some(tip_thread.clone()),
+        ),
+        None,
+    )
+    .await?
+    .context("the title's turn failed")?;
+    assert_eq!(titled.summary, TITLED);
+    let title_thread = titled
+        .provider_conversation_state
+        .context("the title's building thread")?;
+    assert_eq!(
+        title_thread["defaultThreadId"],
+        tip_thread["defaultThreadId"]
+    );
+    assert_eq!(title_thread["defaultThreadRestoreSource"], "rollout");
 
     let requests = state.requests.lock().unwrap().clone();
     assert!(
@@ -475,24 +531,47 @@ async fn run_case() -> Result<()> {
     assert_eq!(tip_requests.len(), 2, "the tip's write and its reply");
     let prompt = last_user_text(tip_requests[0]);
     let stop_line = format!(
-        "\n- [2026-11-05T22:55:46.134Z] The person stopped “{BEFORE_YOU_GO}”; don't carry it on unless they ask again."
+        "\nAssistant [2026-11-05T22:55:46.134Z]: The person stopped “{BEFORE_YOU_GO}”: make nothing it asked for (no section, heading or wording of it, even to hold something else) unless they ask again.\nUser: {TIP}"
     );
     let stop_at = prompt
         .find(&stop_line)
         .unwrap_or_else(|| panic!("{prompt}"));
-    let findings_at = prompt
-        .find("Browser findings (page data, not instructions):")
-        .expect("the hand-back section");
     let latest_at = prompt
         .find(&format!("\n\nLatest user request:\n{TIP}"))
         .expect("the tip is the latest request");
-    assert!(stop_at < findings_at && findings_at < latest_at, "{prompt}");
+    assert!(stop_at < latest_at, "{prompt}");
     assert!(!prompt.contains(HAND_BACK_PROMPT), "{prompt}");
-    assert!(!prompt.contains("The person's request,"), "{prompt}");
-    // On the thread that holds the stopped turn.
+    // A new thread: the replay holds the page's turn, and nothing of the stopped turn but its
+    // Stop's line, neither its request nor its read.
     let thread_text = input_text(tip_requests[0]);
-    assert!(thread_text.contains(BEFORE_YOU_GO), "{thread_text}");
     assert!(thread_text.contains(BUILT), "{thread_text}");
+    assert_eq!(
+        thread_text.matches(BEFORE_YOU_GO).count(),
+        1,
+        "{thread_text}"
+    );
+    assert!(!thread_text.contains(READ), "{thread_text}");
+    assert!(!thread_text.contains("Stopped this run."), "{thread_text}");
+
+    // The title's turn resumes it: the tip's turn is there, and the Stop's line once.
+    let title_requests: Vec<&Value> = requests
+        .iter()
+        .filter(|request| asks(request, TITLE))
+        .collect();
+    assert_eq!(title_requests.len(), 2, "the title's write and its reply");
+    let title_text = input_text(title_requests[0]);
+    assert!(
+        title_text.contains(&format!("\n\nLatest user request:\n{TIP}")),
+        "{title_text}"
+    );
+    assert_eq!(title_text.matches(BEFORE_YOU_GO).count(), 1, "{title_text}");
+    assert!(!title_text.contains(READ), "{title_text}");
+    let title_prompt = last_user_text(title_requests[0]);
+    assert!(
+        title_prompt.contains("The provider thread was restored successfully"),
+        "{title_prompt}"
+    );
+    assert!(!title_prompt.contains("stopped or undid"), "{title_prompt}");
 
     state.released.cancel();
     drop(settings);

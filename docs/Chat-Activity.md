@@ -296,18 +296,28 @@ no stop's Continue, after a reload or a switch of chats too; a file it does not 
 whatever the row read before (`Changed the site`, a file's name); one with some of them undone counts
 them (`Edited 3 files · 1 undone`).
 
-A Stop reaches a restored thread the same way. From the controller's notice of a press of Stop
-(the one notice that names who pressed it), the first turn on each thread after it reads "The
-person stopped “…”; don't carry it on unless they ask again.", naming the request in the person's
-words: for a browser turn or a hand-back, the message its card carried on, and for a Continue under
-an earlier Stop, the request it continued. The line says nothing of what the turn changed before
-the press, which stays until the person undoes it. A browser thread reads a Stop's or an Undo's
-line only for a request one of the chat's browser turns was asked: it reads nothing else of the
-chat, so the words of a message that stayed with Octo never reach a turn a page can ask to type
-them. One that is new, or lost, replays only the chat's browser turns, and reads those lines since
-the first of them after its replay. A Continue under the Stop asks for the request again, so no
-turn after it reads that line; and "Send now" on a queued message, which interrupts the reply it
-waited behind, is no Stop.
+A Stop reaches the next turn of each thread too. From the controller's notice of a press of Stop
+(the one notice that names who pressed it), that turn reads "The person stopped “…”: make nothing
+it asked for (no section, heading or wording of it, even to hold something else) unless they ask
+again.", naming the request in the person's words: for a browser turn or a hand-back, the message
+its card carried on, and for a Continue under an earlier Stop, the request it continued. A thread
+that holds a turn of the stopped request is not resumed: Codex can't take a turn back out of a
+thread, and on a thread that still showed it the stopped request and its reads, a turn built the
+stopped section to hold the next change. So the next turn of each lane that ran the request (its
+building turn, the browser turn of its card, a hand-back of what that turn found) starts a new
+thread, from the chat's replay, which leaves the request, its steps and its browser turns out and
+keeps its Stop's line in their place; the turn after it resumes that thread. A run the Stop ended
+counts though it left no step, as the history doesn't say whether it had begun. A thread the
+request never reached (the building thread after a Stop of a request only the browser ran) is
+resumed, and reads the line after its restore note. The line says nothing of what the turn changed
+before the press, which stays until the person undoes it: the next turn reads the files as they
+are. A browser thread reads a Stop's or an Undo's line only for a request one of the chat's browser
+turns was asked: it reads nothing else of the chat, so the words of a message that stayed with Octo
+never reach a turn a page can ask to type them. One that is new, or lost, replays only the chat's
+browser turns, and reads those lines since the first of them after its replay. A Continue under the
+Stop asks for the request again: no turn after it reads that line, and its turn resumes the thread
+that holds the stopped turn. "Send now" on a queued message, which interrupts the reply it waited
+behind, is no Stop.
 
 A turn's save takes the space's lease, and a Stop can end the job while that save holds it. The
 stopped job may still release its own lease (releasing grants nothing, and its token does nothing

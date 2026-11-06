@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 
 use serde_json::{Value as JsonValue, json};
@@ -173,14 +173,20 @@ fn is_person_message(entry: &JsonValue) -> bool {
 }
 
 /// The person's own words of the request `run` carried out, which their Stop ended or whose
-/// change they undid: its message, or, for a browser turn or a hand-back that carried on a card,
-/// the message that card answered, and for a Continue under an earlier Stop, the request it
-/// continued. The browser turn of a card the
-/// routing step posted for the person's message asks their words, as the controller checked on
-/// its send; any other card is a building turn's, whose reply names its job, and the message of
-/// that turn's run is the person's. None when the history does not show them: no line then,
-/// never someone else's words (Studio's, a card's) in the person's name.
+/// change they undid ([`persons_request_at`]). None when the history does not show them: no line
+/// then, never someone else's words (Studio's, a card's) in the person's name.
 fn persons_request_in<'a>(entries: &'a [JsonValue], run: &str) -> Option<&'a str> {
+    persons_request_at(entries, run).and_then(|at| entry_text(&entries[at], "content"))
+}
+
+/// Where the history holds the person's own words of the request `run` carried out: its
+/// message, or, for a browser turn or a hand-back that carried on a card, the message that card
+/// answered, and for a Continue under an earlier Stop, the request it continued. The browser turn
+/// of a card the routing step posted for the person's message asks their words, as the
+/// controller checked on its send, and the message it repeats is the request; any other card is
+/// a building turn's, whose reply names its job, and the message of that turn's run is the
+/// person's. So every run of one request finds the same entry ([`stopped_requests`]).
+fn persons_request_at(entries: &[JsonValue], run: &str) -> Option<usize> {
     let opened = |run: &str| {
         entries.iter().position(|entry| {
             entry_text(entry, "role") == Some("user") && entry_text(entry, "runId") == Some(run)
@@ -197,7 +203,7 @@ fn persons_request_in<'a>(entries: &'a [JsonValue], run: &str) -> Option<&'a str
     }
     let first = &entries[at];
     if is_person_message(first) {
-        return entry_text(first, "content");
+        return Some(at);
     }
     let card = card_job_of(first)?;
     let carries_on_the_card = |entry: &JsonValue| {
@@ -205,13 +211,21 @@ fn persons_request_in<'a>(entries: &'a [JsonValue], run: &str) -> Option<&'a str
             && entry_text(entry, "role") == Some("user")
             && card_job_of(entry).is_some_and(|other| other.eq_ignore_ascii_case(card))
     };
-    if let Some(routed) = entries[..=at].iter().rev().find(|entry| {
+    if let Some(routed) = entries[..=at].iter().rposition(|entry| {
         carries_on_the_card(entry)
             && entry
                 .pointer("/metadata/prompt_metadata")
                 .is_some_and(super::browser_hand_back::carries_on_a_routed_card)
     }) {
-        return entry_text(routed, "content");
+        let words = entry_text(&entries[routed], "content");
+        return Some(
+            entries[..routed]
+                .iter()
+                .rposition(|entry| {
+                    is_person_message(entry) && entry_text(entry, "content") == words
+                })
+                .unwrap_or(routed),
+        );
     }
     // Only Octo's messages name their job; a person's message metadata is the client's.
     let card_run = entries.iter().find_map(|entry| {
@@ -225,29 +239,164 @@ fn persons_request_in<'a>(entries: &'a [JsonValue], run: &str) -> Option<&'a str
     })?;
     entries
         .iter()
-        .find(|entry| entry_text(entry, "runId") == Some(card_run) && is_person_message(entry))
-        .and_then(|entry| entry_text(entry, "content"))
+        .position(|entry| entry_text(entry, "runId") == Some(card_run) && is_person_message(entry))
+}
+
+/// What a turn reads of a request the person stopped, in their words. A line that only said not
+/// to carry it on did not hold: on the thread that held the stopped turn, the next change built
+/// the stopped section's heading to hold itself (a local test, Nov 6). It says nothing of what
+/// the turn changed before the press, which stays until the person undoes it.
+fn stop_line(words: &str) -> String {
+    format!(
+        "The person stopped “{}”: make nothing it asked for (no section, heading or wording of it, even to hold something else) unless they ask again.",
+        compact_content(words, 300)
+    )
+}
+
+/// A request the person stopped with Stop and has not asked for again.
+struct StoppedRequest<'a> {
+    /// Where the Stop's notice is in the history.
+    notice: usize,
+    /// Every run of the request: those the Stop ended, and every other run whose request
+    /// ([`persons_request_at`]) is the same entry, such as a message's own run, the browser turn
+    /// of its card and the hand-back of what that turn found.
+    runs: HashSet<&'a str>,
+    /// The person's own words of it, when the history shows them.
+    words: Option<&'a str>,
+}
+
+/// The requests the person stopped, oldest Stop first. A Stop's notice names the runs it ended;
+/// a run a later message carries on (a Continue under the Stop asks for it again) is no stopped
+/// request, and runs of one request (a browser turn and its hand-back, say) make one.
+fn stopped_requests(entries: &[JsonValue]) -> Vec<StoppedRequest<'_>> {
+    let mut stopped: Vec<StoppedRequest<'_>> = Vec::new();
+    if !entries.iter().any(is_stop_notice) {
+        return stopped;
+    }
+    let request_of: HashMap<&str, Option<usize>> = entries
+        .iter()
+        .filter_map(|entry| entry_text(entry, "runId"))
+        .map(|run| (run, persons_request_at(entries, run)))
+        .collect();
+    for (index, entry) in entries.iter().enumerate() {
+        if !is_stop_notice(entry) {
+            continue;
+        }
+        let continued: HashSet<&str> = entries[index + 1..]
+            .iter()
+            .filter(|later| entry_text(later, "role") == Some("user"))
+            .flat_map(continued_runs_of)
+            .collect();
+        let listed: Vec<&str> = entry
+            .pointer("/metadata/details/runIds")
+            .and_then(JsonValue::as_array)
+            .map(|runs| {
+                runs.iter()
+                    .filter_map(JsonValue::as_str)
+                    .map(str::trim)
+                    .filter(|run| !run.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let runs = if listed.is_empty() {
+            entry_text(entry, "runId").into_iter().collect()
+        } else {
+            listed
+        };
+        let first_of_this_stop = stopped.len();
+        let mut requests_at: Vec<Option<usize>> = Vec::new();
+        for run in runs.into_iter().filter(|run| !continued.contains(run)) {
+            let at = request_of.get(run).copied().flatten();
+            if let Some(same) =
+                at.and_then(|at| requests_at.iter().position(|other| *other == Some(at)))
+            {
+                stopped[first_of_this_stop + same].runs.insert(run);
+                continue;
+            }
+            let mut runs: HashSet<&str> = request_of
+                .iter()
+                .filter(|(_, other)| at.is_some() && **other == at)
+                .map(|(run, _)| *run)
+                .collect();
+            runs.insert(run);
+            requests_at.push(at);
+            stopped.push(StoppedRequest {
+                notice: index,
+                runs,
+                words: at.and_then(|at| entry_text(&entries[at], "content")),
+            });
+        }
+    }
+    stopped
+}
+
+/// Whether an entry is a step or a reply of a turn of `lane`: a browser turn's for the browser
+/// lane, any other for the building lane, never a routed card's (that run's routing step ran no
+/// turn of a thread) nor the controller's own lines.
+fn is_turn_entry(entry: &JsonValue, lane: ThreadLane) -> bool {
+    entry_text(entry, "role") == Some("assistant")
+        && is_browser_entry(entry) == (lane == ThreadLane::SharedBrowser)
+        && !is_routed_browser_card(entry)
+        && entry
+            .pointer("/metadata/source")
+            .and_then(JsonValue::as_str)
+            != Some("controller")
+}
+
+/// Whether `run` ran a turn of `lane`, or may have when a Stop ended it: for the browser lane, a
+/// browser turn's run, whose entries the controller marks; for the building lane, any other run
+/// but the routing step's that posted a card for the browser, which runs no turn of a thread.
+fn run_of_lane(entries: &[JsonValue], run: &str, lane: ThreadLane) -> bool {
+    let mut of_run = entries
+        .iter()
+        .filter(|entry| entry_text(entry, "runId") == Some(run));
+    match lane {
+        ThreadLane::SharedBrowser => of_run.any(is_browser_entry),
+        ThreadLane::Building => {
+            of_run.all(|entry| !is_browser_entry(entry) && !is_routed_browser_card(entry))
+        }
+    }
+}
+
+/// Whether the thread of `lane` holds a turn of a request the person stopped: a run of that
+/// request ran in this lane, and no turn of the lane since the Stop, but the one about to run
+/// (`current_run`), has taken a step or replied. Codex can't take a turn back out of a thread,
+/// and a line saying the request was stopped didn't keep the next change on that thread from
+/// building it (a local test, Nov 6), so the next turn of the lane starts a new thread, from the
+/// chat's replay, which leaves the request out ([`parse_lane_history`]); the turn after it
+/// resumes that thread. A run the Stop ended counts though it left no step: the Stop may have come
+/// while its first model request was out. Decided from the controller's notice of the Stop and
+/// the lanes it marks on the history, never from words.
+pub(super) fn lane_thread_holds_a_stopped_request(
+    history: Option<&JsonValue>,
+    lane: ThreadLane,
+    current_run: Option<&str>,
+) -> bool {
+    let Some(entries) = history.and_then(JsonValue::as_array) else {
+        return false;
+    };
+    stopped_requests(entries).iter().any(|stopped| {
+        stopped
+            .runs
+            .iter()
+            .any(|run| run_of_lane(entries, run, lane))
+            && !entries[stopped.notice + 1..].iter().any(|entry| {
+                is_turn_entry(entry, lane)
+                    && entry_text(entry, "runId")
+                        .is_some_and(|run| !stopped.runs.contains(run) && Some(run) != current_run)
+            })
+    })
 }
 
 /// Where the Undo and Stop lines a restored thread of `lane` has not seen start: where its last
-/// turn began. Its last turn is the newest run with a reply of its lane in the history: a browser
-/// turn's for the browser lane, any other for the building lane, never a routed card's (that
-/// run's routing step ran no turn of a thread) nor the controller's own lines. A turn reads these
-/// lines only when its prompt is built, so an Undo or a Stop during or after that turn never
-/// reached the thread, and one before it did.
+/// turn began. Its last turn is the newest run with a reply of its lane in the history
+/// ([`is_turn_entry`]). A turn reads these lines only when its prompt is built, so an Undo or a
+/// Stop during or after that turn never reached the thread, and one before it did.
 fn last_turn_start(entries: &[JsonValue], lane: ThreadLane) -> usize {
     entries
         .iter()
         .rev()
-        .filter(|entry| {
-            entry_text(entry, "role") == Some("assistant")
-                && is_browser_entry(entry) == (lane == ThreadLane::SharedBrowser)
-                && !is_routed_browser_card(entry)
-                && entry
-                    .pointer("/metadata/source")
-                    .and_then(JsonValue::as_str)
-                    != Some("controller")
-        })
+        .filter(|entry| is_turn_entry(entry, lane))
         .find_map(|entry| entry_text(entry, "runId"))
         .and_then(|run| {
             entries
@@ -282,6 +431,7 @@ fn taken_back_lines(entries: &[JsonValue], since: usize, lane: ThreadLane) -> (V
         Some(at) => format!("[{at}] {line}"),
         None => line,
     };
+    let stopped = stopped_requests(entries);
     let mut lines: Vec<(bool, String)> = Vec::new();
     for (index, entry) in entries.iter().enumerate().skip(since) {
         if is_undo_line(entry) {
@@ -297,44 +447,17 @@ fn taken_back_lines(entries: &[JsonValue], since: usize, lane: ThreadLane) -> (V
             }
             continue;
         }
-        if !is_stop_notice(entry) {
-            continue;
-        }
-        let continued: HashSet<&str> = entries[index + 1..]
-            .iter()
-            .filter(|later| entry_text(later, "role") == Some("user"))
-            .flat_map(continued_runs_of)
-            .collect();
-        let listed: Vec<&str> = entry
-            .pointer("/metadata/details/runIds")
-            .and_then(JsonValue::as_array)
-            .map(|runs| {
-                runs.iter()
-                    .filter_map(JsonValue::as_str)
-                    .map(str::trim)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let runs = if listed.is_empty() {
-            entry_text(entry, "runId").into_iter().collect()
-        } else {
-            listed
-        };
         let mut named: Vec<&str> = Vec::new();
-        for words in runs
-            .into_iter()
-            .filter(|run| !continued.contains(run))
-            .filter_map(|run| persons_request_in(entries, run))
+        for words in stopped
+            .iter()
+            .filter(|stopped| stopped.notice == index)
+            .filter_map(|stopped| stopped.words)
         {
             if named.contains(&words) || !read_here(Some(words)) {
                 continue;
             }
             named.push(words);
-            let line = format!(
-                "The person stopped “{}”; don't carry it on unless they ask again.",
-                compact_content(words, 300)
-            );
-            lines.push((false, dated(entry, line)));
+            lines.push((false, dated(entry, stop_line(words))));
         }
     }
     let keep_from = lines.len().saturating_sub(TAKEN_BACK_MAX);
@@ -482,6 +605,11 @@ impl BrowserRunEntries {
 ///   the person's own message quotes no request: the message is in the history already
 ///   ([`repeated_person_messages`]). A hand-back's stored prompt is no turn of the person's,
 ///   and reads as none ([`is_hand_back_prompt`]).
+///
+/// A request the person stopped and has not asked for again is left out of both, its steps and
+/// browser turns too ([`stopped_requests`]): a turn whose thread showed it the stopped request
+/// built it. The building lane reads its Stop's line in their place, and the browser lane after
+/// its replay ([`build_prompt_conversation_context`]).
 fn parse_lane_history(value: Option<&JsonValue>, lane: ThreadLane) -> Vec<ConversationTurn> {
     let Some(JsonValue::Array(entries)) = value else {
         return Vec::new();
@@ -490,6 +618,11 @@ fn parse_lane_history(value: Option<&JsonValue>, lane: ThreadLane) -> Vec<Conver
         ThreadLane::Building => repeated_person_messages(entries),
         ThreadLane::SharedBrowser => HashSet::new(),
     };
+    let stopped = stopped_requests(entries);
+    let left_out: HashSet<&str> = stopped
+        .iter()
+        .flat_map(|stopped| stopped.runs.iter().copied())
+        .collect();
     let mut turns = Vec::new();
     let mut run: Option<BrowserRunEntries> = None;
     let flush = |run: &mut Option<BrowserRunEntries>, turns: &mut Vec<ConversationTurn>| {
@@ -533,6 +666,34 @@ fn parse_lane_history(value: Option<&JsonValue>, lane: ThreadLane) -> Vec<Conver
     };
     for (index, entry) in entries.iter().enumerate() {
         if !entry.is_object() {
+            continue;
+        }
+        let mut stops_here = stopped
+            .iter()
+            .filter(|stopped| stopped.notice == index)
+            .peekable();
+        if stops_here.peek().is_some() {
+            flush(&mut run, &mut turns);
+            let mut lines: Vec<String> = Vec::new();
+            for line in stops_here
+                .filter_map(|stopped| stopped.words)
+                .map(stop_line)
+            {
+                if !lines.contains(&line) {
+                    lines.push(line);
+                }
+            }
+            if lane == ThreadLane::Building && !lines.is_empty() {
+                turns.push(ConversationTurn {
+                    role: "assistant".to_string(),
+                    content: lines.join("\n"),
+                    created_at: entry_text(entry, "createdAt").map(ToString::to_string),
+                    browser_run: None,
+                });
+            }
+            continue;
+        }
+        if entry_text(entry, "runId").is_some_and(|run| left_out.contains(run)) {
             continue;
         }
         if !is_browser_entry(entry) {
@@ -612,7 +773,8 @@ pub fn format_conversation_history(turns: &[ConversationTurn]) -> String {
 /// chat so far, with what the person stopped or undid since its last turn, or, for a new or lost
 /// thread, the chat's history as that lane reads it (`parse_lane_history`), a browser thread's
 /// with what the person stopped or undid since the chat's first browser turn. A browser lane
-/// with no earlier browser turn gets no section: its `section_text` is empty.
+/// with no earlier browser turn to replay, nor a Stop or an Undo of one, gets no section: its
+/// `section_text` is empty.
 pub fn build_prompt_conversation_context(
     history_value: Option<&JsonValue>,
     provider_state: Option<&JsonValue>,
@@ -697,10 +859,10 @@ pub fn build_prompt_conversation_context(
     };
     // A new or lost browser thread replays only the chat's browser turns, and no Undo or Stop is
     // one: it reads those since the first of them after its replay, so a request the person
-    // stopped or undid is not one to carry on. The building lane's replay reads them in place,
-    // as lines of the chat.
+    // stopped or undid is not one to carry on, even when the replay left out every browser turn
+    // there was, as a stopped request's. The building lane's replay reads them in place, as
+    // lines of the chat.
     if lane == ThreadLane::SharedBrowser
-        && !turns.is_empty()
         && let Some(first_browser_turn) = entries.iter().position(is_browser_entry)
     {
         let (taken_back, undone) = taken_back_lines(entries, first_browser_turn, lane);
@@ -720,12 +882,16 @@ pub fn build_prompt_conversation_context(
 }
 
 /// Adds `lines` under `note` to a thread's conversation section, one per line; nothing when
-/// there are none.
+/// there are none. An empty section starts with the note.
 fn push_taken_back(section_text: &mut String, note: &str, lines: &[String]) {
     if lines.is_empty() {
         return;
     }
-    section_text.push_str(note);
+    section_text.push_str(if section_text.is_empty() {
+        note.trim_start()
+    } else {
+        note
+    });
     for line in lines {
         section_text.push_str("\n- ");
         section_text.push_str(line);
@@ -1604,23 +1770,6 @@ mod tests {
     /// the person stopped, a tip whose hand-back the person stopped during its save, and that
     /// tip's Undo. Octo's replies name their jobs.
     fn chat_with_stops_and_an_undo() -> Vec<JsonValue> {
-        let routed = |words: &str, run: &str, card: &str, at: &str| {
-            json!({
-                "role": "user", "content": words, "runId": run, "lane": "browser", "createdAt": at,
-                "metadata": {"prompt_metadata": {
-                    "browserTransport": "shared",
-                    "browserRequestOf": format!("job:{card}"),
-                    "browserAutoStarted": true,
-                    "browserCardTurn": {"version": 1, "cardJobId": card, "routed": true},
-                }},
-            })
-        };
-        let hand_back = |run: &str, card: &str, at: &str| {
-            json!({
-                "role": "user", "content": HAND_BACK_PROMPT, "runId": run, "createdAt": at,
-                "metadata": {"browserHandBack": {"version": 1, "cardJobId": card, "browserJobId": "browser-job"}},
-            })
-        };
         vec![
             json!({"role": "user", "content": "Now find how to get there by metro from São Bento.", "runId": "run-3", "createdAt": "2026-11-05T22:50:42Z"}),
             routed(
@@ -1666,6 +1815,28 @@ mod tests {
         ]
     }
 
+    /// The request of the browser turn of the card the routing step posted for the person's
+    /// message: their words again.
+    fn routed(words: &str, run: &str, card: &str, at: &str) -> JsonValue {
+        json!({
+            "role": "user", "content": words, "runId": run, "lane": "browser", "createdAt": at,
+            "metadata": {"prompt_metadata": {
+                "browserTransport": "shared",
+                "browserRequestOf": format!("job:{card}"),
+                "browserAutoStarted": true,
+                "browserCardTurn": {"version": 1, "cardJobId": card, "routed": true},
+            }},
+        })
+    }
+
+    /// A hand-back's stored prompt, carrying on `card`.
+    fn hand_back(run: &str, card: &str, at: &str) -> JsonValue {
+        json!({
+            "role": "user", "content": HAND_BACK_PROMPT, "runId": run, "createdAt": at,
+            "metadata": {"browserHandBack": {"version": 1, "cardJobId": card, "browserJobId": "browser-job"}},
+        })
+    }
+
     /// The notice the controller records for a press of Stop (runtime-controller
     /// `conversation_stop.rs`), naming who pressed it.
     fn stop_notice(run: &str, at: &str) -> JsonValue {
@@ -1678,8 +1849,8 @@ mod tests {
         })
     }
 
-    const BEFORE_YOU_GO_STOPPED: &str = "[2026-11-05T22:55:46Z] The person stopped “Add a short \"Before you go\" section to that page.”; don't carry it on unless they ask again.";
-    const TIP_STOPPED: &str = "[2026-11-05T22:56:56Z] The person stopped “Add a one-line tip about the best time to visit.”; don't carry it on unless they ask again.";
+    const BEFORE_YOU_GO_STOPPED: &str = "[2026-11-05T22:55:46Z] The person stopped “Add a short \"Before you go\" section to that page.”: make nothing it asked for (no section, heading or wording of it, even to hold something else) unless they ask again.";
+    const TIP_STOPPED: &str = "[2026-11-05T22:56:56Z] The person stopped “Add a one-line tip about the best time to visit.”: make nothing it asked for (no section, heading or wording of it, even to hold something else) unless they ask again.";
     const TIP_UNDONE: &str = "[2026-11-05T22:58:41Z] The person undid the change from “Add a one-line tip about the best time to visit.”";
 
     /// What a restored thread of `lane` reads of the chat up to `entries`.
@@ -1801,7 +1972,7 @@ mod tests {
         let context = restored_note(history.as_array().unwrap(), ThreadLane::Building);
         assert!(
             context.section_text.ends_with(
-                "\n- [2026-11-05T10:00:00Z] The person stopped “Map the cafés near the old town.”; don't carry it on unless they ask again."
+                "\n- [2026-11-05T10:00:00Z] The person stopped “Map the cafés near the old town.”: make nothing it asked for (no section, heading or wording of it, even to hold something else) unless they ask again."
             ),
             "{}",
             context.section_text
@@ -1875,14 +2046,15 @@ mod tests {
         assert!(
             restored_note(&stopped, ThreadLane::Building)
                 .section_text
-                .ends_with("The person stopped “Add each shop's opening hours to that page.”; don't carry it on unless they ask again.")
+                .ends_with("The person stopped “Add each shop's opening hours to that page.”: make nothing it asked for (no section, heading or wording of it, even to hold something else) unless they ask again.")
         );
     }
 
     /// Studio's Continue under a Stop asks again for the request the Stop ended
-    /// (`continuedRunIds`, `useChatRunStopContinuation.ts`): its turn is not told to leave that
-    /// request alone, and a Stop of the Continue's own turn names that request, never Studio's
-    /// words for the press.
+    /// (`continuedRunIds`, `useChatRunStopContinuation.ts`, which sends the notice's runs): its
+    /// turn is not told to leave that request alone, resumes the thread that holds the stopped
+    /// turn, and a replay keeps the request. A Stop of the Continue's own turn names that request,
+    /// never Studio's words for the press, and leaves both turns out of the next one.
     #[test]
     fn a_continue_under_a_stop_carries_its_request_on() {
         const CONTINUE: &str = "Continue the stopped turn from its current state. Check what has already finished before proceeding; do not repeat completed actions.";
@@ -1899,7 +2071,22 @@ mod tests {
                 "{}",
                 context.section_text
             );
+            assert!(!lane_thread_holds_a_stopped_request(
+                Some(&json!(continued)),
+                lane,
+                Some("run-c")
+            ));
         }
+        let replay =
+            build_prompt_conversation_context(Some(&json!(continued)), None, ThreadLane::Building)
+                .section_text;
+        assert!(
+            replay.contains(
+                "User [2026-11-05T22:55:34Z]: Add a short \"Before you go\" section to that page.\nAssistant [2026-11-05T22:55:46Z]: Stopped this run."
+            ),
+            "{replay}"
+        );
+        assert!(!replay.contains("make nothing it asked for"), "{replay}");
         // The person stops the Continue's turn too: its line names the request it continued.
         continued.push(json!({"role": "assistant", "content": "Reading the page's file.", "runId": "run-c", "createdAt": "2026-11-05T22:55:55Z"}));
         continued.push(stop_notice("run-c", "2026-11-05T22:56:00Z"));
@@ -1907,11 +2094,30 @@ mod tests {
         let text = restored_note(&continued, ThreadLane::Building).section_text;
         assert!(
             text.ends_with(
-                "\n- [2026-11-05T22:56:00Z] The person stopped “Add a short \"Before you go\" section to that page.”; don't carry it on unless they ask again."
+                "\n- [2026-11-05T22:56:00Z] The person stopped “Add a short \"Before you go\" section to that page.”: make nothing it asked for (no section, heading or wording of it, even to hold something else) unless they ask again."
             ),
             "{text}"
         );
         assert!(!text.contains(CONTINUE), "{text}");
+        let history = json!(continued);
+        assert!(lane_thread_holds_a_stopped_request(
+            Some(&history),
+            ThreadLane::Building,
+            Some("run-d")
+        ));
+        let replay = build_prompt_conversation_context(Some(&history), None, ThreadLane::Building)
+            .section_text;
+        assert!(
+            replay.contains(&format!(
+                "Assistant [2026-11-05T22:56:00Z]: {}",
+                stop_line("Add a short \"Before you go\" section to that page.")
+            )),
+            "{replay}"
+        );
+        for gone in [CONTINUE, "Reading the page's file.", "Stopped this run."] {
+            assert!(!replay.contains(gone), "{gone}: {replay}");
+        }
+        assert_eq!(replay.matches("Before you go").count(), 1, "{replay}");
     }
 
     /// A browser thread that is new, or lost when its restore failed, replays only the chat's
@@ -1930,8 +2136,13 @@ mod tests {
                 build_prompt_conversation_context(Some(&history), state, ThreadLane::SharedBrowser);
             assert_eq!(context.metrics["mode"], json!("stateless_full"));
             let text = &context.section_text;
+            // The stopped tip's browser turn is left out; the earlier ones are replayed.
             assert!(
-                text.contains("Add a one-line tip about the best time to visit."),
+                !text.contains("User [2026-11-05T22:56:23Z]: Add a one-line tip"),
+                "{text}"
+            );
+            assert!(
+                text.contains("User [2026-11-05T22:50:47Z]: Now find how to get there by metro from São Bento."),
                 "{text}"
             );
             assert!(
@@ -1997,7 +2208,7 @@ mod tests {
         let building = restored_note(&chat, ThreadLane::Building).section_text;
         assert!(
             building.ends_with(&format!(
-                "\n- [2026-11-05T23:00:21Z] The person stopped “{ADDRESS}”; don't carry it on unless they ask again.\n- [2026-11-05T23:00:40Z] The person undid the change from “{ADDRESS}”"
+                "\n- [2026-11-05T23:00:21Z] The person stopped “{ADDRESS}”: make nothing it asked for (no section, heading or wording of it, even to hold something else) unless they ask again.\n- [2026-11-05T23:00:40Z] The person undid the change from “{ADDRESS}”"
             )),
             "{building}"
         );
@@ -2030,14 +2241,196 @@ mod tests {
                 "{text}"
             );
             assert!(text.contains("I built a small page with the bookstore's daily hours."));
-            assert!(text.contains("Stopped this run."), "{text}");
         }
+        // Routing reads the chat's lines as they are; a new building thread reads each stopped
+        // request as its Stop's line ([`a_new_building_thread_reads_a_stopped_request_as_its_stop_line`]).
+        assert!(routing.section_text.contains("Stopped this run."));
+        assert!(!building.section_text.contains("Stopped this run."));
         // Words a person typed that only look like it stay theirs.
         let typed = json!([{"role": "user", "content": "Continue building with what the browser turn found, please."}]);
         assert!(
             build_routing_conversation_context(Some(&typed))
                 .section_text
                 .contains("found, please.")
+        );
+    }
+
+    /// A recorded local test (Nov 6): "Before you go" was stopped after its turn read the page's
+    /// files, before any edit. The tip went straight to the building thread, which still held the
+    /// stopped turn and its read, and built the stopped section to hold itself, with the Stop's
+    /// line right above its request. That thread is not resumed: the tip's turn starts a new one
+    /// from the chat's replay, which leaves the section's request and its step out and keeps its
+    /// Stop line in their place. The turn after the tip resumes the tip's thread, and a job taken
+    /// up again after its machine stopped is still the tip's.
+    #[test]
+    fn a_new_building_thread_reads_a_stopped_request_as_its_stop_line() {
+        const BEFORE_YOU_GO: &str = "Add a short \"Before you go\" section to that page.";
+        const TIP: &str = "Add a one-line tip about the best time to visit.";
+        let mut chat = chat_with_stops_and_an_undo()[..8].to_vec();
+        chat.push(json!({"role": "user", "content": BEFORE_YOU_GO, "runId": "run-8", "createdAt": "2026-11-05T22:55:34Z"}));
+        chat.push(json!({
+            "role": "assistant", "content": "/bin/bash -lc sed -n '1,240p' sites/livraria-lello/data.json",
+            "runId": "run-8", "createdAt": "2026-11-05T22:55:40Z",
+            "metadata": {"source": "agent", "kind": "update", "jobId": "job-run-8"},
+        }));
+        chat.push(stop_notice("run-8", "2026-11-05T22:55:46Z"));
+        chat.push(json!({"role": "user", "content": TIP, "runId": "run-9", "createdAt": "2026-11-05T22:56:18Z"}));
+        let history = json!(chat);
+        assert!(lane_thread_holds_a_stopped_request(
+            Some(&history),
+            ThreadLane::Building,
+            Some("run-9")
+        ));
+        // No browser turn ran the section: the browser thread is resumed.
+        assert!(!lane_thread_holds_a_stopped_request(
+            Some(&history),
+            ThreadLane::SharedBrowser,
+            Some("run-9")
+        ));
+        let text = build_prompt_conversation_context(Some(&history), None, ThreadLane::Building)
+            .section_text;
+        assert!(
+            text.contains(&format!(
+                "\nAssistant [2026-11-05T22:55:46Z]: {}\nUser [2026-11-05T22:56:18Z]: {TIP}",
+                stop_line(BEFORE_YOU_GO)
+            )),
+            "{text}"
+        );
+        assert_eq!(text.matches("Before you go").count(), 1, "{text}");
+        for gone in ["sed -n", "Stopped this run."] {
+            assert!(!text.contains(gone), "{gone}: {text}");
+        }
+        assert!(
+            text.contains("I built a small page with the bookstore's daily hours."),
+            "{text}"
+        );
+
+        // The tip's job taken up again: its own steps are no later turn.
+        let mut taken_up = chat.clone();
+        taken_up.push(json!({"role": "assistant", "content": "/bin/bash -lc sed -n '1,220p' sites/livraria-lello/data.json", "runId": "run-9", "metadata": {"source": "agent", "kind": "update"}}));
+        assert!(lane_thread_holds_a_stopped_request(
+            Some(&json!(taken_up)),
+            ThreadLane::Building,
+            Some("run-9")
+        ));
+        // The tip replied on its new thread: the next turn resumes it.
+        chat.push(json!({"role": "assistant", "content": "Added a one-line tip.", "runId": "run-9", "createdAt": "2026-11-05T22:56:40Z", "metadata": {"jobId": "job-run-9"}}));
+        chat.push(json!({"role": "user", "content": "Make the title bigger.", "runId": "run-10", "createdAt": "2026-11-05T22:57:00Z"}));
+        assert!(!lane_thread_holds_a_stopped_request(
+            Some(&json!(chat)),
+            ThreadLane::Building,
+            Some("run-10")
+        ));
+    }
+
+    /// A Stop between a browser turn and the build it hands back to (a local test, Nov 6: "Add
+    /// each laptop's warranty from its own page.") ends the build before it starts, but the chat's
+    /// browser thread holds the browser turn of the stopped request. The next browser turn starts
+    /// a new thread from the replay of the chat's browser turns, without that one, and reads the
+    /// Stop's line after it. The history doesn't say whether the build had begun, so the next
+    /// building turn starts anew too.
+    #[test]
+    fn a_browser_thread_that_read_for_a_stopped_build_is_not_resumed() {
+        const COMPARE: &str =
+            "In your browser, compare the three latest Framework laptops as a comparison page.";
+        const WARRANTY: &str = "Add each laptop's warranty from its own page.";
+        const BATTERY: &str = "Add each laptop's battery life.";
+        let card = |run: &str, job: &str| {
+            json!({
+                "role": "assistant", "content": "Continue this task in Instafy's browser.", "runId": run,
+                "metadata": {"jobId": job, "details": {"browserRequest": {"routed": true}}},
+            })
+        };
+        let mut chat = vec![
+            json!({"role": "user", "content": COMPARE, "runId": "run-1", "createdAt": "2026-11-06T09:44:22Z"}),
+            card("run-1", "card-1"),
+            routed(COMPARE, "run-2", "card-1", "2026-11-06T09:44:28Z"),
+            json!({"role": "assistant", "content": "The 13 Pro weighs 1.4 kg.", "runId": "run-2", "lane": "browser", "createdAt": "2026-11-06T09:45:44Z"}),
+            hand_back("run-3", "card-1", "2026-11-06T09:45:44.7Z"),
+            json!({"role": "assistant", "content": "I built the comparison page.", "runId": "run-3", "createdAt": "2026-11-06T09:47:19Z", "metadata": {"jobId": "job-run-3"}}),
+            json!({"role": "user", "content": WARRANTY, "runId": "run-4", "createdAt": "2026-11-06T09:50:29Z"}),
+            card("run-4", "card-4"),
+            routed(WARRANTY, "run-5", "card-4", "2026-11-06T09:50:37Z"),
+            json!({"role": "assistant", "content": "The EU limited warranty is two years.", "runId": "run-5", "lane": "browser", "createdAt": "2026-11-06T09:51:14Z"}),
+            hand_back("run-6", "card-4", "2026-11-06T09:51:15.2Z"),
+            stop_notice("run-6", "2026-11-06T09:51:15.4Z"),
+            json!({"role": "user", "content": BATTERY, "runId": "run-7", "createdAt": "2026-11-06T09:53:00Z"}),
+            card("run-7", "card-7"),
+            routed(BATTERY, "run-8", "card-7", "2026-11-06T09:53:06Z"),
+        ];
+        let history = json!(chat);
+        for lane in [ThreadLane::SharedBrowser, ThreadLane::Building] {
+            assert!(
+                lane_thread_holds_a_stopped_request(Some(&history), lane, Some("run-8")),
+                "{lane:?}"
+            );
+        }
+        let text =
+            build_prompt_conversation_context(Some(&history), None, ThreadLane::SharedBrowser)
+                .section_text;
+        assert!(text.contains("The 13 Pro weighs 1.4 kg."), "{text}");
+        assert!(!text.contains("two years"), "{text}");
+        assert!(
+            !text.contains("User [2026-11-06T09:50:37Z]: Add each laptop's warranty"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(&format!(
+                "{TAKEN_BACK_IN_CHAT_NOTE}\n- [2026-11-06T09:51:15.4Z] {}",
+                stop_line(WARRANTY)
+            )),
+            "{text}"
+        );
+        // The battery's browser turn replied on its new thread: the next one resumes it.
+        chat.push(json!({"role": "assistant", "content": "Battery: 74 Wh.", "runId": "run-8", "lane": "browser", "createdAt": "2026-11-06T09:54:00Z"}));
+        chat.push(routed(
+            "Add each laptop's weight.",
+            "run-10",
+            "card-9",
+            "2026-11-06T09:55:00Z",
+        ));
+        assert!(!lane_thread_holds_a_stopped_request(
+            Some(&json!(chat)),
+            ThreadLane::SharedBrowser,
+            Some("run-10")
+        ));
+    }
+
+    /// A Stop of a request only the browser ran leaves the building thread, which never ran it,
+    /// to be resumed: it reads the Stop's line after its restore note.
+    #[test]
+    fn a_thread_a_stopped_request_never_reached_is_resumed() {
+        const HOURS: &str = "Find Livraria Lello's opening hours.";
+        let mut notice = stop_notice("run-2", "2026-11-06T09:53:00Z");
+        notice["lane"] = json!("browser");
+        let chat = vec![
+            json!({"role": "user", "content": "Put the hours on a small page.", "runId": "run-0", "createdAt": "2026-11-06T09:50:00Z"}),
+            json!({"role": "assistant", "content": "I built a small page.", "runId": "run-0", "createdAt": "2026-11-06T09:51:00Z", "metadata": {"jobId": "job-0"}}),
+            json!({"role": "user", "content": HOURS, "runId": "run-1", "createdAt": "2026-11-06T09:52:19Z"}),
+            json!({"role": "assistant", "content": "Continue this task in Instafy's browser.", "runId": "run-1", "metadata": {"jobId": "card-1", "details": {"browserRequest": {"routed": true}}}}),
+            routed(HOURS, "run-2", "card-1", "2026-11-06T09:52:24Z"),
+            json!({"role": "assistant", "content": "Opened visitporto.travel", "runId": "run-2", "lane": "browser", "metadata": {"source": "agent", "kind": "update"}}),
+            notice,
+            json!({"role": "user", "content": "Make the title bigger.", "runId": "run-3", "createdAt": "2026-11-06T09:54:00Z"}),
+        ];
+        let history = json!(chat);
+        assert!(!lane_thread_holds_a_stopped_request(
+            Some(&history),
+            ThreadLane::Building,
+            Some("run-3")
+        ));
+        assert!(lane_thread_holds_a_stopped_request(
+            Some(&history),
+            ThreadLane::SharedBrowser,
+            Some("run-3")
+        ));
+        let text = restored_note(&chat, ThreadLane::Building).section_text;
+        assert!(
+            text.ends_with(&format!(
+                "{TAKEN_BACK_NOTE}\n- [2026-11-06T09:53:00Z] {}",
+                stop_line(HOURS)
+            )),
+            "{text}"
         );
     }
 
