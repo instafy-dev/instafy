@@ -447,13 +447,10 @@ let stepKind = null;
 const REFUSED_STEP_KINDS = new Set(["consent", "sign_in", "upload", "reveal_secret", "sensitive"]);
 let refusedStep = null;
 
-async function ensureSiteApproved(rawUrl, label, { destinationUrl = null, pageAsRead } = {}) {
+async function ensureSiteApproved(rawUrl, label, { destinationUrl = null } = {}) {
   assertStepOnTime();
   // A site the run already uses, or routine browsing, opens without a prompt.
-  // A step that asks for the site its control leads to is asked about the page
-  // as Octo read it (askablePage).
   const prompts = !siteApproved(rawUrl);
-  if (prompts) askablePage(pageAsRead);
   const origin = await stepClock.whilePersonAnswers(() => approvalProtocol.ensureOriginApproved(
     rawUrl,
     () => tabLabel(typeof label === "function" ? label() : label),
@@ -493,10 +490,8 @@ function refuseUnlessReadingStep(readingStep) {
 async function allowStepOnce(details, options) {
   assertStepOnTime();
   // Routine browsing takes a routine step without a prompt; every other step
-  // waits for the person's answer, about the page as Octo read it
-  // (askablePage).
+  // waits for the person's answer.
   const prompts = !(options?.routine === true && approvalProtocol.routineBrowsingAllowed());
-  if (prompts) askablePage(options?.pageAsRead);
   const request = await stepClock.whilePersonAnswers(() => (inAgentTab()
     ? approvalProtocol.allowOnce({
       ...details,
@@ -1799,6 +1794,19 @@ function describeInPage(rule, forms, names, element, sources, mode) {
     optionCount = null;
   }
 
+  // Where the control is drawn, read in this same moment, so a reading lists
+  // the controls one moment of the page shows: a carousel that turns between
+  // two looks at the page drops no slide, and shifts no index after it.
+  let rect = null;
+  try {
+    if (element.getClientRects().length) {
+      const drawn = element.getBoundingClientRect();
+      rect = { x: drawn.left, y: drawn.top, width: drawn.width, height: drawn.height };
+    }
+  } catch (_) {
+    rect = null;
+  }
+
   return {
     shown: true,
     expanded,
@@ -1807,6 +1815,7 @@ function describeInPage(rule, forms, names, element, sources, mode) {
     disabled,
     checked,
     selected,
+    rect,
     tag: bounded(element.tagName.toLowerCase(), 64),
     role: bounded(element.getAttribute("role"), 128),
     idAttribute: bounded(element.getAttribute("id")),
@@ -2036,7 +2045,13 @@ async function describeElement(locator, index, hiddenNames, described = undefine
     }
     return null;
   }
-  const box = await locator.boundingBox().catch(() => null);
+  // The box the page gave with the rest of the control's facts, when it gave
+  // one; Playwright's own look at it comes a moment later.
+  const drawn = attributes && attributes.rect;
+  const box = drawn && typeof drawn === "object" &&
+    [drawn.x, drawn.y, drawn.width, drawn.height].every((value) => Number.isFinite(value))
+    ? drawn
+    : await locator.boundingBox().catch(() => null);
   if (!attributes || !box) {
     return null;
   }
@@ -2870,10 +2885,16 @@ let runningStepGuard = null;
 const DECLINE_CLICK_TIMEOUT_MS = 2_000;
 
 // Runs inside the page through Playwright, so it must not use anything from
-// this file's scope. Whether `element` and one of `request.others` sit in the
-// same banner: the nearest container that holds both, below the page's body,
-// is a small part of the page, never a section that only happens to hold two.
-function sameBannerInPage(element, request) {
+// this file's scope. Whether `element` and one of `request.others` sit in one
+// cookie banner: the nearest container that holds both, below the page's
+// body, is a small part of the page, never a section that only happens to
+// hold two, and that banner speaks of cookies. It, or a container around it,
+// is named after them (its id, class, label or test id, or a dialog's title),
+// or its own text says "cookie": its text and that of the small containers
+// around it, up to its dialog. A dialog that speaks only of privacy or
+// consent (a policy to accept, a consent form) is no cookie banner, though
+// its buttons are judged as a banner's (the describer's consent context).
+function cookieBannerInPage(element, request) {
   const doc = element.ownerDocument;
   const roots = [doc.body, doc.documentElement];
   const up = (node) => node.assignedSlot || node.parentElement || (node.parentNode && node.parentNode.host) || null;
@@ -2884,12 +2905,79 @@ function sameBannerInPage(element, request) {
     return false;
   };
   const others = Array.isArray(request && request.others) ? request.others : [];
+  let banner = null;
   for (let node = up(element), depth = 0; node && node.nodeType === 1 && !roots.includes(node) && depth < 16; node = up(node), depth += 1) {
     if (others.some((other) => other && holds(node, other))) {
-      return typeof node.textContent === "string" && node.textContent.length <= 4_000;
+      banner = node;
+      break;
+    }
+  }
+  if (!banner || typeof banner.textContent !== "string" || banner.textContent.length > 4_000) return false;
+  const cookieName = /cookie/i;
+  const cookieText = /\bcookies?\b/i;
+  const labelledText = (node) => String(node.getAttribute("aria-labelledby") || "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 8)
+    .map((id) => {
+      const root = typeof node.getRootNode === "function" ? node.getRootNode() : doc;
+      const labelled = (root && typeof root.getElementById === "function" ? root.getElementById(id) : null) || doc.getElementById(id);
+      return (labelled && labelled.textContent) || "";
+    })
+    .join(" ")
+    .slice(0, 400);
+  const dialogSelector = "dialog, [role=dialog], [role=alertdialog], [aria-modal=true]";
+  let ownText = true;
+  for (let node = banner, depth = 0; node && node.nodeType === 1 && !roots.includes(node) && depth < 16; node = up(node), depth += 1) {
+    const named = [
+      ...["id", "class", "aria-label", "data-testid"].map((name) => node.getAttribute(name) || ""),
+      labelledText(node),
+    ].join(" ").slice(0, 800);
+    if (cookieName.test(named)) return true;
+    const dialog = typeof node.matches === "function" && node.matches(dialogSelector);
+    if (ownText) {
+      const text = typeof node.textContent === "string" ? node.textContent : "";
+      if ((node === banner || text.length <= 1_500) && cookieText.test(text)) return true;
+      const heading = dialog && typeof node.querySelector === "function"
+        ? node.querySelector("h1, h2, h3, h4, h5, h6, [role=heading]")
+        : null;
+      if (heading && cookieText.test(String(heading.textContent || "").slice(0, 400))) return true;
+      // The banner's text ends at its dialog, or where a container around it
+      // is no small part of the page any more.
+      if (dialog || text.length > 1_500) ownText = false;
     }
   }
   return false;
+}
+
+// Words that name a field whose value is a payment detail, a password or a
+// code, in a frame element's own title, name, label or id: a payment
+// provider's card fields sit in such a frame (sensitiveFrameInPage).
+const SENSITIVE_FRAME_SOURCE =
+  "\\b(?:payments?|credit[\\s_-]*card|card[\\s_-]*(?:number|details|data|holder)|cvv|cvc|security[\\s_-]*code|expir\\w*|password|passcode|one[\\s_-]*time|verification[\\s_-]*code|iban)\\b";
+
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Whether the page holds a frame whose own element names
+// a payment, password or code field (`request.pattern`): a checkout's card
+// fields, which a reading never reads, sit in a payment provider's frame.
+// Only the frame elements' own attributes in this document are read, never
+// the frames.
+function sensitiveFrameInPage(request) {
+  const pattern = new RegExp(String(request && request.pattern), "i");
+  return Array.from(document.querySelectorAll("iframe, frame")).some((frame) =>
+    pattern.test(["title", "name", "aria-label", "id"].map((name) => frame.getAttribute(name) || "").join(" ").slice(0, 800)));
+}
+
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Whether a control is gone from what a person sees: out
+// of the page, or hidden, faded out or drawn with no size.
+function controlGoneInPage(element) {
+  if (!element.isConnected) return true;
+  if (typeof element.checkVisibility === "function") {
+    return !element.checkVisibility({ opacityProperty: true, visibilityProperty: true });
+  }
+  const box = element.getBoundingClientRect();
+  return box.width === 0 && box.height === 0;
 }
 
 // A field whose value is a password, a code, a payment detail or another
@@ -2930,13 +3018,17 @@ function holdsPersonalFields(interactive) {
 // the banner's own refusal ("Reject all", "Reject", "Only necessary",
 // "Decline"), as the action policy tells a banner's refusal from its accept
 // (`consentRejection`), only beside a button of the same banner that accepts
-// (`step_refused_consent`). Never the accept, the settings or anything else
-// on it, never a link or a form's button, never one turned off or covered,
-// and never in a frame: a reading lists the page's own controls only. The
-// caller has ruled out a page that may show a secret or holds a sign-in or
-// payment field. It shares nothing, so it asks nobody in any mode, as Octo's
-// own press of it never did, and no form may leave the tab while it runs.
-// True when it pressed one; a banner it could not press stays up.
+// (`step_refused_consent`), in a banner that speaks of cookies
+// (cookieBannerInPage). Never the accept, the settings or anything else on
+// it, never a link or a form's button, never one turned off or covered, and
+// never in a frame: a reading lists the page's own controls only. The caller
+// has ruled out a page that may show a secret or holds a sign-in or payment
+// field, and a page whose frame holds a payment, password or code field
+// (sensitiveFrameInPage) is left alone too. It shares nothing, so it asks
+// nobody in any mode, as Octo's own press of it never did, and no form may
+// leave the tab while it runs. The step says the banner was declined only
+// once its refusal is gone. True when it pressed one, so the page is read
+// again; a banner it could not press stays up.
 async function declineCookieBanner(page, interactive) {
   const pageUrl = page.url();
   // Only a control the describer found in a consent banner can be its
@@ -2958,9 +3050,14 @@ async function declineCookieBanner(page, interactive) {
     !resolvedTargetDestination(entry.description, pageUrl) &&
     !stepFormSubmission(entry.description, "click") &&
     !isFormSubmissionControl(entry.description));
+  if (!refusals.length) return false;
+  const framed = await page
+    .evaluate(sensitiveFrameInPage, { kind: "sensitive-frames", pattern: SENSITIVE_FRAME_SOURCE })
+    .catch(() => null);
+  if (framed !== false) return false;
   for (const { entry } of refusals) {
     const beside = await entry.locator
-      .evaluate(sameBannerInPage, { kind: "same-banner", others: accepts })
+      .evaluate(cookieBannerInPage, { kind: "cookie-banner", others: accepts })
       .catch(() => false);
     if (beside !== true) continue;
     const landing = await clickLanding(entry);
@@ -2988,7 +3085,12 @@ async function declineCookieBanner(page, interactive) {
       if (!pressed) return false;
       await settleAfterAction(page);
       if (own) guard.assertNoneBlocked();
-      declinedCookies = true;
+      // A banner whose button took no press (its script not ready yet) is
+      // still up, and is not said to be declined.
+      const gone = await entry.locator
+        .evaluate(controlGoneInPage, { kind: "control-gone" })
+        .catch(() => true);
+      if (gone === true) declinedCookies = true;
       return true;
     } finally {
       if (own) await guard.release();
@@ -3252,39 +3354,30 @@ async function emitNavigationResult(page) {
 // the fingerprint and the text around it the reading recorded for it (a
 // look-alike that a carousel shows in its place, another product's "Add to
 // cart", is not it): the check a step gets after the person says yes
-// (approvedTarget). `pageAsRead` says which: a step that
-// asks the person needs the page as read (askablePage). A control that is not
-// as the reading showed it is refused by its reading's name. `asked` keeps
-// what the person is asked about, for approvedTarget: that very control, the
-// page's address and the text around the control.
+// (approvedTarget). A step that asks the person is judged the same way: its
+// prompt is built from that control as it is now, and approvedTarget checks
+// it again after the answer. A control that is not as the reading showed it
+// is refused by its reading's name. `asked` keeps what the person is asked
+// about, for approvedTarget: that very control, the page's address and the
+// text around the control.
 async function targetLocator(page, body) {
   const interactive = await collectInteractiveElements(page);
   const target = interactive[body.index];
   const place = target ? await controlPlace(target.locator) : null;
-  const pageAsRead = body.snapshotId === snapshotFingerprint(page.url(), interactive);
-  if (!pageAsRead) {
-    const reading = approvalProtocol.observedControls(body.snapshotId);
-    if (
-      !reading ||
-      reading.pageId !== activePageId ||
-      reading.address !== approvalProtocol.sha256(page.url())
-    ) {
+  if (body.snapshotId !== snapshotFingerprint(page.url(), interactive)) {
+    const read = recordedControl(page, body);
+    if (read === null) {
       pageChangedUnderStep = true;
       throw new Error(
         "Shared Browser snapshot is stale; take a fresh snapshot before acting",
       );
     }
-    const read = reading.controls[body.index];
     if (!read) {
       throw new Error(
         `Shared Browser element index ${body.index} is unavailable; take a fresh snapshot`,
       );
     }
-    if (
-      !target ||
-      targetFingerprint(target.description) !== read.target ||
-      (read.around !== null && (!place || approvalProtocol.sha256(place.around) !== read.around))
-    ) {
+    if (!asRecorded(read, target, place)) {
       pageChangedUnderStep = true;
       throw new Error(
         `${read.name ? `"${read.name}"` : "The control this step is for"} changed after the snapshot this step names, so nothing was done. Take a fresh snapshot, and do the step again if it still fits the request.`,
@@ -3298,21 +3391,36 @@ async function targetLocator(page, body) {
   }
   return {
     ...target,
-    pageAsRead,
     asked: { locator: target.locator, url: page.url(), around: place ? place.around : null },
   };
 }
 
-// A step that asks the person is asked about the page Octo read: when only the
-// rest of the page changed since its snapshot (its own control is as read),
-// nobody is asked, and the step says so without counting as a control that
-// changed (runtime-agent ends a page at the second of those in a row).
-function askablePage(pageAsRead) {
-  if (pageAsRead === false) {
-    throw new Error(
-      "Something else on the page changed after the snapshot this step names, and this step asks the person, so nobody was asked and nothing was done. Take a fresh snapshot and do the step again right after it.",
-    );
+// What the latest reading recorded (recordObservedControls) for the control at
+// a step's index, when that reading is the step's own snapshot, of this tab at
+// this address: null when there is no such reading, undefined when it listed
+// no control there.
+function recordedControl(page, body) {
+  const reading = approvalProtocol.observedControls(body.snapshotId);
+  if (
+    !reading ||
+    reading.pageId !== activePageId ||
+    reading.address !== approvalProtocol.sha256(page.url())
+  ) {
+    return null;
   }
+  return reading.controls[body.index];
+}
+
+// Whether `target`, with the text around it `place` (controlPlace), is the
+// control `read` recorded: the same fingerprint, and the same text around it
+// when the reading could tell.
+function asRecorded(read, target, place) {
+  return Boolean(
+    read &&
+    target &&
+    targetFingerprint(target.description) === read.target &&
+    (read.around === null || (place && approvalProtocol.sha256(place.around) === read.around)),
+  );
 }
 
 // After the person's answer, the step acts on the control they were asked
@@ -3321,12 +3429,13 @@ function askablePage(pageAsRead) {
 // shown, on the same address (its fragment too, which some sites keep their
 // page in), with the same text around it (aroundTextInPage: its card, its
 // form's labels), so a product, an order or a total that changed beside it is
-// asked about again. A control the page drew again in its place stands for it only
-// on a page that reads exactly as Octo's snapshot did. Anything else is not
-// used (controlChanged). The run's authority is read again last, so a
-// take-over or a new run still ends the step there. `around: false` leaves
-// the text around it out, for the check right after the step's own focus,
-// which may open a list beside a field.
+// asked about again. A control the page drew again in its place stands for it
+// only on a page that reads exactly as Octo's snapshot did, or when it is the
+// control that snapshot's reading recorded at that index (targetLocator's own
+// check). Anything else is not used (controlChanged). The run's authority is
+// read again last, so a take-over or a new run still ends the step there.
+// `around: false` leaves the text around it out, for the check right after
+// the step's own focus, which may open a list beside a field.
 async function approvedTarget(page, body, asked, { around = true } = {}) {
   const place = await controlPlace(asked.locator);
   let target = null;
@@ -3336,9 +3445,15 @@ async function approvedTarget(page, body, asked, { around = true } = {}) {
     target = description ? { locator: asked.locator, description } : null;
   } else {
     const interactive = await collectInteractiveElements(page);
-    if (body.snapshotId === snapshotFingerprint(page.url(), interactive) && interactive[body.index]) {
-      target = interactive[body.index];
-      placeNow = await controlPlace(target.locator);
+    const redrawn = interactive[body.index];
+    const redrawnPlace = redrawn ? await controlPlace(redrawn.locator) : null;
+    if (
+      redrawn &&
+      (body.snapshotId === snapshotFingerprint(page.url(), interactive) ||
+        asRecorded(recordedControl(page, body), redrawn, redrawnPlace))
+    ) {
+      target = redrawn;
+      placeNow = redrawnPlace;
     }
   }
   if (
@@ -3407,11 +3522,10 @@ let changedAfterYes = false;
 // Set when a step was not done because the page changed under it while nobody
 // was asked: the control or the fields it was for are not there as its
 // snapshot showed them, or the page no longer reads as a snapshot with no
-// record of its controls (targetLocator). A change elsewhere on the page that
-// keeps a step which asks the person from asking (askablePage) is not one. The
-// failed command says so on stdout, and runtime-agent counts such steps in a
-// row, so a control that never holds still (a live count, a ticker) ends that
-// page instead of a loop of snapshots.
+// record of its controls (targetLocator). The failed command says so on
+// stdout, and runtime-agent counts such steps in a row, so a control that
+// never holds still (a live count, a ticker) ends that page instead of a loop
+// of snapshots.
 let pageChangedUnderStep = false;
 
 // The control a step is for is not on the page as it was when the step was
@@ -3436,9 +3550,12 @@ function controlChanged() {
 const COVER_SETTLE_MS = 600;
 const COVER_LOOK_MS = 100;
 // The browser presses a cookie notice's own reject button once a page settles
-// (declineCookieBanner), so a notice still over a control has none.
+// (declineCookieBanner). A notice still over a control is one it could not
+// decline: one with no reject button, one on a page it presses nothing on,
+// or one that came after the page was read, which the next look declines
+// when it can.
 const CONSENT_COVER_MESSAGE =
-  "A cookie notice covers this page and has no reject button: read on under it, or open the place's own site.";
+  "A cookie notice covers this page, and the browser could not decline it: read on under it, or open the place's own site.";
 
 async function clickLanding(target) {
   const landing = await target.locator
@@ -5454,7 +5571,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       await ensureSiteApproved(
         rawDestination,
         () => `Follow this control to ${labelAddress(rawDestination)}`,
-        { destinationUrl: rawDestination, pageAsRead: target.pageAsRead },
+        { destinationUrl: rawDestination },
       );
     }
     if (!consentRejection) {
@@ -5472,7 +5589,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
         snapshotId: body.snapshotId,
         targetFingerprint: approvedTargetFingerprint,
         payloadFingerprint: approvalProtocol.sha256("click"),
-      }, { routine: readingStep, pageAsRead: target.pageAsRead });
+      }, { routine: readingStep });
     }
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
@@ -5564,7 +5681,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
         await ensureSiteApproved(
           rawDestination,
           () => `Send this form to ${labelAddress(rawDestination)}`,
-          { destinationUrl: rawDestination, pageAsRead: target.pageAsRead },
+          { destinationUrl: rawDestination },
         );
       }
     }
@@ -5589,7 +5706,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       payloadFingerprint: approvalProtocol.sha256(
         JSON.stringify({ text: body.text, submit: submitting }),
       ),
-    }, { routine: readingStep, pageAsRead: target.pageAsRead });
+    }, { routine: readingStep });
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     target = await approvedTarget(page, body, target.asked);
@@ -5696,7 +5813,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       snapshotId: body.snapshotId,
       targetFingerprint: approvedTargetFingerprint,
       payloadFingerprint: approvalProtocol.sha256(JSON.stringify({ option: option.label, index: option.index })),
-    }, { routine: readingStep, pageAsRead: target.pageAsRead });
+    }, { routine: readingStep });
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     target = await approvedTarget(page, body, target.asked);
@@ -5784,7 +5901,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
         await ensureSiteApproved(
           rawDestination,
           () => `Follow this control to ${labelAddress(rawDestination)}`,
-          { destinationUrl: rawDestination, pageAsRead: target.pageAsRead },
+          { destinationUrl: rawDestination },
         );
       }
     }
@@ -5811,7 +5928,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       snapshotId: body.snapshotId,
       targetFingerprint: approvedTargetFingerprint,
       payloadFingerprint: approvalProtocol.sha256(body.key),
-    }, { routine: readingStep, pageAsRead: target.pageAsRead });
+    }, { routine: readingStep });
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     target = await approvedTarget(page, body, target.asked);

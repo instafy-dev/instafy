@@ -1653,11 +1653,11 @@ routine browsing it chooses a start and an end station by label with no prompt
 and nothing sent, the planner's own button asks once and the route is read; a
 list is named by its own label or the option it holds; a list the page posts
 when it changes reaches only the page's own site; the same planner under a
-carousel that turns by itself (which changes the page's snapshot id and nothing
-its reading lists) still has both stations chosen with the snapshot each step
-returned, a list that changed itself is refused by its name, and the planner's
-button is refused before it asks after a turn, uncounted, and asks once from a
-fresh snapshot; and Ask mode asks for each choice, naming the option and the
+carousel that turns by itself between every snapshot and the step after it
+(which changes the page's snapshot id and nothing its reading lists) still has
+both stations chosen with the snapshot each step returned, a list that changed
+itself is refused by its name and counted, and the planner's button asks once
+with a snapshot from before a turn and the route is read; and Ask mode asks for each choice, naming the option and the
 list, or the option alone for a list with no label. Last, other lists: one inside its own label is named by the label's own
 words, a car list with a "Swift" is no payment field, a list that holds several
 options is left to the person, an option past the first thousand is found, a
@@ -1727,9 +1727,13 @@ open is not listed, and a click whose middle lands on a form's button or a
 frame inside the control is refused with nothing sent or asked. A cookie banner
 is declined by the browser itself once a page settles, whether a step opened
 the page or Octo looked at it: its own reject button is pressed and never its
-accept or settings, the step says so, and the reading is the page under it; a
-banner with no reject button, one in a frame and one on a page with a sign-in
-field are left alone. A click under a consent notice with no reject button, or
+accept or settings, in a banner named after cookies or whose own text speaks
+of them, the step says so once the banner is gone, and the reading is the page
+under it; a banner whose button takes no press yet is pressed and not said to
+be declined; a banner with no reject button, one in a frame, one on a page with
+a sign-in field or with a frame holding card fields, and a dialog about a
+privacy policy on the person's signed-in page that never speaks of cookies are
+left alone. A click under a consent notice the browser could not decline, or
 under a loading screen, is refused at once in words with no call log, and a
 cover that goes a moment after the page moves is waited for. The Personal
 Browser's page bridge, host and redaction have unit tests for the same frames,

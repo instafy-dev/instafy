@@ -44,12 +44,14 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    control, and a click whose middle lands on a form's button or a frame
 //    inside the control is refused, sending and asking nothing.
 // 8. A cookie banner is the browser's: once a page settles, the browser
-//    presses the banner's own reject button itself, never its accept or its
-//    settings, and the step says so; never one with no reject button, one in a
-//    frame, or one on a page with a sign-in field. A click that something
-//    outside its control covers is refused at once, in words (a cookie notice
-//    with no reject button says so), with no wait and no call log, and a cover
-//    that goes within a moment is waited for.
+//    presses the banner's own reject button itself, in a banner that speaks of
+//    cookies, never its accept or its settings, and the step says so once the
+//    banner is gone; never one with no reject button, one in a frame, one on
+//    a page with a sign-in field or a frame holding card fields, or a dialog
+//    about a privacy policy that never speaks of cookies. A click that
+//    something outside its control covers is refused at once, in words (a
+//    cookie notice the browser could not decline says so), with no wait and
+//    no call log, and a cover that goes within a moment is waited for.
 // Every site is a loopback fixture; Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
@@ -239,21 +241,47 @@ customElements.define("key-card", class extends HTMLElement {
 // A bookshop's page under a cookie banner with a refusal, settings and an
 // accept. The page records which the banner was answered with, and the
 // banner stays away once answered, as a consent cookie keeps it. `{name}`
-// names the cookie, so each page asks afresh.
-const bannerScript = (name) => `<script>
-const notice = document.getElementById("cookie-notice");
+// names the cookie, so each page asks afresh. `late` gives the banner's
+// buttons their script 8 s after the page loads, as a consent manager still
+// loading does, so a press before that does nothing.
+const bannerScript = (name, { notice = "cookie-notice", late = false } = {}) => `<script>
+const notice = document.getElementById("${notice}");
 const answer = (choice) => { window.consentAnswer = choice; document.cookie = "${name}=" + choice + "; path=/"; notice.remove(); };
-document.getElementById("reject").onclick = () => answer("rejected");
-document.getElementById("accept").onclick = () => answer("accepted");
-document.getElementById("customize").onclick = () => { window.consentAnswer = "settings"; };
+const listen = () => {
+  document.getElementById("reject").onclick = () => answer("rejected");
+  document.getElementById("accept").onclick = () => answer("accepted");
+  const customize = document.getElementById("customize");
+  if (customize) customize.onclick = () => { window.consentAnswer = "settings"; };
+};
+${late ? "setTimeout(listen, 8000);" : "listen();"}
 if (document.cookie.includes("${name}=")) notice.remove();
 </script>`;
-const BANNER = (name, extra = "") => `<h1>Bookshop</h1><p>Open daily, 9:00 AM to 7:30 PM.</p>
+const BANNER = (name, extra = "", options = {}) => `<h1>Bookshop</h1><p>Open daily, 9:00 AM to 7:30 PM.</p>
 <p><a href="/reading/visit">Plan your visit</a></p>${extra}
 <div id="cookie-notice" role="dialog" aria-label="Cookie consent" style="position:fixed;left:0;right:0;bottom:0;padding:16px;background:#fff;border-top:1px solid #94a3b8">
 <p>We use cookies to understand how the shop is used.</p>
 <button type="button" id="customize">Customize</button> <button type="button" id="reject">Reject all</button> <button type="button" id="accept">Accept all</button>
-</div>${bannerScript(name)}`;
+</div>${bannerScript(name, options)}`;
+// A bar whose own names say nothing of cookies, whose text does, with a
+// plain "Reject" and "Accept" in a row of their own.
+const BANNER_IN_TEXT = `<h1>Bookshop</h1><p><a href="/reading/visit">Plan your visit</a></p>
+<div id="notice-bar" style="position:fixed;left:0;right:0;bottom:0;padding:16px;background:#fff">
+<p>This shop uses cookies to remember your basket.</p>
+<div class="choices"><button type="button" id="reject">Reject</button> <button type="button" id="accept">Accept</button></div>
+</div>${bannerScript("bookshop_text_consent", { notice: "notice-bar" })}`;
+// The person's own account page, signed in, under a dialog about a privacy
+// policy that never speaks of cookies, whose "Decline" would close the
+// account: its buttons are judged as a consent banner's, and it is no cookie
+// banner.
+const POLICY = `<h1>Your account</h1><p>Signed in as Ana.</p><p><a href="/reading/visit">Orders</a></p>
+<div role="dialog" aria-label="Updated privacy policy" style="position:fixed;left:0;right:0;bottom:0;padding:16px;background:#fff">
+<p>Accept it to keep using your account, or decline and we will close it.</p>
+<button type="button" onclick="window.consentAnswer = 'declined policy'">Decline</button> <button type="button" onclick="window.consentAnswer = 'accepted policy'">Accept</button>
+</div>`;
+// A checkout whose card fields sit in a payment provider's frame, which a
+// reading never reads, under a cookie banner.
+const CHECKOUT = `<p>Total 140 euros</p><form method="post" action="/pay">
+<iframe src="{frame}/card" title="Secure card payment input frame" width="420" height="60"></iframe><button>Pay</button></form>`;
 // A tourism site's consent notice over the whole page, with an accept and its
 // settings and no reject button, and a cover that is no notice (a loading
 // screen). `live.hideOnScroll()` makes the cover go 300 ms after the page
@@ -314,10 +342,15 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/banner-sign-in": page("Bookshop", BANNER("bookshop_sign_in_consent", `<form method="post" action="/session"><label>Email <input type="email" name="email" autocomplete="username"></label>
 <label>Password <input type="password" name="password" autocomplete="current-password"></label><button>Sign in</button></form>`)),
       "site.test /reading/banner-frame": page("Bookshop", `<h1>Bookshop</h1><iframe src="{frame}/banner" title="Cookie consent" width="500" height="160"></iframe>`),
+      "site.test /reading/banner-in-text": page("Bookshop", BANNER_IN_TEXT),
+      "site.test /reading/banner-late": page("Bookshop", BANNER("bookshop_late_consent", "", { late: true })),
+      "site.test /reading/policy": page("Your account", POLICY),
+      "site.test /reading/checkout": page("Checkout", BANNER("checkout_consent", CHECKOUT)),
       "site.test /reading/notice": page("Visit the city", NOTICE),
       "site.test /reading/covered": page("Timetable", COVERED),
       "site.test /reading/visit": page("Visit", "<h1>Plan your visit</h1>"),
       "frame.test /banner": page("Cookies", BANNER("frame_consent")),
+      "frame.test /card": page("Card", '<label>Card number <input autocomplete="cc-number"></label><label>CVC <input autocomplete="cc-csc"></label>'),
       "frame.test /booking": page("Booking", "<h2>Booking engine</h2><label>Check-in <input type=\"date\"></label><button>Search rooms</button><p>Rooms from 140 euros</p>"),
       "frame.test /pixel": page("Pixel", "<p>pixel</p>"),
       "frame.test /fields": page("Payment", SECRET_FIELDS),
@@ -691,8 +724,24 @@ export async function runSharedBrowserPageReadingFixture() {
     const looked = await ok("GET", "/v1/snapshot");
     assert.equal(await consentAnswer(), "rejected");
     assert.equal(looked.activity.declined, "cookies");
-    // c. A banner on a page with a sign-in field, one in a frame, and a notice
-    // with no reject button: nothing is pressed, and the step says nothing.
+    // A banner whose own names say nothing of cookies is one when its text
+    // speaks of them, and a plain "Reject" is its refusal.
+    reading = await read("/reading/banner-in-text");
+    assert.equal(await consentAnswer(), "rejected", "a banner that speaks of cookies in its text was left up");
+    assert.equal(reading.activity.declined, "cookies");
+    // c. A banner on a page with a sign-in field, one in a frame, a notice
+    // with no reject button, a dialog about a privacy policy on the person's
+    // signed-in account page that never speaks of cookies, and a banner on a
+    // checkout whose card fields sit in a frame: nothing is pressed, and the
+    // step says nothing.
+    reading = await read("/reading/policy");
+    assert.equal(await consentAnswer(), null, "a privacy policy's Decline was pressed");
+    assert.ok(labels(reading).includes("Decline"));
+    assert.equal(reading.activity.declined, undefined);
+    reading = await read("/reading/checkout");
+    assert.equal(await consentAnswer(), null, "a banner on a checkout with a card frame was answered");
+    assert.ok(labels(reading).includes("Reject all"));
+    assert.equal(reading.activity.declined, undefined);
     reading = await read("/reading/banner-sign-in");
     assert.equal(await consentAnswer(), null, "a banner on a sign-in page was answered");
     assert.ok(labels(reading).includes("Reject all"));
@@ -701,6 +750,14 @@ export async function runSharedBrowserPageReadingFixture() {
     const frame = runPage.frames().find((candidate) => candidate.url().includes("frame.test"));
     assert.ok(frame, "the banner's frame loaded");
     assert.equal(await frame.evaluate(() => window.consentAnswer ?? null), null, "a banner in a frame was answered");
+    assert.equal(reading.activity.declined, undefined);
+    // A banner whose button takes no press yet (its script still loading) is
+    // pressed and stays up: the step does not say it was declined.
+    const actionsBeforeLate = fs.readFileSync(actionsPath, "utf8").length;
+    reading = await read("/reading/banner-late");
+    assert.match(fs.readFileSync(actionsPath, "utf8").slice(actionsBeforeLate), /"type":"click","label":"Decline cookies"/u);
+    assert.equal(await consentAnswer(), null);
+    assert.ok(labels(reading).includes("Reject all"), "the banner that took no press is not in the reading");
     assert.equal(reading.activity.declined, undefined);
     reading = await read("/reading/notice");
     assert.equal(await consentAnswer(), null, "a notice with no reject button was answered");
@@ -713,7 +770,7 @@ export async function runSharedBrowserPageReadingFixture() {
     const underNotice = await runTool("POST", "/v1/click", { index: control(reading, "Attractions").index, snapshotId: reading.snapshotId });
     measurements.coveredClickMs = Date.now() - clickStarted;
     assert.equal(underNotice.code, 1, underNotice.stdout);
-    assert.match(underNotice.stderr, /A cookie notice covers this page and has no reject button: read on under it, or open the place's own site\./u);
+    assert.match(underNotice.stderr, /A cookie notice covers this page, and the browser could not decline it: read on under it, or open the place's own site\./u);
     assert.doesNotMatch(underNotice.stderr, /Call log|Timeout|intercepts pointer events/u);
     assert.ok(measurements.coveredClickMs < 8_000, `the covered click waited ${measurements.coveredClickMs} ms`);
     assert.equal(await consentAnswer(), null);
@@ -747,7 +804,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "a long page's text says where it is cut and how far to scroll, and scrolling reads all of it within the reading's cap, past a skip link and a pinned header, on a plain-text page and in a long paragraph; a view out of reach says so; past 200 controls those scrolled past are left out and counted, past 600 matches too, and a closed list's options never crowd out a form",
         "password, card and code fields in a frame or a shadow root carry no value into the reading, a frame's fields are never listed, a key in a shadow root's read-only field or in a control's name the list leaves out still makes a secret screen, and a code in boxes of its own is masked",
         "a section marked open is no control, and a click whose middle lands on a form's button or a frame inside the control is refused, sending and asking nothing",
-        "once a page settles the browser presses a cookie banner's own reject button itself, never its accept or settings, and the step says so; never a banner with no reject button, one in a frame, or one on a page with a sign-in field; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, and a cover that goes within a moment is waited for",
+        "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, and a cover that goes within a moment is waited for",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",

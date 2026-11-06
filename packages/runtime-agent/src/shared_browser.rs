@@ -195,10 +195,9 @@ const CHANGED_AFTER_YES_CODE: &str = "approval_stale";
 /// nobody was asked (the controller's `pageChanged`): the control or fields a
 /// step is for are not there as its snapshot showed them, or the page no longer
 /// reads as a snapshot the controller kept no record of. A change elsewhere on
-/// the page (a carousel's next slide, a clock) leaves a step nobody is asked
-/// about standing, since it is judged by its own control, and a step that asks
-/// the person and is refused for such a change is not counted. The first is
-/// looked at again, as the run's policy and the step's own error say. Two, so a
+/// the page (a carousel's next slide, a clock) leaves a step standing, whether
+/// it asks the person or not, since it is judged by its own control. The first
+/// is looked at again, as the run's policy and the step's own error say. Two, so a
 /// page still drawing after it loaded gets one more snapshot, while a control
 /// that never holds still (a live count, a ticker in a link) ends that page
 /// within seconds instead of a loop of snapshots until the run's time runs

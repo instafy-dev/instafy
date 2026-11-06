@@ -35,8 +35,7 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    changes the page's snapshot id and nothing its reading lists, both
 //    stations are still chosen with the snapshot each step returned, a list
 //    that changed itself is refused by its name, and the planner's button,
-//    which asks, is refused before it asks after a turn and asks once from a
-//    fresh snapshot.
+//    which asks, asks once with a snapshot from before a turn.
 // 5. Other lists: inside their own labels, with a word of a payment detail
 //    among their options, holding several options, long, posting to another
 //    site after an Allow or from Octo's own tab, signing in with another
@@ -170,25 +169,34 @@ const PLANNER = `<h1>Journey Planner</h1>
 <select id="sort" name="sort" onchange="this.form.submit()"><option>By name</option><option>By line</option></select></form>`;
 // The planner on an operator's home page, under a carousel of news that
 // shows one slide at a time and marks it among its dots. A turn moves only
-// the slide shown and the marked dot, which a reading does not list apart:
-// every slide is the same unnamed link, and the dots keep their numbers.
-// `live.renumber()` gives the End list other options, as a planner that
-// reloads a list does.
+// the slide shown, the marked dot and the shown slide's test id, numbered by
+// the turn, which a reading does not list apart: every slide is the same
+// unnamed link, and the dots keep their numbers.
+// `live.spin(ms)` turns it on a timer, as such a carousel does, so the page
+// moves between every snapshot and the step after it. `live.renumber()`
+// gives the End list other options, as a planner that reloads a list does.
 const CAROUSEL_PLANNER = `<section aria-label="News"><style>.slide{display:none;width:240px;height:60px;background:#cbd5e1}.slide.on{display:block}</style>
 <a class="slide on" href="/"></a><a class="slide" href="/"></a><a class="slide" href="/"></a>
 <p><a class="dot active" href="/">1</a> <a class="dot" href="/">2</a> <a class="dot" href="/">3</a></p></section>
 ${PLANNER}
 <script>
 window.live = {
+  turns: 0,
   turn() {
+    this.turns += 1;
     const slides = [...document.querySelectorAll(".slide")];
     const dots = [...document.querySelectorAll(".dot")];
     const at = slides.findIndex((slide) => slide.classList.contains("on"));
     const next = (at + 1) % slides.length;
     slides[at].classList.remove("on");
     slides[next].classList.add("on");
+    slides[next].dataset.testid = "slide-" + this.turns;
     dots[at].classList.remove("active");
     dots[next].classList.add("active");
+  },
+  spin(ms) {
+    clearInterval(this.timer);
+    this.timer = setInterval(() => this.turn(), ms);
   },
   renumber() {
     document.getElementById("end").innerHTML = ["Aliados", "Bolhão", "Trindade"].map((station) => "<option>" + station + "</option>").join("");
@@ -813,27 +821,33 @@ export async function runSharedBrowserFormSubmissionFixture() {
     // d. The planner under a carousel that turns by itself, as on an
     // operator's home page (a local test: "snapshot is stale", then "This page
     // keeps changing", with the planner as it was). A turn changes the
-    // page's snapshot id and nothing its reading lists. A step nobody is
-    // asked about is judged by its own control, so both stations are chosen
-    // with the snapshot each step returned though the carousel turned in
-    // between; a list that changed itself is refused by its name; and the
-    // planner's button, which asks, is refused before it asks after a turn,
-    // is not counted as a control that changed, and asks once from a fresh
-    // snapshot.
+    // page's snapshot id and nothing its reading lists, and the carousel
+    // turns between every snapshot and the step after it. A step is judged by
+    // its own control, so both stations are chosen with the snapshot each
+    // step returned; a list that changed itself is refused by its name and
+    // counted; and the planner's button, which asks, asks once with a
+    // snapshot from before the carousel turned, and the route is read.
     const carouselPage = `${sites().transit}/scenario/carousel-planner`;
-    const turn = () => runPage.evaluate(() => window.live.turn());
     const listed = (observed) => observed.interactiveElements.map(({ chosen: _chosen, ...rest }) => rest);
+    // Waits until the carousel has turned at least once more.
+    const turnsSoFar = () => runPage.evaluate(() => window.live.turns);
+    const turned = async (after) => {
+      const before = await turnsSoFar();
+      for (let waited = 0; (await turnsSoFar()) === before && waited < 2_000; waited += 50) await delay(50);
+      assert.notEqual(await turnsSoFar(), before, `the carousel did not turn after ${after}`);
+    };
     await runPage.goto(carouselPage);
     snapshot = await ok("GET", "/v1/snapshot");
     start = prompts.length;
     requests.length = 0;
     routes.length = 0;
-    await turn();
+    await runPage.evaluate(() => window.live.spin(100));
+    await turned("the first snapshot");
     chosen = await ok("POST", "/v1/choose", { index: list(snapshot, "Start").index, snapshotId: snapshot.snapshotId, option: "São Bento" });
     assert.equal(list(chosen, "Start").chosen, "São Bento");
     assert.notEqual(chosen.snapshotId, snapshot.snapshotId, "the carousel's turn changed the page's snapshot id");
     assert.deepEqual(listed(chosen), listed(snapshot), "the carousel's turn changed nothing the reading lists");
-    await turn();
+    await turned("choosing Start");
     chosen = await ok("POST", "/v1/choose", { index: list(chosen, "End").index, snapshotId: chosen.snapshotId, option: "Trindade" });
     assert.equal(list(chosen, "End").chosen, "Trindade");
     assert.equal(list(chosen, "Start").chosen, "São Bento");
@@ -846,20 +860,13 @@ export async function runSharedBrowserFormSubmissionFixture() {
     assert.deepEqual(JSON.parse(renumbered.stdout), { ok: false, pageChanged: true });
     snapshot = await ok("GET", "/v1/snapshot");
     snapshot = await ok("POST", "/v1/choose", { index: list(snapshot, "End").index, snapshotId: snapshot.snapshotId, option: "Trindade" });
-    await turn();
-    const beforeAsking = await runTool("POST", "/v1/click", { index: control(snapshot, "Plan Your Journey").index, snapshotId: snapshot.snapshotId }, ["allow_once"]);
-    assert.equal(beforeAsking.code, 1, beforeAsking.stdout);
-    assert.match(beforeAsking.stderr, /Something else on the page changed after the snapshot this step names, and this step asks the person, so nobody was asked and nothing was done\./u);
-    assert.ok(!beforeAsking.stdout.includes("pageChanged"), beforeAsking.stdout);
-    assert.deepEqual(promptsSince(start), [], "Nobody was asked about a page Octo did not read");
-    assert.deepEqual(routes, [], "Nothing was planned");
-    snapshot = await ok("GET", "/v1/snapshot");
-    const plannedFromFresh = await ok("POST", "/v1/click", { index: control(snapshot, "Plan Your Journey").index, snapshotId: snapshot.snapshotId }, ["allow_once"]);
+    await turned("choosing End again");
+    const plannedUnderCarousel = await ok("POST", "/v1/click", { index: control(snapshot, "Plan Your Journey").index, snapshotId: snapshot.snapshotId }, ["allow_once"]);
     assert.deepEqual(promptsSince(start), [["action", "click", sites().transit]], "The planner's button asks once");
     assert.equal(routes.length, 1);
     assert.equal(routes[0].start, "São Bento");
     assert.equal(routes[0].end, "Trindade");
-    assert.match(plannedFromFresh.visibleText, /From São Bento to Trindade: take Line D/u);
+    assert.match(plannedUnderCarousel.visibleText, /From São Bento to Trindade: take Line D/u);
 
     // e. Ask mode, in the person's next run: each choice asks, naming the
     // option and the list by its own label, and a click on a list names the
@@ -1045,7 +1052,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
         "a key-like typed value, a default button that posts, another site, another subdomain, no form, a sign-out address, a hidden key-like value (also behind a control named elements), a hidden one-time code, a hidden file format and an unnamed field still ask; a new window, a field inside a submit button and a link-only destination are refused before any prompt",
         "a page script that turns a free search into a post to its own site is stopped by the step's guard",
         "under routine browsing a journey planner's start and end stations are chosen by label with no prompt and nothing sent, its own button asks once naming the fields it sends, and the route is read",
-        "beside a carousel that turns by itself, which changes the page's snapshot id and nothing its reading lists, both stations are chosen with the snapshot each step returned, a list that changed itself is refused by its name, and the planner's button is refused before it asks after a turn, uncounted, and asks once from a fresh snapshot",
+        "beside a carousel that turns by itself between every snapshot and the step after it, which changes the page's snapshot id and nothing its reading lists, both stations are chosen with the snapshot each step returned, a list that changed itself is refused by its name and counted, and the planner's button asks once with a snapshot from before a turn and the route is read",
         "a list is named by its own label or the option it holds, never its options, and a snapshot says which option it holds",
         "an option a list does not have chooses nothing and the answer lists the options; a control that is no list is refused",
         "a list the page posts when it changes may post to its own site, and a post elsewhere is stopped by the step's guard",

@@ -611,19 +611,21 @@ const controlsFor = (targetId) => {
   });
   // A journey planner beside a carousel that shows one slide at a time, its
   // dot marking the slide shown: "planner-turned" is the same page once the
-  // carousel moved on, which only moves the dot's class, and
-  // "planner-end-moved" one whose End list also moved its options.
+  // carousel moved on, which only moves the dot's class, "planner-end-moved"
+  // one whose End list also moved its options, and "planner-plan-moved" one
+  // whose button now sends the form to another address.
   if (mode === "planner" || mode.startsWith("planner-")) {
     const station = (label, options, shownText) => plain({
       tag: "select", inputType: "", labels: label, text: options.join(""), shownText, optionCount: options.length,
     });
+    const route = mode === "planner-plan-moved" ? "https://example.test/route-v2" : "https://example.test/route";
     return [
       station("Start", STATIONS, "Trindade"),
       station("End", mode === "planner-end-moved" ? MOVED_STATIONS : STATIONS, "Aliados"),
       plain({
         tag: "input", inputType: "submit", text: "Plan Your Journey", valueAttribute: "Plan Your Journey", formMethod: "post",
-        formAction: "https://example.test/route", formActionText: "form post https://example.test/route Plan Your Journey",
-        policy: { formActionUrl: "https://example.test/route", formSubmission: "button", formSubmits: true,
+        formAction: route, formActionText: `form post ${route} Plan Your Journey`,
+        policy: { formActionUrl: route, formSubmission: "button", formSubmits: true,
           formName: "Plan Your Journey", formSubmitLabels: "Plan Your Journey", formFieldCount: 2 },
       }),
       plain({
@@ -648,8 +650,10 @@ const controlsFor = (targetId) => {
   }
   // A cookie banner: its refusal, its accept and its settings, then a link of
   // the page. "-no-reject" has no refusal, "-apart" a refusal in another part
-  // of the page, "-sign-in" a sign-in form below it, and "-secret" a page that
-  // shows a secret.
+  // of the page, "-sign-in" a sign-in form below it, "-secret" a page that
+  // shows a secret, "-privacy" a dialog about a privacy policy with no word of
+  // cookies, "-payment-frame" a checkout whose card fields sit in a frame, and
+  // "-stays" a banner whose refusal took no press.
   if (mode.startsWith("cookie-banner")) {
     const banner = (text) => plain({ tag: "button", inputType: "button", text, area: "dialog",
       policy: { consentContext: true, areas: "dialog" } });
@@ -931,9 +935,15 @@ const makePage = (targetId, opened = null) => {
           // middle holds another control, and "click-covered*" one under a
           // cover.
           ? landingFor()
-        : arg && arg.kind === "same-banner"
-          // Whether a cookie banner's refusal sits with an accept.
-          ? mode.startsWith("cookie-banner") && mode !== "cookie-banner-apart"
+        : arg && arg.kind === "cookie-banner"
+          // Whether a cookie banner's refusal sits with an accept, in a banner
+          // that speaks of cookies: "-privacy" is a dialog about a privacy
+          // policy, with no word of cookies.
+          ? mode.startsWith("cookie-banner") && mode !== "cookie-banner-apart" && mode !== "cookie-banner-privacy"
+        : arg && arg.kind === "control-gone"
+          // Whether the banner's refusal is gone after the press:
+          // "-stays" is a banner whose button took no press.
+          ? mode !== "cookie-banner-stays"
         : arg && arg.kind === "around-text"
           // The control's card: "around-changed-after-allow" shows another
           // product beside the same control once the person said yes.
@@ -987,6 +997,10 @@ const makePage = (targetId, opened = null) => {
         return { text, start: 0, end: text.length, above: 0, below: 0, more: false, scrollBy: null };
       }
       if (arg && arg.kind === "page-policy") return signalsFor();
+      // Whether a frame on the page names a payment, password or code field:
+      // "cookie-banner-payment-frame" is a checkout whose card fields sit in
+      // a payment provider's frame.
+      if (arg && arg.kind === "sensitive-frames") return mode === "cookie-banner-payment-frame";
       // The text around each control, read in one call.
       if (arg && arg.kind === "around-all") {
         return Promise.all(arg.elements.map(async (element) =>
@@ -4053,10 +4067,7 @@ async fn a_page_that_keeps_changing_ends_that_page_not_the_run() {
 /// was asked about (`pageChanged`): the field a click names relabelled after
 /// its snapshot, and a field a pause would highlight that changed. Through
 /// runtime-agent, the second such step in a row ends that page with "This page
-/// keeps changing", and the next source opens in the same run. A page that
-/// only drew more controls elsewhere is no such change for the control a step
-/// is for: a step that asks the person is refused before it asks, and is not
-/// counted.
+/// keeps changing", and the next source opens in the same run.
 #[tokio::test]
 async fn the_controller_says_when_the_page_changed_under_a_step() {
     let fixture = EmbeddedControllerFixture::new();
@@ -4078,24 +4089,9 @@ async fn the_controller_says_when_the_page_changed_under_a_step() {
             other => panic!("not a step's own failure: {other:?}"),
         };
 
-    // The page reads one way, then another: it drew a button under its form.
-    // The box a click is for is as it was, and the click asks the person, so
-    // it is refused before it asks, and not counted.
+    // The page reads one way, then another: the field a click is for
+    // relabelled.
     let (first_look, _) = through_the_latch("sign-in-page", "GET", "/v1/snapshot", None).await;
-    let (drawn, stdout) = through_the_latch(
-        "sign-in-page-drawn",
-        "POST",
-        "/v1/click",
-        Some(json!({ "index": 2, "snapshotId": snapshot_id(&first_look) })),
-    )
-    .await;
-    assert_eq!(stdout, "");
-    assert!(
-        words(&drawn).contains("Something else on the page changed after the snapshot this step names, and this step asks the person"),
-        "{}",
-        words(&drawn)
-    );
-    // The field a click is for relabelled: that counts.
     let (first, stdout) = through_the_latch(
         "sign-in-page-relabelled",
         "POST",
@@ -6159,7 +6155,7 @@ fn a_sign_in_page_names_its_fields_and_says_to_pause_on_them() {
 /// now, each at its index with the same label and kind, so the turn pauses on
 /// both. A field that changed still fails the pause (its kind, or its label
 /// alone), as does a form that now sends elsewhere or the same form at another
-/// address of the site, and every step's own check of the whole page stays.
+/// address of the site.
 #[test]
 fn a_sign_in_page_that_draws_more_controls_after_it_loads_still_pauses_on_its_fields() {
     let fixture = EmbeddedControllerFixture::new();
@@ -6175,21 +6171,6 @@ fn a_sign_in_page_that_draws_more_controls_after_it_loads_still_pauses_on_its_fi
     );
     let snapshot_id = snapshot["snapshotId"].as_str().expect("snapshot id");
     let pause = json!({ "indices": [0, 1], "snapshotId": snapshot_id }).to_string();
-
-    // The page drew a passkey button under its form: a step on that snapshot
-    // that asks the person is refused before it asks, as the page changed.
-    let clicked = fixture.call(
-        "sign-in-page-drawn",
-        "POST",
-        "/v1/click",
-        Some(&json!({ "index": 2, "snapshotId": snapshot_id }).to_string()),
-    );
-    assert!(
-        failure_of(&clicked).contains("Something else on the page changed after the snapshot this step names, and this step asks the person"),
-        "{}",
-        failure_of(&clicked)
-    );
-    assert!(fixture.pending_request().is_none(), "the click asked");
 
     // A field it would highlight changed (a one-time code where the password
     // was), or only its label did (a phone number where the email was), its
@@ -7597,13 +7578,14 @@ fn a_look_alike_a_carousel_shows_in_a_controls_place_is_not_it() {
     );
 }
 
-/// A step that asks the person is asked about the page Octo read: one whose control is as its
-/// snapshot showed it but whose page changed elsewhere is refused before it asks, says to take a
-/// fresh snapshot and do it again right after it, and is not counted as a control that changed
-/// (two of those in a row end the page). From a fresh snapshot it asks once and is done. The
-/// planner's button asks under routine browsing too, since it sends the form.
+/// A step that asks the person is judged by its own control too: its prompt is built from that
+/// control as it is now, and the control is checked again after the answer. The planner's button,
+/// which asks under routine browsing too since it sends the form, asks once with the snapshot from
+/// before the carousel moved on and is done (it was refused before it asked, uncounted, on every
+/// try while the carousel turned between a snapshot and the click). A button that changed itself
+/// asks nobody and is refused by its name, as one the page changed under.
 #[test]
-fn a_step_that_asks_keeps_the_whole_page_check() {
+fn a_step_that_asks_is_judged_by_its_own_control_too() {
     let fixture = EmbeddedControllerFixture::new();
     let snapshot = fixture.routine_snapshot("planner");
     let plan = snapshot["interactiveElements"][2].clone();
@@ -7619,27 +7601,19 @@ fn a_step_that_asks_keeps_the_whole_page_check() {
         ),
         &["allow_once"],
     );
-    let stderr = failure_of(&output);
-    assert!(
-        stderr.contains("Something else on the page changed after the snapshot this step names, and this step asks the person, so nobody was asked and nothing was done. Take a fresh snapshot and do the step again right after it."),
-        "{stderr}"
+    payload_of(&output);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0]["operation"], "click");
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "2\n"
     );
-    assert!(
-        requests.is_empty(),
-        "the button asked about a page Octo did not read: {requests:?}"
-    );
-    assert!(
-        !String::from_utf8_lossy(&output.stdout).contains("pageChanged"),
-        "{}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    assert!(!fixture.action_log().contains("\"type\":\"click\""));
 
-    let fresh = payload_of(&fixture.call("planner-turned", "GET", "/v1/snapshot", None));
-    let body = json!({"index": 2, "snapshotId": fresh["snapshotId"]}).to_string();
+    let snapshot = payload_of(&fixture.call("planner", "GET", "/v1/snapshot", None));
+    let body = json!({"index": 2, "snapshotId": snapshot["snapshotId"]}).to_string();
     let (output, requests) = fixture.decide_prepared(
         fixture.command_for(
-            "planner-turned",
+            "planner-plan-moved",
             "page-target",
             "POST",
             "/v1/click",
@@ -7647,16 +7621,34 @@ fn a_step_that_asks_keeps_the_whole_page_check() {
         ),
         &["allow_once"],
     );
-    payload_of(&output);
-    assert_eq!(requests.len(), 1, "{requests:?}");
-    assert_eq!(requests[0]["operation"], "click");
+    let stderr = failure_of(&output);
+    assert!(
+        stderr.contains(
+            "\"Plan Your Journey\" changed after the snapshot this step names, so nothing was done."
+        ),
+        "{stderr}"
+    );
+    assert!(
+        requests.is_empty(),
+        "the changed button asked: {requests:?}"
+    );
+    assert_eq!(
+        serde_json::from_slice::<JsonValue>(&output.stdout).expect("one JSON line"),
+        json!({"ok": false, "pageChanged": true})
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "2\n",
+        "the changed button was clicked"
+    );
 }
 
-/// Through runtime-agent's count: steps refused because only the rest of the page changed are not
-/// counted, so they never end the page; two steps in a row whose own control changed end it, with
-/// "This page keeps changing".
+/// Through runtime-agent's count: a step whose own control changed counts, whether it asks the
+/// person or not, so two in a row end the page with "This page keeps changing"; a step that asks
+/// is never refused, uncounted, over a change elsewhere on the page, which would loop on a page
+/// that never holds still.
 #[tokio::test]
-async fn only_a_control_that_changed_counts_toward_ending_the_page() {
+async fn a_control_that_keeps_changing_ends_the_page_whether_its_step_asks_or_not() {
     let fixture = EmbeddedControllerFixture::new();
     let server = SharedBrowserMcpServer::new();
     let snapshot = fixture.routine_snapshot("planner");
@@ -7669,52 +7661,39 @@ async fn only_a_control_that_changed_counts_toward_ending_the_page() {
             Err(SharedBrowserMcpExecutionFailure::Other(error)) => format!("{error:#}"),
             other => panic!("not a step's own failure: {other:?}"),
         };
-    let plan = json!({"index": 2, "snapshotId": snapshot_id});
-    for _ in 0..3 {
-        let (result, _) = controller_command_through_the_latch(
-            &fixture,
-            &server,
-            "planner-turned",
-            "POST",
-            "/v1/click",
-            Some(plan.clone()),
-        )
-        .await;
-        let said = words(&result);
-        assert!(
-            said.contains("Something else on the page changed"),
-            "{said}"
-        );
-        assert!(!said.contains("This page keeps changing"), "{said}");
-    }
-    let end = json!({"index": 1, "snapshotId": snapshot_id, "option": "São Bento"});
-    let (first, _) = controller_command_through_the_latch(
+    let (first, stdout) = controller_command_through_the_latch(
         &fixture,
         &server,
-        "planner-end-moved",
+        "planner-plan-moved",
         "POST",
-        "/v1/choose",
-        Some(end.clone()),
+        "/v1/click",
+        Some(json!({"index": 2, "snapshotId": snapshot_id})),
     )
     .await;
     assert!(
-        words(&first).contains("\"End\" changed after the snapshot"),
+        words(&first).contains("\"Plan Your Journey\" changed after the snapshot"),
         "{}",
         words(&first)
     );
+    assert!(stdout.contains("pageChanged"), "{stdout}");
     let (second, _) = controller_command_through_the_latch(
         &fixture,
         &server,
         "planner-end-moved",
         "POST",
         "/v1/choose",
-        Some(end),
+        Some(json!({"index": 1, "snapshotId": snapshot_id, "option": "São Bento"})),
     )
     .await;
     assert!(
         words(&second).contains("This page keeps changing"),
         "{}",
         words(&second)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "",
+        "a changed control was used"
     );
 }
 
@@ -12424,13 +12403,17 @@ fn the_browser_declines_a_cookie_banner_itself() {
         "0\n"
     );
 
-    // No refusal on the banner, a refusal apart from the accept, a page with a sign-in field
-    // and a page that may show a secret: nothing is pressed, and the activity says nothing.
+    // No refusal on the banner, a refusal apart from the accept, a page with a sign-in field,
+    // a page that may show a secret, a dialog about a privacy policy that never speaks of
+    // cookies (its "Decline" may close an account), and a checkout whose card fields sit in a
+    // payment provider's frame: nothing is pressed, and the activity says nothing.
     for mode in [
         "cookie-banner-no-reject",
         "cookie-banner-apart",
         "cookie-banner-sign-in",
         "cookie-banner-secret",
+        "cookie-banner-privacy",
+        "cookie-banner-payment-frame",
     ] {
         let fixture = EmbeddedControllerFixture::new();
         let output = fixture.run(mode, "GET", "/v1/snapshot", None);
@@ -12442,21 +12425,32 @@ fn the_browser_declines_a_cookie_banner_itself() {
         );
         assert!(reading["activity"].get("declined").is_none(), "{mode}");
     }
+
+    // A banner whose refusal took no press (its script not ready yet) is still up: the press
+    // happened, and the step does not say the banner was declined.
+    let fixture = EmbeddedControllerFixture::new();
+    let reading = payload_of(&fixture.run("cookie-banner-stays", "GET", "/v1/snapshot", None));
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "0\n"
+    );
+    assert!(reading["activity"].get("declined").is_none(), "{reading}");
 }
 
 /// A local test (Nov 5): a click under a tourism site's consent notice waited 16.4 s and came back with
 /// Playwright's own "Timeout 15000ms exceeded … intercepts pointer events", and the turn gave up.
 /// A click whose control something outside it covers is refused at once, in words: a cookie
-/// notice with no reject button says so and where to go next, any other cover says what to do,
-/// and Playwright's call log never reaches Octo. A cover that goes within the click's short
-/// settle, such as a toast that fades, is no refusal.
+/// notice the browser could not decline says so and where to go next (never that it has no
+/// reject button, which one on a sign-in page or with a reject link has), any other cover says
+/// what to do, and Playwright's call log never reaches Octo. A cover that goes within the click's
+/// short settle, such as a toast that fades, is no refusal.
 #[test]
 fn a_covered_click_is_refused_at_once_in_words() {
     use std::time::{Duration, Instant};
     for (mode, words) in [
         (
             "click-covered-by-notice",
-            "A cookie notice covers this page and has no reject button: read on under it, or open the place's own site.",
+            "A cookie notice covers this page, and the browser could not decline it: read on under it, or open the place's own site.",
         ),
         (
             "click-covered",
