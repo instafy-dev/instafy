@@ -2640,8 +2640,12 @@ exit 1
                 && logged.contains("the page looked blank"),
             "{logged}"
         );
-        for secret in ["Ana and Ben", "secret-token", "Guest list"] {
-            assert!(!logged.contains(secret), "{secret} in {logged}");
+        // Nothing the page wrote: its console, its address, its title.
+        for page_words in ["Ana and Ben", "?token=", "Guest list"] {
+            assert!(
+                !logged.contains(page_words),
+                "the log holds what the page wrote"
+            );
         }
         assert!(logged.lines().all(|line| line.len() <= 600), "{logged}");
     }
