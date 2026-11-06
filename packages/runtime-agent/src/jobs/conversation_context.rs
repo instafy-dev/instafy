@@ -1929,8 +1929,9 @@ mod tests {
             assert_eq!(text.matches(words).count(), 1, "{text}");
             assert!(!text.contains("What this carries on"), "{text}");
         }
+        // Before its Stop, which leaves a stopped turn's request out of the lane's replay.
         let browser = build_prompt_conversation_context(
-            Some(&json!(history)),
+            Some(&json!(history[..3].to_vec())),
             None,
             ThreadLane::SharedBrowser,
         )
