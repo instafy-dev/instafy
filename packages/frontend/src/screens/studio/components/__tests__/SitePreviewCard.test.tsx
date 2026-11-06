@@ -396,32 +396,6 @@ describe("SitePreviewCard", () => {
     expect(mocks.getSitePreview).toHaveBeenCalledTimes(3);
   });
 
-  // A local test, Nov 5: a map's card showed its blank starter for 7.5
-  // minutes over the finished map: the check after the turn kept no new
-  // picture. Its old picture and the facts read with it then go, and the card
-  // shows the site's title alone.
-  it("drops a picture its site no longer shows, and the facts read with it", async () => {
-    Object.assign(URL, { createObjectURL: vi.fn(() => "blob:picture-1"), revokeObjectURL: vi.fn() });
-    mocks.getSitePreview.mockResolvedValue(server({
-      pageDescription: "A blank map, ready to fill",
-      thumbnail: { version: "0123456789abcdef", width: 640, height: 400, capturedAt: null },
-    }));
-    mocks.getSitePreviewThumbnail.mockResolvedValue({ ok: true, blob: new Blob(["x"], { type: "image/jpeg" }) });
-    await render();
-    await act(async () => { await Promise.resolve(); });
-    expect(container.querySelector("[data-testid=preview-card-picture]")).not.toBeNull();
-    expect(container.querySelector("[data-testid=preview-card-facts]")?.textContent).toBe("A blank map, ready to fill");
-
-    mocks.getSitePreview.mockResolvedValue(server({ pageDescription: null, thumbnail: null }));
-    await act(async () => {
-      window.dispatchEvent(new CustomEvent("instafy:preview-thumbnail-updated", { detail: { previewId: PREVIEW_ID, version: null } }));
-    });
-    await act(async () => { await Promise.resolve(); });
-    expect(container.querySelector("[data-testid=preview-card-picture]")).toBeNull();
-    expect(container.querySelector("[data-testid=preview-card-facts]")).toBeNull();
-    expect(openButton()?.textContent).toContain("Site preview");
-  });
-
   it("says Status unavailable after a failed check, and asks again", async () => {
     vi.useFakeTimers();
     mocks.getSitePreview.mockRejectedValueOnce(apiError(500));

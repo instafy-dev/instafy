@@ -304,6 +304,36 @@ describe("Undo of a saved change", () => {
     });
   });
 
+  // A machine that stopped answering long ago keeps its folder's origin until
+  // it is swept: the folder of a machine that answers follows instead.
+  it("passes over the machine that saved the change once it no longer answers", async () => {
+    runtimeState.effectiveRuntimeId = "runtime-2";
+    runtimeState.runtimeStatuses = [
+      { runtimeId: "runtime-1", status: "ready", health: "offline", origin: { originId: TURN_ORIGIN, status: "online", protocols: ["http"] } },
+      { runtimeId: "runtime-2", status: "ready", health: "online", origin: { originId: OTHER_ORIGIN, status: "online", protocols: ["http"] } },
+    ];
+    fetchWorkspaceGitHistoryReview.mockResolvedValue({
+      supported: true,
+      commit: HEAD,
+      entries: [
+        { path: STOPS, code: "M", embeddedRepoRoot: null },
+        { path: STAMP, code: "M", embeddedRepoRoot: null },
+      ],
+      busy: false,
+      error: null,
+    });
+    await renderRow([MAP_NOTE], MAP_NOTE);
+    await undo();
+
+    expect(revertWorkspaceGitPaths).toHaveBeenCalledTimes(1);
+    expect(revertWorkspaceGitPaths.mock.calls[0]?.[0]).toMatchObject({
+      paths: [STOPS, STAMP],
+      originId: OTHER_ORIGIN,
+      runtimeId: "runtime-2",
+      saved: UNDONE,
+    });
+  });
+
   it("follows on the space's one ready machine when the change does not say where it was saved", async () => {
     runtimeState.effectiveRuntimeId = null;
     runtimeState.runtimeStatuses = [

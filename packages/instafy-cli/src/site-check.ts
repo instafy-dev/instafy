@@ -1267,11 +1267,6 @@ export type PreviewCheckIo = {
   uploadThumbnail?: CheckThumbnailUploader;
   /** `--picture-to`: keeps the picture in a file instead of uploading it */
   savePicture?: CheckPictureSaver;
-  /**
-   * The check tried to picture the site of the preview open on that port and path and could not (a blank page, one
-   * that never loaded): when it began loading the page (ms since the epoch).
-   */
-  pictureTried?: (input: { port: number; path: string; takenAt: number }) => Promise<void>;
   /** test hook: see SiteCheckOptions.proxyServer */
   proxyServer?: string;
 };
@@ -1325,8 +1320,9 @@ export async function runPreviewCheckCli(opts: PreviewCheckCliOptions, io: Previ
     if (wantsThumbnail && result.thumbnail && deliver) {
       // The picture never changes the check's exit code.
       const shot = result.thumbnail;
-      // A picture the check could not take counts as tried: another check of the unchanged site fails the same way.
-      if ("skipped" in shot) await io.pictureTried?.({ port, path: sitePath, takenAt }).catch(() => {});
+      // A picture the check could not take (a blank page, one that never said it was ready) is not recorded: the card
+      // still shows the site as it was, so the end of a turn that changed the site checks it again, and drops that
+      // picture when it can take none either.
       const outcome =
         "skipped" in shot
           ? { status: "skipped" as const, reason: shot.skipped }
@@ -1353,7 +1349,7 @@ export async function runPreviewCheckCli(opts: PreviewCheckCliOptions, io: Previ
 /** `instafy preview check`, registered under the `preview` command group. */
 export function registerPreviewCheckCommand(
   preview: Command,
-  card: Pick<PreviewCheckIo, "hasOpenPreview" | "uploadThumbnail" | "savePicture" | "pictureTried"> = {},
+  card: Pick<PreviewCheckIo, "hasOpenPreview" | "uploadThumbnail" | "savePicture"> = {},
 ): Command {
   return preview
     .command("check")

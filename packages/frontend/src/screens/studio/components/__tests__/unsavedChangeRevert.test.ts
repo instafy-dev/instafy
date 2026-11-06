@@ -6,7 +6,11 @@ import { undoFolderRuntimeId } from "../unsavedChangeRevert";
 const machine = (
   runtimeId: string,
   originId: string | null,
-  { ready = true, released = false }: { ready?: boolean; released?: boolean } = {},
+  {
+    ready = true,
+    released = false,
+    silent = false,
+  }: { ready?: boolean; released?: boolean; silent?: boolean } = {},
 ): ControllerRuntimeStatusEntry => ({
   runtimeId,
   status: ready ? "ready" : "stopped",
@@ -14,7 +18,8 @@ const machine = (
   idleTtlSeconds: 600,
   isLocal: false,
   isPreferred: false,
-  health: ready ? "online" : "offline",
+  // A machine that stopped answering stays "ready", with its folder's origin, until it is swept.
+  health: ready && !silent ? "online" : "offline",
   origin: originId ? { originId, status: released ? "released" : "online", protocols: ["http"] } : null,
 });
 
@@ -24,6 +29,20 @@ describe("undoFolderRuntimeId", () => {
     expect(undoFolderRuntimeId(statuses, { runtimeId: "turn" }, "now")).toBe("turn");
     // Named by the origin its save went through.
     expect(undoFolderRuntimeId(statuses, { originId: "turn-origin" }, "now")).toBe("turn");
+    // A change no save took is only in the folder of the machine that ran its turn, answering or not.
+    const silent = [machine("turn", "turn-origin", { silent: true }), machine("now", "now-origin")];
+    expect(undoFolderRuntimeId(silent, { runtimeId: "turn" }, "now")).toBe("turn");
+  });
+
+  // Any folder that answers can follow a saved version: the one it was saved
+  // from only while that machine still answers.
+  it("passes over the machine a saved change came from once it no longer answers", () => {
+    const statuses = [machine("old", "old-origin", { silent: true }), machine("new", "new-origin")];
+    expect(undoFolderRuntimeId(statuses, { originId: "old-origin" }, null)).toBe("new");
+    expect(undoFolderRuntimeId(statuses, { originId: "old-origin" }, "new")).toBe("new");
+    expect(
+      undoFolderRuntimeId([...statuses, machine("third", "third-origin")], { originId: "old-origin" }, "third"),
+    ).toBe("third");
   });
 
   // A local test, Nov 5: a map's Undo in a space whose machine nobody had

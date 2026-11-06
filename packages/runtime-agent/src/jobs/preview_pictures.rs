@@ -24,17 +24,20 @@
 //! `instafy preview open` records each preview in the CLI's state file
 //! (`~/.instafy/cli-preview-state.json`): its id, port and path, the folder its
 //! site's server runs from (`siteDir`), when the site was last pictured for
-//! the card (`pictureAt`, milliseconds since the epoch, whether or not a
-//! picture came of it) and whether it was opened with `--no-thumbnail`. A
-//! preview without a recorded folder, or opened with `--no-thumbnail`, is
-//! left alone; one without a picture time counts every change as newer.
+//! the card (`pictureAt`, milliseconds since the epoch: a picture was taken,
+//! or `open` tried and took none) and whether it was opened with
+//! `--no-thumbnail`. A preview without a recorded folder, or opened with
+//! `--no-thumbnail`, is left alone; one without a picture time counts every
+//! change as newer. A check that keeps no picture records nothing, so a
+//! turn whose own check of its change kept none still has its site checked
+//! here.
 //!
 //! A check that ran and kept no new picture (a blank page, one that never
 //! said it was ready, a redirect, one that did not load) leaves the card with
 //! a picture of the site before the change: the runtime then drops it, with
-//! the facts that came with it, so the card shows the site's title alone,
-//! and logs the check's first problem in the check's own words, never the
-//! page's text.
+//! the page description that came with it, unless a picture was taken since
+//! the check began, and logs the check's first problem in the check's own
+//! words, never the page's text. The card then shows no picture.
 //!
 //! A person's Undo puts a site's files back with no turn (`/git/revert` on
 //! this machine's origin), so no turn sends the site's reload either. The
@@ -94,10 +97,6 @@ const MAX_RELOAD_ANSWER_BYTES: u64 = 16 * 1024;
 /// once the check is done, when it is at most this big.
 const REPORT_FILE: &str = "report.json";
 const MAX_CHECK_REPORT_BYTES: u64 = 256 * 1024;
-/// How long after the runtime starts a check the check may begin loading the
-/// page: the time it records as the site's last picture when it keeps none.
-/// A picture recorded later than this was taken since, by another check.
-const CHECK_START_SLACK_MS: f64 = 5_000.0;
 /// The most of a check's own words that go into the log, each.
 const MAX_CHECK_WORDS: usize = 100;
 
@@ -824,9 +823,9 @@ async fn retake_stale_pictures(
 
 /// A check of a preview's changed site looked at the page and kept no
 /// picture of it, so the card's picture shows the site as it was: the card
-/// drops it, with the page description that came with it, and shows the
-/// site's title alone. Not once a newer picture was taken (another check
-/// that began after this one, which records its time before it sends).
+/// drops it, with the page description that came with it. Not once a picture
+/// was taken since the check began (another check, which records its time
+/// before it sends); the check itself, keeping none, recorded nothing.
 async fn drop_stale_picture(
     project_id: &Uuid,
     state_file: &Path,
@@ -834,13 +833,7 @@ async fn drop_stale_picture(
     started_ms: f64,
     sender: &dyn PictureSender,
 ) {
-    let still_newest = || {
-        !newer_picture_taken(
-            state_file,
-            &preview.preview_id,
-            started_ms + CHECK_START_SLACK_MS,
-        )
-    };
+    let still_newest = || !newer_picture_taken(state_file, &preview.preview_id, started_ms);
     if !still_newest() {
         info!(
             port = preview.port,
@@ -910,8 +903,7 @@ enum Checked {
     /// It kept a picture for the card.
     Picture(TakenPicture),
     /// It looked at the page and kept no picture of it. It started at
-    /// `started_ms` (ms since the epoch) and began loading the page a moment
-    /// later.
+    /// `started_ms` (ms since the epoch), before it began loading the page.
     NoPicture { started_ms: f64 },
     /// It did not finish (it ran out of time, was stopped or could not run),
     /// or could not look at the page (nothing answered, no browser): the card
@@ -1330,7 +1322,8 @@ mod tests {
     fn a_picture_taken_or_tried_after_the_change_stays() {
         let dir = workspace();
         let project = Uuid::new_v4();
-        // The turn's own check ran after its last change.
+        // The turn's own check took a picture after its last change, or the
+        // site's preview was opened after it and could take none.
         let picture_after = now_ms() + 60_000.0;
         let state = json!({ "version": 1, "previews": [
             entry(&project, json!({ "pictureAt": picture_after })),
@@ -2493,8 +2486,8 @@ exit 1
     // starter over the finished map. The check after the turn exited with
     // problems and kept no picture, and the runtime threw its report away,
     // so nothing said why. Now the card's old picture goes, and the log says
-    // why in the check's words. Not when a newer picture was taken while the
-    // check ran, nor when the check could not tell.
+    // why in the check's words. Not when another check, begun moments after
+    // this one, took a picture, nor when the check could not tell.
     #[cfg(unix)]
     #[test]
     fn a_check_that_keeps_no_picture_drops_the_cards_old_one() {
@@ -2510,10 +2503,11 @@ exit 1
             let home = sandbox.path().join("home");
             std::fs::create_dir_all(&bin).unwrap();
             std::fs::create_dir_all(home.join(".instafy")).unwrap();
-            // A stand-in `instafy preview check`: it keeps no picture and
-            // prints its report. On 4182 a newer picture of its preview is
-            // recorded while it runs (another check, since); on 4183 it
-            // prints nothing it could tell from.
+            // A stand-in `instafy preview check`: it keeps no picture,
+            // records nothing, as the CLI does then, and prints its report.
+            // On 4182 another check of its preview, begun three seconds
+            // after this one, records the picture it took; on 4183 it prints
+            // nothing it could tell from.
             std::fs::write(
                 bin.join("instafy"),
                 format!(
@@ -2594,7 +2588,7 @@ exit 1
         .unwrap();
         std::fs::write(
             sandbox.join("newer-state.json"),
-            state(now_ms() + 60_000.0).to_string(),
+            state(now_ms() + 3_000.0).to_string(),
         )
         .unwrap();
 
