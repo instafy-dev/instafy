@@ -1742,8 +1742,10 @@ with a settings link and an accept but no reject is the person's step: a click
 under it and a press of its accept are refused in the same words, which the
 Personal Browser's policy gives too; a pause on its buttons highlights them as
 a cookie notice with no page text and presses none; a button outside a notice,
-or one dressed up beside its accept, gets no pause; and once the person has
-answered it, the next step works on the page under it. The Personal
+or a button, field, sign-in or commit dressed up beside its accept, gets no
+pause, while a notice that speaks only of privacy, and one whose accept allows
+beside an accept limited to the necessary cookies, take it; and once the
+person has answered it, the next step works on the page under it. The Personal
 Browser's page bridge, host and redaction have unit tests for the same frames,
 pictures, cut line, states, names, codes and count.
 

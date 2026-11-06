@@ -7039,8 +7039,8 @@ mod tests {
         // answering a notice is the person's step, as a sign-in is. It also
         // presses a banner's own reject button itself, so only the Personal
         // Browser's turn is told to, and, with nothing in its browser that
-        // refuses an accept or keeps a click from what a notice covers, to
-        // read on and stay out of a banner's settings unless asked.
+        // refuses an accept and a pause that takes only fields, to read on
+        // (the page's text) and stay out of a banner's settings unless asked.
         let reject_line =
             "press it before your next step, and nothing else on the banner; never accept.";
         assert!(PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS.contains(

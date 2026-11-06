@@ -9753,9 +9753,14 @@ fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
         Some(&json!({ "indices": [0], "snapshotId": snapshot_id }).to_string()),
     ));
     assert!(human_input.contains("for reading"), "{human_input}");
-    // It says where the person can answer the page instead: the chat's own tab.
+    // It says where the person can answer a cookie notice instead: the chat's
+    // own tab. A sign-in or form found while reading still stops there.
     assert!(
-        human_input.contains("open it in the chat's own tab, the page the person chose (select_tab, then navigate to this address), take a snapshot there and pause on it with request_human_input"),
+        human_input.contains("When the task needs a page a cookie notice covers, open it in the chat's own tab, the page the person chose (select_tab, then navigate to this address), take a snapshot there and pause on the notice with request_human_input"),
+        "{human_input}"
+    );
+    assert!(
+        human_input.contains("Stop at a sign-in or form and tell the person."),
         "{human_input}"
     );
     let risky = failure_of(&fixture.call(

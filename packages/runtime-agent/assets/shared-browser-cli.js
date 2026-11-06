@@ -2895,6 +2895,9 @@ const DECLINE_CLICK_TIMEOUT_MS = 2_000;
 // around it, up to its dialog. A dialog that speaks only of privacy or
 // consent (a policy to accept, a consent form) is no cookie banner, though
 // its buttons are judged as a banner's (the describer's consent context).
+// With `request.anyConsent` such a dialog counts too: a pause hands the
+// person a notice the browser never presses, and both refusals send the turn
+// to pause on any notice the describer found consent around.
 function cookieBannerInPage(element, request) {
   const doc = element.ownerDocument;
   const roots = [doc.body, doc.documentElement];
@@ -2914,6 +2917,7 @@ function cookieBannerInPage(element, request) {
     }
   }
   if (!banner || typeof banner.textContent !== "string" || banner.textContent.length > 4_000) return false;
+  if (request && request.anyConsent === true) return true;
   const cookieName = /cookie/i;
   const cookieText = /\bcookies?\b/i;
   const labelledText = (node) => String(node.getAttribute("aria-labelledby") || "")
@@ -3101,13 +3105,16 @@ async function declineCookieBanner(page, interactive) {
 }
 
 // Whether a pause may hand these controls to the person as a cookie notice
-// the browser could not decline (request_human_input): each one is a control
-// the describer found in a consent banner, it sits in a banner that speaks
-// of cookies beside a button of that banner that accepts, as the browser's
-// own decline judges a banner (cookieBannerInPage), it is not turned off,
-// and on its own it is no step the action policy refuses or always asks
-// about (a payment, a sign-in or a deletion a page dresses up as a notice's
-// button). A notice in a frame is never listed, so never handed over.
+// the browser could not decline (request_human_input). Each one is a button
+// or link the describer found in a consent banner, as both refusals judge a
+// notice (its consent context), turned on, in one small part of the page
+// with a button of that banner that accepts (cookieBannerInPage). And it is
+// the notice's own answer (its accept, a limited accept or a refusal) that
+// on its own asks only as an accept or allow word does, or a step the
+// browser takes by itself while it reads (its settings link, "Learn more").
+// So a page can't dress a field, a payment, a sign-in, a deletion or a
+// commit ("Book now") up as a notice's button to get a pause. A notice in a
+// frame is never listed, so never handed over.
 async function cookieNoticeButtons(page, interactive, selected) {
   const pageUrl = page.url();
   const accepts = interactive
@@ -3119,17 +3126,21 @@ async function cookieNoticeButtons(page, interactive, selected) {
     .map(({ locator }) => locator);
   if (!accepts.length) return false;
   for (const entry of selected) {
-    if (!entry || entry.description.policy?.consentContext !== true || entry.description.disabled === true) return false;
-    const alone = classifyStep(
-      "click",
-      { ...entry.description, policy: { ...entry.description.policy, consentContext: false } },
-      { pageUrl },
-    );
-    if (alone.verdict === "refuse" || ROUTINE_CONFIRMED_CATEGORIES.has(alone.category)) return false;
-    const inNotice = await entry.locator
-      .evaluate(cookieBannerInPage, { kind: "cookie-banner", others: accepts })
+    if (!entry || EDITABLE_FIELD_TAGS.has(entry.description.tag) ||
+        entry.description.policy?.consentContext !== true || entry.description.disabled === true) return false;
+    const { description } = entry;
+    const inNotice = classifyStep("click", description, { pageUrl });
+    const alone = classifyStep("click", { ...description, policy: { ...description.policy, consentContext: false } }, { pageUrl });
+    const answer = (inNotice.verdict === "refuse" && inNotice.category === "consent") ||
+      inNotice.consentLimited === true || inNotice.consentRejection === true;
+    if (alone.verdict === "refuse") return false;
+    if (answer
+      ? alone.category !== "permission" && ROUTINE_CONFIRMED_CATEGORIES.has(alone.category)
+      : !routineCovers(alone, description) || isFormSubmissionControl(description)) return false;
+    const beside = await entry.locator
+      .evaluate(cookieBannerInPage, { kind: "cookie-banner", others: accepts, anyConsent: true })
       .catch(() => false);
-    if (inNotice !== true) return false;
+    if (beside !== true) return false;
   }
   return true;
 }
@@ -5468,7 +5479,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
   if (method === "POST" && requestPath === "/v1/request-human-input") {
     if (inAgentTab()) {
       throw new Error(
-        "Octo's own tabs are for reading, so nothing was highlighted. When the person needs to answer this page (a sign-in, a form or a cookie notice), open it in the chat's own tab, the page the person chose (select_tab, then navigate to this address), take a snapshot there and pause on it with request_human_input.",
+        "Octo's own tabs are for reading, so nothing was highlighted. Stop at a sign-in or form and tell the person. When the task needs a page a cookie notice covers, open it in the chat's own tab, the page the person chose (select_tab, then navigate to this address), take a snapshot there and pause on the notice with request_human_input.",
       );
     }
     const sourceOrigin = await ensureSiteApproved(page.url(), "Allow the assistant to identify fields for your input");

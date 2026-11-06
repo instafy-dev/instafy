@@ -207,6 +207,11 @@ function signInPause(seq: number, runId: string): RuntimeBrowserSessionAction {
   } } as RuntimeBrowserSessionAction;
 }
 
+function cookieNoticePause(seq: number, runId: string): RuntimeBrowserSessionAction {
+  const pause = signInPause(seq, runId);
+  return { ...pause, humanInputRequest: { ...pause.humanInputRequest!, kind: "cookies", fields: [{ label: "Highlighted button 1" }] } };
+}
+
 function action(seq: number, label: string): RuntimeBrowserSessionAction {
   return { seq, ts: seq, pageId: "PAGE1", type: "navigate", label, url: null, x: null, y: null, viewportW: null, viewportH: null };
 }
@@ -515,6 +520,13 @@ describe("Shared Browser view while Octo drives", () => {
     mocks.actions = [];
     await act(async () => root.render(<Host agentHolds={false} pausedRunId={RUN} />));
     await advance(100);
+    expect(note()).toBeNull();
+    // A pause on a cookie notice signs nobody in: its row keeps Let Octo
+    // continue and says nothing of staying signed in.
+    mocks.actions = [cookieNoticePause(1, RUN)];
+    await act(async () => root.render(<Host agentHolds={false} compact pausedRunId={RUN} onContinue={vi.fn(async () => true)} />));
+    await advance(100);
+    expect(document.querySelector('[data-testid="browser-human-input-row"]')?.querySelector('[data-testid="browser-human-input-continue"]')).not.toBeNull();
     expect(note()).toBeNull();
   });
 

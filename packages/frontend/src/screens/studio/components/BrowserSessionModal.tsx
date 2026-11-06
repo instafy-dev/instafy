@@ -3692,7 +3692,7 @@ export function BrowserSessionModal({
         // from here at every width.
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-x-3 gap-y-1 border-b border-slate-200 px-3 py-1 dark:border-slate-800"
           data-browser-session-safe-zone="true" data-testid="browser-human-input-row">
-          {browserHumanInputState.request ? (
+          {browserHumanInputState.request && browserHumanInputState.request.kind !== "cookies" ? (
             <Text as="p" variant="caption" tone="muted" role="status" className="min-w-0 flex-1"
               data-testid="browser-human-input-sign-in-note">
               {signInNote}

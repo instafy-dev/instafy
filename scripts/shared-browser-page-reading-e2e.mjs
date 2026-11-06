@@ -58,9 +58,11 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    pause on it, and the Personal Browser's policy gives them too. A pause
 //    on its buttons highlights them for the person, says it is a cookie
 //    notice, and hands over no page text; the browser presses none of them.
-//    A button the page dresses up in a notice beside its accept, or one
-//    outside any notice, gets no pause. Once the person has answered it and
-//    lets Octo continue, the next step works on the page under it.
+//    A button, field, sign-in or commit the page dresses up in a notice
+//    beside its accept, or one outside any notice, gets no pause; a notice
+//    that speaks only of privacy, and one whose accept allows ("Allow all"),
+//    take it. Once the person has answered it and lets Octo continue, the
+//    next step works on the page under it.
 // Every site is a loopback fixture; Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
@@ -320,6 +322,20 @@ const DRESSED_NOTICE = `<h1>Your account</h1><p><a href="/reading/visit">Orders<
 <p>We use cookies.</p>
 <button type="button" onclick="window.consentAnswer = 'deleted'">Delete my account</button> <button type="button" onclick="window.consentAnswer = 'accepted'">Accept all cookies</button>
 </div>`;
+// A notice whose accept allows ("Allow all"), beside an accept limited to the
+// necessary cookies and a link to its settings, with no reject; and a
+// sign-in a page dresses up as a notice: a password field, its "Sign in" and
+// a "Book now" beside the notice's accept.
+const ALLOW_NOTICE = `<h1>Museum</h1><p><a href="/reading/visit">Tickets</a></p>
+<div class="cookie-banner" style="position:fixed;left:0;right:0;bottom:0;padding:16px;background:#fff">
+<p>We use cookies to run this site.</p>
+<a href="/reading/cookie-settings">Cookie settings</a> <button type="button" onclick="window.consentAnswer = 'necessary'">Accept only necessary</button> <button type="button" onclick="window.consentAnswer = 'accepted'">Allow all</button>
+</div>`;
+const DRESSED_SIGN_IN = `<h1>Your account</h1>
+<div class="cookie-bar" style="position:fixed;left:0;right:0;bottom:0;padding:16px;background:#fff">
+<p>We use cookies.</p>
+<input type="password" aria-label="Password"> <button type="button" onclick="window.consentAnswer = 'signed in'">Sign in</button> <button type="button" onclick="window.consentAnswer = 'booked'">Book now</button> <button type="button" onclick="window.consentAnswer = 'accepted'">Accept all cookies</button>
+</div>`;
 const COVERED = `<h1>Timetable</h1><p style="margin-top:1200px"><a href="/reading/visit" id="lines">All lines</a></p>
 <div id="loading" style="position:fixed;inset:0;background:rgba(255,255,255,.8)"><p>Loading departures</p></div>
 <script>
@@ -378,6 +394,8 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/notice": page("Visit the city", NOTICE),
       "site.test /reading/cookie-notice": page("Metro", COOKIE_NOTICE),
       "site.test /reading/dressed-notice": page("Your account", DRESSED_NOTICE),
+      "site.test /reading/allow-notice": page("Museum", ALLOW_NOTICE),
+      "site.test /reading/dressed-sign-in": page("Your account", DRESSED_SIGN_IN),
       "site.test /reading/covered": page("Timetable", COVERED),
       "site.test /reading/visit": page("Visit", "<h1>Plan your visit</h1>"),
       "frame.test /banner": page("Cookies", BANNER("frame_consent")),
@@ -869,6 +887,28 @@ export async function runSharedBrowserPageReadingFixture() {
     assert.equal(dressed.code, 1, dressed.stdout);
     assert.match(dressed.stderr, /Human input targets must be observed editable fields, or the buttons of a cookie notice/u);
     assert.equal(await consentAnswer(), null);
+    // A field, a sign-in or a commit a page dresses up in a notice gets no
+    // pause either, alone or beside the notice's accept.
+    reading = await read("/reading/dressed-sign-in");
+    for (const labels of [["Password", "Accept all cookies"], ["Sign in"], ["Book now", "Accept all cookies"]]) {
+      const dressedPause = await runTool("POST", "/v1/request-human-input", { indices: labels.map((label) => control(reading, label).index), snapshotId: reading.snapshotId });
+      assert.equal(dressedPause.code, 1, dressedPause.stdout);
+      assert.match(dressedPause.stderr, /Human input targets must be observed editable fields, or the buttons of a cookie notice/u, `${labels}: ${dressedPause.stderr}`);
+    }
+    assert.equal(await consentAnswer(), null);
+    // Every notice the refusals send the turn to pause on takes the pause: one
+    // that speaks only of privacy and data (section 8's), and one whose accept
+    // allows ("Allow all") beside an accept limited to the necessary cookies.
+    for (const [address, labels] of [
+      ["/reading/notice", ["Learn more", "Agree and close"]],
+      ["/reading/allow-notice", ["Cookie settings", "Accept only necessary", "Allow all"]],
+    ]) {
+      reading = await read(address);
+      const paused = await runTool("POST", "/v1/request-human-input", { indices: labels.map((label) => control(reading, label).index), snapshotId: reading.snapshotId });
+      assert.equal(paused.code, 1, paused.stdout);
+      assert.match(paused.stderr, /\[cookie_notice_required_non_retryable\]/u, `${address}: ${paused.stderr}`);
+      assert.equal(await consentAnswer(), null, `${address}: the pause pressed the notice`);
+    }
     // d. The person answers the notice on the page (here in its settings), and
     // lets Octo continue: the next step works on the page under it.
     reading = await read("/reading/cookie-notice");
@@ -890,7 +930,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "password, card and code fields in a frame or a shadow root carry no value into the reading, a frame's fields are never listed, a key in a shadow root's read-only field or in a control's name the list leaves out still makes a secret screen, and a code in boxes of its own is masked",
         "a section marked open is no control, and a click whose middle lands on a form's button or a frame inside the control is refused, sending and asking nothing",
         "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, and a cover that goes within a moment is waited for",
-        "a cookie notice the browser could not decline is the person's step: a click under it and a press of its accept are refused in the words the Personal Browser's policy gives too, a pause highlights its buttons as a cookie notice with no page text and presses none of them, a button outside a notice or dressed up beside its accept gets no pause, and once the person answered it the next step works",
+        "a cookie notice the browser could not decline is the person's step: a click under it and a press of its accept are refused in the words the Personal Browser's policy gives too, a pause highlights its buttons as a cookie notice with no page text and presses none of them, a button outside a notice, or a button, field, sign-in or commit dressed up beside its accept, gets no pause, a notice that speaks only of privacy or whose accept allows takes it, and once the person answered it the next step works",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",

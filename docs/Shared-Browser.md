@@ -521,19 +521,27 @@ Two steps never ask, in Ask too:
 - **A notice the browser could not decline is the person's step, like a
   sign-in.** `request_human_input` takes a cookie notice's buttons as well as
   editable fields, in the chat's own tab only (Octo's own tabs refuse it, and
-  say to open that page in the chat's own tab and pause there). Each button
-  must be a control the describer found in a consent banner, sit in a banner
-  that speaks of cookies beside a button of that banner that accepts (as the
-  browser's own decline judges a banner), be turned on, and on its own be no
-  step the policy refuses or always asks about, so a page cannot dress a
-  payment, a sign-in or a deletion up as a notice's button to get a pause. A
-  notice in a frame is never listed, so never handed over. The pause
+  say to open that page in the chat's own tab and pause there). Each one must
+  be a button or link the describer found in a consent banner, as both
+  refusals judge a notice (so a notice that speaks only of privacy counts
+  too), in one small part of the page with a button of that banner that
+  accepts, and turned on. And it must be the notice's own answer (its accept,
+  an accept limited to the necessary cookies or a selection, or a refusal)
+  that on its own asks only as an accept or allow word does, or a step the
+  browser takes by itself while it reads (a settings link, "Learn more"). So
+  a page cannot dress a field, a payment, a sign-in, a deletion or a commit
+  ("Book now") up as a notice's button to get a pause. A notice in a frame is
+  never listed, so never handed over. The pause
   highlights those buttons and presses none of them; its guidance says
   `kind: "cookies"` with fixed labels ("Highlighted button 1") and nothing of
   the page, and ends the run under its own code (`cookie_notice_required`).
   The Browser view's hint says "Answer the highlighted cookie notice, then let
   Octo continue." and the turn's reply "Answer the highlighted cookie notice
-  in Instafy's browser, then choose Let Octo continue." The person answers the
+  in Instafy's browser, then choose Let Octo continue." (after a pause right
+  before it, "Instafy's browser is still waiting for you. Answer the
+  highlighted cookie notice, then choose Let Octo continue."). The Browser
+  view's row under the toolbar holds **Let Octo continue** without the
+  sign-in note, since nobody signs in. The person answers the
   notice on the page (in its settings, if they like), and the next turn reads
   the page under it.
 

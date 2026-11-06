@@ -15226,6 +15226,9 @@ const COOKIE_NOTICE_PAUSE_REPLY: &str =
 /// details stay out of chat.
 const HUMAN_INPUT_PAUSE_AGAIN_REPLY: &str = "Instafy's browser is still waiting for you. Sign in or fill in the highlighted fields on the page, then choose Let Octo continue. I don't ask for those details in chat.";
 
+/// The same for a pause on a cookie notice.
+const COOKIE_NOTICE_PAUSE_AGAIN_REPLY: &str = "Instafy's browser is still waiting for you. Answer the highlighted cookie notice, then choose Let Octo continue.";
+
 /// Whether Octo's last reply in the chat before this turn was a pause for the
 /// person's input, in the history the controller leased the turn with.
 fn last_reply_was_a_pause(job: &LeaseJob) -> bool {
@@ -15234,8 +15237,13 @@ fn last_reply_was_a_pause(job: &LeaseJob) -> bool {
         .rev()
         .find(|turn| turn.role.eq_ignore_ascii_case("assistant"))
         .is_some_and(|turn| {
-            let reply = turn.content.trim();
-            reply == HUMAN_INPUT_PAUSE_REPLY || reply == HUMAN_INPUT_PAUSE_AGAIN_REPLY
+            [
+                HUMAN_INPUT_PAUSE_REPLY,
+                HUMAN_INPUT_PAUSE_AGAIN_REPLY,
+                COOKIE_NOTICE_PAUSE_REPLY,
+                COOKIE_NOTICE_PAUSE_AGAIN_REPLY,
+            ]
+            .contains(&turn.content.trim())
         })
 }
 
@@ -15250,10 +15258,10 @@ fn apply_terminal_shared_browser_summary(
     let Some(code) = terminal_consent_failure else {
         return;
     };
-    *summary = if code == "human_input_required" && paused_already {
-        HUMAN_INPUT_PAUSE_AGAIN_REPLY
-    } else {
-        terminal_shared_browser_summary(code)
+    *summary = match code {
+        "human_input_required" if paused_already => HUMAN_INPUT_PAUSE_AGAIN_REPLY,
+        "cookie_notice_required" if paused_already => COOKIE_NOTICE_PAUSE_AGAIN_REPLY,
+        _ => terminal_shared_browser_summary(code),
     }
     .to_string();
     *fallback_kind = None;
@@ -15318,7 +15326,7 @@ fn manual_browser_handoff_is_not_retried_or_reported_as_a_generic_failure() {
         &mut summary,
         &mut fallback,
         Some("cookie_notice_required"),
-        true,
+        false,
     );
     assert_eq!(
         summary,
@@ -29142,6 +29150,28 @@ mod tests {
             row("user", continue_prompt),
         ]));
         assert!(last_reply_was_a_pause(&after_two));
+        // A pause on a cookie notice right after one, Let Octo continue
+        // pressed before the person answered it, says the same of the notice.
+        let after_a_notice = job(json!([
+            row("assistant", COOKIE_NOTICE_PAUSE_REPLY),
+            row("user", continue_prompt),
+        ]));
+        assert!(last_reply_was_a_pause(&after_a_notice));
+        let mut summary = String::new();
+        apply_terminal_shared_browser_summary(
+            &mut summary,
+            &mut None,
+            Some("cookie_notice_required"),
+            last_reply_was_a_pause(&after_a_notice),
+        );
+        assert_eq!(
+            summary,
+            "Instafy's browser is still waiting for you. Answer the highlighted cookie notice, then choose Let Octo continue."
+        );
+        assert!(last_reply_was_a_pause(&job(json!([
+            row("assistant", COOKIE_NOTICE_PAUSE_AGAIN_REPLY),
+            row("user", continue_prompt),
+        ]))));
 
         for first in [
             job(json!([row("user", "Open github.com and sign me in.")])),

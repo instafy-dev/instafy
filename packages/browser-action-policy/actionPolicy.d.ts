@@ -52,6 +52,11 @@ export type PersonalBrowserStepClassification = {
    * asks with `commit`.
    */
   consentRejection?: boolean;
+  /**
+   * Set on that limited accept of a consent banner: like its accept and its
+   * refusal, one of the banner's own answers.
+   */
+  consentLimited?: boolean;
 };
 
 export type PersonalBrowserStepContext = {
