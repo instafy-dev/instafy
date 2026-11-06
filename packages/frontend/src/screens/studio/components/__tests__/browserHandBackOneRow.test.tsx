@@ -310,11 +310,12 @@ describe("a message Octo answers in its browser and then builds from what it fou
     expect(done).toMatchObject({ octoRows: 2, typingRow: false, notice: false });
     expect(done.turns).toHaveLength(2);
     // The follow-up's browser turn opened 17 pages on frame.work, pcworld.com,
-    // phoronix.com and tomshardware.com: its line counts them all, never two
-    // of the sites and nothing of the others.
+    // phoronix.com and tomshardware.com, and read 2 more there when an
+    // opening's time ran out: its line counts them all, never two of the
+    // sites and nothing of the others.
     expect(done.lines).toEqual([
       "Opened frame.work, edited a file",
-      "Opened 17 pages on 4 sites, edited a file",
+      "Opened 19 pages on 4 sites, edited a file",
     ]);
     expect(done.turns[0]!.textContent).toContain("Built and opened the Framework laptop comparison page");
     expect(done.turns[1]!.textContent).toContain("Updated the comparison page");

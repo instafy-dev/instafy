@@ -349,6 +349,20 @@ mod tests {
             key("https://www.visitlisboa.com/en/p/belem-tower"),
             key("https://www.visitlisboa.com/en/p/jeronimos")
         );
+        // The controller finds the steps that read a hand-back's pages by these keys
+        // (runtime-controller `browser_hand_back::page_key`, whose test pins the same ones).
+        assert_eq!(
+            key("https://livrarialello.pt/en/"),
+            json!("6adcdec53b102dab")
+        );
+        assert_eq!(
+            key("https://livrarialello.pt/en/#visit"),
+            json!("6adcdec53b102dab")
+        );
+        assert_eq!(
+            key("https://en.metrodoporto.pt/pages/396"),
+            json!("a002599d7ea51f62")
+        );
     }
 
     #[test]

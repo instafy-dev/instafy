@@ -46,7 +46,9 @@ const MIN_TEAM_TURN: Duration = Duration::from_secs(180);
 const CONTINUATION_GRACE: Duration = Duration::from_secs(60);
 
 /// The files a turn's tools may write, in a folder of the job's own outside the workspace (so
-/// nothing in it is ever published).
+/// nothing in it is ever published). The folder is there for as long as the job runs: a turn
+/// with no time limit has no deadline, so `instafy web search` takes that folder (the one of
+/// `INSTAFY_STEP_TIMINGS_FILE`) still being there as the turn still running.
 pub(super) struct TurnFiles {
     dir: PathBuf,
     timings: PathBuf,

@@ -159,6 +159,8 @@ if (!preferences.session || preferences.session.restore_on_startup !== 1) throw 
   # Live browser processes as "pid nice state command". The held container's
   # PID 1 never reaps orphans, so exited processes (state Z) are left out.
   browser_processes='ps -eo pid=,ni=,stat=,comm= | awk '"'"'$3 !~ /^Z/ && $4 ~ /^(Xtigervnc|Xvnc|fluxbox|fbsetbg|xmessage|chrom|ffmpeg|browser-)/'"'"''
+  # The window manager's children, running or finished, as "pid ppid state command".
+  window_manager_children_probe='ps -eo pid=,ppid=,stat=,comm= | awk '"'"'$4 == "fluxbox" { wm[$1] = 1 } { line[NR] = $0; parent[NR] = $2 } END { for (i in line) if (parent[i] in wm) print line[i] }'"'"''
 
   lazy_report() {
     echo "::group::Browser host output"
@@ -283,6 +285,13 @@ if (!preferences.session || preferences.session.restore_on_startup !== 1) throw 
     local niceness
     niceness="$(docker exec "$name" sh -c "$browser_processes" | awk '$2 < 10 { print $4 "=" $2 }')"
     [[ -z "$niceness" ]] || lazy_fail "Browser processes run above nice 10: ${niceness//$'\n'/ }"
+    # The window manager starts no process of its own: it never waits for one
+    # (fbsetbg, for a background), which then stays a finished process for
+    # the machine's life.
+    local window_manager_children
+    window_manager_children="$(docker exec "$name" sh -c "$window_manager_children_probe")"
+    [[ -z "$window_manager_children" ]] \
+      || lazy_fail "The ${label} browser host's window manager started processes it never waits for: ${window_manager_children//$'\n'/; }"
     local oom
     oom="$(docker exec "$name" sh -c 'cat "/proc/$(cat /tmp/browser-smoke-host.pid)/oom_score_adj"')"
     [[ "$oom" == "1000" ]] || lazy_fail "The browser host's OOM score is ${oom}, not 1000."

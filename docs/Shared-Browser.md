@@ -2517,7 +2517,11 @@ unless the policy is `"covered"`.
   finding lines (each page once, a later line for it adding its facts, and a
   page's facts at most 2,000 characters, whole facts in order, the rest
   counted as `factsLeftOut`; only a reply without any falls back to the
-  addresses on its lines), `readAt` and `viewer` from the job, and an
+  addresses on its lines), `viewer` from the job, `readAt` from when the
+  chat's browser last read that page (the latest completed step of that
+  viewer's browser in the chat that left a tab on it, by the browser turn's
+  end, matched by the page key the step's activity carries, so a page an
+  earlier browser turn read keeps its own time; else the turn's end), and an
   address on a loopback, private, link-local or local-only host is never a
   finding. None of the browser turn's own words go with findings that list
   what their pages showed, not even a first line that says a page stopped it
