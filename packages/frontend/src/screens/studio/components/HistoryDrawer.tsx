@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { GitBranch, NavArrowRight, Refresh, Xmark } from "iconoir-react";
 import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
@@ -32,7 +32,7 @@ import {
   type HistoryNotice,
   type HistoryOriginKind,
 } from "./versioningCopy";
-import { formatRelativeCommitTime, parseSavedVersionSubject } from "./workspaceGitReviewShared";
+import { formatRelativeCommitTime, parseSavedVersionSubject, withOneSpaceCreated } from "./workspaceGitReviewShared";
 
 export const HISTORY_PAGE_SIZE = 20;
 export const HISTORY_COMMIT_DEBOUNCE_MS = 750;
@@ -569,7 +569,7 @@ export function HistoryDrawer({
     });
   }, []);
 
-  const entries = history.entries;
+  const entries = useMemo(() => withOneSpaceCreated(history.entries), [history.entries]);
 
   return (
     <div className="@container relative flex h-full min-h-0 flex-col" data-testid="source-control-drawer" data-mode="history">

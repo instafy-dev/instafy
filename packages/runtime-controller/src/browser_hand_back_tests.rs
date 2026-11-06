@@ -266,6 +266,45 @@ impl Chain {
         .await
     }
 
+    /// A step of `job`'s in Instafy's browser in the workspace that opened
+    /// `url` `minutes_ago` minutes ago, as the runtime posts one: its activity
+    /// carries the page's key, never the address. When it was stored.
+    async fn read_page(
+        &self,
+        job_id: &Uuid,
+        url: &str,
+        minutes_ago: i32,
+    ) -> anyhow::Result<chrono::DateTime<Utc>> {
+        let page_key = crate::browser_hand_back::page_key(url).context("page key")?;
+        self.post(
+            job_id,
+            "Tool call completed: instafy_shared_browser/navigate",
+            "mcp_tool_call",
+            json!({
+                "kind": "codex_mcp_tool_call",
+                "itemId": format!("navigate-{page_key}"),
+                "status": "completed",
+                "server": "instafy_shared_browser",
+                "tool": "navigate",
+                "activity": browser_open_activity(url),
+            }),
+        )
+        .await?;
+        Ok(self
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "update conversation_messages
+                    set created_at = now() - make_interval(mins => $3)
+                  where conversation_id = $1 and metadata #>> '{activity,pageKey}' = $2
+                  returning created_at",
+                &[&self.conversation_id, &page_key, &minutes_ago],
+            )
+            .await?
+            .get(0))
+    }
+
     /// An ordinary turn that ends with a card that continues building, and
     /// the browser turn that continues it, still running: the card's job and
     /// the browser job.
@@ -325,6 +364,22 @@ impl Chain {
         )
         .await
     }
+}
+
+/// A browser step's activity as the runtime writes it for a page it opened
+/// (runtime-agent `activity_labels::browser_step_activity`): its site and the
+/// page's key, never the address.
+fn browser_open_activity(url: &str) -> serde_json::Value {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_default();
+    json!({
+        "v": 1, "key": "browser/open", "role": "content", "live": "Opening {host}",
+        "done": { "one": "opened {host}", "other": "opened {n} pages on {host}", "some": "opened pages on {host}" },
+        "count": 1, "host": host, "pageKey": crate::browser_hand_back::page_key(url), "step": "navigate",
+        "approval": "routine", "also": []
+    })
 }
 
 fn refused(
@@ -574,6 +629,78 @@ async fn a_browser_turn_hands_its_findings_back_to_one_building_turn() -> anyhow
                 .await?;
             let (_, body) = refused(chain.hand_back(&chain.owner, &browser_job, json!({})).await);
             assert_eq!(body.code.as_deref(), Some(HAND_BACK_USED_CODE));
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A browser turn's reply can list a page an earlier browser turn of the
+/// chat read: the bookshop's page, read at 22:51:26, was handed back as read
+/// at 22:52:53, the later turn's end (a local test, Nov 5). Each finding
+/// keeps the time the chat's browser last read its page, by the browser's own
+/// steps; a page none of the runtime's steps read keeps the turn's end.
+#[tokio::test]
+async fn a_hand_back_finding_keeps_the_time_its_page_was_read() -> anyhow::Result<()> {
+    with_chain("browser-hand-back-read-times", |chain| {
+        Box::pin(async move {
+            let (_, browser_job) = chain.card_and_running_browser_turn().await?;
+            // The step read the page three minutes before the turn ended.
+            let read_at = chain
+                .read_page(&browser_job, "https://livrarialello.pt/en/", 3)
+                .await?;
+            // A step a person recorded under the turn's job is no read of the browser's.
+            chain
+                .pool
+                .get()
+                .await?
+                .execute(
+                    "insert into conversation_messages
+                         (id, conversation_id, project_id, role, content, metadata, created_by, created_at)
+                     values ($1, $2, $3, 'assistant', 'Tool call completed', $4::jsonb, $5, now() - interval '2 minutes')",
+                    &[
+                        &Uuid::new_v4(),
+                        &chain.conversation_id,
+                        &chain.project_id,
+                        &PgJson(json!({
+                            "source": "agent", "jobId": browser_job.to_string(), "messageType": "mcp_tool_call",
+                            "activity": browser_open_activity("https://en.metrodoporto.pt/pages/396"),
+                            "details": { "status": "completed", "server": "instafy_shared_browser", "tool": "navigate" },
+                        })),
+                        &chain.owner,
+                    ],
+                )
+                .await?;
+            let reply = [
+                json!({"url": "https://livrarialello.pt/en/", "title": "Livraria Lello", "facts": ["Open daily, 9:00 AM–7:30 PM."]}),
+                json!({"url": "https://en.metrodoporto.pt/pages/396", "title": "Maps and Timetables", "facts": ["Links the journey planner."]}),
+            ]
+            .map(|line| line.to_string())
+            .join("\n");
+            chain.finish(&browser_job, Some(&reply), "succeeded").await?;
+
+            let response = chain
+                .hand_back(&chain.owner, &browser_job, json!({}))
+                .await
+                .map_err(|error| controller_error("hand-back", error))?;
+            let hand_back_job = chain.job_of(&response).await?;
+            let record = chain.payload_metadata(&hand_back_job).await?[HAND_BACK_KEY].clone();
+            let ended = record["readAt"].as_str().context("readAt")?;
+            let times: Vec<&str> = record["findings"]
+                .as_array()
+                .context("findings")?
+                .iter()
+                .map(|finding| finding["readAt"].as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(
+                times,
+                [
+                    read_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true).as_str(),
+                    ended,
+                ],
+                "{record}"
+            );
+            assert_ne!(times[0], ended);
             Ok(())
         })
     })
@@ -1412,6 +1539,9 @@ async fn a_building_lease_lists_the_browser_turns_since_its_lanes_last_saved_tur
             // then Let Octo continue.
             let (card, browser) = chain.card_and_running_browser_turn().await?;
             chain.save_provider_state(&card).await?;
+            let timetable_read_at = chain
+                .read_page(&browser, "https://rail.example.org/timetable", 4)
+                .await?;
             let lines = r#"{"url": "https://rail.example.org/timetable", "title": "Coastal line timetable", "facts": ["The 08:05 express arrives at 10:16."]}"#;
             chain
                 .post(
@@ -1516,6 +1646,12 @@ async fn a_building_lease_lists_the_browser_turns_since_its_lanes_last_saved_tur
             assert_eq!(first["viewer"], "Instafy's browser in the workspace");
             assert_eq!(first["outcome"], "succeeded");
             assert!(first["readAt"].is_string());
+            // The finding keeps the time the browser read its page, not the turn's end.
+            assert_eq!(
+                first["findings"][0]["readAt"],
+                json!(timetable_read_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            );
+            assert_ne!(first["findings"][0]["readAt"], first["readAt"]);
             assert_eq!(turns[1]["request"], LET_OCTO_CONTINUE_LINE);
             assert_eq!(turns[1]["reply"], "The sign-in page is still open.");
 

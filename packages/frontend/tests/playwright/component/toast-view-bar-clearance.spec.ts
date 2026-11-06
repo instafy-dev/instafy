@@ -3,14 +3,15 @@ import { resolveViteReactDependencies } from "./viteComponentDependencies.js";
 
 const FIXTURE_PATH = "/__toast-view-bar-clearance__";
 
-type Layout = "desktop" | "phone" | "phone-file" | "desktop-browser" | "phone-browser" | "desktop-browser-starting";
+type Layout = "desktop" | "desktop-sidebar" | "phone" | "phone-file" | "desktop-browser" | "phone-browser" | "desktop-browser-starting";
 
 /**
  * Studio's header and its Chat | Browser bar as the real components draw
  * them, with the real toast region. Desktop: the open chats' tab strip, then
  * the view bar. Phone: the page header, with the view bar beside the composer
  * in a chat, or under the header on a chat's file. In the Browser view, the
- * browser's own bar with its address comes under them.
+ * browser's own bar with its address comes under them. With the sidebar, the
+ * chat is Studio's workspace beside it, which toasts sit over.
  */
 async function mount(page: Page, layout: Layout) {
   const deps = await resolveViteReactDependencies(page);
@@ -30,6 +31,7 @@ async function mount(page: Page, layout: Layout) {
     import { StatusProvider } from "/src/status/StatusProvider.tsx";
     import { Status } from "/src/status/Status.tsx";
     import { useStatus } from "/src/status/useStatus.tsx";
+    import { useToastAreaRef } from "/src/status/toastClearance.ts";
     import { ConversationSurfaceTabs } from "/src/workspace/ConversationSurfaceLayout.tsx";
     import { ConversationQuickTabs } from "/src/workspace/ConversationQuickTabs.tsx";
     import { BrowserChromeShell } from "/src/screens/studio/components/BrowserChromeShell.tsx";
@@ -67,6 +69,11 @@ async function mount(page: Page, layout: Layout) {
         sharedBrowserChrome: controls,
       });
     }
+    // Studio's workspace, right of its navigation, as StudioLayout registers it.
+    function Workspace({ children }) {
+      const ref = useToastAreaRef(true);
+      return h("div", { ref, className: "flex min-w-0 flex-1 flex-col", "data-testid": "studio-workspace" }, children);
+    }
     function Fixture() {
       const { showStatus } = useStatus();
       window.__showReplyToast = () => showStatus("There is a new reply in “Plan 3 days in Seville for a first…”.", "info", 0,
@@ -85,7 +92,7 @@ async function mount(page: Page, layout: Layout) {
         address: h("input", { "aria-label": "Address", readOnly: true, value: "https://httpbin.org/forms/post",
           className: "h-8 w-full min-w-0 rounded-full border border-slate-200 px-3 text-sm" }),
       }) : null;
-      return h("div", { className: "flex h-dvh flex-col bg-white text-slate-800" },
+      const chat = [
         header,
         besideComposer ? null : views("header"),
         browserBar,
@@ -93,7 +100,14 @@ async function mount(page: Page, layout: Layout) {
         h("div", { className: "m-3 rounded-2xl border border-slate-200 p-2" },
           besideComposer ? views("composer") : null,
           h("div", { className: "px-2 py-2 text-sm text-slate-400" }, "Ask for something…")),
-        h(Status));
+      ];
+      if (layout === "desktop-sidebar") {
+        return h("div", { className: "flex h-dvh bg-white text-slate-800" },
+          h("nav", { "data-testid": "sidebar", className: "w-[304px] shrink-0 border-r border-slate-200 p-3 text-sm" }, "Chats"),
+          h(Workspace, null, ...chat),
+          h(Status));
+      }
+      return h("div", { className: "flex h-dvh flex-col bg-white text-slate-800" }, ...chat, h(Status));
     }
     createRoot(document.getElementById("root")).render(h(StatusProvider, null, h(Fixture)));
   `;
@@ -162,6 +176,29 @@ for (const { layout, width, height } of [
     expect(errors).toEqual([]);
   });
 }
+
+// A local test, Nov 5, in a 999×1041 window: the waiting toast's first frame
+// sat 12 px clear of Chat | Browser, but its left 28 px lay over the sidebar,
+// centred as it was on the whole window.
+test("a toast sits over the workspace, right of the sidebar (999×1041)", async ({ page }) => {
+  await page.setViewportSize({ width: 999, height: 1041 });
+  const errors = await mount(page, "desktop-sidebar");
+  await page.evaluate(() => (window as unknown as { __showReplyToast: () => void }).__showReplyToast());
+  const toast = page.getByTestId("status-toast");
+  await expect(toast).toBeVisible();
+  const toastBox = (await toast.boundingBox())!;
+  const sidebarBox = (await page.getByTestId("sidebar").boundingBox())!;
+  const workspaceBox = (await page.getByTestId("studio-workspace").boundingBox())!;
+  expect(toastBox.x, `toast ${JSON.stringify(toastBox)}, sidebar ${JSON.stringify(sidebarBox)}`)
+    .toBeGreaterThanOrEqual(sidebarBox.x + sidebarBox.width);
+  // Centred over the workspace, inside it.
+  expect(Math.abs(toastBox.x + toastBox.width / 2 - (workspaceBox.x + workspaceBox.width / 2))).toBeLessThanOrEqual(1);
+  expect(toastBox.x + toastBox.width).toBeLessThanOrEqual(workspaceBox.x + workspaceBox.width);
+  // And still under the Chat | Browser bar.
+  const barBox = (await page.getByTestId("conversation-subtabs").boundingBox())!;
+  expect(toastBox.y).toBeGreaterThanOrEqual(barBox.y + barBox.height);
+  expect(errors).toEqual([]);
+});
 
 /**
  * Every frame's toast and bars, from now: where the toast is (its painted box,

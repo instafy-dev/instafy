@@ -215,8 +215,17 @@ const BROWSER_SEARCH: BuiltinLabel = BuiltinLabel {
         "searched {host}",
     ),
 };
-// Clicks, other keys, typing, choosing an option, sending a form that is not a search, scrolling,
-// tabs and status: the line names the pages and searches they lead to, not each step.
+// Typing into a field and choosing an option: filling in a form. A form's typing read "Browsed
+// httpbin.org ×8" in Details (a local test, Nov 5). Quiet as browsing is: the line names the pages
+// and searches it leads to.
+const BROWSER_FILL: BuiltinLabel = BuiltinLabel {
+    key: "browser/fill",
+    role: ActivityRole::Quiet,
+    live: "Filling in a form on {host}",
+    done: single("filled in a form on {host}"),
+};
+// Clicks, other keys, sending a form that is not a search, scrolling, tabs and status: the line
+// names the pages and searches they lead to, not each step.
 const BROWSER_BROWSE: BuiltinLabel = BuiltinLabel {
     key: "browser/browse",
     role: ActivityRole::Quiet,
@@ -1570,6 +1579,7 @@ pub fn browser_step_activity(step: &JsonValue) -> Option<JsonValue> {
         ("navigate" | "open_tab", Some(_), None) => &BROWSER_OPEN,
         ("snapshot", Some(_), None) => &BROWSER_READ,
         ("search", Some(_), None) => &BROWSER_SEARCH,
+        ("type" | "choose", Some(_), None) => &BROWSER_FILL,
         (_, Some(_), None) => &BROWSER_BROWSE,
     };
     let mut found = Found::builtin(label, Some(1));
@@ -2550,8 +2560,8 @@ mod tests {
             ("open_tab", "browser/open", "content"),
             ("snapshot", "browser/read", "content"),
             ("click", "browser/browse", "quiet"),
-            ("type", "browser/browse", "quiet"),
-            ("choose", "browser/browse", "quiet"),
+            ("type", "browser/fill", "quiet"),
+            ("choose", "browser/fill", "quiet"),
             ("submit", "browser/browse", "quiet"),
             ("press", "browser/browse", "quiet"),
             ("scroll", "browser/browse", "quiet"),
@@ -2562,6 +2572,11 @@ mod tests {
             assert_eq!(activity["key"], json!(key), "{kind}");
             assert_eq!(activity["role"], json!(role), "{kind}");
         }
+        // Typing into a field or choosing an option is filling in a form, not browsing.
+        let typed = step(json!({"step": "type", "host": "httpbin.org", "approval": "routine"}));
+        assert_eq!(typed["live"], json!("Filling in a form on {host}"));
+        assert_eq!(typed["done"], json!("filled in a form on {host}"));
+        assert_eq!(typed["approval"], json!("routine"));
         // No host known yet: "Using the browser", with how the step was allowed.
         let unnamed = step(json!({"step": "type", "approval": "denied"}));
         assert_eq!(unnamed["key"], json!("browser/use"));

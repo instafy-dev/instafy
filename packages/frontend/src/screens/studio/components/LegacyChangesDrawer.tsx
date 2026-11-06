@@ -45,6 +45,7 @@ import {
   formatRelativeCommitTime,
   getStatusBadge,
   parseSavedVersionSubject,
+  withOneSpaceCreated,
 } from "./workspaceGitReviewShared";
 import { PROGRAMMATIC_FOCUS_CLASS, restoreLostFocus } from "./historyFocus";
 import { resolveHistoryAuthor } from "./versioningCopy";
@@ -173,7 +174,7 @@ export function LegacyChangesDrawer({
   const visibleDirtyPaths = useMemo(() => dirtyPaths.map((entry) => entry.path), [dirtyPaths]);
   const supported = status?.supported === true;
   const dirtyCount = supported ? (status?.dirtyCount ?? dirtyPaths.length) : 0;
-  const historyEntries = history?.entries ?? [];
+  const historyEntries = useMemo(() => withOneSpaceCreated(history?.entries ?? []), [history?.entries]);
   const historySupported = history !== null && history.supported !== false;
   const historyHeadLabel =
     typeof history?.branch === "string" && history.branch.trim().length > 0

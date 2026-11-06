@@ -1028,10 +1028,11 @@ describe("browser steps", () => {
       browserStep(BROWSER_BROWSE, { host: "tomshardware.com", step: "navigate" }),
       open("gizmodo.com", 30),
     ];
-    // Opened on more than two sites: the pages counted across them.
-    expect(summarize(messages).summary).toBe("Opened 10 pages on 4 sites, read a page on frame.work");
+    // Opened on more than two sites: the pages counted across them, the one
+    // read on frame.work too.
+    expect(summarize(messages).summary).toBe("Opened 11 pages on 4 sites");
     expect(summarize([...messages, open("gizmodo.com", 31), open("gizmodo.com", 32)]).summary)
-      .toBe("Opened 12 pages on 4 sites, read a page on frame.work");
+      .toBe("Opened 13 pages on 4 sites");
     // On two sites the line names both, the bigger first, and the last site
     // leads when it is one of them.
     const twoSites = messages.slice(0, 11);
@@ -1052,7 +1053,6 @@ describe("browser steps", () => {
   it("name both sites that tie for the line's second place", () => {
     const page = (n: number) => n.toString(16).padStart(16, "0");
     const open = (host: string, n: number) => browserStep(BROWSER_OPEN, { host, pageKey: page(n), step: "navigate" });
-    const read = (host: string, n: number) => browserStep(BROWSER_READ, { host, pageKey: page(n), step: "snapshot" });
     const frame = [
       browserStep(BROWSER_BROWSE, { host: "frame.work", step: "click" }),
       open("frame.work", 1), open("frame.work", 2), open("frame.work", 3), open("frame.work", 4),
@@ -1060,23 +1060,58 @@ describe("browser steps", () => {
     // Opened on three sites: the pages counted across them.
     expect(summarize([...frame, open("phoronix.com", 10), open("pcworld.com", 20)]).summary)
       .toBe("Opened 6 pages on 3 sites");
-    // Opened on two sites, beside pages read on a third: both are named.
-    const readFrame = [
-      browserStep(BROWSER_BROWSE, { host: "frame.work", step: "click" }),
-      read("frame.work", 1), read("frame.work", 2), read("frame.work", 3), read("frame.work", 4),
-    ];
-    expect(summarize([...readFrame, open("phoronix.com", 10), open("pcworld.com", 20)]).summary)
-      .toBe("Opened phoronix.com and pcworld.com, read 4 pages on frame.work");
-    // Words that would read as one page on both sites stay apart.
-    expect(summarize([...frame, read("phoronix.com", 10), read("pcworld.com", 20)]).summary)
-      .toBe("Read a page on phoronix.com, read a page on pcworld.com, opened 4 pages on frame.work");
+    // Pages opened on two sites, tied behind searches: both are named in one phrase.
+    const search = (n: number) => browserStep(BROWSER_SEARCH, { host: "frame.work", pageKey: page(n), step: "search" });
+    expect(summarize([search(1), search(2), search(3), search(4), open("phoronix.com", 10), open("pcworld.com", 20)]).summary)
+      .toBe("Opened phoronix.com and pcworld.com, searched frame.work 4 times");
     // Two different steps that tie are both named.
     const searched = browserStep(BROWSER_SEARCH, { host: "phoronix.com", pageKey: page(10), step: "search" });
     expect(summarize([...frame, searched, open("pcworld.com", 20)]).summary)
       .toBe("Searched phoronix.com, opened pcworld.com, opened 4 pages on frame.work");
     // With more than one site tied for that place, none is picked over the others.
+    expect(summarize([...frame, searched, open("pcworld.com", 20), browserStep(BROWSER_SEARCH, { host: "gizmodo.com", pageKey: page(30), step: "search" })]).summary)
+      .toBe("Searched gizmodo.com, opened 4 pages on frame.work");
+  });
+
+  // A local test, Nov 5: a comparison's fill-in opened pages on frame.work and
+  // four review sites and read two on pcmag.com, and its line read "Opened 13
+  // pages on 5 sites" where Details listed six: a page read is counted with
+  // the pages opened, on as many sites as Details lists.
+  it("count the pages read with the pages opened on many sites, and every site", () => {
+    const page = (n: number) => n.toString(16).padStart(16, "0");
+    const open = (host: string, n: number) => browserStep(BROWSER_OPEN, { host, pageKey: page(n), step: "navigate" });
+    const read = (host: string, n: number) => browserStep(BROWSER_READ, { host, pageKey: page(n), step: "snapshot" });
+    const frame = [
+      browserStep(BROWSER_BROWSE, { host: "frame.work", step: "click" }),
+      open("frame.work", 1), open("frame.work", 2), open("frame.work", 3), open("frame.work", 4),
+    ];
+    const readFrame = [
+      browserStep(BROWSER_BROWSE, { host: "frame.work", step: "click" }),
+      read("frame.work", 1), read("frame.work", 2), read("frame.work", 3), read("frame.work", 4),
+    ];
+    const fillIn = [
+      ...frame, open("frame.work", 5),
+      open("phoronix.com", 10), open("pcworld.com", 20), open("gizmodo.com", 30), open("tomshardware.com", 40),
+      read("pcmag.com", 50), read("pcmag.com", 51),
+    ];
+    const activity = summarize(fillIn);
+    expect(activity.summary).toBe("Opened 11 pages on 6 sites");
+    const listed = new Set(activity.details.flatMap((item) => (item.kind === "step" && item.step.activity?.host ? [item.step.activity.host] : [])));
+    expect(listed.size).toBe(6);
+    // Pages read on a third site count with the pages opened on two.
+    expect(summarize([...readFrame, open("phoronix.com", 10), open("pcworld.com", 20)]).summary)
+      .toBe("Opened 6 pages on 3 sites");
+    expect(summarize([...frame, read("phoronix.com", 10), read("pcworld.com", 20)]).summary)
+      .toBe("Opened 6 pages on 3 sites");
     expect(summarize([...readFrame, open("phoronix.com", 10), open("gizmodo.com", 30), read("pcworld.com", 20)]).summary)
-      .toBe("Read a page on pcworld.com, read 4 pages on frame.work");
+      .toBe("Opened 7 pages on 4 sites");
+    // A page opened and then read is one page.
+    expect(summarize([...frame, read("frame.work", 4), open("phoronix.com", 10), read("pcworld.com", 20)]).summary)
+      .toBe("Opened 6 pages on 3 sites");
+    // Pages only read say so.
+    const clicked = browserStep(BROWSER_BROWSE, { host: "phoronix.com", step: "click" });
+    expect(summarize([clicked, read("phoronix.com", 10), read("pcworld.com", 20), read("gizmodo.com", 30), read("gizmodo.com", 31)]).summary)
+      .toBe("Read 4 pages on 3 sites");
   });
 
   it("name the site while a step runs, and the browser before any site is known", () => {

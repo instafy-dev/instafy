@@ -105,6 +105,7 @@ import { HomePanel } from "./studio/components/HomePanel";
 import { useStudioBugReportController } from "./studio/components/useStudioBugReportController";
 import { StudioDiagnostics } from "./studio/components/StudioDiagnostics";
 import { Status } from "../status/Status";
+import { useToastAreaRef } from "../status/toastClearance";
 import type { SettingsTab, StudioNavItem, StudioPanel } from "./studio/types";
 import { useAuth } from "../providers/AuthProvider";
 import { useWorkspaceUi } from "../workspace/useWorkspace";
@@ -1761,6 +1762,10 @@ function StudioLayoutInner() {
     onOpen: () => { if (!isLargeScreen) runAfterSidebarClose(() => {}); },
   });
   closeSearchForNavigation.current = () => { search.closeSearch(false); searchNavigation.cancelPending(); };
+  // Toasts sit over the workspace (or the search that takes its place), never
+  // over the navigation beside it.
+  const workspaceToastArea = useToastAreaRef<HTMLDivElement>(true);
+  const searchToastArea = useToastAreaRef<HTMLDivElement>(true);
   useNativeBackButtonAction(search.open, () => search.closeSearch(), 200);
   const contextHomeActive = navigationScope.page === "home";
   const accountOverview = navigationScope.page === "account";
@@ -1988,13 +1993,14 @@ function StudioLayoutInner() {
             </div>
           ) : null}
 
-          {search.open ? <div className="studio-context-search-screen">
+          {search.open ? <div ref={searchToastArea} className="studio-context-search-screen">
             {!isLargeScreen ? <header className="studio-context-search-mobile" aria-label="Search">{search.renderControl()}</header> : null}
             {isLargeScreen ? <StudioHistoryControls history={mobileHistory} className="self-start px-1" />
               : <div className="px-1"><MobileStudioHistoryControls history={mobileHistory} returnToSearch={false} /></div>}
             <main className="flex min-h-0 min-w-0 flex-1" aria-label="Search results" data-testid="studio-search-screen">{search.results}</main>
           </div> : null}
           <div
+            ref={workspaceToastArea}
             className="studio-context-workspace flex flex-1 min-h-0 min-w-0 flex-col"
             hidden={search.open}
             aria-hidden={search.open || showMobileLeftDrawerOverlay || undefined}

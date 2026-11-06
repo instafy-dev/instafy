@@ -568,8 +568,9 @@ Studio picks its versioning UI per space from the project's default origin:
   helper's and any other save without the person's words read `Save workspace changes`, as does
   a job that does not say. An Undo or a Revert reads `Undid "<that version's title>"`, with
   git's `This reverts commit <id>.` line in its body. A new space's first versions (the seed
-  and the first write of its default files) read `Space created`, and a later write of newer
-  default files `Defaults refreshed`.
+  and the first write of its default files) read `Space created`, and History lists them, one
+  after another, as one: the newest, which holds the space as its setup left it. A later write
+  of newer default files reads `Defaults refreshed`.
 - **Unsaved work** (History only): work kept on `refs/instafy/recovery/*`, listed with
   `GET /git/recovery`. It includes what Undo of a stopped turn's unsaved change put back
   (`undone`, from a workspace runtime's or Desktop origin's `POST /git/revert {paths, keep: true,

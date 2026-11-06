@@ -132,8 +132,11 @@ view or its Browser view is in front (the reply belongs to the turn the person i
 watching there), not while one of its files or previews is. An in-app toast starts
 under the chat's view bar (Chat | Browser) when that bar is at the top of the
 screen, and under the address bar of the Browser view, a preview or the browser in
-the desktop app while one is on screen. Placement follows banners that move that
-bar without resizing it (`toastClearance.ts`, `BrowserChromeShell.tsx`). When a
+the desktop app while one is on screen. Across, it sits over Studio's workspace (or
+the search that takes its place), right of the navigation beside it, never over the
+sidebar or a drawer. Placement follows banners that move that
+bar without resizing it, and the navigation opening, collapsing or being resized
+(`toastClearance.ts`, `BrowserChromeShell.tsx`). When a
 keyboard leaves too little height below the bar, the notice moves into the visible
 viewport and scrolls. When that viewport ends above the device edge, placement
 does not subtract the bottom safe-area inset again. Extremely short viewports

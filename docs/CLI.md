@@ -970,9 +970,11 @@ or a key goes.
 
 **Rules no option turns off.**
 
-- **Octo's turns only.** It runs only inside the runtime's live turn (`INSTAFY_TURN_STARTED_AT` to
-  `INSTAFY_TURN_DEADLINE`), so a published app, a person's own code, a terminal command or a process left over from an
-  earlier turn cannot search (exit 64).
+- **Octo's turns only.** It runs only inside the runtime's live turn: from `INSTAFY_TURN_STARTED_AT`, and until
+  `INSTAFY_TURN_DEADLINE` when the turn has a time limit (a turn with none has no deadline). So a published app, a
+  person's own code, a terminal command or a process left over from an earlier turn cannot search (exit 64): a site
+  server a turn starts to outlive it (`instafy preview open --start`, `instafy bind serve --detach`) gets none of the
+  turn's `INSTAFY_TURN_*` values.
 - **Keys.** A key goes only, over https, to the host of its own entry's `url`, in its own header. It is never printed
   (the output is scrubbed of every provider key as well), never written to the state folder, and never part of an
   error. Redirects are not followed.
@@ -988,7 +990,7 @@ or a key goes.
 - **Limits.** Per turn, at most 4 searches (separate from the configurable page-load budget); 8 results by default and 20
   at most. One search at a time per provider. An HTTP 429, or a refused key (401 or 403), stops that provider for the
   rest of the turn, and the chain's next provider with a key is tried. Every search ends 5 s before the turn's
-  deadline. A space's key makes at most its entry's `daily_limit` searches a day (100).
+  deadline, when it has one. A space's key makes at most its entry's `daily_limit` searches a day (100).
 
 The output ends with one line for the room's activity log: `"activity"` at the top of the JSON, or `activity: …` as
 the last line of the text. Offline fixtures apply as for `instafy web read` (`viewer` is then `fixture`).

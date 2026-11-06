@@ -726,12 +726,14 @@ start_browser_session() {
   fi
 
   if command -v fluxbox >/dev/null 2>&1; then
-    # Avoid Fluxbox's default fbsetbg warning popup in minimal containers.
+    # The style leaves the root window alone (`background: unset`). Any other
+    # background makes fluxbox run fbsetbg, which it never waits for, so the
+    # finished process stays for the machine's life; `none` runs it too, with a
+    # warning popup when no wallpaper setter is installed. The browser covers
+    # the root window.
     mkdir -p /root/.fluxbox
     cat > /tmp/instafy/fluxbox-style <<'EOF'
-background: flat
-background.color: #101010
-background.colorTo: #101010
+background: unset
 EOF
     if [ -f /root/.fluxbox/init ]; then
       grep -v '^session\.screen0\.rootCommand:' /root/.fluxbox/init \
@@ -743,7 +745,6 @@ EOF
     printf '%s\n' 'session.screen0.rootCommand: /bin/true' >> /root/.fluxbox/init
     printf '%s\n' 'session.styleFile: /tmp/instafy/fluxbox-style' >> /root/.fluxbox/init
     printf '%s\n' 'session.screen0.toolbar.visible: false' >> /root/.fluxbox/init
-    pkill -f '^xmessage -default okay -center fbsetbg:' >/dev/null 2>&1 || true
     build_model_safe_env \
       "${MODEL_SAFE_BASE_ENV_KEYS[@]}" \
       DISPLAY XAUTHORITY XDG_RUNTIME_DIR
@@ -1272,12 +1273,10 @@ start_browser_host() {
 
   if command -v fluxbox >/dev/null 2>&1; then
     # The window manager's settings live under this host's HOME, never /root.
+    # Its style leaves the root window alone, so it starts no fbsetbg that it
+    # would never wait for (see the window manager the boot starts above).
     mkdir -p "${HOME}/.fluxbox"
-    printf '%s\n' \
-      'background: flat' \
-      'background.color: #101010' \
-      'background.colorTo: #101010' \
-      > "${state_dir}/fluxbox-style"
+    printf '%s\n' 'background: unset' > "${state_dir}/fluxbox-style"
     printf '%s\n' \
       'session.screen0.rootCommand: /bin/true' \
       "session.styleFile: ${state_dir}/fluxbox-style" \

@@ -36819,8 +36819,9 @@ mod tests {
                 .cloned()
                 .expect("labelled")
         };
+        // Typing reads as filling in a form until the browser says it was a search.
         let running = activity(0);
-        assert_eq!(running["live"], json!("Browsing {host}"));
+        assert_eq!(running["live"], json!("Filling in a form on {host}"));
         assert_eq!(running["host"], json!("visitlisboa.com"));
         let done = activity(1);
         assert_eq!(done["key"], json!("browser/search"));

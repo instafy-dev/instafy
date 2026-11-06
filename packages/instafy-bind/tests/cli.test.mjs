@@ -203,6 +203,17 @@ test("a binder's health names its folder and process only to this machine", asyn
   }
 });
 
+test("a process started to outlive its Octo turn keeps none of that turn's values", async () => {
+  const { detachedBinderEnv } = await import("../src/config.mjs");
+  const env = detachedBinderEnv({
+    PATH: "/bin", SPACE_ID: "s",
+    INSTAFY_TURN_STARTED_AT: "2026-11-05T22:16:41Z", INSTAFY_TURN_DEADLINE: "2026-11-05T22:26:41Z",
+    INSTAFY_TURN_CONTINUE_FILE: "/tmp/continue", INSTAFY_TURNS_PER_DAY: "kept",
+  });
+  // A turn with no time limit has no deadline, so a site server it started would otherwise still count as that turn.
+  assert.deepEqual(Object.keys(env).sort(), ["INSTAFY_TURNS_PER_DAY", "PATH", "SPACE_ID"]);
+});
+
 test("serve --detach keeps credentials the binder does not need out of the long-lived binder's environment", async () => {
   const { detachedBinderEnv, resolveControllerConfig, agentUnavailableReason } = await import("../src/config.mjs");
   const base = {

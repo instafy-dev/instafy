@@ -612,6 +612,27 @@ describe("HistoryDrawer", () => {
     expect(container.querySelector('[class*="uppercase"]')).toBeNull();
   });
 
+  // A local test, Nov 5: a new space's History ended with two "Space created"
+  // rows, its seed and the first write of its default files.
+  it("lists a new space's setup versions as one Space created, the newest", async () => {
+    mocks.fetchHistory.mockResolvedValueOnce(
+      page([
+        historyEntry(1, { subject: "Plan 3 days in Seville for a first visit" }),
+        historyEntry(2, { subject: "Space created", authorName: "Instafy user" }),
+        historyEntry(3, { subject: "Space created", authorName: "Instafy", authorEmail: "origin@instafy.dev" }),
+      ]),
+    );
+    await render();
+    const summaries = Array.from(container.querySelectorAll('[data-testid="source-control-history-summary"]'))
+      .map((row) => row.textContent);
+    expect(summaries).toEqual(["Plan 3 days in Seville for a first visit", "Space created"]);
+    // The row kept is the newest setup version, which holds the space as its setup left it.
+    const rows = Array.from(container.querySelectorAll('[data-testid="source-control-history-entry"]'));
+    expect(rows[1]?.querySelector('[data-testid="history-author"]')?.textContent).toBe("Instafy user");
+    await act(async () => rows[1]?.querySelector<HTMLButtonElement>('[data-testid="source-control-history-review"]')?.click());
+    expect(mocks.openGitReviewTab).toHaveBeenCalledWith(expect.objectContaining({ commit: hex(2) }));
+  });
+
   it("opens a saved version review pinned to the origin", async () => {
     await render();
     await act(async () => q<HTMLButtonElement>(container, "source-control-history-review")?.click());

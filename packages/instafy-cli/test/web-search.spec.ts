@@ -412,7 +412,8 @@ describe("searching with the space's own key (fixtures)", () => {
     const io = { out: (line: string) => out.push(line), err: (line: string) => out.push(line) };
     for (const env of [
       { BRAVE_SEARCH_API_KEY: BRAVE_KEY },
-      { BRAVE_SEARCH_API_KEY: BRAVE_KEY, INSTAFY_TURN_STARTED_AT: new Date(START).toISOString() },
+      // A deadline with no start is no turn of the runtime's.
+      { BRAVE_SEARCH_API_KEY: BRAVE_KEY, INSTAFY_TURN_DEADLINE: new Date(START + 600_000).toISOString() },
       // A process left over from a turn that ended (a site server it started, say).
       { BRAVE_SEARCH_API_KEY: BRAVE_KEY, INSTAFY_TURN_STARTED_AT: new Date(START - 900_000).toISOString(), INSTAFY_TURN_DEADLINE: new Date(START - 300_000).toISOString() },
     ]) {
@@ -422,6 +423,28 @@ describe("searching with the space's own key (fixtures)", () => {
     expect(requests).toHaveLength(0);
     expect(liveTurn(turnEnv(1), START + 2_000)).not.toBeNull();
     expect(liveTurn(turnEnv(1), START + 600_001)).toBeNull();
+  });
+
+  // A turn has no time limit unless the runtime is given one (CODEX_RUN_TIMEOUT_SECONDS), and then the runtime sets
+  // no deadline: such a map turn's `instafy web search … --chain reference-search` came back "runs only in Octo's
+  // turns", so nothing was searched (a local test, Nov 5).
+  it("runs in a turn with no time limit, which has a start and no deadline", async () => {
+    const { requests, transport } = recorder(() => ({ status: 200, body: braveAnswer(["a", "b"]) }));
+    const env = { BRAVE_SEARCH_API_KEY: BRAVE_KEY, INSTAFY_TURN_STARTED_AT: new Date(START - 60_000).toISOString(), INSTAFY_PROJECT_ID: "project-1" };
+    const out: string[] = [];
+    const io = { out: (line: string) => out.push(line), err: (line: string) => out.push(line) };
+    expect(await runWebSearchCli(["ramen"], { json: true }, io, transportDeps(env, transport))).toBe(WEB_SEARCH_EXIT_OK);
+    const report = JSON.parse(out.pop()!) as WebSearchReport;
+    expect(report).toMatchObject({ status: "ok", count: 2 });
+    expect(requests).toHaveLength(1);
+    // With no deadline, a search still ends by its own time limit.
+    expect(liveTurn(env, START)).toEqual({ startedAt: START - 60_000, deadline: Infinity });
+    expect(liveTurn({ ...env, INSTAFY_TURN_DEADLINE: " " }, START)).toEqual({ startedAt: START - 60_000, deadline: Infinity });
+    // A start more than a minute ahead of the clock is no turn of this machine's.
+    expect(liveTurn({ INSTAFY_TURN_STARTED_AT: new Date(START + 61_000).toISOString() }, START)).toBeNull();
+    // A deadline that cannot be read, or that comes before the start, is no turn's either.
+    expect(liveTurn({ ...env, INSTAFY_TURN_DEADLINE: "soon" }, START)).toBeNull();
+    expect(liveTurn({ ...env, INSTAFY_TURN_DEADLINE: new Date(START - 120_000).toISOString() }, START)).toBeNull();
   });
 
   it("refuses a query that looks like a key or a password, and removes personal details before sending", async () => {

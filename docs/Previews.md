@@ -52,7 +52,8 @@ Instafy's browser cannot show a space's own sites: its safety policy blocks the 
    its directory in the workspace, in its own session so it outlives the process that started it, without terminal
    input, with its output appended to `.instafy/agent/logs/preview-<port>.log`, and with the environment stripped of
    credentials by the same rule as `instafy bind serve --detach` (no `CONTROLLER_*` value except
-   `CONTROLLER_BASE_URL`, no `SUPABASE_*` value, no credential-like name). It waits up to 60 s for the port, the same
+   `CONTROLLER_BASE_URL`, no `SUPABASE_*` value, no credential-like name, and none of the turn's `INSTAFY_TURN_*`
+   values, since the site outlives the turn). It waits up to 60 s for the port, the same
    as a wake, and exits 2 with the log's path when the command exits first or the port stays silent (then the command
    is stopped). `--json` adds `startedPid` (null when this same site already ran on its port and nothing was started)
    and `logFile`. The log is Instafy's, not the person's work: a turn's file list never counts it, as it counts nothing

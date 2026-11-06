@@ -7,6 +7,13 @@ import { useCallback, useRef } from "react";
  * region reads where the lowest one ends.
  */
 const bars = new Set<HTMLElement>();
+/**
+ * The area toasts sit over: Studio's workspace, right of its navigation (the
+ * team rail, the sidebar and an open drawer), so a toast never covers the
+ * navigation beside the view it was shown in. The area registers itself while
+ * it is on screen; with none, toasts are centred on the whole screen.
+ */
+const areas = new Map<HTMLElement, ResizeObserver | null>();
 const listeners = new Set<() => void>();
 let layoutObserver: MutationObserver | null = null;
 let layoutResizeObserver: ResizeObserver | null = null;
@@ -59,7 +66,16 @@ export function toastClearanceBottom(): number {
   return Math.ceil(bottom);
 }
 
-/** Calls `listener` when a bar or the layout above it changes. */
+/** The span of the area toasts sit over, in px from the viewport's left edge; null with none on screen. */
+export function toastArea(): { left: number; width: number } | null {
+  for (const area of areas.keys()) {
+    const box = area.getBoundingClientRect();
+    if (box.width > 0 && box.height > 0) return { left: Math.round(box.left), width: Math.round(box.width) };
+  }
+  return null;
+}
+
+/** Calls `listener` when a bar, the layout above it, or the area toasts sit over changes. */
 export function subscribeToastClearance(listener: () => void): () => void {
   listeners.add(listener);
   // A sibling banner can move a fixed-size bar without resizing the bar.
@@ -101,6 +117,29 @@ export function useToastClearanceRef<T extends HTMLElement>(active: boolean): (n
     held.current = { bar: node, observer };
     bars.add(node);
     observeLayout();
+    notify();
+  }, [active]);
+}
+
+/**
+ * A ref for the area toasts sit over while `active`. Its width changes when
+ * the navigation beside it opens, collapses or is resized, which moves its
+ * left edge.
+ */
+export function useToastAreaRef<T extends HTMLElement>(active: boolean): (node: T | null) => void {
+  const held = useRef<HTMLElement | null>(null);
+  return useCallback((node: T | null) => {
+    if (held.current) {
+      areas.get(held.current)?.disconnect();
+      areas.delete(held.current);
+      held.current = null;
+      notify();
+    }
+    if (!active || !node) return;
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(notify) : null;
+    observer?.observe(node);
+    areas.set(node, observer);
+    held.current = node;
     notify();
   }, [active]);
 }

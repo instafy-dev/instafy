@@ -7,8 +7,8 @@
 // the key in a header (plain or with a prefix such as "Bearer "). Search only finds links: Octo reads the pages it
 // picks with `instafy web read` and cites those pages, never a result. Fixed rules no option or data turns off:
 //
-// - only Octo's turns search: the runtime's live turn (INSTAFY_TURN_STARTED_AT to INSTAFY_TURN_DEADLINE), never a
-//   published app, a person's own code or a terminal command;
+// - only Octo's turns search: the runtime's live turn (from INSTAFY_TURN_STARTED_AT, and until INSTAFY_TURN_DEADLINE
+//   when the turn has a time limit), never a published app, a person's own code or a terminal command;
 // - a chain's providers are tried in order and one whose key (`key_env`) is not set is skipped. With none left the
 //   answer is `no_provider`, with a secret-request card for the first one's key to offer once per space;
 // - a key goes only, over https, to the host of its own entry's `url`, in the header the entry names. It is never
@@ -920,13 +920,20 @@ class SearchState {
   }
 }
 
-/** The live turn this call runs in, or null outside one (a published app, a person's own code, a terminal command). */
+/**
+ * The live turn this call runs in, or null outside one (a published app, a person's own code, a terminal command).
+ * A turn with no time limit has a start and no deadline (the runtime leaves `INSTAFY_TURN_DEADLINE` unset), and its
+ * `deadline` is Infinity.
+ */
 export function liveTurn(env: NodeJS.ProcessEnv, now: number): { startedAt: number; deadline: number } | null {
   const startedAt = Date.parse(env.INSTAFY_TURN_STARTED_AT?.trim() ?? "");
-  const deadline = Date.parse(env.INSTAFY_TURN_DEADLINE?.trim() ?? "");
-  if (!Number.isFinite(startedAt) || !Number.isFinite(deadline) || deadline <= startedAt) return null;
-  // A minute of leeway for clocks; a process left over from an earlier turn has a deadline in the past.
-  if (now < startedAt - 60_000 || now > deadline) return null;
+  // A minute of leeway for clocks.
+  if (!Number.isFinite(startedAt) || now < startedAt - 60_000) return null;
+  const limit = env.INSTAFY_TURN_DEADLINE?.trim();
+  if (!limit) return { startedAt, deadline: Infinity };
+  const deadline = Date.parse(limit);
+  // A process left over from an earlier turn that had a time limit has a deadline in the past.
+  if (!Number.isFinite(deadline) || deadline <= startedAt || now > deadline) return null;
   return { startedAt, deadline };
 }
 

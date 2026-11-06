@@ -558,6 +558,7 @@ const PAGE_COUNTED_KEYS = new Set(["browser/read", "browser/open"]);
 // A browser step taken before any site was known ("used the browser").
 const BROWSER_WITHOUT_SITE = "browser/use";
 const BROWSER_READ = "browser/read";
+const BROWSER_OPEN = "browser/open";
 // Browser steps that can take the tab to another page. A look at the page
 // before the first of them that worked is a look at the page the turn started
 // on, which another turn (or another chat) left there.
@@ -814,41 +815,44 @@ function summarizeGroups(steps: TurnStep[]): { phrases: string[]; firstHost: str
 }
 
 /**
- * One kind of browser step on more than two sites reads as one phrase, its
- * pages counted across them: "Opened 22 pages on 4 sites", never two of the
- * sites and nothing of the others. Only words that end with the site ("opened
- * {n} pages on {host}") can say how many sites instead.
+ * Pages opened and read on more than two sites read as one phrase, counted
+ * across them: "Opened 22 pages on 4 sites", never two of the sites and
+ * nothing of the others, so the line counts every site Details lists. A page
+ * read is a page the browser had open, so the phrase says opened when the turn
+ * opened any; reads alone say read ("read 5 pages on 3 sites"). Only words
+ * that end with the site ("opened {n} pages on {host}") can say how many sites
+ * instead.
  */
 function mergeManySites(groups: Map<string, Group>): void {
-  const byKey = new Map<string, Array<[string, Group]>>();
+  const pages: Array<[string, Group]> = [];
   for (const [groupKey, group] of groups) {
     const { entry } = group;
-    if (!entry.key.startsWith("browser/") || entry.host === undefined || entry.role !== "content") continue;
+    if (!PAGE_COUNTED_KEYS.has(entry.key) || entry.host === undefined || entry.role !== "content") continue;
     const done = entry.done;
     if (typeof done !== "object" || !done.other?.endsWith(" on {host}") || !done.some?.endsWith(" on {host}")) continue;
-    byKey.set(entry.key, [...(byKey.get(entry.key) ?? []), [groupKey, group]]);
+    pages.push([groupKey, group]);
   }
-  for (const [key, sites] of byKey) {
-    if (sites.length <= 2) continue;
-    const members = sites.map(([, group]) => group);
-    const pageKeys = new Set(members.flatMap((group) => [...(group.pageKeys ?? [])]));
-    const entry: ActivityEntry = { ...members[0].entry };
-    delete entry.host;
-    const merged: Group = {
-      entry,
-      known: members.reduce((sum, group) => sum + group.known, 0),
-      unknown: members.some((group) => group.unknown),
-      members: members.reduce((sum, group) => sum + group.members, 0),
-      first: Math.min(...members.map((group) => group.first)),
-      last: Math.max(...members.map((group) => group.last)),
-      paths: null,
-      pageKeys: pageKeys.size > 0 ? pageKeys : null,
-      unkeyed: members.reduce((sum, group) => sum + group.unkeyed, 0),
-      sites: sites.length,
-    };
-    for (const [groupKey] of sites) groups.delete(groupKey);
-    groups.set(`${key}@sites`, merged);
-  }
+  const sites = new Set(pages.map(([, group]) => group.entry.host));
+  if (sites.size <= 2) return;
+  const members = pages.map(([, group]) => group);
+  const named = members.find((group) => group.entry.key === BROWSER_OPEN) ?? members[0];
+  const pageKeys = new Set(members.flatMap((group) => [...(group.pageKeys ?? [])]));
+  const entry: ActivityEntry = { ...named.entry };
+  delete entry.host;
+  const merged: Group = {
+    entry,
+    known: members.reduce((sum, group) => sum + group.known, 0),
+    unknown: members.some((group) => group.unknown),
+    members: members.reduce((sum, group) => sum + group.members, 0),
+    first: Math.min(...members.map((group) => group.first)),
+    last: Math.max(...members.map((group) => group.last)),
+    paths: null,
+    pageKeys: pageKeys.size > 0 ? pageKeys : null,
+    unkeyed: members.reduce((sum, group) => sum + group.unkeyed, 0),
+    sites: sites.size,
+  };
+  for (const [groupKey] of pages) groups.delete(groupKey);
+  groups.set(`${entry.key}@sites`, merged);
 }
 
 type AnsweredApproval = {
