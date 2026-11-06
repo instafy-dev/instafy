@@ -169,9 +169,9 @@ type PreviewStateEntry = {
   startedCommand?: string;
   // The site's folder in the workspace (`.` for the workspace itself), as the process serving it runs from, when that
   // was read; and when the site was last pictured for the card (ms since the epoch, as its page load began): when the
-  // picture on the card was taken, or a later try that could not take one. The runtime reads both when a turn ends: a
-  // turn that changed a file in that folder after that checks the site again (`instafy preview check`), which takes a
-  // new picture. A preview with no recorded folder is left as it is.
+  // picture on the card was taken, or when `open` tried and could not take one. The runtime reads both when a turn
+  // ends: a turn that changed a file in that folder after that checks the site again (`instafy preview check`), which
+  // takes a new picture, or drops the old one when it can take none. A preview with no recorded folder is left as it is.
   siteDir?: string;
   pictureAt?: number;
   // Opened with `--no-thumbnail`: no picture of the site goes on its card, from a check or at a turn's end either.
@@ -1539,7 +1539,8 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
       "thumbnail" in attempt
         ? await uploadPreviewThumbnail({ controllerUrl, auth, projectId, previewId, thumbnail: attempt.thumbnail, retryCommand })
         : { status: attempt.status, reason: attempt.reason };
-    // A capture that took or sent no picture counts as tried: a check of the unchanged site would fail the same way.
+    // A capture that took or sent no picture counts as tried: every open starts its card with no picture, and a check of
+    // the unchanged site would fail the same way.
     if (thumbnail.status === "uploaded" || !opts.thumbnailFile) await recordPictured(previewId, takenAt);
   }
 
@@ -1604,10 +1605,10 @@ export async function uploadPreviewThumbnail(params: {
 const PICTURE_RECORD_LOCK_WAIT_MS = 5_000;
 
 /**
- * Records when a preview's site was last pictured for its card (the picture now on it was taken, or a try could not
- * take one), so a turn that changes the site after it is known to have left an older picture. Never throws, and waits
- * for another preview command only briefly: an older time recorded only means the site is checked once more when a
- * turn changes it.
+ * Records when a preview's site was last pictured for its card (a picture was taken for it, or `open` tried and could
+ * not take one: a new open's card starts with no picture), so a turn that changes the site after it is known to have
+ * left an older picture. A check that could not take one records nothing. Never throws, and waits for another preview
+ * command only briefly: an older time recorded only means the site is checked once more when a turn changes it.
  */
 async function recordPictured(previewId: string, takenAt: number): Promise<void> {
   try {
@@ -1635,12 +1636,6 @@ function openPreviewFor(port: number, sitePath: string): PreviewStateEntry | nul
 /** Whether `instafy preview check` should take a picture for a card: a preview is open on this port and path. */
 export function hasOpenPreviewFor(port: number, sitePath: string): boolean {
   return openPreviewFor(port, sitePath) !== null;
-}
-
-/** `instafy preview check` tried to picture the site of the preview open on its port and path, and could not. */
-export async function recordCheckPictureTried(input: { port: number; path: string; takenAt: number }): Promise<void> {
-  const entry = openPreviewFor(input.port, input.path);
-  if (entry) await recordPictured(entry.previewId, input.takenAt);
 }
 
 /**

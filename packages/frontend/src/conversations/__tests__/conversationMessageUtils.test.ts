@@ -952,6 +952,27 @@ describe("extractWorkspaceCommitRangeFromMetadata", () => {
     ).toEqual({ base, head, source: "apply" });
   });
 
+  // An Undo of the saved version brings the folder it was saved from along.
+  it("keeps the origin the turn's save went through with the canonical pair", () => {
+    const originId = "5d1a3c1e-3f0b-4a8e-9a65-2f1f0c6d7e01";
+    expect(
+      extractWorkspaceCommitRangeFromMetadata({
+        artifacts: [{ kind: "origin/apply", metadata: { originId, gitRev: head, gitBaseRev: base } }],
+      }),
+    ).toEqual({ base, head, source: "git", originId });
+    // Only an origin's own id, and only with the pair an Undo reverts.
+    expect(
+      extractWorkspaceCommitRangeFromMetadata({
+        artifacts: [{ kind: "origin/apply", metadata: { originId: "../elsewhere", gitRev: head, gitBaseRev: base } }],
+      }),
+    ).toEqual({ base, head, source: "git" });
+    expect(
+      extractWorkspaceCommitRangeFromMetadata({
+        artifacts: [{ kind: "origin/apply", metadata: { originId, rev: head, baseRev: base } }],
+      }),
+    ).toEqual({ base, head, source: "apply" });
+  });
+
   it("falls back to the apply pair but never mixes pairs", () => {
     const range = extractWorkspaceCommitRangeFromMetadata({
       artifacts: [

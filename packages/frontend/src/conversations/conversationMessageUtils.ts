@@ -627,6 +627,15 @@ function gitRevString(value: unknown): string | null {
   return /^[0-9a-f]{7,64}$/i.test(trimmed) ? trimmed : null;
 }
 
+// An origin's id as the runtime records it on a save (a UUID).
+function originIdString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed) ? trimmed : null;
+}
+
 // The base..head commit pair of the run that produced this message's file
 // changes, taken from the runtime's origin/apply artifact. Lets the diff cards
 // show what *that run* changed (as a real edit diff even on snapshot-history
@@ -670,10 +679,15 @@ export function extractWorkspaceCommitRangeFromMetadata(
     const source = gitPair.base && gitPair.head ? "git" : "apply";
     const pair = source === "git" ? gitPair : applyPair;
     if (pair.base && pair.head && pair.base !== pair.head) {
-      const savedPaths = source === "git" ? readSavedPaths(artifactMetadata["paths"]) : [];
-      return savedPaths.length > 0
-        ? { base: pair.base, head: pair.head, source, savedPaths }
-        : { base: pair.base, head: pair.head, source };
+      const range: ChatMessageCommitRange = { base: pair.base, head: pair.head, source };
+      if (source === "git") {
+        const savedPaths = readSavedPaths(artifactMetadata["paths"]);
+        if (savedPaths.length > 0) range.savedPaths = savedPaths;
+        // The folder the turn's save came from, which an Undo of that version brings along.
+        const originId = originIdString(artifactMetadata["originId"]);
+        if (originId) range.originId = originId;
+      }
+      return range;
     }
   }
   return null;
