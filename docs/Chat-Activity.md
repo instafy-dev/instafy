@@ -231,21 +231,21 @@ Undo under a stopped turn's unsaved files puts them back as the saved version ha
 folder the turn ran in, with no message and no turn, behind Studio's own "Undo this change?"
 dialog. The report of a turn that lost its lease says what the turn left in each file (its blob id,
 or null for a file it removed) and which of them the folder already held changed when the turn
-began (`undo` on its `apply/files` artifact, with the machine that ran it). Studio puts nothing back
-and says why, with the agent's Undo offered instead, when a later turn of the chat changed one of
-the files, or when the turn found one already changed (the person's own edit, an earlier turn's
+began (`undo` on its `apply/files` artifact, with the machine that ran it). Studio puts nothing
+back and says why, with the agent's Undo offered instead, when a later turn of the chat changed one
+of the files, or when the turn found one already changed (the person's own edit, an earlier turn's
 unsaved work): putting it back as saved would take that back too. Otherwise it asks that folder's
-own origin (`POST /git/revert {paths, keep: true, expected}`, on the machine that ran the turn, else
-the space's one ready machine, else the one its turns run on now, or the Desktop folder's), which
-checks each file under its locks: one that
-no longer holds what the turn left (a turn still running, a turn in another chat, the person's own
-edit) refuses the whole Undo, and one that reads as saved is left alone. The origin keeps what it
-undoes on an `undone` recovery ref, which the next save, refresh or stop pushes, so History then
-lists it under Unsaved work, as a saved change's Undo keeps the version it undid. The machine
-then reloads and pictures those files' sites (below). A failed save, and a turn
-whose Stop came after its model was done, keep the Undo that asks the agent, as does a file the
-space's history leaves out (tmp, dependencies), which stays as it is. "Ask the agent to undo it"
-sends a message in the person's name that names the change by its time, never by an id.
+own origin (`POST /git/revert {paths, keep: true, expected}`, on the machine that ran the turn,
+else the space's one ready machine, else the one its turns run on now, or the Desktop folder's),
+which checks each file under its locks: one that no longer holds what the turn left (a turn still
+running, a turn in another chat, the person's own edit) refuses the whole Undo, and one that reads
+as saved is left alone. The origin keeps what it undoes on an `undone` recovery ref, which the next
+save, refresh or stop pushes, so History then lists it under Unsaved work, as a saved change's Undo
+keeps the version it undid. The machine then reloads and pictures those files' sites (below). A
+failed save, and a turn whose Stop came after its model was done, keep the Undo that asks the
+agent, as does a file the space's history leaves out (tmp, dependencies), which stays as it is.
+"Ask the agent to undo it" sends a message in the person's name that names the change by its time,
+never by an id.
 
 Undo under a saved change saves a new version that reverses it, on the space's own origin. Once
 that version is saved, the card says so and the chat's history gets its line (below); then the
@@ -253,26 +253,25 @@ machine's folder, which serves the page the person sees, follows that version (`
 {paths, saved}` on the folder's own origin), as the refresh before a turn would. That folder is on
 the machine the change was saved from (the origin its save went through), else on the space's one
 ready machine, and only then on the one the space's turns run on now, which a space whose machine
-nobody chose has none of until a chat opens Instafy's browser. The folder moves only when
-it holds no unpublished work and no local edit is in the way, keeps every local edit, and pushes
-nothing. Neither the card nor the line waits for the folder. A Desktop folder is where the version
-was saved, so it holds it already.
+nobody chose has none of until a chat opens Instafy's browser. The folder moves only when it holds
+no unpublished work and no local edit is in the way, keeps every local edit, and pushes nothing.
+Neither the card nor the line waits for the folder. A Desktop folder is where the version was
+saved, so it holds it already.
 
 Either Undo changes a site's files with no turn, so no turn tells the pages people have open, and a
 change a Stop kept never got its turn's reload. Once the folder holds the files as the Undo (or the
-Stop) left them, the machine does, for each site whose open
-preview's folder holds one of them (`jobs/preview_pictures.rs`), in a turn's order: it sends the
-site's reload, the one a turn sends after it changes a bound site (`instafy bind command <site>
-reload '{}'`, from the workspace, with no credential), so every open view of the page, on every
-device, loads it again; then it pictures the site again for its card, so the check's own page never
-takes that reload halfway. The binder that serves the site takes the reload. A map that `uw host`
-serves takes none, and needs none when the Undo puts back the map's earlier reload stamp: the map
-skill's last step (`uw reload`) writes one into `data/version.json`, the change's save keeps it,
-and the host watches that file and reloads every open view itself when it changes. A map change
-made without that step, and a plain folder no binder serves, show the Undo after their Reload. The
-machine runs no `uw reload` for an Undo: it writes `data/version.json`, a change no save takes after
-an Undo, which a stop would keep as unsaved work and which the next Undo's folder follow would
-refuse to move past.
+Stop) left them, the machine does, for each site whose open preview's folder holds one of them
+(`jobs/preview_pictures.rs`), in a turn's order: it sends the site's reload, the one a turn sends
+after it changes a bound site (`instafy bind command <site> reload '{}'`, from the workspace, with
+no credential), so every open view of the page, on every device, loads it again; then it pictures
+the site again for its card, so the check's own page never takes that reload halfway. The binder
+that serves the site takes the reload. A map that `uw host` serves takes none, and needs none when
+the Undo puts back the map's earlier reload stamp: the map skill's last step (`uw reload`) writes
+one into `data/version.json`, the change's save keeps it, and the host watches that file and
+reloads every open view itself when it changes. A map change made without that step, and a plain
+folder no binder serves, show the Undo after their Reload. The machine runs no `uw reload` for an
+Undo: it writes `data/version.json`, a change no save takes after an Undo, which a stop would keep
+as unsaved work and which the next Undo's folder follow would refuse to move past.
 
 An Undo that worked leaves one line in the chat's history, in the controller's words: "The person
 undid the change from “…”", quoting the person's request that made the change (`POST

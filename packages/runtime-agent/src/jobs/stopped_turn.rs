@@ -317,9 +317,9 @@ impl JobProcessor {
     /// A Stop cancelled the job, and the controller records the report on its
     /// turn; the job then ended here, and the open views of the sites it
     /// changed reload and their previews are pictured again
-    /// ([`reload_and_picture_changed_sites`]). A job a stop of this runtime put back in the queue
-    /// is turned down, and keeps its record of how its turn began for its
-    /// next lease. Whether the controller recorded it.
+    /// ([`reload_and_picture_changed_sites`]). A job a stop of this runtime
+    /// put back in the queue is turned down, and keeps its record of how its
+    /// turn began for its next lease. Whether the controller recorded it.
     pub(crate) async fn report_stopped_turn(
         &self,
         client: &ControllerClient,
