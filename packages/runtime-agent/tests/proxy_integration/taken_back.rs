@@ -425,7 +425,7 @@ async fn run_case() -> Result<()> {
         "role": "assistant", "content": "Stopped this run.", "runId": "run-8",
         "createdAt": "2026-11-05T22:55:46.134Z",
         "metadata": {"source": "controller", "kind": "run_cancellation", "details": {
-            "reason": "Stopped", "runIds": ["run-8"], "stopRequested": true,
+            "reason": "Stopped", "runIds": ["run-8"], "stopRequested": true, "actorUserId": "person-1",
         }},
     }));
     chat.push(person(TIP, "run-9"));
@@ -475,7 +475,7 @@ async fn run_case() -> Result<()> {
     assert_eq!(tip_requests.len(), 2, "the tip's write and its reply");
     let prompt = last_user_text(tip_requests[0]);
     let stop_line = format!(
-        "\n- [2026-11-05T22:55:46.134Z] The person stopped “{BEFORE_YOU_GO}”; leave it undone unless they ask again."
+        "\n- [2026-11-05T22:55:46.134Z] The person stopped “{BEFORE_YOU_GO}”; don't carry it on unless they ask again."
     );
     let stop_at = prompt
         .find(&stop_line)

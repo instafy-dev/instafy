@@ -283,14 +283,24 @@ message a member records never keeps that `kind`, and Studio and the runtime rea
 the controller's `source`. The routing step and every later turn read it with the history, and the
 first turn on a restored thread of either lane after the Undo, whose thread never saw it, reads it
 after its restore note; so "keep going" carries on what is still open, never the change the person
-took back. A Stop reaches a restored thread the same way: from the controller's notice of the
-person's Stop, the first turn on each thread after it reads "The person stopped “…”; leave it undone
-unless they ask again.", naming the request in the person's words (for a browser turn or a
-hand-back, the message its card carried on). The files the line names read as undone in their row, which then offers no Undo for them and
+took back. The files the line names read as undone in their row, which then offers no Undo for them and
 no stop's Continue, after a reload or a switch of chats too; a file it does not name keeps its state
 (Not saved, say). A row whose files are all undone reads `Undone ›`, its files folded behind it,
 whatever the row read before (`Changed the site`, a file's name); one with some of them undone counts
 them (`Edited 3 files · 1 undone`).
+
+A Stop reaches a restored thread the same way. From the controller's notice of a press of Stop
+(the one notice that names who pressed it), the first turn on each thread after it reads "The
+person stopped “…”; don't carry it on unless they ask again.", naming the request in the person's
+words: for a browser turn or a hand-back, the message its card carried on, and for a Continue under
+an earlier Stop, the request it continued. The line says nothing of what the turn changed before
+the press, which stays until the person undoes it. A browser thread reads a Stop's or an Undo's
+line only for a request one of the chat's browser turns was asked: it reads nothing else of the
+chat, so the words of a message that stayed with Octo never reach a turn a page can ask to type
+them. One that is new, or lost, replays only the chat's browser turns, and reads those lines since
+the first of them after its replay. A Continue under the Stop asks for the request again, so no
+turn after it reads that line; and "Send now" on a queued message, which interrupts the reply it
+waited behind, is no Stop.
 
 A turn's save takes the space's lease, and a Stop can end the job while that save holds it. The
 stopped job may still release its own lease (releasing grants nothing, and its token does nothing

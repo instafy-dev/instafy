@@ -60,18 +60,24 @@ pub struct PromptConversationContext {
 /// (runtime-controller `change_undone.rs`): "The person undid the change from “…”". It is an
 /// entry of the history like any other, so routing and a new or lost thread's replay read it.
 const CHANGE_UNDONE_KIND: &str = "change_undone";
-/// The notice the controller records when the person presses Stop (runtime-controller
-/// `conversation_stop.rs`): "Stopped this run.", naming the runs it stopped.
+/// The notice the controller records when it cancels runs, naming them: for a press of Stop,
+/// "Stopped this run." (runtime-controller `conversation_stop.rs`), and for other reasons too
+/// ([`is_stop_notice`]).
 const RUN_CANCELLATION_KIND: &str = "run_cancellation";
-/// At most this many of the chat's latest Undo and Stop lines reach a restored thread.
+/// At most this many of the chat's latest Undo and Stop lines reach a thread.
 const TAKEN_BACK_MAX: usize = 5;
 /// What a restored thread reads before the Undo and Stop lines it has not seen. An Undo is no
 /// turn of any thread's, and a Stop ends a turn of either lane, or one before it reached a thread:
 /// a restored browser thread never heard of an Undo, and its next turn asked to build the undone
 /// tip again; a hand-back read right after a stopped turn built what the person had stopped
-/// (a local test, Nov 5).
-const TAKEN_BACK_NOTE: &str =
-    "\n\nSince this thread's last turn, the person took these back on purpose (newest last):";
+/// (a local test, Nov 5). A Stop takes back what was still to do, not what the turn changed
+/// before the press, which stays until the person undoes it: its line says the person stopped
+/// the request, never that they took its changes back.
+const TAKEN_BACK_NOTE: &str = "\n\nSince this thread's last turn, the person stopped or undid these on purpose (newest last):";
+/// What a new or lost browser thread reads after its replay, which holds only the chat's
+/// browser turns: the Undos and Stops since the first of them, which no browser turn shows.
+const TAKEN_BACK_IN_CHAT_NOTE: &str =
+    "\n\nIn this chat, the person stopped or undid these on purpose (newest last):";
 
 /// Whether an entry is the controller's own: the line an Undo left, a Stop's notice. A message a
 /// client records never keeps the controller's `source`, so a line that only says so is no Undo
@@ -89,14 +95,36 @@ fn is_undo_line(entry: &JsonValue) -> bool {
     is_controller_line(entry, CHANGE_UNDONE_KIND)
 }
 
-/// Whether a history entry is the notice of the person's Stop (`stopRequested`), not of a run the
-/// controller ended for another reason.
+/// Whether a history entry is the notice of someone's press of Stop: the only notice of cancelled
+/// runs that names who pressed it (`actorUserId`, runtime-controller `conversation_stop.rs`).
+/// Other notices say `stopRequested` too and take nothing back: "Send now" on a queued message
+/// interrupts the reply it waited behind ("Interrupted by a new message"), and the message
+/// usually adds to that request; a deleted space or a cancelled plan stops every turn.
 fn is_stop_notice(entry: &JsonValue) -> bool {
     is_controller_line(entry, RUN_CANCELLATION_KIND)
         && entry
             .pointer("/metadata/details/stopRequested")
             .and_then(JsonValue::as_bool)
             == Some(true)
+        && entry
+            .pointer("/metadata/details/actorUserId")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|actor| !actor.trim().is_empty())
+}
+
+/// The runs a message carries on: Studio's Continue under a Stop names the runs it stopped
+/// (`continuedRunIds`), and asks again for what they were doing.
+fn continued_runs_of(entry: &JsonValue) -> impl Iterator<Item = &str> {
+    [
+        "/metadata/continuedRunIds",
+        "/metadata/prompt_metadata/continuedRunIds",
+    ]
+    .into_iter()
+    .filter_map(|pointer| entry.pointer(pointer).and_then(JsonValue::as_array))
+    .flatten()
+    .filter_map(JsonValue::as_str)
+    .map(str::trim)
+    .filter(|run| !run.is_empty())
 }
 
 /// Whether an assistant entry is the card the routing step posts for a message it sends to the
@@ -144,16 +172,29 @@ fn is_person_message(entry: &JsonValue) -> bool {
         && !is_hand_back_prompt(entry)
 }
 
-/// The person's own words of a request their Stop ended in `run`: its message, or, for a browser
-/// turn or a hand-back that carried on a card, the message that card answered. The browser turn
-/// of a card the routing step posted for the person's message asks their words, as the controller
-/// checked on its send; any other card is a building turn's, whose reply names its job, and the
-/// message of that turn's run is the person's. None when the history does not show them: no
-/// line then, never someone else's words in the person's name.
-fn stopped_request<'a>(entries: &'a [JsonValue], run: &str) -> Option<&'a str> {
-    let at = entries.iter().position(|entry| {
-        entry_text(entry, "role") == Some("user") && entry_text(entry, "runId") == Some(run)
-    })?;
+/// The person's own words of the request `run` carried out, which their Stop ended or whose
+/// change they undid: its message, or, for a browser turn or a hand-back that carried on a card,
+/// the message that card answered, and for a Continue under an earlier Stop, the request it
+/// continued. The browser turn of a card the
+/// routing step posted for the person's message asks their words, as the controller checked on
+/// its send; any other card is a building turn's, whose reply names its job, and the message of
+/// that turn's run is the person's. None when the history does not show them: no line then,
+/// never someone else's words (Studio's, a card's) in the person's name.
+fn persons_request_in<'a>(entries: &'a [JsonValue], run: &str) -> Option<&'a str> {
+    let opened = |run: &str| {
+        entries.iter().position(|entry| {
+            entry_text(entry, "role") == Some("user") && entry_text(entry, "runId") == Some(run)
+        })
+    };
+    let mut at = opened(run)?;
+    let mut hops = 0;
+    while let Some(continued) = continued_runs_of(&entries[at]).next() {
+        hops += 1;
+        if hops > entries.len() {
+            return None;
+        }
+        at = opened(continued)?;
+    }
     let first = &entries[at];
     if is_person_message(first) {
         return entry_text(first, "content");
@@ -188,19 +229,14 @@ fn stopped_request<'a>(entries: &'a [JsonValue], run: &str) -> Option<&'a str> {
         .and_then(|entry| entry_text(entry, "content"))
 }
 
-/// The Undo and Stop lines a restored thread of `lane` has not seen, oldest first, each with
-/// when the person did it: those since its last turn began. Its last turn is the newest run with
-/// a reply of its lane in the history: a browser turn's for the browser lane, any other for the
-/// building lane, never a routed card's (that run's routing step ran no turn of a thread) nor the
-/// controller's own lines. A turn reads these lines only when its prompt is built, so an Undo or
-/// a Stop during or after that turn never reached the thread, and one before it did. A Stop's
-/// line names each request it ended in the person's words ([`stopped_request`]). The newest
-/// [`TAKEN_BACK_MAX`], and how many of them are Undos.
-fn taken_back_lines(history: Option<&JsonValue>, lane: ThreadLane) -> (Vec<String>, usize) {
-    let Some(JsonValue::Array(entries)) = history else {
-        return (Vec::new(), 0);
-    };
-    let last_turn = entries
+/// Where the Undo and Stop lines a restored thread of `lane` has not seen start: where its last
+/// turn began. Its last turn is the newest run with a reply of its lane in the history: a browser
+/// turn's for the browser lane, any other for the building lane, never a routed card's (that
+/// run's routing step ran no turn of a thread) nor the controller's own lines. A turn reads these
+/// lines only when its prompt is built, so an Undo or a Stop during or after that turn never
+/// reached the thread, and one before it did.
+fn last_turn_start(entries: &[JsonValue], lane: ThreadLane) -> usize {
+    entries
         .iter()
         .rev()
         .filter(|entry| {
@@ -212,22 +248,51 @@ fn taken_back_lines(history: Option<&JsonValue>, lane: ThreadLane) -> (Vec<Strin
                     .and_then(JsonValue::as_str)
                     != Some("controller")
         })
-        .find_map(|entry| entry_text(entry, "runId"));
-    let since = last_turn
+        .find_map(|entry| entry_text(entry, "runId"))
         .and_then(|run| {
             entries
                 .iter()
                 .position(|entry| entry_text(entry, "runId") == Some(run))
         })
-        .unwrap_or(0);
+        .unwrap_or(0)
+}
+
+/// The chat's Undo and Stop lines from `since` on that a thread of `lane` reads, oldest first,
+/// each with when the person did it. A Stop's line names each request it ended in the person's
+/// words ([`persons_request_in`]), unless a later message carries that run on (a Continue under the
+/// Stop asks for it again). A browser thread reads only those of a request one of the chat's
+/// browser turns was asked: it reads nothing else of the chat, so the words of a message that
+/// stayed with Octo (an address to put on a page, say) never reach a turn a page can ask to type
+/// them somewhere, and it could not carry that request on anyway. The newest [`TAKEN_BACK_MAX`],
+/// and how many of them are Undos.
+fn taken_back_lines(entries: &[JsonValue], since: usize, lane: ThreadLane) -> (Vec<String>, usize) {
+    let asked_the_browser: Option<HashSet<&str>> = (lane == ThreadLane::SharedBrowser).then(|| {
+        entries
+            .iter()
+            .filter(|entry| is_browser_entry(entry) && entry_text(entry, "role") == Some("user"))
+            .filter_map(|entry| entry_text(entry, "content"))
+            .collect()
+    });
+    let read_here = |words: Option<&str>| {
+        asked_the_browser
+            .as_ref()
+            .is_none_or(|asked| words.is_some_and(|words| asked.contains(words)))
+    };
     let dated = |entry: &JsonValue, line: String| match entry_text(entry, "createdAt") {
         Some(at) => format!("[{at}] {line}"),
         None => line,
     };
     let mut lines: Vec<(bool, String)> = Vec::new();
-    for entry in &entries[since.min(entries.len())..] {
+    for (index, entry) in entries.iter().enumerate().skip(since) {
         if is_undo_line(entry) {
-            if let Some(content) = entry_text(entry, "content") {
+            // The controller names the run whose change was undone (`undoneRunId`).
+            let request = entry
+                .pointer("/metadata/undoneRunId")
+                .and_then(JsonValue::as_str)
+                .and_then(|run| persons_request_in(entries, run.trim()));
+            if let Some(content) = entry_text(entry, "content")
+                && read_here(request)
+            {
                 lines.push((true, dated(entry, compact_content(content, 400))));
             }
             continue;
@@ -235,6 +300,11 @@ fn taken_back_lines(history: Option<&JsonValue>, lane: ThreadLane) -> (Vec<Strin
         if !is_stop_notice(entry) {
             continue;
         }
+        let continued: HashSet<&str> = entries[index + 1..]
+            .iter()
+            .filter(|later| entry_text(later, "role") == Some("user"))
+            .flat_map(continued_runs_of)
+            .collect();
         let listed: Vec<&str> = entry
             .pointer("/metadata/details/runIds")
             .and_then(JsonValue::as_array)
@@ -253,14 +323,15 @@ fn taken_back_lines(history: Option<&JsonValue>, lane: ThreadLane) -> (Vec<Strin
         let mut named: Vec<&str> = Vec::new();
         for words in runs
             .into_iter()
-            .filter_map(|run| stopped_request(entries, run))
+            .filter(|run| !continued.contains(run))
+            .filter_map(|run| persons_request_in(entries, run))
         {
-            if named.contains(&words) {
+            if named.contains(&words) || !read_here(Some(words)) {
                 continue;
             }
             named.push(words);
             let line = format!(
-                "The person stopped “{}”; leave it undone unless they ask again.",
+                "The person stopped “{}”; don't carry it on unless they ask again.",
                 compact_content(words, 300)
             );
             lines.push((false, dated(entry, line)));
@@ -538,9 +609,10 @@ pub fn format_conversation_history(turns: &[ConversationTurn]) -> String {
 }
 
 /// The conversation context of a turn in `lane`: a line saying its restored thread holds the
-/// chat so far, or, for a new or lost thread, the chat's history as that lane reads it
-/// (`parse_lane_history`). A browser lane with no earlier browser turn gets no section: its
-/// `section_text` is empty.
+/// chat so far, with what the person stopped or undid since its last turn, or, for a new or lost
+/// thread, the chat's history as that lane reads it (`parse_lane_history`), a browser thread's
+/// with what the person stopped or undid since the chat's first browser turn. A browser lane
+/// with no earlier browser turn gets no section: its `section_text` is empty.
 pub fn build_prompt_conversation_context(
     history_value: Option<&JsonValue>,
     provider_state: Option<&JsonValue>,
@@ -550,19 +622,16 @@ pub fn build_prompt_conversation_context(
     let history_replay_required = lane_history_replay_required(provider_state, lane);
     let stateful_thread_restored = provider_state_claims_restored_thread(provider_state, lane);
     let model_context_window = resolve_effective_model_context_window();
+    let entries = history_value
+        .and_then(JsonValue::as_array)
+        .map_or(&[][..], Vec::as_slice);
 
     if stateful_thread_restored {
         let mut section_text = "The provider thread was restored successfully, so the full prior conversation is already present in the model state. Focus on the latest user request below and reuse the existing thread context instead of asking the user to repeat themselves.".to_string();
         // An Undo is no turn of the thread's, and a Stop may end another lane's turn or one that
         // never reached this thread, so the restored thread never saw them.
-        let (taken_back, undone) = taken_back_lines(history_value, lane);
-        if !taken_back.is_empty() {
-            section_text.push_str(TAKEN_BACK_NOTE);
-            for line in &taken_back {
-                section_text.push_str("\n- ");
-                section_text.push_str(line);
-            }
-        }
+        let (taken_back, undone) = taken_back_lines(entries, last_turn_start(entries, lane), lane);
+        push_taken_back(&mut section_text, TAKEN_BACK_NOTE, &taken_back);
         return PromptConversationContext {
             section_label: "Conversation state",
             metrics: json!({
@@ -599,8 +668,8 @@ pub fn build_prompt_conversation_context(
         DEFAULT_STATELESS_HISTORY_TARGET_TOKENS,
     );
 
-    if turns.is_empty() || full_history_tokens <= history_target_tokens {
-        return PromptConversationContext {
+    let mut context = if turns.is_empty() || full_history_tokens <= history_target_tokens {
+        PromptConversationContext {
             section_label: "Recent conversation turns",
             metrics: json!({
                 "mode": "stateless_full",
@@ -615,17 +684,52 @@ pub fn build_prompt_conversation_context(
                 "modelContextWindow": model_context_window,
             }),
             section_text: full_history,
-        };
+        }
+    } else {
+        let mut context = build_compacted_context(
+            &turns,
+            history_replay_required,
+            history_target_tokens,
+            model_context_window,
+        );
+        context.section_text.insert_str(0, browser_runs_note);
+        context
+    };
+    // A new or lost browser thread replays only the chat's browser turns, and no Undo or Stop is
+    // one: it reads those since the first of them after its replay, so a request the person
+    // stopped or undid is not one to carry on. The building lane's replay reads them in place,
+    // as lines of the chat.
+    if lane == ThreadLane::SharedBrowser
+        && !turns.is_empty()
+        && let Some(first_browser_turn) = entries.iter().position(is_browser_entry)
+    {
+        let (taken_back, undone) = taken_back_lines(entries, first_browser_turn, lane);
+        if !taken_back.is_empty() {
+            push_taken_back(
+                &mut context.section_text,
+                TAKEN_BACK_IN_CHAT_NOTE,
+                &taken_back,
+            );
+            context.metrics["estimatedHistoryTokens"] =
+                json!(estimate_token_count(&context.section_text));
+        }
+        context.metrics["undoneChanges"] = json!(undone);
+        context.metrics["stoppedRequests"] = json!(taken_back.len() - undone);
     }
-
-    let mut context = build_compacted_context(
-        &turns,
-        history_replay_required,
-        history_target_tokens,
-        model_context_window,
-    );
-    context.section_text.insert_str(0, browser_runs_note);
     context
+}
+
+/// Adds `lines` under `note` to a thread's conversation section, one per line; nothing when
+/// there are none.
+fn push_taken_back(section_text: &mut String, note: &str, lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
+    section_text.push_str(note);
+    for line in lines {
+        section_text.push_str("\n- ");
+        section_text.push_str(line);
+    }
 }
 
 /// Routing runs on a new provider turn. Supply ordinary stateless history, not
@@ -1517,14 +1621,6 @@ mod tests {
                 "metadata": {"browserHandBack": {"version": 1, "cardJobId": card, "browserJobId": "browser-job"}},
             })
         };
-        let stopped = |run: &str, at: &str| {
-            json!({
-                "role": "assistant", "content": "Stopped this run.", "runId": run, "createdAt": at,
-                "metadata": {"source": "controller", "kind": "run_cancellation", "details": {
-                    "reason": "Stopped", "runIds": [run], "jobIds": [format!("job-{run}")], "stopRequested": true,
-                }},
-            })
-        };
         vec![
             json!({"role": "user", "content": "Now find how to get there by metro from São Bento.", "runId": "run-3", "createdAt": "2026-11-05T22:50:42Z"}),
             routed(
@@ -1545,7 +1641,7 @@ mod tests {
             hand_back("run-7", "card-5", "2026-11-05T22:52:54Z"),
             json!({"role": "assistant", "content": "I built a small page with the bookstore's daily hours.", "runId": "run-7", "createdAt": "2026-11-05T22:54:06Z", "metadata": {"jobId": "job-run-7"}}),
             json!({"role": "user", "content": "Add a short \"Before you go\" section to that page.", "runId": "run-8", "createdAt": "2026-11-05T22:55:34Z"}),
-            stopped("run-8", "2026-11-05T22:55:46Z"),
+            stop_notice("run-8", "2026-11-05T22:55:46Z"),
             json!({"role": "user", "content": "Add a one-line tip about the best time to visit.", "runId": "run-9", "createdAt": "2026-11-05T22:56:18Z"}),
             routed(
                 "Add a one-line tip about the best time to visit.",
@@ -1555,19 +1651,35 @@ mod tests {
             ),
             json!({"role": "assistant", "content": "", "runId": "run-10", "lane": "browser", "createdAt": "2026-11-05T22:56:40Z", "metadata": {"jobId": "job-run-10"}}),
             hand_back("run-11", "card-9", "2026-11-05T22:56:40.7Z"),
-            stopped("run-11", "2026-11-05T22:56:56Z"),
+            stop_notice("run-11", "2026-11-05T22:56:56Z"),
             json!({"role": "assistant", "content": "Applied file changes: sites/livraria-lello/app.js", "runId": "run-11", "createdAt": "2026-11-05T22:56:58Z", "metadata": {"kind": "update"}}),
             json!({
                 "role": "assistant",
                 "content": "The person undid the change from “Add a one-line tip about the best time to visit.”",
                 "createdAt": "2026-11-05T22:58:41Z",
-                "metadata": {"source": "controller", "kind": "change_undone", "presentation": {"hidden": true}},
+                "metadata": {
+                    "source": "controller", "kind": "change_undone", "presentation": {"hidden": true},
+                    "undoneRunId": "run-11", "undonePaths": ["sites/livraria-lello/app.js"],
+                    "actorUserId": "person-1",
+                },
             }),
         ]
     }
 
-    const BEFORE_YOU_GO_STOPPED: &str = "[2026-11-05T22:55:46Z] The person stopped “Add a short \"Before you go\" section to that page.”; leave it undone unless they ask again.";
-    const TIP_STOPPED: &str = "[2026-11-05T22:56:56Z] The person stopped “Add a one-line tip about the best time to visit.”; leave it undone unless they ask again.";
+    /// The notice the controller records for a press of Stop (runtime-controller
+    /// `conversation_stop.rs`), naming who pressed it.
+    fn stop_notice(run: &str, at: &str) -> JsonValue {
+        json!({
+            "role": "assistant", "content": "Stopped this run.", "runId": run, "createdAt": at,
+            "metadata": {"source": "controller", "kind": "run_cancellation", "details": {
+                "reason": "Stopped", "runIds": [run], "jobIds": [format!("job-{run}")],
+                "stopRequested": true, "actorUserId": "person-1", "agentHandles": ["octo"],
+            }},
+        })
+    }
+
+    const BEFORE_YOU_GO_STOPPED: &str = "[2026-11-05T22:55:46Z] The person stopped “Add a short \"Before you go\" section to that page.”; don't carry it on unless they ask again.";
+    const TIP_STOPPED: &str = "[2026-11-05T22:56:56Z] The person stopped “Add a one-line tip about the best time to visit.”; don't carry it on unless they ask again.";
     const TIP_UNDONE: &str = "[2026-11-05T22:58:41Z] The person undid the change from “Add a one-line tip about the best time to visit.”";
 
     /// What a restored thread of `lane` reads of the chat up to `entries`.
@@ -1587,8 +1699,8 @@ mod tests {
     /// browser turn found." as its request and built the stopped section; after the tip's Undo,
     /// the browser thread, which had heard of neither, asked to build the tip again. The building
     /// thread reads the stopped section before the tip's hand-back; the browser thread reads the
-    /// tip's Stop and its Undo before "keep going", and not the section, which its own turn for
-    /// the tip had read already.
+    /// tip's Stop and its Undo before "keep going", and nothing of the section, which no browser
+    /// turn was asked.
     #[test]
     fn a_restored_thread_of_either_lane_reads_what_the_person_stopped_and_undid() {
         let chat = chat_with_stops_and_an_undo();
@@ -1603,13 +1715,12 @@ mod tests {
         );
         assert_eq!(building.metrics["stoppedRequests"], json!(1));
         assert_eq!(building.metrics["undoneChanges"], json!(0));
-        // The tip's own browser turn, on the chat's browser thread, read the section's Stop.
+        // The tip's own browser turn, on the chat's browser thread: no browser turn was asked for
+        // the section, so it reads nothing of it.
         let tip_browser_turn = &chat[..12];
         let browser = restored_note(tip_browser_turn, ThreadLane::SharedBrowser);
         assert!(
-            browser
-                .section_text
-                .ends_with(&format!("\n- {BEFORE_YOU_GO_STOPPED}")),
+            !browser.section_text.contains(TAKEN_BACK_NOTE),
             "{}",
             browser.section_text
         );
@@ -1685,16 +1796,210 @@ mod tests {
             {"role": "assistant", "content": "Read 3 pages.", "runId": "run-3", "lane": "browser", "metadata": {"jobId": "job-3"}},
             {"role": "user", "content": HAND_BACK_PROMPT, "runId": "run-4",
              "metadata": {"browserHandBack": {"version": 1, "cardJobId": "card-job", "browserJobId": "job-3"}}},
-            {"role": "assistant", "content": "Stopped this run.", "runId": "run-4", "createdAt": "2026-11-05T10:00:00Z",
-             "metadata": {"source": "controller", "kind": "run_cancellation", "details": {"runIds": ["run-4"], "stopRequested": true}}},
+            stop_notice("run-4", "2026-11-05T10:00:00Z"),
         ]);
         let context = restored_note(history.as_array().unwrap(), ThreadLane::Building);
         assert!(
             context.section_text.ends_with(
-                "\n- [2026-11-05T10:00:00Z] The person stopped “Map the cafés near the old town.”; leave it undone unless they ask again."
+                "\n- [2026-11-05T10:00:00Z] The person stopped “Map the cafés near the old town.”; don't carry it on unless they ask again."
             ),
             "{}",
             context.section_text
+        );
+    }
+
+    /// A Stop takes back what the turn still had to do, not what it changed before the press: a
+    /// Stop during the tip's save kept its change, saved and undoable (docs/Chat-Activity.md, "A
+    /// stopped turn's changes"). Until the person undid it, the next turn of either thread read
+    /// that the person "took these back on purpose" and to "leave it undone", as if the kept
+    /// change were to come out. The line says only what the person stopped, and not to carry it
+    /// on.
+    #[test]
+    fn a_stop_that_kept_its_change_is_not_read_as_taking_it_back() {
+        let chat = chat_with_stops_and_an_undo();
+        // The tip's Stop during its save, the change it kept, and no Undo.
+        let mut kept = chat[..16].to_vec();
+        assert!(
+            kept[15]["content"]
+                .as_str()
+                .is_some_and(|content| content.starts_with("Applied file changes:"))
+        );
+        kept.push(json!({"role": "user", "content": "Make the title bigger.", "runId": "run-12", "createdAt": "2026-11-05T23:01:00Z"}));
+        for lane in [ThreadLane::Building, ThreadLane::SharedBrowser] {
+            let text = restored_note(&kept, lane).section_text;
+            assert!(
+                text.ends_with(&format!("{TAKEN_BACK_NOTE}\n- {TIP_STOPPED}")),
+                "{text}"
+            );
+            for wrong in ["took these back", "leave it undone", "undone"] {
+                assert!(!text.contains(wrong), "{wrong}: {text}");
+            }
+        }
+    }
+
+    /// "Send now" on a queued message interrupts the reply it waited behind, and the controller's
+    /// notice of that says `stopRequested` as a Stop's does (runtime-controller
+    /// `conversations.rs`, `interrupt_conversation_runs`). The message usually adds to the
+    /// request it interrupted, so it is no Stop of the person's: the next turn is not told to
+    /// leave that request alone.
+    #[test]
+    fn a_message_sent_now_interrupts_without_taking_anything_back() {
+        let history = [
+            json!({"role": "user", "content": "Make a page of Porto's bookshops.", "runId": "run-0"}),
+            json!({"role": "assistant", "content": "Made the page.", "runId": "run-0"}),
+            json!({"role": "user", "content": "Add each shop's opening hours to that page.", "runId": "run-1"}),
+            json!({"role": "assistant", "content": "Reading the page's file.", "runId": "run-1"}),
+            json!({
+                "role": "assistant", "content": "Interrupted by a new message (1 run canceled.)",
+                "runId": "run-1", "createdAt": "2026-11-05T10:02:30Z",
+                "metadata": {"source": "controller", "kind": "run_cancellation", "details": {
+                    "reason": "Interrupted by a new message", "jobIds": ["job-1"], "runIds": ["run-1"],
+                    "runCount": 1, "jobCount": 1, "outcome": "canceled", "finalStatus": "canceled",
+                    "runStatus": "canceled", "stopRequested": true, "suppressedPlanGroupIds": [],
+                }},
+            }),
+            json!({"role": "user", "content": "Use a dark theme for it too.", "runId": "run-2"}),
+        ];
+        for lane in [ThreadLane::Building, ThreadLane::SharedBrowser] {
+            let context = restored_note(&history, lane);
+            assert!(
+                !context.section_text.contains("stopped"),
+                "{}",
+                context.section_text
+            );
+            assert_eq!(context.metrics["stoppedRequests"], json!(0));
+        }
+        // The same run stopped with Stop is the person's Stop.
+        let mut stopped = history.to_vec();
+        stopped[4] = stop_notice("run-1", "2026-11-05T10:02:30Z");
+        assert!(
+            restored_note(&stopped, ThreadLane::Building)
+                .section_text
+                .ends_with("The person stopped “Add each shop's opening hours to that page.”; don't carry it on unless they ask again.")
+        );
+    }
+
+    /// Studio's Continue under a Stop asks again for the request the Stop ended
+    /// (`continuedRunIds`, `useChatRunStopContinuation.ts`): its turn is not told to leave that
+    /// request alone, and a Stop of the Continue's own turn names that request, never Studio's
+    /// words for the press.
+    #[test]
+    fn a_continue_under_a_stop_carries_its_request_on() {
+        const CONTINUE: &str = "Continue the stopped turn from its current state. Check what has already finished before proceeding; do not repeat completed actions.";
+        let chat = chat_with_stops_and_an_undo();
+        let mut continued = chat[..10].to_vec();
+        continued.push(json!({
+            "role": "user", "content": CONTINUE, "runId": "run-c", "createdAt": "2026-11-05T22:55:50Z",
+            "metadata": {"prompt_metadata": {"continuedStopMessageId": "stop-8", "continuedRunIds": ["run-8"]}},
+        }));
+        for lane in [ThreadLane::Building, ThreadLane::SharedBrowser] {
+            let context = restored_note(&continued, lane);
+            assert!(
+                !context.section_text.contains(TAKEN_BACK_NOTE),
+                "{}",
+                context.section_text
+            );
+        }
+        // The person stops the Continue's turn too: its line names the request it continued.
+        continued.push(json!({"role": "assistant", "content": "Reading the page's file.", "runId": "run-c", "createdAt": "2026-11-05T22:55:55Z"}));
+        continued.push(stop_notice("run-c", "2026-11-05T22:56:00Z"));
+        continued.push(json!({"role": "user", "content": "Make the title bigger.", "runId": "run-d", "createdAt": "2026-11-05T22:57:00Z"}));
+        let text = restored_note(&continued, ThreadLane::Building).section_text;
+        assert!(
+            text.ends_with(
+                "\n- [2026-11-05T22:56:00Z] The person stopped “Add a short \"Before you go\" section to that page.”; don't carry it on unless they ask again."
+            ),
+            "{text}"
+        );
+        assert!(!text.contains(CONTINUE), "{text}");
+    }
+
+    /// A browser thread that is new, or lost when its restore failed, replays only the chat's
+    /// browser turns, and no Stop or Undo is one: the tip the person stopped and undid replayed as
+    /// a plain request, the path on which "keep going" asked to build it again (a local test,
+    /// Nov 5, on a restored thread). It reads the chat's Stops and Undos since its first browser
+    /// turn after the replay. Before any browser turn it has nothing to carry on, and reads none.
+    #[test]
+    fn a_new_or_lost_browser_thread_reads_what_the_person_stopped_and_undid() {
+        let mut chat = chat_with_stops_and_an_undo();
+        chat.push(json!({"role": "user", "content": "keep going", "runId": "run-12", "createdAt": "2026-11-05T23:00:05Z"}));
+        let history = json!(chat);
+        let lost = json!({"sharedBrowserThreadId": "browser-thread", "sharedBrowserHistoryReplayRequired": true});
+        for state in [None, Some(&lost)] {
+            let context =
+                build_prompt_conversation_context(Some(&history), state, ThreadLane::SharedBrowser);
+            assert_eq!(context.metrics["mode"], json!("stateless_full"));
+            let text = &context.section_text;
+            assert!(
+                text.contains("Add a one-line tip about the best time to visit."),
+                "{text}"
+            );
+            assert!(
+                text.ends_with(&format!(
+                    "{TAKEN_BACK_IN_CHAT_NOTE}\n- {TIP_STOPPED}\n- {TIP_UNDONE}"
+                )),
+                "{text}"
+            );
+            assert!(!text.contains(HAND_BACK_PROMPT), "{text}");
+            assert!(!text.contains("Before you go"), "{text}");
+            assert_eq!(context.metrics["stoppedRequests"], json!(1));
+            assert_eq!(context.metrics["undoneChanges"], json!(1));
+        }
+        let building_only = json!([
+            {"role": "user", "content": "Add a section.", "runId": "run-1"},
+            stop_notice("run-1", "2026-11-05T10:00:00Z"),
+            {"role": "user", "content": "keep going", "runId": "run-2"},
+        ]);
+        let context = build_prompt_conversation_context(
+            Some(&building_only),
+            None,
+            ThreadLane::SharedBrowser,
+        );
+        assert_eq!(context.section_text, "");
+    }
+
+    /// A browser thread reads nothing of the chat but its browser turns, and a page can ask it to
+    /// type what it read: the Stop or Undo of a message that stayed with Octo, whose words no
+    /// browser turn was asked, reaches the building thread alone, restored or new. A browser
+    /// turn's own request the person stopped or undid reaches both.
+    #[test]
+    fn a_browser_thread_reads_stops_and_undos_only_of_what_it_was_asked() {
+        const ADDRESS: &str = "Put my home address, 12 Rua Nova, on the contact page.";
+        let mut chat = chat_with_stops_and_an_undo();
+        chat.push(json!({"role": "user", "content": ADDRESS, "runId": "run-20", "createdAt": "2026-11-05T23:00:00Z"}));
+        chat.push(json!({"role": "assistant", "content": "Applied file changes: sites/livraria-lello/app.js", "runId": "run-20", "createdAt": "2026-11-05T23:00:20Z"}));
+        chat.push(stop_notice("run-20", "2026-11-05T23:00:21Z"));
+        chat.push(json!({
+            "role": "assistant", "content": format!("The person undid the change from “{ADDRESS}”"),
+            "createdAt": "2026-11-05T23:00:40Z",
+            "metadata": {"source": "controller", "kind": "change_undone", "undoneRunId": "run-20", "actorUserId": "person-1"},
+        }));
+        chat.push(json!({"role": "user", "content": "keep going", "runId": "run-21", "createdAt": "2026-11-05T23:01:00Z"}));
+        let history = json!(chat);
+        let restored = restored_note(&chat, ThreadLane::SharedBrowser).section_text;
+        let new =
+            build_prompt_conversation_context(Some(&history), None, ThreadLane::SharedBrowser)
+                .section_text;
+        for text in [&restored, &new] {
+            assert!(!text.contains("12 Rua Nova"), "{text}");
+            assert!(text.contains(TIP_STOPPED), "{text}");
+            assert!(text.contains(TIP_UNDONE), "{text}");
+        }
+        // An Undo the controller recorded without its run reaches no browser thread either.
+        let mut unnamed = chat.clone();
+        unnamed[16]["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("undoneRunId");
+        let text = restored_note(&unnamed, ThreadLane::SharedBrowser).section_text;
+        assert!(!text.contains(TIP_UNDONE), "{text}");
+        // The building thread reads both, as its own turns were asked them.
+        let building = restored_note(&chat, ThreadLane::Building).section_text;
+        assert!(
+            building.ends_with(&format!(
+                "\n- [2026-11-05T23:00:21Z] The person stopped “{ADDRESS}”; don't carry it on unless they ask again.\n- [2026-11-05T23:00:40Z] The person undid the change from “{ADDRESS}”"
+            )),
+            "{building}"
         );
     }
 

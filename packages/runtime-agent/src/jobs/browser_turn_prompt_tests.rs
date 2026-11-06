@@ -1031,7 +1031,7 @@ fn a_stop_and_an_undo_stay_taken_back_in_the_next_turns_prompts() {
         json!({
             "role": "assistant", "content": "Stopped this run.", "runId": run, "createdAt": at,
             "metadata": {"source": "controller", "kind": "run_cancellation", "details": {
-                "reason": "Stopped", "runIds": [run], "stopRequested": true,
+                "reason": "Stopped", "runIds": [run], "stopRequested": true, "actorUserId": "person-1",
             }},
         })
     };
@@ -1093,7 +1093,7 @@ fn a_stop_and_an_undo_stay_taken_back_in_the_next_turns_prompts() {
         building_thread,
     );
     let stop_line = format!(
-        "\n- [2026-11-05T22:55:46.134Z] The person stopped “{BEFORE_YOU_GO}”; leave it undone unless they ask again."
+        "\n- [2026-11-05T22:55:46.134Z] The person stopped “{BEFORE_YOU_GO}”; don't carry it on unless they ask again."
     );
     let latest = format!("\n\nLatest user request:\n{TIP}");
     let stop_at = prompt
@@ -1118,7 +1118,7 @@ fn a_stop_and_an_undo_stay_taken_back_in_the_next_turns_prompts() {
     chat.push(json!({
         "role": "assistant", "content": format!("The person undid the change from “{TIP}”"),
         "createdAt": "2026-11-05T22:58:41.471Z",
-        "metadata": {"source": "controller", "kind": "change_undone", "presentation": {"hidden": true}},
+        "metadata": {"source": "controller", "kind": "change_undone", "presentation": {"hidden": true}, "undoneRunId": "run-11"},
     }));
     chat.push(json!({"role": "user", "content": "keep going", "runId": "run-12", "createdAt": "2026-11-05T23:00:05.192Z"}));
     chat.push(routed(
@@ -1139,7 +1139,7 @@ fn a_stop_and_an_undo_stay_taken_back_in_the_next_turns_prompts() {
         browser_thread,
     );
     let taken_back = format!(
-        "\n- [2026-11-05T22:56:56.821Z] The person stopped “{TIP}”; leave it undone unless they ask again.\n- [2026-11-05T22:58:41.471Z] The person undid the change from “{TIP}”"
+        "\n- [2026-11-05T22:56:56.821Z] The person stopped “{TIP}”; don't carry it on unless they ask again.\n- [2026-11-05T22:58:41.471Z] The person undid the change from “{TIP}”"
     );
     assert!(prompt.contains(&taken_back), "{prompt}");
     // Its own turn for the tip read the section's Stop already.

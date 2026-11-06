@@ -855,7 +855,10 @@ the skill's "Finding a page" section again, from the space's own copy. A chat's
 browser thread holds only its browser turns: each starts from what it is asked
 (the person's words or a card's task), and a new or lost browser thread is
 given the chat's earlier browser turns, never Octo's building turns, files or
-command output. Codex withdraws the space's `AGENTS.md` from a
+command output, and after them which of the requests those turns were asked the
+person stopped, or undid the change of, since the first of those turns; a
+restored one is given those since its own last turn
+([Chat activity](Chat-Activity.md#a-stopped-turns-changes)). Codex withdraws the space's `AGENTS.md` from a
 turn without the workspace, so it is given that file's "Replies" too (how a reply
 reads: plain words, no error codes, file paths or inside words, "not checked" on
 a fact no page read this turn states, and only steps the turn started). The
