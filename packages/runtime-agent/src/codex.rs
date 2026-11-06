@@ -3323,6 +3323,36 @@ pub(crate) const BUILDING_THREAD_KEYS: [&str; 7] = [
     CODEX_STATE_DEFAULT_HISTORY_REPLAY_REQUIRED_KEY,
 ];
 
+/// Every state key of the Shared Browser lane's thread.
+const SHARED_BROWSER_THREAD_KEYS: [&str; 5] = [
+    CODEX_STATE_SHARED_BROWSER_THREAD_ID_KEY,
+    CODEX_STATE_SHARED_BROWSER_ROLLOUT_PATH_KEY,
+    CODEX_STATE_SHARED_BROWSER_THREAD_RESTORE_FAILED_KEY,
+    CODEX_STATE_SHARED_BROWSER_THREAD_RESTORE_SOURCE_KEY,
+    CODEX_STATE_SHARED_BROWSER_HISTORY_REPLAY_REQUIRED_KEY,
+];
+
+impl ThreadLane {
+    /// Every state key of the lane's thread: without them, a run of the lane starts a new
+    /// thread, and the other lane's keys ride along.
+    pub(crate) fn thread_state_keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Building => &BUILDING_THREAD_KEYS,
+            Self::SharedBrowser => &SHARED_BROWSER_THREAD_KEYS,
+        }
+    }
+
+    /// The state key naming the Stop the lane's thread was started after
+    /// (`jobs::leave_thread_holding_a_stopped_request`). No key of the thread itself: one started
+    /// later, a lost thread's replacement say, was started after that Stop too.
+    pub(crate) fn started_after_stop_key(self) -> &'static str {
+        match self {
+            Self::Building => "defaultThreadStartedAfterStop",
+            Self::SharedBrowser => "sharedBrowserThreadStartedAfterStop",
+        }
+    }
+}
+
 fn extract_thread_id_from_provider_state(
     state: Option<&JsonValue>,
     lane: ThreadLane,
