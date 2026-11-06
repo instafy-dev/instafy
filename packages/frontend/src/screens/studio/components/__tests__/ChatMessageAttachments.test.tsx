@@ -398,10 +398,10 @@ describe("chat message attachments", () => {
     expect(dialog.contains(document.activeElement)).toBe(true);
     await act(async () => {
       document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
-      await new Promise((resolve) => window.setTimeout(resolve, 30));
     });
     expect(document.querySelector('[role="dialog"]')).toBeNull();
-    expect(document.activeElement).toBe(trigger);
+    // React Aria restores focus on the frame after the dialog unmounts.
+    await vi.waitFor(() => expect(document.activeElement).toBe(trigger));
     expect(draft.value).toBe("Keep this draft");
   });
 

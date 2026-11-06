@@ -90,6 +90,19 @@ determines the winner. Arbitrary layout classes remain supported.
   description slot; utility icons are plain 16px icons, not nested bordered tiles.
   Shared separators reset the native rule border so only the themed 1px divider
   is visible. Popover scroll areas follow the selected theme's native color scheme.
+  Message and conversation actions use the same rows and keyboard navigation.
+  Message stats are a readable definition list rather than a group of status badges;
+  Back and Copy remain outside its scroll area. Escape or native Back returns from
+  stats to the actions before dismissing, restoring focus to the stats action.
+  The context-menu owner measures its width and full content height before clamping
+  position, so enlarged text stays inside the viewport with room to scroll.
+  Its modal content participates
+  in the shared native-browser occlusion contract.
+  Private-chat invitation confirmations use the small shared editor dialog,
+  responsive gutters and wrapping form actions. The title scrolls with the body
+  so enlarged text on short screens leaves room to read; actions remain fixed.
+  Closing cancels without sending;
+  pending invitations keep focus and block dismissal and duplicate submission.
 - The opt-in `studio-scrollbar` preset gives pointer-driven transcript and message
   action surfaces a consistent themed scrollbar. Chromium/Electron reserve a
   12px lane around a 6px painted thumb; other engines use native thin scrollbars.
@@ -196,6 +209,8 @@ For overlays, let the shared shell own the viewport clearance and use these pres
   header, body and footer together, removing their local padding classes. The
   footer remains unpadded by default for callers whose actions already own padding;
   `divider` adds a separator when fixed actions need that boundary.
+  `StudioDialogHeader wrapTitle` lets a confirmation question wrap beside Close;
+  resource titles retain their existing single-line truncation by default.
 - `StudioPopover layout="menu"` supplies 8px padding, a 6px trigger gap and 8px
   viewport clearance. Its 192px minimum width is clamped to the available viewport.
   `layout="form"` uses the same spacing and follows the trigger's width, also clamped.
