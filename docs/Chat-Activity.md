@@ -428,7 +428,9 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   the step waited on a prompt (its site's or its own) and the person allowed it, `routine` when
   routine browsing took an acting step without one, `free` for a site's own search
   ([Shared Browser](Shared-Browser.md#human-approval-policy)), and absent when the step needed no
-  answer.
+  answer. A click that checks or unchecks a box, a radio button or a switch, and leaves the tab
+  on its page, chose an option: its `step` is `choose`, so a form's clicks on its size and
+  toppings read as filling the form in, with its typing, in one row of Details.
 - **runtime-agent keeps four facts** (`shared_browser_activity.rs`), when the tool call ends:
   `step` (one of `navigate`, `open_tab`, `snapshot`, `search`, `submit`, `click`, `type`,
   `choose`, `press`, `scroll`, `tabs`, `status`); `host`, the address's domain in lower case without a
@@ -469,7 +471,7 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   | `navigate`, `open_tab` | Opening {host} | opened {host} / opened {n} pages on {host} / opened pages on {host} | content |
   | `snapshot` | Reading {host} | read a page on {host} / read {n} pages on {host} / read pages on {host} | content |
   | `search` (typing with submit, or Enter, in a search field) | Searching {host} | searched {host} / searched {host} {n} times / searched {host} | content |
-  | `type`, `choose` | Filling in a form on {host} | filled in a form on {host} (Details only) | quiet |
+  | `type`, `choose` (and a click that checks a box or a radio button) | Filling in a form on {host} | filled in a form on {host} (Details only) | quiet |
   | `submit`, `click`, `press`, `scroll`, `tabs`, `status` | Browsing {host} | browsed {host} (Details only) | quiet |
   | a step refused as the person's: `consent`, `sign_in`, `upload`, `reveal_secret`, `sensitive` | Accepting cookies on {host}, Signing in on {host}, Choosing a file on {host}, Showing a password or key on {host}, Entering private details on {host} | none: it never happens (Details: "Tried accepting cookies on {host}") | quiet |
   | no host known yet | Using the browser | used the browser | content |

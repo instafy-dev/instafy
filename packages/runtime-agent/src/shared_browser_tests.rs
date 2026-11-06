@@ -4444,15 +4444,18 @@ fn a_type_step_names_the_field_and_how_many_characters_went_in_never_the_text() 
 }
 
 // A click on a checkbox says whether it is checked now. Any other click says nothing more than
-// its reading.
+// its reading. The checkbox's click chose an option, and its activity says so: a form's clicks on
+// its size and toppings read "Browsed httpbin.org" between the rows of its typing (a local test,
+// Nov 5), where they are part of filling the form in.
 #[test]
 fn a_click_on_a_checkbox_says_whether_it_is_checked_now() {
-    for (mode, done) in [
+    for (mode, done, step) in [
         (
             "topping-checkbox",
             Some("Clicked \"Extra Cheese\", and it is checked now."),
+            "choose",
         ),
-        ("plain-button", None),
+        ("plain-button", None, "click"),
     ] {
         let fixture = EmbeddedControllerFixture::new();
         fixture.prepare_routine_start("page-target");
@@ -4468,6 +4471,7 @@ fn a_click_on_a_checkbox_says_whether_it_is_checked_now() {
             done,
             "{mode}"
         );
+        assert_eq!(clicked["activity"]["step"], json!(step), "{mode}");
     }
 }
 

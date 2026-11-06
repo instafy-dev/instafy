@@ -7,8 +7,9 @@
 // the key in a header (plain or with a prefix such as "Bearer "). Search only finds links: Octo reads the pages it
 // picks with `instafy web read` and cites those pages, never a result. Fixed rules no option or data turns off:
 //
-// - only Octo's turns search: the runtime's live turn (from INSTAFY_TURN_STARTED_AT, and until INSTAFY_TURN_DEADLINE
-//   when the turn has a time limit), never a published app, a person's own code or a terminal command;
+// - only Octo's turns search: the runtime's live turn (from INSTAFY_TURN_STARTED_AT, until INSTAFY_TURN_DEADLINE when
+//   the turn has a time limit, else while the turn's own folder is there), never a published app, a person's own
+//   code, a terminal command or a process left over from an earlier turn;
 // - a chain's providers are tried in order and one whose key (`key_env`) is not set is skipped. With none left the
 //   answer is `no_provider`, with a secret-request card for the first one's key to offer once per space;
 // - a key goes only, over https, to the host of its own entry's `url`, in the header the entry names. It is never
@@ -921,20 +922,36 @@ class SearchState {
 }
 
 /**
- * The live turn this call runs in, or null outside one (a published app, a person's own code, a terminal command).
- * A turn with no time limit has a start and no deadline (the runtime leaves `INSTAFY_TURN_DEADLINE` unset), and its
- * `deadline` is Infinity.
+ * The live turn this call runs in, or null outside one (a published app, a person's own code, a terminal command, a
+ * process left over from an earlier turn). A turn with a time limit lasts until its `INSTAFY_TURN_DEADLINE`. A turn
+ * with none has a start and no deadline (the runtime leaves `INSTAFY_TURN_DEADLINE` unset, and `deadline` is
+ * Infinity): it lasts while its own folder is there (`turnFolderIsThere`).
  */
 export function liveTurn(env: NodeJS.ProcessEnv, now: number): { startedAt: number; deadline: number } | null {
   const startedAt = Date.parse(env.INSTAFY_TURN_STARTED_AT?.trim() ?? "");
   // A minute of leeway for clocks.
   if (!Number.isFinite(startedAt) || now < startedAt - 60_000) return null;
   const limit = env.INSTAFY_TURN_DEADLINE?.trim();
-  if (!limit) return { startedAt, deadline: Infinity };
+  // A process left over from an earlier turn that had no time limit outlives that turn's folder.
+  if (!limit) return turnFolderIsThere(env) ? { startedAt, deadline: Infinity } : null;
   const deadline = Date.parse(limit);
   // A process left over from an earlier turn that had a time limit has a deadline in the past.
   if (!Number.isFinite(deadline) || deadline <= startedAt || now > deadline) return null;
   return { startedAt, deadline };
+}
+
+/**
+ * Whether the folder the runtime made for this turn's job is still there: the folder of the turn's
+ * `INSTAFY_STEP_TIMINGS_FILE`, which every turn of the runtime gets and which the runtime removes when the job ends.
+ */
+function turnFolderIsThere(env: NodeJS.ProcessEnv): boolean {
+  const file = env.INSTAFY_STEP_TIMINGS_FILE?.trim();
+  if (!file || !path.isAbsolute(file)) return false;
+  try {
+    return fs.statSync(path.dirname(file)).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------------------------------------------

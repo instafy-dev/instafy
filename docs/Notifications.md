@@ -133,10 +133,12 @@ watching there), not while one of its files or previews is. An in-app toast star
 under the chat's view bar (Chat | Browser) when that bar is at the top of the
 screen, and under the address bar of the Browser view, a preview or the browser in
 the desktop app while one is on screen. Across, it sits over Studio's workspace (or
-the search that takes its place), right of the navigation beside it, never over the
-sidebar or a drawer. Placement follows banners that move that
-bar without resizing it, and the navigation opening, collapsing or being resized
-(`toastClearance.ts`, `BrowserChromeShell.tsx`). When a
+the search that takes its place), right of the navigation beside it, so never over the
+sidebar or its drawers, and left of the participants drawer while that is open over the
+workspace's right edge (with less than a phone's width, 320 px, left beside that drawer,
+it spans the workspace, as on a phone). Placement follows banners that move that
+bar without resizing it, the navigation opening, collapsing or being resized, and the
+participants drawer opening and closing (`toastClearance.ts`, `BrowserChromeShell.tsx`). When a
 keyboard leaves too little height below the bar, the notice moves into the visible
 viewport and scrolls. When that viewport ends above the device edge, placement
 does not subtract the bottom safe-area inset again. Extremely short viewports

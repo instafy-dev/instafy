@@ -442,20 +442,25 @@ export function HistoryDrawer({
     }
     const seen = new Set(known.map((entry) => entry.commit));
     const fresh = page.entries.filter((entry) => !seen.has(entry.commit));
-    if (fresh.length === 0) {
-      // A server that ignores `skip` answers the first page again: stop here.
-      setHistory((previous) => ({ ...previous, hasMore: false }));
+    // The rows History shows for them: an older setup version is listed with
+    // the newest one, so it adds no row of its own.
+    const shown = withOneSpaceCreated([...known, ...fresh]).slice(withOneSpaceCreated(known).length);
+    if (shown.length === 0) {
+      // A server that ignores `skip` answers the first page again, or only
+      // older setup versions came: stop here. Those are kept, so they are
+      // never asked for again.
+      setHistory((previous) => ({ ...previous, entries: [...previous.entries, ...fresh], hasMore: false }));
       setNotice({ tone: "info", text: HISTORY_NO_MORE_COPY });
       setHeadingFocusRequests((value) => value + 1);
       return;
     }
-    focusCommitRef.current = fresh[0]?.commit ?? null;
+    focusCommitRef.current = shown[0]?.commit ?? null;
     setHistory((previous) => ({
       ...previous,
       entries: [...previous.entries, ...fresh],
       hasMore: page.hasMore === true,
     }));
-    setNotice({ tone: "info", text: loadedMoreVersionsCopy(fresh.length) });
+    setNotice({ tone: "info", text: loadedMoreVersionsCopy(shown.length) });
   }, [history.entries, loadingMore, originId, projectId, ready, reportFailure, setNotice]);
 
   const handleCommitted = useCallback(

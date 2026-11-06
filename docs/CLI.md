@@ -970,11 +970,12 @@ or a key goes.
 
 **Rules no option turns off.**
 
-- **Octo's turns only.** It runs only inside the runtime's live turn: from `INSTAFY_TURN_STARTED_AT`, and until
-  `INSTAFY_TURN_DEADLINE` when the turn has a time limit (a turn with none has no deadline). So a published app, a
-  person's own code, a terminal command or a process left over from an earlier turn cannot search (exit 64): a site
-  server a turn starts to outlive it (`instafy preview open --start`, `instafy bind serve --detach`) gets none of the
-  turn's `INSTAFY_TURN_*` values.
+- **Octo's turns only.** It runs only inside the runtime's live turn: from `INSTAFY_TURN_STARTED_AT` until
+  `INSTAFY_TURN_DEADLINE` when the turn has a time limit, and while the folder of its `INSTAFY_STEP_TIMINGS_FILE` is
+  there when it has none (the runtime makes that folder for the turn's job and removes it when the job ends). So a
+  published app, a person's own code, a terminal command or a process left over from an earlier turn cannot search
+  (exit 64), and a site server a turn starts to outlive it (`instafy preview open --start`, `instafy bind serve
+  --detach`) gets none of the turn's `INSTAFY_TURN_*` values.
 - **Keys.** A key goes only, over https, to the host of its own entry's `url`, in its own header. It is never printed
   (the output is scrubbed of every provider key as well), never written to the state folder, and never part of an
   error. Redirects are not followed.

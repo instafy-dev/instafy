@@ -3,7 +3,7 @@ import { resolveViteReactDependencies } from "./viteComponentDependencies.js";
 
 const FIXTURE_PATH = "/__toast-view-bar-clearance__";
 
-type Layout = "desktop" | "desktop-sidebar" | "phone" | "phone-file" | "desktop-browser" | "phone-browser" | "desktop-browser-starting";
+type Layout = "desktop" | "desktop-sidebar" | "desktop-sidebar-people" | "phone" | "phone-file" | "desktop-browser" | "phone-browser" | "desktop-browser-starting";
 
 /**
  * Studio's header and its Chat | Browser bar as the real components draw
@@ -11,7 +11,8 @@ type Layout = "desktop" | "desktop-sidebar" | "phone" | "phone-file" | "desktop-
  * the view bar. Phone: the page header, with the view bar beside the composer
  * in a chat, or under the header on a chat's file. In the Browser view, the
  * browser's own bar with its address comes under them. With the sidebar, the
- * chat is Studio's workspace beside it, which toasts sit over.
+ * chat is Studio's workspace beside it, which toasts sit over, and the
+ * participants drawer lies over the workspace's right edge.
  */
 async function mount(page: Page, layout: Layout) {
   const deps = await resolveViteReactDependencies(page);
@@ -31,7 +32,7 @@ async function mount(page: Page, layout: Layout) {
     import { StatusProvider } from "/src/status/StatusProvider.tsx";
     import { Status } from "/src/status/Status.tsx";
     import { useStatus } from "/src/status/useStatus.tsx";
-    import { useToastAreaRef } from "/src/status/toastClearance.ts";
+    import { useToastAreaRef, useToastEdgePanelRef } from "/src/status/toastClearance.ts";
     import { ConversationSurfaceTabs } from "/src/workspace/ConversationSurfaceLayout.tsx";
     import { ConversationQuickTabs } from "/src/workspace/ConversationQuickTabs.tsx";
     import { BrowserChromeShell } from "/src/screens/studio/components/BrowserChromeShell.tsx";
@@ -72,7 +73,14 @@ async function mount(page: Page, layout: Layout) {
     // Studio's workspace, right of its navigation, as StudioLayout registers it.
     function Workspace({ children }) {
       const ref = useToastAreaRef(true);
-      return h("div", { ref, className: "flex min-w-0 flex-1 flex-col", "data-testid": "studio-workspace" }, children);
+      return h("div", { ref, className: "relative flex min-w-0 flex-1 flex-col", "data-testid": "studio-workspace" }, children);
+    }
+    // The participants drawer, over the workspace's right edge, as ParticipantsDrawer registers it.
+    function PeopleDrawer() {
+      const ref = useToastEdgePanelRef(true);
+      return h("aside", { ref, "data-testid": "participants-drawer",
+        className: "absolute right-0 top-0 bottom-0 z-30 w-[300px] max-w-[85vw] border-l border-slate-200 bg-white p-3 text-sm" },
+        "In this conversation");
     }
     function Fixture() {
       const { showStatus } = useStatus();
@@ -101,10 +109,10 @@ async function mount(page: Page, layout: Layout) {
           besideComposer ? views("composer") : null,
           h("div", { className: "px-2 py-2 text-sm text-slate-400" }, "Ask for something…")),
       ];
-      if (layout === "desktop-sidebar") {
+      if (layout.startsWith("desktop-sidebar")) {
         return h("div", { className: "flex h-dvh bg-white text-slate-800" },
           h("nav", { "data-testid": "sidebar", className: "w-[304px] shrink-0 border-r border-slate-200 p-3 text-sm" }, "Chats"),
-          h(Workspace, null, ...chat),
+          h(Workspace, null, ...chat, layout === "desktop-sidebar-people" ? h(PeopleDrawer) : null),
           h(Status));
       }
       return h("div", { className: "flex h-dvh flex-col bg-white text-slate-800" }, ...chat, h(Status));
@@ -197,6 +205,27 @@ test("a toast sits over the workspace, right of the sidebar (999×1041)", async 
   // And still under the Chat | Browser bar.
   const barBox = (await page.getByTestId("conversation-subtabs").boundingBox())!;
   expect(toastBox.y).toBeGreaterThanOrEqual(barBox.y + barBox.height);
+  expect(errors).toEqual([]);
+});
+
+// Centred over the whole workspace, the toast in that window covered 176 px of
+// the participants drawer, which lies over the workspace's right edge.
+test("a toast sits left of the participants drawer (999×1041)", async ({ page }) => {
+  await page.setViewportSize({ width: 999, height: 1041 });
+  const errors = await mount(page, "desktop-sidebar-people");
+  await page.evaluate(() => (window as unknown as { __showReplyToast: () => void }).__showReplyToast());
+  const toast = page.getByTestId("status-toast");
+  await expect(toast).toBeVisible();
+  const toastBox = (await toast.boundingBox())!;
+  const sidebarBox = (await page.getByTestId("sidebar").boundingBox())!;
+  const drawerBox = (await page.getByTestId("participants-drawer").boundingBox())!;
+  expect(toastBox.x, `toast ${JSON.stringify(toastBox)}, sidebar ${JSON.stringify(sidebarBox)}`)
+    .toBeGreaterThanOrEqual(sidebarBox.x + sidebarBox.width);
+  expect(toastBox.x + toastBox.width, `toast ${JSON.stringify(toastBox)}, drawer ${JSON.stringify(drawerBox)}`)
+    .toBeLessThanOrEqual(drawerBox.x);
+  // Centred in the room between them.
+  const room = { left: sidebarBox.x + sidebarBox.width, right: drawerBox.x };
+  expect(Math.abs(toastBox.x + toastBox.width / 2 - (room.left + room.right) / 2)).toBeLessThanOrEqual(1);
   expect(errors).toEqual([]);
 });
 

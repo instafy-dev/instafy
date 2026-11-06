@@ -38,6 +38,7 @@ import {
   type ParticipantSubscriptionUsage,
 } from "./chatParticipantsStore";
 import { formatReset, windowLabel } from "./subscriptionUsageFormat";
+import { useToastEdgePanelRef } from "../../../status/toastClearance";
 
 /**
  * Right-edge overlay listing the active conversation's people and agents.
@@ -550,6 +551,8 @@ export function ParticipantsDrawer({
   onOpenMachine?: (runtimeId: string) => void;
 }) {
   const snapshot = useChatParticipantsSnapshot();
+  // It lies over the workspace's right edge: toasts sit left of it.
+  const toastEdgePanel = useToastEdgePanelRef<HTMLElement>(true);
   // Relative reset times ("resets in 2h 10m") go stale between snapshots, so
   // re-tick every 30s while the drawer is open. Cheap: a single interval, no
   // network. Seeded lazily so tests can render deterministically at mount.
@@ -649,6 +652,7 @@ export function ParticipantsDrawer({
 
   return (
     <aside
+      ref={toastEdgePanel}
       aria-label="Conversation participants"
       data-testid="participants-drawer"
       className="absolute right-0 top-0 bottom-0 z-30 flex w-[300px] max-w-[85vw] flex-col border-l border-slate-200/70 bg-white shadow-[0_0_40px_-12px_rgba(0,0,0,0.25)] dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel)] dark:shadow-[0_0_40px_-12px_rgba(0,0,0,0.6)]"

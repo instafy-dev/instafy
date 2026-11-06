@@ -94,7 +94,10 @@ describe("reference search (Wikipedia, Wikivoyage, Wikidata)", () => {
   // in Octo's turns" (a local test, Nov 5).
   it("searches in a turn with no time limit", async () => {
     const { requests, transport } = wikimedia();
-    const { INSTAFY_TURN_DEADLINE: _limit, ...unlimited } = turnEnv();
+    // Such a turn lasts while the folder the runtime made for its job is there.
+    const folder = path.join(base, "instafy-turns", "job-1");
+    fs.mkdirSync(folder, { recursive: true });
+    const { INSTAFY_TURN_DEADLINE: _limit, ...unlimited } = turnEnv(caseNo, { INSTAFY_STEP_TIMINGS_FILE: path.join(folder, "step-timings.ndjson") });
     const report = await reference("Seville Cathedral official site", unlimited, transport);
     expect(report).toMatchObject({ status: "ok", chain: "reference-search" });
     expect(report.count).toBeGreaterThan(0);

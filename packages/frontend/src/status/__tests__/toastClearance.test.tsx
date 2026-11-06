@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Status } from "../Status";
 import { StatusProvider, type StatusContextValue } from "../StatusProvider";
-import { subscribeToastClearance, toastArea, toastClearanceBottom, useToastAreaRef, useToastClearanceRef } from "../toastClearance";
+import { subscribeToastClearance, toastArea, toastClearanceBottom, useToastAreaRef, useToastClearanceRef, useToastEdgePanelRef } from "../toastClearance";
 import { useStatus } from "../useStatus";
 
 let status: StatusContextValue | null = null;
@@ -20,24 +20,37 @@ function Workspace({ children }: { children: ReactNode }) {
   return <div ref={ref} data-testid="workspace">{children}</div>;
 }
 
-function Harness({ bar, banner = false, workspace = false }: { bar: "header" | "composer" | null; banner?: boolean; workspace?: boolean }) {
+/** A drawer over the workspace's right edge, as the participants drawer is. */
+function EdgePanel() {
+  const ref = useToastEdgePanelRef<HTMLElement>(true);
+  return <aside ref={ref} data-testid="edge-panel" />;
+}
+
+function Harness({ bar, banner = false, workspace = false, panel = false }: { bar: "header" | "composer" | null; banner?: boolean; workspace?: boolean; panel?: boolean }) {
   status = useStatus();
-  const views = <>{banner ? <div data-testid="inserted-banner">Reconnecting</div> : null}{bar ? <Bar active={bar === "header"} /> : null}<div data-testid="transcript"><p>Message</p></div></>;
+  const views = <>{banner ? <div data-testid="inserted-banner">Reconnecting</div> : null}{bar ? <Bar active={bar === "header"} /> : null}<div data-testid="transcript"><p>Message</p></div>{panel ? <EdgePanel /> : null}</>;
   return <>{workspace ? <Workspace>{views}</Workspace> : views}<Status /></>;
 }
 
 describe("toasts and the view bar", () => {
   let container: HTMLDivElement;
   let root: Root;
+  // Where the workspace ends on the right: the window's width.
+  let windowWidth = 1024;
 
   beforeEach(() => {
+    windowWidth = 1024;
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     // A view bar at 1024×768: 48 px down, 45 px tall. Studio's workspace
     // starts right of a 304 px sidebar.
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
       const shift = document.querySelector('[data-testid="inserted-banner"]') ? 40 : 0;
       if (this.dataset.testid === "workspace") {
-        return { top: 0, bottom: 768, left: 304, right: 1024, width: 720, height: 768, x: 304, y: 0, toJSON: () => ({}) } as DOMRect;
+        return { top: 0, bottom: 768, left: 304, right: windowWidth, width: windowWidth - 304, height: 768, x: 304, y: 0, toJSON: () => ({}) } as DOMRect;
+      }
+      // A 300 px drawer pinned to the workspace's right edge.
+      if (this.dataset.testid === "edge-panel") {
+        return { top: 0, bottom: 768, left: windowWidth - 300, right: windowWidth, width: 300, height: 768, x: windowWidth - 300, y: 0, toJSON: () => ({}) } as DOMRect;
       }
       return this.dataset.testid === "view-bar"
         ? { top: 48 + shift, bottom: 93 + shift, left: 0, right: 1024, width: 1024, height: 45, x: 0, y: 48 + shift, toJSON: () => ({}) } as DOMRect
@@ -56,8 +69,8 @@ describe("toasts and the view bar", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  const render = (bar: "header" | "composer" | null, banner = false, workspace = false) =>
-    act(async () => root.render(<StatusProvider><Harness bar={bar} banner={banner} workspace={workspace} /></StatusProvider>));
+  const render = (bar: "header" | "composer" | null, banner = false, workspace = false, panel = false) =>
+    act(async () => root.render(<StatusProvider><Harness bar={bar} banner={banner} workspace={workspace} panel={panel} /></StatusProvider>));
   const region = () => document.querySelector<HTMLElement>('[data-testid="status-toast"]')?.closest<HTMLElement>("section, [role=region]");
   const regionTop = () => region()?.style.top;
 
@@ -77,6 +90,25 @@ describe("toasts and the view bar", () => {
     expect(toastArea()).toBeNull();
     expect(region()?.style.left).toBe("");
     expect(region()?.style.width).toBe("");
+  });
+
+  // Centred over the whole workspace, a toast in a 999 px window covered 176
+  // px of the participants drawer, which lies over the workspace's right edge.
+  it("puts a toast left of a drawer over the workspace's right edge", async () => {
+    windowWidth = 999;
+    await render("header", false, true, true);
+    expect(toastArea()).toEqual({ left: 304, width: 395 });
+    await act(async () => status!.showStatus("Octo is waiting for your OK in “Open httpbin.org in your browser”.", "info", 0, { actionLabel: "View", onAction: () => {} }));
+    expect(region()?.style.left).toBe("304px");
+    expect(region()?.style.width).toBe("395px");
+    // Once the drawer closes, over the whole workspace again.
+    await render("header", false, true, false);
+    expect(region()?.style.width).toBe("695px");
+    // With less than a phone's width left beside the drawer, the toast spans
+    // the workspace, as it does on a phone.
+    windowWidth = 900;
+    await render("header", false, true, true);
+    expect(toastArea()).toEqual({ left: 304, width: 596 });
   });
 
   it("knows where the view bar at the top ends, and forgets it when it goes", async () => {

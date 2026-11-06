@@ -430,7 +430,13 @@ describe("searching with the space's own key (fixtures)", () => {
   // turns", so nothing was searched (a local test, Nov 5).
   it("runs in a turn with no time limit, which has a start and no deadline", async () => {
     const { requests, transport } = recorder(() => ({ status: 200, body: braveAnswer(["a", "b"]) }));
-    const env = { BRAVE_SEARCH_API_KEY: BRAVE_KEY, INSTAFY_TURN_STARTED_AT: new Date(START - 60_000).toISOString(), INSTAFY_PROJECT_ID: "project-1" };
+    // The folder the runtime makes for the turn's job, as it names it to the turn's tools.
+    const folder = path.join(base, "instafy-turns", "job-1");
+    fs.mkdirSync(folder, { recursive: true });
+    const env = {
+      BRAVE_SEARCH_API_KEY: BRAVE_KEY, INSTAFY_TURN_STARTED_AT: new Date(START - 60_000).toISOString(), INSTAFY_PROJECT_ID: "project-1",
+      INSTAFY_STEP_TIMINGS_FILE: path.join(folder, "step-timings.ndjson"),
+    };
     const out: string[] = [];
     const io = { out: (line: string) => out.push(line), err: (line: string) => out.push(line) };
     expect(await runWebSearchCli(["ramen"], { json: true }, io, transportDeps(env, transport))).toBe(WEB_SEARCH_EXIT_OK);
@@ -440,6 +446,17 @@ describe("searching with the space's own key (fixtures)", () => {
     // With no deadline, a search still ends by its own time limit.
     expect(liveTurn(env, START)).toEqual({ startedAt: START - 60_000, deadline: Infinity });
     expect(liveTurn({ ...env, INSTAFY_TURN_DEADLINE: " " }, START)).toEqual({ startedAt: START - 60_000, deadline: Infinity });
+    // Only a turn of the runtime's has that folder.
+    const { INSTAFY_STEP_TIMINGS_FILE: _timings, ...withoutFolder } = env;
+    expect(liveTurn(withoutFolder, START)).toBeNull();
+    expect(liveTurn({ ...env, INSTAFY_STEP_TIMINGS_FILE: "step-timings.ndjson" }, START)).toBeNull();
+    // A process left over from that turn (a server it started in the background, say) keeps its values, but the
+    // runtime removed the turn's folder when its job ended: it cannot search.
+    fs.rmSync(folder, { recursive: true, force: true });
+    expect(liveTurn(env, START + 3_600_000)).toBeNull();
+    expect(await runWebSearchCli(["ramen", "noodles"], { json: true }, io, transportDeps(env, transport))).toBe(WEB_SEARCH_EXIT_USAGE);
+    expect(JSON.parse(out.pop()!).error).toMatch(/runs only in Octo's turns/);
+    expect(requests).toHaveLength(1);
     // A start more than a minute ahead of the clock is no turn of this machine's.
     expect(liveTurn({ INSTAFY_TURN_STARTED_AT: new Date(START + 61_000).toISOString() }, START)).toBeNull();
     // A deadline that cannot be read, or that comes before the start, is no turn's either.
