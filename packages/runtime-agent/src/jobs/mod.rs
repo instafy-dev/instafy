@@ -35884,7 +35884,10 @@ mod tests {
 
         let files = vec![
             changed_file("sites/seville/index.html", Some(FileChangeKind::Created)),
-            changed_file("sites/seville/data/stops.geojson", Some(FileChangeKind::Changed)),
+            changed_file(
+                "sites/seville/data/stops.geojson",
+                Some(FileChangeKind::Changed),
+            ),
         ];
         let normalized = normalize_codex_files(&project_dir, files).unwrap();
 
@@ -35893,9 +35896,15 @@ mod tests {
                 .iter()
                 .map(|f| f.workspace_path.as_str())
                 .collect::<Vec<_>>(),
-            ["sites/seville/index.html", "sites/seville/data/stops.geojson"]
+            [
+                "sites/seville/index.html",
+                "sites/seville/data/stops.geojson"
+            ]
         );
-        assert!(!tmp.path().join("sites").exists(), "no copy above the space");
+        assert!(
+            !tmp.path().join("sites").exists(),
+            "no copy above the space"
+        );
         assert_eq!(
             fs::read_to_string(project_dir.join("sites/seville/index.html")).unwrap(),
             "map"
