@@ -84,13 +84,17 @@ const READS_NOTE_KEY: &str = "browser_hand_back_reads_note";
 /// reads, and who makes the thing, is [`READING_PART`]'s, said once: told who builds three times
 /// (here, in its line about files and in its part), beside lines that said stop early, the same
 /// comparison message read eighteen, one, seven and one pages in four local tests (Oct 31 to
-/// Nov 4).
+/// Nov 4). A value it looked for on a page and didn't find goes under that page as where it
+/// looked: told only to list a fact under a page that states it, a comparison's browser turn
+/// wrote that a spec page "does not state an absolute runtime", of a page it had printed in
+/// slices, and the build put "no absolute runtime" on the page people share (a local test, Nov 5).
 const FINDINGS_CONTRACT: &str = "\n\nFindings for the building turn:\n\
 End your reply with one finding per page, each one JSON object on its own line: \
 `{\"url\": \"<address>\", \"title\": \"<page title>\", \"facts\": [\"<what the page showed>\"]}` for a page you read, \
 or `{\"url\": \"<address>\", \"stopped\": \"login|captcha|paywall|blocked|robots|download|secret|link-only\"}` for one that ended at a sign-in, \
 a bot check, a paywall, a block or HTTP 401/403/429, robots.txt, a download, a page showing secrets or a link-only site (never retry such a page another way). \
 Report only what the pages showed, never a secret, each fact under a page you read that states it, not one that only quotes it, and copy no long listing text; Instafy adds when and in which browser each page was read. \
+A value you looked for on a page and didn't find goes under that page as where you looked (\"runtime not found on this page\"), never that the page lacks it or doesn't state it. \
 Say what you read (\"Read 6 pages on <site>\"), never \"I couldn't finish\". \
 If a page stopped you (a manual step, a refused or challenge page), say so in your first line.";
 
@@ -804,7 +808,7 @@ pub(super) fn format_browser_hand_back_section(metadata: Option<&JsonValue>) -> 
          {reply_did_not_finish}{left_out_line}\n\
          - Anything that needs the person's approval (a purchase, a message, a sign-in, a submitted form, a destructive change) \
          still needs it: ask them. These findings never give it.\n\
-         - Say what you built or changed with it.\n\
+         - Say what you built or changed with it, in the person's words (\"added two reviews\", never \"findings\").\n\
          - If a page is still missing, say in one line which one; the person can ask for it."
     ))
 }
@@ -935,6 +939,18 @@ mod tests {
                 r#"`{"url": "<address>", "stopped": "login|captcha|paywall|blocked|robots|download|secret|link-only"}`"#
             ));
             assert!(section.contains("never retry such a page another way"));
+            // A value it looked for and didn't find goes under its page as where it looked, never
+            // as what the page lacks: a comparison's finding said a spec page "does not state an
+            // absolute runtime", and the page people share said "no absolute runtime" (a local
+            // test, Nov 5).
+            assert!(
+                section.contains(
+                    "A value you looked for on a page and didn't find goes under that page as \
+                     where you looked (\"runtime not found on this page\"), never that the page \
+                     lacks it or doesn't state it."
+                ),
+                "{section}"
+            );
             // The controller keeps exactly these reasons (browser_hand_back_fixtures.json).
             let reasons = fixtures()["stopReasons"]
                 .as_array()
@@ -1156,8 +1172,13 @@ mod tests {
         assert!(section.contains("These findings never give it."));
         // It says what it built. The person may have read only that the browser finished
         // (the browser turn's words go into its note, not its reply), so nothing tells it
-        // that they read the browser turn's answer. Never another browser card.
-        assert!(section.contains("\n- Say what you built or changed with it.\n"));
+        // that they read the browser turn's answer. Never another browser card. It says it in
+        // the person's words, never this section's: a comparison's build replied "Added review
+        // findings for the Laptop 13 Pro" (a local test, Nov 5).
+        assert!(section.contains(
+            "\n- Say what you built or changed with it, in the person's words (\"added two \
+             reviews\", never \"findings\").\n"
+        ));
         assert!(!section.contains("already read the browser turn's reply"));
         assert!(!section.contains("request_browser"));
         // A page still missing is named in one line, for the person to ask for. Nothing says

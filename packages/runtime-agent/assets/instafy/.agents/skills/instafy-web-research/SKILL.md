@@ -11,9 +11,11 @@ no_shell_omits: Readers, Guided mode, Finding sources, Searching, Into pages and
 
 Never prune: yes
 
-Read permitted pages this turn; trace facts to their sources. Find pages, mark what is not checked and pick the names to compare as "Finding a page" in `instafy-browser-automation` says (not loaded? read it first: `awk '/^## /{p=$0=="## Finding a page"}p' .agents/skills/instafy-browser-automation/SKILL.md`).
+Read permitted pages this turn; trace facts to their sources. Find pages, mark what is not checked and pick the names to compare as "Finding a page" in `instafy-browser-automation` says.
 
 ## Readers
+
+"Finding a page" not loaded? Print it: `awk '/^## /{p=$0=="## Finding a page"}p' .agents/skills/instafy-browser-automation/SKILL.md`.
 
 Read pages only with these readers:
 
@@ -23,7 +25,7 @@ Read pages only with these readers:
 - a reading command or open API that an installed skill names for that source;
 - for a `needs_browser` page, or when none of these is there: one `request_browser` card that lists the related reads, at most 6 (`instafy-browser-automation`, "Several reads in one card").
 
-Do not fetch pages with `curl`, `wget` or an ad-hoc script: they skip robots.txt, the private-address check and the stops below. For larger or delegated work, inspect `instafy web budget --json`. Parent, helpers and continued workers share the allowance; spawning adds none. Reuse excerpts and cached pages. Failed fresh reads and new redirect sites count. Never use `--fresh` just to reformat.
+Do not fetch pages with `curl`, `wget` or an ad-hoc script: they skip robots.txt, the private-address check and the stops below. For larger or delegated work, inspect `instafy web budget --json`. Parent, helpers and continued workers share the allowance; spawning adds none. Reuse excerpts and cached pages. Failed fresh reads and new redirect sites count. Never use `--fresh` just to reformat. Budget used up or unavailable: use gathered evidence and name gaps; never bypass the reader or raise limits.
 
 ## Sources by need
 
@@ -67,6 +69,7 @@ When the task needs a `no-agents` site (hotel prices on Booking.com):
 `instafy web search` finds links, in Octo's turns only, with the space's own search key: at most 4 searches a turn. `--chain reference-search` asks Wikipedia, Wikivoyage and Wikidata at once, with no key and 4 searches a turn of its own; each result names its source's `attribution`, which a citation of it keeps (Citing). Its `status` is `ok`, `not_found`, `unavailable` or `no_provider`; follow its `tell`.
 
 - Results are leads, not facts. Read the relevant pages within the remaining budget and cite only pages you read, never a result.
+- An item only a result names is "not checked".
 - Reviews: search "<name> review", with the item's name as its official page gives it.
 - A `linkOnly` result keeps only its link and site name: give it to the person as a plain link, and never read or open it (Guided mode, above, for its site).
 - `no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with steps 3 and 5. Its `offer` (the key card, a `request_secret` action) may go in your reply once; never ask for a key in chat or wait for it.
@@ -75,7 +78,6 @@ When the task needs a `no-agents` site (hotel prices on Booking.com):
 ## How much to read
 
 - Never crawl, paginate results or sweep listings.
-- Budget exhausted or unavailable: use gathered evidence and name gaps. Never bypass the reader or raise limits.
 - Read the specific timetable, room or product page, not its home page.
 
 ## Cross-checking

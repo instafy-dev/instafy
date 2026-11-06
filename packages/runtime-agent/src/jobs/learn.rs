@@ -145,9 +145,8 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     // From before it stopped telling every turn to load the memory its prompt already holds
     // (`python AGENTS.py`, a "fast context load" and a `/learn` section).
     include_str!("legacy/agents-doc-v12.md"),
-    // From before a reply that didn't find something said where it looked, in place of a rule
-    // that only forbade saying a site or page lacks it, and before "findings" was named among
-    // the words that describe the turn itself.
+    // From before a reply that didn't find something said where it looked or which page it didn't
+    // reach, in place of a rule that only forbade saying a site or page lacks it.
     include_str!("legacy/agents-doc-v13.md"),
 ];
 /// Whether `text` is a copy of `AGENTS.md` Instafy ships, the current one or an earlier one. A
@@ -2226,10 +2225,6 @@ mod tests {
     /// at still stays in the reply, in plain words (the builder skill's "what is unverified", and
     /// the page skill's "nobody has looked at the page yet").
     /// The copies from before, with the examples or from before them, are upgraded.
-    ///
-    /// The findings a building turn is given are the turn's own word for what the pages showed,
-    /// as its run and checks are: a comparison's build replied "Added review findings for the
-    /// Laptop 13 Pro" (a local test, Nov 5). The rule names them too.
     #[test]
     fn agents_doc_says_never_to_describe_the_turn_itself() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2241,7 +2236,7 @@ mod tests {
             .expect("Replies section");
         assert!(
             replies.contains(
-                "- Never describe the turn itself: its run, pass, snapshot, findings, tools or checks."
+                "- Never describe the turn itself: its run, pass, snapshot, tools or checks."
             ),
             "{replies}"
         );
@@ -2261,14 +2256,11 @@ mod tests {
         let previous = include_str!("legacy/agents-doc-v8.md");
         assert!(previous.contains("passed the desktop and phone checks"));
         assert!(!previous.contains("Never describe the turn itself"));
-        let before_findings = include_str!("legacy/agents-doc-v13.md");
-        assert!(before_findings.contains("its run, pass, snapshot, tools or checks."));
         for previous in [
             include_str!("legacy/agents-doc-v2.md"),
             include_str!("legacy/agents-doc-v3.md"),
             include_str!("legacy/agents-doc-v6.md"),
             previous,
-            before_findings,
         ] {
             let workspace = tempdir().expect("workspace");
             let path = workspace.path().join(AGENTS_DOC_FILENAME);
@@ -2292,14 +2284,15 @@ mod tests {
     /// forbade saying so: three replies still said a page lacks something, in the forbidden form
     /// ("lists its address and coordinates, but not nearby metro directions", of a home page whose
     /// seven closed sections no step opened; a local test, Nov 5). It gives the words now: say
-    /// where you looked.
+    /// where you looked, or which page you didn't reach. It still forbids both forms, a site's and
+    /// a page's: every one of those replies said it of a page.
     #[test]
     fn agents_doc_says_unread_facts_are_not_checked_and_names_only_steps_the_turn_started() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
         let doc = flat(AGENTS_DOC_TEMPLATE);
         for needle in [
             "A fact no page you read this turn states says \"not checked\", or stays out.",
-            "When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\"), never that a site doesn't have it or that a page didn't load, unless a page you read says so.",
+            "When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\") or which page you didn't reach, never that a site or page lacks it or didn't load, unless a page you read says so.",
             "Say only steps this turn did or started.",
             "offer it as a next step instead",
         ] {

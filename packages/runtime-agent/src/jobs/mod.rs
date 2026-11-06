@@ -2277,9 +2277,17 @@ fn format_project_memory_snapshot_with_preferences(
     let mut loaded_learned_blocks: Vec<LoadedLearnedBlock> = Vec::new();
 
     // What a turn's copy of a skill leaves out: the section only the routing step reads, and the
-    // sections the skill names for this turn ([`sections_left_out`]). Nothing else of the file
-    // takes their place.
+    // sections the skill names for this turn ([`sections_left_out`]). A turn with no shell leaves
+    // out its front matter too, the router's own fields: the research skill's routing words
+    // ("search the web, web search") reached a browser turn that has no web search. Nothing else
+    // of the file takes their place.
     let without_omitted_sections = |text: &str, omitted: &[String]| -> String {
+        let text = match skill_routing::split_front_matter(text) {
+            (front, body) if pinned.is_some() && !front.is_empty() && !body.trim().is_empty() => {
+                body.trim_start()
+            }
+            _ => text,
+        };
         let mut text = without_markdown_h2_section(text, ROUTING_PREFLIGHT_SECTION).into_owned();
         for heading in omitted {
             text = without_markdown_h2_section(&text, heading).into_owned();

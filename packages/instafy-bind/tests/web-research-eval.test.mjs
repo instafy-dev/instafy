@@ -245,12 +245,14 @@ test("every rule the eval grades is a rule the skills state", () => {
     coords_from_allowed: ["Coordinates come only from the venue's own site", "Never take coordinates from a map service's links or embeds."],
     facts_on_page: ["Read permitted pages this turn; trace facts to their sources."],
     titles_match: ["Read permitted pages this turn; trace facts to their sources."],
+    // a search result's address is a page to read, said where the searches are, which a turn with no search leaves out
+    no_guessed_paths: ["Results are leads, not facts. Read the relevant pages within the remaining budget and cite only pages you read, never a result."],
   };
   for (const [id, needles] of Object.entries(rules)) for (const needle of needles) assert.ok(skill.includes(needle), `${id}: ${needle}`);
   // "Finding a page" is the browser skill's, and the research skill points to it.
   const browser = flat(BROWSER_SKILL);
   const finding = {
-    no_guessed_paths: ["Open an address the person, a skill or a search result gave, a link on a page you read (print a page's links with its text), or the home page of the official site the task is about (for reviews, a reviewer's own site).", "Never a search engine or a guessed path."],
+    no_guessed_paths: ["Open an address the person or a skill gave, a link on a page you read (print a page's links with its text), or the home page of the official site the task is about (for reviews, a reviewer's own site).", "Never a search engine or a guessed path."],
     missing_page_searched: ["A page that says it is missing (\"not found\", \"are you lost?\"): use that site's own search box or menu."],
     no_search_engine: ["Never a search engine or a guessed path."],
     facts_from_own_page: ["comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: choose its stations and the day and time the person travels (a daytime hour when they gave none), press its button and read the route off the page it shows, saying which day and time it is for), not a listing or a kiosk page: those only lead to it."],

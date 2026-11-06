@@ -1,6 +1,7 @@
 /* Compare starter: 2-8 options side by side. A table when the page is wide, a list on phones, same order and ids: a
- * phone's row shows the values found, each with its source line, and names the rest once ("Not found yet: Weight,
- * Price"). You design the content in data.json; keep theme.css and site.js. Restyle only when asked.
+ * phone's row shows the values found, each with its source line, and names the rest once ("Not found yet: Weight
+ * (checked 17 Oct on maker.com ↗), Price"). You design the content in data.json; keep theme.css and site.js.
+ * Restyle only when asked.
  *
  * data.json:
  *   title, lede            the page title and its one-line answer: the verdict, and the biggest unknown about the
@@ -364,8 +365,8 @@
 
   /** Phones: one list, a row per option. The sorted value (with its caption) sits on the right, so you compare by
    * scanning down the right edge; the values found follow as facts in the same order on every row, each with its
-   * source line. What nobody found is named once under them ("Not found yet: Weight, Price"), not a stack of
-   * "Unknown"s. */
+   * source line. What was not found is named once under them ("Not found yet: Weight (checked 17 Oct on maker.com
+   * ↗), Price"), with the page it was looked for on, not a stack of "Unknown"s. */
   function cards(data, items, st, shared) {
     var cols = columns(data);
     var def = sortDef(data, st);
@@ -375,8 +376,9 @@
       var gaps = [];
       var drawn = cols.map(function (c) {
         var el = cell(item, c, shared, c === sortCol ? c.label : undefined);
-        if (!isGap(item, c, el)) return el;
-        gaps.push({ label: String(c.label || c.key), note: gapNote(valueOf(item, c), c) });
+        var looked = lookedFor(item, c);
+        if (!looked && !isGap(item, c, el)) return el;
+        gaps.push({ label: String(c.label || c.key), note: gapNote(valueOf(item, c), c), page: looked });
         return null;
       });
       var top = sortCol ? drawn[cols.indexOf(sortCol)] : null;
@@ -388,15 +390,26 @@
           h("div", null, nameBlock(item)),
           top ? h("div", { "class": "sortv" }, top) : null),
         facts.length ? h("dl", { "class": "facts" }, facts) : null,
-        gaps.length ? h("p", { "class": "cap not-found", text: notFound(gaps) }) : null,
+        gaps.length ? h("p", { "class": "cap not-found" }, notFound(gaps)) : null,
         hasMore(item) ? h("div", { "class": "actions" }, detailsButton(item, st)) : null,
         open && hasMore(item) ? more(item) : null);
     }));
   }
-  /** A cell that says only "Unknown" (and why): no value, no page read for it ("Not found · checked … ↗" cites one), no
-   * check running or failed, and nothing to press or open ("where to check ↗"). A price whose store can be opened or
-   * checked stays on its row: its "Open store ↗" or "Check price" comes once the binder has answered (the row keeps its
-   * shape), and a check that could not read the store says there why. */
+  /** A value looked for on a page and not found there, a fact with its page and no value ({"src", "url", "date"}): that
+   * fact, for the line of what was not found, which names the page ("Weight (checked 17 Oct on maker.com ↗)"); null
+   * for any other value, and for a price whose store can be opened or checked, which keeps its row. Its cell said "Not
+   * found · checked …" on the row, above a "Not found yet" line that left it out: one card used the words for two
+   * things. */
+  function lookedFor(item, col) {
+    var f = valueOf(item, col);
+    if (!f || !f.src || f.prov || site.shown(f)) return null;
+    if (isPrice(col) && (site.anyPending([item]) || (item.store && (item.store.readable || site.safeUrl(item.store.url))))) return null;
+    return f;
+  }
+  /** A cell that says only "Unknown" (and why): no value, no page read for it (lookedFor), no check running or failed,
+   * and nothing to press or open ("where to check ↗"). A price whose store can be opened or checked stays on its row:
+   * its "Open store ↗" or "Check price" comes once the binder has answered (the row keeps its shape), and a check that
+   * could not read the store says there why. */
   function isGap(item, col, drawn) {
     var f = valueOf(item, col);
     if (site.shown(f) || (f && (f.src || f.status === "not_found"))) return false;
@@ -412,14 +425,22 @@
     if (label && rest.indexOf(label) === 0) rest = rest.slice(label.length).trim();
     return !rest || /^(unknown|to confirm|((is|are|was|were) )?not (yet )?(checked|verified|found|known|listed|read)( yet)?)$/.test(rest) ? "" : note.slice(0, 100);
   }
-  /** "Not found yet: Weight, Price, Reviews"; values missing for one reason share it: "Not found yet: Price and Battery
-   * (maker.example did not answer), Suction". */
+  /** "Not found yet: Weight, Price, Reviews"; values missing for one reason share it, and values looked for on one page
+   * share that page: "Not found yet: Price and Battery (maker.example did not answer), Weight (checked 17 Oct on
+   * maker.com ↗), Suction". */
   function notFound(gaps) {
     var parts = [];
     gaps.forEach(function (g) {
-      var same = g.note ? parts.filter(function (p) { return p.note === g.note; })[0] : null;
-      if (same) same.labels.push(g.label); else parts.push({ note: g.note, labels: [g.label] });
+      var key = g.page || g.note ? (g.page ? citeKey(g.page) : "") + "|" + g.note : "";
+      var same = key ? parts.filter(function (p) { return p.key === key; })[0] : null;
+      if (same) same.labels.push(g.label); else parts.push({ key: key, note: g.note, page: g.page, labels: [g.label] });
     });
-    return "Not found yet: " + parts.map(function (p) { return and(p.labels) + (p.note ? " (" + p.note + ")" : ""); }).join(", ");
+    var out = ["Not found yet: "];
+    parts.forEach(function (p, i) {
+      out.push((i ? ", " : "") + and(p.labels));
+      if (p.page) out.push(" (" + (p.note ? p.note + " · " : ""), site.cite(p.page), ")");
+      else if (p.note) out.push(" (" + p.note + ")");
+    });
+    return out;
   }
 })();

@@ -413,6 +413,8 @@ describe("the shopping comparison eval (fixtures)", () => {
       "Short: \"<item>: 1 of 2 reviews found\", in the reply and on the page, citing only those reviews.",
       "an item with no price read this turn is listed as \"price unknown\", never as within it",
       "each fact not read marked unknown with why.",
+      // a model only a search names is "not checked", said where the searches are
+      "- An item only a result names is \"not checked\".",
       "and an item's name as its official page gives it",
       "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with steps 3 and 5.",
       "for reviews, a reviewer's home page, then its links.",
@@ -429,7 +431,7 @@ describe("the shopping comparison eval (fixtures)", () => {
     for (const rule of [
       "## Finding a page",
       "A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.",
-      "Comparing: list the models a page you read names, its menu included, then open each one's own page; mark one only a search result names \"not checked\". Never names from memory, never placeholders such as \"candidate 1\".",
+      "Comparing: list the models a page you read names, its menu included, then open each one's own page. Never names from memory, never placeholders such as \"candidate 1\".",
       // a stopped page ends that page, never the research: the next source is "Finding a page"'s
       "ends that page, not the task: \"Finding a page\" says what comes next. Never retry that page another way.",
     ]) {

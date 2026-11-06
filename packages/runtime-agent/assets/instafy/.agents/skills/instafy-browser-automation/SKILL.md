@@ -75,11 +75,11 @@ open your own tab (`open_tab`, 3 at most) only to hold two pages at once.
 
 For every reader, browser or not:
 
-- Open an address the person, a skill or a search result gave, a link on a page you read (print a page's links with its text), or the home page of the official site the task is about (for reviews, a reviewer's own site). Never a search engine or a guessed path.
+- Open an address the person or a skill gave, a link on a page you read (print a page's links with its text), or the home page of the official site the task is about (for reviews, a reviewer's own site). Never a search engine or a guessed path.
 - A page that says it is missing ("not found", "are you lost?"): use that site's own search box or menu.
 - A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.
 - A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: choose its stations and the day and time the person travels (a daytime hour when they gave none), press its button and read the route off the page it shows, saying which day and time it is for), not a listing or a kiosk page: those only lead to it.
-- Comparing: list the models a page you read names, its menu included, then open each one's own page; mark one only a search result names "not checked". Never names from memory, never placeholders such as "candidate 1".
+- Comparing: list the models a page you read names, its menu included, then open each one's own page. Never names from memory, never placeholders such as "candidate 1".
 - A page whose reading lists a cookie banner's reject button ("Reject all", "Reject", "Only necessary"): press it before your next step, and nothing else on the banner; never accept. With no reject button on the banner itself, leave it up and read on. Refuse through its settings only when the person asks; saving those settings asks once.
 
 ## Shared Browser command (only when Shared Browser is exposed)

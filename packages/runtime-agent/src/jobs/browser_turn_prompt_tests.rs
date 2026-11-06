@@ -144,10 +144,13 @@ fn section<'a>(prompt: &'a str, heading: &str) -> &'a str {
     &rest[..rest.find("\n## ").unwrap_or(rest.len())]
 }
 
-/// A bundled skill as a browser turn reads it: all but the section only the routing step reads
-/// and the sections its front matter names for a turn with no shell (`no_shell_omits`).
+/// A bundled skill as a browser turn reads it: all but its front matter, the section only the
+/// routing step reads and the sections its front matter names for a turn with no shell
+/// (`no_shell_omits`).
 fn as_a_browser_turn_reads(skill: &str) -> String {
-    let mut text = without_markdown_h2_section(skill, ROUTING_PREFLIGHT_SECTION).into_owned();
+    let (_, body) = skill_routing::split_front_matter(skill);
+    let mut text =
+        without_markdown_h2_section(body.trim_start(), ROUTING_PREFLIGHT_SECTION).into_owned();
     for heading in parse_skill_front_matter(skill).no_shell_omits {
         text = without_markdown_h2_section(&text, &heading).into_owned();
     }
@@ -289,6 +292,9 @@ fn a_browser_turn_carries_its_browser_skill_whole() {
 /// a price's `instafy web search` fallback), and it keeps one findings format, its prompt's own:
 /// the provenance a page or dataset keeps for each fact is the building turn's. What a page's text
 /// may start and what any search may hold, a site's own search box included, every reader reads.
+/// Nor does it read a skill's front matter, the router's own fields: the research skill's routing
+/// words ("search the web, web search") reached a comparison's browser turn, which listed its tools
+/// twice for a web search (a local test, Nov 5).
 #[test]
 fn a_turn_with_no_shell_leaves_out_the_sections_a_skill_names() {
     let tmp = space();
@@ -329,6 +335,11 @@ fn a_turn_with_no_shell_leaves_out_the_sections_a_skill_names() {
         "reference-search",
         "<name> review",
         "search results",
+        "web search",
+        "a search result",
+        "awk '",
+        "Budget exhausted",
+        "bypass the reader",
     ] {
         assert!(!read.contains(gone), "{gone}");
     }
@@ -348,6 +359,7 @@ fn a_turn_with_no_shell_leaves_out_the_sections_a_skill_names() {
     ] {
         assert!(read.contains(kept), "{kept}");
     }
+    let front_matter = ["routing_keywords:", "no_shell_omits:", "context_parent:"];
     for transport in ["shared", "desktop-personal"] {
         let (prompt, _) = prompt_for(tmp.path(), metadata(Some(transport)), None);
         assert!(prompt.contains(&read), "{transport}");
@@ -357,10 +369,25 @@ fn a_turn_with_no_shell_leaves_out_the_sections_a_skill_names() {
                 "{transport}: {heading}"
             );
         }
+        assert!(
+            prompt.contains("```markdown\n# Web research\n"),
+            "{transport}: {prompt}"
+        );
+        for field in front_matter {
+            assert!(!prompt.contains(field), "{transport}: {field}");
+        }
+        // Nor the pinned browser skill's.
+        assert!(
+            prompt.contains("```markdown\n# Browser automation\n"),
+            "{transport}"
+        );
     }
     let (building, _) = prompt_for(tmp.path(), metadata(None), None);
     for heading in &omitted {
         assert!(building.contains(&format!("\n## {heading}\n")), "{heading}");
+    }
+    for field in front_matter {
+        assert!(building.contains(field), "{field}");
     }
 }
 
@@ -909,6 +936,38 @@ fn a_browser_turn_that_hands_back_reads_its_part_right_before_the_request() {
             "{request}"
         );
     }
+}
+
+/// A browser turn whose findings go back to the building turn ends its reply with a finding line
+/// per page, and the replies guide it reads never tells it to keep its findings out of a reply:
+/// one that ended with none handed back nothing, and nothing was built (a local test, Nov 3). The
+/// word stays out of the building turn's reply by the hand-back's own line
+/// (`browser_hand_back::format_browser_hand_back_section`), which only that turn reads.
+#[test]
+fn a_browser_turn_told_to_end_with_finding_lines_is_never_told_to_leave_its_findings_out() {
+    let tmp = space();
+    let hands_back = json!({
+        "browserTransport": "shared",
+        "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+        "browserHandsBack": true,
+        "browserCardTurn": {
+            "version": 1,
+            "cardJobId": "00000000-0000-4000-8000-0000000000a1",
+            "routed": true,
+        },
+        "writeScope": {"mode": "read_only"},
+    });
+    let request = "Compare the three latest laptops of one maker: processor, battery, weight and price, with two independent reviews each, as a comparison page.";
+    let (prompt, _) = prompt_for_request(tmp.path(), request, hands_back, None);
+    assert!(
+        prompt.contains("End your reply with one finding per page"),
+        "{prompt}"
+    );
+    let rule = prompt
+        .lines()
+        .find(|line| line.starts_with("- Never describe the turn itself:"))
+        .expect("the replies guide's rule");
+    assert!(!rule.contains("finding"), "{rule}");
 }
 
 /// A browser turn reads its own line about files, and the build request where it is offered,

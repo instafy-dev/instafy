@@ -823,13 +823,16 @@ routing step sent to the browser, also leaves out the sections named for it
 (`routed_omits`): no card listed its reads, so it reads nothing of reading a
 card's list ("Several reads in one card"), while what a page's text may start
 and which pages end a read are in the "Core rules" every browser turn reads.
-Every skill a browser turn loads leaves out the sections it names the same way,
-so a browser turn is given no step it cannot take: the `instafy-web-research`
-skill's readers (and what `instafy web read` marks, reports and returns),
-searches (a search for reviews included), guided links and rules for building
-pages and datasets, for one, while its rules for what a page's text may start
-and what a search may hold, a site's own search box included, reach every
-reader. Of the space's `AGENTS.md`, a browser turn reads its "Replies", as a
+Every skill a browser turn loads leaves out the sections it names the same way:
+the `instafy-web-research` skill's readers (and what `instafy web read` marks,
+reports and returns, its budget, and how a turn without the browser skill
+prints "Finding a page"), searches (a search for reviews, and a search result's
+item that no page names, "not checked", included), guided links and rules for
+building pages and datasets, for one, while its rules for what a page's text
+may start and what a search may hold, a site's own search box included, reach
+every reader. Nor does a browser turn read a skill's front matter, the router's
+own fields, its routing words among them ("web search" is one of the research
+skill's). Of the space's `AGENTS.md`, a browser turn reads its "Replies", as a
 restored one does, when the file is a copy Instafy ships; a copy the space
 edited, or one with no such section, comes whole. Of `INSTAFY.md` it reads
 nothing while the file is a copy Instafy ships, whose snapshot, constants and
@@ -869,14 +872,16 @@ given the chat's earlier browser turns, never Octo's building turns, files or
 command output. Codex withdraws the space's `AGENTS.md` from a
 turn without the workspace, so it is given that file's "Replies" too (how a reply
 reads: plain words, no error codes, file paths or inside words, "not checked" on
-a fact no page read this turn states, where it looked for what it didn't find,
-never that a site lacks it, and only steps the turn started). The
+a fact no page read this turn states, where it looked for what it didn't find or
+which page it didn't reach, never that a site or page lacks it, and only steps
+the turn started). The
 "Finding a page" section, which the
 `instafy-web-research` skill points to (a research turn without the browser
 skill prints just that section with one command), says how every reader finds a
-page: an address the person, a skill or a search result gave, a link on a page
-read (its links printed with its text), or the official site's home page (for
-reviews, a reviewer's own site), never a search engine or a guessed path; a
+page: an address the person or a skill gave, a link on a page read (its links
+printed with its text), or the official site's home page (for reviews, a
+reviewer's own site), never a search engine or a guessed path (a turn that
+searches opens a result's page too, by the research skill's "Searching"); a
 missing page's own site search; a page
 that fails (busy, blank or an
 error page such as a 504) sends the turn to the place's own site at once, in the
@@ -2605,7 +2610,9 @@ unless the policy is `"covered"`.
   A browser turn that continues a building card is asked to end its reply
   with one finding per page, one JSON object per line, as the browser skill
   writes them, each fact under a page it read that states it rather than one
-  that only quotes it. Those lines are for Octo: the runtime takes every line
+  that only quotes it, and a value it looked for on a page and didn't find
+  under that page as where it looked ("runtime not found on this page"), never
+  that the page lacks it. Those lines are for Octo: the runtime takes every line
   the controller would read as a finding out of the reply the person reads, and
   posts them as one note of the turn
   (`details.browserFindings: {pages, pagesRead}`), where the controller reads

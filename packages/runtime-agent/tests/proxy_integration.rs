@@ -38,6 +38,9 @@ static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 #[path = "proxy_integration/browser_hand_back.rs"]
 mod browser_hand_back;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "proxy_integration/client_timezone.rs"]
+mod client_timezone;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "proxy_integration/evidence_retry.rs"]
 mod evidence_retry;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
