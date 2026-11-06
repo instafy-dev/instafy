@@ -304,14 +304,17 @@ its card carried on, and for a Continue under an earlier Stop, the request it co
 that holds a turn of the stopped request is not resumed: Codex can't take a turn back out of a
 thread, and on a thread that still showed it the stopped request and its reads, a turn built the
 stopped section to hold the next change. So the next turn of each lane that ran the request (its
-building turn, the browser turn of its card, a hand-back of what that turn found) starts a new
-thread, from the chat's replay, which leaves the request, its steps and its browser turns out and
-keeps its Stop's line in their place; the turn after it resumes that thread. A run the Stop ended
-counts though it left no step, as the history doesn't say whether it had begun. A thread the
-request never reached (the building thread after a Stop of a request only the browser ran) is
-resumed, and reads the line after its restore note. The line says nothing of what the turn changed
-before the press, which stays until the person undoes it: the next turn reads the files as they
-are. A browser thread reads a Stop's or an Undo's line only for a request one of the chat's browser
+building turn, the browser turn of its card, a Let Octo continue of that turn, a hand-back of what
+they found) starts a new thread, from the chat's replay, which leaves the request, its steps and
+its browser turns out and keeps its Stop's line in their place. The provider state saves that
+thread with the Stop it was started after, and later turns resume it. Any other thread the state
+names is left for a newer Stop of a request that ran in its lane: the state still names the thread
+from before the Stop after a turn that failed or a granted turn, which save none, and after a team
+plan's turn, which keeps it. A run the Stop ended counts though it left no step, as the history
+doesn't say whether it had begun. A thread the request never reached (the building thread after a
+Stop of a request only the browser ran) is resumed, and reads the line after its restore note. A
+change the turn's save kept stays until the person undoes it: a building turn's line names its
+files, from the stopped turn's report, and the next turn reads them as they are. A browser thread reads a Stop's or an Undo's line only for a request one of the chat's browser
 turns was asked: it reads nothing else of the chat, so the words of a message that stayed with Octo
 never reach a turn a page can ask to type them. One that is new, or lost, replays only the chat's
 browser turns, and reads those lines since the first of them after its replay. A Continue under the

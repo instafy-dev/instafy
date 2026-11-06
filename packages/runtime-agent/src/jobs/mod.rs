@@ -604,32 +604,39 @@ fn split_shared_thread_state(state: Option<JsonValue>) -> (Option<JsonValue>, bo
     (Some(JsonValue::Object(map)), retired)
 }
 
-/// A thread that holds a turn of a request the person stopped is not resumed
-/// (`conversation_context::lane_thread_holds_a_stopped_request`): the lane's keys go, so Codex
+/// A thread that may hold a turn of a request the person stopped is not resumed
+/// (`conversation_context::stop_to_leave_lane_thread_for`): the lane's keys go, so Codex
 /// starts a new thread, and the turn's prompt replays the chat as its lane reads it, with the
-/// stopped request left out and its Stop line kept, as for a new or lost thread. The run saves its
-/// new thread as a merge of this state, so the other lane's thread rides along and the lane's
-/// next turn resumes the new one. A team plan's turns leave the chat out of their prompts, so
-/// they keep their thread. The second value says whether a thread was left.
+/// stopped request left out and its Stop line kept, as for a new or lost thread. The state names
+/// the Stop the new thread is started after, and the run saves its new thread as a merge of this
+/// state, so the other lane's thread rides along and the lane's next turn resumes the new one. A
+/// turn that fails saves no thread, so the turn after it starts anew too. A team plan's turns
+/// leave the chat out of their prompts, so they keep their thread. The second value says whether
+/// a thread was left.
 fn leave_thread_holding_a_stopped_request(
     state: Option<JsonValue>,
     job: &LeaseJob,
     lane: ThreadLane,
 ) -> (Option<JsonValue>, bool) {
+    if is_explicit_team_planning_job(job) || is_multi_agent_worker_job(job) {
+        return (state, false);
+    }
+    let marker = lane.started_after_stop_key();
+    let started_after = state
+        .as_ref()
+        .and_then(|state| state.get(marker))
+        .and_then(JsonValue::as_str);
+    let Some(stop) = conversation_context::stop_to_leave_lane_thread_for(
+        job.payload.get("conversation_history"),
+        lane,
+        started_after,
+    )
+    .map(ToString::to_string) else {
+        return (state, false);
+    };
     let Some(JsonValue::Object(mut map)) = state else {
         return (state, false);
     };
-    let current_run = job.run_id.map(|run| run.to_string());
-    if is_explicit_team_planning_job(job)
-        || is_multi_agent_worker_job(job)
-        || !conversation_context::lane_thread_holds_a_stopped_request(
-            job.payload.get("conversation_history"),
-            lane,
-            current_run.as_deref(),
-        )
-    {
-        return (Some(JsonValue::Object(map)), false);
-    }
     let names_a_thread = |map: &JsonMap<String, JsonValue>| {
         lane.thread_id_keys()
             .iter()
@@ -646,6 +653,7 @@ fn leave_thread_holding_a_stopped_request(
             nested.remove(*key);
         }
     }
+    map.insert(marker.to_string(), JsonValue::String(stop));
     (Some(JsonValue::Object(map)), left)
 }
 
@@ -24728,6 +24736,8 @@ mod tests {
             assert!(left_state.get(key).is_none(), "{key}: {left_state}");
         }
         assert_eq!(left_state["sharedBrowserThreadId"], browser);
+        // The new thread is saved with the Stop it was started after.
+        assert_eq!(left_state[ThreadLane::Building.started_after_stop_key()], "run-2");
         let (for_run, _) = provider_conversation_state_for_this_runtime(
             Some(left_state.clone()),
             ThreadLane::Building,
@@ -24758,10 +24768,33 @@ mod tests {
             (Some(state.clone()), false)
         );
 
-        // The tip's turn replied on its new thread: the turn after it resumes that thread.
+        // The tip's turn failed and saved no thread, so Try again's job names the thread from
+        // before the Stop: it leaves that thread too.
+        let mut failed = history.clone();
+        failed.push(json!({"role": "assistant", "content": "The turn stopped before it finished.", "runId": tip_run.to_string(), "metadata": {"source": "agent", "outcome": "failed", "messageType": "error"}}));
+        let again_run = Uuid::new_v4();
+        failed.push(json!({"role": "user", "content": "Add a one-line tip about the best time to visit.", "runId": again_run.to_string()}));
+        let (again_state, again_left) = leave_thread_holding_a_stopped_request(
+            Some(state.clone()),
+            &job_of(&failed, again_run),
+            ThreadLane::Building,
+        );
+        assert!(again_left);
+        assert!(again_state.expect("state").get("defaultThreadId").is_none());
+
+        // The tip's turn replied on its new thread: the turn after it resumes that thread, and a
+        // turn after one that kept the old thread (a team plan's) still leaves it.
         history.push(json!({"role": "assistant", "content": "Added a one-line tip.", "runId": tip_run.to_string(), "metadata": {"jobId": "job-tip"}}));
         let next_run = Uuid::new_v4();
         history.push(json!({"role": "user", "content": "Make the title bigger.", "runId": next_run.to_string()}));
+        assert!(
+            leave_thread_holding_a_stopped_request(
+                Some(state.clone()),
+                &job_of(&history, next_run),
+                ThreadLane::Building
+            )
+            .1
+        );
         let fresh = tmp.path().join("fresh.jsonl");
         fs::write(&fresh, "").expect("write fresh rollout");
         let saved = crate::codex::provider_state_after_fresh_thread(

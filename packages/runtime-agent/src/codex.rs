@@ -3341,6 +3341,16 @@ impl ThreadLane {
             Self::SharedBrowser => &SHARED_BROWSER_THREAD_KEYS,
         }
     }
+
+    /// The state key naming the Stop the lane's thread was started after
+    /// (`jobs::leave_thread_holding_a_stopped_request`). No key of the thread itself: one started
+    /// later, a lost thread's replacement say, was started after that Stop too.
+    pub(crate) fn started_after_stop_key(self) -> &'static str {
+        match self {
+            Self::Building => "defaultThreadStartedAfterStop",
+            Self::SharedBrowser => "sharedBrowserThreadStartedAfterStop",
+        }
+    }
 }
 
 fn extract_thread_id_from_provider_state(
