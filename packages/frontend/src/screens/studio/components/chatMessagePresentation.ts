@@ -522,6 +522,9 @@ export function synthesizeAgentJobThreadMessages(
   const turnJobIdsByRowJobId = new Map<string, string[]>();
   const rowJobIdByJoinedFailureId = new Map<string, string>();
   const pendingHandBackByRowJobId = new Map<string, { runId: string | null }>();
+  // A hand-back's run that ended before its job showed anything (a Stop in the gap after the
+  // browser turn, say): the row is that run's, so a Stop of it reads "Stopped".
+  const endedHandBackRunByRowJobId = new Map<string, string>();
   for (const [browserJobId, handBacks] of routedFold.handBacksByBrowserJobId) {
     if (!threadStartMessageIdByJobId.has(browserJobId) || rowJobIdByJoinedJobId.has(browserJobId)) continue;
     const turnJobIds = [browserJobId];
@@ -543,11 +546,12 @@ export function synthesizeAgentJobThreadMessages(
     // Sent, and its turn has shown nothing yet: the row stands for it. A
     // resend of a failed one is the retry's to show ("Trying again…").
     const newest = handBacks.at(-1);
-    if (
-      newest && !newest.jobId && !retryFold.hiddenPromptIds.has(newest.promptId) &&
-      !(newest.runId && routedFold.handBackRunsEndedWithoutAJob.has(newest.runId))
-    ) {
-      pendingHandBackByRowJobId.set(browserJobId, { runId: newest.runId });
+    if (newest && !newest.jobId && !retryFold.hiddenPromptIds.has(newest.promptId)) {
+      if (newest.runId && routedFold.handBackRunsEndedWithoutAJob.has(newest.runId)) {
+        endedHandBackRunByRowJobId.set(browserJobId, newest.runId);
+      } else {
+        pendingHandBackByRowJobId.set(browserJobId, { runId: newest.runId });
+      }
     }
   }
 
@@ -671,6 +675,7 @@ export function synthesizeAgentJobThreadMessages(
     const newestJobId = turnJobIds.at(-1) ?? jobId;
     const retryPendingJobId = turnJobIds.find((turnJobId) => pendingJobIds.has(turnJobId));
     const pendingHandBack = pendingHandBackByRowJobId.get(jobId);
+    const endedHandBackRunId = endedHandBackRunByRowJobId.get(jobId);
     output.push({
       id: `agent-job-thread:${jobId}`,
       role: "assistant",
@@ -692,6 +697,7 @@ export function synthesizeAgentJobThreadMessages(
               ...(pendingHandBack.runId ? { [HAND_BACK_RUN_ID_METADATA_KEY]: pendingHandBack.runId } : {}),
             }
           : {}),
+        ...(endedHandBackRunId ? { [HAND_BACK_RUN_ID_METADATA_KEY]: endedHandBackRunId } : {}),
       },
     });
   });
@@ -707,7 +713,10 @@ export function synthesizeAgentJobThreadMessages(
 export const TURN_JOB_IDS_METADATA_KEY = "turnJobIds";
 /** Metadata on a browser turn's row whose hand-back was sent and has shown nothing yet. */
 export const HAND_BACK_PENDING_METADATA_KEY = "handBackPending";
-/** The run of that hand-back, once the chat has its stored prompt. */
+/**
+ * The run of that hand-back, once the chat has its stored prompt, or of one that ended before
+ * its job showed anything.
+ */
 export const HAND_BACK_RUN_ID_METADATA_KEY = "handBackRunId";
 
 /** The turns a row shows, oldest first: its `turnJobIds`, else its one job. */
@@ -753,8 +762,17 @@ export function newestTurnMessages<T extends ChatMessage>(threadMessages: T[], t
 export function readPendingHandBack(message: Pick<ChatMessage, "metadata">): { runId: string | null } | null {
   const metadata = message.metadata && isRecord(message.metadata) ? message.metadata : null;
   if (metadata?.[HAND_BACK_PENDING_METADATA_KEY] !== true) return null;
-  const runId = metadata[HAND_BACK_RUN_ID_METADATA_KEY];
-  return { runId: typeof runId === "string" && runId.trim() ? runId.trim() : null };
+  return { runId: readHandBackRunId(message) };
+}
+
+/**
+ * The run of a browser turn's row's hand-back that has shown nothing: one on its way
+ * ({@link readPendingHandBack}), or one that ended before its job ran it.
+ */
+export function readHandBackRunId(message: Pick<ChatMessage, "metadata">): string | null {
+  const metadata = message.metadata && isRecord(message.metadata) ? message.metadata : null;
+  const runId = metadata?.[HAND_BACK_RUN_ID_METADATA_KEY];
+  return typeof runId === "string" && runId.trim() ? runId.trim() : null;
 }
 
 /** A failure posted for a run whose job never ran it. */

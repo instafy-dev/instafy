@@ -1313,8 +1313,13 @@ fn anything_not_read_on_a_page_says_not_checked_or_stays_out() {
 /// here shows it. A local test, Nov 2: after a page that marked its metro route not checked, a
 /// stopped edit to that page and its Undo, "keep going" stayed `direct` ("interrupted after
 /// undoing the section change… no new external browser step is clearly requested") and asked
-/// "What would you like me to continue with?". The routing step reads the whole section with the
-/// line, within its budget. An unedited earlier copy is upgraded.
+/// "What would you like me to continue with?". A local test, Nov 5: with the rule against a
+/// stopped or undone change as a line of its own ahead of the routes, the same "keep going" went
+/// to the browser alone ("The previously undone page edit should not be revived; the browser can
+/// continue the unfinished site research."), and its page stayed without the route. The rule is
+/// part of the `browser` line again, beside what "keep going" carries on and where a page here
+/// sends it; a building turn reads the person's Stops and Undos itself. The routing step reads the
+/// whole section with the line, within its budget. An unedited earlier copy is upgraded.
 #[test]
 fn a_bare_keep_going_carries_on_what_the_chat_left_open() {
     let start = BROWSER_SKILL
@@ -1328,20 +1333,17 @@ fn a_bare_keep_going_carries_on_what_the_chat_left_open() {
         .expect("the browser line");
     assert!(
         line.ends_with(
-            "or it carries on browser work this chat started, whether or not that found the answer: a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked or not confirmed, such as a route); when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`."
+            "or it carries on browser work this chat started, whether or not that found the answer: a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked or not confirmed, such as a route), never a change the person stopped or undid; when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`."
         ),
         "{line}"
     );
-    // Never a change the person stopped or undid, on any route: the first rule, ahead of the
-    // routes, where `direct` reads it too.
+    // No rule of its own ahead of the routes: the first rule is the `browser` route's.
     let first_rule = section
         .lines()
         .find(|line| line.starts_with("- "))
         .expect("the first rule");
-    assert_eq!(
-        first_rule,
-        "- A bare \"keep going\" never carries on a change the person stopped or undid."
-    );
+    assert_eq!(first_rule, line);
+    assert_eq!(section.matches("stopped or undid").count(), 1, "{section}");
     assert!(section.chars().count() <= BROWSER_SKILL_ROUTING_MAX_CHARS);
 
     let tmp = scaffolded_space();
@@ -1363,12 +1365,21 @@ fn a_bare_keep_going_carries_on_what_the_chat_left_open() {
     );
     assert!(prompt.contains(line), "{prompt}");
 
-    let previous = include_str!("legacy/browser-automation-v26.md");
-    assert!(!previous.contains("a bare \"keep going\""));
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+    for (previous, had) in [
+        (include_str!("legacy/browser-automation-v26.md"), false),
+        (include_str!("legacy/browser-automation-v30.md"), true),
+    ] {
+        assert_eq!(
+            previous.contains(
+                "- A bare \"keep going\" never carries on a change the person stopped or undid.\n"
+            ),
+            had
+        );
+        let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+        fs::write(&skill, previous).unwrap();
+        learn::ensure_project_memory_scaffold(tmp.path());
+        assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+    }
 }
 
 /// The kinds of link-only site and guided mode: a `no-agents` site is never read or opened and the person is
@@ -2188,10 +2199,11 @@ fn the_research_skill_reads_finding_a_page_with_one_short_command() {
 /// sent carried-on work to a build. "Put the hours and the metro route on a small page I can
 /// share." went through the browser, though its routing answer said the chat already had the
 /// facts. A bare "keep going" after a Stop and an Undo took a `direct` route and put the undone
-/// section back: the rule against it sat in the `browser` route's line. It is the first rule now,
-/// ahead of every route. Filling in a page that exists stays `browser_then_build`. The routing
-/// step reads the whole section for each of these messages, and an unedited earlier copy is
-/// upgraded.
+/// section back: the rule against it sat in the `browser` route's line. It sits there again, now
+/// that a building turn reads the person's Stops and Undos itself (`conversation_context.rs`):
+/// as a rule of its own, ahead of every route, it sent "keep going" to the browser alone. Filling
+/// in a page that exists stays `browser_then_build`. The routing step reads the whole section for
+/// each of these messages, and an unedited earlier copy is upgraded.
 #[test]
 fn research_that_ends_in_a_page_reaches_its_build_and_keep_going_never_undoes_an_undo() {
     let start = BROWSER_SKILL
@@ -2203,32 +2215,27 @@ fn research_that_ends_in_a_page_reaches_its_build_and_keep_going_never_undoes_an
         .lines()
         .filter(|line| line.starts_with("- "))
         .collect();
-    assert_eq!(
-        rules[0],
-        "- A bare \"keep going\" never carries on a change the person stopped or undid."
+    assert!(rules[0].starts_with("- `browser`:"), "{}", rules[0]);
+    assert!(
+        rules[0].ends_with(
+            "never a change the person stopped or undid; when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`."
+        ),
+        "{}",
+        rules[0]
     );
-    assert!(rules[1].starts_with("- `browser`:"), "{}", rules[1]);
     assert!(
         rules[1].ends_with(
-            "when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`."
+            "A request to make one with no site to use first (\"on a map\", \"put this on a page\") is `direct`: a map's skill finds and cites its places itself. So is one made from what this chat already found."
         ),
         "{}",
         rules[1]
     );
-    assert!(!rules[1].contains("stopped or undid"), "{}", rules[1]);
     assert!(
         rules[2].ends_with(
-            "A request to make one with no site to use first (\"on a map\", \"put this on a page\") is `direct`: a map's skill finds and cites its places itself. So is one made from what this chat already found."
-        ),
-        "{}",
-        rules[2]
-    );
-    assert!(
-        rules[3].ends_with(
             "unless all it needs is what this chat's browser work found: filling in, checking again or going on with that work is `browser_then_build`."
         ),
         "{}",
-        rules[3]
+        rules[2]
     );
     assert_eq!(section.matches("stopped or undid").count(), 1, "{section}");
     assert!(section.chars().count() <= BROWSER_SKILL_ROUTING_MAX_CHARS);
@@ -2294,7 +2301,7 @@ fn a_map_request_is_a_build_and_keep_going_carries_on_what_is_not_confirmed() {
     let browser = rule("browser");
     for words in [
         "the work happens on a website (use a site, sign in, send a form, press its buttons), or it carries on browser work this chat started",
-        "a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked or not confirmed, such as a route); when a page here shows it",
+        "a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked or not confirmed, such as a route), never a change the person stopped or undid; when a page here shows it",
     ] {
         assert!(browser.contains(words), "{words}\n{browser}");
     }
@@ -2305,10 +2312,10 @@ fn a_map_request_is_a_build_and_keep_going_carries_on_what_is_not_confirmed() {
     ] {
         assert!(!section.contains(earlier), "{earlier}");
     }
-    // Never a change the person stopped or undid: still the first rule, ahead of every route.
+    // Never a change the person stopped or undid: part of the `browser` route, the first one.
     assert_eq!(
         section.lines().find(|line| line.starts_with("- ")),
-        Some("- A bare \"keep going\" never carries on a change the person stopped or undid.")
+        Some(browser)
     );
     assert!(
         section.chars().count() <= BROWSER_SKILL_ROUTING_MAX_CHARS,
