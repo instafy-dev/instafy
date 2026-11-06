@@ -51,6 +51,44 @@ pub(crate) fn preserve_unchanged_goal_revision(patch: &mut Value, existing: Opti
     }
 }
 
+/// An explicit goal command is saved before its first dispatch. Reject a late
+/// callback if a newer edit changed that saved goal. Check under the conversation
+/// row lock after resolving idempotent retries; inline dispatch metadata cannot
+/// overwrite the separately saved goal.
+pub(crate) fn require_goal_command_snapshot(
+    request_metadata: &Value,
+    conversation_metadata: Option<&Value>,
+) -> StateResult<()> {
+    if request_metadata
+        .pointer("/command/type")
+        .and_then(Value::as_str)
+        != Some("goal")
+    {
+        return Ok(());
+    }
+    let now = Utc::now().to_rfc3339();
+    let requested = request_metadata
+        .get("goal")
+        .and_then(|value| normalize_goal(value, &now));
+    let current = conversation_metadata
+        .and_then(|metadata| {
+            metadata
+                .get("instafyGoal")
+                .or_else(|| metadata.get("instafy_goal"))
+        })
+        .and_then(|value| normalize_goal(value, &now));
+    if requested
+        .as_ref()
+        .is_none_or(|goal| goal.status != GoalStatus::Active)
+        || requested != current
+    {
+        return Err(super::conflict(
+            "The goal changed before this turn started. Resume the current goal to continue.",
+        ));
+    }
+    Ok(())
+}
+
 fn uuid_at(value: &Value, pointer: &str) -> Option<Uuid> {
     value.pointer(pointer)?.as_str()?.parse().ok()
 }

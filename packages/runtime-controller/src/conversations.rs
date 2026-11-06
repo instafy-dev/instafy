@@ -3262,6 +3262,20 @@ pub(crate) async fn ensure_conversation_record(
         .map_err(|error| internal_error(format!("failed to load conversation: {error}")))?;
 
     if let Some(metadata) = request.conversation_metadata.as_mut() {
+        // Explicit goal commands save their goal before dispatch. Their inline
+        // snapshot cannot overwrite a newer edit while loading the conversation.
+        // Admission compares the expected goal after idempotent retries resolve.
+        if request
+            .metadata
+            .pointer("/command/type")
+            .and_then(JsonValue::as_str)
+            == Some("goal")
+        {
+            if let Some(map) = metadata.as_object_mut() {
+                map.remove("instafyGoal");
+                map.remove("instafy_goal");
+            }
+        }
         strip_client_internal_metadata(metadata);
         crate::conversation_goals::state::prepare_client_metadata(metadata);
         if let Some(row) = existing.as_ref() {

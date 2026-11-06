@@ -119,14 +119,23 @@ pub(crate) async fn bind_dispatch(
         }
         binding
     } else {
-        // A worker, scheduled automation or scoped runtime request is not a new
-        // user goal instruction. Nor can its payload claim to own one.
+        // Access in a person's name is not a new instruction from them. Only
+        // authenticated ingress stamps a trigger; internal dispatches (including
+        // browser hand-backs) may synthesize the same access context. Checked
+        // system turns sent by a client are also continuations, not fresh goal
+        // instructions. Dispatch verifies these stamps before calling us.
         if context.is_service_role
             || context.scoped_claims.is_some()
             || request.delegating_job_id.is_some()
+            || !request
+                .trigger
+                .as_ref()
+                .is_some_and(|trigger| trigger.user_id == owner)
+            || crate::system_turns::system_turn_of(&json!({"metadata": request.metadata})).is_some()
         {
             return Ok(());
         }
+        state::require_goal_command_snapshot(&request.metadata, Some(&metadata))?;
         // A newer user turn supersedes every older automatic wakeup, even when
         // the goal's text did not change. Late agent messages cannot undo it.
         let next_revision = Uuid::new_v4();

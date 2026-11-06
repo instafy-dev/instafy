@@ -109,7 +109,7 @@ interface ConversationsContextValue {
   ) => void;
   setConversationControllerId: (conversationId: string, controllerId: string | null) => void;
   setConversationTitle: (conversationId: string, title: string) => void;
-  setConversationGoal: (conversationId: string, goal: ConversationGoal | null) => void;
+  setConversationGoal: (conversationId: string, goal: ConversationGoal | null, expectedGoal?: ConversationGoal | null) => void;
   markConversationRead: (conversationId: string) => void;
   linkRunToConversation: (runId: string, conversationId: string) => void;
   unlinkRunFromConversation: (runId: string) => void;
@@ -425,10 +425,10 @@ const AccountConversationsProvider = ({ children }: PropsWithChildren) => {
   }, []);
 
   const setConversationGoal = useCallback(
-    (conversationId: string, goal: ConversationGoal | null) => {
-      // Explicit goal commands own the awaited controller write before dispatch.
-      // A second background PATCH could arrive after dispatch and invalidate it.
-      dispatch({ type: "SET_GOAL", id: conversationId, goal });
+    (conversationId: string, goal: ConversationGoal | null, expectedGoal?: ConversationGoal | null) => {
+      // An optimistic command can restore only its own snapshot after a failed save.
+      // Explicit commands own the controller write; this only projects local state.
+      dispatch({ type: "SET_GOAL", id: conversationId, goal, expectedGoal });
     },
     [],
   );

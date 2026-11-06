@@ -73,3 +73,17 @@ it("projects a local goal edit without racing the command's awaited controller w
   expect(current.activeConversation?.activeGoal).toEqual(goal);
   expect(updateMetadata).not.toHaveBeenCalled();
 });
+
+
+it("does not let a saved command overwrite a newer goal snapshot", async () => {
+  await render();
+  const id = current.activeConversationId!;
+  const original = createConversationGoal("Original objective", session.userId);
+  await act(async () => current.setConversationGoal(id, original, null));
+  expect(current.activeConversation?.activeGoal).toEqual(original);
+  const replacement = createConversationGoal("New objective", session.userId);
+  await act(async () => current.setConversationGoal(id, replacement));
+  await act(async () => current.setConversationGoal(id, { ...original, status: "completed" }, original));
+  expect(current.activeConversation?.activeGoal).toEqual(replacement);
+  expect(updateMetadata).not.toHaveBeenCalled();
+});

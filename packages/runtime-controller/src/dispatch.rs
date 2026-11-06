@@ -1361,9 +1361,6 @@ pub(crate) async fn process_dispatch_prompt_timed(
         return Ok(recorded_dispatch_response(conversation.id));
     }
 
-    crate::conversation_goals::bind_dispatch(&transaction, context, &conversation, &mut request)
-        .await?;
-
     // Idempotent retries must win before the optimistic lane comparison. A
     // retry of a successfully admitted message naturally finds its own active
     // job and must return that run, never enqueue a duplicate follow-up.
@@ -1507,6 +1504,11 @@ pub(crate) async fn process_dispatch_prompt_timed(
             record,
         );
     }
+
+    // Goal authority depends on authenticated ingress and verified system-turn
+    // provenance, not just the person whose access an internal send uses.
+    crate::conversation_goals::bind_dispatch(&transaction, context, &conversation, &mut request)
+        .await?;
 
     // An ambient multi-human turn dispatches to the default agent stamped with
     // the agent_evaluation marker; the agent's participation skill decides

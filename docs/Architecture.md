@@ -169,13 +169,18 @@ A conversation goal is persisted in `conversations.metadata.instafyGoal`. Studio
 shows that state and sends explicit `/goal` edits; it does not schedule follow-up
 turns or apply the runtime's goal updates locally. An explicit start or resume
 persists the goal before dispatching its first turn.
+Failed saves restore the previous goal only if no newer goal has arrived. An
+explicit start or resume is admitted only against the saved goal snapshot; a
+delayed dispatch cannot overwrite a newer edit or pause. A failed initial dispatch shows an error without changing
+the saved goal or creating a continuation; retry or resume remains explicit.
 
 The controller binds a user turn to a private goal revision. User edits, new user
 turns and Stop invalidate older continuations; Stop pauses the goal even between
 jobs. Runtime goal updates require the source job's authenticated owner and exact
 revision. Only a fresh user turn may reactivate an inactive goal through a goal
 update; automatic continuations cannot resume themselves. Workers cannot change
-the parent goal. A final team checkpoint can
+the parent goal. Verified automatic retries and browser hand-backs do not count
+as new user input. A final team checkpoint can
 inherit its planning job's binding; a planning receipt cannot continue the goal
 before that checkpoint.
 

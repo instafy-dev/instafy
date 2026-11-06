@@ -246,6 +246,74 @@ async fn only_a_fresh_authoritative_user_turn_can_resume_or_clear_an_inactive_go
 }
 
 #[tokio::test]
+async fn a_delayed_explicit_goal_start_cannot_overwrite_or_run_a_newer_goal() -> anyhow::Result<()>
+{
+    let pool = require_origin_test_pool("goal start snapshot").await?;
+    let mut db = pool.get().await?;
+    let tx = db.transaction().await?;
+    let fixture = GoalFixture::seed(&tx).await?;
+    let original = fixture.metadata.clone();
+    let project = crate::load_project_record(
+        &tx,
+        &fixture.payload["project_id"].as_str().unwrap().parse()?,
+    )
+    .await
+    .map_err(api_error)?;
+    let context = crate::auth::RequestContext {
+        user_id: Some(fixture.owner),
+        is_service_role: false,
+        scoped_claims: None,
+    };
+    for edit in ["pause", "clear", "replace", "edit"] {
+        let mut current = original.clone();
+        match edit {
+            "pause" => current["instafyGoal"]["status"] = json!("paused"),
+            "clear" => current["instafyGoal"] = Value::Null,
+            "replace" => current["instafyGoal"]["id"] = json!(Uuid::new_v4()),
+            _ => current["instafyGoal"]["updatedAt"] = json!("2026-11-06T12:00:00Z"),
+        }
+        tx.execute(
+            "update conversations set metadata=$2 where id=$1",
+            &[&fixture.conversation, &current],
+        )
+        .await?;
+        let mut request =
+            crate::dispatch::normalize_dispatch_request(serde_json::from_value(json!({
+                "projectId":project.id, "conversationId":fixture.conversation,
+                "promptText":"Start the previously saved goal",
+                "metadata":{"command":{"type":"goal"},"goal":original["instafyGoal"]},
+                "conversationMetadata":{"instafyGoal":original["instafyGoal"]}
+            }))?)
+            .map_err(api_error)?;
+        let conversation =
+            crate::conversations::ensure_conversation_record(&tx, &project, &mut request, &context)
+                .await
+                .map_err(api_error)?;
+        request.trigger = Some(crate::job_trigger::JobTrigger {
+            user_id: fixture.owner,
+            kind: None,
+            device_id: None,
+            received_at: None,
+        });
+        let error = super::bind_dispatch(&tx, &context, &conversation, &mut request)
+            .await
+            .expect_err("stale explicit start must not merge its snapshot or start work");
+        assert_eq!(error.0, axum::http::StatusCode::CONFLICT, "{edit}");
+        assert_eq!(fixture.metadata(&tx).await?, current, "{edit}");
+    }
+    // The same contract accepts the saved active goal, and unrelated human
+    // messages remain free to inspect or change a paused goal normally.
+    state::require_goal_command_snapshot(
+        &json!({"command":{"type":"goal"},"goal":original["instafyGoal"]}),
+        Some(&original),
+    )
+    .map_err(api_error)?;
+    state::require_goal_command_snapshot(&json!({}), Some(&original)).map_err(api_error)?;
+    tx.rollback().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn unchanged_client_goal_snapshot_preserves_the_running_jobs_binding() -> anyhow::Result<()> {
     let pool = require_origin_test_pool("unchanged goal snapshot").await?;
     let mut db = pool.get().await?;
@@ -660,11 +728,12 @@ async fn goal_scheduler_dispatches_once_across_crashes_before_and_after_dispatch
                 tx.commit().await?;
             }
             let context = crate::auth::RequestContext {user_id:Some(owner),is_service_role:false,scoped_claims:None};
-            let request = normalize_dispatch_request(serde_json::from_value(json!({
+            let mut request = normalize_dispatch_request(serde_json::from_value(json!({
                 "projectId": project, "conversationId": conversation,
                 "promptText": "Check the release checklist and continue until verified", "intent":"feature",
                 "metadata":{"clientMessageId":Uuid::new_v4(),"agentSelection":{"active":["octo"],"mentions":["octo"]},"writeScope":{"mode":"read_only"}}
             }))?).map_err(api_error)?;
+            request.trigger = crate::job_trigger::JobTrigger::of_send(&app.config, &context, &request.metadata);
             let response = process_dispatch_prompt(&app, &context, request).await.map_err(api_error)?;
             let source = response.job_id.ok_or_else(||anyhow::anyhow!("initial goal dispatch queued no job: {}",response.status))?;
             let wake = {
