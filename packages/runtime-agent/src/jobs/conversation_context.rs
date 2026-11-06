@@ -2401,15 +2401,20 @@ mod tests {
         }));
         failed.push(json!({"role": "user", "content": TIP, "runId": "run-10", "createdAt": "2026-11-05T22:57:00Z"}));
         assert!(leaves(&json!(failed), ThreadLane::Building, None));
-        let again = build_prompt_conversation_context(Some(&json!(failed)), None, ThreadLane::Building)
-            .section_text;
+        let again =
+            build_prompt_conversation_context(Some(&json!(failed)), None, ThreadLane::Building)
+                .section_text;
         assert!(again.contains(&stop_line(BEFORE_YOU_GO, &[])), "{again}");
         // The tip replied on its new thread, saved with the Stop it was started after: the next
         // turn resumes it. A state that still names the thread from before the Stop, as after a
         // team plan's turn kept it and replied, is left whatever replied since.
         chat.push(json!({"role": "assistant", "content": "Added a one-line tip.", "runId": "run-9", "createdAt": "2026-11-05T22:56:40Z", "metadata": {"jobId": "job-run-9"}}));
         chat.push(json!({"role": "user", "content": "Make the title bigger.", "runId": "run-10", "createdAt": "2026-11-05T22:57:00Z"}));
-        assert!(!leaves(&json!(chat), ThreadLane::Building, Some("2026-11-05T22:55:46Z")));
+        assert!(!leaves(
+            &json!(chat),
+            ThreadLane::Building,
+            Some("2026-11-05T22:55:46Z")
+        ));
         assert!(leaves(&json!(chat), ThreadLane::Building, None));
         // A later Stop of a turn on the new thread leaves it for that Stop.
         chat.push(stop_notice("run-10", "2026-11-05T22:57:10Z"));
@@ -2422,7 +2427,11 @@ mod tests {
             ),
             Some("2026-11-05T22:57:10Z")
         );
-        assert!(!leaves(&json!(chat), ThreadLane::Building, Some("2026-11-05T22:57:10Z")));
+        assert!(!leaves(
+            &json!(chat),
+            ThreadLane::Building,
+            Some("2026-11-05T22:57:10Z")
+        ));
     }
 
     /// A Stop between a browser turn and the build it hands back to (a local test, Nov 6: "Add
@@ -2462,10 +2471,7 @@ mod tests {
         ];
         let history = json!(chat);
         for lane in [ThreadLane::SharedBrowser, ThreadLane::Building] {
-            assert!(
-                leaves(&history, lane, None),
-                "{lane:?}"
-            );
+            assert!(leaves(&history, lane, None), "{lane:?}");
         }
         let text =
             build_prompt_conversation_context(Some(&history), None, ThreadLane::SharedBrowser)
@@ -2491,7 +2497,11 @@ mod tests {
             "card-9",
             "2026-11-06T09:55:00Z",
         ));
-        assert!(!leaves(&json!(chat), ThreadLane::SharedBrowser, Some("2026-11-06T09:51:15.4Z")));
+        assert!(!leaves(
+            &json!(chat),
+            ThreadLane::SharedBrowser,
+            Some("2026-11-06T09:51:15.4Z")
+        ));
     }
 
     /// A Stop of a request only the browser ran leaves the building thread, which never ran it,

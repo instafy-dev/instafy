@@ -24737,7 +24737,10 @@ mod tests {
         }
         assert_eq!(left_state["sharedBrowserThreadId"], browser);
         // The new thread is saved with the Stop it was started after.
-        assert_eq!(left_state[ThreadLane::Building.started_after_stop_key()], "run-2");
+        assert_eq!(
+            left_state[ThreadLane::Building.started_after_stop_key()],
+            "run-2"
+        );
         let (for_run, _) = provider_conversation_state_for_this_runtime(
             Some(left_state.clone()),
             ThreadLane::Building,
