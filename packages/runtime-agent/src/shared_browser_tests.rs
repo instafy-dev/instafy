@@ -85,7 +85,8 @@ const formEntriesFor = (arg) => ({
 // same, as written or with case, accents and spacing aside, and the list.
 const listOptions = () => mode === "bulk-actions"
   ? BULK_ACTIONS
-  : mode === "line-list" ? LINES : mode.startsWith("station-list") ? STATIONS : null;
+  : mode === "line-list" ? LINES : mode.startsWith("station-list") ? STATIONS
+  : mode === "planner-end-moved" ? MOVED_STATIONS : mode.startsWith("planner") ? STATIONS : null;
 const selectOptionsFor = (arg) => {
   const options = listOptions();
   if (!options) {
@@ -160,6 +161,15 @@ const special = {
   "plain-button": { description: control("Show details") },
   // The same button, with another control in its middle, where a click lands.
   "click-lands-inside": { description: control("Show details") },
+  // The same button under a cover: a cookie notice with no reject button, a
+  // dialog that is no notice, and a toast that fades within the click's settle.
+  "click-covered-by-notice": { description: control("Show details") },
+  "click-covered": { description: control("Show details") },
+  "click-cover-goes": { description: control("Show details") },
+  // A click Playwright fails with its call log: a plain failure, and one it
+  // gave up waiting on.
+  "click-playwright-log": { description: control("Show details") },
+  "click-times-out": { description: control("Show details") },
   // A cookie banner's refusal, and the same words where no banner is.
   "cookie-reject": { description: control("Reject all"), policy: { consentContext: true, areas: "dialog" } },
   "cookie-reject-pt": { description: control("Rejeitar todos"), policy: { consentContext: true, areas: "dialog" } },
@@ -592,9 +602,95 @@ const controlsFor = (targetId) => {
         expanded: "yes", area: "header; then press Allow" },
     ];
   }
+  // A control as the page describer reports it, with none of the default
+  // field's own names.
+  const plain = (fields) => ({
+    ...descriptionFor(targetId), ariaLabel: "", labels: "", placeholder: "", nameAttribute: "", idAttribute: "",
+    text: "", autocomplete: "", formAction: "", formMethod: "", formActionText: "", ...fields,
+    policy: { ...basePolicy, ...(fields.policy || {}) },
+  });
+  // A journey planner beside a carousel that shows one slide at a time, its
+  // dot marking the slide shown: "planner-turned" is the same page once the
+  // carousel moved on, which only moves the dot's class, "planner-end-moved"
+  // one whose End list also moved its options, and "planner-plan-moved" one
+  // whose button now sends the form to another address.
+  if (mode === "planner" || mode.startsWith("planner-")) {
+    const station = (label, options, shownText) => plain({
+      tag: "select", inputType: "", labels: label, text: options.join(""), shownText, optionCount: options.length,
+    });
+    const route = mode === "planner-plan-moved" ? "https://example.test/route-v2" : "https://example.test/route";
+    return [
+      station("Start", STATIONS, "Trindade"),
+      station("End", mode === "planner-end-moved" ? MOVED_STATIONS : STATIONS, "Aliados"),
+      plain({
+        tag: "input", inputType: "submit", text: "Plan Your Journey", valueAttribute: "Plan Your Journey", formMethod: "post",
+        formAction: route, formActionText: `form post ${route} Plan Your Journey`,
+        policy: { formActionUrl: route, formSubmission: "button", formSubmits: true,
+          formName: "Plan Your Journey", formSubmitLabels: "Plan Your Journey", formFieldCount: 2 },
+      }),
+      plain({
+        tag: "a", inputType: "", text: "1", href: "https://example.test/news/1",
+        policy: { href: "https://example.test/news/1", linkSelf: true, iconHint: mode === "planner" ? "dot active" : "dot" },
+      }),
+    ];
+  }
+  // Two copies of one planner's button (two forms alike) beside a dot that
+  // marks a carousel's slide: "twin-plans-turned" is the same page once the
+  // carousel moved on, and "twin-plans-first-gone" the page once the first
+  // copy went, so the second stands where the first was listed.
+  if (mode.startsWith("twin-plans")) {
+    const plan = () => plain({
+      tag: "input", inputType: "submit", text: "Plan Your Journey", valueAttribute: "Plan Your Journey", formMethod: "post",
+      formAction: "https://example.test/route", formActionText: "form post https://example.test/route Plan Your Journey",
+      policy: { formActionUrl: "https://example.test/route", formSubmission: "button", formSubmits: true,
+        formName: "Plan Your Journey", formSubmitLabels: "Plan Your Journey", formFieldCount: 2 },
+    });
+    const dot = plain({
+      tag: "a", inputType: "", text: "1", href: "https://example.test/news/1",
+      policy: { href: "https://example.test/news/1", linkSelf: true, iconHint: mode === "twin-plans" ? "dot active" : "dot" },
+    });
+    return mode === "twin-plans-first-gone" ? [plan(), dot] : [plan(), plan(), dot];
+  }
+  // A carousel of offers that shows one at a time, each with the same "Show
+  // details" button, and a dot that marks the offer shown:
+  // "carousel-offer-next" shows the next offer's look-alike in place (the dot
+  // moved, and the text around the button is another product's), and
+  // "carousel-offer-dot" only moved the dot.
+  if (mode.startsWith("carousel-offer")) {
+    return [
+      plain({ tag: "button", inputType: "button", text: "Show details" }),
+      plain({
+        tag: "a", inputType: "", text: "1", href: "https://example.test/offers",
+        policy: { href: "https://example.test/offers", linkSelf: true, iconHint: mode === "carousel-offer" ? "dot active" : "dot" },
+      }),
+    ];
+  }
+  // A cookie banner: its refusal, its accept and its settings, then a link of
+  // the page. "-no-reject" has no refusal, "-apart" a refusal in another part
+  // of the page, "-sign-in" a sign-in form below it, "-secret" a page that
+  // shows a secret, "-privacy" a dialog about a privacy policy with no word of
+  // cookies, "-payment-frame" a checkout whose card fields sit in a frame, and
+  // "-stays" a banner whose refusal took no press.
+  if (mode.startsWith("cookie-banner")) {
+    const banner = (text) => plain({ tag: "button", inputType: "button", text, area: "dialog",
+      policy: { consentContext: true, areas: "dialog" } });
+    return [
+      ...(mode === "cookie-banner-no-reject" ? [] : [banner("Reject all")]),
+      banner("Accept all"),
+      banner("Customize"),
+      plain({ tag: "a", inputType: "", text: "Opening hours", href: "https://example.test/hours",
+        policy: { href: "https://example.test/hours", linkSelf: true } }),
+      ...(mode === "cookie-banner-sign-in"
+        ? [plain({ tag: "input", inputType: "password", ariaLabel: "Password", labels: "Password",
+          autocomplete: "current-password", formMethod: "post", formAction: "https://example.test/session",
+          formActionText: "form post Sign in",
+          policy: { formHasPassword: true, formPasswordCount: 1, formFieldCount: 2 } })]
+        : []),
+    ];
+  }
   return [descriptionFor(targetId)];
 };
-const signalsFor = () => mode === "secret-screen" || mode === "station-list-secret-screen"
+const signalsFor = () => mode === "secret-screen" || mode === "station-list-secret-screen" || mode === "cookie-banner-secret"
   ? { credentialContext: true, secretField: true, secretCode: false, maskedNearReveal: false }
   : mode === "signals-fail"
     ? null
@@ -611,7 +707,7 @@ const bodyTextFor = (currentUrl, targetId) => {
     return `Script-written blank ${CANARY}`;
   }
   if (mode === "canary-text") return `Order note ${CANARY} for the fixture`;
-  if (mode === "secret-screen" || mode === "station-list-secret-screen") return `Production key ${CANARY}`;
+  if (mode === "secret-screen" || mode === "station-list-secret-screen" || mode === "cookie-banner-secret") return `Production key ${CANARY}`;
   // innerText also holds text a person cannot see, such as a collapsed menu.
   if (mode === "hidden-controls") return "Fixture page\nKontenplan";
   if (mode === "hidden-secret-text") return `Fixture page\nProduction key ${CANARY}`;
@@ -777,6 +873,14 @@ const makePage = (targetId, opened = null) => {
       if (mode === "click-error-canary") {
         throw new Error(`element <button data-key="${CANARY}"> is not attached to the DOM`);
       }
+      if (mode === "click-playwright-log") {
+        throw new Error("elementHandle.click: Element is not attached to the DOM\nCall log:\n\u001b[2m  - attempting click action\u001b[22m\n\u001b[2m    - <div class=\"notice\"> intercepts pointer events\u001b[22m");
+      }
+      if (mode === "click-times-out") {
+        const timeout = new Error("elementHandle.click: Timeout 15000ms exceeded.\nCall log:\n\u001b[2m  - <div class=\"notice\"> intercepts pointer events\u001b[22m\n\u001b[2m  - retrying click action, attempt #2\u001b[22m");
+        timeout.name = "TimeoutError";
+        throw timeout;
+      }
       // The tab or the browser closed while the click ran. Playwright's
       // client error keeps the plain name "Error".
       if (mode === "page-closed-during-click") {
@@ -824,6 +928,17 @@ const makePage = (targetId, opened = null) => {
       }
     },
   };
+  // Where a click on a control lands, look by look within one step: a toast
+  // over "click-cover-goes" fades after the step's second look.
+  let landingLooks = 0;
+  const landingFor = () => {
+    landingLooks += 1;
+    if (mode === "click-lands-inside") return { other: true };
+    if (mode === "click-covered-by-notice") return { other: false, covered: true, consent: true };
+    if (mode === "click-covered") return { other: false, covered: true, consent: false };
+    if (mode === "click-cover-goes" && landingLooks <= 2) return { other: false, covered: true, consent: false };
+    return { other: false };
+  };
   const handleAt = (ordinal) => ({
     ...handle,
     evaluate: async (_fn, arg) => arg && arg.kind === "form-entries"
@@ -834,12 +949,24 @@ const makePage = (targetId, opened = null) => {
           ? selectOptionsFor(arg)
         : arg && arg.kind === "click-landing"
           // Where a click lands: "click-lands-inside" is a control whose
-          // middle holds another control.
-          ? { other: mode === "click-lands-inside" }
+          // middle holds another control, and "click-covered*" one under a
+          // cover.
+          ? landingFor()
+        : arg && arg.kind === "cookie-banner"
+          // Whether a cookie banner's refusal sits with an accept, in a banner
+          // that speaks of cookies: "-privacy" is a dialog about a privacy
+          // policy, with no word of cookies.
+          ? mode.startsWith("cookie-banner") && mode !== "cookie-banner-apart" && mode !== "cookie-banner-privacy"
+        : arg && arg.kind === "control-gone"
+          // Whether the banner's refusal is gone after the press:
+          // "-stays" is a banner whose button took no press.
+          ? mode !== "cookie-banner-stays"
         : arg && arg.kind === "around-text"
           // The control's card: "around-changed-after-allow" shows another
           // product beside the same control once the person said yes.
-          ? { connected: true, around: mode === "around-changed-after-allow" && approvalWasConsumed()
+          // "carousel-offer-next" shows the next offer's look-alike button in place.
+          ? { connected: true, around: (mode === "around-changed-after-allow" && approvalWasConsumed()) ||
+              mode === "carousel-offer-next"
             ? "Red mug Add to cart" : "Blue mug Add to cart" }
           : controlsFor(targetId)[ordinal],
     click: async () => {
@@ -887,6 +1014,15 @@ const makePage = (targetId, opened = null) => {
         return { text, start: 0, end: text.length, above: 0, below: 0, more: false, scrollBy: null };
       }
       if (arg && arg.kind === "page-policy") return signalsFor();
+      // Whether a frame on the page names a payment, password or code field:
+      // "cookie-banner-payment-frame" is a checkout whose card fields sit in
+      // a payment provider's frame.
+      if (arg && arg.kind === "sensitive-frames") return mode === "cookie-banner-payment-frame";
+      // The text around each control, read in one call.
+      if (arg && arg.kind === "around-all") {
+        return Promise.all(arg.elements.map(async (element) =>
+          (await element.evaluate(undefined, { kind: "around-text" })).around));
+      }
       if (arg && arg.kind === "withheld-read") return Boolean(markPath && fs.existsSync(markPath));
       if (arg && arg.kind === "withheld-mark") {
         if (markPath) fs.writeFileSync(markPath, "withheld");
@@ -3945,10 +4081,10 @@ async fn a_page_that_keeps_changing_ends_that_page_not_the_run() {
 }
 
 /// The controller says so on stdout when the page changed under a step nobody
-/// was asked about (`pageChanged`): a page that drew more controls after the
-/// snapshot a click names, and a field a pause would highlight that changed.
-/// Through runtime-agent, the second such step in a row ends that page with
-/// "This page keeps changing", and the next source opens in the same run.
+/// was asked about (`pageChanged`): the field a click names relabelled after
+/// its snapshot, and a field a pause would highlight that changed. Through
+/// runtime-agent, the second such step in a row ends that page with "This page
+/// keeps changing", and the next source opens in the same run.
 #[tokio::test]
 async fn the_controller_says_when_the_page_changed_under_a_step() {
     let fixture = EmbeddedControllerFixture::new();
@@ -3970,13 +4106,14 @@ async fn the_controller_says_when_the_page_changed_under_a_step() {
             other => panic!("not a step's own failure: {other:?}"),
         };
 
-    // The page reads one way, then another: it keeps drawing.
+    // The page reads one way, then another: the field a click is for
+    // relabelled.
     let (first_look, _) = through_the_latch("sign-in-page", "GET", "/v1/snapshot", None).await;
     let (first, stdout) = through_the_latch(
-        "sign-in-page-drawn",
+        "sign-in-page-relabelled",
         "POST",
         "/v1/click",
-        Some(json!({ "index": 2, "snapshotId": snapshot_id(&first_look) })),
+        Some(json!({ "index": 0, "snapshotId": snapshot_id(&first_look) })),
     )
     .await;
     assert_eq!(
@@ -3984,7 +4121,7 @@ async fn the_controller_says_when_the_page_changed_under_a_step() {
         json!({"ok": false, "pageChanged": true})
     );
     assert!(
-        words(&first).contains("take a fresh snapshot before acting"),
+        words(&first).contains("\"Email\" changed after the snapshot this step names"),
         "{}",
         words(&first)
     );
@@ -6039,7 +6176,7 @@ fn a_sign_in_page_names_its_fields_and_says_to_pause_on_them() {
 /// now, each at its index with the same label and kind, so the turn pauses on
 /// both. A field that changed still fails the pause (its kind, or its label
 /// alone), as does a form that now sends elsewhere or the same form at another
-/// address of the site, and every step's own check of the whole page stays.
+/// address of the site.
 #[test]
 fn a_sign_in_page_that_draws_more_controls_after_it_loads_still_pauses_on_its_fields() {
     let fixture = EmbeddedControllerFixture::new();
@@ -6055,20 +6192,6 @@ fn a_sign_in_page_that_draws_more_controls_after_it_loads_still_pauses_on_its_fi
     );
     let snapshot_id = snapshot["snapshotId"].as_str().expect("snapshot id");
     let pause = json!({ "indices": [0, 1], "snapshotId": snapshot_id }).to_string();
-
-    // The page drew a passkey button under its form: a step on that snapshot
-    // is stale, as before.
-    let clicked = fixture.call(
-        "sign-in-page-drawn",
-        "POST",
-        "/v1/click",
-        Some(&json!({ "index": 2, "snapshotId": snapshot_id }).to_string()),
-    );
-    assert!(
-        failure_of(&clicked).contains("Shared Browser snapshot is stale"),
-        "{}",
-        failure_of(&clicked)
-    );
 
     // A field it would highlight changed (a one-time code where the password
     // was), or only its label did (a phone number where the email was), its
@@ -7362,6 +7485,300 @@ fn a_routine_start_chooses_a_station_by_its_label_without_a_prompt() {
     assert!(
         !fixture.approval_dir.join("request.json").exists(),
         "a click on a list asked"
+    );
+}
+
+/// A local test (Nov 5), the seventh with no metro route: `choose` set the planner's Start station,
+/// then `choose` End, with the snapshot that step returned, was refused as stale, and once more
+/// after a fresh snapshot, which ended the page. The planner had not changed: its 39 listed
+/// controls read the same in both snapshots, while the snapshot ids differed. The whole page's
+/// fingerprint holds what a reading does not show, such as a carousel's dots and the slide it
+/// shows, which turn by themselves. A step nobody is asked about is now judged by its own control,
+/// as a step the person said yes to already was: the End list goes ahead on a page whose carousel
+/// moved on since the snapshot, and an End list that changed itself is refused, by its name.
+#[test]
+fn a_step_nobody_is_asked_about_is_judged_by_its_own_control() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot = fixture.routine_snapshot("planner");
+    assert_eq!(snapshot["interactiveElements"][1]["label"], "End");
+    let snapshot_id = snapshot["snapshotId"]
+        .as_str()
+        .expect("snapshot id")
+        .to_string();
+    let choose = |mode: &str, snapshot_id: &str| {
+        let body =
+            json!({"index": 1, "snapshotId": snapshot_id, "option": "São Bento"}).to_string();
+        // "100" fails any prompt this step would publish as unanswered.
+        fixture
+            .command_for_with_timeout(
+                mode,
+                "page-target",
+                "POST",
+                "/v1/choose",
+                Some(&body),
+                "100",
+            )
+            .output()
+            .expect("choose")
+    };
+    // A choice made with the snapshot from before the carousel moved on goes ahead, asking
+    // nobody.
+    let chosen = payload_of(&choose("planner-turned", &snapshot_id));
+    assert_eq!(chosen["activity"]["step"], "choose");
+    assert_eq!(chosen["activity"]["approval"], "routine");
+    assert_eq!(
+        chosen_options(&fixture),
+        ["choose 1 {\"index\":4,\"label\":\"S\u{e3}o Bento\"}"]
+    );
+    assert!(
+        !fixture.approval_dir.join("request.json").exists(),
+        "choosing asked"
+    );
+    // The page did read differently: its snapshot id is another.
+    assert_ne!(chosen["snapshotId"], snapshot["snapshotId"]);
+
+    // A list that changed itself is refused by the name its snapshot gave it, nothing is
+    // chosen, and the step counts as one the page changed under.
+    let snapshot_id = fixture.routine_snapshot("planner")["snapshotId"]
+        .as_str()
+        .expect("snapshot id")
+        .to_string();
+    let moved = choose("planner-end-moved", &snapshot_id);
+    let stderr = failure_of(&moved);
+    assert!(
+        stderr.contains("\"End\" changed after the snapshot this step names, so nothing was done. Take a fresh snapshot, and do the step again if it still fits the request."),
+        "{stderr}"
+    );
+    assert_eq!(
+        serde_json::from_slice::<JsonValue>(&moved.stdout).expect("one JSON line"),
+        json!({"ok": false, "pageChanged": true})
+    );
+    assert_eq!(
+        chosen_options(&fixture).len(),
+        1,
+        "the moved list was chosen in"
+    );
+
+    // A snapshot of another address, or one no reading recorded, is judged whole, as before.
+    let unknown = choose("planner-turned", &"0".repeat(64));
+    assert!(failure_of(&unknown).contains("snapshot is stale"));
+}
+
+/// A carousel that turns shows the next offer's look-alike button where the snapshot showed the
+/// first one: the same name and the same fingerprint, around another product's text. A step
+/// nobody is asked about is judged by its control and the text around it, as a step the person
+/// said yes to is, so it is refused by its name, never done on the look-alike; a turn that only
+/// moved the carousel's dot leaves it standing.
+#[test]
+fn a_look_alike_a_carousel_shows_in_a_controls_place_is_not_it() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot = fixture.routine_snapshot("carousel-offer");
+    assert_eq!(snapshot["interactiveElements"][0]["label"], "Show details");
+    let body = json!({"index": 0, "snapshotId": snapshot["snapshotId"]}).to_string();
+    let swapped = routine_click(&fixture, "carousel-offer-next", &body);
+    let stderr = failure_of(&swapped);
+    assert!(
+        stderr.contains(
+            "\"Show details\" changed after the snapshot this step names, so nothing was done."
+        ),
+        "{stderr}"
+    );
+    assert_eq!(
+        serde_json::from_slice::<JsonValue>(&swapped.stdout).expect("one JSON line"),
+        json!({"ok": false, "pageChanged": true})
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        ""
+    );
+    let clicked = routine_click(&fixture, "carousel-offer-dot", &body);
+    payload_of(&clicked);
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "0\n"
+    );
+}
+
+/// A step that asks the person is judged by its own control too: its prompt is built from that
+/// control as it is now, and the control is checked again after the answer. The planner's button,
+/// which asks under routine browsing too since it sends the form, asks once with the snapshot from
+/// before the carousel moved on and is done (it was refused before it asked, uncounted, on every
+/// try while the carousel turned between a snapshot and the click). A button that changed itself
+/// asks nobody and is refused by its name, as one the page changed under.
+#[test]
+fn a_step_that_asks_is_judged_by_its_own_control_too() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot = fixture.routine_snapshot("planner");
+    let plan = snapshot["interactiveElements"][2].clone();
+    assert_eq!(plan["label"], "Plan Your Journey");
+    let body = json!({"index": 2, "snapshotId": snapshot["snapshotId"]}).to_string();
+    let (output, requests) = fixture.decide_prepared(
+        fixture.command_for(
+            "planner-turned",
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body),
+        ),
+        &["allow_once"],
+    );
+    payload_of(&output);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0]["operation"], "click");
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "2\n"
+    );
+
+    let snapshot = payload_of(&fixture.call("planner", "GET", "/v1/snapshot", None));
+    let body = json!({"index": 2, "snapshotId": snapshot["snapshotId"]}).to_string();
+    let (output, requests) = fixture.decide_prepared(
+        fixture.command_for(
+            "planner-plan-moved",
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body),
+        ),
+        &["allow_once"],
+    );
+    let stderr = failure_of(&output);
+    assert!(
+        stderr.contains(
+            "\"Plan Your Journey\" changed after the snapshot this step names, so nothing was done."
+        ),
+        "{stderr}"
+    );
+    assert!(
+        requests.is_empty(),
+        "the changed button asked: {requests:?}"
+    );
+    assert_eq!(
+        serde_json::from_slice::<JsonValue>(&output.stdout).expect("one JSON line"),
+        json!({"ok": false, "pageChanged": true})
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "2\n",
+        "the changed button was clicked"
+    );
+}
+
+/// Two copies of one form: the index a step names is all that tells which of two buttons alike it
+/// is for. Once the copy ahead of it went, its index names the other copy, which reads the same in
+/// every way a reading can tell, so the step asks nobody and is refused by its name, as a step
+/// after a yes never uses a twin. With both copies where they were and only a carousel moved on,
+/// the step asks and is done.
+#[test]
+fn a_step_on_one_of_two_alike_is_refused_once_one_went_ahead_of_it() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot = fixture.routine_snapshot("twin-plans");
+    assert_eq!(
+        snapshot["interactiveElements"][0]["label"],
+        "Plan Your Journey"
+    );
+    assert_eq!(
+        snapshot["interactiveElements"][1]["label"],
+        "Plan Your Journey"
+    );
+    let body = json!({"index": 0, "snapshotId": snapshot["snapshotId"]}).to_string();
+    let (output, requests) = fixture.decide_prepared(
+        fixture.command_for(
+            "twin-plans-first-gone",
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body),
+        ),
+        &["allow_once"],
+    );
+    let stderr = failure_of(&output);
+    assert!(
+        stderr.contains(
+            "\"Plan Your Journey\" changed after the snapshot this step names, so nothing was done."
+        ),
+        "{stderr}"
+    );
+    assert!(requests.is_empty(), "the step asked: {requests:?}");
+    assert_eq!(
+        serde_json::from_slice::<JsonValue>(&output.stdout).expect("one JSON line"),
+        json!({"ok": false, "pageChanged": true})
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "",
+        "the other copy was clicked"
+    );
+
+    let (output, requests) = fixture.decide_prepared(
+        fixture.command_for(
+            "twin-plans-turned",
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body),
+        ),
+        &["allow_once"],
+    );
+    payload_of(&output);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "0\n"
+    );
+}
+
+/// Through runtime-agent's count: a step whose own control changed counts, whether it asks the
+/// person or not, so two in a row end the page with "This page keeps changing"; a step that asks
+/// is never refused, uncounted, over a change elsewhere on the page, which would loop on a page
+/// that never holds still.
+#[tokio::test]
+async fn a_control_that_keeps_changing_ends_the_page_whether_its_step_asks_or_not() {
+    let fixture = EmbeddedControllerFixture::new();
+    let server = SharedBrowserMcpServer::new();
+    let snapshot = fixture.routine_snapshot("planner");
+    let snapshot_id = snapshot["snapshotId"]
+        .as_str()
+        .expect("snapshot id")
+        .to_string();
+    let words =
+        |result: &std::result::Result<JsonValue, SharedBrowserMcpExecutionFailure>| match result {
+            Err(SharedBrowserMcpExecutionFailure::Other(error)) => format!("{error:#}"),
+            other => panic!("not a step's own failure: {other:?}"),
+        };
+    let (first, stdout) = controller_command_through_the_latch(
+        &fixture,
+        &server,
+        "planner-plan-moved",
+        "POST",
+        "/v1/click",
+        Some(json!({"index": 2, "snapshotId": snapshot_id})),
+    )
+    .await;
+    assert!(
+        words(&first).contains("\"Plan Your Journey\" changed after the snapshot"),
+        "{}",
+        words(&first)
+    );
+    assert!(stdout.contains("pageChanged"), "{stdout}");
+    let (second, _) = controller_command_through_the_latch(
+        &fixture,
+        &server,
+        "planner-end-moved",
+        "POST",
+        "/v1/choose",
+        Some(json!({"index": 1, "snapshotId": snapshot_id, "option": "São Bento"})),
+    )
+    .await;
+    assert!(
+        words(&second).contains("This page keeps changing"),
+        "{}",
+        words(&second)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "",
+        "a changed control was used"
     );
 }
 
@@ -12020,6 +12437,174 @@ fn a_cookie_banners_accept_is_refused_without_a_prompt_even_as_a_link() {
             failure_of(&output).contains("[step_refused_consent]"),
             "{mode} routine start"
         );
+    }
+}
+
+/// A local test (Nov 5): a banner's "Reject" or "Reject all" was in five turns' readings and no turn pressed
+/// it; the line that told a turn to rested on the model following text. Instafy's browser now
+/// presses a banner's own refusal itself once the page settles, before Octo reads it: only beside
+/// an accept of the same banner, never the accept or the settings, and never on a page with a
+/// sign-in field or one that may show a secret. It asks nobody, the step's activity says so
+/// (`declined: "cookies"`, which Details lists), and the reading Octo gets is the page after it.
+#[test]
+fn the_browser_declines_a_cookie_banner_itself() {
+    let fixture = EmbeddedControllerFixture::new();
+    let (output, requests) = fixture.run_with_decisions(
+        "cookie-banner",
+        "page-target",
+        "GET",
+        "/v1/snapshot",
+        None,
+        &["https://example.test"],
+        &[],
+    );
+    let reading = payload_of(&output);
+    assert!(requests.is_empty(), "declining asked: {requests:?}");
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "0\n",
+        "only the banner's refusal was pressed"
+    );
+    assert_eq!(reading["activity"]["declined"], "cookies");
+    assert!(
+        fixture
+            .action_log()
+            .contains("\"type\":\"click\",\"label\":\"Decline cookies\""),
+        "{}",
+        fixture.action_log()
+    );
+    // A step that leaves the tab on such a page declines it too.
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_authority("page-target", &["https://example.test"]);
+    let opened = payload_of(&fixture.call(
+        "cookie-banner",
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://example.test/hours"}"#),
+    ));
+    assert_eq!(opened["activity"]["declined"], "cookies");
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "0\n"
+    );
+
+    // No refusal on the banner, a refusal apart from the accept, a page with a sign-in field,
+    // a page that may show a secret, a dialog about a privacy policy that never speaks of
+    // cookies (its "Decline" may close an account), and a checkout whose card fields sit in a
+    // payment provider's frame: nothing is pressed, and the activity says nothing.
+    for mode in [
+        "cookie-banner-no-reject",
+        "cookie-banner-apart",
+        "cookie-banner-sign-in",
+        "cookie-banner-secret",
+        "cookie-banner-privacy",
+        "cookie-banner-payment-frame",
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let output = fixture.run(mode, "GET", "/v1/snapshot", None);
+        let reading = payload_of(&output);
+        assert_eq!(
+            std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+            "",
+            "{mode} pressed something"
+        );
+        assert!(reading["activity"].get("declined").is_none(), "{mode}");
+    }
+
+    // A banner whose refusal took no press (its script not ready yet) is still up: the press
+    // happened, and the step does not say the banner was declined.
+    let fixture = EmbeddedControllerFixture::new();
+    let reading = payload_of(&fixture.run("cookie-banner-stays", "GET", "/v1/snapshot", None));
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "0\n"
+    );
+    assert!(reading["activity"].get("declined").is_none(), "{reading}");
+}
+
+/// A local test (Nov 5): a click under a tourism site's consent notice waited 16.4 s and came back with
+/// Playwright's own "Timeout 15000ms exceeded … intercepts pointer events", and the turn gave up.
+/// A click whose control something outside it covers is refused at once, in words: a cookie
+/// notice the browser could not decline says so and where to go next (never that it has no
+/// reject button, which one on a sign-in page or with a reject link has), any other cover says
+/// what to do, and Playwright's call log never reaches Octo. A cover that goes within the click's
+/// short settle, such as a toast that fades, is no refusal.
+#[test]
+fn a_covered_click_is_refused_at_once_in_words() {
+    use std::time::{Duration, Instant};
+    for (mode, words) in [
+        (
+            "click-covered-by-notice",
+            "A cookie notice covers this page, and the browser could not decline it: read on under it, or open the place's own site.",
+        ),
+        (
+            "click-covered",
+            "Something else on the page covers \"Show details\", so nothing was clicked. Take a fresh snapshot, and read on without it if it is still covered.",
+        ),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot = fixture.routine_snapshot(mode);
+        let body = json!({ "index": 0, "snapshotId": snapshot["snapshotId"] }).to_string();
+        let started = Instant::now();
+        let output = routine_click(&fixture, mode, &body);
+        assert!(started.elapsed() < Duration::from_secs(5), "{mode} waited");
+        let stderr = failure_of(&output);
+        assert!(stderr.contains(words), "{mode}: {stderr}");
+        assert!(!stderr.contains("Call log"), "{stderr}");
+        assert!(!stderr.contains("Timeout"), "{stderr}");
+        assert_eq!(
+            std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+            "",
+            "{mode} was clicked"
+        );
+    }
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot = fixture.routine_snapshot("click-cover-goes");
+    let body = json!({ "index": 0, "snapshotId": snapshot["snapshotId"] }).to_string();
+    payload_of(&routine_click(&fixture, "click-cover-goes", &body));
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "0\n"
+    );
+}
+
+/// A click under routine browsing, against the run `routine_snapshot` prepared: "100" fails any
+/// prompt it would publish as unanswered.
+fn routine_click(fixture: &EmbeddedControllerFixture, mode: &str, body: &str) -> Output {
+    fixture
+        .command_for_with_timeout(mode, "page-target", "POST", "/v1/click", Some(body), "100")
+        .output()
+        .expect("routine click")
+}
+
+/// Playwright's own errors carry a call log of every retry, in terminal colours and naming the
+/// page's markup. A failed step keeps only its first line, and an action Playwright gave up
+/// waiting on says so in words.
+#[test]
+fn a_failed_step_never_carries_playwrights_call_log() {
+    for (mode, words) in [
+        (
+            "click-playwright-log",
+            "Shared Browser command failed: elementHandle.click: Element is not attached to the DOM\n",
+        ),
+        (
+            "click-times-out",
+            "Shared Browser command failed: The page did not take this step in time, so it may not have happened. Take a fresh snapshot to see the page as it is now.\n",
+        ),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot = fixture.routine_snapshot(mode);
+        let body = json!({ "index": 0, "snapshotId": snapshot["snapshotId"] }).to_string();
+        let stderr = failure_of(&routine_click(&fixture, mode, &body));
+        assert!(stderr.contains(words), "{mode}: {stderr}");
+        for raw in [
+            "Call log",
+            "intercepts pointer events",
+            "retrying",
+            "\u{1b}",
+        ] {
+            assert!(!stderr.contains(raw), "{mode}: {stderr}");
+        }
     }
 }
 

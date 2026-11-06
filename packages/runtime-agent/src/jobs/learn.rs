@@ -520,6 +520,9 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // card's listed reads ask (`routed_omits`), and what page text may start and which pages end
     // a read moved from that section into "Core rules", which every browser turn reads.
     include_str!("legacy/browser-automation-v31.md"),
+    // From before Instafy's browser declined a page's cookie banner itself, so a turn no longer
+    // pressed a banner's reject button, or left one with none up, by a line of its own.
+    include_str!("legacy/browser-automation-v32.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,
