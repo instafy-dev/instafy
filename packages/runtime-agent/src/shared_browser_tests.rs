@@ -634,6 +634,23 @@ const controlsFor = (targetId) => {
       }),
     ];
   }
+  // Two copies of one planner's button (two forms alike) beside a dot that
+  // marks a carousel's slide: "twin-plans-turned" is the same page once the
+  // carousel moved on, and "twin-plans-first-gone" the page once the first
+  // copy went, so the second stands where the first was listed.
+  if (mode.startsWith("twin-plans")) {
+    const plan = () => plain({
+      tag: "input", inputType: "submit", text: "Plan Your Journey", valueAttribute: "Plan Your Journey", formMethod: "post",
+      formAction: "https://example.test/route", formActionText: "form post https://example.test/route Plan Your Journey",
+      policy: { formActionUrl: "https://example.test/route", formSubmission: "button", formSubmits: true,
+        formName: "Plan Your Journey", formSubmitLabels: "Plan Your Journey", formFieldCount: 2 },
+    });
+    const dot = plain({
+      tag: "a", inputType: "", text: "1", href: "https://example.test/news/1",
+      policy: { href: "https://example.test/news/1", linkSelf: true, iconHint: mode === "twin-plans" ? "dot active" : "dot" },
+    });
+    return mode === "twin-plans-first-gone" ? [plan(), dot] : [plan(), plan(), dot];
+  }
   // A carousel of offers that shows one at a time, each with the same "Show
   // details" button, and a dot that marks the offer shown:
   // "carousel-offer-next" shows the next offer's look-alike in place (the dot
@@ -7644,6 +7661,70 @@ fn a_step_that_asks_is_judged_by_its_own_control_too() {
         std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
         "2\n",
         "the changed button was clicked"
+    );
+}
+
+/// Two copies of one form: the index a step names is all that tells which of two buttons alike it
+/// is for. Once the copy ahead of it went, its index names the other copy, which reads the same in
+/// every way a reading can tell, so the step asks nobody and is refused by its name, as a step
+/// after a yes never uses a twin. With both copies where they were and only a carousel moved on,
+/// the step asks and is done.
+#[test]
+fn a_step_on_one_of_two_alike_is_refused_once_one_went_ahead_of_it() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot = fixture.routine_snapshot("twin-plans");
+    assert_eq!(
+        snapshot["interactiveElements"][0]["label"],
+        "Plan Your Journey"
+    );
+    assert_eq!(
+        snapshot["interactiveElements"][1]["label"],
+        "Plan Your Journey"
+    );
+    let body = json!({"index": 0, "snapshotId": snapshot["snapshotId"]}).to_string();
+    let (output, requests) = fixture.decide_prepared(
+        fixture.command_for(
+            "twin-plans-first-gone",
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body),
+        ),
+        &["allow_once"],
+    );
+    let stderr = failure_of(&output);
+    assert!(
+        stderr.contains(
+            "\"Plan Your Journey\" changed after the snapshot this step names, so nothing was done."
+        ),
+        "{stderr}"
+    );
+    assert!(requests.is_empty(), "the step asked: {requests:?}");
+    assert_eq!(
+        serde_json::from_slice::<JsonValue>(&output.stdout).expect("one JSON line"),
+        json!({"ok": false, "pageChanged": true})
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "",
+        "the other copy was clicked"
+    );
+
+    let (output, requests) = fixture.decide_prepared(
+        fixture.command_for(
+            "twin-plans-turned",
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body),
+        ),
+        &["allow_once"],
+    );
+    payload_of(&output);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "0\n"
     );
 }
 

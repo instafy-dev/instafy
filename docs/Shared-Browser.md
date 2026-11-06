@@ -1654,7 +1654,10 @@ it gave it, and a step goes ahead when the address and the tab are the same
 and the control at its index has the fingerprint and the text around it that
 reading recorded, the check a step already gets after the person says yes
 (below): a look-alike a carousel shows in its place, around another product's
-text, is not it. A step that asks the person is judged the same way: its
+text, is not it. The controls that look like it (the same fingerprint: two
+copies of one form, one button in every row) must also be where the reading
+listed them, since with one of them gone or a new one ahead of it the index
+names another, which neither fingerprint nor text tells apart. A step that asks the person is judged the same way: its
 prompt is built from that control as it is now, and the control is checked
 again after the answer, so a planner's button that sends its form asks once
 however often a carousel beside it turns. A control that changed is refused
@@ -1689,9 +1692,7 @@ labels, its row), when that is a small part of the page. So a look-alike shown
 in its place (a shop carousel's next "Add to cart"), another order in the
 address, or another product drawn beside it in place is never taken for it. A
 control the page drew again in its place stands for it only on a page that
-reads exactly as Octo's snapshot did, or when it is the control that
-snapshot's reading recorded at its index, with the same fingerprint and the
-same text around it. The run's authority is read again last,
+reads exactly as Octo's snapshot did. The run's authority is read again last,
 so a take-over or a new run still ends the step there, and the step stays on
 its tab and its site. A control that changed is not used: the step fails
 without ending the run, and Octo takes a fresh snapshot and, if the step still

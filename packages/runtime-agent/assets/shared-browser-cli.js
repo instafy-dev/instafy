@@ -3353,7 +3353,9 @@ async function emitNavigationResult(page) {
 // the address and the tab are the same, and the control at that index has
 // the fingerprint and the text around it the reading recorded for it (a
 // look-alike that a carousel shows in its place, another product's "Add to
-// cart", is not it): the check a step gets after the person says yes
+// cart", is not it), and the controls that look like it are where the reading
+// listed them (alikeInPlace: with one of two copies of a form gone, the index
+// names the other): the check a step gets after the person says yes
 // (approvedTarget). A step that asks the person is judged the same way: its
 // prompt is built from that control as it is now, and approvedTarget checks
 // it again after the answer. A control that is not as the reading showed it
@@ -3365,19 +3367,20 @@ async function targetLocator(page, body) {
   const target = interactive[body.index];
   const place = target ? await controlPlace(target.locator) : null;
   if (body.snapshotId !== snapshotFingerprint(page.url(), interactive)) {
-    const read = recordedControl(page, body);
-    if (read === null) {
+    const reading = recordedReading(page, body);
+    if (!reading) {
       pageChangedUnderStep = true;
       throw new Error(
         "Shared Browser snapshot is stale; take a fresh snapshot before acting",
       );
     }
+    const read = reading.controls[body.index];
     if (!read) {
       throw new Error(
         `Shared Browser element index ${body.index} is unavailable; take a fresh snapshot`,
       );
     }
-    if (!asRecorded(read, target, place)) {
+    if (!asRecorded(read, target, place) || !alikeInPlace(reading, read, interactive)) {
       pageChangedUnderStep = true;
       throw new Error(
         `${read.name ? `"${read.name}"` : "The control this step is for"} changed after the snapshot this step names, so nothing was done. Take a fresh snapshot, and do the step again if it still fits the request.`,
@@ -3395,20 +3398,15 @@ async function targetLocator(page, body) {
   };
 }
 
-// What the latest reading recorded (recordObservedControls) for the control at
-// a step's index, when that reading is the step's own snapshot, of this tab at
-// this address: null when there is no such reading, undefined when it listed
-// no control there.
-function recordedControl(page, body) {
+// The latest reading recorded (recordObservedControls), when it is the step's
+// own snapshot, of this tab at this address; null otherwise.
+function recordedReading(page, body) {
   const reading = approvalProtocol.observedControls(body.snapshotId);
-  if (
-    !reading ||
-    reading.pageId !== activePageId ||
-    reading.address !== approvalProtocol.sha256(page.url())
-  ) {
-    return null;
-  }
-  return reading.controls[body.index];
+  return reading &&
+    reading.pageId === activePageId &&
+    reading.address === approvalProtocol.sha256(page.url())
+    ? reading
+    : null;
 }
 
 // Whether `target`, with the text around it `place` (controlPlace), is the
@@ -3416,11 +3414,26 @@ function recordedControl(page, body) {
 // when the reading could tell.
 function asRecorded(read, target, place) {
   return Boolean(
-    read &&
     target &&
     targetFingerprint(target.description) === read.target &&
     (read.around === null || (place && approvalProtocol.sha256(place.around) === read.around)),
   );
+}
+
+// Whether the controls that look like the step's own (the same fingerprint:
+// two copies of one form, one button in every row) are where the reading
+// listed them. When one came or went ahead of it, its index may name another
+// of them, which neither its fingerprint nor the text around it tells apart.
+function alikeInPlace(reading, read, interactive) {
+  const listed = [];
+  reading.controls.forEach((control, index) => {
+    if (control.target === read.target) listed.push(index);
+  });
+  const now = [];
+  interactive.forEach(({ description }, index) => {
+    if (targetFingerprint(description) === read.target) now.push(index);
+  });
+  return listed.length === now.length && listed.every((index, at) => index === now[at]);
 }
 
 // After the person's answer, the step acts on the control they were asked
@@ -3429,13 +3442,12 @@ function asRecorded(read, target, place) {
 // shown, on the same address (its fragment too, which some sites keep their
 // page in), with the same text around it (aroundTextInPage: its card, its
 // form's labels), so a product, an order or a total that changed beside it is
-// asked about again. A control the page drew again in its place stands for it
-// only on a page that reads exactly as Octo's snapshot did, or when it is the
-// control that snapshot's reading recorded at that index (targetLocator's own
-// check). Anything else is not used (controlChanged). The run's authority is
-// read again last, so a take-over or a new run still ends the step there.
-// `around: false` leaves the text around it out, for the check right after
-// the step's own focus, which may open a list beside a field.
+// asked about again. A control the page drew again in its place stands for it only
+// on a page that reads exactly as Octo's snapshot did. Anything else is not
+// used (controlChanged). The run's authority is read again last, so a
+// take-over or a new run still ends the step there. `around: false` leaves
+// the text around it out, for the check right after the step's own focus,
+// which may open a list beside a field.
 async function approvedTarget(page, body, asked, { around = true } = {}) {
   const place = await controlPlace(asked.locator);
   let target = null;
@@ -3445,15 +3457,9 @@ async function approvedTarget(page, body, asked, { around = true } = {}) {
     target = description ? { locator: asked.locator, description } : null;
   } else {
     const interactive = await collectInteractiveElements(page);
-    const redrawn = interactive[body.index];
-    const redrawnPlace = redrawn ? await controlPlace(redrawn.locator) : null;
-    if (
-      redrawn &&
-      (body.snapshotId === snapshotFingerprint(page.url(), interactive) ||
-        asRecorded(recordedControl(page, body), redrawn, redrawnPlace))
-    ) {
-      target = redrawn;
-      placeNow = redrawnPlace;
+    if (body.snapshotId === snapshotFingerprint(page.url(), interactive) && interactive[body.index]) {
+      target = interactive[body.index];
+      placeNow = await controlPlace(target.locator);
     }
   }
   if (

@@ -1695,7 +1695,9 @@ given another field, and the twin left once the one asked about went are not
 used: the step fails without a terminal code, says it asks the person again,
 and its failed command lists their yes and says it went unused (runtime-agent
 ends the run at the second, which its unit tests cover); asked again, the new
-prompt names the form as it is now. A take-over while the prompt waits still
+prompt names the form as it is now. The twin left once the copy Octo read went
+before the step is not used either: nobody is asked, and the step is refused
+by its name as one the page changed under. A take-over while the prompt waits still
 ends the step, and a page that left its site after the yes ends the run with
 `approval_stale`.
 

@@ -497,6 +497,21 @@ export async function runSharedBrowserAllowedStepFixture() {
       askedAgain(await runTool("POST", "/v1/click", control(planned, "Plan your journey", 0), ["allow_once"], () =>
         runPage.evaluate(() => document.querySelector("form").remove())), "the twin left");
     });
+    // The same before anyone is asked: the copy Octo read went, so its index
+    // names the other copy, which reads the same. The step asks nobody and is
+    // refused as one the page changed under.
+    await check("the twin left after the one Octo read went, before the step", async () => {
+      const planned = await openPlanner("?twice=1");
+      requests.length = 0;
+      const askedBefore = prompts.length;
+      await runPage.evaluate(() => document.querySelector("form").remove());
+      const result = await runTool("POST", "/v1/click", control(planned, "Plan your journey", 0), ["allow_once"]);
+      assert.equal(result.code, 1, `the step ran: ${result.stdout}`);
+      assert.match(result.stderr, /"Plan your journey" changed after the snapshot this step names, so nothing was done\./u);
+      assert.deepEqual(JSON.parse(result.stdout), { ok: false, pageChanged: true });
+      assert.equal(prompts.length, askedBefore, "the step asked");
+      assert.deepEqual(sent(), [], "something was sent");
+    });
     await check("the second of two alike on an unchanged page", async () => {
       const planned = await openPlanner("?twice=1");
       requests.length = 0;
@@ -543,7 +558,7 @@ export async function runSharedBrowserAllowedStepFixture() {
         "typing that sends the form and Enter in a field run the same way while the page changes",
         "a control swapped for another, a form sent elsewhere, the page's address or fragment moved (an app that went to another order in its fragment), a shop carousel's hidden look-alike, another product drawn beside the control in place, a countdown inside its form and a form given another field while the prompt waits are not used: the step fails without ending the run, says it asks again, lists the person's yes and says it went unused",
         "asked again, the step's new prompt names the form as it is now, and the yes sends it",
-        "of two controls alike, the one asked about is used once the page changed or a look-alike appeared ahead of it, and on an unchanged page; never its twin once it went",
+        "of two controls alike, the one asked about is used once the page changed or a look-alike appeared ahead of it, and on an unchanged page; never its twin once it went, after the yes or before anyone is asked",
         "a take-over while the prompt waits ends the step, and a yes then does nothing",
         "a page that left its site after the yes ends the run with the stale code, and the failed command lists the yes",
       ],
