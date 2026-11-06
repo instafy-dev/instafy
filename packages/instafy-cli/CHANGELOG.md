@@ -1,5 +1,15 @@
 # @instafy/cli
 
+## 0.5.7
+
+### Patch Changes
+
+- d026d3e: `instafy preview check` no longer records a picture it could not take (a blank page, one that never said it was ready) as the site's last picture. When Octo's own check after a change keeps no picture, the card still has its picture of the site from before the change, so the check Instafy runs at the end of the turn looks at the site again, and the card takes a new picture or drops the old one.
+- a480628: Require a text match in conversation search so unmatched queries return no results and title-based show cannot open an unrelated recent conversation.
+- 71b1bf3: On a page made from the blank starter, each block the page puts straight in its list keeps the theme's gap above it, so two cards one under the other no longer touch, while a button, a picture or a sentence with a link there keeps its own size and line. The other starters, which put one block there, look as they did, and a page made before keeps its own copy of `theme.css`. `instafy runtime start` runs a Docker runtime under an init, as the runtime Compose files do, so the processes the agent's tools leave behind (git's helpers, the browser's) are reaped instead of piling up.
+- dc25791: `instafy web search` runs in a turn with no time limit again: the runtime gives such a turn a start and no deadline, which the command took for no turn at all, so nothing was searched. Such a turn lasts while the folder the runtime made for its job is there, so a process left over from it cannot search once the job has ended. A site a turn starts to outlive it (`instafy preview open --start`, `instafy bind serve --detach`) no longer carries the turn's `INSTAFY_TURN_*` values, so it is never taken for the turn.
+- 1327250: On a page of options, a value the page that was read does not give now reads "Not found · checked 17 Oct on maker.com ↗", saying where it was looked for, instead of "Not listed", which said the page lacks it. On a phone, such a value is named once, in its card's "Not found yet" line, with the page it was looked for on ("Weight (checked 17 Oct on maker.com ↗)"). A store page whose price a live check cannot find says "price not found on the shop.example page", and `instafy bind check`'s hint for a value that says nothing gives that wording too. Pages made before keep their own copy of `site.js` and `app.js`.
+
 ## 0.5.6
 
 ### Patch Changes
