@@ -400,10 +400,10 @@
     };
     // looked for and not found: the source was read and the value was not found on it ("Not found · checked 16 Oct on
     // maker.com ↗"); the link to the page that was read stays even when the source is named once for the column (then
-    // without the date)
+    // without the date). It says when the page was checked, never "seen", a price's word for one a page showed.
     var notFoundOn = function (note, src, url, fact) {
       add((opts.label ? opts.label + " not found" : "Not found") + (usefulNote(note) ? " · " + usefulNote(note) : ""));
-      if (fact && !opts.shared) citeParts(fact, { price: opts.price }).forEach(add);
+      if (fact && !opts.shared) citeParts({ src: fact.src, url: fact.url, date: fact.date }).forEach(add);
       else if (safeUrl(url)) add(link(url, host(url) || src));
       else if (src) add(src);
     };

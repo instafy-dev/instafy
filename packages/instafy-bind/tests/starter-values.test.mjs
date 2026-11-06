@@ -350,6 +350,9 @@ test("compare: no cell is blank or a dash, and every value cites its page and da
   assert.equal((silent.match(/Not found ·/g) || []).length, 3, `the maker's page was read and none of the three was found there: ${silent}`);
   assert.doesNotMatch(silent, /Not listed/, silent);
   assert.match(silent, /checked 27 Oct( 2026)? on maker\.example ↗/);
+  // a price not found was checked there, never "seen": "Not found · seen 27 Oct" read as a price someone saw
+  assert.equal((silent.match(/Not found · checked 27 Oct( 2026)? on maker\.example ↗/g) || []).length, 3, silent);
+  assert.doesNotMatch(silent, /Not found · seen/, silent);
   const blocked = rowText(document, "option:blocked");
   assert.match(blocked, /Unknown · shop-two\.example blocks automated price checks/, blocked);
   assert.match(blocked, /Open Shop Two ↗/);
