@@ -316,7 +316,11 @@ export type TurnStep = {
 export type DetailItem =
   | { kind: "step"; id: string; step: TurnStep }
   | { kind: "update"; id: string; message: ChatMessage }
-  /** A browser prompt the person answered, or left: "You allowed a search on visitlisboa.com". */
+  /**
+   * A browser prompt the person answered, or left: "You allowed a search on
+   * visitlisboa.com". Also what the browser did on its own during a step,
+   * for the person's privacy: "Declined cookies on frame.work".
+   */
   | { kind: "approval"; id: string; text: string };
 
 export type BrowserApprovalOutcome = "allowed" | "denied" | "expired";
@@ -1001,6 +1005,22 @@ export function isBrowserToolStep(step: Pick<TurnStep, "kind" | "message" | "act
   return BROWSER_TOOL_SERVERS.has(server);
 }
 
+/**
+ * What the browser did on its own during a browser step that worked, each as
+ * a row of its own after the step in Details ("Declined cookies on
+ * frame.work"): the step's quiet `also` entries, which the line never names.
+ */
+function browserOwnRows(step: TurnStep, key: string): DetailItem[] {
+  if (step.state !== "done" || !step.activity || !isBrowserToolStep(step)) {
+    return [];
+  }
+  return step.activity.also.flatMap((entry): DetailItem[] =>
+    entry.role === "quiet" && entry.done
+      ? [{ kind: "approval", id: `${key}:${entry.key}`, text: capitalize(doneWords(entry.done, entry.count, entry.host)) }]
+      : [],
+  );
+}
+
 function isBrowserTabsStep(entry: ActivityEntry | null): boolean {
   return Boolean(entry?.key.startsWith("browser/") && entry.step === "tabs");
 }
@@ -1419,15 +1439,16 @@ export function summarizeTurnActivity(
     }
     const step = steps[stepIndexByKey.get(item.key) ?? 0];
     const approval = step.state === "running" ? null : stepAnsweredApproval(step.activity);
+    const own = browserOwnRows(step, item.key);
     if (!approval) {
-      return [{ kind: "step", id: item.key, step }];
+      return [{ kind: "step", id: item.key, step }, ...own];
     }
     answered.push(approval);
     const answer: DetailItem = { kind: "approval", id: `approval:${item.key}`, text: capitalize(approvalWords(approval, null)) };
     // A step the person said no to, or left, did not happen: its answer is
     // its one row ("You said no to a click on httpbin.org"), never also a
     // step that was tried.
-    return approval.outcome === "allowed" ? [{ kind: "step", id: item.key, step }, answer] : [answer];
+    return approval.outcome === "allowed" ? [{ kind: "step", id: item.key, step }, answer, ...own] : [answer];
   });
   if (answered.length === 0) {
     for (const approval of options.approvals ?? []) {

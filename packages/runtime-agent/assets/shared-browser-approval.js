@@ -12,6 +12,11 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
   // The most fields a snapshot's record keeps (observedFields): a pause on
   // fields further down the page checks the whole page instead.
   const MAX_OBSERVED_FIELDS = 64;
+  // The latest reading's controls (observedControls): as many as a reading
+  // lists, each a fingerprint and its name as the reading gave it, cut.
+  const MAX_OBSERVED_CONTROLS = 200;
+  const MAX_OBSERVED_CONTROL_NAME_CHARS = 80;
+  const OBSERVED_CONTROLS_MAX_BYTES = 128 * 1024;
   const MAX_APPROVED_ORIGINS = 32;
   // A site the person declined stays closed for the rest of the run, without
   // another prompt. The first site declined in a run leaves the run going, so
@@ -71,6 +76,9 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     // The editable fields of Octo's latest snapshot of the page the person
     // chose, so a pause on fields checks only the fields it highlights.
     "observed-fields.json",
+    // The controls of Octo's latest reading of a page, in any tab, so a step
+    // nobody is asked about is judged by its own control.
+    "observed-controls.json",
     // The tabs Octo opened in this run, each with its number and its own site
     // approvals.
     "tabs.json",
@@ -413,6 +421,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     const statePath = path.join(approvalDir, "state.json");
     const withholdPath = path.join(approvalDir, "withhold-next.json");
     const observedFieldsPath = path.join(approvalDir, "observed-fields.json");
+    const observedControlsPath = path.join(approvalDir, "observed-controls.json");
 
     function readAuthority(expected = null) {
       const marker = exactObject(
@@ -993,6 +1002,98 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       );
     }
 
+    // The controls Octo's latest reading of a page listed, in any tab: the
+    // reading's snapshot id, a fingerprint of the page's address and the tab
+    // it is in, and each control's fingerprint (`target`) with its name as
+    // the reading gave it (`name`), by index. A step nobody is asked about is
+    // judged by its own control against this, so a carousel's next slide or
+    // a clock elsewhere on the page leaves it standing. Run-scoped like the
+    // rest of the directory, and only the latest reading is kept.
+    function recordObservedControls(snapshotId, reading) {
+      if (
+        typeof snapshotId !== "string" ||
+        !HEX_64_PATTERN.test(snapshotId) ||
+        !reading ||
+        typeof reading.address !== "string" ||
+        !HEX_64_PATTERN.test(reading.address) ||
+        typeof reading.pageId !== "string" ||
+        !PAGE_ID_PATTERN.test(reading.pageId) ||
+        byteLength(reading.pageId) > MAX_PAGE_ID_BYTES ||
+        !Array.isArray(reading.controls) ||
+        reading.controls.length > MAX_OBSERVED_CONTROLS ||
+        reading.controls.some(
+          (entry) =>
+            !entry ||
+            typeof entry.target !== "string" ||
+            !HEX_64_PATTERN.test(entry.target) ||
+            typeof entry.name !== "string",
+        )
+      ) {
+        fail("approval_protocol_invalid", "Shared Browser observed controls are out of bounds");
+      }
+      const authority = readAuthority(initialAuthority);
+      atomicWriteJson(
+        observedControlsPath,
+        {
+          version: 1,
+          ...authority,
+          snapshotId,
+          address: reading.address,
+          pageId: reading.pageId,
+          controls: reading.controls.map(({ target, name }) => ({
+            target,
+            name: Array.from(name).slice(0, MAX_OBSERVED_CONTROL_NAME_CHARS).join(""),
+          })),
+        },
+        OBSERVED_CONTROLS_MAX_BYTES,
+      );
+    }
+
+    // The reading recorded for `snapshotId`: `{address, pageId, controls}`,
+    // or null when there is none (none yet, another reading's, or one this
+    // run cannot read). A step then checks the whole page, as before.
+    function observedControls(snapshotId) {
+      const authority = readAuthority(initialAuthority);
+      let raw;
+      try {
+        raw = readJson(observedControlsPath, OBSERVED_CONTROLS_MAX_BYTES, false);
+      } catch (_) {
+        return null;
+      }
+      if (
+        raw === null ||
+        typeof raw !== "object" ||
+        Array.isArray(raw) ||
+        Object.keys(raw).length !== 9 ||
+        raw.version !== 1 ||
+        Object.keys(authority).some((key) => raw[key] !== authority[key]) ||
+        raw.snapshotId !== snapshotId ||
+        typeof raw.address !== "string" ||
+        !HEX_64_PATTERN.test(raw.address) ||
+        typeof raw.pageId !== "string" ||
+        !PAGE_ID_PATTERN.test(raw.pageId) ||
+        !Array.isArray(raw.controls) ||
+        raw.controls.length > MAX_OBSERVED_CONTROLS ||
+        raw.controls.some(
+          (entry) =>
+            !entry ||
+            typeof entry !== "object" ||
+            Object.keys(entry).length !== 2 ||
+            typeof entry.target !== "string" ||
+            !HEX_64_PATTERN.test(entry.target) ||
+            typeof entry.name !== "string" ||
+            entry.name.length > 4 * MAX_OBSERVED_CONTROL_NAME_CHARS,
+        )
+      ) {
+        return null;
+      }
+      return {
+        address: raw.address,
+        pageId: raw.pageId,
+        controls: raw.controls.map(({ target, name }) => ({ target, name })),
+      };
+    }
+
     // The fields recorded for `snapshotId` as a map of index to fingerprint,
     // or null when there is no such record (none yet, another snapshot's, or
     // one this run cannot read): the pause then checks the whole page.
@@ -1144,6 +1245,8 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       recordObservedFields,
       observedFields,
       maxObservedFields: MAX_OBSERVED_FIELDS,
+      recordObservedControls,
+      observedControls,
       didNotAnswerRecently,
       rememberUnanswered,
       maxLabelBytes: MAX_LABEL_BYTES,

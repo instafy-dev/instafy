@@ -498,6 +498,9 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // make, a second findings format, a third copy of how a list is set and a building turn's
     // card (`no_shell_omits`) left what a browser turn reads.
     include_str!("legacy/browser-automation-v29.md"),
+    // From before Instafy's browser declined a page's cookie banner itself, so a turn no longer
+    // pressed a banner's reject button, or left one with none up, by a line of its own.
+    include_str!("legacy/browser-automation-v30.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,

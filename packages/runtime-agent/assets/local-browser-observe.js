@@ -132,7 +132,21 @@ async function main() {
   }
 }
 
+// What a failed observation says, as the Shared Browser's failed steps say
+// it: a Playwright error carries a stack and a call log of every retry, in
+// terminal colours and naming the page's markup, which never reach Octo; only
+// the error's first line does, and a wait Playwright gave up on says so in
+// words.
+function failureText(error) {
+  if (error && error.name === "TimeoutError") {
+    return "The page did not answer in time, so nothing was observed.";
+  }
+  const message = error && error.message ? String(error.message) : String(error);
+  // eslint-disable-next-line no-control-regex
+  return message.replace(/\u001b\[[0-9;]*m/gu, "").split("\n")[0].trim();
+}
+
 main().catch((error) => {
-  process.stderr.write(`${error?.stack || error}\n`);
+  process.stderr.write(`${failureText(error)}\n`);
   process.exitCode = 1;
 });

@@ -257,6 +257,16 @@ const BROWSER_REFUSED_PRIVATE: BuiltinLabel = BuiltinLabel {
     live: "Entering private details on {host}",
     done: None,
 };
+// What the browser did on its own during a step (the controller's `declined`, kept by
+// shared_browser_activity): it declined the page's cookie banner. It rides along with the step's
+// own label, Details lists it after the step ("Declined cookies on frame.work"), and the line never
+// names it.
+const BROWSER_DECLINED_COOKIES: BuiltinLabel = BuiltinLabel {
+    key: "browser/declined-cookies",
+    role: ActivityRole::Quiet,
+    live: "Declining cookies on {host}",
+    done: single("declined cookies on {host}"),
+};
 const TOOL: BuiltinLabel = BuiltinLabel {
     key: "tool/use",
     role: ActivityRole::Content,
@@ -1585,7 +1595,18 @@ pub fn browser_step_activity(step: &JsonValue) -> Option<JsonValue> {
             activity.insert(field.into(), value.clone());
         }
     }
-    activity.insert("also".into(), JsonValue::Array(Vec::new()));
+    // What the browser did on its own during the step rides along with it, on the step's site:
+    // the line never names it, and Details lists it after the step.
+    let mut also = Vec::new();
+    if let Some(host) = host
+        && facts.get("declined").and_then(JsonValue::as_str)
+            == Some(crate::shared_browser_activity::DECLINED_COOKIES)
+    {
+        let mut declined = Found::builtin(&BROWSER_DECLINED_COOKIES, Some(1)).entry_json();
+        declined.insert("host".into(), JsonValue::from(host));
+        also.push(JsonValue::Object(declined));
+    }
+    activity.insert("also".into(), JsonValue::Array(also));
     check_activity(&JsonValue::Object(activity))
 }
 
@@ -2637,6 +2658,43 @@ mod tests {
         let unnamed =
             browser_step_activity(&json!({"step": "click", "refused": "consent"})).unwrap();
         assert_eq!(unnamed["key"], json!("browser/use"));
+    }
+
+    // A local test (Nov 5): banners' "Reject all" and "Reject" were listed in five turns and
+    // pressed in none. The browser now declines a page's banner itself while it reads the page; Details says
+    // "Declined cookies on frame.work" after the step, and the step keeps its own label and its
+    // place on the line.
+    #[test]
+    fn a_banner_the_browser_declined_rides_along_with_its_step() {
+        let opened = browser_step_activity(&json!({
+            "step": "navigate", "host": "frame.work", "pageKey": "0123456789abcdef", "declined": "cookies",
+        }))
+        .expect("labelled");
+        assert_eq!(opened["key"], json!("browser/open"));
+        assert_eq!(opened["role"], json!("content"));
+        assert_eq!(
+            opened["also"],
+            json!([{
+                "key": "browser/declined-cookies",
+                "role": "quiet",
+                "live": "Declining cookies on {host}",
+                "done": "declined cookies on {host}",
+                "count": 1,
+                "host": "frame.work",
+            }])
+        );
+        // The word is not itself part of the activity, and only the controller's own word counts.
+        assert!(opened.get("declined").is_none());
+        for facts in [
+            json!({"step": "navigate", "host": "frame.work", "declined": "Reject all"}),
+            json!({"step": "navigate", "host": "frame.work", "declined": true}),
+            json!({"step": "navigate", "host": "frame.work"}),
+            // With no site known, there is no site to name.
+            json!({"step": "navigate", "declined": "cookies"}),
+        ] {
+            let activity = browser_step_activity(&facts).expect("labelled");
+            assert_eq!(activity["also"], json!([]), "{facts}");
+        }
     }
 
     // A browser step that did not happen (the person said no, no answer came, a link-only site,

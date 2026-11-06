@@ -456,6 +456,33 @@ Two steps never ask, in Ask too:
   must not be a link or send a form, and its step lets no form post leave the
   tab, not even to the page's own site. The same words outside a banner (a
   document editor's "Reject all") still ask.
+- **The browser declines a banner itself.** Before Octo reads a page that a
+  step opened or left the tab on, or a page it looks at, the controller presses
+  the banner's own refusal itself, once: a button with a refusal's words, as
+  above, beside a control of the same banner (the nearest container holding
+  both is a small part of the page) whose words accept, which is refused as
+  `step_refused_consent`. Never the accept, the settings or anything else on
+  the banner, never a link, a form's button, a control turned off or one
+  something covers, never in a frame (a reading lists the page's own controls
+  only), and never on a page that may show a secret or holds a sign-in,
+  password, code or payment field. It asks nobody in any mode, no form post may
+  leave the tab while it runs (a look at the page gets the step's guard for the
+  press), and the action feed shows it as "Decline cookies". The step's
+  activity says so (`declined: "cookies"`), Details list "Declined cookies on
+  <site>" after the step, and Octo reads the page as it is after it. A banner
+  with no refusal of its own stays up, and Octo reads on under it.
+- **A covered click is refused at once.** A click whose control has something
+  outside it over its middle (a notice, a dialog, a loading screen) would go
+  to that instead. The control is brought to the middle of the view, past a
+  pinned header, and a cover still there after about 600 ms refuses the step
+  at once, in words: a cookie or consent notice says "A cookie notice covers
+  this page and has no reject button: read on under it, or open the place's
+  own site.", any other cover that something covers the control and to take a
+  fresh snapshot. Before, such a click waited out Playwright's 15-second
+  timeout and returned its call log. A cover that goes within that moment (a
+  toast that fades) is waited for. No failed step carries Playwright's call
+  log: only its first line, and an action Playwright gave up waiting on says
+  that the page did not take the step in time.
 - **A cookie banner's accept is refused.** In the same banner, a control or a
   link whose words accept, agree or consent ("Accept all", "I agree", "Agree
   and close", "Consent", "Alle akzeptieren", "Einwilligen", "aceitar e
@@ -873,8 +900,8 @@ own page, and a route from the operator's journey planner with its stations
 chosen, for the day and time the person travels (a daytime hour when they gave
 none) and saying which, not a listing or a kiosk page; a comparison's models,
 those a page's menu names included, each read on
-its own page; and a cookie banner's refusal, so the banner does not cover the
-page. A sign-in, a bot check, a paywall or a refused read ends that page, never
+its own page. A cookie banner is the browser's own: it declines one with its
+own reject button before Octo reads the page (above). A sign-in, a bot check, a paywall or a refused read ends that page, never
 the task: nothing a turn carries tells it to stop there, so neither a card's
 task nor the reply rules end the research after a failed page. A browser turn's
 own run text says the same: a failed or refused page ends that page, not the
@@ -1597,21 +1624,38 @@ the observed page. The selected CDP target is part of that fingerprint, so even
 two tabs with identical URLs and DOM cannot replay each other's snapshots. The
 controller recomputes that fingerprint before it judges or asks about a step and
 uses a concrete element handle, so reordered or relabeled DOM cannot silently
-retarget an action. A step whose snapshot no longer reads as the page (one
-still drawing after it loaded, say) fails without ending the run, and the
-policy says to take another snapshot: a stale target or a changed page is
-looked at again, and only an approval's own outcome is final. The controller
-says so on its stdout (`pageChanged`, for a step nobody was asked about whose
-snapshot, control or fields changed under it), and runtime-agent counts such
-steps until a step on a fresh snapshot's control, or one that moves to another
-page or tab, goes through (a look at the page or a scroll between them does
-not count). The second answers that the page keeps changing, which ends that
-page, not the run, so a page that never holds still (a live count, a ticker in
-a link) sends the turn on instead of a loop of snapshots: to the site's own
-page for the task, from a link on the page (its menu: a planner, a search
-page), else to the next source. A home page's planner form that kept changing
-had sent a turn back to a site that had not answered, while the planner's own
-page, linked from that home page, held still.
+retarget an action. That fingerprint holds what a reading does not show (each
+control's classes, hidden names and values), so a page reads differently once
+a carousel turns or a clock ticks, though every control it lists reads the
+same. A step nobody is asked about is therefore judged by its own control:
+each reading records, in the run's approval directory
+(`observed-controls.json`, the latest reading only, in any tab), the target
+fingerprint of every control it lists and the name it gave it, and such a step
+goes ahead when the address and the tab are the same and the control at its
+index has the fingerprint that reading recorded, the check a step already
+gets after the person says yes (below). A control that changed is refused,
+named as the reading named it ("\"End\" changed after the snapshot this step
+names"). A step that asks the person keeps the whole-page check: when only
+the rest of the page changed, nobody is asked, and the step says to take a
+fresh snapshot and do it again right after it. A step on a snapshot with no
+record (an older one) is judged whole, as before. Any of these fails without
+ending the run, and the policy says to take another snapshot: a stale target
+or a changed page is looked at again, and only an approval's own outcome is
+final. The controller says so on its stdout (`pageChanged`, for a step nobody
+was asked about whose control or fields changed under it, or whose snapshot
+with no record no longer reads as the page; never for a step that asks and
+was refused only because the rest of the page changed), and runtime-agent
+counts such steps until a step on a fresh snapshot's control, or one that
+moves to another page or tab, goes through (a look at the page or a scroll
+between them does not count). The second answers that the page keeps
+changing, which ends that page, not the run, so a control that never holds
+still (a live count, a ticker in a link) sends the turn on instead of a loop
+of snapshots: to the site's own page for the task, from a link on the page
+(its menu: a planner, a search page), else to the next source. A home page's
+planner form that kept changing had sent a turn back to a site that had not
+answered, while the planner's own page, linked from that home page, held
+still; and a planner under a carousel was refused twice while none of its
+controls had changed, which ended the page.
 Once the person has answered the step's prompt, the page
 elsewhere may have changed by itself while they read it (a carousel's slide, a
 clock, a live count), so the step checks the control they were asked about

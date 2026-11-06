@@ -15,6 +15,8 @@
 //! - `refused`: which of the person's own steps the browser refused to take, one of
 //!   [`REFUSED_STEPS`], so Details names it for what it was ("Tried accepting cookies on
 //!   metrodoporto.pt"), not as any click;
+//! - `declined`: `cookies` when the browser declined the page's cookie banner by itself while it
+//!   read the page ([`DECLINED_COOKIES`]), so Details says "Declined cookies on frame.work";
 //! - `look`: for a step that can take the tab to another page and whose time ran out, the look
 //!   the controller answered with (`snapshot`, or `status` for a page too busy to read), which
 //!   the step's words say. Its `step` stays its own kind, so Studio knows the tab may be on
@@ -48,6 +50,9 @@ const CONTROLLER_APPROVALS: &[&str] = &["once", "routine", "free"];
 /// file, showing a credential and typing into a field for a password, code or payment.
 pub(crate) const REFUSED_STEPS: &[&str] =
     &["consent", "sign_in", "upload", "reveal_secret", "sensitive"];
+/// What the browser did on its own during a step, as the controller says it: it declined the
+/// page's cookie banner (`declined`), which Details lists after the step.
+pub(crate) const DECLINED_COOKIES: &str = "cookies";
 /// The longest address the controller's activity may carry.
 const MAX_URL_CHARS: usize = 4_096;
 
@@ -213,6 +218,14 @@ pub(crate) fn browser_step_facts(
     if let Some(refused) = refused {
         facts.insert("refused".into(), JsonValue::from(refused));
     }
+    // The browser declined the page's cookie banner by itself while it read the page.
+    if reported
+        .and_then(|activity| activity.get("declined"))
+        .and_then(JsonValue::as_str)
+        == Some(DECLINED_COOKIES)
+    {
+        facts.insert("declined".into(), JsonValue::from(DECLINED_COOKIES));
+    }
     Some(JsonValue::Object(facts))
 }
 
@@ -296,6 +309,52 @@ mod tests {
         }
         assert_eq!(step_page_address("navigate", None, Some(&json!({}))), None);
         assert_eq!(step_page_address("navigate", None, None), None);
+    }
+
+    /// A banner the browser declined by itself is kept as the controller's one word, and only
+    /// for a step that answered; any other value is dropped.
+    #[test]
+    fn keeps_a_declined_banner_as_one_word() {
+        let payload = |declined: JsonValue| {
+            json!({
+                "activity": {
+                    "step": "navigate",
+                    "url": "https://frame.work/at/en",
+                    "declined": declined,
+                },
+            })
+        };
+        let mut last_host = None;
+        let facts = browser_step_facts(
+            "navigate",
+            None,
+            Some(&payload(json!("cookies"))),
+            None,
+            &mut last_host,
+        )
+        .unwrap();
+        assert_eq!(facts["declined"], "cookies");
+        for declined in [json!("Reject all"), json!(true), json!({"cookies": true})] {
+            let facts = browser_step_facts(
+                "navigate",
+                None,
+                Some(&payload(declined.clone())),
+                None,
+                &mut last_host,
+            )
+            .unwrap();
+            assert!(facts.get("declined").is_none(), "{declined}");
+        }
+        // A step that ended the run never reached the page.
+        let ended = browser_step_facts(
+            "navigate",
+            None,
+            Some(&payload(json!("cookies"))),
+            Some("approval_denied"),
+            &mut last_host,
+        )
+        .unwrap();
+        assert!(ended.get("declined").is_none());
     }
 
     #[test]

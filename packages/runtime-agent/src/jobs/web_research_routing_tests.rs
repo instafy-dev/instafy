@@ -604,16 +604,21 @@ fn the_browser_skill_reads_a_cards_pages_on_the_chats_own_page() {
     }
 }
 
-/// Accepting a cookie banner is the person's step: a banner with no reject button of its own is left up and read
-/// under (going into its settings is how an accept was reached before), its settings refuse only when the person
-/// asks, and no learning example clicks "I agree". Within the carried part; an unedited earlier copy is upgraded.
+/// Accepting a cookie banner is the person's step, and no learning example clicks "I agree". A banner is the browser's
+/// job: Instafy's browser declines one with its own reject button itself once a page settles, and refuses a click a
+/// banner with none covers, in words (`shared-browser-cli.js`), so the skill no longer says how to answer one. An
+/// unedited earlier copy is upgraded.
 #[test]
-fn the_browser_skill_leaves_a_banner_without_a_reject_button_up() {
+fn the_browser_skill_leaves_cookie_banners_to_the_browser() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
-    assert!(carried.contains(
-        "With no reject button on the banner itself, leave it up and read on. Refuse through its settings only when the person asks; saving those settings asks once."
-    ));
+    let skill = flat(BROWSER_SKILL);
+    for line in [
+        "reject button",
+        "With no reject button on the banner itself, leave it up and read on.",
+        "Refuse through its settings only when the person asks",
+    ] {
+        assert!(!skill.contains(line), "{line}");
+    }
     assert!(!BROWSER_SKILL.contains("I agree"));
 
     for previous in [
@@ -1754,7 +1759,6 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
         "A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.",
         "A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: choose its stations and the day and time the person travels (a daytime hour when they gave none), press its button and read the route off the page it shows, saying which day and time it is for), not a listing or a kiosk page",
         "Comparing: list the models a page you read names, its menu included, then open each one's own page; mark one only a search result names \"not checked\". Never names from memory, never placeholders such as \"candidate 1\".",
-        "A page whose reading lists a cookie banner's reject button (\"Reject all\", \"Reject\", \"Only necessary\"): press it before your next step, and nothing else on the banner; never accept.",
     ] {
         assert!(carried.contains(needle), "{needle}");
     }
@@ -2042,8 +2046,8 @@ fn a_browser_turn_on_a_restored_thread_is_given_finding_a_page() {
 
     let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
     let edited = BROWSER_SKILL.replace(
-        "saving those settings asks once.\n",
-        "saving those settings asks once.\n- Start from the city's open-data portal.\n",
+        "never placeholders such as \"candidate 1\".\n",
+        "never placeholders such as \"candidate 1\".\n- Start from the city's open-data portal.\n",
     );
     assert_ne!(edited, BROWSER_SKILL);
     fs::write(&skill, &edited).unwrap();
@@ -2395,19 +2399,27 @@ fn a_route_is_planned_to_the_end_and_a_forms_prompt_is_the_persons() {
     );
 }
 
-/// A banner's reject button was in the page's reading, and no turn pressed it: "Reject all" on a
-/// bookshop's page and "Reject" on a maker's product page, both listed as banner buttons, the
-/// second drive running (local tests, Nov 3). The line said to press one "so it does not cover
-/// the page the person watches", which a turn reading the page's text never sees, and named no
-/// moment. It says when (before the turn's next step), names a plain "Reject" too, and still
-/// never accepts or presses anything else on a banner. Within the part a snapshot carries.
+/// A banner's reject button was in the page's reading, and no turn pressed it: "Reject all" on a bookshop's page and
+/// "Reject" on a maker's product page, listed in five turns (local tests, Nov 5), though a line said to press one before the
+/// next step. Instafy's browser now presses a banner's own reject button itself once a page settles, never its
+/// accept or settings, and Details says so; the line left the skill. The Personal Browser, which cannot tell a banner
+/// yet, keeps it in its own run instructions.
 #[test]
-fn a_banners_reject_button_in_the_reading_is_pressed_before_the_next_step() {
+fn a_banners_reject_button_is_the_browsers_to_press() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
-    assert!(carried.contains(
-        "- A page whose reading lists a cookie banner's reject button (\"Reject all\", \"Reject\", \"Only necessary\"): press it before your next step, and nothing else on the banner; never accept. With no reject button on the banner itself, leave it up and read on."
-    ));
+    assert!(!flat(BROWSER_SKILL).contains("press it before your next step"));
     assert!(!flat(BROWSER_SKILL).contains("so it does not cover the page the person watches"));
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
+    let previous = include_str!("legacy/browser-automation-v30.md");
+    assert!(
+        flat(previous).contains(
+            "press it before your next step, and nothing else on the banner; never accept."
+        )
+    );
+    let tmp = scaffolded_space();
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }

@@ -43,6 +43,13 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // 7. A click acts on the control itself: a section a page marks open is no
 //    control, and a click whose middle lands on a form's button or a frame
 //    inside the control is refused, sending and asking nothing.
+// 8. A cookie banner is the browser's: once a page settles, the browser
+//    presses the banner's own reject button itself, never its accept or its
+//    settings, and the step says so; never one with no reject button, one in a
+//    frame, or one on a page with a sign-in field. A click that something
+//    outside its control covers is refused at once, in words (a cookie notice
+//    with no reject button says so), with no wait and no call log, and a cover
+//    that goes within a moment is waited for.
 // Every site is a loopback fixture; Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
@@ -229,6 +236,39 @@ customElements.define("key-card", class extends HTMLElement {
 });
 </script>`;
 
+// A bookshop's page under a cookie banner with a refusal, settings and an
+// accept. The page records which the banner was answered with, and the
+// banner stays away once answered, as a consent cookie keeps it. `{name}`
+// names the cookie, so each page asks afresh.
+const bannerScript = (name) => `<script>
+const notice = document.getElementById("cookie-notice");
+const answer = (choice) => { window.consentAnswer = choice; document.cookie = "${name}=" + choice + "; path=/"; notice.remove(); };
+document.getElementById("reject").onclick = () => answer("rejected");
+document.getElementById("accept").onclick = () => answer("accepted");
+document.getElementById("customize").onclick = () => { window.consentAnswer = "settings"; };
+if (document.cookie.includes("${name}=")) notice.remove();
+</script>`;
+const BANNER = (name, extra = "") => `<h1>Bookshop</h1><p>Open daily, 9:00 AM to 7:30 PM.</p>
+<p><a href="/reading/visit">Plan your visit</a></p>${extra}
+<div id="cookie-notice" role="dialog" aria-label="Cookie consent" style="position:fixed;left:0;right:0;bottom:0;padding:16px;background:#fff;border-top:1px solid #94a3b8">
+<p>We use cookies to understand how the shop is used.</p>
+<button type="button" id="customize">Customize</button> <button type="button" id="reject">Reject all</button> <button type="button" id="accept">Accept all</button>
+</div>${bannerScript(name)}`;
+// A tourism site's consent notice over the whole page, with an accept and its
+// settings and no reject button, and a cover that is no notice (a loading
+// screen). `live.hideOnScroll()` makes the cover go 300 ms after the page
+// scrolls, as a toast that fades once the page moves does.
+const NOTICE = `<h1>Visit the city</h1><p style="margin-top:1200px"><a href="/reading/visit" id="attractions">Attractions</a></p>
+<div id="consent-backdrop" style="position:fixed;inset:0;background:rgba(0,0,0,.4)"><div role="dialog" aria-label="Your privacy" style="margin:80px auto;width:320px;padding:16px;background:#fff">
+<p>We and our partners store and read data on your device.</p>
+<button type="button" onclick="window.consentAnswer = 'settings'">Learn more</button> <button type="button" onclick="window.consentAnswer = 'accepted'">Agree and close</button>
+</div></div>`;
+const COVERED = `<h1>Timetable</h1><p style="margin-top:1200px"><a href="/reading/visit" id="lines">All lines</a></p>
+<div id="loading" style="position:fixed;inset:0;background:rgba(255,255,255,.8)"><p>Loading departures</p></div>
+<script>
+window.live = { hideOnScroll() { addEventListener("scroll", () => setTimeout(() => document.getElementById("loading").remove(), 300), { once: true }); } };
+</script>`;
+
 export async function runSharedBrowserPageReadingFixture() {
   assert.ok(fs.existsSync(executablePath), "Locked Playwright Chromium is missing; run pnpm --filter @instafy/frontend exec playwright install chromium");
   fs.mkdirSync(resultDirectory, { recursive: true });
@@ -269,6 +309,15 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/key-name": page("API keys", KEY_NAME),
       "site.test /reading/code-boxes": page("Sign in", CODE_BOXES),
       "site.test /reading/sections": page("Account", SECTIONS),
+      "site.test /reading/banner": page("Bookshop", BANNER("bookshop_consent")),
+      "site.test /reading/banner-look": page("Bookshop", BANNER("bookshop_look_consent")),
+      "site.test /reading/banner-sign-in": page("Bookshop", BANNER("bookshop_sign_in_consent", `<form method="post" action="/session"><label>Email <input type="email" name="email" autocomplete="username"></label>
+<label>Password <input type="password" name="password" autocomplete="current-password"></label><button>Sign in</button></form>`)),
+      "site.test /reading/banner-frame": page("Bookshop", `<h1>Bookshop</h1><iframe src="{frame}/banner" title="Cookie consent" width="500" height="160"></iframe>`),
+      "site.test /reading/notice": page("Visit the city", NOTICE),
+      "site.test /reading/covered": page("Timetable", COVERED),
+      "site.test /reading/visit": page("Visit", "<h1>Plan your visit</h1>"),
+      "frame.test /banner": page("Cookies", BANNER("frame_consent")),
       "frame.test /booking": page("Booking", "<h2>Booking engine</h2><label>Check-in <input type=\"date\"></label><button>Search rooms</button><p>Rooms from 140 euros</p>"),
       "frame.test /pixel": page("Pixel", "<p>pixel</p>"),
       "frame.test /fields": page("Payment", SECRET_FIELDS),
@@ -621,6 +670,71 @@ export async function runSharedBrowserPageReadingFixture() {
     const shown = await ok("POST", "/v1/click", { index: control(reading, "Show more").index, snapshotId: reading.snapshotId });
     assert.ok(shown.interactiveElements.some((entry) => entry.label === "More shown"), "A click on a plain button did nothing");
 
+    // 8. A cookie banner is the browser's, and a covered click is refused in words.
+    const labels = (observed) => observed.interactiveElements.map((entry) => entry.label);
+    const consentAnswer = () => runPage.evaluate(() => window.consentAnswer ?? null);
+    const actionsBefore = fs.readFileSync(actionsPath, "utf8").length;
+    let promptsBeforeBanner = prompts.length;
+    // a. A step that opens the page declines its banner before Octo reads it:
+    // the reading is the page under it, and the step says so.
+    const declinedOpen = await ok("POST", "/v1/navigate", { url: `${sites().site}/reading/banner` });
+    assert.equal(await consentAnswer(), "rejected", "the banner's refusal was not the one pressed");
+    assert.equal(declinedOpen.activity.declined, "cookies");
+    for (const label of ["Reject all", "Accept all", "Customize"]) {
+      assert.ok(!labels(declinedOpen).includes(label), `${label} is still on the page Octo read`);
+    }
+    assert.ok(labels(declinedOpen).includes("Plan your visit"));
+    assert.match(fs.readFileSync(actionsPath, "utf8").slice(actionsBefore), /"type":"click","label":"Decline cookies"/u);
+    assert.equal(prompts.length, promptsBeforeBanner, "declining asked");
+    // b. A look at the page declines one too.
+    await runPage.goto(`${sites().site}/reading/banner-look`);
+    const looked = await ok("GET", "/v1/snapshot");
+    assert.equal(await consentAnswer(), "rejected");
+    assert.equal(looked.activity.declined, "cookies");
+    // c. A banner on a page with a sign-in field, one in a frame, and a notice
+    // with no reject button: nothing is pressed, and the step says nothing.
+    reading = await read("/reading/banner-sign-in");
+    assert.equal(await consentAnswer(), null, "a banner on a sign-in page was answered");
+    assert.ok(labels(reading).includes("Reject all"));
+    assert.equal(reading.activity.declined, undefined);
+    reading = await read("/reading/banner-frame");
+    const frame = runPage.frames().find((candidate) => candidate.url().includes("frame.test"));
+    assert.ok(frame, "the banner's frame loaded");
+    assert.equal(await frame.evaluate(() => window.consentAnswer ?? null), null, "a banner in a frame was answered");
+    assert.equal(reading.activity.declined, undefined);
+    reading = await read("/reading/notice");
+    assert.equal(await consentAnswer(), null, "a notice with no reject button was answered");
+    assert.equal(reading.activity.declined, undefined);
+    // d. A click under that notice is refused at once in words, with no wait
+    // and no call log; the notice is left up, and nothing is opened.
+    requests.length = 0;
+    promptsBeforeBanner = prompts.length;
+    let clickStarted = Date.now();
+    const underNotice = await runTool("POST", "/v1/click", { index: control(reading, "Attractions").index, snapshotId: reading.snapshotId });
+    measurements.coveredClickMs = Date.now() - clickStarted;
+    assert.equal(underNotice.code, 1, underNotice.stdout);
+    assert.match(underNotice.stderr, /A cookie notice covers this page and has no reject button: read on under it, or open the place's own site\./u);
+    assert.doesNotMatch(underNotice.stderr, /Call log|Timeout|intercepts pointer events/u);
+    assert.ok(measurements.coveredClickMs < 8_000, `the covered click waited ${measurements.coveredClickMs} ms`);
+    assert.equal(await consentAnswer(), null);
+    assert.equal(new URL(runPage.url()).pathname, "/reading/notice");
+    assert.deepEqual(requests, [], "the covered click opened something");
+    assert.equal(prompts.length, promptsBeforeBanner);
+    // e. Any other cover says what to do, in words of its own.
+    reading = await read("/reading/covered");
+    const underCover = await runTool("POST", "/v1/click", { index: control(reading, "All lines").index, snapshotId: reading.snapshotId });
+    assert.equal(underCover.code, 1, underCover.stdout);
+    assert.match(underCover.stderr, /Something else on the page covers "All lines", so nothing was clicked\. Take a fresh snapshot, and read on without it if it is still covered\./u);
+    assert.doesNotMatch(underCover.stderr, /Call log|Timeout/u);
+    // f. A cover that goes a moment after the page moves is waited for, and
+    // the click is done.
+    reading = await read("/reading/covered");
+    await runPage.evaluate(() => window.live.hideOnScroll());
+    clickStarted = Date.now();
+    const afterCover = await ok("POST", "/v1/click", { index: control(reading, "All lines").index, snapshotId: reading.snapshotId });
+    measurements.coverWaitedClickMs = Date.now() - clickStarted;
+    assert.equal(new URL(afterCover.url).pathname, "/reading/visit", "the click under a cover that went was not done");
+
     const result = {
       status: "passed", fixtureVersion: 1, browserVersion: context.browser()?.version() ?? "unknown",
       platform: process.platform, architecture: process.arch, nodeVersion: process.version,
@@ -633,6 +747,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "a long page's text says where it is cut and how far to scroll, and scrolling reads all of it within the reading's cap, past a skip link and a pinned header, on a plain-text page and in a long paragraph; a view out of reach says so; past 200 controls those scrolled past are left out and counted, past 600 matches too, and a closed list's options never crowd out a form",
         "password, card and code fields in a frame or a shadow root carry no value into the reading, a frame's fields are never listed, a key in a shadow root's read-only field or in a control's name the list leaves out still makes a secret screen, and a code in boxes of its own is masked",
         "a section marked open is no control, and a click whose middle lands on a form's button or a frame inside the control is refused, sending and asking nothing",
+        "once a page settles the browser presses a cookie banner's own reject button itself, never its accept or settings, and the step says so; never a banner with no reject button, one in a frame, or one on a page with a sign-in field; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, and a cover that goes within a moment is waited for",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",

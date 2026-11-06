@@ -963,6 +963,50 @@ mod tests {
         }
     }
 
+    /// A failed observation says only the first line of what failed: Playwright's errors carry a
+    /// stack and a call log of every retry, in terminal colours and naming the page's markup, as
+    /// a Shared Browser step's did when a click waited out Playwright's timeout. A wait Playwright
+    /// gave up on says so in words.
+    #[test]
+    fn a_failed_observation_never_carries_playwrights_call_log() {
+        let modules = tempfile::tempdir().unwrap();
+        let playwright = modules.path().join("playwright");
+        std::fs::create_dir_all(&playwright).unwrap();
+        std::fs::write(
+            playwright.join("index.js"),
+            r#"module.exports = { chromium: { launch: async () => {
+  const error = new Error(process.env.FAKE_FAILURE === "timeout"
+    ? "page.goto: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - navigating to \"https://example.com/\", waiting until \"load\"\u001b[22m"
+    : "page.goto: net::ERR_CONNECTION_RESET at https://example.com/\nCall log:\n\u001b[2m  - navigating to \"https://example.com/\"\u001b[22m");
+  if (process.env.FAKE_FAILURE === "timeout") error.name = "TimeoutError";
+  throw error;
+} } };"#,
+        )
+        .unwrap();
+        for (failure, words) in [
+            (
+                "timeout",
+                "The page did not answer in time, so nothing was observed.\n",
+            ),
+            (
+                "reset",
+                "page.goto: net::ERR_CONNECTION_RESET at https://example.com/\n",
+            ),
+        ] {
+            let output = std::process::Command::new("node")
+                .arg("-e")
+                .arg(OBSERVER_SCRIPT)
+                .arg(json!({ "url": "https://example.com/", "observations": [] }).to_string())
+                .env(PLAYWRIGHT_PATH_ENV, &playwright)
+                .env(PROXY_URL_ENV, "http://127.0.0.1:9/")
+                .env("FAKE_FAILURE", failure)
+                .output()
+                .expect("run the observer");
+            assert!(!output.status.success(), "{failure}");
+            assert_eq!(String::from_utf8_lossy(&output.stderr), words, "{failure}");
+        }
+    }
+
     #[test]
     fn disabled_or_incomplete_environment_has_no_capability() {
         assert_eq!(local_browser_config_from_reader(|_| None).unwrap(), None);

@@ -1621,6 +1621,43 @@ describe("answered browser prompts", () => {
   });
 });
 
+describe("what the browser did on its own", () => {
+  // The browser declined a cookie banner while it read the page a step left
+  // it on, as runtime-agent words it (activity_labels.rs).
+  const DECLINED = {
+    key: "browser/declined-cookies",
+    role: "quiet",
+    live: "Declining cookies on {host}",
+    done: "declined cookies on {host}",
+    count: 1,
+    host: "frame.work",
+  };
+  const opened = (status = "completed") =>
+    step(
+      "mcp_tool_call",
+      { v: 1, count: 1, ...BROWSER_OPEN, host: "frame.work", pageKey: PAGE_A, step: "navigate", also: [DECLINED] },
+      { status, server: "instafy_shared_browser", tool: "navigate" },
+    );
+
+  it("is a row of its own in Details after its step, and never on the line", () => {
+    const activity = summarizeTurnActivity([opened()], { jobId: JOB, phase: "completed" });
+    expect(activity.summary).toBe("Opened frame.work");
+    expect(activity.details.map((item) => item.kind)).toEqual(["step", "approval"]);
+    const [row, declined] = activity.details;
+    expect(row.kind === "step" && row.step.label).toBe("Opened frame.work");
+    expect(declined.kind === "approval" && declined.text).toBe("Declined cookies on frame.work");
+  });
+
+  it("is listed only for a step that worked, and only for a browser step", () => {
+    const failed = summarizeTurnActivity([opened("failed")], { jobId: JOB, phase: "completed" });
+    expect(failed.details.map((item) => item.kind)).toEqual(["step"]);
+    // A command's quiet companions are its own business: no row for them.
+    const command = step("command_execution", { ...ADD_POINT, also: [{ ...DECLINED }] });
+    const commandActivity = summarizeTurnActivity([command], { jobId: JOB, phase: "completed" });
+    expect(commandActivity.details.map((item) => item.kind)).toEqual(["step"]);
+  });
+});
+
 describe("detailsOnlySummary", () => {
   const update = (type: string, content = "a note"): { kind: "update"; id: string; message: ChatMessage } => {
     const message = note(content, type);

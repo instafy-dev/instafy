@@ -414,7 +414,8 @@ in it counts.
   command: "Ran a command".
 - Browser steps may also carry `host`, `pageKey` (16 hex characters, never the URL), `step` and
   `approval`. Which of the person's own steps the browser refused chooses the label and is not
-  carried itself.
+  carried itself. What the browser did on its own during a step rides along in `also`, which
+  Studio lists after the step in Details and never on the line.
 
 ## Browser steps
 
@@ -462,6 +463,12 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   `reveal_secret`, `sensitive`), and runtime-agent keeps it as a fifth fact, so Details name the
   step for what it was: "Tried accepting cookies on metrodoporto.pt", not "Tried browsing
   metrodoporto.pt". Any other word names nothing.
+- **What the browser did on its own.** A step after which the browser declined the page's cookie
+  banner itself, before Octo read the page, carries `"declined": "cookies"` in its activity;
+  runtime-agent keeps that one word as a sixth fact and adds a quiet `also` entry to the step's
+  own label on the step's site, and Studio lists that entry as a row of its own in Details,
+  after the step: "Declined cookies on frame.work". The line never names it, and a step that
+  failed lists none. Any other value names nothing.
 - **The labels** (`jobs/activity_labels.rs`):
 
   | Step | Running | Done (one / other / some) | Role |
@@ -471,6 +478,7 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   | `search` (typing with submit, or Enter, in a search field) | Searching {host} | searched {host} / searched {host} {n} times / searched {host} | content |
   | `submit`, `click`, `type`, `choose`, `press`, `scroll`, `tabs`, `status` | Browsing {host} | browsed {host} (Details only) | quiet |
   | a step refused as the person's: `consent`, `sign_in`, `upload`, `reveal_secret`, `sensitive` | Accepting cookies on {host}, Signing in on {host}, Choosing a file on {host}, Showing a password or key on {host}, Entering private details on {host} | none: it never happens (Details: "Tried accepting cookies on {host}") | quiet |
+  | beside a step: the browser declined the page's banner (`declined: "cookies"`), in `also` | Declining cookies on {host} | declined cookies on {host} (Details only, its own row) | quiet |
   | no host known yet | Using the browser | used the browser | content |
 
   Opening, reading and searching carry `when: "success"`: a step the person said no to, left
