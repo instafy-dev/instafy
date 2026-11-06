@@ -13832,11 +13832,15 @@ fn normalize_codex_read_files(
         .collect()
 }
 
+/// The turn's changed files, as paths in the space's folder. Only that folder is touched: the
+/// folder above it holds the machine's other spaces, or, for a folder the person brought, their
+/// own files. Each save used to copy every changed file there too (a map at
+/// `/workspace/sites/<site>`, beside the space's folder, that nothing served), a delete removed
+/// the same path there, and a reported file missing from the space was moved in from there.
 fn normalize_codex_files(
     workspace_dir: &Path,
     files: Vec<CodexFileDescriptor>,
 ) -> Result<Vec<CodexFileDescriptor>> {
-    let workspace_root = workspace_dir.parent().unwrap_or(workspace_dir);
     let mut normalized = Vec::new();
 
     for mut file in files {
@@ -13854,27 +13858,13 @@ fn normalize_codex_files(
 
         let relative_string = sanitized_rel.to_string_lossy().to_string();
         let target_path = workspace_dir.join(&sanitized_rel);
-        let fallback_path = workspace_root.join(&sanitized_rel);
         let change_kind = file.change.as_ref().map(|descriptor| &descriptor.kind);
         let has_inline_content = file.content.is_some() || file.content_base64.is_some();
 
         if matches!(change_kind, Some(FileChangeKind::Deleted)) {
             delete_path_if_exists(&target_path)
                 .with_context(|| format!("failed to delete workspace path {:?}", target_path))?;
-            if fallback_path != target_path {
-                delete_path_if_exists(&fallback_path).with_context(|| {
-                    format!("failed to delete fallback path {:?}", fallback_path)
-                })?;
-            }
-
-            file.workspace_path = relative_string.clone();
-            file.path = relative_string.clone();
-            normalized.push(file);
-            continue;
-        }
-        let mut moved_from_fallback = false;
-
-        if has_inline_content {
+        } else if has_inline_content {
             write_inline_file_change(&target_path, &sanitized_rel, &file).with_context(|| {
                 format!(
                     "failed to apply inline codex file change for {:?}",
@@ -13882,80 +13872,16 @@ fn normalize_codex_files(
                 )
             })?;
         } else if !target_path.exists() {
-            if fallback_path.exists() {
-                moved_from_fallback = true;
-                if let Some(parent) = target_path.parent() {
-                    fs::create_dir_all(parent).with_context(|| {
-                        format!("failed to create parent directories for {:?}", target_path)
-                    })?;
-                }
-                if let Err(rename_error) = fs::rename(&fallback_path, &target_path) {
-                    fs::copy(&fallback_path, &target_path).with_context(|| {
-                        format!("failed to copy {:?} to {:?}", fallback_path, target_path)
-                    })?;
-                    if let Err(remove_error) = fs::remove_file(&fallback_path) {
-                        warn!(
-                            ?remove_error,
-                            fallback = %fallback_path.display(),
-                            target = %target_path.display(),
-                            "failed to remove fallback artifact after copy"
-                        );
-                    }
-                    warn!(
-                        ?rename_error,
-                        fallback = %fallback_path.display(),
-                        target = %target_path.display(),
-                        "rename fallback failed; copied artifact into project workspace"
-                    );
-                }
-            } else {
-                warn!(
-                    workspace_path = %file.workspace_path,
-                    target = %target_path.display(),
-                    "codex artifact missing from workspace; skipping"
-                );
-                continue;
-            }
-
-            if !target_path.exists() {
-                warn!(
-                    workspace_path = %file.workspace_path,
-                    target = %target_path.display(),
-                    "codex artifact missing from workspace after inline apply; skipping"
-                );
-                continue;
-            }
-        }
-
-        if workspace_root != workspace_dir {
-            if fallback_path != target_path {
-                if moved_from_fallback {
-                    // Skip rehydrating the fallback location when the file originated there.
-                    // Downstream watchers only need a copy in the project workspace.
-                } else {
-                    if let Some(parent) = fallback_path.parent() {
-                        if let Err(error) = fs::create_dir_all(parent) {
-                            warn!(
-                                ?error,
-                                fallback = %fallback_path.display(),
-                                "failed to create fallback parent directories"
-                            );
-                        }
-                    }
-                    if let Err(error) = fs::copy(&target_path, &fallback_path) {
-                        warn!(
-                            ?error,
-                            target = %target_path.display(),
-                            fallback = %fallback_path.display(),
-                            "failed to mirror workspace artifact into fallback path"
-                        );
-                    }
-                }
-            }
+            warn!(
+                workspace_path = %file.workspace_path,
+                target = %target_path.display(),
+                "codex artifact missing from workspace; skipping"
+            );
+            continue;
         }
 
         file.workspace_path = relative_string.clone();
-        file.path = relative_string.clone();
+        file.path = relative_string;
         normalized.push(file);
     }
 
@@ -35952,32 +35878,99 @@ mod tests {
         );
     }
 
-    #[test]
-    fn normalize_moves_fallback_file_into_project_workspace() {
-        let tmp = tempdir().unwrap();
-        let project_dir = tmp.path().join("proj");
-        fs::create_dir_all(&project_dir).unwrap();
-
-        let fallback_file = tmp.path().join("index.html");
-        fs::write(&fallback_file, "hello world").unwrap();
-
-        let files = vec![CodexFileDescriptor {
-            path: "index.html".into(),
-            workspace_path: "index.html".into(),
+    fn changed_file(path: &str, kind: Option<FileChangeKind>) -> CodexFileDescriptor {
+        CodexFileDescriptor {
+            path: path.into(),
+            workspace_path: path.into(),
             label: None,
             description: None,
             mime_type: None,
             content: None,
             content_base64: None,
-            change: None,
-        }];
+            change: kind.map(|kind| FileChangeDescriptor {
+                raw: json!({ "type": format!("{kind:?}").to_ascii_lowercase() }),
+                kind,
+                lines: Vec::new(),
+            }),
+        }
+    }
 
+    // A map saved from a space at <root>/<space> also landed at <root>/sites/<site>, beside the
+    // space's folder, at every save: the folder above a space is the machine's other spaces, or a
+    // person's own folder around one they brought.
+    #[test]
+    fn a_saved_change_is_never_copied_above_the_space() {
+        let tmp = tempdir().unwrap();
+        let project_dir = tmp.path().join("proj");
+        fs::create_dir_all(project_dir.join("sites/seville/data")).unwrap();
+        fs::write(project_dir.join("sites/seville/index.html"), "map").unwrap();
+        fs::write(project_dir.join("sites/seville/data/stops.geojson"), "{}").unwrap();
+
+        let files = vec![
+            changed_file("sites/seville/index.html", Some(FileChangeKind::Created)),
+            changed_file(
+                "sites/seville/data/stops.geojson",
+                Some(FileChangeKind::Changed),
+            ),
+        ];
         let normalized = normalize_codex_files(&project_dir, files).unwrap();
+
+        assert_eq!(
+            normalized
+                .iter()
+                .map(|f| f.workspace_path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "sites/seville/index.html",
+                "sites/seville/data/stops.geojson"
+            ]
+        );
+        assert!(
+            !tmp.path().join("sites").exists(),
+            "no copy above the space"
+        );
+        assert_eq!(
+            fs::read_to_string(project_dir.join("sites/seville/index.html")).unwrap(),
+            "map"
+        );
+    }
+
+    #[test]
+    fn a_deleted_file_is_deleted_in_the_space_only() {
+        let tmp = tempdir().unwrap();
+        let project_dir = tmp.path().join("proj");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("notes.md"), "the space's").unwrap();
+        fs::write(tmp.path().join("notes.md"), "someone else's").unwrap();
+
+        let normalized = normalize_codex_files(
+            &project_dir,
+            vec![changed_file("notes.md", Some(FileChangeKind::Deleted))],
+        )
+        .unwrap();
+
         assert_eq!(normalized.len(), 1);
-        assert!(project_dir.join("index.html").exists());
-        assert!(!fallback_file.exists());
-        assert_eq!(normalized[0].workspace_path, "index.html");
-        assert_eq!(normalized[0].path, "index.html");
+        assert!(!project_dir.join("notes.md").exists());
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("notes.md")).unwrap(),
+            "someone else's"
+        );
+    }
+
+    #[test]
+    fn a_reported_file_missing_from_the_space_is_not_taken_from_above_it() {
+        let tmp = tempdir().unwrap();
+        let project_dir = tmp.path().join("proj");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let above = tmp.path().join("index.html");
+        fs::write(&above, "hello world").unwrap();
+
+        let normalized =
+            normalize_codex_files(&project_dir, vec![changed_file("index.html", None)]).unwrap();
+        assert!(normalized.is_empty());
+        assert!(!project_dir.join("index.html").exists());
+        assert_eq!(fs::read_to_string(&above).unwrap(), "hello world");
     }
 
     #[test]
@@ -36163,31 +36156,22 @@ mod tests {
     }
 
     #[test]
-    fn normalize_moves_absolute_fallback_file_into_project_workspace() {
+    fn an_absolute_path_above_the_space_is_not_taken_into_it() {
         let tmp = tempdir().unwrap();
         let project_dir = tmp.path().join("proj");
         fs::create_dir_all(&project_dir).unwrap();
 
-        let fallback_file = tmp.path().join("index.html");
-        fs::write(&fallback_file, "hello world").unwrap();
+        let above = tmp.path().join("index.html");
+        fs::write(&above, "hello world").unwrap();
 
-        let files = vec![CodexFileDescriptor {
-            path: fallback_file.to_string_lossy().to_string(),
-            workspace_path: fallback_file.to_string_lossy().to_string(),
-            label: None,
-            description: None,
-            mime_type: None,
-            content: None,
-            content_base64: None,
-            change: None,
-        }];
-
-        let normalized = normalize_codex_files(&project_dir, files).unwrap();
-        assert_eq!(normalized.len(), 1);
-        assert!(project_dir.join("index.html").exists());
-        assert!(!fallback_file.exists());
-        assert_eq!(normalized[0].workspace_path, "index.html");
-        assert_eq!(normalized[0].path, "index.html");
+        let normalized = normalize_codex_files(
+            &project_dir,
+            vec![changed_file(&above.to_string_lossy(), None)],
+        )
+        .unwrap();
+        assert!(normalized.is_empty());
+        assert!(!project_dir.join("index.html").exists());
+        assert_eq!(fs::read_to_string(&above).unwrap(), "hello world");
     }
 
     #[test]
