@@ -481,14 +481,18 @@ Two steps never ask, in Ask too:
   "Declined cookies on <site>" after the step; a banner whose button took no
   press (its script not ready yet) stays up and is not said to be declined.
   Octo reads the page as it is after the press. A banner with no refusal of
-  its own stays up, and Octo reads on under it.
+  its own stays up: answering it is the person's step (see the notice pause
+  below).
 - **A covered click is refused at once.** A click whose control has something
   outside it over its middle (a notice, a dialog, a loading screen) would go
   to that instead. The control is brought to the middle of the view, past a
   pinned header, and a cover still there after about 600 ms refuses the step
-  at once, in words: a cookie or consent notice says "A cookie notice covers
-  this page, and the browser could not decline it: read on under it, or open
-  the place's own site." (it may have no reject button, sit on a page the
+  at once, in words: a cookie or consent notice says
+  "A cookie notice covers this page, and the browser could not decline it. If
+  the task needs this page, pause on the notice's buttons with
+  request_human_input in the chat's own tab: the person answers it there and
+  chooses Let Octo continue. Otherwise open a link under it by its address, or
+  the official site of the place or service the task is about." (it may have no reject button, sit on a page the
   browser presses nothing on, or have come after the page was read, which the
   next look declines when it can), any other cover that something covers the
   control and to take a fresh snapshot. Before, such a click waited out Playwright's 15-second
@@ -502,8 +506,9 @@ Two steps never ask, in Ask too:
   continuar", "Toestemming geven", …, in the refusal's languages), or that
   only allows ("Allow", "Allow all cookies", "Autoriser", "Alle Cookies
   zulassen"), is refused in every mode before any prompt
-  (`step_refused_consent`): accepting is the person's step, and Octo reads on
-  under the banner. A link is refused too, which plain-link navigation would
+  (`step_refused_consent`): accepting is the person's step, and the refusal
+  says so in the covered click's words, which the Personal Browser's policy
+  gives too. A link is refused too, which plain-link navigation would
   otherwise take. Only these words count: a banner's "Disagree" toggles, its
   cookie policy link, its settings ("Manage consent", a "Consent" tab) stay
   ordinary steps, and an accept word with "not", "no" or "without" up to two
@@ -513,6 +518,24 @@ Two steps never ask, in Ask too:
   selection", "Save and accept") is how a refusal made in the banner's
   settings is saved, so it is not refused: it asks once in every mode, a link
   too, because pre-ticked purposes could ride along.
+- **A notice the browser could not decline is the person's step, like a
+  sign-in.** `request_human_input` takes a cookie notice's buttons as well as
+  editable fields, in the chat's own tab only (Octo's own tabs refuse it, and
+  say to open that page in the chat's own tab and pause there). Each button
+  must be a control the describer found in a consent banner, sit in a banner
+  that speaks of cookies beside a button of that banner that accepts (as the
+  browser's own decline judges a banner), be turned on, and on its own be no
+  step the policy refuses or always asks about, so a page cannot dress a
+  payment, a sign-in or a deletion up as a notice's button to get a pause. A
+  notice in a frame is never listed, so never handed over. The pause
+  highlights those buttons and presses none of them; its guidance says
+  `kind: "cookies"` with fixed labels ("Highlighted button 1") and nothing of
+  the page, and ends the run under its own code (`cookie_notice_required`).
+  The Browser view's hint says "Answer the highlighted cookie notice, then let
+  Octo continue." and the turn's reply "Answer the highlighted cookie notice
+  in Instafy's browser, then choose Let Octo continue." The person answers the
+  notice on the page (in its settings, if they like), and the next turn reads
+  the page under it.
 
 The browser view's prompt asks in the chat row's words: "Octo wants to use
 example.com." with **Deny** and **Allow site** (or "Octo wants to click “Search”
@@ -1854,7 +1877,7 @@ readable. The Shared and Personal Browser policies, the browser skill and the
 turn that writes a card's task state the same rule. A run on a resumed provider
 thread is given its own policy as well (once, when it differs from the one the
 thread last read), and the hint says the rule again where it applies. The
-turn's reply after a pause says "Sign in or fill in the highlighted
+turn's reply after a pause on fields says "Sign in or fill in the highlighted
 fields on the page in Instafy's browser, then choose Let Octo continue. I don't
 ask for those details in chat." When Octo's last reply in the chat was such a
 pause already, it says "Instafy's browser is still waiting for you. Sign in or

@@ -1737,7 +1737,13 @@ a sign-in field or with a frame holding card fields, and a dialog about a
 privacy policy on the person's signed-in page that never speaks of cookies are
 left alone. A click under a consent notice the browser could not decline, or
 under a loading screen, is refused at once in words with no call log, and a
-cover that goes a moment after the page moves is waited for. The Personal
+cover that goes a moment after the page moves is waited for. A cookie notice
+with a settings link and an accept but no reject is the person's step: a click
+under it and a press of its accept are refused in the same words, which the
+Personal Browser's policy gives too; a pause on its buttons highlights them as
+a cookie notice with no page text and presses none; a button outside a notice,
+or one dressed up beside its accept, gets no pause; and once the person has
+answered it, the next step works on the page under it. The Personal
 Browser's page bridge, host and redaction have unit tests for the same frames,
 pictures, cut line, states, names, codes and count.
 

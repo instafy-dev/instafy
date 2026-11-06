@@ -156,8 +156,9 @@ const AGENT_TABS_FILE_MAX_BYTES: u64 = 8 * 1024;
 /// on loopback, so a slower answer is a stuck browser.
 const AGENT_TAB_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_CDP_PORT: u16 = 9223;
-const TERMINAL_APPROVAL_FAILURE_CODES: [&str; 10] = [
+const TERMINAL_APPROVAL_FAILURE_CODES: [&str; 11] = [
     "human_input_required",
+    "cookie_notice_required",
     "approval_denied",
     "approval_timeout",
     "approval_stale",
@@ -178,6 +179,9 @@ const BROWSER_UNAVAILABLE_CODE: &str = "browser_unavailable";
 /// closed under the command. The script's `BROWSER_UNAVAILABLE_EXIT_CODE`
 /// must stay equal to it.
 const BROWSER_UNAVAILABLE_EXIT_CODE: i32 = 75;
+/// What starts the line on which the controller script writes a failed step's
+/// sentence (`assets/shared-browser-cli.js`), before it exits.
+const CONTROLLER_FAILURE_MARK: &str = "Shared Browser command failed: ";
 /// Tool calls in a row that may find the browser unavailable before the run
 /// stops using it. Two, so one slow connect under load does not end a turn,
 /// while a browser that is gone ends it within seconds instead of the model
@@ -2810,6 +2814,10 @@ fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
             "Human input is needed. End this turn now. The user will fill the highlighted fields directly after confirmed shutdown, then explicitly continue in a fresh browser turn. Never request or repeat their values.".to_string(),
             false,
         ),
+        "cookie_notice_required" => (
+            "The person answers the cookie notice on the page. End this turn now: they choose Let Octo continue once they have, and the next turn takes a fresh snapshot.".to_string(),
+            false,
+        ),
         BROWSER_UNAVAILABLE_CODE => (
             "Instafy's browser closed or stopped responding on this space's machine. End this turn now: do not retry or call another browser tool. Say in one short sentence that the browser closed and that they can open it again and send a message to continue.".to_string(),
             true,
@@ -3178,13 +3186,12 @@ fn network_failure(message: &str) -> Option<NetworkFailure> {
 
 /// A failed call's result. A page the network did not deliver says so in
 /// plain words, with the browser's code only in `error.details`; any other
-/// failure keeps the controller's own (masked) error text.
+/// failure says what the browser said of its step (its controller's own,
+/// masked sentence, [`controller_failure`]), with nothing before it.
 fn failed_tool_result(message: &str) -> CallToolResult {
     match network_failure(message) {
         Some(failure) => network_failure_tool_result(&failure),
-        None => CallToolResult::error(vec![ContentBlock::text(format!(
-            "Shared Browser action failed: {message}"
-        ))]),
+        None => CallToolResult::error(vec![ContentBlock::text(message.to_string())]),
     }
 }
 
@@ -3289,7 +3296,7 @@ pub(crate) fn shared_browser_mcp_tools() -> Vec<Tool> {
         Tool::new(
             Cow::Borrowed("request_human_input"),
             Cow::Borrowed(
-                "End this turn and ask the user to fill one to eight highlighted fields from a fresh snapshot. Never include field values. The user explicitly continues in a fresh turn.",
+                "End this turn and ask the user to fill one to eight highlighted fields, or to answer a cookie notice by its highlighted buttons, from a fresh snapshot. Never include field values. The user explicitly continues in a fresh turn.",
             ),
             schema(json!({
                 "type": "object", "additionalProperties": false,
@@ -3830,7 +3837,12 @@ async fn execute_request(request: &SharedBrowserRequest) -> Result<JsonValue> {
 }
 
 /// The error of a controller command that exited unsuccessfully. Only its
-/// exit code, never its error text, marks the browser as unavailable.
+/// exit code, never its error text, marks the browser as unavailable. Its
+/// words are the browser's own sentence, which the controller script writes
+/// on a line of its own after [`CONTROLLER_FAILURE_MARK`] when a step fails:
+/// Octo reads what happened to its step, never how a command exited. A
+/// command that wrote no such line (killed, or Node failed before the script
+/// ran) says how it exited and what it wrote.
 fn controller_failure(
     status: std::process::ExitStatus,
     stderr: &[u8],
@@ -3838,14 +3850,22 @@ fn controller_failure(
 ) -> anyhow::Error {
     let stderr = String::from_utf8_lossy(stderr);
     let details = stderr.trim();
-    let message = format!(
-        "Shared Browser command exited with {status}: {}",
-        if details.is_empty() {
-            "no error details"
-        } else {
-            details
-        }
-    );
+    let message = details
+        .match_indices(CONTROLLER_FAILURE_MARK)
+        .find(|(at, _)| *at == 0 || details[..*at].ends_with('\n'))
+        .map(|(at, _)| details[at + CONTROLLER_FAILURE_MARK.len()..].trim())
+        .filter(|sentence| !sentence.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "Shared Browser command exited with {status}: {}",
+                if details.is_empty() {
+                    "no error details"
+                } else {
+                    details
+                }
+            )
+        });
     if status.code() == Some(BROWSER_UNAVAILABLE_EXIT_CODE) {
         BrowserUnavailable(message).into()
     } else {

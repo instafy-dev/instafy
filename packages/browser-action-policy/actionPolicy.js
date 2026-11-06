@@ -454,7 +454,7 @@
     },
     consent: {
       code: "step_refused_consent",
-      message: "Accepting cookies or other consent is the user's step. Leave the banner up and read on under it.",
+      message: "A cookie notice covers this page, and the browser could not decline it. If the task needs this page, pause on the notice's buttons with request_human_input in the chat's own tab: the person answers it there and chooses Let Octo continue. Otherwise open a link under it by its address, or the official site of the place or service the task is about.",
     },
     sensitive: {
       code: "sensitive_input_blocked",

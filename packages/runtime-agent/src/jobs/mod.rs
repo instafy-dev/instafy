@@ -15210,6 +15210,12 @@ fn should_retry_codex_once(
 /// their input (`human_input_required`).
 const HUMAN_INPUT_PAUSE_REPLY: &str = "Sign in or fill in the highlighted fields on the page in Instafy's browser, then choose Let Octo continue. I don't ask for those details in chat.";
 
+/// What the person reads when it paused on a cookie notice that Instafy's
+/// browser could not decline (`cookie_notice_required`): the same words as the
+/// hint the Browser view shows beside the notice.
+const COOKIE_NOTICE_PAUSE_REPLY: &str =
+    "Answer the highlighted cookie notice in Instafy's browser, then choose Let Octo continue.";
+
 /// What it reads when Octo's last reply in the chat was such a pause already:
 /// the browser is still waiting for the person. The same words again read as
 /// if Let Octo continue had done nothing (pressed without signing in, a local
@@ -15262,6 +15268,7 @@ fn apply_terminal_shared_browser_summary(
 fn terminal_shared_browser_summary(code: &str) -> &'static str {
     match code {
         "human_input_required" => HUMAN_INPUT_PAUSE_REPLY,
+        "cookie_notice_required" => COOKIE_NOTICE_PAUSE_REPLY,
         "approval_timeout" => {
             "I'm waiting for your OK to continue in Instafy's browser. I haven't done that step yet. Send a message when you're ready and I'll ask again."
         }
@@ -15303,6 +15310,25 @@ fn manual_browser_handoff_is_not_retried_or_reported_as_a_generic_failure() {
     assert!(!summary.contains("consent ended"));
     assert!(fallback.is_none());
     assert!(!should_retry_codex_once(Some("human_input_required"), true));
+    // A pause on a cookie notice asks the person to answer it, never to sign
+    // in or fill in fields, in the words of the Browser view's hint, and is no
+    // failure either.
+    let mut fallback = Some(CodexFallbackSummaryKind::MissingFinalAssistantMessage);
+    apply_terminal_shared_browser_summary(
+        &mut summary,
+        &mut fallback,
+        Some("cookie_notice_required"),
+        true,
+    );
+    assert_eq!(
+        summary,
+        "Answer the highlighted cookie notice in Instafy's browser, then choose Let Octo continue."
+    );
+    assert!(fallback.is_none());
+    assert!(!should_retry_codex_once(
+        Some("cookie_notice_required"),
+        true
+    ));
 }
 
 fn has_successful_patch_apply_event(events: &[JsonValue]) -> bool {

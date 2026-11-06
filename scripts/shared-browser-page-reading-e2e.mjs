@@ -52,6 +52,15 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    something outside its control covers is refused at once, in words (a
 //    cookie notice the browser could not decline says so), with no wait and
 //    no call log, and a cover that goes within a moment is waited for.
+// 9. A cookie notice the browser could not decline (an accept and a settings
+//    link, no reject) is the person's step, like a sign-in: a click under it
+//    and a press of its accept are refused in the same words, which say to
+//    pause on it, and the Personal Browser's policy gives them too. A pause
+//    on its buttons highlights them for the person, says it is a cookie
+//    notice, and hands over no page text; the browser presses none of them.
+//    A button the page dresses up in a notice beside its accept, or one
+//    outside any notice, gets no pause. Once the person has answered it and
+//    lets Octo continue, the next step works on the page under it.
 // Every site is a loopback fixture; Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
@@ -78,6 +87,12 @@ const scriptSource = [
     .map((name) => fs.readFileSync(path.join(repositoryRoot, "packages/runtime-agent/assets", name), "utf8")),
 ].join("\n");
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// The action policy both browsers judge steps by: the Personal Browser's
+// refusals are its words.
+const actionPolicyModule = createRequire(import.meta.url)(path.join(repositoryRoot, "packages/browser-action-policy/actionPolicy.js"));
+// What a cookie notice the browser could not decline tells Octo, whether a
+// click under it was kept from its control or Octo tried to accept it.
+const NOTICE_WORDS = "A cookie notice covers this page, and the browser could not decline it. If the task needs this page, pause on the notice's buttons with request_human_input in the chat's own tab: the person answers it there and chooses Let Octo continue. Otherwise open a link under it by its address, or the official site of the place or service the task is about.";
 // The reading's text cap (MAX_VISIBLE_TEXT_CHARS in the controller).
 const TEXT_CAP = 12_000;
 // Values fields hold, which no reading may carry. Assembled at run time so the
@@ -291,6 +306,20 @@ const NOTICE = `<h1>Visit the city</h1><p style="margin-top:1200px"><a href="/re
 <p>We and our partners store and read data on your device.</p>
 <button type="button" onclick="window.consentAnswer = 'settings'">Learn more</button> <button type="button" onclick="window.consentAnswer = 'accepted'">Agree and close</button>
 </div></div>`;
+// A transport operator's cookie notice over its whole page, with a link to
+// its cookie settings page and an accept, and no reject button; and a notice
+// whose "Delete my account" sits beside its accept, as a page could dress up
+// another control as a notice's.
+const COOKIE_NOTICE = `<h1>Metro</h1><p style="margin-top:1200px"><a href="/reading/visit" id="planner">Plan a journey</a></p>
+<div id="consent-backdrop" style="position:fixed;inset:0;background:rgba(0,0,0,.4)"><div class="cookie-bar" style="margin:80px auto;width:320px;padding:16px;background:#fff">
+<p>This site uses cookies to work and to measure how it is used.</p>
+<a href="/reading/cookie-settings" role="button">Customize cookies</a> <button type="button" onclick="window.consentAnswer = 'accepted'; document.getElementById('consent-backdrop').remove()">Accept all cookies</button>
+</div></div>`;
+const DRESSED_NOTICE = `<h1>Your account</h1><p><a href="/reading/visit">Orders</a></p>
+<div class="cookie-bar" style="position:fixed;left:0;right:0;bottom:0;padding:16px;background:#fff">
+<p>We use cookies.</p>
+<button type="button" onclick="window.consentAnswer = 'deleted'">Delete my account</button> <button type="button" onclick="window.consentAnswer = 'accepted'">Accept all cookies</button>
+</div>`;
 const COVERED = `<h1>Timetable</h1><p style="margin-top:1200px"><a href="/reading/visit" id="lines">All lines</a></p>
 <div id="loading" style="position:fixed;inset:0;background:rgba(255,255,255,.8)"><p>Loading departures</p></div>
 <script>
@@ -347,6 +376,8 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/policy": page("Your account", POLICY),
       "site.test /reading/checkout": page("Checkout", BANNER("checkout_consent", CHECKOUT)),
       "site.test /reading/notice": page("Visit the city", NOTICE),
+      "site.test /reading/cookie-notice": page("Metro", COOKIE_NOTICE),
+      "site.test /reading/dressed-notice": page("Your account", DRESSED_NOTICE),
       "site.test /reading/covered": page("Timetable", COVERED),
       "site.test /reading/visit": page("Visit", "<h1>Plan your visit</h1>"),
       "frame.test /banner": page("Cookies", BANNER("frame_consent")),
@@ -770,7 +801,8 @@ export async function runSharedBrowserPageReadingFixture() {
     const underNotice = await runTool("POST", "/v1/click", { index: control(reading, "Attractions").index, snapshotId: reading.snapshotId });
     measurements.coveredClickMs = Date.now() - clickStarted;
     assert.equal(underNotice.code, 1, underNotice.stdout);
-    assert.match(underNotice.stderr, /A cookie notice covers this page, and the browser could not decline it: read on under it, or open the place's own site\./u);
+    assert.ok(underNotice.stderr.includes(NOTICE_WORDS), underNotice.stderr);
+    assert.doesNotMatch(underNotice.stderr, /read on under/u);
     assert.doesNotMatch(underNotice.stderr, /Call log|Timeout|intercepts pointer events/u);
     assert.ok(measurements.coveredClickMs < 8_000, `the covered click waited ${measurements.coveredClickMs} ms`);
     assert.equal(await consentAnswer(), null);
@@ -792,6 +824,59 @@ export async function runSharedBrowserPageReadingFixture() {
     measurements.coverWaitedClickMs = Date.now() - clickStarted;
     assert.equal(new URL(afterCover.url).pathname, "/reading/visit", "the click under a cover that went was not done");
 
+    // 9. A cookie notice the browser could not decline is the person's step.
+    // a. The browser leaves it up, and a click under it and a press of its
+    // accept are refused in the same words, which the Personal Browser's
+    // policy gives too: pause on it, or go elsewhere. Nothing is pressed.
+    assert.equal(actionPolicyModule.refusalFor("consent").message, NOTICE_WORDS);
+    reading = await read("/reading/cookie-notice");
+    assert.equal(await consentAnswer(), null, "a notice with no reject button was answered");
+    assert.equal(reading.activity.declined, undefined);
+    const covered = await runTool("POST", "/v1/click", { index: control(reading, "Plan a journey").index, snapshotId: reading.snapshotId });
+    assert.equal(covered.code, 1, covered.stdout);
+    assert.ok(covered.stderr.includes(NOTICE_WORDS), covered.stderr);
+    const accepted = await runTool("POST", "/v1/click", { index: control(reading, "Accept all cookies").index, snapshotId: reading.snapshotId });
+    assert.equal(accepted.code, 1, accepted.stdout);
+    assert.ok(accepted.stderr.includes(`${NOTICE_WORDS} [step_refused_consent]`), accepted.stderr);
+    assert.equal(await consentAnswer(), null, "the browser pressed the notice's accept");
+    // b. A pause on its buttons highlights them, in the chat's own tab, and
+    // says it is a cookie notice, with no page text; nothing is pressed.
+    reading = await ok("GET", "/v1/snapshot");
+    const notice = ["Customize cookies", "Accept all cookies"].map((label) => control(reading, label).index);
+    const actionsBeforePause = fs.readFileSync(actionsPath, "utf8").length;
+    const noticePause = await runTool("POST", "/v1/request-human-input", { indices: notice, snapshotId: reading.snapshotId });
+    assert.equal(noticePause.code, 1, noticePause.stdout);
+    assert.match(noticePause.stderr, /\[cookie_notice_required_non_retryable\]/u);
+    const pauseEvents = fs.readFileSync(actionsPath, "utf8").slice(actionsBeforePause).trim().split("\n")
+      .map((line) => JSON.parse(line)).filter((event) => event.type === "human_input");
+    assert.equal(pauseEvents.length, 1, "the pause was not published");
+    assert.equal(pauseEvents[0].humanInputRequest.kind, "cookies");
+    assert.deepEqual(pauseEvents[0].humanInputRequest.fields, [{ label: "Highlighted button 1" }, { label: "Highlighted button 2" }]);
+    assert.doesNotMatch(JSON.stringify(pauseEvents[0]), /cookies to work|Customize cookies|Accept all cookies/u, "page text reached the pause");
+    assert.deepEqual(
+      await runPage.evaluate(() => Array.from(document.querySelectorAll("#consent-backdrop a, #consent-backdrop button"), (element) => element.style.outlineStyle)),
+      ["solid", "solid"],
+      "the notice's buttons are not highlighted",
+    );
+    assert.equal(await consentAnswer(), null, "the pause pressed the notice");
+    // c. A button outside any notice, and one a page dresses up beside a
+    // notice's accept, get no pause.
+    const outside = await runTool("POST", "/v1/request-human-input", { indices: [control(reading, "Plan a journey").index], snapshotId: reading.snapshotId });
+    assert.equal(outside.code, 1, outside.stdout);
+    assert.match(outside.stderr, /Human input targets must be observed editable fields, or the buttons of a cookie notice/u);
+    reading = await read("/reading/dressed-notice");
+    const dressed = await runTool("POST", "/v1/request-human-input", { indices: [control(reading, "Delete my account").index], snapshotId: reading.snapshotId });
+    assert.equal(dressed.code, 1, dressed.stdout);
+    assert.match(dressed.stderr, /Human input targets must be observed editable fields, or the buttons of a cookie notice/u);
+    assert.equal(await consentAnswer(), null);
+    // d. The person answers the notice on the page (here in its settings), and
+    // lets Octo continue: the next step works on the page under it.
+    reading = await read("/reading/cookie-notice");
+    await runPage.evaluate(() => { window.consentAnswer = "rejected in its settings"; document.getElementById("consent-backdrop").remove(); });
+    reading = await ok("GET", "/v1/snapshot");
+    const continued = await ok("POST", "/v1/click", { index: control(reading, "Plan a journey").index, snapshotId: reading.snapshotId });
+    assert.equal(new URL(continued.url).pathname, "/reading/visit", "the step after the person answered the notice was not done");
+
     const result = {
       status: "passed", fixtureVersion: 1, browserVersion: context.browser()?.version() ?? "unknown",
       platform: process.platform, architecture: process.arch, nodeVersion: process.version,
@@ -805,6 +890,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "password, card and code fields in a frame or a shadow root carry no value into the reading, a frame's fields are never listed, a key in a shadow root's read-only field or in a control's name the list leaves out still makes a secret screen, and a code in boxes of its own is masked",
         "a section marked open is no control, and a click whose middle lands on a form's button or a frame inside the control is refused, sending and asking nothing",
         "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, and a cover that goes within a moment is waited for",
+        "a cookie notice the browser could not decline is the person's step: a click under it and a press of its accept are refused in the words the Personal Browser's policy gives too, a pause highlights its buttons as a cookie notice with no page text and presses none of them, a button outside a notice or dressed up beside its accept gets no pause, and once the person answered it the next step works",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",
