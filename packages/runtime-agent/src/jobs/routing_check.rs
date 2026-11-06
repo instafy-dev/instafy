@@ -868,7 +868,7 @@ mod tests {
             assert!(input.browser_routes_offered, "{id}");
             assert!(
                 input.prompt.contains(
-                    "such as a route), never a change the person stopped or undid; when a page here shows it"
+                    "So is a bare \"keep going\" when a page here marks something not checked or not confirmed"
                 ),
                 "{id}: {}",
                 input.prompt
@@ -898,6 +898,66 @@ mod tests {
         // Four requests sent on to the browser, two empty replies and two hand-backs' words.
         assert_eq!(input.history_metrics["ignoredEntries"], json!(8));
         assert_eq!(input.history_metrics["includedTurns"], json!(13));
+    }
+
+    /// Two chats of a recorded local test (Nov 6), each with the entries its routing step
+    /// received there. After a comparison's building turn said it could not read the maker's
+    /// pages, "Fill in what's still missing." needs the web and a change here, in a chat with no
+    /// browser turn yet; after a page that marks its metro route not confirmed, a stopped section
+    /// and a tip stopped and undone, "keep going" carries the route on. Each input reads the
+    /// routing section's line for it, and the chat as the routing step read it there: the
+    /// comparison and its reply; twelve of the page's entries, its two Stops and the Undo among
+    /// them, and five left out (three requests sent on to the browser, an empty reply and a
+    /// hand-back's words).
+    #[test]
+    fn a_fill_in_after_a_reply_and_keep_going_after_a_page_read_their_lines() {
+        let cases = shipped();
+        let workspace = tempdir().unwrap();
+        prepare_workspace(workspace.path()).unwrap();
+        let fill_in = case(&cases, "comparison-fill-in-after-a-reply");
+        assert!(
+            fill_in
+                .history
+                .iter()
+                .all(|entry| entry.get("lane").is_none())
+        );
+        let keep_going = case(&cases, "keep-going-unconfirmed-route-after-stops-and-undo");
+        for (case, line, included, ignored) in [
+            (
+                &fill_in,
+                "Also when the browser part needs what only this space or another chat holds (what a page, map or file here says, or, once this chat has a browser turn, \"those\" from a reply that was not the browser's)",
+                3,
+                0,
+            ),
+            (
+                &keep_going,
+                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on, never a change the person stopped or undid.",
+                13,
+                5,
+            ),
+        ] {
+            assert_eq!(case.expected(), "browser_then_build", "{}", case.id);
+            let input = routing_input(case, workspace.path()).unwrap();
+            assert!(input.browser_routes_offered, "{}", case.id);
+            assert!(input.prompt.contains(line), "{}: {}", case.id, input.prompt);
+            assert!(input.prompt.contains(
+                "That browser turn sees only those words, with your `summary` while this chat has no browser turn"
+            ));
+            assert_eq!(
+                input.history_metrics["includedTurns"],
+                json!(included),
+                "{}",
+                case.id
+            );
+            assert_eq!(
+                input.history_metrics["ignoredEntries"],
+                json!(ignored),
+                "{}",
+                case.id
+            );
+        }
+        let input = routing_input(&keep_going, workspace.path()).unwrap();
+        assert_eq!(input.prompt.matches("Stopped this run.").count(), 2);
     }
 
     /// The routing input is the job's, reading the browser skill's routing section from the

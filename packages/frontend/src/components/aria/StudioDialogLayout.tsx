@@ -15,6 +15,8 @@ type StudioDialogHeaderProps = {
   closeButtonDisabled?: boolean;
   /** Media keeps its controls mounted while floating them over the mobile image. */
   layout?: "default" | "media";
+  /** Keep a decision or question readable in narrow confirmation dialogs. */
+  wrapTitle?: boolean;
   className?: string;
   titleClassName?: string;
   descriptionClassName?: string;
@@ -29,6 +31,7 @@ export function StudioDialogHeader({
   closeLabel = "Close dialog",
   closeButtonDisabled = false,
   layout = "default",
+  wrapTitle = false,
   className,
   titleClassName,
   descriptionClassName,
@@ -56,7 +59,7 @@ export function StudioDialogHeader({
               as="h2"
               variant="subtitle"
               tone="primary"
-              className={["truncate", titleClassName].filter(Boolean).join(" ")}
+              className={[wrapTitle ? "break-words" : "truncate", titleClassName].filter(Boolean).join(" ")}
             >
               {title}
             </Text>

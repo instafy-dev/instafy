@@ -513,10 +513,16 @@ const STEP_FAILED_STATES: &str =
 /// page, a click, typing) is something done in the browser.
 const BROWSER_LOOK_TOOLS: &str = "('list_tabs', 'status', 'snapshot')";
 
+/// Codex's own tools that list or read what a turn's MCP servers offer, on whichever server a
+/// call names (Codex reports one that names none as `codex`): a look too, never something done.
+const MCP_RESOURCE_LOOK_TOOLS: &str =
+    "('list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource')";
+
 /// Whether any step of job `$2` in project `$1` worked: a command, a tool call
 /// or a file change whose last report is not a failure (one whose end never
 /// arrived counts, since it may have worked), other than a look at the
-/// browser's tabs or page and the runtime's own routing pre-observation.
+/// browser's tabs or page, a listing or reading of what the turn's MCP servers
+/// offer, and the runtime's own routing pre-observation.
 fn step_that_worked_sql() -> String {
     format!(
         "select exists (
@@ -539,6 +545,7 @@ fn step_that_worked_sql() -> String {
                 and coalesce(step.exit_code, '0') = '0'
                 and not coalesce(step.server in ('instafy_shared_browser', 'instafy_personal_browser')
                                  and step.tool in {BROWSER_LOOK_TOOLS}, false)
+                and not coalesce(step.tool in {MCP_RESOURCE_LOOK_TOOLS}, false)
          )"
     )
 }
@@ -1100,6 +1107,12 @@ mod tests {
         assert!(filter.starts_with("project_id = $1"), "{sql}");
         assert!(sql.contains(STEP_FAILED_STATES), "{sql}");
         assert!(sql.contains(BROWSER_LOOK_TOOLS), "{sql}");
+        assert!(
+            sql.contains(&format!(
+                "and not coalesce(step.tool in {MCP_RESOURCE_LOOK_TOOLS}, false)"
+            )),
+            "{sql}"
+        );
     }
 
     #[test]

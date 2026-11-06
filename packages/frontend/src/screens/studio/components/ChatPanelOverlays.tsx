@@ -1,12 +1,16 @@
+import { useLayoutEffect, useRef, useState } from "react";
 import { Dialog, Modal, ModalOverlay } from "react-aria-components";
-import { Badge } from "../../../components/Badge";
-import { Button } from "../../../components/Button";
-import { Spinner } from "../../../components/Spinner";
+import { ArrowLeft, NavArrowRight } from "iconoir-react";
+import { IconButton } from "../../../components/Button";
+import { MenuItemContent } from "../../../components/MenuItemContent";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
+import { StudioMenuAction, StudioMenuSeparator, moveStudioMenuActionFocus } from "../../../components/aria/StudioMenu";
+import { StudioModalNativeOcclusion } from "../../../components/aria/studioModalOcclusion";
 import { formatPromptContextModeLabel, formatTokenCountLabel, resolveTokenUsageForMessage } from "./chatMessageDetailHelpers";
 import { formatSpeakerTimestamp } from "./chatSpeakerTimestamp";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
+import { clampFloatingSurfacePositionToStudioViewport, type FloatingSurfacePlacement } from "../../../utils/floatingSurfacePosition";
 
 type MessageMenuLike = {
   kind: "message" | "conversation";
@@ -17,14 +21,43 @@ type MessageMenuLike = {
   view: "actions" | "token_usage";
 };
 
-type InvitePromptLike = {
-  missingUsers: Array<{
-    displayName?: string | null;
-    handle?: string | null;
-  }>;
-};
-
 type SelectedMessageTokenUsage = ReturnType<typeof resolveTokenUsageForMessage>;
+
+function MessageStats({ usage }: { usage: NonNullable<SelectedMessageTokenUsage> }) {
+  const context = usage.context;
+  const counts: Array<[string, string | number | null]> = [
+    ["Input", formatTokenCountLabel(usage.inputTokens)],
+    ["Cached", formatTokenCountLabel(usage.cachedInputTokens)],
+    ["Output", formatTokenCountLabel(usage.outputTokens)],
+  ];
+  const details: Array<[string, string | number | null]> = context ? [
+    ["Prompt", context.estimatedPromptTokens === null ? null : formatTokenCountLabel(context.estimatedPromptTokens)],
+    ["History", context.estimatedHistoryTokens === null ? null : formatTokenCountLabel(context.estimatedHistoryTokens)],
+    ["Window", context.modelContextWindow === null ? null : formatTokenCountLabel(context.modelContextWindow)],
+    ["Window used", context.estimatedPromptUsagePercent === null ? null : `${context.estimatedPromptUsagePercent}%`],
+    ["Turns", context.totalTurns === null ? context.includedTurns : `${context.includedTurns ?? 0}/${context.totalTurns}`],
+    ["Summarized", context.summarizedTurns && context.summarizedTurns > 0 ? context.summarizedTurns : null],
+    ["Omitted", context.omittedTurns && context.omittedTurns > 0 ? context.omittedTurns : null],
+  ] : [];
+  return <div className="space-y-3 px-2.5 py-2">
+    <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-2">
+      {counts.map(([label, value]) => <div key={label} className="contents">
+        <Text as="dt" variant="bodyCompact" tone="muted">{label}</Text>
+        <Text as="dd" variant="bodyCompact" tone="primary" className="text-right tabular-nums">{value}</Text>
+      </div>)}
+    </dl>
+    {context ? <>
+      <StudioMenuSeparator />
+      <Text variant="bodyCompact" tone="primary">{formatPromptContextModeLabel(context)}</Text>
+      <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-2">
+        {details.filter(([, value]) => value !== null).map(([label, value]) => <div key={label} className="contents">
+          <Text as="dt" variant="bodyCompact" tone="muted">{label}</Text>
+          <Text as="dd" variant="bodyCompact" tone="primary" className="text-right tabular-nums">{value}</Text>
+        </div>)}
+      </dl>
+    </> : null}
+  </div>;
+}
 
 export function ChatMessageMenuOverlay({
   messageMenu,
@@ -60,324 +93,108 @@ export function ChatMessageMenuOverlay({
   onOpenThread?: (() => void) | null;
   openThreadLabel?: string;
 }) {
-  useNativeBackButtonAction(Boolean(messageMenu), onClose);
-  if (!messageMenu) {
-    return null;
-  }
+  const backRef = useRef<HTMLButtonElement>(null);
+  const statsRef = useRef<HTMLButtonElement>(null);
+  const actionsRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const modalRef = useRef<HTMLDivElement>(null);
+  const [measuredPosition, setMeasuredPosition] = useState<({ menu: MessageMenuLike } & FloatingSurfacePlacement) | null>(null);
+  useLayoutEffect(() => {
+    if (!messageMenu || !modalRef.current) return;
+    const { width, height } = modalRef.current.getBoundingClientRect();
+    if (!width) return;
+    // The opener estimates the size. Use the content's full height so menus
+    // near the bottom move upward before shrinking their readable scroll area.
+    const scroller = scrollRef.current;
+    const overflow = scroller ? Math.max(0, scroller.scrollHeight - scroller.clientHeight) : 0;
+    const position = clampFloatingSurfacePositionToStudioViewport({
+      clientX: messageMenu.x, clientY: messageMenu.y, surfaceWidth: width, surfaceHeight: height + overflow, padding: 12,
+    });
+    setMeasuredPosition({ menu: messageMenu, ...position });
+  }, [messageMenu, selectedMessageTokenUsage]);
+  const previousView = useRef(messageMenu?.view);
+  useLayoutEffect(() => {
+    if (messageMenu?.view === "token_usage") backRef.current?.focus({ preventScroll: true });
+    else if (previousView.current === "token_usage" && messageMenu?.view === "actions") {
+      const button = statsRef.current;
+      const scroller = actionsRef.current;
+      button?.focus({ preventScroll: true });
+      if (button && scroller) {
+        // Reveal the restored action inside its menu without moving the chat underneath.
+        const row = button.getBoundingClientRect();
+        const bounds = scroller.getBoundingClientRect();
+        if (row.bottom > bounds.bottom) scroller.scrollTop += row.bottom - bounds.bottom;
+        else if (row.top < bounds.top) scroller.scrollTop += row.top - bounds.top;
+      }
+    }
+    previousView.current = messageMenu?.view;
+  }, [messageMenu?.view]);
+  const back = () => {
+    if (messageMenu?.view === "token_usage") onShowActionsView();
+    else onClose();
+  };
+  useNativeBackButtonAction(Boolean(messageMenu), back);
+  if (!messageMenu) return null;
+  const position = measuredPosition?.menu === messageMenu ? measuredPosition : messageMenu;
   const sentTime = messageMenu.kind === "message" ? formatSpeakerTimestamp(selectedMessageTimestamp) : null;
 
-  return (
-    <ModalOverlay
-      isOpen
-      isDismissable
-      onOpenChange={(open) => { if (!open) onClose(); }}
-      className="fixed inset-0 z-50"
-      onContextMenu={(event) => event.preventDefault()}
-    >
-      <Modal
-        className="w-64 outline-none"
-        style={{
-          position: "fixed",
-          left: messageMenu.x,
-          top: messageMenu.y,
-          maxHeight: messageMenu.maxHeight,
-        }}
-      >
-        <Surface tone="default" radius="xl" shadow="lg" className="studio-scrollbar max-h-[inherit] overflow-y-auto p-2 text-sm">
-          <Dialog
-            aria-label={messageMenu.view === "token_usage" ? "Message stats" : messageMenu.kind === "message" ? "Message actions" : "Conversation actions"}
-            className="outline-none"
-          >
-            {messageMenu.view === "token_usage" ? (
-              <div className="space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <Text as="span" variant="overline" tone="subtle" className="tracking-wide">
-                    Message stats
-                  </Text>
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    radius="full"
-                    onPress={onShowActionsView}
-                  >
-                    Back
-                  </Button>
-                </div>
-                {selectedMessageTokenUsage ? (
-                  <>
-                    <div className="flex flex-wrap gap-2 text-xs">
-                      <Badge size="xs" className="text-slate-600">
-                        Input {selectedMessageTokenUsage.inputTokens}
-                      </Badge>
-                      <Badge size="xs" className="text-slate-600">
-                        Cached {selectedMessageTokenUsage.cachedInputTokens}
-                      </Badge>
-                      <Badge size="xs" className="text-slate-600">
-                        Output {selectedMessageTokenUsage.outputTokens}
-                      </Badge>
-                      {selectedMessageTokenUsage.context ? (
-                        <Badge size="xs" className="text-slate-600">
-                          {formatPromptContextModeLabel(selectedMessageTokenUsage.context)}
-                        </Badge>
-                      ) : null}
-                    </div>
-                    {selectedMessageTokenUsage.context ? (
-                      <div className="space-y-2 text-xs text-slate-500">
-                        <div className="flex flex-wrap gap-2">
-                          {selectedMessageTokenUsage.context.estimatedPromptTokens !== null ? (
-                            <Badge size="xs" className="text-slate-600">
-                              Prompt {formatTokenCountLabel(selectedMessageTokenUsage.context.estimatedPromptTokens)}
-                            </Badge>
-                          ) : null}
-                          {selectedMessageTokenUsage.context.estimatedHistoryTokens !== null ? (
-                            <Badge size="xs" className="text-slate-600">
-                              History {formatTokenCountLabel(selectedMessageTokenUsage.context.estimatedHistoryTokens)}
-                            </Badge>
-                          ) : null}
-                          {selectedMessageTokenUsage.context.modelContextWindow !== null ? (
-                            <Badge size="xs" className="text-slate-600">
-                              Window {formatTokenCountLabel(selectedMessageTokenUsage.context.modelContextWindow)}
-                            </Badge>
-                          ) : null}
-                          {selectedMessageTokenUsage.context.estimatedPromptUsagePercent !== null ? (
-                            <Badge size="xs" className="text-slate-600">
-                              {selectedMessageTokenUsage.context.estimatedPromptUsagePercent}% used
-                            </Badge>
-                          ) : null}
-                        </div>
-                        {(selectedMessageTokenUsage.context.totalTurns !== null ||
-                          selectedMessageTokenUsage.context.includedTurns !== null ||
-                          selectedMessageTokenUsage.context.summarizedTurns !== null ||
-                          selectedMessageTokenUsage.context.omittedTurns !== null) ? (
-                          <div className="rounded-2xl border border-slate-200/70 px-3 py-2">
-                            <Text as="div" variant="caption" tone="muted">
-                              {selectedMessageTokenUsage.context.totalTurns !== null
-                                ? `Turns ${selectedMessageTokenUsage.context.includedTurns ?? 0}/${selectedMessageTokenUsage.context.totalTurns}`
-                                : "Prompt context details"}
-                            </Text>
-                            <div className="mt-1 flex flex-wrap gap-2">
-                              {selectedMessageTokenUsage.context.summarizedTurns !== null &&
-                              selectedMessageTokenUsage.context.summarizedTurns > 0 ? (
-                                <Badge size="xs" className="text-slate-600">
-                                  Summarized {selectedMessageTokenUsage.context.summarizedTurns}
-                                </Badge>
-                              ) : null}
-                              {selectedMessageTokenUsage.context.omittedTurns !== null &&
-                              selectedMessageTokenUsage.context.omittedTurns > 0 ? (
-                                <Badge size="xs" className="text-slate-600">
-                                  Omitted {selectedMessageTokenUsage.context.omittedTurns}
-                                </Badge>
-                              ) : null}
-                            </div>
-                          </div>
-                        ) : null}
-                      </div>
-                    ) : null}
-                    <Button
-                      variant="outline"
-                      size="xs"
-                      radius="full"
-                      fullWidth
-                      onPress={() => void onCopyTokenUsage()}
-                    >
-                      Copy stats
-                    </Button>
-                  </>
-                ) : (
-                  <Text as="p" variant="caption" tone="muted">
-                    No message stats are available.
-                  </Text>
-                )}
-              </div>
-            ) : (
-              <div className="space-y-1">
-                {sentTime ? (
-                  <Text as="p" variant="caption" tone="muted" className="px-2 py-1" data-testid="chat-message-sent-time">
-                    Sent <time dateTime={sentTime.dateTime}>{sentTime.title}</time>
-                  </Text>
-                ) : null}
-                {messageMenu.kind === "message" && selectedTextAvailable ? (
-                  <>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      radius="lg"
-                      fullWidth
-                      onPress={() => void onReplyToSelection?.()}
-                      className="justify-start"
-                    >
-                      Reply to selection
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      radius="lg"
-                      fullWidth
-                      onPress={() => void onSummarizeSelection?.()}
-                      className="justify-start"
-                    >
-                      Summarize selection
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      radius="lg"
-                      fullWidth
-                      onPress={() => void onExplainSelection?.()}
-                      className="justify-start"
-                    >
-                      Explain more
-                    </Button>
-                    <div className="my-1 h-px bg-slate-200/80 dark:bg-[color:var(--color-studio-dark-divider)]" />
-                  </>
-                ) : null}
-                {messageMenu.kind === "message" && onOpenThread ? (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    radius="lg"
-                    fullWidth
-                    onPress={() => {
-                      onOpenThread();
-                      onClose();
-                    }}
-                    className="justify-start"
-                  >
-                    {openThreadLabel ?? "Open thread"}
-                  </Button>
-                ) : null}
-                {messageMenu.kind === "message" ? (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    radius="lg"
-                    fullWidth
-                    onPress={() => void onCopySelectedMessage()}
-                    className="justify-start"
-                  >
-                    Copy message
-                  </Button>
-                ) : null}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  radius="lg"
-                  fullWidth
-                  onPress={() => void onCopyConversation()}
-                  className="justify-start"
-                >
-                  Copy conversation
-                </Button>
-                {messageMenu.kind === "message" && selectedMessageTokenUsage ? (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    radius="lg"
-                    fullWidth
-                    onPress={onShowTokenUsageView}
-                    className="justify-start"
-                  >
-                    Message stats…
-                  </Button>
-                ) : null}
-              </div>
-            )}
-          </Dialog>
-        </Surface>
-      </Modal>
-    </ModalOverlay>
-  );
+  return <ModalOverlay isOpen isDismissable onOpenChange={(open) => { if (!open) onClose(); }}
+    className="fixed inset-0 z-[80]" onContextMenu={(event) => event.preventDefault()}>
+    <Modal ref={modalRef} className="w-64 outline-none"
+      style={{ position: "fixed", left: position.x,
+        top: position.y, maxHeight: position.maxHeight,
+        maxWidth: "calc(100vw - var(--instafy-safe-area-inset-left, 0px) - var(--instafy-safe-area-inset-right, 0px) - 24px)" }}>
+      <Surface tone="floating" radius="2xl" shadow="none" className="flex max-h-[inherit] min-h-0 flex-col overflow-hidden p-2"
+          onKeyDownCapture={(event) => {
+            if (event.key !== "Escape" || event.nativeEvent.isComposing) return;
+            event.preventDefault();
+            event.stopPropagation();
+            back();
+          }}>
+        <Dialog aria-label={messageMenu.view === "token_usage" ? "Message stats" : messageMenu.kind === "message" ? "Message actions" : "Conversation actions"}
+          className="flex min-h-0 flex-col outline-none">
+          <StudioModalNativeOcclusion enabled />
+          {messageMenu.view === "token_usage" ? <>
+            <div className="flex shrink-0 items-center gap-2 pb-1">
+              <IconButton ref={backRef} variant="ghost" tone="neutral" aria-label="Back to message actions" title="Back" onPress={onShowActionsView}>
+                <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+              </IconButton>
+              <Text as="h2" variant="bodyStrong" tone="primary">Message stats</Text>
+            </div>
+            <div ref={scrollRef} className="studio-scrollbar min-h-0 overflow-y-auto overscroll-contain">
+              {selectedMessageTokenUsage ? <MessageStats usage={selectedMessageTokenUsage} />
+                : <Text variant="bodyCompact" tone="muted" className="px-2.5 py-2">No message stats are available.</Text>}
+            </div>
+            {selectedMessageTokenUsage ? <div className="shrink-0 pt-1">
+              <StudioMenuAction onPress={() => void onCopyTokenUsage()}><MenuItemContent>Copy stats</MenuItemContent></StudioMenuAction>
+            </div> : null}
+          </> : <div ref={(node) => { actionsRef.current = node; scrollRef.current = node; }} className="studio-scrollbar min-h-0 overflow-y-auto overscroll-contain" onKeyDown={moveStudioMenuActionFocus}>
+            {sentTime ? <Text variant="caption" tone="muted" className="px-2.5 py-2" data-testid="chat-message-sent-time">
+              Sent <time dateTime={sentTime.dateTime}>{sentTime.title}</time>
+            </Text> : null}
+            {messageMenu.kind === "message" && selectedTextAvailable ? <>
+              <StudioMenuAction onPress={() => void onReplyToSelection?.()}><MenuItemContent>Reply to selection</MenuItemContent></StudioMenuAction>
+              <StudioMenuAction onPress={() => void onSummarizeSelection?.()}><MenuItemContent>Summarize selection</MenuItemContent></StudioMenuAction>
+              <StudioMenuAction onPress={() => void onExplainSelection?.()}><MenuItemContent>Explain more</MenuItemContent></StudioMenuAction>
+              <StudioMenuSeparator />
+            </> : null}
+            {messageMenu.kind === "message" && onOpenThread ? <StudioMenuAction onPress={() => { onOpenThread(); onClose(); }}>
+              <MenuItemContent>{openThreadLabel ?? "Open thread"}</MenuItemContent>
+            </StudioMenuAction> : null}
+            {messageMenu.kind === "message" ? <StudioMenuAction onPress={() => void onCopySelectedMessage()}>
+              <MenuItemContent>Copy message</MenuItemContent>
+            </StudioMenuAction> : null}
+            <StudioMenuAction onPress={() => void onCopyConversation()}><MenuItemContent>Copy conversation</MenuItemContent></StudioMenuAction>
+            {messageMenu.kind === "message" && selectedMessageTokenUsage ? <StudioMenuAction ref={statsRef} onPress={onShowTokenUsageView}>
+              <MenuItemContent end={<NavArrowRight aria-hidden="true" />}>Message stats…</MenuItemContent>
+            </StudioMenuAction> : null}
+          </div>}
+        </Dialog>
+      </Surface>
+    </Modal>
+  </ModalOverlay>;
 }
 
 export { ChatImageLightboxOverlay } from "./ChatImageLightbox";
 
-export function ChatInvitePromptOverlay({
-  invitePrompt,
-  invitePromptBusy,
-  onClose,
-  onSendWithout,
-  onInviteAndSend,
-}: {
-  invitePrompt: InvitePromptLike | null;
-  invitePromptBusy: boolean;
-  onClose: () => void;
-  onSendWithout: () => void;
-  onInviteAndSend: () => void;
-}) {
-  if (!invitePrompt) {
-    return null;
-  }
-
-  return (
-    <div
-      className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-900/60 p-4 sm:items-center"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Invite teammate"
-      data-testid="chat-invite-prompt"
-      onClick={onClose}
-      style={{
-        paddingBottom: "max(var(--instafy-safe-area-inset-bottom), 1rem)",
-        paddingLeft: "max(var(--instafy-safe-area-inset-left), 1rem)",
-        paddingRight: "max(var(--instafy-safe-area-inset-right), 1rem)",
-        paddingTop: "max(var(--instafy-safe-area-inset-top), 1rem)",
-      }}
-    >
-      <div
-        className="w-full max-w-sm overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)]"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="space-y-1 px-4 pb-2 pt-4">
-          <Text as="div" variant="bodyStrong" tone="inherit" className="text-sm">
-            Add to this private chat?
-          </Text>
-          <Text as="div" variant="caption" tone="muted" className="text-xs leading-snug">
-            {invitePrompt.missingUsers.length === 1 ? (
-              <>
-                <span className="font-medium">{invitePrompt.missingUsers[0]?.displayName ?? "Teammate"}</span>{" "}
-                can’t see this conversation yet.
-              </>
-            ) : (
-              <>
-                These teammates can’t see this conversation yet:{" "}
-                <span className="font-medium">
-                  {invitePrompt.missingUsers
-                    .map((user) => user.displayName || user.handle || "Teammate")
-                    .join(", ")}
-                </span>
-                .
-              </>
-            )}
-          </Text>
-        </div>
-        <div className="flex items-center justify-end gap-2 border-t border-slate-200 px-3 py-3 dark:border-[color:var(--color-studio-dark-divider)]">
-          <Button
-            variant="ghost"
-            size="sm"
-            radius="xl"
-            isDisabled={invitePromptBusy}
-            onPress={() => void onSendWithout()}
-          >
-            Send without @
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            radius="xl"
-            isDisabled={invitePromptBusy}
-            onPress={() => void onInviteAndSend()}
-          >
-            {invitePromptBusy ? (
-              <>
-                <Spinner aria-hidden="true" tone="primary" size="xs" />
-                Inviting…
-              </>
-            ) : (
-              "Invite & send"
-            )}
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-}
+export { ChatInvitePromptOverlay } from "./ChatInvitePromptOverlay";

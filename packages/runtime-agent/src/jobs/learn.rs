@@ -523,6 +523,14 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // From before Instafy's browser declined a page's cookie banner itself, so a turn no longer
     // pressed a banner's reject button, or left one with none up, by a line of its own.
     include_str!("legacy/browser-automation-v32.md"),
+    // From before research that ends in a page went to the browser first unless it was a map or
+    // a page made only from what the chat already found, a bare "keep going" with a page here
+    // that marks something open was `browser_then_build`'s, a reply that was not the browser's
+    // kept a message with the building turn only once the chat had a browser turn, a card for
+    // what only this space holds said a change here is built after it, a card was asked for only
+    // in a reply-only turn, and the routing step's `summary` went with the person's words in a
+    // chat with no browser turn yet.
+    include_str!("legacy/browser-automation-v33.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,
@@ -583,6 +591,9 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     // into the sections a browser turn leaves out (it read of a reader and a search it does not
     // have), and a price not read said where it was not found ("no price on <page>").
     include_str!("legacy/web-research-v15.md"),
+    // From before a `request_browser` card was a reader only in a reply-only turn: a turn that
+    // must change files has none.
+    include_str!("legacy/web-research-v16.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

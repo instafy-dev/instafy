@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import {
   Bookmark,
   Expand,
@@ -24,7 +24,7 @@ import { Badge } from "../../../components/Badge";
 import { IconButton } from "../../../components/Button";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { Text } from "../../../components/Text";
-import { StudioMenuAction, StudioMenuSeparator } from "../../../components/aria/StudioMenu";
+import { StudioMenuAction, StudioMenuSeparator, moveStudioMenuActionFocus } from "../../../components/aria/StudioMenu";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { CHAT_SLASH_COMMANDS } from "../../../conversations/slashCommands";
@@ -33,35 +33,6 @@ import { AVAILABLE_FEATURED_CONNECTORS, type ProductConnector } from "./connecto
 type ComposerActionMenuView = "main" | "commands" | "connect";
 
 const NO_INSTALLED_SKILLS: ReadonlySet<string> = new Set();
-
-// The popover is a Dialog of ghost Buttons, so Tab already reaches every row;
-// this adds menu-style ArrowUp/ArrowDown (wrapping) and Home/End between the
-// enabled rows of whichever view is showing.
-function moveRowFocus(event: KeyboardEvent<HTMLDivElement>) {
-  const { key } = event;
-  if (key !== "ArrowDown" && key !== "ArrowUp" && key !== "Home" && key !== "End") {
-    return;
-  }
-  const rows = Array.from(
-    event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not([disabled])"),
-  );
-  if (rows.length === 0) {
-    return;
-  }
-  const index = rows.indexOf(document.activeElement as HTMLButtonElement);
-  let next: number;
-  if (key === "Home") {
-    next = 0;
-  } else if (key === "End") {
-    next = rows.length - 1;
-  } else if (key === "ArrowDown") {
-    next = index < 0 ? 0 : (index + 1) % rows.length;
-  } else {
-    next = index <= 0 ? rows.length - 1 : index - 1;
-  }
-  rows[next]?.focus();
-  event.preventDefault();
-}
 
 function commandTestId(command: string): string {
   const normalized = command.replace(/^\//, "").replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "");
@@ -238,7 +209,7 @@ export function ComposerActionMenu({
         data-testid="composer-action-menu"
       >
         {view === "commands" ? (
-          <div className="space-y-1" onKeyDown={moveRowFocus}>
+          <div className="space-y-1" onKeyDown={moveStudioMenuActionFocus}>
             <ActionRow
               icon={<NavArrowLeft className="h-4 w-4" aria-hidden="true" />}
               title="Commands"
@@ -258,7 +229,7 @@ export function ComposerActionMenu({
             ))}
           </div>
         ) : view === "connect" && onSelectConnector ? (
-          <div className="space-y-1" onKeyDown={moveRowFocus}>
+          <div className="space-y-1" onKeyDown={moveStudioMenuActionFocus}>
             <ActionRow
               icon={<NavArrowLeft className="h-4 w-4" aria-hidden="true" />}
               title="Connect a tool"
@@ -302,7 +273,7 @@ export function ComposerActionMenu({
             ) : null}
           </div>
         ) : (
-          <div className="space-y-1" onKeyDown={moveRowFocus}>
+          <div className="space-y-1" onKeyDown={moveStudioMenuActionFocus}>
             {onExpandDraft ? (
               <ActionRow
                 icon={<Expand className="h-4 w-4" aria-hidden="true" />}
