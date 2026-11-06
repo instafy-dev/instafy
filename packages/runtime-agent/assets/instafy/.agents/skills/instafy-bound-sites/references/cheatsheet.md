@@ -218,15 +218,15 @@ Never a second parallel theme, a webfont, a gradient or pill buttons unless aske
 
 - Lede: the verdict, plus the biggest unknown about the title's question ("None was tested for flat feet; try
   the Brooks first."). A row names only its own unknown. The footer ("Still to confirm") holds only what the page
-  does not already say (not the lede's unknown, not a cell's "Not listed"), each as something the reader can do
+  does not already say (not the lede's unknown, not a cell's "Not found"), each as something the reader can do
   ("Check train times on Taiwan Railway before you book"), never how you worked ("no timetable was read").
 - `url` is the page you read and `date` the day you read it: each value cites them ("checked 17 Oct on
   fleetfeet.com ↗"; a price "seen 17 Oct"); add `asof` when the source dates the fact itself
   (shown instead: "seen 5 Aug"; a price over 30 days old also says "may have changed"), so an old list price never
   looks fresh. A store known to block checks gets `"readable": false` from the start (no button that will fail).
 - When every price or most of a column comes from one page on one date, the starters say it once under the list.
-- No value is a dash, "n/a" or "?": leave out `v` and say why in `note` ("no price on maker.com's page"); the page
-  reads "Unknown · why".
+- No value is a dash, "n/a" or "?": leave out `v` and say why in `note` ("price not found on maker.com's page");
+  the page reads "Unknown · why".
 - A seller's own product copy names itself as such (`"src": "Fleet Feet product page"`), so it never reads as a review;
   a feel or ride from it is the seller's words in `why` too ("the store calls it gently guided"). Plain words over
   brand names for features ("firm rails at the heel", not "GuideRails").
@@ -235,8 +235,8 @@ Never a second parallel theme, a webfont, a gradient or pill buttons unless aske
   badge, not something behind "Details".
 - An estimate you made (a leg time, a walk) names its basis: a `src` and `url` ("Estimate · Taiwan Railway ↗")
   or a route-search `url` ("Estimate · how ↗"). "Not checked" means nobody checked it; a fact with a `url` says
-  where to check. A page you read that does not give the value is `{"src", "url", "date"}` without `v`: "Not listed ·
-  checked 17 Oct on fleetfeet.com ↗". On a checklist the same reads "To confirm" ("checked" is the tick there).
+  where to check. A page you read without finding the value on it is `{"src", "url", "date"}` without `v`: "Not
+  found · checked 17 Oct on fleetfeet.com ↗". On a checklist the same reads "To confirm" ("checked" is the tick there).
 - A review site's price is its list price, `"list": true`: the row says "list price" next to the store link, so it
   never reads as the store's price today, and the line under the list names the source once; the lede need not say
   it again.

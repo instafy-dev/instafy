@@ -37,7 +37,7 @@ async function main(ref) {
   }
   kit.progress(2, 2, `Reading the price on ${host}`, host);
   const offer = offers.find((o) => typeof o.amount === "number" && o.currency);
-  if (!offer) return blocked(`no price on the ${host} page`);
+  if (!offer) return blocked(`price not found on the ${host} page`);
   kit.records([
     {
       type: "offer",

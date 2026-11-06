@@ -104,6 +104,12 @@ const LEGACY_INSTAFY_TEMPLATES: &[&str] = &[
     // whose files this runtime keeps (a Desktop folder) kept it in every turn's snapshot.
     include_str!("legacy/instafy-doc-v2.md"),
 ];
+/// Whether `text` is a copy of `INSTAFY.md` Instafy ships, the current one or an earlier one: its
+/// snapshot, constants and workflows still hold placeholders, so it says nothing of the space. A
+/// copy a space filled in or edited is not.
+pub(super) fn is_bundled_instafy_doc(text: &str) -> bool {
+    text == INSTAFY_TEMPLATE || LEGACY_INSTAFY_TEMPLATES.contains(&text)
+}
 const AGENTS_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/AGENTS.md"
@@ -139,6 +145,9 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     // From before it stopped telling every turn to load the memory its prompt already holds
     // (`python AGENTS.py`, a "fast context load" and a `/learn` section).
     include_str!("legacy/agents-doc-v12.md"),
+    // From before a reply that didn't find something said where it looked or which page it didn't
+    // reach, in place of a rule that only forbade saying a site or page lacks it.
+    include_str!("legacy/agents-doc-v13.md"),
 ];
 /// Whether `text` is a copy of `AGENTS.md` Instafy ships, the current one or an earlier one. A
 /// copy a space edited, or a team's own, is not: its rules are the space's.
@@ -340,6 +349,9 @@ const LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES: &[&str] = &[
     include_str!("legacy/bound-sites-cheatsheet-v1.md"),
     // From before one `instafy preview open --start` picked the port, served the site and showed it.
     include_str!("legacy/bound-sites-cheatsheet-v2.md"),
+    // From before a value not found on a page read said where it was looked for ("price not found
+    // on maker.com's page", "Not found · checked …"), not that the page lacks it.
+    include_str!("legacy/bound-sites-cheatsheet-v3.md"),
 ];
 /// The hub for pages people tap through: it picks the builder from the installed skills (a skill
 /// pack's own skill, bound sites, or a starter site) and shows the result as a preview card.
@@ -382,6 +394,9 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // From before a reply about a page to share said who can open it and how to get a link, not as
     // an assumption, and replies to send nobody sees went.
     include_str!("legacy/interactive-artifacts-v10.md"),
+    // From before a value nobody found said where it was looked for ("price not found on
+    // maker.com's page"), not that the page lacks it.
+    include_str!("legacy/interactive-artifacts-v11.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),
@@ -501,9 +516,13 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // From before a bare "keep going" never carrying on a change the person stopped or undid was
     // part of the `browser` route's line, not a rule of its own ahead of the routes.
     include_str!("legacy/browser-automation-v30.md"),
+    // From before a browser turn that carries on the person's own message left out what a
+    // card's listed reads ask (`routed_omits`), and what page text may start and which pages end
+    // a read moved from that section into "Core rules", which every browser turn reads.
+    include_str!("legacy/browser-automation-v31.md"),
     // From before Instafy's browser declined a page's cookie banner itself, so a turn no longer
     // pressed a banner's reject button, or left one with none up, by a line of its own.
-    include_str!("legacy/browser-automation-v31.md"),
+    include_str!("legacy/browser-automation-v32.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,
@@ -560,6 +579,10 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     // building turn can use (`no_shell_omits`), and reading stopped "when material facts are
     // supported".
     include_str!("legacy/web-research-v14.md"),
+    // From before what `instafy web read` marks, reports and returns, and a review search, moved
+    // into the sections a browser turn leaves out (it read of a reader and a search it does not
+    // have), and a price not read said where it was not found ("no price on <page>").
+    include_str!("legacy/web-research-v15.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -2263,19 +2286,25 @@ mod tests {
     /// The rule named what doesn't exist ("a place, stop, route, time or page"), and a turn that read a
     /// journey planner's station list, which showed only the station it held, replied that the planner
     /// didn't list another station, and that a directions page it never opened gave no directions; a page
-    /// made from that reply said both again. It names what a site or page lacks now.
+    /// made from that reply said both again. It named what a site or page lacks then, and only
+    /// forbade saying so: three replies still said a page lacks something, in the forbidden form
+    /// ("lists its address and coordinates, but not nearby metro directions", of a home page whose
+    /// seven closed sections no step opened; a local test, Nov 5). It gives the words now: say
+    /// where you looked, or which page you didn't reach. It still forbids both forms, a site's and
+    /// a page's: every one of those replies said it of a page.
     #[test]
     fn agents_doc_says_unread_facts_are_not_checked_and_names_only_steps_the_turn_started() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
         let doc = flat(AGENTS_DOC_TEMPLATE);
         for needle in [
             "A fact no page you read this turn states says \"not checked\", or stays out.",
-            "Never say a site or page lacks something (a place, stop, route or time), or that a page didn't load, unless a page you read says so: say which page you didn't reach.",
+            "When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\") or which page you didn't reach, never that a site or page lacks it or didn't load, unless a page you read says so.",
             "Say only steps this turn did or started.",
             "offer it as a next step instead",
         ] {
             assert!(doc.contains(needle), "{needle}");
         }
+        assert!(!doc.contains("lacks something"));
         // Its example of a failure said "the shop's site didn't load", of a site no page said
         // was down: the example says which page wasn't reached, as the rule does, and nothing
         // else in "Replies" says a page didn't load.
@@ -2299,7 +2328,9 @@ mod tests {
         assert!(
             before_lacks.contains("Never say a place, stop, route, time or page doesn't exist")
         );
-        for previous in [before_not_checked, before_lacks] {
+        let before_where_you_looked = include_str!("legacy/agents-doc-v13.md");
+        assert!(before_where_you_looked.contains("Never say a site or page lacks something"));
+        for previous in [before_not_checked, before_lacks, before_where_you_looked] {
             let workspace = tempdir().expect("workspace");
             let path = workspace.path().join(AGENTS_DOC_FILENAME);
             fs::write(&path, previous).unwrap();

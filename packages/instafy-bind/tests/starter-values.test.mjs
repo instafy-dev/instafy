@@ -1,6 +1,6 @@
 // The values on a page of options, as the compare and ranked starters draw them: a stated limit ("€600 or less")
 // counts only a value the page shows, so a row whose price is unknown is listed apart ("Price unknown") and never
-// under the limit; no cell is blank or a dash ("Unknown", "Not listed", with why); and every value cites the page it
+// under the limit; no cell is blank or a dash ("Unknown", "Not found", with why); and every value cites the page it
 // was read on and the day ("checked 27 Oct on maker.example"). Runs the starters' own site.js and app.js in a vm
 // against a small DOM (no browser): what a row says, and in which part of the list it is.
 import test from "node:test";
@@ -346,8 +346,13 @@ test("compare: no cell is blank or a dash, and every value cites its page and da
   assert.match(read, /8,000 Pa · checked 27 Oct( 2026)? on review-two\.example ↗/, read);
   const silent = rowText(document, "option:silent");
   assert.doesNotMatch(silent, /—|n\/a/, `a dash is no value: ${silent}`);
-  assert.equal((silent.match(/Not listed/g) || []).length, 3, `the maker's page was read and gives none of the three: ${silent}`);
+  // where it was looked for, never that the page lacks it
+  assert.equal((silent.match(/Not found ·/g) || []).length, 3, `the maker's page was read and none of the three was found there: ${silent}`);
+  assert.doesNotMatch(silent, /Not listed/, silent);
   assert.match(silent, /checked 27 Oct( 2026)? on maker\.example ↗/);
+  // a price not found was checked there, never "seen": "Not found · seen 27 Oct" read as a price someone saw
+  assert.equal((silent.match(/Not found · checked 27 Oct( 2026)? on maker\.example ↗/g) || []).length, 3, silent);
+  assert.doesNotMatch(silent, /Not found · seen/, silent);
   const blocked = rowText(document, "option:blocked");
   assert.match(blocked, /Unknown · shop-two\.example blocks automated price checks/, blocked);
   assert.match(blocked, /Open Shop Two ↗/);
@@ -414,7 +419,10 @@ test("compare on a phone: a row shows the values found with their sources and na
   assert.equal(document.querySelectorAll("p.not-found").length, 0, "no line of what was not found under the table");
 });
 
-test("compare on a phone: a missing value that can still be checked, opened or was looked for stays on its row", async () => {
+// A value looked for on a page and not found there said "Not found · checked … ↗" on its row, above a "Not found yet"
+// line that left it out: one card used the words for two things. It is named in that line with the page it was looked
+// for on; the desktop table keeps its cell.
+test("compare on a phone: a missing value that can still be checked or opened stays on its row, and one looked for is named with its page", async () => {
   const data = laptopsData();
   data.columns[3] = { key: "price", label: "Price", type: "price" };
   data.sort = [{ key: "price", label: "Price, low to high", dir: "asc" }];
@@ -426,8 +434,11 @@ test("compare on a phone: a missing value that can still be checked, opened or w
     // value is missing are not repeated
     item("air", "Maker Laptop Air", { cpu: MAKER("Chip Series 3", "air"), price: { note: "not read yet" }, battery: { note: "Battery not checked." }, weight: { note: "Unknown" } },
       { store: { name: "Shop", url: "https://shop.example/air", readable: true } }),
-    // the maker's page was read and does not give the weight: "Not listed · checked … ↗" stays a fact
+    // the maker's page was read and the weight was not found there: named once, with the page it was looked for on
     item("max", "Maker Laptop Max", { cpu: MAKER("Other Chip AI 300 Series", "max"), weight: { src: "Maker", url: "https://maker.example/max/specs", date: DAY }, battery: { v: "85 Wh", url: "https://maker.example/max" } }),
+    // two values looked for on one page share it, and a note that says why stays beside it
+    item("mini", "Maker Laptop Mini", { cpu: MAKER("Chip Series 2", "mini"), battery: { src: "Maker", url: "https://maker.example/mini/specs", date: DAY },
+      weight: { src: "Maker", url: "https://maker.example/mini/specs", date: DAY }, reviews: { src: "Maker", url: "https://maker.example/mini", date: DAY, note: "looked in its press section" } }),
   ];
   const { document } = await draw("compare", data, { width: 375 });
   const line = (ref) => rowText(document, ref).match(/Not found yet: .*$/)?.[0] ?? "";
@@ -435,9 +446,22 @@ test("compare on a phone: a missing value that can still be checked, opened or w
   assert.equal(line("option:air"), "Not found yet: Battery, Weight, Two independent reviews");
   assert.match(rowText(document, "option:air"), /Price unknown · not read yet · Open Shop ↗/, "the store link stays on the right");
   const max = rowText(document, "option:max");
-  assert.match(max, /WeightNot listed · checked 27 Oct( 2026)? on maker\.example ↗/, `a page read without it is cited: ${max}`);
   assert.match(max, /BatteryUnknown · where to check ↗/, `a value without its page keeps where to check: ${max}`);
-  assert.match(max, /Not found yet: Price, Two independent reviews$/, max);
+  assert.match(line("option:max"), /^Not found yet: Weight \(checked 27 Oct( 2026)? on maker\.example ↗\), Price, Two independent reviews$/, max);
+  // "Not found" says one thing on a card: the line of what was not found
+  for (const ref of ["option:pro", "option:air", "option:max", "option:mini"]) {
+    const card = rowText(document, ref);
+    assert.equal((card.match(/Not found/g) || []).length, 1, `${ref}: ${card}`);
+  }
+  const mini = document.getElementById("list").querySelectorAll("[data-ref]").find((el) => el.getAttribute("data-ref") === "option:mini");
+  assert.match(line("option:mini"), /^Not found yet: Battery and Weight \(checked 27 Oct( 2026)? on maker\.example ↗\), Price, Two independent reviews \(looked in its press section · checked 27 Oct( 2026)? on maker\.example ↗\)$/, line("option:mini"));
+  // the page it was looked for on is a link to that page
+  const links = mini.querySelector("p.not-found").querySelectorAll("a").map((a) => a.getAttribute("href"));
+  assert.deepEqual(links, ["https://maker.example/mini/specs", "https://maker.example/mini"], links.join(" "));
+  // the wide table keeps a cell for each, saying where it was looked for
+  const { document: wide } = await draw("compare", data, { width: 1280 });
+  assert.match(rowText(wide, "option:max"), /Not found · checked 27 Oct( 2026)? on maker\.example ↗/);
+  assert.equal(wide.querySelectorAll("p.not-found").length, 0);
 });
 
 // A phone row folded a price into "Not found yet: Price" until the binder answered, then moved it to the right of the
