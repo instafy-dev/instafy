@@ -869,7 +869,10 @@ the skill's "Finding a page" section again, from the space's own copy. A chat's
 browser thread holds only its browser turns: each starts from what it is asked
 (the person's words or a card's task), and a new or lost browser thread is
 given the chat's earlier browser turns, never Octo's building turns, files or
-command output. Codex withdraws the space's `AGENTS.md` from a
+command output, and after them which of the requests those turns were asked the
+person stopped, or undid the change of, since the first of those turns; a
+restored one is given those since its own last turn
+([Chat activity](Chat-Activity.md#a-stopped-turns-changes)). Codex withdraws the space's `AGENTS.md` from a
 turn without the workspace, so it is given that file's "Replies" too (how a reply
 reads: plain words, no error codes, file paths or inside words, "not checked" on
 a fact no page read this turn states, where it looked for what it didn't find or
@@ -2526,7 +2529,9 @@ unless the policy is `"covered"`.
   `browserHandBack` with what the browser turn was asked (at most 2,000
   characters), for a card the routing step posted the message's own words as
   `personRequest` (from that message's job, at most 8,000 characters; the
-  building turn reads them as the person's request), and every finding line of
+  building turn reads them as its latest request, in place of Studio's words,
+  which it read right after a turn the person had stopped and took for a
+  request to carry that turn on), and every finding line of
   its final reply as a labelled finding `{url, title, facts, readAt, viewer}`
   (plus `stopped` for a page that was not read: `login`, `captcha`, `paywall`,
   `blocked`, `robots`, `download`, `secret` or `link-only`, and any other reason
@@ -2534,7 +2539,11 @@ unless the policy is `"covered"`.
   finding lines (each page once, a later line for it adding its facts, and a
   page's facts at most 2,000 characters, whole facts in order, the rest
   counted as `factsLeftOut`; only a reply without any falls back to the
-  addresses on its lines), `readAt` and `viewer` from the job, and an
+  addresses on its lines), `viewer` from the job, `readAt` from when the
+  chat's browser last read that page (the latest completed step of that
+  viewer's browser in the chat that left a tab on it, by the browser turn's
+  end, matched by the page key the step's activity carries, so a page an
+  earlier browser turn read keeps its own time; else the turn's end), and an
   address on a loopback, private, link-local or local-only host is never a
   finding. None of the browser turn's own words go with findings that list
   what their pages showed, not even a first line that says a page stopped it
@@ -2590,7 +2599,8 @@ unless the policy is `"covered"`.
   carries on the person's own message with its reply alone: the message is in
   that replay already). A Let Octo
   continue press reads as one line there, not as Studio's instructions in the
-  person's name. It takes no
+  person's name, and a hand-back's own stored words read as nothing there and
+  in the routing step's history: the person's message is in it already. It takes no
   routing step: its route is decided (build in this chat), and the findings it
   builds from are in its own prompt, which a routing step never sees. So it
   runs in the lane a routed build runs in: it edits the space and ends in plain

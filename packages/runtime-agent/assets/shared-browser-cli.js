@@ -5196,9 +5196,12 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       await emitNavigationResult(page);
     }
     const checked = moved ? null : await checkedLine(target.description, target.locator);
+    // A click that checks or unchecks a box, a radio button or a switch on the
+    // page it was on chooses an option: Details name it with the form's typing.
+    const chose = !moved && isCheckableDescription(target.description);
     return withActivity(
       { ...await snapshotAfterStep(page, withholding), ...(checked ? { done: checked } : {}) },
-      stepActivity(page, "click", stepApproval()),
+      stepActivity(page, chose ? "choose" : "click", stepApproval()),
     );
   }
 

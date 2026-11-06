@@ -245,6 +245,11 @@ test("a started host reports ready, keeps a persisted profile and stops every ch
   assert.equal(envOf(fixture, "chromium").get("DISPLAY"), ":47");
   // The window manager's settings live under the host's HOME, never /root.
   assert.match(read(fixture, "host-home/.fluxbox/init"), /^session\.screen0\.rootCommand: \/bin\/true$/mu);
+  // Its style leaves the root window alone: any background it sets runs
+  // fbsetbg, which fluxbox never waits for, so a machine kept that finished
+  // process for its life (a local test, Nov 5).
+  assert.match(read(fixture, "host-home/.fluxbox/init"), /^session\.styleFile: .*\/state\/fluxbox-style$/mu);
+  assert.equal(read(fixture, "state/fluxbox-style"), "background: unset\n");
   // On Linux the host leads its own process group and runs the browser at
   // nice 10; other platforms have no setsid or portable niceness probe.
   if (process.platform === "linux") {

@@ -123,6 +123,28 @@ export function parseSavedVersionSubject(subject: string): {
   };
 }
 
+/**
+ * The title of a new space's first versions: git-service's seed, the
+ * controller's first write of the space's default files and the machine's own
+ * setup commit (git-service `INIT_COMMIT_MESSAGE`, `SPACE_CREATED_TITLE` in
+ * runtime-controller and runtime-agent).
+ */
+export const SPACE_CREATED_TITLE = "Space created";
+
+function isSpaceCreated(entry: { subject: string }): boolean {
+  return entry.subject.trim() === SPACE_CREATED_TITLE;
+}
+
+/**
+ * Saved versions as History lists them, newest first. A new space is made in
+ * more than one version, one after another and each "Space created" (a local
+ * test, Nov 5, listed two): for the person that is one version, the newest of
+ * them, which holds the space as its setup left it.
+ */
+export function withOneSpaceCreated<T extends { subject: string }>(entries: readonly T[]): T[] {
+  return entries.filter((entry, index) => !(index > 0 && isSpaceCreated(entry) && isSpaceCreated(entries[index - 1])));
+}
+
 export function sanitizeReviewPathTestId(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]+/g, "-");
 }

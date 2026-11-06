@@ -47,8 +47,12 @@
 //!
 //! The record carries every finding line of the browser turn's last reply as
 //! a labelled finding `{url, title, facts, readAt, viewer}`: the address,
-//! title and facts come from the line, `readAt` and `viewer` from the job
-//! itself. None of the turn's own words go with them: a page that stopped it
+//! title and facts come from the line, `viewer` from the job itself, and
+//! `readAt` from the browser's own record of when it read that page: the
+//! latest browser step of the chat that left a tab on it by the turn's end
+//! ([`page_read_times`]), else the turn's end: a reply can list a page an
+//! earlier browser turn of the chat read. None of the turn's own words go
+//! with them: a page that stopped it
 //! is a finding with `stopped`, which says which page and why, and only a
 //! reply whose lines list no fact goes as it is
 //! ([`words_for_the_building_turn`]); the record fits the runtime's section
@@ -76,9 +80,12 @@
 //! The runtime quotes them to a building turn on a restored thread; the
 //! hand-back's own browser turn is in its record, not the list.
 
+use std::collections::HashMap;
+
 use axum::{http::StatusCode, Json};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
+use sha2::{Digest, Sha256};
 use tokio_postgres::types::Json as PgJson;
 use uuid::Uuid;
 
@@ -141,6 +148,10 @@ pub(crate) const LET_OCTO_CONTINUE_LINE: &str = "The person let Octo continue in
 
 const VIEWER_WORKSPACE: &str = "Instafy's browser in the workspace";
 const VIEWER_DEVICE: &str = "Instafy's browser on the person's device";
+/// The tool server of each viewer's browser steps (runtime-agent `codex.rs`
+/// `SHARED_BROWSER_MCP_SERVER_NAME`, `PERSONAL_BROWSER_MCP_SERVER_NAME`).
+const SHARED_BROWSER_SERVER: &str = "instafy_shared_browser";
+const PERSONAL_BROWSER_SERVER: &str = "instafy_personal_browser";
 
 pub(crate) const HAND_BACK_SECOND_HOP_CODE: &str = "browser_hand_back_second_hop";
 pub(crate) const HAND_BACK_USED_CODE: &str = "browser_hand_back_used";
@@ -402,7 +413,7 @@ fn finding_facts(object: &JsonMap<String, JsonValue>) -> Vec<String> {
 /// finding (`{"url", "title", "facts"}` or `{"url", "stopped"}`): Some(None)
 /// when that `url` is no usable address, None when the line is not such an
 /// object. Its `readAt` and `viewer`, if any, are the model's; the record uses
-/// the job's.
+/// the browser's and the job's ([`page_read_times`]).
 fn json_finding(line: &str) -> Option<Option<Finding>> {
     let mut text = line.trim();
     for marker in ["- ", "* ", "• "] {
@@ -713,6 +724,103 @@ fn labelled_findings(reply: &str, viewer: &str, read_at: &str) -> Vec<JsonValue>
         .iter()
         .map(|finding| labelled(finding, viewer, read_at))
         .collect()
+}
+
+/// The runtime's key of a page, as a browser step's activity carries it
+/// (runtime-agent `shared_browser_activity::page_key`): the first 16 hex
+/// characters of the SHA-256 of the address without its fragment, as the URL
+/// parser writes it. None for no address.
+pub(crate) fn page_key(address: &str) -> Option<String> {
+    let mut url = url::Url::parse(address).ok()?;
+    url.set_fragment(None);
+    let digest = Sha256::digest(url.as_str().as_bytes());
+    Some(
+        digest
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
+}
+
+/// When the chat's browser last read each page `findings` name, by `until`
+/// (the end of the browser turn that lists them): the latest step of the
+/// viewer's browser that worked and left a tab on that page, by the page key
+/// its activity carries. The runtime writes a step's activity from the
+/// browser's own result, never from page text or the model's words, and the
+/// controller keeps it only on the runtime's own messages. A turn's reply can
+/// list a page an earlier browser turn of the chat read: that page keeps the
+/// time it was read, never the later turn's end. A page no step left a tab on
+/// is not in the map.
+async fn page_read_times(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: &Uuid,
+    viewer: &str,
+    findings: &[JsonValue],
+    until: DateTime<Utc>,
+) -> Result<HashMap<String, DateTime<Utc>>, (StatusCode, Json<ApiError>)> {
+    let mut keys: Vec<String> = findings
+        .iter()
+        .filter_map(|finding| finding.get("url").and_then(JsonValue::as_str))
+        .filter_map(page_key)
+        .collect();
+    keys.sort();
+    keys.dedup();
+    if keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let server = if viewer == VIEWER_DEVICE {
+        PERSONAL_BROWSER_SERVER
+    } else {
+        SHARED_BROWSER_SERVER
+    };
+    let rows = transaction
+        .query(
+            "select metadata #>> '{activity,pageKey}' as page_key, max(created_at) as read_at
+               from conversation_messages
+              where conversation_id = $1
+                and role = 'assistant'
+                and created_by is null
+                and created_at <= $2
+                and lower(coalesce(metadata #>> '{messageType}', metadata #>> '{message_type}', ''))
+                    = 'mcp_tool_call'
+                and metadata #>> '{details,server}' = $3
+                and metadata #>> '{details,status}' = 'completed'
+                and metadata #>> '{activity,pageKey}' = any($4)
+              group by 1",
+            &[conversation_id, &until, &server, &keys],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to read when the browser read its pages: {error}"
+            ))
+        })?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<_, String>("page_key"),
+                row.get::<_, DateTime<Utc>>("read_at"),
+            )
+        })
+        .collect())
+}
+
+/// Each finding's `readAt` as the time its page was read ([`page_read_times`]),
+/// where the browser's record has one; any other keeps the browser turn's end.
+/// The times are written as that end is, so the record keeps its length.
+fn stamp_page_read_times(findings: &mut [JsonValue], read_times: &HashMap<String, DateTime<Utc>>) {
+    for finding in findings {
+        let read_at = finding
+            .get("url")
+            .and_then(JsonValue::as_str)
+            .and_then(page_key)
+            .and_then(|key| read_times.get(&key));
+        if let Some(read_at) = read_at {
+            finding["readAt"] = json!(read_at.to_rfc3339_opts(SecondsFormat::Secs, true));
+        }
+    }
 }
 
 /// The checked record a building turn carries as `metadata.browserHandBack`.
@@ -1190,7 +1298,7 @@ pub(crate) async fn require_hand_back(
     } else {
         None
     };
-    let record = hand_back_record(
+    let mut record = hand_back_record(
         &browser_job_id,
         &card_job_id,
         viewer,
@@ -1199,6 +1307,11 @@ pub(crate) async fn require_hand_back(
         person_request,
         &reply,
     );
+    if let Some(findings) = record["findings"].as_array_mut() {
+        let read_times =
+            page_read_times(transaction, conversation_id, viewer, findings, completed_at).await?;
+        stamp_page_read_times(findings, &read_times);
+    }
     // A browser turn that read no page leaves the building turn nothing to
     // continue with; its own reply already says what stopped it.
     if !record_read_a_page(&record) {
@@ -1990,6 +2103,16 @@ pub(crate) async fn browser_turns_since(
             .get("prompt_text")
             .and_then(JsonValue::as_str)
             .unwrap_or_default();
+        let mut findings = labelled_findings(&reply, viewer, &read_at);
+        let read_times = page_read_times(
+            transaction,
+            conversation_id,
+            viewer,
+            &findings,
+            completed_at,
+        )
+        .await?;
+        stamp_page_read_times(&mut findings, &read_times);
         listed.push((
             row.get::<_, DateTime<Utc>>("run_created_at"),
             json!({
@@ -1997,7 +2120,7 @@ pub(crate) async fn browser_turns_since(
                 "request": browser_request_for_building(request),
                 "reply": reply,
                 "replyTruncated": truncated,
-                "findings": labelled_findings(&reply, viewer, &read_at),
+                "findings": findings,
                 "readAt": read_at,
                 "viewer": viewer,
                 "outcome": row.get::<_, Option<String>>("outcome"),
@@ -2030,6 +2153,95 @@ mod tests {
     #[test]
     fn a_hand_back_asks_what_studio_sends() {
         assert_eq!(json!(HAND_BACK_PROMPT), fixtures()["handBackPrompt"]);
+    }
+
+    /// A page's key is the runtime's (runtime-agent
+    /// `shared_browser_activity`'s test pins the same keys): a finding finds
+    /// the browser steps that read its page, whatever fragment it names.
+    #[test]
+    fn a_page_key_is_the_one_a_browser_step_carries() {
+        assert_eq!(
+            page_key("https://livrarialello.pt/en/").as_deref(),
+            Some("6adcdec53b102dab")
+        );
+        assert_eq!(
+            page_key("https://livrarialello.pt/en/#visit").as_deref(),
+            Some("6adcdec53b102dab")
+        );
+        assert_eq!(
+            page_key("https://en.metrodoporto.pt/pages/396").as_deref(),
+            Some("a002599d7ea51f62")
+        );
+        assert_eq!(page_key("not an address"), None);
+    }
+
+    /// A browser turn's reply listed the bookshop's page, which the turn
+    /// before it had read at 22:51:26, and the hand-back said it was read at
+    /// 22:52:53, the end of the later turn (a local test, Nov 5). Each finding
+    /// keeps the time its own page was read; one the browser has no step for
+    /// keeps the turn's end.
+    #[test]
+    fn a_finding_keeps_the_time_its_page_was_read() {
+        let read_at = |at: &str| {
+            DateTime::parse_from_rfc3339(at)
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        let reply = [
+            json!({"url": "https://livrarialello.pt/en/", "title": "Livraria Lello", "facts": ["Open daily, 9:00 AM–7:30 PM."]}),
+            json!({"url": "https://en.metrodoporto.pt/pages/396", "title": "Maps and Timetables", "facts": ["Links the journey planner."]}),
+            json!({"url": "https://www.visitporto.travel/", "stopped": "blocked"}),
+        ]
+        .map(|line| line.to_string())
+        .join("\n");
+        let job = Uuid::new_v4();
+        let mut record = hand_back_record(
+            &job,
+            &job,
+            VIEWER_WORKSPACE,
+            read_at("2026-11-05T22:52:53.732Z"),
+            "",
+            None,
+            &reply,
+        );
+        let before = quoted_chars(&record);
+        let read_times = HashMap::from([
+            (
+                page_key("https://livrarialello.pt/en/").unwrap(),
+                read_at("2026-11-05T22:51:26.402Z"),
+            ),
+            (
+                page_key("https://en.metrodoporto.pt/pages/396").unwrap(),
+                read_at("2026-11-05T22:52:44.190Z"),
+            ),
+        ]);
+        stamp_page_read_times(record["findings"].as_array_mut().unwrap(), &read_times);
+        let times: Vec<(&str, &str)> = record["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|finding| {
+                (
+                    finding["url"].as_str().unwrap(),
+                    finding["readAt"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            times,
+            [
+                ("https://livrarialello.pt/en/", "2026-11-05T22:51:26Z"),
+                (
+                    "https://en.metrodoporto.pt/pages/396",
+                    "2026-11-05T22:52:44Z"
+                ),
+                ("https://www.visitporto.travel/", "2026-11-05T22:52:53Z"),
+            ]
+        );
+        // The browser turn's own end stays the record's, and the record what
+        // it quotes.
+        assert_eq!(record["readAt"], json!("2026-11-05T22:52:53Z"));
+        assert_eq!(quoted_chars(&record), before);
     }
 
     /// A build request hand-back the conversation moved past leaves nothing:

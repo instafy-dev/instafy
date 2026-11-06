@@ -457,7 +457,9 @@ Billing reads only the controller's own marks on the job (`system_turns.rs`):
 A send that fails a check still goes out, as an ordinary turn, and a client's own copy of any mark
 is dropped at dispatch and on recorded messages. Nothing of the person's rides on these turns:
 whatever words a hand-back was sent with, it asks only Studio's "Continue building with what the
-browser turn found.", and one that carries attachments is refused. A send that carries words for
+browser turn found." (one that carries on a message sent straight to the browser reads that
+message's own words as its request, from the controller's record, never the send's), and one that
+carries attachments is refused. A send that carries words for
 one agent (`agentPromptSegments`, or `agentSelection.promptSegments`, which dispatch hands that
 agent in place of the send's own words) is never stamped as an automatic retry or a card's browser
 turn, and a hand-back that carries some is refused. Words someone sends into any of these turns
