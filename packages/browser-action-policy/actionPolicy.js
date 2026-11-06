@@ -454,7 +454,7 @@
     },
     consent: {
       code: "step_refused_consent",
-      message: "Accepting cookies or other consent is the user's step. Leave the banner up and read on under it.",
+      message: "A cookie notice covers this page, and the browser could not decline it. If the task needs this page, pause on the notice's buttons with request_human_input in the chat's own tab: the person answers it there and chooses Let Octo continue. Otherwise open a link under it by its address, or the official site of the place or service the task is about.",
     },
     sensitive: {
       code: "sensitive_input_blocked",
@@ -1083,13 +1083,14 @@
     // control is: a button, a purpose's toggle or a link, which would
     // otherwise pass as plain navigation below. A tab only shows part of the
     // banner. An accept limited to the necessary cookies or to a selection
-    // saves a refusal, so it asks once, in every mode, as a link too.
+    // saves a refusal, so it asks once, in every mode, as a link too
+    // (`consentLimited`: the banner's own answer, as its accept is).
     const consent = target.consentContext === true && role !== "tab" ? consentStep(target, label) : null;
     if (consent === "accept") return refuse("consent", "accept in a consent banner");
     if (consent === "limited") {
       const step = classifyActivation({ ...target, consentContext: false }, ctx);
-      if (step.verdict === "allow") return { ...ask("change", "limited accept in a consent banner"), commit: true };
-      return step.verdict === "ask" && step.category === "change" ? { ...step, commit: true } : step;
+      if (step.verdict === "allow") return { ...ask("change", "limited accept in a consent banner"), commit: true, consentLimited: true };
+      return { ...step, ...(step.verdict === "ask" && step.category === "change" ? { commit: true } : {}), consentLimited: true };
     }
 
     const href = cleanText(target.href);

@@ -15210,6 +15210,12 @@ fn should_retry_codex_once(
 /// their input (`human_input_required`).
 const HUMAN_INPUT_PAUSE_REPLY: &str = "Sign in or fill in the highlighted fields on the page in Instafy's browser, then choose Let Octo continue. I don't ask for those details in chat.";
 
+/// What the person reads when it paused on a cookie notice that Instafy's
+/// browser could not decline (`cookie_notice_required`): the same words as the
+/// hint the Browser view shows beside the notice.
+const COOKIE_NOTICE_PAUSE_REPLY: &str =
+    "Answer the highlighted cookie notice in Instafy's browser, then choose Let Octo continue.";
+
 /// What it reads when Octo's last reply in the chat was such a pause already:
 /// the browser is still waiting for the person. The same words again read as
 /// if Let Octo continue had done nothing (pressed without signing in, a local
@@ -15220,6 +15226,9 @@ const HUMAN_INPUT_PAUSE_REPLY: &str = "Sign in or fill in the highlighted fields
 /// details stay out of chat.
 const HUMAN_INPUT_PAUSE_AGAIN_REPLY: &str = "Instafy's browser is still waiting for you. Sign in or fill in the highlighted fields on the page, then choose Let Octo continue. I don't ask for those details in chat.";
 
+/// The same for a pause on a cookie notice.
+const COOKIE_NOTICE_PAUSE_AGAIN_REPLY: &str = "Instafy's browser is still waiting for you. Answer the highlighted cookie notice, then choose Let Octo continue.";
+
 /// Whether Octo's last reply in the chat before this turn was a pause for the
 /// person's input, in the history the controller leased the turn with.
 fn last_reply_was_a_pause(job: &LeaseJob) -> bool {
@@ -15228,8 +15237,13 @@ fn last_reply_was_a_pause(job: &LeaseJob) -> bool {
         .rev()
         .find(|turn| turn.role.eq_ignore_ascii_case("assistant"))
         .is_some_and(|turn| {
-            let reply = turn.content.trim();
-            reply == HUMAN_INPUT_PAUSE_REPLY || reply == HUMAN_INPUT_PAUSE_AGAIN_REPLY
+            [
+                HUMAN_INPUT_PAUSE_REPLY,
+                HUMAN_INPUT_PAUSE_AGAIN_REPLY,
+                COOKIE_NOTICE_PAUSE_REPLY,
+                COOKIE_NOTICE_PAUSE_AGAIN_REPLY,
+            ]
+            .contains(&turn.content.trim())
         })
 }
 
@@ -15244,10 +15258,10 @@ fn apply_terminal_shared_browser_summary(
     let Some(code) = terminal_consent_failure else {
         return;
     };
-    *summary = if code == "human_input_required" && paused_already {
-        HUMAN_INPUT_PAUSE_AGAIN_REPLY
-    } else {
-        terminal_shared_browser_summary(code)
+    *summary = match code {
+        "human_input_required" if paused_already => HUMAN_INPUT_PAUSE_AGAIN_REPLY,
+        "cookie_notice_required" if paused_already => COOKIE_NOTICE_PAUSE_AGAIN_REPLY,
+        _ => terminal_shared_browser_summary(code),
     }
     .to_string();
     *fallback_kind = None;
@@ -15262,6 +15276,7 @@ fn apply_terminal_shared_browser_summary(
 fn terminal_shared_browser_summary(code: &str) -> &'static str {
     match code {
         "human_input_required" => HUMAN_INPUT_PAUSE_REPLY,
+        "cookie_notice_required" => COOKIE_NOTICE_PAUSE_REPLY,
         "approval_timeout" => {
             "I'm waiting for your OK to continue in Instafy's browser. I haven't done that step yet. Send a message when you're ready and I'll ask again."
         }
@@ -15303,6 +15318,25 @@ fn manual_browser_handoff_is_not_retried_or_reported_as_a_generic_failure() {
     assert!(!summary.contains("consent ended"));
     assert!(fallback.is_none());
     assert!(!should_retry_codex_once(Some("human_input_required"), true));
+    // A pause on a cookie notice asks the person to answer it, never to sign
+    // in or fill in fields, in the words of the Browser view's hint, and is no
+    // failure either.
+    let mut fallback = Some(CodexFallbackSummaryKind::MissingFinalAssistantMessage);
+    apply_terminal_shared_browser_summary(
+        &mut summary,
+        &mut fallback,
+        Some("cookie_notice_required"),
+        false,
+    );
+    assert_eq!(
+        summary,
+        "Answer the highlighted cookie notice in Instafy's browser, then choose Let Octo continue."
+    );
+    assert!(fallback.is_none());
+    assert!(!should_retry_codex_once(
+        Some("cookie_notice_required"),
+        true
+    ));
 }
 
 fn has_successful_patch_apply_event(events: &[JsonValue]) -> bool {
@@ -29116,6 +29150,28 @@ mod tests {
             row("user", continue_prompt),
         ]));
         assert!(last_reply_was_a_pause(&after_two));
+        // A pause on a cookie notice right after one, Let Octo continue
+        // pressed before the person answered it, says the same of the notice.
+        let after_a_notice = job(json!([
+            row("assistant", COOKIE_NOTICE_PAUSE_REPLY),
+            row("user", continue_prompt),
+        ]));
+        assert!(last_reply_was_a_pause(&after_a_notice));
+        let mut summary = String::new();
+        apply_terminal_shared_browser_summary(
+            &mut summary,
+            &mut None,
+            Some("cookie_notice_required"),
+            last_reply_was_a_pause(&after_a_notice),
+        );
+        assert_eq!(
+            summary,
+            "Instafy's browser is still waiting for you. Answer the highlighted cookie notice, then choose Let Octo continue."
+        );
+        assert!(last_reply_was_a_pause(&job(json!([
+            row("assistant", COOKIE_NOTICE_PAUSE_AGAIN_REPLY),
+            row("user", continue_prompt),
+        ]))));
 
         for first in [
             job(json!([row("user", "Open github.com and sign me in.")])),

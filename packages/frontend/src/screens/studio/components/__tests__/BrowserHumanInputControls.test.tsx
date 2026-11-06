@@ -208,6 +208,17 @@ describe("BrowserHumanInputControls", () => {
     expect(props.onContinue).toHaveBeenCalledExactlyOnceWith(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);
   });
 
+  it("asks the person to answer a cookie notice the browser could not decline", async () => {
+    props.request = { version: 1, handoffId: "notice", origin: "https://example.test", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, kind: "cookies", fields: [{ label: "Highlighted button 1" }, { label: "Highlighted button 2" }] };
+    props.humanControlConfirmed = true;
+    await render();
+    expect(container.textContent).toContain("Answer the highlighted cookie notice, then let Octo continue.");
+    expect(container.textContent).not.toContain("highlighted field");
+    expect(container.textContent).not.toContain("Keep passwords and codes out of chat");
+    await click("browser-human-input-continue");
+    expect(props.onContinue).toHaveBeenCalledExactlyOnceWith(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);
+  });
+
   it("keeps generic Done after manual navigation removes origin-bound guidance", async () => {
     props.request = { version: 1, handoffId: "handoff", origin: "https://example.test", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, fields: [{ label: "Highlighted field 1" }] };
     props.humanControlConfirmed = true;

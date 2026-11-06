@@ -693,6 +693,16 @@ describe("mapRuntimeBrowserSessionActionsPayload", () => {
     expect(result.actions[1].humanInputRequest).toBeUndefined();
   });
 
+  it("keeps a cookie notice pause's kind", () => {
+    const request = humanInputRequest({ kind: "cookies", fields: [{ label: "Highlighted button 1" }] });
+    const result = mapRuntimeBrowserSessionActionsPayload({
+      actions: [{ seq: 1, type: "human_input", pageId: "page-1", humanInputRequest: request }],
+      cursor: 100,
+    });
+    expect(result.actions[0].humanInputRequest).toEqual(request);
+    expect(result.actions[0].humanInputRequest?.kind).toBe("cookies");
+  });
+
   it.each([
     { version: 2 },
     { handoffId: "not-a-uuid" },
@@ -716,6 +726,9 @@ describe("mapRuntimeBrowserSessionActionsPayload", () => {
     { fields: [{ label: "\n" }] },
     { fields: [{ label: "Highlighted field 1", value: "must not be forwarded" }] },
     { instructions: "must not be forwarded" },
+    { kind: "fields" },
+    { kind: "" },
+    { kind: true },
   ])("drops malformed human-input guidance: %j", (overrides) => {
     const result = mapRuntimeBrowserSessionActionsPayload({
       actions: [{ seq: 1, type: "human_input", pageId: "page-1", humanInputRequest: humanInputRequest(overrides) }],

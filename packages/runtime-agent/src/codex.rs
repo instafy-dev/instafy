@@ -124,7 +124,7 @@ const MAX_COMMAND_OUTPUT_BUFFER_CHARS: usize = 8192;
 const BROWSER_MODE_DEVELOPER_INSTRUCTIONS: &str = r#"Browser/UI execution run:
 - Use project memory, pinned skills, and loaded learned blocks as the source of task behavior. This prompt only defines run-level invariants.
 - Use the dedicated browser tools configured for this turn when browser execution was requested. Every site and action approval the browser asks for still applies, and ask before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step unless the user's current message named it.
-- Keep the visible page open and focused. Report only concrete observed state. A failed or refused page ends that page, not the task: go on to the next source in this turn, as "Finding a page" says. Say in plain words what did not work when nothing is left to try (a failed result's plain reason); never paste raw error codes or error text such as `net::ERR_…` into your reply."#;
+- Keep the visible page open and focused. Report only concrete observed state. A failed or refused page ends that page, not the task: go on to the next source in this turn, as "Finding a page" says. Say in plain words what did not work when nothing is left to try (a failed result's plain reason, such as "a cookie notice covered the page"); never paste raw error codes or error text such as `net::ERR_…` into your reply."#;
 /// The Shared Browser policy, around the one line that says how the run's
 /// approvals start (see `crate::shared_browser::run_approval_start`).
 macro_rules! shared_browser_developer_instructions {
@@ -144,7 +144,7 @@ macro_rules! shared_browser_developer_instructions {
             $approval_start,
             "\n",
             r#"- Snapshots, status, results and errors mask values that look like keys, tokens or codes as `[redacted secret]` or `REDACTED`. Never try to recover a masked value. When a snapshot has `secretScreen: true`, the page text is withheld until a new page loads: stop, do not click anything on that page to reveal or copy the value, and tell the user in words which control on that page shows it, using the control names the snapshot still lists.
-- An error ending in `[step_refused_secret]`, `[step_refused_sign_in]`, `[step_refused_upload]` or `[step_refused_consent]` is final in every approval mode: revealing or copying a credential, signing in, choosing files and accepting cookies are the user's steps. Do not retry or look for another control that does the same; tell the user which step is theirs, and for a sign-in use `request_human_input` on its fields. For `[step_refused_consent]`: accepting is the person's step; read on under the banner.
+- An error ending in `[step_refused_secret]`, `[step_refused_sign_in]`, `[step_refused_upload]` or `[step_refused_consent]` is final in every approval mode: revealing or copying a credential, signing in, choosing files and accepting cookies are the user's steps. Do not retry or look for another control that does the same; tell the user which step is theirs, and for a sign-in or a cookie notice use `request_human_input` on its fields or the notice's buttons.
 - Downloads are blocked in this browser. Do not try to download or export files through it.
 - A denial, an approval that ran out of time, or a replayed approval is final for that attempted action. Do not retry it automatically; say in plain words which step did not go through and wait for a new user instruction. A step that ran out of its own time (`stepTimedOut: true`) is not one of these: it answered with the page as it is, so take a snapshot to see what it did and go on from there.
 - A page the network did not deliver fails with a plain reason, such as "Instafy's browser couldn't reach that site", and the browser's code only in `error.details`. It ends that page, not the task: go on to the next source in this turn. When nothing is left to try, tell the person that reason in your own words; the code is for diagnosis, never for your reply.
@@ -6908,6 +6908,11 @@ mod tests {
         assert!(
             BROWSER_MODE_DEVELOPER_INSTRUCTIONS.contains("Say in plain words what did not work")
         );
+        // A local test (Nov 6): a turn said its page "did not expose working controls" after
+        // the browser said a cookie notice covered it. A covered page is reported as covered.
+        assert!(BROWSER_MODE_DEVELOPER_INSTRUCTIONS.contains(
+            "(a failed result's plain reason, such as \"a cookie notice covered the page\")"
+        ));
         assert!(BROWSER_MODE_DEVELOPER_INSTRUCTIONS.contains("never paste raw error codes"));
         for policy in [
             BROWSER_MODE_DEVELOPER_INSTRUCTIONS,
@@ -7028,10 +7033,14 @@ mod tests {
             }
         }
         // Only the Shared Browser's page describer finds a cookie banner, so
-        // only it refuses an accept there; the turn reads on under it. It also
+        // only it refuses an accept there, and a click a notice it could not
+        // decline covers. Both refusals say to pause on the notice, so its
+        // run text never says to read on under one: it says one thing, that
+        // answering a notice is the person's step, as a sign-in is. It also
         // presses a banner's own reject button itself, so only the Personal
         // Browser's turn is told to, and, with nothing in its browser that
-        // refuses an accept, to stay out of a banner's settings unless asked.
+        // refuses an accept and a pause that takes only fields, to read on
+        // (the page's text) and stay out of a banner's settings unless asked.
         let reject_line =
             "press it before your next step, and nothing else on the banner; never accept.";
         assert!(PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS.contains(
@@ -7042,8 +7051,9 @@ mod tests {
             SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS,
         ] {
             assert!(instructions.contains(
-                "For `[step_refused_consent]`: accepting is the person's step; read on under the banner."
+                "for a sign-in or a cookie notice use `request_human_input` on its fields or the notice's buttons."
             ));
+            assert!(!instructions.contains("read on under"), "{instructions}");
             assert!(!instructions.contains(reject_line));
         }
         assert!(PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS.contains(reject_line));
@@ -10936,7 +10946,7 @@ required = true
                 result: Ok(CallToolResult {
                     content: vec![json!({
                         "type": "text",
-                        "text": "Shared Browser action failed",
+                        "text": "Instafy's browser could not be reached",
                     })],
                     structured_content,
                     is_error: Some(true),

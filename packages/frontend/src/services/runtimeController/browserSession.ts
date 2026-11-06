@@ -117,6 +117,8 @@ export type RuntimeBrowserHumanInputRequest = {
   origin: string;
   createdAtMs: number;
   expiresAtMs: number;
+  /** A pause on a cookie notice the browser could not decline: the person answers its highlighted buttons. */
+  kind?: "cookies";
   fields: Array<{ label: string }>;
 };
 
@@ -1210,8 +1212,13 @@ function mapBrowserHumanInputRequest(value: unknown): RuntimeBrowserHumanInputRe
     return null;
   }
   const row = value as Record<string, unknown>;
+  // A pause on a cookie notice also says so (`kind`); a pause on fields does not.
+  const notice = Object.hasOwn(row, "kind");
+  if (notice && row.kind !== "cookies") {
+    return null;
+  }
   const keys = ["version", "handoffId", "runId", "initiatorUserId", "browserPageId", "origin", "createdAtMs", "expiresAtMs", "fields"];
-  if (Object.keys(row).length !== keys.length || !keys.every((key) => Object.hasOwn(row, key))) {
+  if (Object.keys(row).length !== keys.length + (notice ? 1 : 0) || !keys.every((key) => Object.hasOwn(row, key))) {
     return null;
   }
   if (row.version !== 1
@@ -1257,6 +1264,7 @@ function mapBrowserHumanInputRequest(value: unknown): RuntimeBrowserHumanInputRe
     origin: row.origin,
     createdAtMs: row.createdAtMs,
     expiresAtMs: row.expiresAtMs,
+    ...(notice ? { kind: "cookies" as const } : {}),
     fields,
   };
 }

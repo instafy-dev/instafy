@@ -3296,7 +3296,7 @@ fn a_failed_step_keeps_the_persons_yes_in_its_result() {
             page_changed,
         } = failed_step(stdout.as_bytes()).unwrap_or_default();
         ControllerFailure {
-            message: "Shared Browser command exited with exit status: 1: The page changed after the person said yes".to_string(),
+            message: "The page changed after the person said yes".to_string(),
             step,
             approval,
             refused,
@@ -3308,7 +3308,7 @@ fn a_failed_step_keeps_the_persons_yes_in_its_result() {
     // Beside the failure's own words (see
     // `a_failed_step_with_facts_still_tells_the_model_what_failed`).
     let words = json!({
-        "reason": "Shared Browser action failed: Shared Browser command exited with exit status: 1: The page changed after the person said yes",
+        "reason": "The page changed after the person said yes",
     });
     let allowed = failed_call_result(&failure(r#"{"ok":false,"activity":{"approval":"once"}}"#));
     assert_eq!(allowed.is_error, Some(true));
@@ -3359,9 +3359,9 @@ async fn a_failed_step_with_facts_still_tells_the_model_what_failed() {
     use std::os::unix::process::ExitStatusExt;
     for (stderr, stdout, words) in [
         (
-            "Shared Browser command failed: Accepting cookies or other consent is the user's step. Leave the banner up and read on under it. [step_refused_consent]",
+            "Shared Browser command failed: A cookie notice covers this page, and the browser could not decline it. If the task needs this page, pause on the notice's buttons with request_human_input in the chat's own tab: the person answers it there and chooses Let Octo continue. Otherwise open a link under it by its address, or the official site of the place or service the task is about. [step_refused_consent]",
             r#"{"ok":false,"activity":{"refused":"consent"}}"#,
-            "Leave the banner up and read on under it. [step_refused_consent]",
+            "pause on the notice's buttons with request_human_input in the chat's own tab",
         ),
         (
             "Shared Browser command failed: Shared Browser refuses to type authentication, payment, or identity secrets; let the user enter this value directly",
@@ -3390,9 +3390,26 @@ async fn a_failed_step_with_facts_still_tells_the_model_what_failed() {
             .to_text()
             .unwrap_or_default();
         assert!(read.contains(words), "{read}");
+        // The browser's own sentence, with nothing of how its command exited before it.
+        for prefix in [
+            "Shared Browser action failed",
+            "exited with",
+            "exit status",
+            "Shared Browser command failed",
+        ] {
+            assert!(!read.contains(prefix), "{read}");
+            assert!(!wire.to_string().contains(prefix), "{wire}");
+        }
         // Details still read the step's facts from the same result.
         assert!(wire["structuredContent"]["activity"].is_object(), "{wire}");
     }
+    // A command that wrote no sentence of its own (killed, or Node failed before the
+    // script ran) still says how it exited, for a person reading the logs.
+    let killed = controller_failure(std::process::ExitStatus::from_raw(9), b"", b"");
+    assert!(
+        format!("{killed:#}").contains("no error details"),
+        "{killed:#}"
+    );
 }
 
 /// A step that failed, and a result that ends the run (the sign-in pause, a
@@ -5496,6 +5513,63 @@ async fn human_input_latch_blocks_every_later_observation_or_action() {
     assert_eq!(
         result.structured_content.unwrap()["terminalConsent"]["retryable"],
         false
+    );
+}
+
+/// A pause on a cookie notice the browser could not decline ends the run as a
+/// sign-in pause does, under its own code, so the person's reply asks them to
+/// answer the notice, and nothing the page shows is read until they continue.
+#[tokio::test]
+async fn a_cookie_notice_pause_ends_the_run_like_a_sign_in_pause() {
+    let server = SharedBrowserMcpServer::new();
+    let request = mcp_tool_request(
+        "request_human_input",
+        json!({ "indices": [0, 1], "snapshotId": "a".repeat(64) })
+            .as_object()
+            .cloned(),
+    )
+    .unwrap();
+    let outcome = server
+        .execute_with_failure_latch(&request, || async {
+            Err(anyhow::anyhow!(
+                "The person answers the cookie notice on the page. [cookie_notice_required_non_retryable]"
+            ))
+        })
+        .await;
+    assert!(matches!(
+        outcome,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "cookie_notice_required"
+        ))
+    ));
+    let snapshot = mcp_tool_request("snapshot", None).unwrap();
+    let denied = server
+        .execute_with_failure_latch(&snapshot, || async {
+            panic!("a cookie notice pause must not read the page")
+        })
+        .await;
+    assert!(matches!(
+        denied,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "cookie_notice_required"
+        ))
+    ));
+    let result = terminal_consent_call_result("cookie_notice_required");
+    assert_ne!(result.is_error, Some(true));
+    let structured = result.structured_content.unwrap();
+    assert_eq!(
+        structured["terminalConsent"]["code"],
+        "cookie_notice_required"
+    );
+    assert!(
+        structured["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("End this turn now")),
+        "{structured}"
+    );
+    assert_eq!(
+        canonical_terminal_consent_failure_code("cookie_notice_required"),
+        Some("cookie_notice_required")
     );
 }
 
@@ -9679,6 +9753,16 @@ fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
         Some(&json!({ "indices": [0], "snapshotId": snapshot_id }).to_string()),
     ));
     assert!(human_input.contains("for reading"), "{human_input}");
+    // It says where the person can answer a cookie notice instead: the chat's
+    // own tab. A sign-in or form found while reading still stops there.
+    assert!(
+        human_input.contains("When the task needs a page a cookie notice covers, open it in the chat's own tab, the page the person chose (select_tab, then navigate to this address), take a snapshot there and pause on the notice with request_human_input"),
+        "{human_input}"
+    );
+    assert!(
+        human_input.contains("Stop at a sign-in or form and tell the person."),
+        "{human_input}"
+    );
     let risky = failure_of(&fixture.call(
         "safe",
         "POST",
@@ -12136,11 +12220,10 @@ fn network_codes_map_to_a_few_plain_reasons() {
     assert_eq!(reason("page.goto: Timeout 30000ms exceeded"), None);
     assert_eq!(reason("net::ERR_"), None);
     assert_eq!(reason(&format!("net::ERR_{}", "X".repeat(80))), None);
-    let other =
-        failed_tool_result("Shared Browser command exited with exit status: 1: stale snapshot");
+    let other = failed_tool_result("Shared Browser snapshot is stale");
     assert_eq!(
         other.content[0].as_text().expect("text content").text,
-        "Shared Browser action failed: Shared Browser command exited with exit status: 1: stale snapshot"
+        "Shared Browser snapshot is stale"
     );
     assert_eq!(other.structured_content, None);
 }
@@ -12535,7 +12618,7 @@ fn a_covered_click_is_refused_at_once_in_words() {
     for (mode, words) in [
         (
             "click-covered-by-notice",
-            "A cookie notice covers this page, and the browser could not decline it: read on under it, or open the place's own site.",
+            "A cookie notice covers this page, and the browser could not decline it. If the task needs this page, pause on the notice's buttons with request_human_input in the chat's own tab: the person answers it there and chooses Let Octo continue. Otherwise open a link under it by its address, or the official site of the place or service the task is about.",
         ),
         (
             "click-covered",
@@ -12930,12 +13013,12 @@ async fn mcp_wire_carries_each_kind_of_browser_result_whole() {
             "isError": false,
         })
     );
-    // A failure keeps the controller's own text, and a page the network did not deliver says
-    // so in plain words.
+    // A failure says what the browser said of its step, with nothing before it, and a page the
+    // network did not deliver says so in plain words.
     assert_eq!(
         wire_result(failed_tool_result("the run's tab closed")).await,
         json!({
-            "content": [{ "type": "text", "text": "Shared Browser action failed: the run's tab closed" }],
+            "content": [{ "type": "text", "text": "the run's tab closed" }],
             "isError": true,
         })
     );
@@ -12969,12 +13052,12 @@ async fn mcp_wire_carries_each_kind_of_browser_result_whole() {
         json!({
             "content": [{
                 "type": "text",
-                "text": "Shared Browser action failed: The page changed after the person said yes",
+                "text": "The page changed after the person said yes",
             }],
             "structuredContent": {
                 "activity": { "step": "submit", "approval": "once" },
                 "error": {
-                    "reason": "Shared Browser action failed: The page changed after the person said yes",
+                    "reason": "The page changed after the person said yes",
                 },
             },
             "isError": true,
@@ -12991,12 +13074,12 @@ async fn mcp_wire_carries_each_kind_of_browser_result_whole() {
         json!({
             "content": [{
                 "type": "text",
-                "text": "Shared Browser action failed: Shared Browser command exited with exit status: 75: Shared Browser command failed: Instafy's browser could not be reached",
+                "text": "Instafy's browser could not be reached",
             }],
             "structuredContent": {
                 "browserUnavailable": true,
                 "error": {
-                    "reason": "Shared Browser action failed: Shared Browser command exited with exit status: 75: Shared Browser command failed: Instafy's browser could not be reached",
+                    "reason": "Instafy's browser could not be reached",
                 },
             },
             "isError": true,

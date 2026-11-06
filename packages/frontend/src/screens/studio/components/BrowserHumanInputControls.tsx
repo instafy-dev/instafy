@@ -57,9 +57,13 @@ export function canLetOctoContinue(props: HumanInputControlsProps): boolean {
 function HumanInputControls(props: HumanInputControlsProps & { takeOver?: ReactNode }) {
   const { state } = props;
   const canPress = canLetOctoContinue(props);
-  const manualGuidance = state.request
-    ? `Fill the ${state.request.fields.length === 1 ? "highlighted field" : `${state.request.fields.length} highlighted fields`} on the page, then let Octo continue. Keep passwords and codes out of chat.`
-    : "You control the browser. Finish your changes on the page, then let Octo continue.";
+  // What the pause asks of the person, by its kind: a cookie notice the
+  // browser could not decline is answered on the page, fields are filled.
+  const manualGuidance = state.request?.kind === "cookies"
+    ? "Answer the highlighted cookie notice, then let Octo continue."
+    : state.request
+      ? `Fill the ${state.request.fields.length === 1 ? "highlighted field" : `${state.request.fields.length} highlighted fields`} on the page, then let Octo continue. Keep passwords and codes out of chat.`
+      : "You control the browser. Finish your changes on the page, then let Octo continue.";
   const waitingGuidance = state.busy === "continue"
     ? "Continuing Octo's task. Input remains locked."
     : "Waiting for agent control to stop. Input remains locked.";
