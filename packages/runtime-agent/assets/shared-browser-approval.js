@@ -1004,10 +1004,11 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
 
     // The controls Octo's latest reading of a page listed, in any tab: the
     // reading's snapshot id, a fingerprint of the page's address and the tab
-    // it is in, and each control's fingerprint (`target`) with its name as
-    // the reading gave it (`name`), by index. A step nobody is asked about is
-    // judged by its own control against this, so a carousel's next slide or
-    // a clock elsewhere on the page leaves it standing. Run-scoped like the
+    // it is in, and each control's fingerprint (`target`), a fingerprint of
+    // the text around it (`around`, null when the page could not say) and its
+    // name as the reading gave it (`name`), by index. A step nobody is asked
+    // about is judged by its own control against this, so a carousel's next
+    // slide or a clock elsewhere on the page leaves it standing. Run-scoped like the
     // rest of the directory, and only the latest reading is kept.
     function recordObservedControls(snapshotId, reading) {
       if (
@@ -1026,6 +1027,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
             !entry ||
             typeof entry.target !== "string" ||
             !HEX_64_PATTERN.test(entry.target) ||
+            (entry.around !== null && (typeof entry.around !== "string" || !HEX_64_PATTERN.test(entry.around))) ||
             typeof entry.name !== "string",
         )
       ) {
@@ -1040,8 +1042,9 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
           snapshotId,
           address: reading.address,
           pageId: reading.pageId,
-          controls: reading.controls.map(({ target, name }) => ({
+          controls: reading.controls.map(({ target, around, name }) => ({
             target,
+            around,
             name: Array.from(name).slice(0, MAX_OBSERVED_CONTROL_NAME_CHARS).join(""),
           })),
         },
@@ -1078,9 +1081,10 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
           (entry) =>
             !entry ||
             typeof entry !== "object" ||
-            Object.keys(entry).length !== 2 ||
+            Object.keys(entry).length !== 3 ||
             typeof entry.target !== "string" ||
             !HEX_64_PATTERN.test(entry.target) ||
+            (entry.around !== null && (typeof entry.around !== "string" || !HEX_64_PATTERN.test(entry.around))) ||
             typeof entry.name !== "string" ||
             entry.name.length > 4 * MAX_OBSERVED_CONTROL_NAME_CHARS,
         )
@@ -1090,7 +1094,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       return {
         address: raw.address,
         pageId: raw.pageId,
-        controls: raw.controls.map(({ target, name }) => ({ target, name })),
+        controls: raw.controls.map(({ target, around, name }) => ({ target, around, name })),
       };
     }
 

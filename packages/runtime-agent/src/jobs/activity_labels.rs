@@ -2667,7 +2667,7 @@ mod tests {
     #[test]
     fn a_banner_the_browser_declined_rides_along_with_its_step() {
         let opened = browser_step_activity(&json!({
-            "step": "navigate", "host": "frame.work", "pageKey": "0123456789abcdef", "declined": "cookies",
+            "step": "navigate", "host": "frame.work", "pageKey": "cccccccccccccccc", "declined": "cookies",
         }))
         .expect("labelled");
         assert_eq!(opened["key"], json!("browser/open"));

@@ -2564,17 +2564,32 @@ function recordObservedFields(snapshotId, url, interactive) {
   }
 }
 
-// Records the controls a reading lists, each by its target fingerprint and the
-// name the reading gave it, in any tab: a step nobody is asked about is judged
-// by its own control against it (targetLocator). Only the latest reading is
-// kept; a step that names another checks the whole page, as before.
-function recordObservedControls(snapshotId, url, interactive, names) {
+// Records the controls a reading lists, each by its target fingerprint, a
+// fingerprint of the text around it (aroundTextInPage: its card, its form's
+// labels) and the name the reading gave it, in any tab: a step nobody is asked
+// about is judged by its own control against it (targetLocator), as a step
+// the person said yes to is judged by the control they were asked about. Only
+// the latest reading is kept; a step that names another checks the whole
+// page, as before.
+async function recordObservedControls(page, snapshotId, url, interactive, names) {
+  const arounds = await page
+    .evaluate(AROUND_ALL_IN_PAGE, {
+      kind: "around-all",
+      elements: interactive.map(({ locator }) => locator),
+      maxChars: AROUND_TEXT_MAX_CHARS,
+    })
+    .catch(() => null);
+  const aroundOf = (index) => {
+    const around = Array.isArray(arounds) && arounds.length === interactive.length ? arounds[index] : null;
+    return typeof around === "string" ? approvalProtocol.sha256(around.slice(0, AROUND_TEXT_MAX_CHARS)) : null;
+  };
   try {
     approvalProtocol.recordObservedControls(snapshotId, {
       address: approvalProtocol.sha256(url),
       pageId: activePageId,
       controls: interactive.map(({ description }, index) => ({
         target: targetFingerprint(description),
+        around: aroundOf(index),
         name: typeof names[index] === "string" ? names[index] : "",
       })),
     });
@@ -3084,7 +3099,7 @@ async function snapshot(page, { withhold = false, decline = false } = {}) {
   const signInHint = inAgentTab() || view.secretScreen ? null : signInHintOf(interactive);
   const snapshotId = snapshotFingerprint(rawUrl, interactive);
   recordObservedFields(snapshotId, rawUrl, interactive);
-  recordObservedControls(snapshotId, rawUrl, interactive, view.names);
+  await recordObservedControls(page, snapshotId, rawUrl, interactive, view.names);
   return {
     snapshotId,
     browserPageId: EXPECTED_BROWSER_PAGE_ID,
@@ -3234,8 +3249,10 @@ async function emitNavigationResult(page) {
 // changed elsewhere since (a carousel's next slide, a clock), it still does
 // when the snapshot is the latest reading recorded (recordObservedControls),
 // the address and the tab are the same, and the control at that index has
-// the fingerprint the reading recorded for it: the check a step gets after
-// the person says yes (approvedTarget). `pageAsRead` says which: a step that
+// the fingerprint and the text around it the reading recorded for it (a
+// look-alike that a carousel shows in its place, another product's "Add to
+// cart", is not it): the check a step gets after the person says yes
+// (approvedTarget). `pageAsRead` says which: a step that
 // asks the person needs the page as read (askablePage). A control that is not
 // as the reading showed it is refused by its reading's name. `asked` keeps
 // what the person is asked about, for approvedTarget: that very control, the
@@ -3243,6 +3260,7 @@ async function emitNavigationResult(page) {
 async function targetLocator(page, body) {
   const interactive = await collectInteractiveElements(page);
   const target = interactive[body.index];
+  const place = target ? await controlPlace(target.locator) : null;
   const pageAsRead = body.snapshotId === snapshotFingerprint(page.url(), interactive);
   if (!pageAsRead) {
     const reading = approvalProtocol.observedControls(body.snapshotId);
@@ -3262,7 +3280,11 @@ async function targetLocator(page, body) {
         `Shared Browser element index ${body.index} is unavailable; take a fresh snapshot`,
       );
     }
-    if (!target || targetFingerprint(target.description) !== read.target) {
+    if (
+      !target ||
+      targetFingerprint(target.description) !== read.target ||
+      (read.around !== null && (!place || approvalProtocol.sha256(place.around) !== read.around))
+    ) {
       pageChangedUnderStep = true;
       throw new Error(
         `${read.name ? `"${read.name}"` : "The control this step is for"} changed after the snapshot this step names, so nothing was done. Take a fresh snapshot, and do the step again if it still fits the request.`,
@@ -3274,7 +3296,6 @@ async function targetLocator(page, body) {
       `Shared Browser element index ${body.index} is unavailable; take a fresh snapshot`,
     );
   }
-  const place = await controlPlace(target.locator);
   return {
     ...target,
     pageAsRead,
@@ -3353,6 +3374,20 @@ function aroundTextInPage(element, request) {
 }
 
 const AROUND_TEXT_MAX_CHARS = 2_000;
+// The text around each of a reading's controls, in one call (`request.elements`
+// in page order): what aroundTextInPage gives each, or null for one it could
+// not judge.
+const AROUND_ALL_IN_PAGE = new Function(
+  "request",
+  `const around = ${aroundTextInPage};
+  return request.elements.map((element) => {
+    try {
+      return around(element, request).around;
+    } catch (_) {
+      return null;
+    }
+  });`,
+);
 async function controlPlace(locator) {
   const place = await locator
     .evaluate(aroundTextInPage, { kind: "around-text", maxChars: AROUND_TEXT_MAX_CHARS })

@@ -632,6 +632,20 @@ const controlsFor = (targetId) => {
       }),
     ];
   }
+  // A carousel of offers that shows one at a time, each with the same "Show
+  // details" button, and a dot that marks the offer shown:
+  // "carousel-offer-next" shows the next offer's look-alike in place (the dot
+  // moved, and the text around the button is another product's), and
+  // "carousel-offer-dot" only moved the dot.
+  if (mode.startsWith("carousel-offer")) {
+    return [
+      plain({ tag: "button", inputType: "button", text: "Show details" }),
+      plain({
+        tag: "a", inputType: "", text: "1", href: "https://example.test/offers",
+        policy: { href: "https://example.test/offers", linkSelf: true, iconHint: mode === "carousel-offer" ? "dot active" : "dot" },
+      }),
+    ];
+  }
   // A cookie banner: its refusal, its accept and its settings, then a link of
   // the page. "-no-reject" has no refusal, "-apart" a refusal in another part
   // of the page, "-sign-in" a sign-in form below it, and "-secret" a page that
@@ -923,7 +937,9 @@ const makePage = (targetId, opened = null) => {
         : arg && arg.kind === "around-text"
           // The control's card: "around-changed-after-allow" shows another
           // product beside the same control once the person said yes.
-          ? { connected: true, around: mode === "around-changed-after-allow" && approvalWasConsumed()
+          // "carousel-offer-next" shows the next offer's look-alike button in place.
+          ? { connected: true, around: (mode === "around-changed-after-allow" && approvalWasConsumed()) ||
+              mode === "carousel-offer-next"
             ? "Red mug Add to cart" : "Blue mug Add to cart" }
           : controlsFor(targetId)[ordinal],
     click: async () => {
@@ -971,6 +987,11 @@ const makePage = (targetId, opened = null) => {
         return { text, start: 0, end: text.length, above: 0, below: 0, more: false, scrollBy: null };
       }
       if (arg && arg.kind === "page-policy") return signalsFor();
+      // The text around each control, read in one call.
+      if (arg && arg.kind === "around-all") {
+        return Promise.all(arg.elements.map(async (element) =>
+          (await element.evaluate(undefined, { kind: "around-text" })).around));
+      }
       if (arg && arg.kind === "withheld-read") return Boolean(markPath && fs.existsSync(markPath));
       if (arg && arg.kind === "withheld-mark") {
         if (markPath) fs.writeFileSync(markPath, "withheld");
@@ -7539,6 +7560,41 @@ fn a_step_nobody_is_asked_about_is_judged_by_its_own_control() {
     // A snapshot of another address, or one no reading recorded, is judged whole, as before.
     let unknown = choose("planner-turned", &"0".repeat(64));
     assert!(failure_of(&unknown).contains("snapshot is stale"));
+}
+
+/// A carousel that turns shows the next offer's look-alike button where the snapshot showed the
+/// first one: the same name and the same fingerprint, around another product's text. A step
+/// nobody is asked about is judged by its control and the text around it, as a step the person
+/// said yes to is, so it is refused by its name, never done on the look-alike; a turn that only
+/// moved the carousel's dot leaves it standing.
+#[test]
+fn a_look_alike_a_carousel_shows_in_a_controls_place_is_not_it() {
+    let fixture = EmbeddedControllerFixture::new();
+    let snapshot = fixture.routine_snapshot("carousel-offer");
+    assert_eq!(snapshot["interactiveElements"][0]["label"], "Show details");
+    let body = json!({"index": 0, "snapshotId": snapshot["snapshotId"]}).to_string();
+    let swapped = routine_click(&fixture, "carousel-offer-next", &body);
+    let stderr = failure_of(&swapped);
+    assert!(
+        stderr.contains(
+            "\"Show details\" changed after the snapshot this step names, so nothing was done."
+        ),
+        "{stderr}"
+    );
+    assert_eq!(
+        serde_json::from_slice::<JsonValue>(&swapped.stdout).expect("one JSON line"),
+        json!({"ok": false, "pageChanged": true})
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        ""
+    );
+    let clicked = routine_click(&fixture, "carousel-offer-dot", &body);
+    payload_of(&clicked);
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "0\n"
+    );
 }
 
 /// A step that asks the person is asked about the page Octo read: one whose control is as its

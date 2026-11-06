@@ -466,8 +466,8 @@ Two steps never ask, in Ask too:
   something covers, never in a frame (a reading lists the page's own controls
   only), and never on a page that may show a secret or holds a sign-in,
   password, code or payment field. It asks nobody in any mode, no form post may
-  leave the tab while it runs (a look at the page gets the step's guard for the
-  press), and the action feed shows it as "Decline cookies". The step's
+  leave the tab while it runs (a look at the page gets a step's guard of its own
+  for the press), and the action feed shows it as "Decline cookies". The step's
   activity says so (`declined: "cookies"`), Details list "Declined cookies on
   <site>" after the step, and Octo reads the page as it is after it. A banner
   with no refusal of its own stays up, and Octo reads on under it.
@@ -901,8 +901,8 @@ chosen, for the day and time the person travels (a daytime hour when they gave
 none) and saying which, not a listing or a kiosk page; a comparison's models,
 those a page's menu names included, each read on
 its own page. A cookie banner is the browser's own: it declines one with its
-own reject button before Octo reads the page (above). A sign-in, a bot check, a paywall or a refused read ends that page, never
-the task: nothing a turn carries tells it to stop there, so neither a card's
+own reject button before Octo reads the page (above). A sign-in, a bot check,
+a paywall or a refused read ends that page, never the task: nothing a turn carries tells it to stop there, so neither a card's
 task nor the reply rules end the research after a failed page. A browser turn's
 own run text says the same: a failed or refused page ends that page, not the
 task, so the turn goes on to the next source in the same turn and says in plain
@@ -1630,12 +1630,14 @@ a carousel turns or a clock ticks, though every control it lists reads the
 same. A step nobody is asked about is therefore judged by its own control:
 each reading records, in the run's approval directory
 (`observed-controls.json`, the latest reading only, in any tab), the target
-fingerprint of every control it lists and the name it gave it, and such a step
-goes ahead when the address and the tab are the same and the control at its
-index has the fingerprint that reading recorded, the check a step already
-gets after the person says yes (below). A control that changed is refused,
-named as the reading named it ("\"End\" changed after the snapshot this step
-names"). A step that asks the person keeps the whole-page check: when only
+fingerprint of every control it lists, a fingerprint of the text around it
+(its card, its form's labels) and the name it gave it, and such a step goes
+ahead when the address and the tab are the same and the control at its index
+has the fingerprint and the text around it that reading recorded, the check a
+step already gets after the person says yes (below): a look-alike a carousel
+shows in its place, around another product's text, is not it. A control that
+changed is refused, named as the reading named it (`"End" changed after the snapshot this step
+names`). A step that asks the person keeps the whole-page check: when only
 the rest of the page changed, nobody is asked, and the step says to take a
 fresh snapshot and do it again right after it. A step on a snapshot with no
 record (an older one) is judged whole, as before. Any of these fails without
