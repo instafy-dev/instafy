@@ -818,15 +818,23 @@ and whole, but for its "Routing preflight", which only the routing step reads
 (no turn's snapshot carries that section), and the sections its front matter
 names for a turn with no shell (`no_shell_omits`: the card a building turn hands
 the person, what the skill is for, the browsers' names, and where a turn with a
-shell reads more). Every skill a browser turn loads leaves out the sections it
-names the same way, so a browser turn is given no step it cannot take: the
-`instafy-web-research` skill's readers, searches, guided links and rules for
-building pages and datasets, for one, while its rules for what a page's text
-may start and what a search may hold reach every reader. Of the space's
-`AGENTS.md`, a browser turn reads its "Replies", as a restored one does, when
-the file is a copy Instafy ships; a copy the space edited, or one with no such
-section, comes whole. Besides it
-the turn is told of, and loads when its words route them, only the
+shell reads more). A turn that carries on the person's own message, which the
+routing step sent to the browser, also leaves out the sections named for it
+(`routed_omits`): no card listed its reads, so it reads nothing of reading a
+card's list ("Several reads in one card"), while what a page's text may start
+and which pages end a read are in the "Core rules" every browser turn reads.
+Every skill a browser turn loads leaves out the sections it names the same way,
+so a browser turn is given no step it cannot take: the `instafy-web-research`
+skill's readers (and what `instafy web read` marks, reports and returns),
+searches (a search for reviews included), guided links and rules for building
+pages and datasets, for one, while its rules for what a page's text may start
+and what a search may hold, a site's own search box included, reach every
+reader. Of the space's `AGENTS.md`, a browser turn reads its "Replies", as a
+restored one does, when the file is a copy Instafy ships; a copy the space
+edited, or one with no such section, comes whole. Of `INSTAFY.md` it reads
+nothing while the file is a copy Instafy ships, whose snapshot, constants and
+workflows are placeholders; a copy the space filled in or edited comes whole.
+Besides it the turn loads, when its words route them, only the
 skills it can use with no shell (runtime-agent `usable_with_no_shell`): not the
 space's memory, routing and team skills (`context_kind` `root`, `meta` or
 `learned_index`), not a skill that runs code of its own (a `scripts/` folder, or
@@ -834,17 +842,20 @@ a skill pack whose manifest names commands, such as the map pack), and not the
 runtime's own skills that build, run commands or plan a team
 (`SHELL_TURN_SKILLS`). Every other skill its words route loads, one the space
 added or imported included; a skill it cannot use takes no routing place from
-one it can, and its skills index lists only the ones it can use. Its browser
-skill counts against the snapshot's budget as much as a routed skill does, so
-those keep their room beside it. Nor is it told how to run a command, change a
-file, or start a team plan or a goal, since a browser turn's only tools are its
-browser's: its request leaves those lines out, its client context gives the
-person's time zone without the commands that take one, and a Shared Browser
-thread begins on base instructions without the structured lane's paragraphs on
-the command tool and file writes (`SHARED_BROWSER_BASE_INSTRUCTIONS`), which it
-keeps when a later run resumes it, as a thread begun before keeps its own. The
-space's `INSTAFY.md`, and a skill it can use, may still name commands that
-other turns run. What other turns read of the skill when they
+one it can, and it reads no skills index, since it cannot open a skill file.
+Its browser skill counts against the snapshot's budget as much as a routed
+skill does, so those keep their room beside it. Nor is it told how to run a
+command, change a file, or start a team plan or a goal, since a browser turn's
+only tools are its browser's: its request leaves those lines out, its contract
+gives its answer's shape alone, with none of the building turns' cards
+(secrets, integrations, location), skill setups or Octo's device and camera
+capabilities, its client context gives the person's time zone without the
+commands that take one, and a Shared Browser thread begins on base
+instructions without the structured lane's paragraphs on the command tool and
+file writes (`SHARED_BROWSER_BASE_INSTRUCTIONS`), which it keeps when a later
+run resumes it, as a thread begun before keeps its own. A space's own
+`INSTAFY.md`, and a skill it can use, may still name commands that other turns
+run. What other turns read of the skill when they
 need it (how to write a learned block and the cues a run reports for one, the
 owner-local `observe` tool, the Personal Browser's own notes, and what a script
 that drives a browser keeps in mind) is in its
@@ -858,7 +869,8 @@ given the chat's earlier browser turns, never Octo's building turns, files or
 command output. Codex withdraws the space's `AGENTS.md` from a
 turn without the workspace, so it is given that file's "Replies" too (how a reply
 reads: plain words, no error codes, file paths or inside words, "not checked" on
-a fact no page read this turn states, and only steps the turn started). The
+a fact no page read this turn states, where it looked for what it didn't find,
+never that a site lacks it, and only steps the turn started). The
 "Finding a page" section, which the
 `instafy-web-research` skill points to (a research turn without the browser
 skill prints just that section with one command), says how every reader finds a
@@ -2613,8 +2625,9 @@ unless the policy is `"covered"`.
   whose every page stopped it and that wrote no words of its own: no hand-back
   follows a turn that read no page. The building turn cannot open the
   browser, so the browser turn reads what the request needs before it ends:
-  each item's own page and, for reviews, the review pages a page it read links
-  to, else a reviewer's own site, as "Finding a page" says for every reader.
+  each item's own page from the links it read and, for reviews, each
+  reviewer's own site, by its address or its own search box, since the turn has
+  no web search, as "Finding a page" says for every reader.
   Right before the request it reads its part
   of it in plain words: the reading, every page the request needs, while what
   the request asks Octo to make is the building turn's part, from its finding

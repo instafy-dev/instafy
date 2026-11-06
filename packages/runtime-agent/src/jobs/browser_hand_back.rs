@@ -108,9 +108,13 @@ If a page stopped you (a manual step, a refused or challenge page), say so in yo
 /// it: when every page stopped it, no hand-back follows and [`move_findings_into_details`] posts
 /// its words, so a promise to make the thing would be kept by nothing. A review no page links to
 /// comes from a reviewer's own site, as the browser skill's "Finding a page" says for every
-/// reader: said here only, a browser turn that answers in words lost it.
+/// reader: said here only, a browser turn that answers in words lost it. Told reviews came only
+/// from links on the pages it read, beside a skill line that allowed a reviewer's own site and
+/// others that named a web search, a comparison's browser turn listed its tools twice for a web
+/// search, read the maker's home page, which links each model's own page, and answered that the
+/// pages it had did not establish the specs or the reviews (a local test, Nov 5).
 const READING_PART: &str = "\n\nYour part of this request is the reading: read every page it needs before you end \
-(each item's own page and, for reviews, review pages a page you read links to). \
+(each item's own page from the links you read and, for reviews, each reviewer's own site, by its address or its own search box: this turn has no web search). \
 What it asks Octo to make is the building turn's part, from your finding lines, \
 so never stop because this turn can't make it, and say nothing about making it in your reply.";
 
@@ -954,9 +958,10 @@ mod tests {
             assert!(
                 section.ends_with(
                     "say so in your first line.\n\nYour part of this request is the reading: \
-                     read every page it needs before you end (each item's own page and, for \
-                     reviews, review pages a page you read links to). What it asks Octo to make \
-                     is the building turn's part, from your finding lines, so never stop because \
+                     read every page it needs before you end (each item's own page from the links \
+                     you read and, for reviews, each reviewer's own site, by its address or its \
+                     own search box: this turn has no web search). What it asks Octo to make is \
+                     the building turn's part, from your finding lines, so never stop because \
                      this turn can't make it, and say nothing about making it in your reply."
                 ),
                 "{section}"
@@ -1017,7 +1022,11 @@ mod tests {
     /// work, a comparison's browser turn read one maker page in 14 s and handed back; its
     /// follow-up read four, wrote that one of them links to reviews of each model, and opened none
     /// of them, while the hand-back was told the person can ask for a missing page. What the
-    /// request needs is said in its part, once: the findings section says no more who builds.
+    /// request needs is said in its part, once: the findings section says no more who builds. It
+    /// says where each item's page and each review come from: the links it read, and each
+    /// reviewer's own site, by its address or its own search box, since the turn has no web
+    /// search. Told reviews came only from links on the pages it read, a comparison's browser
+    /// turn listed its tools twice for a web search and read one page (a local test, Nov 5).
     #[test]
     fn a_browser_turn_that_hands_back_reads_what_the_request_needs() {
         let metadata = json!({
@@ -1028,8 +1037,9 @@ mod tests {
         let section = format_browser_findings_contract_section(Some(&metadata)).expect("contract");
         for line in [
             "\nFindings for the building turn:\nEnd your reply",
-            "read every page it needs before you end (each item's own page and, for reviews, \
-             review pages a page you read links to). ",
+            "read every page it needs before you end (each item's own page from the links you \
+             read and, for reviews, each reviewer's own site, by its address or its own search \
+             box: this turn has no web search). ",
             "Say what you read (\"Read 6 pages on <site>\"), never \"I couldn't finish\". ",
         ] {
             assert!(section.contains(line), "{line}: {section}");
@@ -1068,7 +1078,8 @@ mod tests {
         assert_eq!(
             part,
             "Your part of this request is the reading: read every page it needs before you end \
-             (each item's own page and, for reviews, review pages a page you read links to). \
+             (each item's own page from the links you read and, for reviews, each reviewer's own \
+             site, by its address or its own search box: this turn has no web search). \
              What it asks Octo to make is the building turn's part, from your finding lines, so \
              never stop because this turn can't make it, and say nothing about making it in your \
              reply."

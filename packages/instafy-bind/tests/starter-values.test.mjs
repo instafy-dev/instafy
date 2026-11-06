@@ -1,6 +1,6 @@
 // The values on a page of options, as the compare and ranked starters draw them: a stated limit ("€600 or less")
 // counts only a value the page shows, so a row whose price is unknown is listed apart ("Price unknown") and never
-// under the limit; no cell is blank or a dash ("Unknown", "Not listed", with why); and every value cites the page it
+// under the limit; no cell is blank or a dash ("Unknown", "Not found", with why); and every value cites the page it
 // was read on and the day ("checked 27 Oct on maker.example"). Runs the starters' own site.js and app.js in a vm
 // against a small DOM (no browser): what a row says, and in which part of the list it is.
 import test from "node:test";
@@ -346,7 +346,9 @@ test("compare: no cell is blank or a dash, and every value cites its page and da
   assert.match(read, /8,000 Pa · checked 27 Oct( 2026)? on review-two\.example ↗/, read);
   const silent = rowText(document, "option:silent");
   assert.doesNotMatch(silent, /—|n\/a/, `a dash is no value: ${silent}`);
-  assert.equal((silent.match(/Not listed/g) || []).length, 3, `the maker's page was read and gives none of the three: ${silent}`);
+  // where it was looked for, never that the page lacks it
+  assert.equal((silent.match(/Not found ·/g) || []).length, 3, `the maker's page was read and none of the three was found there: ${silent}`);
+  assert.doesNotMatch(silent, /Not listed/, silent);
   assert.match(silent, /checked 27 Oct( 2026)? on maker\.example ↗/);
   const blocked = rowText(document, "option:blocked");
   assert.match(blocked, /Unknown · shop-two\.example blocks automated price checks/, blocked);
@@ -426,7 +428,7 @@ test("compare on a phone: a missing value that can still be checked, opened or w
     // value is missing are not repeated
     item("air", "Maker Laptop Air", { cpu: MAKER("Chip Series 3", "air"), price: { note: "not read yet" }, battery: { note: "Battery not checked." }, weight: { note: "Unknown" } },
       { store: { name: "Shop", url: "https://shop.example/air", readable: true } }),
-    // the maker's page was read and does not give the weight: "Not listed · checked … ↗" stays a fact
+    // the maker's page was read and the weight was not found there: "Not found · checked … ↗" stays a fact
     item("max", "Maker Laptop Max", { cpu: MAKER("Other Chip AI 300 Series", "max"), weight: { src: "Maker", url: "https://maker.example/max/specs", date: DAY }, battery: { v: "85 Wh", url: "https://maker.example/max" } }),
   ];
   const { document } = await draw("compare", data, { width: 375 });
@@ -435,7 +437,7 @@ test("compare on a phone: a missing value that can still be checked, opened or w
   assert.equal(line("option:air"), "Not found yet: Battery, Weight, Two independent reviews");
   assert.match(rowText(document, "option:air"), /Price unknown · not read yet · Open Shop ↗/, "the store link stays on the right");
   const max = rowText(document, "option:max");
-  assert.match(max, /WeightNot listed · checked 27 Oct( 2026)? on maker\.example ↗/, `a page read without it is cited: ${max}`);
+  assert.match(max, /WeightNot found · checked 27 Oct( 2026)? on maker\.example ↗/, `a page read without it is cited: ${max}`);
   assert.match(max, /BatteryUnknown · where to check ↗/, `a value without its page keeps where to check: ${max}`);
   assert.match(max, /Not found yet: Price, Two independent reviews$/, max);
 });

@@ -15,8 +15,8 @@
  *   "date" ("seen 5 Aug on …"); a price with an "asof" over 30 days old is muted and says "may have changed", like a
  *   live price past its time. A value that only says nothing is known ("—", "n/a", "?", "unknown") is no value.
  *   site.trust(fact | record, opts) draws the one trust line: "checked 17 Oct on maker.com ↗", "at Store ↗ · checked
- *   4 min ago", "Estimate", "Price not checked" (nobody checked it), "Not listed · checked 16 Oct on maker.com ↗" (a
- *   fact with a source and no value: the source was read and does not give it); in a table of options a value nobody
+ *   4 min ago", "Estimate", "Price not checked" (nobody checked it), "Not found · checked 16 Oct on maker.com ↗" (a
+ *   fact with a source and no value: the source was read and the value not found on it); in a table of options a value nobody
  *   found reads opts.unknown, "Unknown · why" ("Price unknown"). A price fact with "list": true is that source's
  *   list price, never a store's price now: "$900 · list price on BabyGearLab ↗ · seen 5 Aug".
  * - Filters: site.within(value, filter) is "in", "out" or "unknown" for the page's one filter ({key, max, min}), and
@@ -391,18 +391,18 @@
     var value = valueText(x);
     // "Not checked" has one meaning on every page: nobody checked it. A checklist says "To confirm" (opts.unknown),
     // because there "checked" is the tick.
-    // A table of options says "Unknown" ("Price unknown") for a value nobody found, then why; "Not listed" when the
-    // page that was read does not give it.
+    // A table of options says "Unknown" ("Price unknown") for a value nobody found, then why; "Not found" with the
+    // page that was read when the value was not found on it: where it was looked for, never that the page lacks it.
     var word = opts.unknown || "Not checked";
     var notChecked = function (note, url) {
       add((opts.label ? opts.label + " " + word.toLowerCase() : word) + (usefulNote(note) ? " · " + usefulNote(note) : ""));
       if (safeUrl(url)) add(link(url, "where to check", "act"));
     };
-    // looked for and not there: the source was read and does not give it ("Not listed · checked 16 Oct on maker.com
-    // ↗"); the link to the page that was read stays even when the source is named once for the column (then without
-    // the date)
-    var notListed = function (note, src, url, fact) {
-      add((opts.label ? opts.label + " not listed" : "Not listed") + (usefulNote(note) ? " · " + usefulNote(note) : ""));
+    // looked for and not found: the source was read and the value was not found on it ("Not found · checked 16 Oct on
+    // maker.com ↗"); the link to the page that was read stays even when the source is named once for the column (then
+    // without the date)
+    var notFoundOn = function (note, src, url, fact) {
+      add((opts.label ? opts.label + " not found" : "Not found") + (usefulNote(note) ? " · " + usefulNote(note) : ""));
       if (fact && !opts.shared) citeParts(fact, { price: opts.price }).forEach(add);
       else if (safeUrl(url)) add(link(url, host(url) || src));
       else if (src) add(src);
@@ -414,7 +414,7 @@
       var url = (x.handoff && x.handoff.url) || x.prov.url;
       if (x.type === "claim" && x.status === "not_found") {
         value = "";
-        notListed(x.note, x.prov.source_label || x.prov.source || "", x.prov.url, null);
+        notFoundOn(x.note, x.prov.source_label || x.prov.source || "", x.prov.url, null);
       } else if (x.type === "claim" && (x.status === "uncertain" || x.value == null)) {
         value = "";
         notChecked(x.note);
@@ -457,7 +457,7 @@
         add("list price");
       }
     } else if (x && x.src && !value) {
-      notListed(x.note, x.src, x.url, x);
+      notFoundOn(x.note, x.src, x.url, x);
     } else {
       value = "";
       // a check that failed says so once ("Couldn't check · reason · Try again"), not under "Not checked" as well

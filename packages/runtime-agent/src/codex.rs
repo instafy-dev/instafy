@@ -938,6 +938,9 @@ pub struct CodexRunOptions {
     pub project_id: Option<uuid::Uuid>,
     /// The job this run serves; used only to name it in runtime log lines.
     pub job_id: Option<uuid::Uuid>,
+    /// The person's IANA time zone, from the job's client context: the commands the turn runs
+    /// get it as `TZ` ([`give_commands_the_client_timezone`]), and this process keeps its own.
+    pub client_timezone: Option<String>,
     pub disable_shell_tool: bool,
     pub disable_final_output_json_schema: bool,
     pub final_output_schema: CodexFinalOutputSchema,
@@ -2048,6 +2051,10 @@ impl CodexClient {
             }
         }
         scope_runtime_model_shell_environment(&mut config.permissions.shell_environment_policy);
+        give_commands_the_client_timezone(
+            &mut config.permissions.shell_environment_policy,
+            options.client_timezone.as_deref(),
+        );
         let mut shared_browser_process_groups = None;
         let mut provider_process_groups = None;
         if let Some(turn) = options.granted.as_ref() {
@@ -3885,6 +3892,18 @@ fn scope_runtime_model_shell_environment(policy: &mut ShellEnvironmentPolicy) {
         policy
             .exclude
             .push(EnvironmentVariablePattern::new_case_insensitive(key));
+    }
+}
+
+/// The person's time zone for the commands a turn runs, as `TZ`, from the job's client context.
+/// This process keeps its own zone: Codex dates each turn by it (`<current_date>`) and names the
+/// machine's zone beside that date, so a zone set for the whole process moved the date and not its
+/// name. At 23:00 UTC a browser turn read 2026-11-06 "in Etc/UTC", while the routing step, which
+/// runs no command and was given no zone, read 2026-11-05 (a local test, Nov 5). The person's zone
+/// and local time are in the prompt's client context.
+fn give_commands_the_client_timezone(policy: &mut ShellEnvironmentPolicy, timezone: Option<&str>) {
+    if let Some(timezone) = timezone.map(str::trim).filter(|zone| !zone.is_empty()) {
+        policy.r#set.insert("TZ".to_string(), timezone.to_string());
     }
 }
 
@@ -8465,6 +8484,33 @@ mod tests {
                 .expect_err("a header helper must fail closed")
                 .to_string();
         assert!(error.contains("HTTP header helper"), "{error}");
+    }
+
+    /// The commands a turn runs see the person's time zone, and nothing else of the process
+    /// changes: Codex dates the turn by this process's own zone and names the machine's beside it,
+    /// so a zone set for the whole process moved the date and not its name (2026-11-06 "in
+    /// Etc/UTC" at 23:00 UTC). A turn with no zone from its client keeps the inherited one.
+    #[test]
+    fn a_turns_commands_get_the_persons_time_zone_and_the_process_keeps_its_own() {
+        use codex_protocol::shell_environment::create_env_from_vars;
+
+        let inherited = || {
+            vec![
+                ("PATH".to_string(), "/usr/bin".to_string()),
+                ("TZ".to_string(), "Etc/UTC".to_string()),
+            ]
+        };
+        let mut policy = ShellEnvironmentPolicy::default();
+        give_commands_the_client_timezone(&mut policy, Some(" Europe/Vienna "));
+        let child = create_env_from_vars(inherited(), &policy, None);
+        assert_eq!(child.get("TZ").map(String::as_str), Some("Europe/Vienna"));
+        for unknown in [None, Some(""), Some("  ")] {
+            let mut policy = ShellEnvironmentPolicy::default();
+            give_commands_the_client_timezone(&mut policy, unknown);
+            assert!(policy.r#set.is_empty(), "{unknown:?}");
+            let child = create_env_from_vars(inherited(), &policy, None);
+            assert_eq!(child.get("TZ").map(String::as_str), Some("Etc/UTC"));
+        }
     }
 
     #[test]

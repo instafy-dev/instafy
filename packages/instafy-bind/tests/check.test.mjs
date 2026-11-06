@@ -518,7 +518,7 @@ test("check fails a comparison row that says nowhere where it comes from", () =>
   // real-sounding model fails without anything behind it
   assert.deepEqual(uncitedRows(data([row("Latest eligible model 1", { found: "reviews.example.net" })])), []);
   assert.deepEqual(uncitedRows(data([row("Brightvac S9 Ultra")])).map((r) => r.item), ["Brightvac S9 Ultra"]);
-  // a page read: a value's (a value or "Not listed") or a "sources" entry, each with its https page
+  // a page read: a value's (a value or "Not found") or a "sources" entry, each with its https page
   assert.deepEqual(uncitedRows(data([
     row("A", { facts: { price: { v: "€399", ...page } } }),
     row("B", { facts: { price: { ...page } } }),

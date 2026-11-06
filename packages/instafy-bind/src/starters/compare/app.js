@@ -27,8 +27,8 @@
  *                          checked". `instafy bind check` fails a row with neither: a guess or a placeholder.
  *   unchecked: ["what was not checked", …]     listed once in the footer, on an empty page too
  *   fact: {"v": "$145", "src": "Example Store", "url": "https://…", "date": "2026-10-17", "asof"?: "2026-08-05", "est": false}
- *   Each value cites its page and day ("checked 17 Oct on maker.com ↗"), and no cell is blank: a source you read that
- *   does not give the value is the fact without "v" ({"src", "url", "date"}): "Not listed · checked 17 Oct on
+ *   Each value cites its page and day ("checked 17 Oct on maker.com ↗"), and no cell is blank: a source you read
+ *   without finding the value on it is the fact without "v" ({"src", "url", "date"}): "Not found · checked 17 Oct on
  *   maker.com ↗"; any other missing value reads "Unknown", with {"note": "the store blocks price checks"} saying why.
  *   Never a dash. A value cites only a page that gives it: a count of what you found ("1 of 2 reviews found") cites a
  *   page it counts, and with none found it is {"note": "no review of this model read"}, citing no page.
@@ -393,7 +393,7 @@
         open && hasMore(item) ? more(item) : null);
     }));
   }
-  /** A cell that says only "Unknown" (and why): no value, no page read for it ("Not listed · checked … ↗" cites one), no
+  /** A cell that says only "Unknown" (and why): no value, no page read for it ("Not found · checked … ↗" cites one), no
    * check running or failed, and nothing to press or open ("where to check ↗"). A price whose store can be opened or
    * checked stays on its row: its "Open store ↗" or "Check price" comes once the binder has answered (the row keeps its
    * shape), and a check that could not read the store says there why. */
