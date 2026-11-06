@@ -105,27 +105,34 @@ A member can **Present** a site whose page says it can share its view, and the o
   change also refreshes the card.
 - **After a turn.** `open` records, with each preview it opens on the machine, the folder the site's server runs from
   in the workspace (`siteDir`), and `open` and `check` record when they last pictured the site for the card
-  (`pictureAt`), also when no picture came of it (a blank page, one that never loaded). While a turn's changes are
-  saved, each preview whose folder holds a file the turn changed after that is checked once more, at the size its
-  picture comes from (`instafy preview check --desktop`), from the workspace: at most three previews and 30 s in all,
-  a check starting only with 15 s of that left, none once the turn is stopped or its changes could not be saved. A
-  file in the folder of another of the space's previews, inside a preview's own folder, is that other site's change
-  only: a comparison served from the workspace itself is not pictured again for a turn that changed only another open
-  preview's site. Any other file the turn changed still counts for it, since its folder is the whole workspace. The
-  reply does not wait for it: the check goes on after the reply is posted, and the card's picture changes in place
-  once it is sent (`preview.thumbnail_updated`). The check keeps the picture in a file (`--picture-to <file>`, for
-  the runtime only, with the preview's id, the page's description and when the page began loading in
-  `<file>.json`), and the runtime sends it with its own credential, which still works once the turn has ended. The
-  check itself is given no credential: it goes on while the next turn may run, another member's with other granted
-  secrets, and any process in a runtime can read another's environment, so it gets only what a helper that outlives
-  a turn may have and the settings it reads (`PREVIEW_CHECK_ENV_KEYS`: where Node finds Playwright and Playwright its
-  browsers, the skill packs whose link-only lists the capture enforces, and the reserved preview ports), never the
-  turn's granted secrets. A picture older than one taken since (the next turn's own check, which records when it took
-  its picture before it sends it) is not sent, nor sent again after the runtime's credential is renewed. So a turn that stopped
-  before its own check still leaves the card showing the site as it left it, and a turn whose own check came after
-  its last change adds nothing. The check's screenshots and picture go to a folder removed after it, and a check
-  that fails, runs out of time or is stopped ends with every helper it started and leaves the old picture. A preview
-  with no recorded folder or id, or opened with `--no-thumbnail`, is left alone.
+  (`pictureAt`): `open` also when no picture came of it (a blank page, one that never loaded), since a new open's card
+  starts with none; a check that could take none records nothing, so the card's older picture still counts as older
+  than the turn's change. While a turn's changes are saved, each preview whose folder holds a file the turn changed
+  after that is checked once more, at the size its picture comes from (`instafy preview check --desktop`), from the
+  workspace: at most three previews and 30 s in all, a check starting only with 15 s of that left, none once the turn
+  is stopped or its changes could not be saved. A file in the folder of another of the space's previews, inside a
+  preview's own folder, is that other site's change only: a comparison served from the workspace itself is not
+  pictured again for a turn that changed only another open preview's site. Any other file the turn changed still
+  counts for it, since its folder is the whole workspace. The reply does not wait for it: the check goes on after the
+  reply is posted, and the card's picture changes in place once it is sent (`preview.thumbnail_updated`). The check
+  keeps the picture in a file (`--picture-to <file>`, for the runtime only, with the preview's id, the page's
+  description and when the page began loading in `<file>.json`), and the runtime sends it with its own credential,
+  which still works once the turn has ended. The check itself is given no credential: it goes on while the next turn
+  may run, another member's with other granted secrets, and any process in a runtime can read another's environment,
+  so it gets only what a helper that outlives a turn may have and the settings it reads (`PREVIEW_CHECK_ENV_KEYS`:
+  where Node finds Playwright and Playwright its browsers, the skill packs whose link-only lists the capture enforces,
+  and the reserved preview ports), never the turn's granted secrets. A picture older than one taken since (the next
+  turn's own check, which records when it took its picture before it sends it) is not sent, nor sent again after the
+  runtime's credential is renewed. So a turn that stopped before its own check still leaves the card showing the site
+  as it left it, and a turn whose own check took a picture after its last change adds nothing. A check that looked at
+  the page and kept no picture (a blank page, one that never said it was ready, a redirect, one that did not load)
+  leaves a picture of the site from before the change, so the runtime drops it, with the page description read with
+  it, unless a picture was taken since the check began: the card then shows no picture, and under its title only a
+  `--summary` the turn gave. That holds when the turn's own check after its change kept none too, since that check
+  recorded nothing. The runtime logs why, in the check's own words (its reason and the kind of its first problem,
+  never the page's text, title or an address). The check's screenshots, picture and report go to a folder removed
+  after it, and a check that fails, runs out of time or is stopped ends with every helper it started and leaves the
+  old picture. A preview with no recorded folder or id, or opened with `--no-thumbnail`, is left alone.
 - **What the capture may load.** Only the site's own loopback origin directly. Every other request goes through the
   image's `browser-egress-proxy`, an instance of its own on a free loopback port: public addresses on ports 80 and
   443 only, connected to the address it checked. Another loopback port, `localhost` names, private, link-local,
@@ -147,7 +154,9 @@ A member can **Present** a site whose page says it can share its view, and the o
   preview's runtime may upload, as for `/ready`; people cannot. The controller decides the type from the bytes (JPEG,
   PNG or WebP; never SVG or GIF), reads the size from the header (64 to 2000 pixels each way), caps it at 512 KiB, and
   removes metadata (EXIF, XMP, ICC, comments, text chunks, anything after the image) without decoding pixels. At most
-  6 uploads per preview a minute and 60 per runtime an hour.
+  6 uploads per preview a minute and 60 per runtime an hour. The same runtime, and only it, drops the picture with the
+  page description read with it (`DELETE /projects/:id/previews/:pid/thumbnail`, counted with the uploads) when a
+  check of its changed site kept no new one.
 - **Storage.** One picture per preview in `runtime_preview_thumbnails` (RLS on, no client policy). It goes with every
   new open of the preview (a preview is keyed by machine and port, so a site that replaces another on the port has the
   same id; the CLI takes a new picture once that site is live), when the preview is replaced (`supersededBy`) or closed for good,
@@ -163,8 +172,9 @@ A member can **Present** a site whose page says it can share its view, and the o
   screen, within the chat's in-memory image budget (40 images, 64 MiB). Never a Storage object, a signed URL, an
   iframe, a notification or part of the card message, which stays ids-only.
 - **Refresh.** Each upload publishes `preview.thumbnail_updated {previewId, version, runtimeId}` with the preview's
-  conversation, built as `preview.wake` is, so the same `/events` filters apply. It carries no picture and no
-  description; the latest card for the preview asks `GET` again and every card reads the answer.
+  conversation, built as `preview.wake` is, so the same `/events` filters apply, and a drop publishes it with
+  `version: null`. It carries no picture and no description; the latest card for the preview asks `GET` again and
+  every card reads the answer.
 
 ## Waking a stopped site
 

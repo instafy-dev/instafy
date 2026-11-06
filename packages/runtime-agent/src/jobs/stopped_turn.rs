@@ -26,8 +26,9 @@
 //! The controller takes the report only from the runtime that held the job,
 //! once, for a job it cancelled moments before, and only to record it: the
 //! job stays cancelled and its charge stays as the Stop left it. The turn's
-//! line then names the edit, with Review changes and Undo, and the previews
-//! whose sites it changed are pictured again.
+//! line then names the edit, with Review changes and Undo. The turn never got
+//! to its own reload, so every view open on a site it changed loads it again,
+//! as after an Undo, and the site's preview is pictured again.
 //!
 //! A job whose lease was lost to a stop of this runtime is back in the queue,
 //! not cancelled: the controller turns its report down, and the job's next
@@ -48,7 +49,7 @@ use parking_lot::Mutex;
 use serde_json::{Value as JsonValue, json};
 use tracing::info;
 
-use super::preview_pictures::PictureRetake;
+use super::preview_pictures::{changed_paths, reload_and_picture_changed_sites};
 use super::{CodexFileDescriptor, GitStatusEntry, JobExecution, JobMessage, JobProcessor};
 use crate::controller::{ControllerClient, LeaseJob, MAX_AGENT_METADATA_ARRAY_ITEMS, Registration};
 
@@ -314,10 +315,11 @@ impl JobProcessor {
 
     /// What a stopped turn changed goes to the controller in one end report.
     /// A Stop cancelled the job, and the controller records the report on its
-    /// turn; the job then ended here, and the previews whose sites it changed
-    /// are pictured again. A job a stop of this runtime put back in the queue
-    /// is turned down, and keeps its record of how its turn began for its
-    /// next lease. Whether the controller recorded it.
+    /// turn; the job then ended here, and the open views of the sites it
+    /// changed reload and their previews are pictured again
+    /// ([`reload_and_picture_changed_sites`]). A job a stop of this runtime
+    /// put back in the queue is turned down, and keeps its record of how its
+    /// turn began for its next lease. Whether the controller recorded it.
     pub(crate) async fn report_stopped_turn(
         &self,
         client: &ControllerClient,
@@ -345,16 +347,16 @@ impl JobProcessor {
                     "recorded what the stopped turn changed"
                 );
                 super::turn_baseline::forget(&changes.workspace_dir, job.id);
+                // The change is kept in the folder, but the turn never got to
+                // its own reload: every open view of a site it changed loads
+                // it, then the site is pictured again, as after an Undo.
                 if let Ok(project_id) = self.project_id_for_job(job) {
-                    PictureRetake::start(
-                        &changes.workspace_dir,
+                    reload_and_picture_changed_sites(
+                        changes.workspace_dir.clone(),
                         project_id,
-                        false,
-                        &changes.files,
-                        None,
+                        changed_paths(&changes.files),
                         self.picture_sender(),
-                    )
-                    .detach();
+                    );
                 }
                 true
             }
