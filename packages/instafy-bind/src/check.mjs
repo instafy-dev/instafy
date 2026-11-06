@@ -386,7 +386,7 @@ export function checkValues(dir) {
     const where = `${cell.item} · ${cell.label}`;
     if (!fact || typeof fact !== "object") continue; // drawn "Unknown": nothing was found, and the page says so
     if (fact.v != null && !hasValue(fact)) {
-      problems.push(`${where}: "${valueOf(fact).trim() || " "}" says nothing. Leave out "v" and say why in "note" ("no price on maker.com's page"), or give the page you read that does not list it ({"src", "url", "date"}); the page then says "Unknown".`);
+      problems.push(`${where}: "${valueOf(fact).trim() || " "}" says nothing. Leave out "v" and say why in "note" ("price not found on maker.com's page"), or give the page you read without finding it there ({"src", "url", "date"}); the page then says "Unknown".`);
       continue;
     }
     if (!hasValue(fact) || fact.est) continue;

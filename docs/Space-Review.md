@@ -58,6 +58,9 @@ materially change the request. Explicit user choices take precedence over browse
 The browser supplies its detected IANA timezone with each message; failed detection is sent as
 unknown, not UTC. A local timestamp's offset or locale alone does not establish a timezone.
 When the timezone is unknown and no reliable preference is available, Octo asks before saving.
+The commands a turn runs get that timezone as `TZ`, and the person's local date and time are in
+the turn's client context. The runtime's own clock keeps the machine's zone, so the date every
+turn is told and the zone named beside it agree, the routing step's included.
 
 The reminder worker posts a normal Octo message and source links into the existing private chat.
 It does not run a model, start the suggested work, or create another chat. Delivery and clearing

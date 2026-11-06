@@ -40,7 +40,7 @@ own kind of page.
   these are all of them or the latest, only when it says so. Facts carry their trust: `checked 17 Oct on maker.com`,
   `€549 at Shop · seen 17 Oct`, `checked 4 min ago`, `Estimate`, `Unknown`.
 - Options side by side: each value names the page it was read on and the day; one nobody found reads `Unknown` and
-  why ("no price on maker.com's page"), never a blank or a dash. A value cites only a page that gives it: a count of
+  why ("price not found on maker.com's page"), never a blank or a dash. A value cites only a page that gives it: a count of
   what you found cites only what it counts, so none found cites no page. A filter from a stated limit ("under €600")
   counts known values only: an item whose value is unknown is listed apart ("Price unknown"), never as within it, on
   the page, in the lede and in the reply. The starters do this with `site.byFilter`; a page you write uses it too. A

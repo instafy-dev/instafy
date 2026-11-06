@@ -199,7 +199,7 @@ test("read_offer reads the row's store page from data.json: an offer with the st
 
     const none = await tryIntent(dir, "read_offer", '{"ref":"option:option-c"}', { allowLocal: true });
     assert.equal(none.accepted[0].status, "uncertain");
-    assert.match(none.accepted[0].note, /no price on the 127\.0\.0\.1 page/);
+    assert.match(none.accepted[0].note, /price not found on the 127\.0\.0\.1 page/);
 
     const unknown = await tryIntent(dir, "read_offer", '{"ref":"option:other"}', { allowLocal: true });
     assert.equal(unknown.exit, 1);
