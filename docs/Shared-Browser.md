@@ -1277,22 +1277,24 @@ a space whose copy of the skill lacks it keeps today's routes. Research whose
 answer ends in a page (a comparison, prices, a route) is `browser_then_build`
 from the first message too, while research answered in a reply (facts, a
 price, opening hours, reviews) stays with Octo, whose turn reads public pages
-itself. A request to make something with no site to use first ("on a map",
-"put this on a page") stays with Octo: a browser turn cannot make it, and a
-map's skill finds and cites its places itself. So does one made from what the
-chat already found. Folded into one sentence with that second case, the rule
-for "on a map" likely lost to research that ends in a page: a three-day city
-plan "on a map" went through the browser to a map with no hotels, no day plan
-and no sight's own page cited (a local test, Nov 4). A message that carries on the
-chat's browser work goes on there, whether or not that work found its answer,
-and a bare "keep going" carries on what the chat left open (what its replies
-or a page here mark not checked or not confirmed, such as a route), never a
-change the person stopped or undid. The turn that carries it on reads the same
-in `AGENTS.md`'s "Replies", and says which. A message that names the browser
-still stays with Octo when the browser turn could not do it alone: it sees
-only the person's words and the chat's earlier browser turns, so a message
-that needs what this space or another chat holds, a site that runs in this
-space, or a message that says not to use the browser is not sent there. The
+itself. Only a map ("on a map") stays with Octo, since a map's skill finds
+and cites its places itself, and so does a page made only from what the chat
+already found. A comparison that named no site to use first once stayed with
+Octo too, under a rule written for maps, and its building turn, which must
+change files and so cannot ask for the browser, met a maker's robots.txt and
+no search key (a local test, Nov 6). A message that carries on the chat's
+browser work goes on there, whether or not that work found its answer, and a
+bare "keep going" is `browser_then_build` when a page here marks something not
+checked or not confirmed, such as a route, or an earlier message asked for a
+page not made yet; it never carries on a change the person stopped or undid.
+The turn that carries it on reads the same in `AGENTS.md`'s "Replies", and says
+which. A message that names the browser still stays with Octo when the browser
+turn could not do it alone: it sees only the person's words (with the routing
+step's summary of what they carry on while the chat has no browser turn) and
+the chat's earlier browser turns, so a message that changes nothing here but
+needs what this space or another chat holds, a site that runs in this space,
+or a message that says not to use the browser is not sent there; one that
+needs the web and a change here is `browser_then_build`. The
 routes are offered only for the
 person's own words (never a prompt Instafy wrote for a command such as
 `/learn`) on an interactive turn that could ask for the browser itself (not a
@@ -1300,13 +1302,18 @@ hand-back, a worker, a plan, an unattended run or a browser turn) and that
 Octo answers for sure (not a group chat's message that Octo first decides
 whether to answer at all), with no attachments. That message's job then runs
 no model turn of its own: it posts one card marked `routed`, whose task is the
-person's own words, and no reply. Studio opens it as it opens any card, and
+person's own words, and no reply. In a chat with earlier turns but no browser
+turn yet, the words are followed by one quoted line, "What this carries on:
+…", with the routing step's summary, since the browser turn reads nothing of
+those turns; like any card's task, the line names no address the person could
+not have seen in the chat, and is left out when it would. Studio opens it as it opens any card, and
 the chat reads it as one turn: the turn's line says "Opening Instafy's
 browser…" until the browser turn shows something, and neither the card nor
 the continuation is shown. The chat keeps the continuation as any card's, as
 one line ("Octo opened Instafy's browser for …"); what it sends, and what is
-stored as its message, is still the person's words, as the browser turn's
-task. Routing and a building turn on a new thread read those words once,
+stored as its message, is still the card's task, as the browser turn's task,
+and so is what **Try again** sends. Routing and a building turn on a new
+thread read the person's words once,
 from the person's own message: they leave that copy out and quote the
 browser turn with its reply alone (only a continuation the controller
 checked as the routed card's own, `browserCardTurn.routed`, whose message is
@@ -1893,7 +1900,7 @@ the bounded server and a fresh snapshot, except for a browser turn that carries
 on the person's own message and asked Octo to make it: that message goes to the
 building turn instead (see "Hand-back"). If the retry still has no instrumented
 action evidence, the job fails closed instead of presenting an unverified prose
-success. The person reads one plain sentence for it ("Octo couldn't open a page
+success. The person reads one plain sentence for it ("Octo didn't open a page
 in the browser, so this turn stopped."); the artifact beside it keeps the
 machine-readable reason.
 

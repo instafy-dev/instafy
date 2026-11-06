@@ -127,7 +127,7 @@ describe("RunFailureMessageBody", () => {
   // in the browser, so this turn stopped.", and its Details opened that same
   // sentence again above the steps.
   it("never repeats its own sentence in Details", async () => {
-    const SENTENCE = "Octo couldn't open a page in the browser, so this turn stopped.";
+    const SENTENCE = "Octo didn't open a page in the browser, so this turn stopped.";
     const plain = createMessage({ ...FAILURE, id: "plain", content: SENTENCE });
     expect(presentationFor(plain).friendlyText).toBe(SENTENCE);
     const steps = <div data-testid="turn-steps">Tried opening roborock.com</div>;
@@ -342,7 +342,7 @@ describe("RunFailureMessageBody", () => {
     const plain = createMessage({
       ...FAILURE,
       id: "plain",
-      content: "Octo couldn't open a page in the browser, so this turn stopped.",
+      content: "Octo didn't open a page in the browser, so this turn stopped.",
     });
     const requestRetry = vi.fn();
     await render(contextValue({ requestRetry }), plain);
@@ -553,7 +553,7 @@ describe("RunFailureMessageBody", () => {
       const plain = createMessage({
         ...FAILURE,
         id: "plain",
-        content: "Octo couldn't open a page in the browser, so this turn stopped.",
+        content: "Octo didn't open a page in the browser, so this turn stopped.",
       });
       await render(
         contextValue({ scheduledAutoRetry: { key: "plain", dueAt: Date.now() + 20_000 }, cancelAutoRetry: vi.fn() }),

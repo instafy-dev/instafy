@@ -7356,6 +7356,8 @@ impl JobProcessor {
         // Where the routing step may send this message straight to Instafy's browser: the browser
         // skill's routing section, which says when.
         let mut browser_routes: Option<String> = None;
+        // What the routing step, which read the whole chat, said the message asks.
+        let mut routing_summary: Option<String> = None;
         anyhow::ensure!(
             pending_worker_input.is_none()
                 || (skills_kickoff.is_none()
@@ -7389,6 +7391,11 @@ impl JobProcessor {
                     // legacy direct-route fallback with its requirements erased.
                     parse_workspace_file_change_requirement(&output.final_json)
                         .context("invalid routing preflight completion contract")?;
+                    routing_summary = output
+                        .final_json
+                        .get("summary")
+                        .and_then(JsonValue::as_str)
+                        .map(str::to_owned);
                     let preflight = parse_agent_routing_preflight(&output.final_json);
                     if preflight.is_none() {
                         warn!(
@@ -7419,7 +7426,7 @@ impl JobProcessor {
                         && worker_question_reply.is_none()
                         && pending_worker_input.is_none()
                         && let Some(execution) = routed_browser_execution(
-                            prompt_text,
+                            &routed_browser_task(job, prompt_text, routing_summary.as_deref()),
                             continue_building,
                             agent_routing_preflight_artifact(&preflight),
                         )
@@ -14280,7 +14287,7 @@ fn turn_that_cannot_save(
 /// (Studio keeps a reason that names the AI vendor or a tool behind Details).
 /// The artifact beside it keeps the machine-readable reason.
 const SHARED_BROWSER_NO_PAGE_FAILURE: &str =
-    "Octo couldn't open a page in the browser, so this turn stopped.";
+    "Octo didn't open a page in the browser, so this turn stopped.";
 const PERSONAL_BROWSER_NOT_USED_FAILURE: &str =
     "Octo couldn't use the browser on this device, so this turn stopped.";
 /// The status a retry for the same reason leaves in Details.
@@ -16556,8 +16563,47 @@ fn browser_routing_snapshot_for_job(
         .flatten()
 }
 
+/// The task of the card for a message the routing step sent straight to Instafy's browser: the
+/// person's words and, in a chat with earlier turns but no browser turn yet, the routing step's
+/// `summary` of what the message carries on ([`browser_request::routed_task`]). A browser turn
+/// reads only the chat's browser turns, so the line is all it learns of the turns before. The
+/// chat's messages and replies are what the person could have seen, which an address on that
+/// line must be.
+fn routed_browser_task(job: &LeaseJob, prompt_text: &str, summary: Option<&str>) -> String {
+    let entries = job
+        .payload
+        .get("conversation_history")
+        .and_then(JsonValue::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let said: Vec<&str> = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.get("role").and_then(JsonValue::as_str),
+                Some("user" | "assistant")
+            )
+        })
+        .filter_map(|entry| entry.get("content").and_then(JsonValue::as_str))
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .chain(std::iter::once(prompt_text.trim()))
+        .collect();
+    // The history ends with the message itself, which the line above adds once more.
+    let earlier = said
+        .iter()
+        .rev()
+        .skip(1)
+        .skip_while(|content| **content == prompt_text.trim())
+        .count();
+    if earlier == 0 || conversation_context::has_browser_turn(entries) {
+        return prompt_text.trim().to_owned();
+    }
+    browser_request::routed_task(prompt_text, summary, &said)
+}
+
 /// A message the routing step sent straight to Instafy's browser: its job runs no main model
-/// turn. Its only message is the card, marked `routed`, whose task is the person's own words;
+/// turn. Its only message is the card, marked `routed`, whose task is the person's own words
+/// (with what it carries on, in a chat with no browser turn yet: [`routed_browser_task`]);
 /// Studio opens it by itself where it can, and where it cannot, it stays a button with its
 /// reason. The card's browser turn and its hand-back follow the card's own checks. No reply, no
 /// run log and no provider state: the building thread never sees this turn (its browser turn
@@ -26440,6 +26486,121 @@ mod tests {
                 "{raw}"
             );
         }
+    }
+
+    /// In a chat with earlier turns but no browser turn yet, a routed card's task carries what the
+    /// routing step said the message carries on, as one quoted line after the person's words: the
+    /// browser turn reads none of those turns. A local test (Nov 6): after a comparison page's
+    /// building turn said it could not read the maker's pages, "Fill in what's still missing."
+    /// went to the browser with those words alone, and its turns, and Try again's, which sends the
+    /// card's task again, answered that they could not tell what was missing. Like any card's
+    /// task, the line names no address the person could not have seen in the chat: one only a
+    /// page, a tool's output or a guess gave, or one that can't be checked, leaves the line out.
+    /// A chat with a browser turn, which that turn reads, and a first message get the words alone.
+    #[test]
+    fn a_routed_card_in_a_chat_with_no_browser_turn_carries_what_it_carries_on() {
+        let words = "Fill in what's still missing.";
+        let summary = "Continue the Framework comparison research in the browser, then build the comparison page from the findings.";
+        let chat = |entries: JsonValue| {
+            test_lease_job(
+                Some("feature"),
+                json!({ "prompt_text": words, "conversation_history": entries, "metadata": {} }),
+            )
+        };
+        let earlier = json!([
+            {"role": "user", "content": "Compare the three latest Framework laptops: CPU, battery, weight, price, with two independent reviews each, as a comparison page.", "runId": "run-1"},
+            {"role": "assistant", "content": "I couldn\u{2019}t verify the three latest models: [frame.work](https://frame.work/at/en) blocks automated reads. Please send the pages you want compared.", "runId": "run-1"},
+            {"role": "user", "content": words, "runId": "run-2"},
+        ]);
+        let job = chat(earlier.clone());
+        let task = routed_browser_task(&job, words, Some(summary));
+        assert_eq!(
+            task,
+            format!("{words}\n\nWhat this carries on: \"{summary}\"")
+        );
+        let card = routed_browser_execution(&task, true, json!({})).expect("routed card");
+        let request =
+            &card.final_messages[0].metadata.as_ref().unwrap()["details"]["browserRequest"];
+        assert_eq!(request["task"], json!(task));
+        assert_eq!(browser_request::routed_task_words(&task), words);
+        // One line, whatever the summary's own lines.
+        assert_eq!(
+            routed_browser_task(
+                &job,
+                words,
+                Some("Continue the comparison.\n\nThen build it.")
+            ),
+            format!("{words}\n\nWhat this carries on: \"Continue the comparison. Then build it.\"")
+        );
+
+        // An address the chat showed may be named; one it never showed may not.
+        let seen = "Read www.frame.work's laptop pages, then build the comparison page.";
+        assert!(routed_browser_task(&job, words, Some(seen)).ends_with(&format!("\"{seen}\"")));
+        for unseen in [
+            "Read the laptops on shop.example.com, then build the page.",
+            "Open https://reviews.example.org/laptops and compare.",
+            "Read [reviews.example.org] and compare.",
+            "Open http://localhost:3000 and compare.",
+            "Open http://[::1]/ and compare.",
+            "Read xn--bcher-kva.example's pages.",
+            "Read b\u{fc}cher.example's pages.",
+        ] {
+            assert_eq!(
+                routed_browser_task(&job, words, Some(unseen)),
+                words,
+                "{unseen}"
+            );
+        }
+        for nothing in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("fill in what's still missing."),
+        ] {
+            assert_eq!(
+                routed_browser_task(&job, words, nothing),
+                words,
+                "{nothing:?}"
+            );
+        }
+        // A long summary is cut on its line.
+        let long = "Continue the comparison. ".repeat(40);
+        let cut = routed_browser_task(&job, words, Some(&long));
+        assert!(cut.ends_with("\u{2026}\""), "{cut}");
+        assert_eq!(cut.lines().count(), 3, "{cut}");
+
+        // A chat whose browser turn its next browser turn reads, and a chat's first message.
+        let mut browsed = earlier.as_array().unwrap().clone();
+        browsed.insert(
+            2,
+            json!({"role": "assistant", "content": "Read the 13's page.", "runId": "run-3", "lane": "browser"}),
+        );
+        assert_eq!(
+            routed_browser_task(&chat(json!(browsed)), words, Some(summary)),
+            words
+        );
+        for first in [
+            json!([{"role": "user", "content": words}]),
+            json!([]),
+            JsonValue::Null,
+        ] {
+            assert_eq!(
+                routed_browser_task(&chat(first.clone()), words, Some(summary)),
+                words,
+                "{first}"
+            );
+        }
+    }
+
+    /// A browser turn that ended without opening a page says Octo didn't open one: in a local test
+    /// (Nov 6) its row read "Octo couldn't open a page in the browser" right under "Opened
+    /// Instafy's browser".
+    #[test]
+    fn a_browser_turn_that_opened_no_page_says_it_did_not() {
+        assert_eq!(
+            SHARED_BROWSER_NO_PAGE_FAILURE,
+            "Octo didn't open a page in the browser, so this turn stopped."
+        );
     }
 
     /// A message sent straight to Instafy's browser ends its job with the routed card alone: its

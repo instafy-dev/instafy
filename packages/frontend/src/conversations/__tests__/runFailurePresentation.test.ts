@@ -1156,7 +1156,7 @@ describe("resolveRunFailurePresentation", () => {
     // without opening a page. Older runtimes named the AI vendor and the
     // tools ("Codex did not execute the dedicated Shared Browser tools after
     // retry."), which stays behind Details above.
-    const reason = "Octo couldn't open a page in the browser, so this turn stopped.";
+    const reason = "Octo didn't open a page in the browser, so this turn stopped.";
     const presentation = resolveRunFailurePresentation({
       metadata: { source: "agent", outcome: "failed", jobId: "job-1" },
       content: reason,

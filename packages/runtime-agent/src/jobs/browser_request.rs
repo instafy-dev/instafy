@@ -1,6 +1,16 @@
+use std::collections::BTreeSet;
+
 use serde_json::{Value, json};
 
 use super::JobMessage;
+
+/// Where a routed card's task names what the message carries on: a line of its own after the
+/// person's words ([`routed_task`]).
+const CARRIES_ON: &str = "\n\nWhat this carries on: ";
+/// The most of the routing step's `summary` that line quotes.
+const CARRIES_ON_MAX_CHARS: usize = 600;
+/// The longest task a card carries, in UTF-16 units as Studio counts them.
+const TASK_MAX_UTF16_UNITS: usize = 8_000;
 
 #[derive(Debug, Clone)]
 pub(super) struct BrowserRequest {
@@ -53,7 +63,7 @@ impl BrowserRequest {
         if task.is_empty() {
             return Err("no task");
         }
-        if task.encode_utf16().count() > 8_000 {
+        if task.encode_utf16().count() > TASK_MAX_UTF16_UNITS {
             return Err("task over 8,000 characters");
         }
         let location = match value.get("browserLocation") {
@@ -77,7 +87,7 @@ impl BrowserRequest {
     /// any card. None for a message no card could carry.
     pub(super) fn routed(task: &str, continue_building: bool) -> Option<Self> {
         let task = task.trim();
-        if task.is_empty() || task.encode_utf16().count() > 8_000 {
+        if task.is_empty() || task.encode_utf16().count() > TASK_MAX_UTF16_UNITS {
             return None;
         }
         Some(Self {
@@ -120,6 +130,147 @@ impl BrowserRequest {
             })),
         }
     }
+}
+
+/// The task of the card for a message the routing step sent straight to the browser in a chat
+/// with earlier turns but no browser turn yet: the person's words, then the routing step's
+/// `summary` as one quoted line. A browser turn reads only the chat's browser turns, so with none
+/// it had only the words, which can lean on a reply it never saw ("Fill in what's still
+/// missing."), while the routing step read the whole chat. Like every card's task, the line
+/// names no address the person could not have seen in the chat (`seen`: its messages and
+/// replies), such as one a page, a tool's output or a guess gave: a summary that names one, or
+/// one that can't be checked ([`named_hosts`]), is left out, as is an empty one or one that only
+/// repeats the words.
+pub(super) fn routed_task(words: &str, summary: Option<&str>, seen: &[&str]) -> String {
+    let words = words.trim();
+    let Some(summary) = summary
+        .map(|summary| summary.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|summary| !summary.is_empty() && !summary.eq_ignore_ascii_case(words))
+    else {
+        return words.to_owned();
+    };
+    let (named, uncheckable) = named_hosts(&summary);
+    let seen: BTreeSet<String> = seen.iter().flat_map(|text| named_hosts(text).0).collect();
+    if uncheckable || !named.is_subset(&seen) {
+        return words.to_owned();
+    }
+    let mut quoted: String = summary.chars().take(CARRIES_ON_MAX_CHARS).collect();
+    if quoted.len() < summary.len() {
+        quoted.push('\u{2026}');
+    }
+    let task = format!("{words}{CARRIES_ON}\"{quoted}\"");
+    if task.encode_utf16().count() > TASK_MAX_UTF16_UNITS {
+        return words.to_owned();
+    }
+    task
+}
+
+/// The person's own words of a routed card's task: all of it but its summary line
+/// ([`routed_task`]).
+pub(super) fn routed_task_words(task: &str) -> &str {
+    task.split_once(CARRIES_ON).map_or(task, |(words, _)| words)
+}
+
+/// Every host `text` names, lowercased and without a leading `www.` (in an address, as a bare
+/// domain or as an IPv4 address), as Studio reads a card's task before it opens it by itself,
+/// and whether it names one that can't be compared with what the person read: localhost, an
+/// IPv6 literal, or a punycode or non-ASCII host.
+fn named_hosts(text: &str) -> (BTreeSet<String>, bool) {
+    let mut hosts = BTreeSet::new();
+    let mut uncheckable = false;
+    let separator = |c: char| {
+        c.is_whitespace()
+            || "\"'`()<>{},;!?*|\u{201c}\u{201d}\u{2018}\u{2019}\u{ab}\u{bb}".contains(c)
+    };
+    for word in text.split(separator) {
+        let word = word.trim_matches(|c: char| c == '.' || c == ':');
+        let (scheme, rest) = word
+            .split_once("://")
+            .map_or((false, word), |(_, rest)| (true, rest));
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        // An email address names no page to open.
+        if !scheme && authority.contains('@') {
+            continue;
+        }
+        let authority = authority.rsplit('@').next().unwrap_or_default();
+        let bare = authority
+            .trim_start_matches('[')
+            .split(']')
+            .next()
+            .unwrap_or_default();
+        if (bare.contains("::") || bare.matches(':').count() == 7)
+            && bare
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+        {
+            uncheckable = true;
+            continue;
+        }
+        let host = authority
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .trim_matches(|c: char| c == '[' || c == ']')
+            .trim_end_matches('.');
+        if host.eq_ignore_ascii_case("localhost") {
+            uncheckable = true;
+            continue;
+        }
+        if !host.is_ascii() {
+            uncheckable |= names_non_ascii_host(host);
+            continue;
+        }
+        let labels: Vec<&str> = host.split('.').collect();
+        if labels.len() < 2
+            || !labels.iter().all(|label| {
+                !label.is_empty()
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            })
+        {
+            continue;
+        }
+        let last = labels[labels.len() - 1];
+        let domain =
+            (2..=63).contains(&last.len()) && last.bytes().all(|b| b.is_ascii_alphabetic());
+        let ipv4 = labels.len() == 4
+            && labels
+                .iter()
+                .all(|label| label.len() <= 3 && label.bytes().all(|b| b.is_ascii_digit()));
+        if !domain && !ipv4 {
+            continue;
+        }
+        if labels
+            .iter()
+            .any(|label| label.to_ascii_lowercase().starts_with("xn--"))
+        {
+            uncheckable = true;
+            continue;
+        }
+        let host = host.to_ascii_lowercase();
+        hosts.insert(
+            host.strip_prefix("www.")
+                .map_or(host.clone(), str::to_owned),
+        );
+    }
+    (hosts, uncheckable)
+}
+
+/// Whether a word with letters beyond ASCII is a host: labels joined by an ASCII dot under a last
+/// label of two or more characters ("bücher.de"), or by a fullwidth or ideographic dot
+/// before an ASCII letter or digit ("example．com"). A sentence that ends in an
+/// ideographic full stop is not one.
+fn names_non_ascii_host(word: &str) -> bool {
+    let dots = ['\u{3002}', '\u{ff0e}', '\u{ff61}'];
+    let chars: Vec<char> = word.chars().collect();
+    let wide = chars
+        .windows(2)
+        .any(|pair| dots.contains(&pair[0]) && pair[1].is_ascii_alphanumeric());
+    let ascii = word
+        .rsplit_once('.')
+        .is_some_and(|(head, last)| !head.is_empty() && last.chars().count() >= 2);
+    wide || ascii
 }
 
 #[cfg(test)]

@@ -173,7 +173,7 @@ async fn note(fixture: &ReservedManagedAiPrompt, text: &str) -> anyhow::Result<(
 }
 
 /// The runtime's failure for a browser turn that opened no page.
-const NO_PAGE_FAILURE: &str = "Octo couldn't open a page in the browser, so this turn stopped.";
+const NO_PAGE_FAILURE: &str = "Octo didn't open a page in the browser, so this turn stopped.";
 
 /// A turn that ends in the failure block costs nothing when it left the
 /// person nothing: here a browser turn that looked at its tabs and whose
@@ -229,6 +229,58 @@ async fn a_failed_turn_that_left_nothing_costs_nothing() -> anyhow::Result<()> {
     assert_eq!(status, StatusCode::OK);
     assert_given_back_for(&fixture, FAILED_TURN_WITHOUT_RESULT_REFUND_REASON).await?;
     fixture.cleanup().await
+}
+
+/// Listing or reading what a turn's MCP servers offer is a look, as looking at
+/// the browser's tabs is: a local drive charged 2 credits and a prompt slot for
+/// each of two browser turns that left only their failure, after one
+/// `list_mcp_resources` call each. Such a turn is refunded, on whichever server
+/// the call named; the same turn with a page it opened is charged.
+#[tokio::test]
+async fn a_failed_turn_that_only_listed_mcp_resources_costs_nothing() -> anyhow::Result<()> {
+    let tool = |server: &str, tool: &str| json!({ "kind": "codex_mcp_tool_call", "server": server, "tool": tool });
+    for opened_a_page in [false, true] {
+        let Some(fixture) =
+            seed_reserved_managed_ai_prompt(&format!("mcp-resources-{opened_a_page}")).await?
+        else {
+            eprintln!("skipping failed turn billing test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        for (server, name) in [
+            ("codex", "list_mcp_resources"),
+            ("codex", "list_mcp_resource_templates"),
+            ("instafy_shared_browser", "read_mcp_resource"),
+        ] {
+            step(&fixture, "mcp_tool_call", tool(server, name), "completed").await?;
+        }
+        if opened_a_page {
+            step(
+                &fixture,
+                "mcp_tool_call",
+                browser_tool("navigate"),
+                "completed",
+            )
+            .await?;
+        }
+        let status = complete(
+            &fixture,
+            json!({
+                "job_id": fixture.job_id,
+                "outcome": "failed",
+                "error_message": NO_PAGE_FAILURE,
+                "artifacts": [run_log_with_usage()],
+            }),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        if opened_a_page {
+            assert_charged_its_tokens(&fixture).await?;
+        } else {
+            assert_given_back_for(&fixture, FAILED_TURN_WITHOUT_RESULT_REFUND_REASON).await?;
+        }
+        fixture.cleanup().await?;
+    }
+    Ok(())
 }
 
 /// A failure alone is not proof that the person got nothing: the runtime

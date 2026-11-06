@@ -211,7 +211,9 @@ fn persons_request_in<'a>(entries: &'a [JsonValue], run: &str) -> Option<&'a str
                 .pointer("/metadata/prompt_metadata")
                 .is_some_and(super::browser_hand_back::carries_on_a_routed_card)
     }) {
-        return entry_text(routed, "content");
+        return entry_text(routed, "content")
+            .map(super::browser_request::routed_task_words)
+            .map(str::trim_end);
     }
     // Only Octo's messages name their job; a person's message metadata is the client's.
     let card_run = entries.iter().find_map(|entry| {
@@ -386,6 +388,11 @@ fn is_browser_entry(entry: &JsonValue) -> bool {
     entry.get("lane").and_then(JsonValue::as_str) == Some("browser")
 }
 
+/// Whether a chat's history holds a browser turn.
+pub(super) fn has_browser_turn(entries: &[JsonValue]) -> bool {
+    entries.iter().any(is_browser_entry)
+}
+
 fn entry_text<'a>(entry: &'a JsonValue, key: &str) -> Option<&'a str> {
     entry
         .get(key)
@@ -396,8 +403,9 @@ fn entry_text<'a>(entry: &'a JsonValue, key: &str) -> Option<&'a str> {
 
 /// The entries that repeat the person's message: each request of a browser turn that carries
 /// on the card the routing step posted for that message, when the message itself is in the
-/// history before it. Its words are the message's, sent once more as that turn's task, which
-/// the controller checked on its send (`browserCardTurn.routed`,
+/// history before it. Its words are the message's, sent once more as that turn's task (in a chat
+/// that had no browser turn, with the routing step's summary line after them:
+/// [`super::browser_request::routed_task`]), which the controller checked on its send (`browserCardTurn.routed`,
 /// [`super::browser_hand_back::carries_on_a_routed_card`]). Routing and the building lane read
 /// the message once, from the person's own entry; the browser lane, which reads no other entry,
 /// reads it as that turn's request. Read twice, the next message's routing read "User: Compare
@@ -414,7 +422,7 @@ fn repeated_person_messages(entries: &[JsonValue]) -> HashSet<usize> {
         };
         if !is_browser_entry(entry) {
             said.insert(content);
-        } else if said.contains(content)
+        } else if said.contains(super::browser_request::routed_task_words(content))
             && entry
                 .pointer("/metadata/prompt_metadata")
                 .is_some_and(super::browser_hand_back::carries_on_a_routed_card)
@@ -1538,6 +1546,51 @@ mod tests {
         ] {
             assert_eq!(text.matches(words).count(), 1, "{text}");
         }
+    }
+
+    /// In a chat with no browser turn yet, a routed card's task ends with what the routing step
+    /// said the message carries on (`browser_request::routed_task`). Routing and a building
+    /// thread still read the person's message once, a new browser thread reads the whole task as
+    /// that turn's request, and a Stop of that turn names only the person's words: the line is
+    /// the routing step's, never theirs.
+    #[test]
+    fn a_routed_request_with_what_it_carries_on_reads_once_and_stops_in_the_persons_words() {
+        let words = "Fill in what's still missing.";
+        let task = format!(
+            "{words}\n\nWhat this carries on: \"Continue the laptop comparison, then build its page.\""
+        );
+        let mut request = routed_browser_request(
+            &task,
+            json!({"version": 1, "cardJobId": "card-1", "routed": true}),
+        );
+        request["createdAt"] = json!("2026-11-06T09:41:35Z");
+        let history = vec![
+            json!({"role": "user", "content": "Compare the three latest laptops, as a comparison page.", "runId": "run-0", "createdAt": "2026-11-06T09:37:53Z"}),
+            json!({"role": "user", "content": words, "runId": "run-1", "createdAt": "2026-11-06T09:41:26Z"}),
+            request,
+            stop_notice("run-2", "2026-11-06T09:41:50Z"),
+        ];
+        let routing = build_routing_conversation_context(Some(&json!(history))).section_text;
+        let building =
+            build_prompt_conversation_context(Some(&json!(history)), None, ThreadLane::Building)
+                .section_text;
+        for text in [&routing, &building] {
+            assert_eq!(text.matches(words).count(), 1, "{text}");
+            assert!(!text.contains("What this carries on"), "{text}");
+        }
+        let browser = build_prompt_conversation_context(
+            Some(&json!(history)),
+            None,
+            ThreadLane::SharedBrowser,
+        )
+        .section_text;
+        assert!(browser.contains(&task), "{browser}");
+        let stopped = restored_note(&history, ThreadLane::Building).section_text;
+        assert!(
+            stopped.contains(&format!("\u{201c}{words}\u{201d}")),
+            "{stopped}"
+        );
+        assert!(!stopped.contains("What this carries on"), "{stopped}");
     }
 
     /// Only the lane's own thread makes the prompt say the thread holds the chat so far: a
