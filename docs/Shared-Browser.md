@@ -1291,10 +1291,13 @@ The turn that carries it on reads the same in `AGENTS.md`'s "Replies", and says
 which. A message that names the browser still stays with Octo when the browser
 turn could not do it alone: it sees only the person's words (with the routing
 step's summary of what they carry on while the chat has no browser turn) and
-the chat's earlier browser turns, so a message that changes nothing here but
-needs what this space or another chat holds, a site that runs in this space,
-or a message that says not to use the browser is not sent there; one that
-needs the web and a change here is `browser_then_build`. The
+the chat's earlier browser turns, so a message whose browser part needs what
+this space or another chat holds (what a page, map or file here says, or, once
+the chat has a browser turn, what a reply that was not the browser's named), a
+site that runs in this space, or a message that says not to use the browser is
+not sent there. Its building turn reads what the browser part needs and names
+it in a card, which hands back to a build when the message changes something
+here: such a turn changes no file itself, so it can ask for the browser. The
 routes are offered only for the
 person's own words (never a prompt Instafy wrote for a command such as
 `/learn`) on an interactive turn that could ask for the browser itself (not a

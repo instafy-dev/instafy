@@ -525,9 +525,11 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     include_str!("legacy/browser-automation-v32.md"),
     // From before research that ends in a page went to the browser first unless it was a map or
     // a page made only from what the chat already found, a bare "keep going" with a page here
-    // that marks something open was `browser_then_build`'s, a building turn named what the
-    // browser part needs in a card only for a message that changes nothing here, and the routing
-    // step's `summary` went with the person's words in a chat with no browser turn yet.
+    // that marks something open was `browser_then_build`'s, a reply that was not the browser's
+    // kept a message with the building turn only once the chat had a browser turn, a card for
+    // what only this space holds said a change here is built after it, a card was asked for only
+    // in a reply-only turn, and the routing step's `summary` went with the person's words in a
+    // chat with no browser turn yet.
     include_str!("legacy/browser-automation-v33.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a

@@ -552,7 +552,7 @@ fn the_skills_name_instafy_web_read_as_a_reader() {
     // Whether a page needs a card at all is the building turn's choice, in the section a
     // building turn reads before it hands the person a card.
     assert!(carried.contains(
-        "A public page with no JavaScript or sign-in needs no card: `instafy web read <url…> --json` reads it; its `needs_browser` pages go in a card."
+        "A public page with no JavaScript or sign-in needs no card: `instafy web read <url…> --json` reads it; in a reply-only turn, its `needs_browser` pages go in a card."
     ));
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
 
@@ -1035,7 +1035,7 @@ fn a_follow_up_on_the_chats_browser_work_browses_even_when_it_needs_a_page_here(
         .expect("the line that keeps a message direct");
     assert!(
         stay.ends_with(
-            "the building turn reads it and names it in a card; when it changes something here, that is `browser_then_build`."
+            "the building turn reads it and names it in a card, and a change here is built after it, unless all it needs is what this chat's browser work found: filling in, checking again or going on with that work is `browser_then_build`."
         ),
         "{stay}"
     );
@@ -1093,12 +1093,12 @@ fn a_follow_up_goes_to_the_browser_only_with_what_its_browser_work_found() {
         .expect("the line that keeps a message direct");
     assert!(
         stay.starts_with(
-            "- Stay `direct`, even when the message names Instafy's browser, when the site runs in this space (a preview card), the person says not to use the browser, or it has attachments. Also when the message changes nothing here and the browser part needs what only this space or another chat holds"
+            "- Stay `direct`, even when the message names Instafy's browser, when the site runs in this space (a preview card), the person says not to use the browser, or it has attachments. Also when the browser part needs what only this space or another chat holds (what a page, map or file here says, or, once this chat has a browser turn, \"those\" from a reply that was not the browser's)"
         ),
         "{stay}"
     );
     assert!(
-        stay.contains("names it in a card; when it changes something here"),
+        stay.contains("names it in a card, and a change here is built after it, unless all it needs is what this chat's browser work found: filling in"),
         "{stay}"
     );
     assert!(
@@ -1106,7 +1106,7 @@ fn a_follow_up_goes_to_the_browser_only_with_what_its_browser_work_found() {
         "{stay}"
     );
     // The exception ends the line: nothing after it reads as `browser_then_build`.
-    let exception = stay.find("; when it changes").expect("the exception");
+    let exception = stay.find(", unless ").expect("the exception");
     assert!(!stay[exception..].contains(". "), "{}", &stay[exception..]);
     assert!(stay.ends_with("is `browser_then_build`."), "{stay}");
 
@@ -2271,7 +2271,7 @@ fn research_that_ends_in_a_page_reaches_its_build_and_keep_going_never_undoes_an
         "{}",
         rules[1]
     );
-    assert!(rules[2].ends_with("the building turn reads it and names it in a card; when it changes something here, that is `browser_then_build`."), "{}", rules[2]);
+    assert!(rules[2].ends_with("the building turn reads it and names it in a card, and a change here is built after it, unless all it needs is what this chat's browser work found: filling in, checking again or going on with that work is `browser_then_build`."), "{}", rules[2]);
     assert_eq!(section.matches("stopped or undid").count(), 1, "{section}");
     assert!(section.chars().count() <= BROWSER_SKILL_ROUTING_MAX_CHARS);
 
@@ -2571,16 +2571,11 @@ fn research_ending_in_a_page_browses_first_and_keep_going_with_a_page_builds() {
         .expect("the line that keeps a message direct");
     assert!(
         stay.contains(
-            "Also when the message changes nothing here and the browser part needs what only this space or another chat holds"
+            "Also when the browser part needs what only this space or another chat holds (what a page, map or file here says, or, once this chat has a browser turn, \"those\" from a reply that was not the browser's): the building turn reads it and names it in a card, and a change here is built after it, unless"
         ),
         "{stay}"
     );
-    assert!(
-        stay.ends_with(
-            "names it in a card; when it changes something here, that is `browser_then_build`."
-        ),
-        "{stay}"
-    );
+    assert!(!stay.contains("changes nothing here"), "{stay}");
     assert!(section.contains(
         "That browser turn sees only those words, with your `summary` while this chat has no browser turn, and this chat's earlier browser turns."
     ));
@@ -2588,7 +2583,6 @@ fn research_ending_in_a_page_browses_first_and_keep_going_with_a_page_builds() {
         "with no site to use first",
         "put this on a page",
         "when a page here shows it",
-        "unless all it needs is what this chat's browser work found",
     ] {
         assert!(!section.contains(gone), "{gone}");
     }
@@ -2625,7 +2619,7 @@ fn research_ending_in_a_page_browses_first_and_keep_going_with_a_page_builds() {
 }
 
 /// A `request_browser` card is a reader only in a turn whose answer is a reply: a turn that must
-/// change files has none in its answer. A local test (Nov 6): a comparison page's building turn
+/// change files has none in its answer, in the research skill and in the browser skill's handoff. A local test (Nov 6): a comparison page's building turn
 /// read "one `request_browser` card" for the maker's pages, which its answer could not carry,
 /// and asked the person to send the pages. The research skill stays within what a turn loads of
 /// it, and an unedited earlier copy is upgraded.
@@ -2638,6 +2632,15 @@ fn a_card_is_a_reader_only_in_a_reply_only_turn() {
     ));
     assert!(!research.contains("or when none of these is there"));
     assert!(RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+    // The browser skill's handoff, which such a turn reads too, says the same.
+    let browser = flat(BROWSER_SKILL);
+    for words in [
+        "When a page would help in a reply-only turn and neither Personal nor Shared Browser tools are exposed, emit one `request_browser` action",
+        "reads it; in a reply-only turn, its `needs_browser` pages go in a card.",
+    ] {
+        assert!(browser.contains(words), "{words}");
+    }
+    assert!(!browser.contains("When a page would help and neither"));
     let previous = include_str!("legacy/web-research-v16.md");
     assert!(flat(previous).contains("or when none of these is there: one `request_browser` card"));
     let tmp = scaffolded_space();

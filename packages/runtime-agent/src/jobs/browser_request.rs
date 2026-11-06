@@ -216,8 +216,10 @@ fn named_hosts(text: &str) -> (BTreeSet<String>, bool) {
             uncheckable = true;
             continue;
         }
+        // Letters beyond ASCII in an address's host; a bare word is read with the whole text
+        // below ([`names_unicode_host`]).
         if !host.is_ascii() {
-            uncheckable |= names_non_ascii_host(host);
+            uncheckable |= scheme;
             continue;
         }
         let labels: Vec<&str> = host.split('.').collect();
@@ -254,23 +256,60 @@ fn named_hosts(text: &str) -> (BTreeSet<String>, bool) {
                 .map_or(host.clone(), str::to_owned),
         );
     }
-    (hosts, uncheckable)
+    (hosts, uncheckable || names_unicode_host(text))
 }
 
-/// Whether a word with letters beyond ASCII is a host: labels joined by an ASCII dot under a last
-/// label of two or more characters ("bücher.de"), or by a fullwidth or ideographic dot
-/// before an ASCII letter or digit ("example．com"). A sentence that ends in an
-/// ideographic full stop is not one.
-fn names_non_ascii_host(word: &str) -> bool {
-    let dots = ['\u{3002}', '\u{ff0e}', '\u{ff61}'];
-    let chars: Vec<char> = word.chars().collect();
-    let wide = chars
-        .windows(2)
-        .any(|pair| dots.contains(&pair[0]) && pair[1].is_ascii_alphanumeric());
-    let ascii = word
-        .rsplit_once('.')
-        .is_some_and(|(head, last)| !head.is_empty() && last.chars().count() >= 2);
-    wide || ascii
+/// Whether `text` names a host with letters beyond ASCII, as Studio's `namesUnicodeHost` reads
+/// one: labels of letters, numbers and marks joined by an ASCII, fullwidth or ideographic dot,
+/// with a fullwidth or ideographic dot before an ASCII letter or digit ("example．com"), or an
+/// ASCII dot and a last label of two or more characters ("bücher.de"). A price ("€1.099"), a
+/// size ("13.5″"), an abbreviation ("т.е.") or a sentence that ends in an ideographic full stop
+/// names none.
+fn names_unicode_host(text: &str) -> bool {
+    const DOTS: [char; 4] = ['.', '\u{3002}', '\u{ff0e}', '\u{ff61}'];
+    let starts = |c: char| c.is_alphanumeric();
+    let continues = |c: char| {
+        starts(c)
+            || c == '-'
+            || matches!(c, '\u{300}'..='\u{36f}' | '\u{1ab0}'..='\u{1aff}' | '\u{1dc0}'..='\u{1dff}' | '\u{20d0}'..='\u{20ff}' | '\u{fe20}'..='\u{fe2f}')
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let mut at = 0;
+    while at < chars.len() {
+        if !starts(chars[at]) {
+            at += 1;
+            continue;
+        }
+        let mut labels: Vec<&[char]> = Vec::new();
+        let mut separators: Vec<char> = Vec::new();
+        let (mut start, mut end) = (at, at + 1);
+        loop {
+            while end < chars.len() && continues(chars[end]) {
+                end += 1;
+            }
+            labels.push(&chars[start..end]);
+            if end + 1 < chars.len() && DOTS.contains(&chars[end]) && starts(chars[end + 1]) {
+                separators.push(chars[end]);
+                (start, end) = (end + 1, end + 2);
+            } else {
+                break;
+            }
+        }
+        let candidate = &chars[at..end];
+        at = end;
+        if separators.is_empty() || candidate.iter().all(char::is_ascii) {
+            continue;
+        }
+        let wide = separators
+            .iter()
+            .zip(&labels[1..])
+            .any(|(dot, label)| *dot != '.' && label[0].is_ascii_alphanumeric());
+        let ascii = separators.contains(&'.') && labels.last().is_some_and(|last| last.len() >= 2);
+        if wide || ascii {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

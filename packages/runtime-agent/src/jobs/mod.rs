@@ -16566,26 +16566,17 @@ fn browser_routing_snapshot_for_job(
 /// The task of the card for a message the routing step sent straight to Instafy's browser: the
 /// person's words and, in a chat with earlier turns but no browser turn yet, the routing step's
 /// `summary` of what the message carries on ([`browser_request::routed_task`]). A browser turn
-/// reads only the chat's browser turns, so the line is all it learns of the turns before. The
-/// chat's messages and replies are what the person could have seen, which an address on that
-/// line must be.
+/// reads only the chat's browser turns, so the line is all it learns of the turns before. What
+/// the person could have read of the chat ([`conversation_context::read_by_the_person`]) is
+/// where an address on that line must come from, as Studio checks a card's task.
 fn routed_browser_task(job: &LeaseJob, prompt_text: &str, summary: Option<&str>) -> String {
     let entries = job
         .payload
         .get("conversation_history")
         .and_then(JsonValue::as_array)
         .map_or(&[][..], Vec::as_slice);
-    let said: Vec<&str> = entries
-        .iter()
-        .filter(|entry| {
-            matches!(
-                entry.get("role").and_then(JsonValue::as_str),
-                Some("user" | "assistant")
-            )
-        })
-        .filter_map(|entry| entry.get("content").and_then(JsonValue::as_str))
-        .map(str::trim)
-        .filter(|content| !content.is_empty())
+    let said: Vec<&str> = conversation_context::read_by_the_person(entries)
+        .into_iter()
         .chain(std::iter::once(prompt_text.trim()))
         .collect();
     // The history ends with the message itself, which the line above adds once more.
@@ -26551,6 +26542,16 @@ mod tests {
                 "{unseen}"
             );
         }
+        // A price or a size beside a dot names no host, as Studio reads it.
+        for kept in [
+            "Compare the 13.5\u{2033} laptops at \u{20ac}1.099 or less, then build the page.",
+            "Fill in the prices (1.099\u{20ac}), then build the page.",
+        ] {
+            assert!(
+                routed_browser_task(&job, words, Some(kept)).ends_with(&format!("\"{kept}\"")),
+                "{kept}"
+            );
+        }
         for nothing in [
             None,
             Some(""),
@@ -26590,6 +26591,51 @@ mod tests {
                 "{first}"
             );
         }
+    }
+
+    /// The summary line names only an address the person could have read in the chat, as Studio
+    /// checks a card's task before it opens it by itself: a command, a tool call, an error, a
+    /// notice or a hidden row is no message or reply of the chat, and a page or a tool's output
+    /// reaches the chat only through them.
+    #[test]
+    fn a_routed_cards_summary_names_only_addresses_the_person_read() {
+        let words = "Fill in what's still missing.";
+        let earlier = json!([
+            {"role": "user", "content": "Compare the three latest laptops, as a comparison page.", "runId": "run-1"},
+            {"role": "assistant", "content": "I couldn't read the maker's pages. Please send them.", "runId": "run-1"},
+            {"role": "user", "content": words, "runId": "run-2"},
+        ]);
+        let chat = |entries: JsonValue| {
+            test_lease_job(
+                Some("feature"),
+                json!({ "prompt_text": words, "conversation_history": entries, "metadata": {} }),
+            )
+        };
+        let unread = "Read reviews.example.org's laptop pages, then build the page.";
+        let with = |row: JsonValue| {
+            let mut entries = earlier.as_array().unwrap().clone();
+            entries.insert(1, row);
+            chat(json!(entries))
+        };
+        for row in [
+            json!({"role": "assistant", "content": "instafy web read https://reviews.example.org/laptops", "metadata": {"source": "agent", "kind": "update"}}),
+            json!({"role": "assistant", "content": "Read reviews.example.org", "metadata": {"messageType": "mcp_tool_call"}}),
+            json!({"role": "assistant", "content": "reviews.example.org answered 403", "metadata": {"messageType": "error"}}),
+            json!({"role": "assistant", "content": "Stopped on reviews.example.org", "metadata": {"source": "controller", "kind": "run_cancellation"}}),
+            json!({"role": "assistant", "content": "See reviews.example.org", "metadata": {"presentation": {"hidden": true}}}),
+        ] {
+            assert_eq!(
+                routed_browser_task(&with(row.clone()), words, Some(unread)),
+                words,
+                "{row}"
+            );
+        }
+        let replied = with(
+            json!({"role": "assistant", "content": "Two reviews are on reviews.example.org."}),
+        );
+        assert!(
+            routed_browser_task(&replied, words, Some(unread)).ends_with(&format!("\"{unread}\""))
+        );
     }
 
     /// A browser turn that ended without opening a page says Octo didn't open one: in a local test

@@ -925,7 +925,7 @@ mod tests {
         for (case, line, included, ignored) in [
             (
                 &fill_in,
-                "Also when the message changes nothing here and the browser part needs what only this space or another chat holds (what a page, map or file here says, or \"those\" from a reply that was not the browser's): the building turn reads it and names it in a card; when it changes something here, that is `browser_then_build`.",
+                "Also when the browser part needs what only this space or another chat holds (what a page, map or file here says, or, once this chat has a browser turn, \"those\" from a reply that was not the browser's)",
                 3,
                 0,
             ),

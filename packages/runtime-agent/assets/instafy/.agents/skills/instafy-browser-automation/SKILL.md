@@ -29,8 +29,8 @@ Use this skill whenever a web page would help, whether or not the person mention
 
 ## Open or resume from Chat
 
-When a page would help and neither Personal nor Shared Browser tools are
-exposed, emit one `request_browser` action:
+When a page would help in a reply-only turn and neither Personal nor Shared
+Browser tools are exposed, emit one `request_browser` action:
 
 ```json
 { "type": "request_browser", "task": "The user's concrete browsing task and relevant continuation context", "browserLocation": "auto" }
@@ -61,7 +61,7 @@ or a rejected action must not produce another browser request to bypass the
 existing control boundary. Read-only public verification may still use
 `instafy_local_browser.observe` without an interactive handoff. A public page with
 no JavaScript or sign-in needs no card: `instafy web read <url…> --json` reads
-it; its `needs_browser` pages go in a card.
+it; in a reply-only turn, its `needs_browser` pages go in a card.
 
 ## Several reads in one card
 
@@ -123,5 +123,5 @@ A routing step before Octo's turn can send the person's message straight to Inst
 
 - `browser`: the person names Instafy's browser ("in your browser"), the work happens on a website (use a site, sign in, send a form, press its buttons), or it carries on browser work this chat started, whether or not that found the answer.
 - `browser_then_build`: the same, and Octo then makes or changes something in this space (a page, a map, a table). So is research whose answer ends in a page (a comparison, prices, a route), from the first message. So is a bare "keep going" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on, never a change the person stopped or undid. A map ("on a map") is `direct`: its skill finds and cites its places itself. So is a page made only from what this chat already found.
-- Stay `direct`, even when the message names Instafy's browser, when the site runs in this space (a preview card), the person says not to use the browser, or it has attachments. Also when the message changes nothing here and the browser part needs what only this space or another chat holds (what a page, map or file here says, or "those" from a reply that was not the browser's): the building turn reads it and names it in a card; when it changes something here, that is `browser_then_build`.
+- Stay `direct`, even when the message names Instafy's browser, when the site runs in this space (a preview card), the person says not to use the browser, or it has attachments. Also when the browser part needs what only this space or another chat holds (what a page, map or file here says, or, once this chat has a browser turn, "those" from a reply that was not the browser's): the building turn reads it and names it in a card, and a change here is built after it, unless all it needs is what this chat's browser work found: filling in, checking again or going on with that work is `browser_then_build`.
 - Research whose answer is a reply (facts, a price, opening hours, reviews) stays `direct` when the message does not name the browser, unless it carries on this chat's browser work: the building turn reads first and opens the browser itself if a page needs it.
