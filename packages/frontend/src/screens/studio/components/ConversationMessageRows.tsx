@@ -297,10 +297,11 @@ export function ConversationMessageRows({
           lastAssistantHandle = null;
           rows.push(<ChatTimeDivider key={`time-divider:${message.id}`} timestamp={dividerTimestamp} now={timelineNow} messageId={message.id} />);
         }
-        // A continuation sent to Instafy's browser for a card, or a hand-back
-        // of what the browser found, reads as a one-line notice, not as a
-        // message the person wrote. One whose dispatch failed shows nothing;
-        // a card keeps its button with the error.
+        // A continuation sent to Instafy's browser for a card reads as a
+        // one-line notice, not as a message the person wrote. One whose
+        // dispatch failed shows nothing; a card keeps its button with the
+        // error. A hand-back of what the browser found never comes here: its
+        // turn is part of the browser turn's row (routedBrowserFold.ts).
         if (message.role === "user" && isBrowserNoticePrompt(message)) {
           if (!isUnsentBrowserNoticePrompt(message)) {
             rows.push(<BrowserRequestNoticeRow key={message.id} message={message} />);

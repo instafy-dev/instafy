@@ -236,11 +236,42 @@ describe("Credits display choices", () => {
     } });
     await act(async () => root.render(<MemoryRouter><CreditsPanel /></MemoryRouter>));
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="section-usage"]')!.click());
+    // Only what costs something a minute is a rate: hosted runtimes cost nothing here.
     const services = [...container.querySelectorAll('[data-testid="credits-active-services-mobile"] > div')]
       .map((row) => row.textContent);
-    expect(services).toEqual([expect.stringMatching(/^Live accessMetered/), expect.stringMatching(/^Hosted runtimesNot metered/)]);
+    expect(services).toEqual([expect.stringMatching(/^Live accessMetered/)]);
     expect(container.textContent).toContain("Everything below uses the same balance.");
     expect(container.textContent).not.toMatch(/AI prompts|burn/);
+  });
+
+  // A local test, Nov 4: Usage showed two services at 0 credits a minute
+  // ("Not metered", with billing intervals), "In $0.10/1M Cached $0.01/1M Out
+  // $0.50/1M", and "Hosted runtime metering is currently disabled (0
+  // credits/min). If you plan for 1 credit/min, …": an operator's page.
+  it("says in Usage what a message costs, and nothing that costs nothing or is the operator's", async () => {
+    mocks.projectList = [{ id: "project-a", orgName: "Personal" }];
+    mocks.controllerEnabled = true;
+    const free = (reason: string) => ({ reason, enabled: false, amount: 0, intervalSeconds: 60, creditsPerMinute: 0 });
+    mocks.fetchCreditPolicy.mockResolvedValue({ success: true, policy: {
+      display: { unitLabel: "credits", currency: "USD", unitsPerUsd: 1000 },
+      refill: { kind: "daily", timezone: "UTC" },
+      plans: [],
+      usage: {
+        tunnel: free("tunnel"),
+        hostedRuntime: free("hosted_runtime"),
+        managedAi: { reason: "managed_ai_prompt", enabled: true, label: "Instafy AI", provider: "openai", creditsPerPrompt: 1,
+          dailyPromptLimit: 0, modelLabel: "GPT-6 Luna", inputUsdMicrosPer1k: 100, cachedInputUsdMicrosPer1k: 10, outputUsdMicrosPer1k: 500 },
+      },
+    } });
+    await act(async () => root.render(<MemoryRouter><CreditsPanel /></MemoryRouter>));
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="section-usage"]')!.click());
+    const text = container.textContent ?? "";
+    expect(text).toContain("From 1 credit a message");
+    expect(text).toContain("Each message holds 1 credit, then costs what it used.");
+    // The balance and its daily top-up stay above.
+    expect(container.querySelector('[data-testid="credits-balance-label"]')?.textContent).toBe("Balance");
+    expect(text).toContain("once a day");
+    expect(text).not.toMatch(/\/1M|metering is currently disabled|If you plan for|0 credits\/min|Not metered|Billing interval|Active services/);
   });
 
   // Local drive 3: Activity showed only the newest 8 rows, with no way to see more.

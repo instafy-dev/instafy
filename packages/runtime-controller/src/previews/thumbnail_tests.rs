@@ -378,6 +378,77 @@ async fn the_previews_runtime_uploads_a_thumbnail_and_get_lists_it() -> anyhow::
     .await
 }
 
+// A local test, Nov 5: a map's card showed its blank starter for 7.5 minutes
+// over the finished map, because the end-of-turn check kept no new picture.
+// The preview's runtime then drops the old one, its page description with
+// it, and every card for the preview hears that it has none.
+#[tokio::test]
+async fn the_previews_runtime_drops_a_picture_its_site_no_longer_shows() -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let preview_id = f.live_preview(&job).await?;
+            let (status, view) = f
+                .upload(
+                    &job.token,
+                    &preview_id,
+                    upload_body(&jpeg(640, 400), "image/jpeg"),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{view}");
+            let path = f.thumbnail_path(&preview_id);
+
+            // Nobody else drops it: not a person, not another runtime.
+            let other = f.job(None).await?;
+            for token in [
+                f.tokens[0].clone(),
+                f.tokens[1].clone(),
+                other.token.clone(),
+            ] {
+                let (status, body) = f.request(&token, "DELETE", &path, Value::Null).await?;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            }
+            assert_eq!(f.thumbnail_rows(&preview_id).await?, 1);
+
+            let mut events = f.state.events.subscribe();
+            let (status, body) = f.request(&job.token, "DELETE", &path, Value::Null).await?;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+            assert_eq!(f.thumbnail_rows(&preview_id).await?, 0);
+            let event = loop {
+                let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+                    .await??;
+                if event.kind == "preview.thumbnail_updated" {
+                    break event;
+                }
+            };
+            assert_eq!(
+                event.data,
+                json!({ "previewId": preview_id, "version": null, "runtimeId": job.runtime_id })
+            );
+            // The card has neither the picture nor the facts that came with it.
+            let (status, body) = f
+                .request(
+                    &f.tokens[2],
+                    "GET",
+                    &f.path(&format!("/{preview_id}")),
+                    Value::Null,
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["thumbnail"], Value::Null);
+            assert!(body.get("pageDescription").is_none(), "{body}");
+            let (status, _, _) = f.picture(&f.tokens[2], &preview_id).await?;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+
+            // Asked again, there is nothing left to drop.
+            let (status, _) = f.request(&job.token, "DELETE", &path, Value::Null).await?;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            Ok(())
+        })
+    })
+    .await
+}
+
 #[tokio::test]
 async fn another_runtimes_job_cannot_upload() -> anyhow::Result<()> {
     run(|f| {

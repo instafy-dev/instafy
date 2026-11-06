@@ -6,7 +6,15 @@ export const loginKeyboardBoundaries: Record<string, string> = {
     const snapshot = () => window.__loginKeyboardReview.auth;
     export function useAuth() { return window.__loginKeyboardReview.hooks.useSyncExternalStore(subscribe, snapshot, snapshot); }
   `,
-  "/src/lib/supabaseClient.ts": `export const hasSupabaseConfig = true;`,
+  // Every name LoginPage imports. Only the real client holds an other-account
+  // link, so the account switch that would use the client never runs here.
+  "/src/lib/supabaseClient.ts": `
+    export const hasSupabaseConfig = true;
+    export const sessionPersistsAcrossLoads = true;
+    export const supabase = null;
+    export const supabaseUrl = undefined;
+    export const supabaseAnonKey = undefined;
+  `,
   "/src/screens/login/useNativeGithubAuth.ts": `
     const noop = () => {};
     export const OAUTH_PROVIDER_LABELS = { github: "GitHub", google: "Google" };

@@ -56,6 +56,7 @@ pub(crate) use chat_attachments::TurnAttachments;
 mod conversation_context;
 mod git_sync;
 mod known_safe_command;
+pub mod routing_check;
 mod routing_evidence;
 mod routing_recovery;
 mod save_report;
@@ -96,6 +97,8 @@ mod skills;
 pub(crate) mod stopped_turn;
 mod turn_baseline;
 mod turn_continuation;
+#[cfg(test)]
+mod turn_reading_tests;
 pub(crate) mod user_input_request;
 #[cfg(test)]
 mod web_research_routing_tests;
@@ -155,6 +158,8 @@ const ROUTED_BROWSER_TASK_MAX_UTF16_UNITS: usize = 8_000;
 const COLLABORATION_SKILL_DELEGATION_MAX_CHARS: usize = 1_600;
 const COLLABORATION_RESULT_POLICY_MAX_CHARS: usize = 1_200;
 const COLLABORATION_SKILL_PATH: &str = ".agents/skills/instafy-agent-collaboration/SKILL.md";
+/// The collaboration skill's folder under `.agents/skills`.
+const COLLABORATION_SKILL_ID: &str = "instafy-agent-collaboration";
 const ROUTING_PRE_OBSERVATION_OUTPUT_MAX_CHARS: usize = 4_000;
 const ROUTING_PRE_OBSERVATION_TIMEOUT_SECS: u64 = 10;
 const WORKSPACE_LEASE_WRITE_SCOPE: &str = "workspace.lease.write";
@@ -980,6 +985,13 @@ struct SkillMetadata {
     context_parents: Vec<String>,
     context_children: Vec<String>,
     routing_keywords: Vec<String>,
+    /// The `## ` sections of the skill a turn with no shell leaves out (`no_shell_omits`): what
+    /// only a turn that runs commands can use. The skill says which; the turn reads the rest.
+    no_shell_omits: Vec<String>,
+    /// The `## ` sections a browser turn that carries on the person's own message leaves out too
+    /// (`routed_omits`): what only a turn a card's task started can use, such as the reads a card
+    /// lists. The routing step sent that turn the person's words, which list none.
+    routed_omits: Vec<String>,
     always_include: bool,
     max_children: Option<usize>,
 }
@@ -1003,6 +1015,12 @@ impl SkillMetadata {
         }
         if self.routing_keywords.is_empty() {
             self.routing_keywords = defaults.routing_keywords;
+        }
+        if self.no_shell_omits.is_empty() {
+            self.no_shell_omits = defaults.no_shell_omits;
+        }
+        if self.routed_omits.is_empty() {
+            self.routed_omits = defaults.routed_omits;
         }
         if !self.always_include {
             self.always_include = defaults.always_include;
@@ -1086,6 +1104,8 @@ fn apply_skill_metadata_field(out: &mut SkillMetadata, key: &str, value: &str) {
         "routingkeywords" | "keywords" | "routingterms" => {
             out.routing_keywords = parse_skill_metadata_list(normalized_value.as_str())
         }
+        "noshellomits" => out.no_shell_omits = parse_skill_metadata_list(normalized_value.as_str()),
+        "routedomits" => out.routed_omits = parse_skill_metadata_list(normalized_value.as_str()),
         "alwaysinclude" | "contextalwaysinclude" => {
             if let Some(value) = parse_skill_metadata_bool(normalized_value.as_str()) {
                 out.always_include = value;
@@ -1116,6 +1136,8 @@ fn default_skill_metadata_for_dir(dir_name: &str) -> SkillMetadata {
                 context_parents: Vec::new(),
                 context_children: Vec::new(),
                 routing_keywords: Vec::new(),
+                no_shell_omits: Vec::new(),
+                routed_omits: Vec::new(),
                 always_include: false,
                 max_children: None,
             }
@@ -1131,6 +1153,8 @@ fn default_skill_metadata_for_dir(dir_name: &str) -> SkillMetadata {
                 context_parents: Vec::new(),
                 context_children: Vec::new(),
                 routing_keywords: Vec::new(),
+                no_shell_omits: Vec::new(),
+                routed_omits: Vec::new(),
                 always_include: false,
                 max_children: None,
             }
@@ -1164,6 +1188,8 @@ fn default_skill_metadata_for_dir(dir_name: &str) -> SkillMetadata {
                 context_parents: Vec::new(),
                 context_children: Vec::new(),
                 routing_keywords: Vec::new(),
+                no_shell_omits: Vec::new(),
+                routed_omits: Vec::new(),
                 always_include: false,
                 max_children: None,
             }
@@ -1180,6 +1206,8 @@ fn default_skill_metadata_for_dir(dir_name: &str) -> SkillMetadata {
                 context_parents: Vec::new(),
                 context_children: Vec::new(),
                 routing_keywords: Vec::new(),
+                no_shell_omits: Vec::new(),
+                routed_omits: Vec::new(),
                 always_include: false,
                 max_children: None,
             }
@@ -1191,6 +1219,8 @@ fn default_skill_metadata_for_dir(dir_name: &str) -> SkillMetadata {
             context_parents: vec!["instafy-skill-router".to_string()],
             context_children: Vec::new(),
             routing_keywords: Vec::new(),
+            no_shell_omits: Vec::new(),
+            routed_omits: Vec::new(),
             always_include: false,
             max_children: Some(2),
         },
@@ -1205,6 +1235,8 @@ fn parse_skill_front_matter(raw: &str) -> SkillMetadata {
         context_parents: Vec::new(),
         context_children: Vec::new(),
         routing_keywords: Vec::new(),
+        no_shell_omits: Vec::new(),
+        routed_omits: Vec::new(),
         always_include: false,
         max_children: None,
     };
@@ -1241,6 +1273,8 @@ fn parse_skill_header_kv(raw: &str) -> SkillMetadata {
         context_parents: Vec::new(),
         context_children: Vec::new(),
         routing_keywords: Vec::new(),
+        no_shell_omits: Vec::new(),
+        routed_omits: Vec::new(),
         always_include: false,
         max_children: None,
     };
@@ -1992,7 +2026,14 @@ fn format_project_memory_snapshot(
     prompt_text: &str,
 ) -> Option<ProjectMemorySnapshot> {
     let preferences = ProjectPreferencesSnapshot::load(workspace_dir);
-    format_project_memory_snapshot_with_preferences(workspace_dir, prompt_text, &preferences, None)
+    format_project_memory_snapshot_with_preferences(
+        workspace_dir,
+        prompt_text,
+        &preferences,
+        None,
+        false,
+        &[],
+    )
 }
 
 /// A skill a turn carries whatever its words, whole, and the section of it a turn on a
@@ -2070,12 +2111,13 @@ fn usable_with_no_shell(context: &ContextNode) -> bool {
 }
 
 /// The section of a skill only the routing step reads ([`format_browser_routing_preflight_snapshot`]):
-/// a turn that carries the skill whole leaves it out.
+/// no turn's memory snapshot carries it.
 const ROUTING_PREFLIGHT_SECTION: &str = "Routing preflight";
 
-/// `AGENTS.md`'s replies guide. Codex withdraws the space's `AGENTS.md` from a turn without the
-/// workspace ("The previously provided AGENTS.md instructions no longer apply"), so a browser
-/// turn on a restored thread is given this section with the browser skill's.
+/// `AGENTS.md`'s replies guide, all of `AGENTS.md` a browser turn reads: the rest says how to run
+/// commands. Codex withdraws the space's `AGENTS.md` from a turn without the workspace ("The
+/// previously provided AGENTS.md instructions no longer apply"), so a browser turn on a restored
+/// thread is given this section again with the browser skill's.
 const BROWSER_TURN_REPLIES_SECTION: &str = "## Replies";
 
 /// A Personal or Shared Browser turn: its only tools are its browser's. It has no shell, so it
@@ -2157,6 +2199,11 @@ fn workspace_file_section(
         &workspace_dir.join(relative_path),
         PROJECT_MEMORY_MAX_FILE_BYTES,
     )?;
+    markdown_section(&text, heading)
+}
+
+/// The section of `text` under `heading`, a line of its own, up to the next `## ` heading.
+fn markdown_section(text: &str, heading: &str) -> Option<String> {
     let start = text.match_indices(heading).map(|(at, _)| at).find(|&at| {
         (at == 0 || text[..at].ends_with('\n')) && text[at + heading.len()..].starts_with('\n')
     })?;
@@ -2165,11 +2212,46 @@ fn workspace_file_section(
     Some(format!("{heading}{}", body[..end].trim_end()))
 }
 
+/// `AGENTS.md`'s replies guide for a turn with no shell, when the space's copy is one Instafy
+/// ships, the current one or an earlier one: the rest of it says how to run commands. None for a
+/// copy the space edited or wrote, whose own rules may be for every turn, and for one with no
+/// such section; those are carried whole, as a building turn carries them.
+fn bundled_agents_doc_replies(workspace_dir: &Path) -> Option<String> {
+    let (text, truncated) = read_text_file_lossy_truncated(
+        workspace_dir,
+        &workspace_dir.join(learn::AGENTS_DOC_FILENAME),
+        PROJECT_MEMORY_MAX_FILE_BYTES,
+    )?;
+    if truncated || !learn::is_bundled_agents_doc(&text) {
+        return None;
+    }
+    markdown_section(&text, BROWSER_TURN_REPLIES_SECTION)
+}
+
+/// The `## ` sections of a skill a turn leaves out, as the skill's front matter names them: a turn
+/// with no shell its `no_shell_omits`, and a browser turn that carries on the person's own message
+/// its `routed_omits` too.
+fn sections_left_out(metadata: &SkillMetadata, no_shell: bool, routed: bool) -> Vec<String> {
+    let mut omitted = Vec::new();
+    if no_shell {
+        omitted.extend(metadata.no_shell_omits.iter().cloned());
+        if routed {
+            omitted.extend(metadata.routed_omits.iter().cloned());
+        }
+    }
+    omitted
+}
+
+/// `routed`: the turn is a browser turn that carries on the person's own message
+/// ([`browser_hand_back::carries_on_a_routed_card`]). `left_out` names skills this turn's
+/// snapshot does not carry, whatever its words.
 fn format_project_memory_snapshot_with_preferences(
     workspace_dir: &Path,
     prompt_text: &str,
     preferences: &ProjectPreferencesSnapshot,
     pinned: Option<&PinnedSkill>,
+    routed: bool,
+    left_out: &[&str],
 ) -> Option<ProjectMemorySnapshot> {
     let pinned_skill = pinned.map(|pinned| pinned.id);
     let mut remaining = PROJECT_MEMORY_MAX_TOTAL_BYTES;
@@ -2194,13 +2276,36 @@ fn format_project_memory_snapshot_with_preferences(
     out.push_str("\nProject memory snapshot (from workspace; already loaded):\n");
     let mut loaded_learned_blocks: Vec<LoadedLearnedBlock> = Vec::new();
 
-    let append_file = |label: &str, path: &Path, remaining: &mut usize, out: &mut String| {
+    // What a turn's copy of a skill leaves out: the section only the routing step reads, and the
+    // sections the skill names for this turn ([`sections_left_out`]). A turn with no shell leaves
+    // out its front matter too, the router's own fields: the research skill's routing words
+    // ("search the web, web search") reached a browser turn that has no web search. Nothing else
+    // of the file takes their place.
+    let without_omitted_sections = |text: &str, omitted: &[String]| -> String {
+        let text = match skill_routing::split_front_matter(text) {
+            (front, body) if pinned.is_some() && !front.is_empty() && !body.trim().is_empty() => {
+                body.trim_start()
+            }
+            _ => text,
+        };
+        let mut text = without_markdown_h2_section(text, ROUTING_PREFLIGHT_SECTION).into_owned();
+        for heading in omitted {
+            text = without_markdown_h2_section(&text, heading).into_owned();
+        }
+        text
+    };
+    let append_file = |label: &str,
+                       path: &Path,
+                       omitted_sections: &[String],
+                       remaining: &mut usize,
+                       out: &mut String| {
         if *remaining == 0 || !path.exists() {
             return;
         }
         let budget = PROJECT_MEMORY_MAX_FILE_BYTES.min(*remaining);
         if let Some((text, truncated)) = read_text_file_lossy_truncated(workspace_dir, path, budget)
         {
+            let text = without_omitted_sections(&text, omitted_sections);
             let rel = path.strip_prefix(workspace_dir).unwrap_or(path);
             let _ = writeln!(out, "\n## {} ({})", label, rel.display());
             out.push_str("```markdown\n");
@@ -2213,38 +2318,69 @@ fn format_project_memory_snapshot_with_preferences(
         }
     };
     // A turn's pinned skill is carried whole, up to `PINNED_SKILL_MAX_BYTES`, but for the
-    // section only the routing step reads: the turn cannot open the file for the rest. It takes
-    // as much of the budget as a skill its words route would, so those keep their room.
-    let append_pinned_skill =
-        |label: &str, path: &Path, remaining: &mut usize, out: &mut String| {
-            if *remaining == 0 || !path.exists() {
-                return;
-            }
-            let Some((text, cut)) =
-                read_text_file_lossy_truncated(workspace_dir, path, PROJECT_MEMORY_MAX_TOTAL_BYTES)
-            else {
-                return;
-            };
-            let text = without_markdown_h2_section(&text, ROUTING_PREFLIGHT_SECTION);
-            let mut end = text.len().min(PINNED_SKILL_MAX_BYTES);
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            let rel = path.strip_prefix(workspace_dir).unwrap_or(path);
-            let _ = writeln!(out, "\n## {} ({})", label, rel.display());
-            out.push_str("```markdown\n");
-            out.push_str(text[..end].trim_end());
-            out.push_str("\n```\n");
-            if cut || end < text.len() {
-                out.push_str("[truncated]\n");
-            }
-            *remaining = remaining.saturating_sub(end.min(PROJECT_MEMORY_MAX_FILE_BYTES));
+    // sections it leaves out: the turn cannot open the file for the rest. It takes as much of the
+    // budget as a skill its words route would, so those keep their room.
+    let append_pinned_skill = |label: &str,
+                               path: &Path,
+                               omitted_sections: &[String],
+                               remaining: &mut usize,
+                               out: &mut String| {
+        if *remaining == 0 || !path.exists() {
+            return;
+        }
+        let Some((text, cut)) =
+            read_text_file_lossy_truncated(workspace_dir, path, PROJECT_MEMORY_MAX_TOTAL_BYTES)
+        else {
+            return;
         };
+        let text = without_omitted_sections(&text, omitted_sections);
+        let mut end = text.len().min(PINNED_SKILL_MAX_BYTES);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let rel = path.strip_prefix(workspace_dir).unwrap_or(path);
+        let _ = writeln!(out, "\n## {} ({})", label, rel.display());
+        out.push_str("```markdown\n");
+        out.push_str(text[..end].trim_end());
+        out.push_str("\n```\n");
+        if cut || end < text.len() {
+            out.push_str("[truncated]\n");
+        }
+        *remaining = remaining.saturating_sub(end.min(PROJECT_MEMORY_MAX_FILE_BYTES));
+    };
 
-    append_file("AGENTS.md", &agents_doc_path, &mut remaining, &mut out);
+    // A turn with no shell reads `AGENTS.md`'s replies guide, as it does on a restored thread
+    // (`pinned_replies_section`), when the space's copy is one Instafy ships: the rest says how
+    // to run commands. A copy the space edited, or one with no such section, is carried whole: a
+    // team's own section ("Never open example.com in the browser.") is for every turn.
+    match pinned
+        .is_some()
+        .then(|| bundled_agents_doc_replies(workspace_dir))
+        .flatten()
+    {
+        Some(replies) if remaining > 0 => {
+            let _ = writeln!(out, "\n## AGENTS.md ({})", learn::AGENTS_DOC_FILENAME);
+            out.push_str("```markdown\n");
+            out.push_str(replies.trim_end());
+            out.push_str("\n```\n");
+            remaining = remaining.saturating_sub(replies.len());
+        }
+        Some(_) => {}
+        None => append_file("AGENTS.md", &agents_doc_path, &[], &mut remaining, &mut out),
+    }
     // Use the same read as the narrow preference snapshot. Do not project a
     // second copy (or a partially read/invalid preference) into broad memory.
-    if let Some(memory) = preferences.memory_without_preferences() {
+    // A turn with no shell leaves out a copy Instafy ships, as it leaves out `AGENTS.md`'s rules
+    // for commands: its snapshot, constants and workflows are placeholders, and the rest says how a
+    // turn that writes files keeps the space's memory. A copy the space filled in or edited comes
+    // whole.
+    let bundled_memory = preferences
+        .source()
+        .is_some_and(learn::is_bundled_instafy_doc);
+    if let Some(memory) = preferences
+        .memory_without_preferences()
+        .filter(|_| pinned.is_none() || !bundled_memory)
+    {
         let budget = PROJECT_MEMORY_MAX_FILE_BYTES.min(remaining);
         let mut end = memory.len().min(budget);
         while !memory.is_char_boundary(end) {
@@ -2272,28 +2408,32 @@ fn format_project_memory_snapshot_with_preferences(
             None => true,
         };
         if !contexts.is_empty() {
-            out.push_str("\n## Persistent contexts index (.agents/skills)\n");
-            for context in contexts.iter().filter(|context| told_of(context)) {
-                if remaining == 0 {
-                    break;
-                }
-                let name = context
-                    .metadata
-                    .name
-                    .as_deref()
-                    .unwrap_or(context.id.as_str());
-                let description = context.metadata.description.as_deref().unwrap_or("");
-                let line = if description.is_empty() {
-                    format!("- {name}\n")
-                } else {
-                    format!("- {name}: {description}\n")
-                };
-                let line_len = line.as_bytes().len();
-                if line_len <= remaining {
-                    out.push_str(&line);
-                    remaining = remaining.saturating_sub(line_len);
-                } else {
-                    break;
+            // A turn with a pinned skill has no shell to open a skill file with: it is given the
+            // skills it loads below, and no index of the others.
+            if pinned.is_none() {
+                out.push_str("\n## Persistent contexts index (.agents/skills)\n");
+                for context in &contexts {
+                    if remaining == 0 {
+                        break;
+                    }
+                    let name = context
+                        .metadata
+                        .name
+                        .as_deref()
+                        .unwrap_or(context.id.as_str());
+                    let description = context.metadata.description.as_deref().unwrap_or("");
+                    let line = if description.is_empty() {
+                        format!("- {name}\n")
+                    } else {
+                        format!("- {name}: {description}\n")
+                    };
+                    let line_len = line.as_bytes().len();
+                    if line_len <= remaining {
+                        out.push_str(&line);
+                        remaining = remaining.saturating_sub(line_len);
+                    } else {
+                        break;
+                    }
                 }
             }
 
@@ -2341,6 +2481,25 @@ fn format_project_memory_snapshot_with_preferences(
             } else {
                 Vec::new()
             };
+            // A skill this turn leaves out, and the index of learned blocks while the space has
+            // none (it says only how to open them), take no place either.
+            let has_learned_blocks = workspace_memory_io::child_directories(
+                workspace_dir,
+                learn::LEARNED_BLOCKS_DIR_RELATIVE_PATH,
+            )
+            .into_iter()
+            .any(|block| read_skill_metadata(workspace_dir, &block.join("SKILL.md")).is_some());
+            selected_contexts.retain(|context| {
+                let learned_index = contexts.iter().any(|node| {
+                    node.id == context.id
+                        && node
+                            .metadata
+                            .context_kind
+                            .as_deref()
+                            .is_some_and(|kind| kind.eq_ignore_ascii_case("learned_index"))
+                });
+                !left_out.contains(&context.id.as_str()) && (has_learned_blocks || !learned_index)
+            });
             // A turn with a pinned skill loads, besides it, only the skills it can use; the
             // learned blocks its words route still come.
             if pinned.is_some() {
@@ -2393,10 +2552,27 @@ fn format_project_memory_snapshot_with_preferences(
                     break;
                 }
                 let label = format!("Context: {}", context.label);
+                let omitted_sections = contexts
+                    .iter()
+                    .find(|node| node.id == context.id)
+                    .map(|node| sections_left_out(&node.metadata, pinned.is_some(), routed))
+                    .unwrap_or_default();
                 if Some(context.id.as_str()) == pinned_skill {
-                    append_pinned_skill(&label, &context.path, &mut remaining, &mut out);
+                    append_pinned_skill(
+                        &label,
+                        &context.path,
+                        &omitted_sections,
+                        &mut remaining,
+                        &mut out,
+                    );
                 } else {
-                    append_file(&label, &context.path, &mut remaining, &mut out);
+                    append_file(
+                        &label,
+                        &context.path,
+                        &omitted_sections,
+                        &mut remaining,
+                        &mut out,
+                    );
                 }
             }
 
@@ -3525,6 +3701,9 @@ impl ClientTimezoneGuard {
         }
     }
 
+    /// The commands the turn runs get the person's zone as `TZ` too, from the run's options
+    /// (`codex::give_commands_the_client_timezone`); this process keeps its own, by which Codex
+    /// dates the turn.
     fn new(timezone: &str) -> Self {
         let timezone = timezone.trim();
         if timezone.is_empty() {
@@ -3532,10 +3711,7 @@ impl ClientTimezoneGuard {
         }
 
         Self {
-            _overrides: vec![
-                EnvOverride::apply("INSTAFY_CLIENT_TIMEZONE", timezone),
-                EnvOverride::apply("TZ", timezone),
-            ],
+            _overrides: vec![EnvOverride::apply("INSTAFY_CLIENT_TIMEZONE", timezone)],
         }
     }
 
@@ -3575,6 +3751,23 @@ const SECRET_REJECTION_CONTRACT: &str = "\
 - On a 401/403 or auth error, include the fitting `actions`.\n\
 - When the service or the skill's check rejects a value the space already holds (not a permission error on one resource), emit `request_secret` again for every value that rejection could be about, even if the person says they already replaced them in Secrets.\n\
 - `request_secret`: { type, name, optional valueLabel, description, whereToGet, skill, sensitive, agentHandles }\n";
+
+/// What a browser turn is told of its answer on its thread's first turn: its shape, and that it
+/// is a reply. Its only tools are its browser's, and what the runtime acts on in its answer is its
+/// reply and, where its prompt offers one, its build request (`browser_hand_back`). The building
+/// turns' contract (secrets, integrations, location, skill setups, the inventory of the space's
+/// values) was about 9,000 of its first prompt's 46,000 characters; a comparison's browser turn
+/// read it, listed its tools twice for a web search it does not have, and read one page (a local
+/// test, Nov 5). A skill its words route still says how to ask for anything else it can.
+const BROWSER_TURN_RESPONSE_CONTRACT: &str = "\nPlease follow these constraints:\n\
+- Respond with a single JSON object shaped as { \"summary\": string, \"files\": [], optional \"actions\": [] }. Do not wrap the JSON in Markdown or code fences.\n\
+- Do not use the final assistant message for progress or status updates. If you need to inspect or execute something, do the tool work first, then return the final JSON object only after the task is complete.\n\
+- If the user requests a different output format, still return the JSON object; satisfy the request inside `summary` as closely as possible.\n\
+- `summary` must be a natural, conversational reply to the latest user request. Use the workspace context only when it helps answer the question or the user explicitly asks.\n\
+- Context you recovered from earlier turns, other conversations or context cards is for you: never say that you recovered it, where from, or any conversation, job, thread or context-card id.\n\
+- When the user references another conversation (see \"Referenced conversations\"), treat it as additional context.\n\
+- For browser/UI tasks, use this turn's browser tools when it has them and report observed page output.\n\
+- Never include secret values or tokens in chat or JSON.\n";
 
 /// Native reference syntax is a Studio output contract, independent of which
 /// skill or response lane supplies the work. Include it on restored turns too:
@@ -4234,6 +4427,17 @@ fn turn_browser_mode(job: &LeaseJob, runtime_is_browser_session: bool) -> Result
 
 fn should_run_agent_routing_preflight_for_execution(job: &LeaseJob, prompt_text: &str) -> bool {
     !is_bounded_job(job) && should_run_agent_routing_preflight(job, prompt_text)
+}
+
+/// Ends a job whose lease is gone (a Stop cancelled it, and its heartbeat or a refused request
+/// said so) before it does any more: before its folder is brought up to date, its routing step
+/// asks a model, or its thread is restored and its prompt written into it. Its error says the
+/// lease was lost, so the job loop reports nothing for it.
+fn ensure_lease_held(cancel_signal: Option<&JobCancelSignal>, before: &str) -> Result<()> {
+    if cancel_signal.is_some_and(JobCancelSignal::is_canceled) {
+        bail!("job lease lost {before}");
+    }
+    Ok(())
 }
 
 fn ensure_bounded_job_uses_bounded_lane(
@@ -5701,6 +5905,7 @@ impl JobProcessor {
             auto_sync_after_apply_override: None,
             progress_sender: progress.as_ref().map(|progress| progress.sender.clone()),
             local_origin: self.local_origin_sync(),
+            title: workspace_commit::version_title(job),
         };
         Ok(checkpoint_write_scoped_worker(execution, checkpoint, &files).await)
     }
@@ -6704,16 +6909,8 @@ impl JobProcessor {
             job_id: Some(job.id),
             run_timeout: turn_files.limit(),
             run_deadline: turn_files.deadline(),
-            disable_shell_tool: true,
-            final_output_schema: CodexFinalOutputSchema::RoutingPreflight,
-            suppress_contextual_instructions: true,
-            routing_scoped_worker_execution: Some(if self.isolated_workers.enabled {
-                ScopedWorkerExecution::IsolatedTools
-            } else {
-                ScopedWorkerExecution::FileGeneration
-            }),
             cancel_signal,
-            ..CodexRunOptions::default()
+            ..routing_preflight_run_options(self.isolated_workers.enabled)
         }
     }
 
@@ -6814,6 +7011,10 @@ impl JobProcessor {
         // parallelism should come from multiple runtimes until the allowed credentials become
         // per-run config instead of global env.
         let _job_process_env_guard = JOB_PROCESS_ENV_LOCK.lock().await;
+        ensure_lease_held(
+            cancel_signal.as_ref(),
+            "before the folder was brought up to date",
+        )?;
         let _proxy_env = proxy_envelope.map(ProxyEnvGuard::new);
         let _controller_token_env = self.guard_controller_token(registration, job).await?;
         // Verified separately and intentionally never exported to the Codex
@@ -7055,6 +7256,7 @@ impl JobProcessor {
                     .as_ref()
                     .map(|progress| progress.sender.clone()),
                 local_origin: self.local_origin_sync(),
+                title: workspace_commit::version_title(job),
             };
             let outcome = skills::resolve_skills_lane(request, &workspace_dir).await;
             match settle_skills_lane_outcome(outcome, lane_checkpoint).await {
@@ -7163,26 +7365,20 @@ impl JobProcessor {
         let routing_preflight = if skills_kickoff.is_none()
             && should_run_agent_routing_preflight_for_execution(job, prompt_text)
         {
-            let active_plan_group_id = latest_plan_group_id_from_payload(&job.payload);
-            browser_routes = pending_worker_input
-                .is_none()
-                .then(|| browser_routing_snapshot_for_job(job, &workspace_dir, prompt_text))
-                .flatten();
-            let preflight_prompt = build_agent_routing_preflight_prompt_with_browser_routes(
+            let request = routing_preflight_request(
+                job,
                 &workspace_dir,
                 prompt_text,
-                active_plan_group_id.as_deref(),
                 pending_worker_input.as_ref(),
-                browser_routes.as_deref(),
             );
-            let (preflight_prompt, primary_context) =
-                agent_routing_primary_prompt(&preflight_prompt, &job.payload);
-            tracing::info!(job_id = %job.id, context = %primary_context, "routing preflight history projection");
+            browser_routes = request.browser_routes;
+            tracing::info!(job_id = %job.id, context = %request.history_metrics, "routing preflight history projection");
             let preflight_options =
                 self.routing_preflight_options(job, task_usage, turn_files, cancel_signal.clone());
             let _codex_guard = CODEX_EXECUTION_LOCK.lock().await;
+            ensure_lease_held(cancel_signal.as_ref(), "before its routing step")?;
             match codex
-                .execute_with_options(&preflight_prompt, None, preflight_options)
+                .execute_with_options(&request.prompt, None, preflight_options)
                 .await
             {
                 Ok(output) => {
@@ -7391,6 +7587,7 @@ impl JobProcessor {
             // turn.
             project_id: (!granted_execution).then_some(project_id),
             job_id: Some(job.id),
+            client_timezone: extract_client_timezone(job.payload.get("metadata")),
             disable_shell_tool: bounded_execution,
             disable_final_output_json_schema: final_output_mode.disable_final_output_json_schema(),
             final_output_schema,
@@ -7649,6 +7846,7 @@ impl JobProcessor {
                     .as_ref()
                     .map(|progress| progress.sender.clone()),
                 local_origin: self.local_origin_sync(),
+                title: workspace_commit::version_title(job),
             };
             return Ok(Box::pin(checkpoint_write_scoped_worker(
                 execution, checkpoint, &files,
@@ -7682,6 +7880,10 @@ impl JobProcessor {
             turn_start.record(&workspace_dir, status);
         }
         let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
+        ensure_lease_held(
+            cancel_signal.as_ref(),
+            "before its thread was restored and its prompt written",
+        )?;
         let shared_browser_action_log_before =
             explicit_shared_browser_execution.then(crate::shared_browser::action_log_len);
 
@@ -9340,6 +9542,7 @@ impl JobProcessor {
                                 .as_ref()
                                 .map(|progress| progress.sender.clone()),
                             self.local_origin_sync(),
+                            &workspace_commit::version_title(job),
                         )
                         .await
                         {
@@ -9624,6 +9827,7 @@ impl JobProcessor {
                             .as_ref()
                             .map(|progress| progress.sender.clone()),
                         self.local_origin_sync(),
+                        &workspace_commit::version_title(job),
                     )
                     .await
                     {
@@ -10170,11 +10374,24 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "\nWorkspace memory snapshot skipped for this cross-chat context recovery turn. Use relevant context cards and bounded Instafy CLI conversation lookup instead of loading broad project memory.\n",
             );
         } else if include_workspace_memory && !stateful_thread_restored {
+            // A turn in the write lane emits no team plan (its contract says so) and reads the
+            // collaboration skill's delegation choice in its own section below: the rest of that
+            // skill (team plans, worker scopes, advisory locks) is a planning turn's, and its
+            // write scope is the guardrail section's.
+            let left_out: &[&str] = if workspace_write_response {
+                &[COLLABORATION_SKILL_ID]
+            } else {
+                &[]
+            };
             if let Some(snapshot) = format_project_memory_snapshot_with_preferences(
                 workspace_dir,
                 request_for_skills,
                 preferences,
                 pinned_skill_for_turn(job),
+                job.payload
+                    .get("metadata")
+                    .is_some_and(browser_hand_back::carries_on_a_routed_card),
+                left_out,
             ) {
                 append_prompt_section(
                     &mut prompt,
@@ -10472,15 +10689,21 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                         "- Populate `files` only for real workspace changes.\n"
                     },
                     // A turn that may not ask for the browser is not offered its card: a browser
-                    // turn that ended on one stopped where it could have taken the step itself.
+                    // turn that ended on one stopped where it could have taken the step itself. A
+                    // browser turn is reminded of its answer's shape alone, as its thread's first
+                    // turn was told (`BROWSER_TURN_RESPONSE_CONTRACT`).
                     if browser_turn {
-                        "- Use `actions` for required secrets, integrations or location.\n"
+                        ""
                     } else if browser_request_unsupported(job) {
                         "- Use `actions` for required secrets, integrations, location, goal creation/status updates, or skill-authored multi-agent coordination.\n"
                     } else {
                         "- Use `actions` for required secrets, integrations, location, opening Instafy's browser (`request_browser`), goal creation/status updates, or skill-authored multi-agent coordination.\n"
                     },
-                    SECRET_REJECTION_CONTRACT,
+                    if browser_turn {
+                        ""
+                    } else {
+                        SECRET_REJECTION_CONTRACT
+                    },
                     if browser_turn {
                         ""
                     } else {
@@ -10612,41 +10835,50 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 - The controller is only the durable queue/status substrate. The lead agent owns the plan and the later checkpoint decision.\n\
                 - Native helpers belong to their parent turn; top-level Instafy workers have durable jobs/threads. Actual parallel execution depends on the admitted runtime capabilities.\n",
             );
+        } else if browser_turn {
+            // A browser turn is told the shape of its answer and nothing of the building turns'
+            // cards, commands or files (`BROWSER_TURN_RESPONSE_CONTRACT`). A chat keeps one
+            // browser thread, so what its first turn is told stays in every later browser turn's
+            // history.
+            append_prompt_section(
+                &mut prompt,
+                &mut prompt_section_metrics,
+                "responseContract",
+                BROWSER_TURN_RESPONSE_CONTRACT,
+            );
         } else {
             full_contract_carries_skill_setup = true;
             let response_contract_start = prompt.len();
-            // A browser turn has only its browser's tools: it is told nothing of how to run a
-            // command, change a file or start a team plan or a goal, as it is not offered the
-            // browser card. A chat keeps one browser thread, so what its first turn is told
-            // stays in every later browser turn's history.
-            let workspace_tools = |lines: &'static str| if browser_turn { "" } else { lines };
             prompt.push_str(&[
             "\nPlease follow these constraints:\n\
             - Respond with a single JSON object shaped as { \"summary\": string, \"files\": [], optional \"actions\": [] }. Do not wrap the JSON in Markdown or code fences.\n\
             - Do not use the final assistant message for progress or status updates. If you need to inspect or execute something, do the tool work first, then return the final JSON object only after the task is complete.\n",
-            workspace_tools("- When runtime metadata marks command execution or concrete workspace/runtime observation as required, call the available runtime command tool (`exec_command` or `shell`) before returning the final JSON. Do not only reason about commands. If no command tool is callable, return a JSON `summary` that states that concrete blocker. This does not block file-only create/edit/delete requests that can be satisfied with inline `files[]` content.\n"),
+            "- When runtime metadata marks command execution or concrete workspace/runtime observation as required, call the available runtime command tool (`exec_command` or `shell`) before returning the final JSON. Do not only reason about commands. If no command tool is callable, return a JSON `summary` that states that concrete blocker. This does not block file-only create/edit/delete requests that can be satisfied with inline `files[]` content.\n",
             "- If the user requests a different output format, still return the JSON object; satisfy the request inside `summary` as closely as possible.\n\
             - `summary` must be a natural, conversational reply to the latest user request. Use the workspace context only when it helps answer the question or the user explicitly asks.\n",
-            workspace_tools("- Workspace memory/instructions may exist in `AGENTS.md`, `INSTAFY.md`, and `.agents/skills/*/SKILL.md` (legacy `learnings/*` may also exist). A snapshot is included above when available. Treat it as authoritative and avoid re-reading it via shell commands unless the user explicitly asks, you suspect it changed during this run, or you are running `/learn`. For `/learn`, run `python AGENTS.py` if present and use its output as the memory snapshot.\n\
+            "- Workspace memory/instructions may exist in `AGENTS.md`, `INSTAFY.md`, and `.agents/skills/*/SKILL.md` (legacy `learnings/*` may also exist). A snapshot is included above when available. Treat it as authoritative and avoid re-reading it via shell commands unless the user explicitly asks, you suspect it changed during this run, or you are running `/learn`. For `/learn`, run `python AGENTS.py` if present and use its output as the memory snapshot.\n\
             - If the latest user request is general knowledge (e.g. arithmetic) and does not require filesystem state, answer immediately and avoid running shell commands first.\n\
             - Avoid exploratory commands (especially `--help` output dumps). Only run commands that are needed to complete the task or to resolve a concrete error. When an Instafy capability you need seems missing, `instafy <group> --help` counts as needed.\n\
             - When the user asks about metadata the prompt doesn’t include (e.g. token usage), do not guess; retrieve it via the Instafy CLI (`instafy history ...` first, `instafy api get` as advanced fallback), not raw HTTP (curl/wget).\n\
-            - Do not call controller APIs with curl/wget; use `instafy history` / `instafy api get` so auth works consistently and the command is logged.\n"),
-            "- For integration workflows, do a capability preflight before claiming success. Emit `request_integration` or `request_secret` only when evidence identifies missing third-party credentials or account scopes that the person can supply through that integration. A first-party Instafy operation denied by the current job's scope is not evidence that the person is signed out or missing a secret: report that the operation could not be saved or performed, without requesting credentials, reconnecting, or trying another identity.\n\
-            - For integration requests (for example \"connect <provider>\"), if runtime/tool capability is unclear, do a skills preflight: check installed skills first, and if no clear match exists, use skill discovery/import before concluding unsupported.\n",
+            - Do not call controller APIs with curl/wget; use `instafy history` / `instafy api get` so auth works consistently and the command is logged.\n",
+            "- For integration workflows, do a capability preflight before claiming success. Emit `request_integration` or `request_secret` only when evidence identifies missing third-party credentials or account scopes that the person can supply through that integration. A first-party Instafy operation denied by the current job's scope is not evidence that the person is signed out or missing a secret: report that the operation could not be saved or performed, without requesting credentials, reconnecting, or trying another identity.\n",
+            "- For integration requests (for example \"connect <provider>\"), if runtime/tool capability is unclear, do a skills preflight: check installed skills first, and if no clear match exists, use skill discovery/import before concluding unsupported.\n",
             ]
             .concat());
             prompt.push_str(SECRET_REJECTION_CONTRACT);
             prompt.push_str(
             "- The skill's own check rejects a held value when its token request answers 401 or its status says the credential is wrong. When the provider's answer does not say which value it rejected, ask again for all of them, so the person gets the fields back in the chat instead of a detour to settings. Say in one sentence that the provider did not accept the values, quote the provider's own reason when it gives one, and give the skill's copy hints for those values.\n\
-            - Missing secret/env UX: emit the relevant `request_secret`/`request_integration` action immediately, then ask one short follow-up question: whether the user already has the credential and whether they want help finding/creating it.\n\
-            - For auth/integration tasks, check which values the space already has before requesting a new secret. The inventory is already in your environment as `INSTAFY_PROJECT_SECRET_INVENTORY`; read that rather than shelling out for it, and never run a command to list secrets during first-run skill setup. When the person says they saved a value, the environment is the answer to what is present, not the wording of their message: check it, or run the skill's status check, before saying any value is still missing.\n\
-            - A conversation that began with a skill setup (`/skills import ... --start` or `/skills start`) stays that setup until the skill's \"## Getting started\" is done. On every later turn, including the one a saved card continues, first pick the setup up at its next unanswered step, re-reading that SKILL.md if you need to (confirm what it asks you to confirm, write the files it names, offer its schedule), and only then take up anything new. While the setup lasts, write to the person in plain sentences: no \"please\", no em dashes, no exclamation marks, no jokes.\n",
+            - Missing secret/env UX: emit the relevant `request_secret`/`request_integration` action immediately, then ask one short follow-up question: whether the user already has the credential and whether they want help finding/creating it.\n",
+            );
+            prompt.push_str(
+            "- For auth/integration tasks, check which values the space already has before requesting a new secret. The inventory is already in your environment as `INSTAFY_PROJECT_SECRET_INVENTORY`; read that rather than shelling out for it, and never run a command to list secrets during first-run skill setup. When the person says they saved a value, the environment is the answer to what is present, not the wording of their message: check it, or run the skill's status check, before saying any value is still missing.\n",
+            );
+            prompt.push_str(
+            "- A conversation that began with a skill setup (`/skills import ... --start` or `/skills start`) stays that setup until the skill's \"## Getting started\" is done. On every later turn, including the one a saved card continues, first pick the setup up at its next unanswered step, re-reading that SKILL.md if you need to (confirm what it asks you to confirm, write the files it names, offer its schedule), and only then take up anything new. While the setup lasts, write to the person in plain sentences: no \"please\", no em dashes, no exclamation marks, no jokes.\n",
             );
             prompt.push_str(WORKSPACE_IS_CURRENT_RULE);
             // A turn that may not ask for the browser is not offered its card, here as in a
-            // restored thread's reminder. A chat keeps one browser thread, so what its first turn
-            // is offered stays in every later browser turn's history.
+            // restored thread's reminder.
             let offers_browser_card = !browser_request_unsupported(job);
             prompt.push_str(&[
             "- Context you recovered from earlier turns, other conversations or context cards is for you: never say that you recovered it, where from, or any conversation, job, thread or context-card id.\n",
@@ -10662,7 +10894,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             } else {
                 ""
             },
-            workspace_tools("- { type: 'multi_agent_plan', rationale: string, thresholdReason: string, mode: 'read_only' | 'write_scoped', optional handoffPaths: string[], agents: [{ handle: string, label: string, prompt: string, scopeSummary: string, optional writeScope: object }, ...the selected durable worker lanes], lead: { leadHandle: string, continuationPrompt: string, optional expectedReportFormat: string only for an explicit user-requested format }, optional runtimeRouting: { strategy: 'reuse' | 'spread', optional desiredSlots: number, optional rationale: string }, optional presentation: { optional workerEvidenceVisibility: 'hidden' | 'compact' | 'expanded' | 'surface_on_failure', optional leadSummaryVisibility: 'hidden' | 'compact', optional showThresholdReason: boolean } }\n\
+            "- { type: 'multi_agent_plan', rationale: string, thresholdReason: string, mode: 'read_only' | 'write_scoped', optional handoffPaths: string[], agents: [{ handle: string, label: string, prompt: string, scopeSummary: string, optional writeScope: object }, ...the selected durable worker lanes], lead: { leadHandle: string, continuationPrompt: string, optional expectedReportFormat: string only for an explicit user-requested format }, optional runtimeRouting: { strategy: 'reuse' | 'spread', optional desiredSlots: number, optional rationale: string }, optional presentation: { optional workerEvidenceVisibility: 'hidden' | 'compact' | 'expanded' | 'surface_on_failure', optional leadSummaryVisibility: 'hidden' | 'compact', optional showThresholdReason: boolean } }\n\
               - { type: 'goal_update', status: 'active' | 'paused' | 'completed' | 'blocked' | 'canceled', optional objective: string, optional progressSummary: string, optional doneWhen: string, optional stopWhen: string, optional operation: 'clear' }\n\
               - Emit `goal_update` when the latest user request explicitly asks to create, set, start, update, pause, resume, complete, block, cancel, or clear a conversation goal, or when an active conversation goal is included and this turn has concrete evidence that the goal changed. Use status `active` with `objective` to create or update a goal. Do not infer goals from ordinary questions or small one-off requests.\n\
               - A request to create/start a goal also authorizes starting the work now. Do not respond with only a goal-created acknowledgement or a suggestion to start later.\n\
@@ -10682,7 +10914,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - For follow-ups about lanes, workers, files, or evidence, prefer the most recent matching user-visible evidence in this active conversation, but what you observe in the workspace during this turn beats what earlier turns or `instafy conversation show` say, including earlier failure notices. Use older same-topic context cards or prior conversation search results only if current conversation evidence is absent or clearly not the target.\n\
               - For current-conversation evidence-only follow-ups, do not search workspace files, source trees, `.instafy`, `.codex-runtime*`, `.codex-runtime-fallback`, or runtime logs. If restored provider context is insufficient, inspect only the active conversation with `instafy conversation show --include-threads --transcript --json`, which reads this conversation's id from the environment. Only if an older CLI reports a missing conversation argument, add the Conversation ID from Runtime context.\n\
               - Broad or cross-chat coordination should search compact context cards and prior conversations first. Save/update compact cards for durable work focus and open questions; do not invent a separate first-class topic-focus object.\n\
-              - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n"),
+              - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n",
             "- If you emit `request_integration`, your `summary` must actively close the gap with: (1) what is blocked, (2) the exact next UI step using the action card in this message, and (3) the exact retry phrase the user should send.\n\
               - If you emit `request_secret`, keep `summary` short: what is blocked, and that the value goes in the card on this message. Do not write a retry phrase or any instruction to reply: the card saves the value and continues the run itself. Do not name the environment variable in `summary`; call the value what the provider calls it on screen. Assume the person has never made an API token and has never seen the provider's developer screens. Teaching them is not `summary`'s job: carry the skill's own \"## Getting started\" walkthrough in the conversation beside the card, a step or two at a time, waiting for each answer, and naming the screens the skill declares. While a value's card is unanswered, carry on in words and do not emit `request_secret` for it again; a value the service or the skill's check rejected is a new ask, not a repeat. Write to the person in plain sentences: no \"please\", no em dashes, no exclamation marks.\n\
               - In a skill setup and its `request_secret` cards, addresses come only from the skill. If the skill declares an address, use that exact one and no other. If it declares none, name the screen in words and ask the person what they see. Never write a host or a link you did not read in the skill, and never offer two candidate addresses: a guessed address is a link the person will trust because it is yours.",
@@ -10708,7 +10940,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - If multiple secret inputs are required, include all names in `suggestedSecretNames` (ordered by setup priority).\n\
               Never include secret values or tokens in chat or JSON.\n\
             - When referencing UI onboarding/actions in `summary`, do not use positional wording (for example \"above\", \"below\", \"left\", \"right\"). Use position-agnostic wording like \"the integration action card in this message\".\n",
-            workspace_tools("- If the user asks you to create/edit/delete files, you MUST actually perform the filesystem changes in the workspace (prefer the `apply_patch` tool). Do not claim a file was changed unless it truly exists in the workspace.\n\
+            "- If the user asks you to create/edit/delete files, you MUST actually perform the filesystem changes in the workspace (prefer the `apply_patch` tool). Do not claim a file was changed unless it truly exists in the workspace.\n\
             - If you cannot apply file changes via tools, you MUST include the full post-change contents inline in the JSON `files` array using either `content` (UTF-8 text) or `contentBase64` (base64-encoded bytes). The runtime will write the files for you; this does not require `exec_command` or `shell`. Do not treat missing command tools as a blocker for file-only create/edit/delete requests when you can return inline `files[]` content.\n\
             - If you use `apply_patch`, follow the patch format exactly. Example (create a file):\n\
               *** Begin Patch\n\
@@ -10720,28 +10952,17 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             - Populate `files` with any workspace files you changed; otherwise return an empty array.\n\
             - Each entry in `files` should include at least { path: string, workspacePath: string }. For created/changed files include either `content` or `contentBase64`.\n\
             - Example `files` entry: { \"path\": \"hello.txt\", \"workspacePath\": \"hello.txt\", \"change\": { \"type\": \"created\" }, \"content\": \"hello\\n\" }\n\
-            - When you describe file changes, include a `change` object such as { type: 'created' | 'deleted' | 'changed', optional lines: [{ from: number, to: number }] } whenever you can do so reliably.\n"),
+            - When you describe file changes, include a `change` object such as { type: 'created' | 'deleted' | 'changed', optional lines: [{ from: number, to: number }] } whenever you can do so reliably.\n",
             "- When the user references another conversation (see \"Referenced conversations\"), treat it as additional context.\n",
-            workspace_tools("- If the user asks about token usage for a previous answer, retrieve it (do not guess) via `instafy history messages` (it already knows this conversation; `instafy api get` is the fallback) and then reply in the exact format `Token usage — input: <n>, cached: <n>, output: <n>`.\n\
+            "- If the user asks about token usage for a previous answer, retrieve it (do not guess) via `instafy history messages` (it already knows this conversation; `instafy api get` is the fallback) and then reply in the exact format `Token usage — input: <n>, cached: <n>, output: <n>`.\n\
             - Those `token_usage` rows are per turn: each counts only its own turn's tokens, not the conversation's running total. For how much one answer used, add the rows whose `metadata.details.usageScope` is `turn` and whose `metadata.jobId` is that answer's job: a recovery retry adds its own row, marked with `metadata.details.attempt`. The row without `usageScope` and the credit ledger reflect only the first attempt, so do not add that row or quote either for the answer. For a total across answers, add only the rows whose `metadata.details.usageScope` is `turn`; rows from before per-turn reporting have none and hold a running total. If an answer's job has no `usageScope` `turn` row, its usage was not reported: say so rather than quoting a neighbouring row or a zero. A final wrap-up pass after a missing answer is not reported as a row, so a job that ran one used somewhat more than its rows add up to.\n\
-            - When the request depends on observable workspace, runtime, repo, process, or server state, use the appropriate tool calls before answering and report concrete observed output (for example: exit code, process status, line counts, tail output).\n"),
+            - When the request depends on observable workspace, runtime, repo, process, or server state, use the appropriate tool calls before answering and report concrete observed output (for example: exit code, process status, line counts, tail output).\n",
             if offers_browser_card {
                 "- For browser/UI tasks, use this turn's browser tools when it has them and report observed page output. Without them, emit `request_browser`: it is a handoff to Instafy's browser, not evidence that a page was opened or a task completed.\n"
             } else {
                 "- For browser/UI tasks, use this turn's browser tools when it has them and report observed page output.\n"
             },
-            "- For nearby/location-dependent browsing requests (for example \"good coffee nearby\"), do not stop at a generic search-results page if the user asked for a recommendation. Continue until you can report at least one concrete candidate or the exact blocker.\n\
-            - For recommendation-seeking browser tasks, prefer map/listing/review pages over repeating search-result links. If needed, inspect a few likely candidates and summarize the strongest observed option with concrete details.\n\
-            - Use loaded skills and learned blocks for workflow behavior. Treat Rust/runtime prompts as execution invariants only, not as the source of task-specific strategy.\n\
-            - If a browser tool fails or refuses a page, that ends that page, not the task: go on to the next source in this turn. When nothing is left to try, say in plain words what did not work (never paste raw error codes such as `net::ERR_…`); do not claim success without real execution.",
-            if offers_browser_card {
-                " No browser tools on this turn is not a failure: emit `request_browser`."
-            } else {
-                ""
-            },
-            "\n\
-            - Ask for clarification if you lack enough information to act.
-            ",
+            "- Ask for clarification if you lack enough information to act.\n",
             ]
             .concat());
             record_prompt_section_metric(
@@ -10790,11 +11011,20 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             && !full_contract_carries_skill_setup
             && conversation_began_with_skill_setup(job)
         {
+            // A browser turn has no workspace of its own to check.
             append_prompt_section(
                 &mut prompt,
                 &mut prompt_section_metrics,
                 "skillSetupContinuation",
-                &[SKILL_SETUP_CONTINUATION, WORKSPACE_IS_CURRENT_RULE].concat(),
+                &[
+                    SKILL_SETUP_CONTINUATION,
+                    if browser_turn {
+                        ""
+                    } else {
+                        WORKSPACE_IS_CURRENT_RULE
+                    },
+                ]
+                .concat(),
             );
         }
 
@@ -10872,10 +11102,13 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             );
         }
 
+        // A browser turn's only tools are its browser's: Octo's device and camera capabilities are
+        // the building turn's.
         if !stateful_thread_restored
             && !multi_agent_planning_turn
             && !lead_continuation_checkpoint
             && !multi_agent_worker
+            && !browser_turn
             && let Some(section) =
                 format_assistant_capability_context_section(job.payload.get("metadata"))
         {
@@ -10979,7 +11212,11 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             );
         }
 
-        let latest_request_section = format!("\n\nLatest user request:\n{trimmed_prompt}");
+        // A hand-back's stored words are the controller's one line; the person's own words, when
+        // it carries them, are what it asks (`browser_hand_back::person_request`).
+        let latest_request = browser_hand_back::person_request(job.payload.get("metadata"))
+            .unwrap_or(trimmed_prompt);
+        let latest_request_section = format!("\n\nLatest user request:\n{latest_request}");
         append_prompt_section(
             &mut prompt,
             &mut prompt_section_metrics,
@@ -13690,11 +13927,15 @@ fn normalize_codex_read_files(
         .collect()
 }
 
+/// The turn's changed files, as paths in the space's folder. Only that folder is touched: the
+/// folder above it holds the machine's other spaces, or, for a folder the person brought, their
+/// own files. Each save used to copy every changed file there too (a map at
+/// `/workspace/sites/<site>`, beside the space's folder, that nothing served), a delete removed
+/// the same path there, and a reported file missing from the space was moved in from there.
 fn normalize_codex_files(
     workspace_dir: &Path,
     files: Vec<CodexFileDescriptor>,
 ) -> Result<Vec<CodexFileDescriptor>> {
-    let workspace_root = workspace_dir.parent().unwrap_or(workspace_dir);
     let mut normalized = Vec::new();
 
     for mut file in files {
@@ -13712,27 +13953,13 @@ fn normalize_codex_files(
 
         let relative_string = sanitized_rel.to_string_lossy().to_string();
         let target_path = workspace_dir.join(&sanitized_rel);
-        let fallback_path = workspace_root.join(&sanitized_rel);
         let change_kind = file.change.as_ref().map(|descriptor| &descriptor.kind);
         let has_inline_content = file.content.is_some() || file.content_base64.is_some();
 
         if matches!(change_kind, Some(FileChangeKind::Deleted)) {
             delete_path_if_exists(&target_path)
                 .with_context(|| format!("failed to delete workspace path {:?}", target_path))?;
-            if fallback_path != target_path {
-                delete_path_if_exists(&fallback_path).with_context(|| {
-                    format!("failed to delete fallback path {:?}", fallback_path)
-                })?;
-            }
-
-            file.workspace_path = relative_string.clone();
-            file.path = relative_string.clone();
-            normalized.push(file);
-            continue;
-        }
-        let mut moved_from_fallback = false;
-
-        if has_inline_content {
+        } else if has_inline_content {
             write_inline_file_change(&target_path, &sanitized_rel, &file).with_context(|| {
                 format!(
                     "failed to apply inline codex file change for {:?}",
@@ -13740,80 +13967,16 @@ fn normalize_codex_files(
                 )
             })?;
         } else if !target_path.exists() {
-            if fallback_path.exists() {
-                moved_from_fallback = true;
-                if let Some(parent) = target_path.parent() {
-                    fs::create_dir_all(parent).with_context(|| {
-                        format!("failed to create parent directories for {:?}", target_path)
-                    })?;
-                }
-                if let Err(rename_error) = fs::rename(&fallback_path, &target_path) {
-                    fs::copy(&fallback_path, &target_path).with_context(|| {
-                        format!("failed to copy {:?} to {:?}", fallback_path, target_path)
-                    })?;
-                    if let Err(remove_error) = fs::remove_file(&fallback_path) {
-                        warn!(
-                            ?remove_error,
-                            fallback = %fallback_path.display(),
-                            target = %target_path.display(),
-                            "failed to remove fallback artifact after copy"
-                        );
-                    }
-                    warn!(
-                        ?rename_error,
-                        fallback = %fallback_path.display(),
-                        target = %target_path.display(),
-                        "rename fallback failed; copied artifact into project workspace"
-                    );
-                }
-            } else {
-                warn!(
-                    workspace_path = %file.workspace_path,
-                    target = %target_path.display(),
-                    "codex artifact missing from workspace; skipping"
-                );
-                continue;
-            }
-
-            if !target_path.exists() {
-                warn!(
-                    workspace_path = %file.workspace_path,
-                    target = %target_path.display(),
-                    "codex artifact missing from workspace after inline apply; skipping"
-                );
-                continue;
-            }
-        }
-
-        if workspace_root != workspace_dir {
-            if fallback_path != target_path {
-                if moved_from_fallback {
-                    // Skip rehydrating the fallback location when the file originated there.
-                    // Downstream watchers only need a copy in the project workspace.
-                } else {
-                    if let Some(parent) = fallback_path.parent() {
-                        if let Err(error) = fs::create_dir_all(parent) {
-                            warn!(
-                                ?error,
-                                fallback = %fallback_path.display(),
-                                "failed to create fallback parent directories"
-                            );
-                        }
-                    }
-                    if let Err(error) = fs::copy(&target_path, &fallback_path) {
-                        warn!(
-                            ?error,
-                            target = %target_path.display(),
-                            fallback = %fallback_path.display(),
-                            "failed to mirror workspace artifact into fallback path"
-                        );
-                    }
-                }
-            }
+            warn!(
+                workspace_path = %file.workspace_path,
+                target = %target_path.display(),
+                "codex artifact missing from workspace; skipping"
+            );
+            continue;
         }
 
         file.workspace_path = relative_string.clone();
-        file.path = relative_string.clone();
+        file.path = relative_string;
         normalized.push(file);
     }
 
@@ -16597,6 +16760,58 @@ fn agent_routing_primary_prompt(base: &str, payload: &JsonValue) -> (String, Jso
     )
 }
 
+/// What a job's routing step sends the model, built here for the job and for the routing check
+/// (`routing_check`), so the check reads exactly what a turn's routing step reads.
+pub(crate) struct RoutingPreflightRequest {
+    pub(crate) prompt: String,
+    /// The browser skill's routing section, when the browser routes are offered.
+    pub(crate) browser_routes: Option<String>,
+    /// The history projection's counts.
+    pub(crate) history_metrics: JsonValue,
+}
+
+fn routing_preflight_request(
+    job: &LeaseJob,
+    workspace_dir: &Path,
+    prompt_text: &str,
+    pending: Option<&worker_input_routing::PendingContext>,
+) -> RoutingPreflightRequest {
+    let active_plan_group_id = latest_plan_group_id_from_payload(&job.payload);
+    let browser_routes = pending
+        .is_none()
+        .then(|| browser_routing_snapshot_for_job(job, workspace_dir, prompt_text))
+        .flatten();
+    let prompt = build_agent_routing_preflight_prompt_with_browser_routes(
+        workspace_dir,
+        prompt_text,
+        active_plan_group_id.as_deref(),
+        pending,
+        browser_routes.as_deref(),
+    );
+    let (prompt, history_metrics) = agent_routing_primary_prompt(&prompt, &job.payload);
+    RoutingPreflightRequest {
+        prompt,
+        browser_routes,
+        history_metrics,
+    }
+}
+
+/// How a routing step runs: no tools of its own, the routing answer's schema, and none of the
+/// space's broad instructions.
+fn routing_preflight_run_options(isolated_tool_workers: bool) -> CodexRunOptions {
+    CodexRunOptions {
+        disable_shell_tool: true,
+        final_output_schema: CodexFinalOutputSchema::RoutingPreflight,
+        suppress_contextual_instructions: true,
+        routing_scoped_worker_execution: Some(if isolated_tool_workers {
+            ScopedWorkerExecution::IsolatedTools
+        } else {
+            ScopedWorkerExecution::FileGeneration
+        }),
+        ..CodexRunOptions::default()
+    }
+}
+
 fn extract_markdown_h2_section(content: &str, heading: &str) -> Option<String> {
     let target = format!("## {heading}");
     let start = content
@@ -19103,15 +19318,14 @@ fn resolve_exact_owned_write_scope_path(workspace_dir: &Path, raw: &str) -> Opti
 /// task that ended "then build a comparison page", a comparison's browser turn
 /// read one page and stopped "because this turn is read-only", and a browser
 /// turn asked for a page told the person "in this run: it's read-only" (local
-/// tests, Oct 31). A browser turn that hands back is told that reading what the
-/// request needs is why it changes no files, and that the building turn right
-/// after it makes what the person asked for: told only that it reads pages and
-/// that the building turn after it makes the page, a comparison's browser turn
-/// read one page and answered that it could not create the page "in this
-/// read-only turn" (a local test, Nov 4). Any other read-only job is told it is
-/// read-only. A browser turn that carries on the person's own message and hands
-/// nothing back is also told how to hand a message that asks Octo to make
-/// something to the building turn
+/// tests, Oct 31). A browser turn that hands back reads only that it changes no
+/// files: its part (the reading) and who makes what the person asked for are said
+/// once, right before the request (`browser_hand_back::READING_PART`). Told who
+/// builds here too, and twice more, a comparison's browser turn read one page and
+/// answered that it could not create the page "in this read-only turn" (a local
+/// test, Nov 4). Any other read-only job is told it is read-only. A browser turn
+/// that carries on the person's own message and hands nothing back is also told
+/// how to hand a message that asks Octo to make something to the building turn
 /// ([`browser_hand_back::offers_the_build_request`]).
 fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> String {
     let browser = metadata
@@ -19123,7 +19337,7 @@ fn read_only_write_scope_line(metadata: Option<&JsonValue>) -> String {
         .and_then(JsonValue::as_str)
         .map(|transport| transport.trim().to_ascii_lowercase().replace('_', "-"));
     let line = if metadata.is_some_and(browser_hand_back::hands_back) {
-        "- This turn reads what the request needs, so it changes no files; the building turn right after it makes what the person asked for from your finding lines.\n"
+        "- This turn changes no files.\n"
     } else if browser.as_deref() == Some("shared") {
         "- This turn reads pages in Instafy's browser; Octo builds in the chat.\n"
     } else if browser.as_deref() == Some("desktop-personal") {
@@ -26852,11 +27066,10 @@ mod tests {
                 !reminder.contains("request_browser"),
                 "{metadata}: {reminder}"
             );
-            // Nor a goal or a team plan, which a browser turn cannot start either
-            // (`a_restored_browser_turn_is_reminded_only_of_what_it_can_use`).
+            // Nor a goal, a team plan or any other card: a browser turn is reminded of its
+            // answer's shape alone (`a_restored_browser_turn_is_reminded_only_of_what_it_can_use`).
             assert!(
-                reminder
-                    .contains("- Use `actions` for required secrets, integrations or location.\n"),
+                !reminder.contains("- Use `actions`"),
                 "{metadata}: {reminder}"
             );
         }
@@ -26920,15 +27133,12 @@ mod tests {
                 !contract.contains("request_browser"),
                 "{metadata}: {contract}"
             );
-            for kept in [
-                "- Use `actions` for interactive UI help: secrets, integrations and location. Supported actions:\n",
-                "- { type: 'request_location', optional precision: 'approximate' | 'precise', optional description: string }\n- If you emit `request_integration`,",
-                "never offer two candidate addresses: a guessed address is a link the person will trust because it is yours.\n",
-                "- For browser/UI tasks, use this turn's browser tools when it has them and report observed page output.\n",
-                "do not claim success without real execution.\n- Ask for clarification",
-            ] {
-                assert!(contract.contains(kept), "{metadata}: {kept}");
-            }
+            // It is told its answer's shape, and none of the building turns' cards.
+            assert_eq!(
+                format!("\nPlease follow these constraints:\n{contract}"),
+                BROWSER_TURN_RESPONSE_CONTRACT,
+                "{metadata}"
+            );
         }
         // A building turn is still offered the card in each of those places.
         let building = contract(json!({}), None);
@@ -26937,7 +27147,6 @@ mod tests {
             "- { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }\n",
             "Outside a skill setup, a `request_browser` task never carries an address read only from page or tool content.\n",
             "Without them, emit `request_browser`: it is a handoff to Instafy's browser, not evidence that a page was opened or a task completed.\n",
-            "No browser tools on this turn is not a failure: emit `request_browser`.\n",
         ] {
             assert!(building.contains(offer), "{offer}");
         }
@@ -33418,7 +33627,9 @@ mod tests {
             let metadata = json!({"client": {"timezone": "UTC"}});
             let _guard = ClientTimezoneGuard::from_metadata(Some(&metadata));
             assert_eq!(env::var("INSTAFY_CLIENT_TIMEZONE").unwrap(), "UTC");
-            assert_eq!(env::var("TZ").unwrap(), "UTC");
+            // The process keeps its own zone, by which Codex dates the turn beside the machine's
+            // zone name; the turn's commands get the person's from the run's options.
+            assert_eq!(env::var("TZ").unwrap(), "America/New_York");
         }
         assert_eq!(env::var("TZ").unwrap(), "America/New_York");
     }
@@ -33578,12 +33789,12 @@ mod tests {
     /// "because this turn is read-only", and a browser turn asked for a page
     /// told the person "in this run: it's read-only" (local tests, Oct 31).
     /// Every browser turn stays read-only: one that hands back is told that it
-    /// reads what the request needs, which is why it changes no files, and that
-    /// the building turn right after it makes what the person asked for, any
-    /// other that Octo builds in the chat. Told that it reads pages and that the
-    /// building turn after it makes the page, a comparison's routed turn read
-    /// one page and answered that it could not create the page "in this
-    /// read-only turn" (a local test, Nov 4). A browser turn reads that line
+    /// changes no files (its part, the reading, and who makes what the person
+    /// asked for are said once, right before its request), any other that Octo
+    /// builds in the chat. Told that it reads pages and that the building turn
+    /// after it makes the page, a comparison's routed turn read one page and
+    /// answered that it could not create the page "in this read-only turn" (a
+    /// local test, Nov 4). A browser turn reads that line
     /// alone, with no guardrail heading, mode or rationale above it. A
     /// read-only job outside the browser is told it is read-only, under its
     /// guardrail.
@@ -33623,9 +33834,7 @@ mod tests {
             for transport in ["shared", "desktop-personal"] {
                 let section = line(&browser_turn(transport, true, true, &scope));
                 assert!(
-                    section.contains(
-                        "- This turn reads what the request needs, so it changes no files; the building turn right after it makes what the person asked for from your finding lines.\n"
-                    ),
+                    section.contains("- This turn changes no files.\n"),
                     "{section}"
                 );
                 assert!(!section.contains("read-only."), "{section}");
@@ -33707,15 +33916,14 @@ mod tests {
                 assert!(!section.contains("request_build"), "{section}");
             }
         }
-        // A routed turn whose findings go back to the building turn: told which turn makes what
-        // the person asked for, and never offered a build request.
+        // A routed turn whose findings go back to the building turn: told that it changes no
+        // files (its part says which turn makes what the person asked for), and never offered a
+        // build request.
         for transport in ["shared", "desktop-personal"] {
             for stamp in [json!(true), json!(false)] {
                 let section = section(&routed(transport, true, stamp));
                 assert!(
-                    section.contains(
-                        "- This turn reads what the request needs, so it changes no files; the building turn right after it makes what the person asked for from your finding lines.\n"
-                    ),
+                    section.contains("- This turn changes no files.\n"),
                     "{section}"
                 );
                 assert!(!section.contains("request_build"), "{section}");
@@ -35760,32 +35968,99 @@ mod tests {
         );
     }
 
-    #[test]
-    fn normalize_moves_fallback_file_into_project_workspace() {
-        let tmp = tempdir().unwrap();
-        let project_dir = tmp.path().join("proj");
-        fs::create_dir_all(&project_dir).unwrap();
-
-        let fallback_file = tmp.path().join("index.html");
-        fs::write(&fallback_file, "hello world").unwrap();
-
-        let files = vec![CodexFileDescriptor {
-            path: "index.html".into(),
-            workspace_path: "index.html".into(),
+    fn changed_file(path: &str, kind: Option<FileChangeKind>) -> CodexFileDescriptor {
+        CodexFileDescriptor {
+            path: path.into(),
+            workspace_path: path.into(),
             label: None,
             description: None,
             mime_type: None,
             content: None,
             content_base64: None,
-            change: None,
-        }];
+            change: kind.map(|kind| FileChangeDescriptor {
+                raw: json!({ "type": format!("{kind:?}").to_ascii_lowercase() }),
+                kind,
+                lines: Vec::new(),
+            }),
+        }
+    }
 
+    // A map saved from a space at <root>/<space> also landed at <root>/sites/<site>, beside the
+    // space's folder, at every save: the folder above a space is the machine's other spaces, or a
+    // person's own folder around one they brought.
+    #[test]
+    fn a_saved_change_is_never_copied_above_the_space() {
+        let tmp = tempdir().unwrap();
+        let project_dir = tmp.path().join("proj");
+        fs::create_dir_all(project_dir.join("sites/seville/data")).unwrap();
+        fs::write(project_dir.join("sites/seville/index.html"), "map").unwrap();
+        fs::write(project_dir.join("sites/seville/data/stops.geojson"), "{}").unwrap();
+
+        let files = vec![
+            changed_file("sites/seville/index.html", Some(FileChangeKind::Created)),
+            changed_file(
+                "sites/seville/data/stops.geojson",
+                Some(FileChangeKind::Changed),
+            ),
+        ];
         let normalized = normalize_codex_files(&project_dir, files).unwrap();
+
+        assert_eq!(
+            normalized
+                .iter()
+                .map(|f| f.workspace_path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "sites/seville/index.html",
+                "sites/seville/data/stops.geojson"
+            ]
+        );
+        assert!(
+            !tmp.path().join("sites").exists(),
+            "no copy above the space"
+        );
+        assert_eq!(
+            fs::read_to_string(project_dir.join("sites/seville/index.html")).unwrap(),
+            "map"
+        );
+    }
+
+    #[test]
+    fn a_deleted_file_is_deleted_in_the_space_only() {
+        let tmp = tempdir().unwrap();
+        let project_dir = tmp.path().join("proj");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("notes.md"), "the space's").unwrap();
+        fs::write(tmp.path().join("notes.md"), "someone else's").unwrap();
+
+        let normalized = normalize_codex_files(
+            &project_dir,
+            vec![changed_file("notes.md", Some(FileChangeKind::Deleted))],
+        )
+        .unwrap();
+
         assert_eq!(normalized.len(), 1);
-        assert!(project_dir.join("index.html").exists());
-        assert!(!fallback_file.exists());
-        assert_eq!(normalized[0].workspace_path, "index.html");
-        assert_eq!(normalized[0].path, "index.html");
+        assert!(!project_dir.join("notes.md").exists());
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("notes.md")).unwrap(),
+            "someone else's"
+        );
+    }
+
+    #[test]
+    fn a_reported_file_missing_from_the_space_is_not_taken_from_above_it() {
+        let tmp = tempdir().unwrap();
+        let project_dir = tmp.path().join("proj");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let above = tmp.path().join("index.html");
+        fs::write(&above, "hello world").unwrap();
+
+        let normalized =
+            normalize_codex_files(&project_dir, vec![changed_file("index.html", None)]).unwrap();
+        assert!(normalized.is_empty());
+        assert!(!project_dir.join("index.html").exists());
+        assert_eq!(fs::read_to_string(&above).unwrap(), "hello world");
     }
 
     #[test]
@@ -35971,31 +36246,22 @@ mod tests {
     }
 
     #[test]
-    fn normalize_moves_absolute_fallback_file_into_project_workspace() {
+    fn an_absolute_path_above_the_space_is_not_taken_into_it() {
         let tmp = tempdir().unwrap();
         let project_dir = tmp.path().join("proj");
         fs::create_dir_all(&project_dir).unwrap();
 
-        let fallback_file = tmp.path().join("index.html");
-        fs::write(&fallback_file, "hello world").unwrap();
+        let above = tmp.path().join("index.html");
+        fs::write(&above, "hello world").unwrap();
 
-        let files = vec![CodexFileDescriptor {
-            path: fallback_file.to_string_lossy().to_string(),
-            workspace_path: fallback_file.to_string_lossy().to_string(),
-            label: None,
-            description: None,
-            mime_type: None,
-            content: None,
-            content_base64: None,
-            change: None,
-        }];
-
-        let normalized = normalize_codex_files(&project_dir, files).unwrap();
-        assert_eq!(normalized.len(), 1);
-        assert!(project_dir.join("index.html").exists());
-        assert!(!fallback_file.exists());
-        assert_eq!(normalized[0].workspace_path, "index.html");
-        assert_eq!(normalized[0].path, "index.html");
+        let normalized = normalize_codex_files(
+            &project_dir,
+            vec![changed_file(&above.to_string_lossy(), None)],
+        )
+        .unwrap();
+        assert!(normalized.is_empty());
+        assert!(!project_dir.join("index.html").exists());
+        assert_eq!(fs::read_to_string(&above).unwrap(), "hello world");
     }
 
     #[test]
@@ -36651,8 +36917,9 @@ mod tests {
                 .cloned()
                 .expect("labelled")
         };
+        // Typing reads as filling in a form until the browser says it was a search.
         let running = activity(0);
-        assert_eq!(running["live"], json!("Browsing {host}"));
+        assert_eq!(running["live"], json!("Filling in a form on {host}"));
         assert_eq!(running["host"], json!("visitlisboa.com"));
         let done = activity(1);
         assert_eq!(done["key"], json!("browser/search"));

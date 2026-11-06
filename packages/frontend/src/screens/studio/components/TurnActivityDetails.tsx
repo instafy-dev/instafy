@@ -4,7 +4,7 @@ import { IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
 import type { ChatMessage } from "../types";
 import { displayActivityHost } from "./activityHost";
-import { parseCommandExecutionOutput } from "./chatContentHelpers";
+import { parseCommandExecutionOutput, stripWorkspacePrefixForPreview } from "./chatContentHelpers";
 import { extractMessageDetails } from "./chatMessageMetadata";
 import { CommandOutputBlock } from "./CommandOutputBlock";
 import { renderThreadCompactEventIcon, stripShellWrapperFromCommand } from "./threadPreviewHelpers";
@@ -163,8 +163,11 @@ function stepDescription(step: TurnStep): { detail: string | null; mono: boolean
     case "search":
       return { detail: text("query") || null, mono: false };
     case "edit": {
+      // From the space's folder, as the person knows their files: never the
+      // machine's "/workspace/<space id>/".
       const paths = Array.isArray(details?.paths)
         ? (details.paths as unknown[]).filter((path): path is string => typeof path === "string")
+          .map(stripWorkspacePrefixForPreview)
         : [];
       return { detail: paths.length > 0 ? paths.join(", ") : null, mono: true };
     }

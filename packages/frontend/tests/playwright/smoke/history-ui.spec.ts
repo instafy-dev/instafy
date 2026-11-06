@@ -138,7 +138,7 @@ test.describe("History UI (stateless gateway)", () => {
     await expect
       .poll(async () => (await readWorkspaceFileText(page, filePath, { projectId })) ?? "", { timeout: 60_000 })
       .toBe(`one ${unique}\n`);
-    await expect(historyRows(page).filter({ hasText: `Revert "Update ${filePath}"` }).first()).toBeVisible({
+    await expect(historyRows(page).filter({ hasText: `Undid "Update ${filePath}"` }).first()).toBeVisible({
       timeout: 30_000,
     });
   });

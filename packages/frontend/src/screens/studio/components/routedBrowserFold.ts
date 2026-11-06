@@ -21,13 +21,22 @@
 // back without opening a page (the runtime's build request note), reads as
 // the building turn alone: the card goes as soon as that note arrives, and
 // once the hand-back the controller sends for it is in the chat, the browser
-// turn and the hand-back's notice go too. Until then, or when that hand-back
-// was refused, the browser turn shows what it has (the controller leaves a
-// refusal's reason as its reply).
+// turn goes too, and the hand-back's prompt never shows. Until then, or when
+// that hand-back was refused, the browser turn shows what it has (the
+// controller leaves a refusal's reason as its reply).
+//
+// A browser turn whose findings a hand-back took back to the building turn
+// reads as one answer with it: one Octo row, with one line, one reply and the
+// card. The hand-back's prompt shows nothing, and its turn's steps, reply and
+// card join the browser turn's row (synthesizeAgentJobThreadMessages). Until
+// that turn shows something the row stands for it, as a retry's failed turn
+// stands for its resend. A hand-back whose dispatch failed sends nothing, and
+// the browser turn stays the last word.
 
 import { hasFailedRunMetadata } from "../../../conversations/runFailurePresentation";
+import { wasRunStartedByPromptSentFromThisPage } from "../../../conversations/sentPromptRegistry";
 import type { ChatMessage } from "../types";
-import { BROWSER_BUILD_REQUEST_NOTE_KEY, readBrowserHandBackOf } from "./browserHandBack";
+import { BROWSER_BUILD_REQUEST_NOTE_KEY, isUnsentBrowserNoticePrompt, readBrowserHandBackOf } from "./browserHandBack";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { getControllerConversationNoticeKind } from "./controllerConversationNotice";
 import {
@@ -71,7 +80,7 @@ export type RoutedBrowserFold = {
   buildRequestJobIds: ReadonlySet<string>;
   /**
    * Those of {@link buildRequestJobIds} whose hand-back is in the chat: the
-   * browser turn and the hand-back's notice show nothing either.
+   * browser turn and the hand-back's prompt show nothing either.
    */
   handedBackBuildRequestJobIds: ReadonlySet<string>;
   /**
@@ -82,7 +91,23 @@ export type RoutedBrowserFold = {
    * browser turn shows something.
    */
   settledCardIds: ReadonlySet<string>;
+  /**
+   * The hand-backs that took a browser turn's findings back to the building
+   * turn, by that browser turn's job, oldest first: each one's run, and its
+   * job once that job has written something. A try again of a hand-back is
+   * one more of them. Their prompts are in {@link hiddenPromptIds}.
+   */
+  handBacksByBrowserJobId: ReadonlyMap<string, readonly BrowserHandBackTurn[]>;
+  /**
+   * Runs of those hand-backs that ended before any job ran them (a failure
+   * posted for the run alone, or the controller's notice that it stopped or
+   * could not start).
+   */
+  handBackRunsEndedWithoutAJob: ReadonlySet<string>;
 };
+
+/** A hand-back's turn: its run, and its job once that job wrote something. */
+export type BrowserHandBackTurn = { promptId: string; runId: string | null; jobId: string | null };
 
 /**
  * A run that ended before its job showed anything: a failure posted for it
@@ -152,16 +177,6 @@ export function resolveRoutedBrowserFold(messages: readonly ChatMessage[]): Rout
   const waitingCardKeys = new Set<string>();
   const buildRequestJobIds = new Set<string>();
   const handedBackBuildRequestJobIds = new Set<string>();
-  if (routedCards.size === 0) {
-    return {
-      hiddenPromptIds,
-      cardIdByBrowserJobId,
-      waitingCardKeys,
-      buildRequestJobIds,
-      handedBackBuildRequestJobIds,
-      settledCardIds: settledBrowserCardIds(messages, cards, waitingCardKeys),
-    };
-  }
   for (const message of messages) {
     const key = readBrowserRequestOf(message);
     const card = key ? routedCards.get(key) : undefined;
@@ -176,13 +191,31 @@ export function resolveRoutedBrowserFold(messages: readonly ChatMessage[]): Rout
       waitingCardKeys.add(key);
     }
   }
-  // The hand-back that took such a message to the building turn.
+  // The hand-back that took such a message to the building turn; any other
+  // took what a browser turn found back to the building turn, and joins
+  // that browser turn's row.
+  const handBacksByBrowserJobId = new Map<string, BrowserHandBackTurn[]>();
+  const handBackRunsEndedWithoutAJob = new Set<string>();
   for (const message of messages) {
     const handedBack = readBrowserHandBackOf(message);
-    if (handedBack && buildRequestJobIds.has(handedBack)) {
+    if (!handedBack) continue;
+    if (buildRequestJobIds.has(handedBack)) {
       hiddenPromptIds.add(message.id);
       handedBackBuildRequestJobIds.add(handedBack);
+      continue;
     }
+    hiddenPromptIds.add(message.id);
+    // Its dispatch failed: no turn went on, and the browser turn stays the last word.
+    if (isUnsentBrowserNoticePrompt(message)) continue;
+    // The stored prompt names its run; the copy this page sent knows the
+    // runs its dispatch started.
+    const runId = stringField(message, ["runId", "run_id"]) ||
+      [...jobByRunId].find(([run, job]) => wasRunStartedByPromptSentFromThisPage(message, [run, job]))?.[0] ||
+      null;
+    const turns = handBacksByBrowserJobId.get(handedBack) ?? [];
+    turns.push({ promptId: message.id, runId, jobId: runId ? jobByRunId.get(runId) ?? null : null });
+    handBacksByBrowserJobId.set(handedBack, turns);
+    if (runId && runsEndedWithoutAJob.has(runId)) handBackRunsEndedWithoutAJob.add(runId);
   }
   return {
     hiddenPromptIds,
@@ -191,6 +224,8 @@ export function resolveRoutedBrowserFold(messages: readonly ChatMessage[]): Rout
     buildRequestJobIds,
     handedBackBuildRequestJobIds,
     settledCardIds: settledBrowserCardIds(messages, cards, waitingCardKeys),
+    handBacksByBrowserJobId,
+    handBackRunsEndedWithoutAJob,
   };
 }
 

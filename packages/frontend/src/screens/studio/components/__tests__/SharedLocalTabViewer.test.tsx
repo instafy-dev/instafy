@@ -237,9 +237,15 @@ it("Explore requests owner approval, scopes frames and input, and returns to Fol
   state.view={viewId,connectionId:"own",userId:"viewer",viewport:{width:390,height:700,dpr:1}};await update();expect(image()).toBeNull();
   await act(async()=>socket.dispatchEvent(new MessageEvent("message",{data:new Uint8Array([255,216,255,217]).buffer})));expect(image()).toBeNull();
   await act(async()=>socket.dispatchEvent(new MessageEvent("message",{data:localExploreFrame(viewId,new Uint8Array([255,216,255,217])).buffer})));
+  // Viewport measurement can send a debounced resize between an action and
+  // its assertion. Check exactly the new action commands, not timer ordering.
+  const actionCommandsSince = (start: number) => socket.send.mock.calls.slice(start)
+    .map(([payload]) => JSON.parse(payload)).filter(command => command.type !== "exploreResize");
+  const beforeInput = socket.send.mock.calls.length;
   await act(async()=>image().dispatchEvent(new KeyboardEvent("keydown",{key:"a",bubbles:true,cancelable:true})));
-  expect(JSON.parse(socket.send.mock.calls.at(-1)![0])).toEqual({type:"exploreInput",viewId,input:{type:"text",text:"a"}});
-  await exploreAction();expect(socket.send).toHaveBeenLastCalledWith('{"type":"exploreReturn"}');
+  expect(actionCommandsSince(beforeInput)).toEqual([{type:"exploreInput",viewId,input:{type:"text",text:"a"}}]);
+  const beforeReturn = socket.send.mock.calls.length;
+  await exploreAction();expect(actionCommandsSince(beforeReturn)).toEqual([{type:"exploreReturn"}]);
   state.view=null;await update();expect(image()).toBeNull();await frame();expect(image()).not.toBeNull();expect(connect).toHaveBeenCalledTimes(1);
 });
 

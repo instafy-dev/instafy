@@ -451,3 +451,151 @@ async fn the_stopped_turns_report_ends_the_job_here_only_when_recorded() {
     // A turn that changed nothing has nothing to report.
     assert!(StoppedTurnChanges::of_lost_lease(&anyhow!("lease lost")).is_none());
 }
+
+// A local test, Nov 5: a Stop during the save kept a turn's change to a bound
+// page, but the page open in two places showed it only after a Reload: the
+// turn never got to its own reload. Once the controller records what the
+// stopped turn changed, every view open on that site gets the reload a turn
+// sends after it changes a bound site, from the workspace, with no
+// credential, as after an Undo.
+#[cfg(unix)]
+#[test]
+fn a_change_a_stop_kept_reloads_the_views_open_on_its_site() {
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD_MARKER: &str = "INSTAFY_STOPPED_TURN_RELOAD_TEST_CHILD";
+    const TEST_NAME: &str =
+        "jobs::stopped_turn::tests::a_change_a_stop_kept_reloads_the_views_open_on_its_site";
+
+    // HOME and PATH are process-wide: run in a test process of its own.
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let bin = sandbox.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(sandbox.path().join("home/.instafy")).unwrap();
+        // A stand-in `instafy`: like the binder, its `bind command` is taken
+        // for a folder a binder serves (one with `.bind/server.json`).
+        fs::write(
+            bin.join("instafy"),
+            format!(
+                r#"#!/bin/sh
+echo "args=$* | cwd=$(pwd -P) | job=${{CONTROLLER_ACCESS_TOKEN:-}}" >> '{seen}'
+if [ "$1" = bind ] && [ "$2" = command ] && [ -f "$3/.bind/server.json" ]; then
+  echo '{{"ok":true,"viewers":2}}'
+  exit 0
+fi
+exit 1
+"#,
+                seen = sandbox.path().join("seen").display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(bin.join("instafy"), fs::Permissions::from_mode(0o755)).unwrap();
+        let output = StdCommand::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_MARKER, sandbox.path())
+            .env("HOME", sandbox.path().join("home"))
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("CONTROLLER_ACCESS_TOKEN", "job-token")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed"),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let sandbox = PathBuf::from(std::env::var_os(CHILD_MARKER).unwrap());
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let workspace = runtime.block_on(async {
+        let (mut config, mut received) = controller(StatusCode::OK).await;
+        config.workspace_root = sandbox.join("root");
+        let processor = JobProcessor::new(Arc::new(config.clone()));
+        let job = test_lease_job(Some("feature"), json!({ "prompt_text": "Add a tip" }));
+        let project = job.project_id.unwrap();
+        let workspace = config.project_workspace_dir(&project);
+        fs::create_dir_all(&workspace).unwrap();
+        checkout(&workspace);
+        // A bound page its binder serves, open in someone's view, and
+        // another site nobody has open.
+        fs::create_dir_all(workspace.join("sites/porto/.bind")).unwrap();
+        fs::write(workspace.join("sites/porto/.bind/server.json"), "{}").unwrap();
+        fs::create_dir_all(workspace.join("sites/lisbon/.bind")).unwrap();
+        fs::write(workspace.join("sites/lisbon/.bind/server.json"), "{}").unwrap();
+        fs::write(
+            home.join(".instafy/cli-preview-state.json"),
+            json!({ "version": 1, "previews": [{
+                "previewId": "preview-porto",
+                "projectId": project.to_string(),
+                "localPort": 4180,
+                "path": "/",
+                "pid": std::process::id(),
+                "siteDir": "sites/porto",
+            }]})
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("sites/porto/app.js"),
+            "tip: \"Arrive at opening\"\n",
+        )
+        .unwrap();
+        // The turn's model was done and its save ran when the Stop reached it.
+        let execution = finished_execution(vec![
+            json!({
+                "kind": "apply/files",
+                "files": [{ "path": "sites/porto/app.js", "workspacePath": "sites/porto/app.js", "changeType": "changed", "change": { "type": "changed" } }],
+            }),
+            json!({
+                "kind": "origin/apply",
+                "metadata": { "gitSyncStatus": "synced", "gitRev": "abc1234", "gitBaseRev": "def5678" },
+            }),
+        ]);
+        let changes = StoppedTurnChanges::of_finished_turn(workspace.clone(), &execution)
+            .expect("the turn changed a file");
+        let registration = crate::jobs::tests::test_registration_with_proxy();
+        let client = ControllerClient::new(&config).unwrap();
+        assert!(
+            processor
+                .report_stopped_turn(&client, &registration, &job, &changes)
+                .await
+        );
+        received.try_recv().expect("one end report");
+        workspace
+    });
+
+    let seen = || fs::read_to_string(sandbox.join("seen")).unwrap_or_default();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !seen().contains("args=bind ") && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let reloads: Vec<String> = seen()
+        .lines()
+        .filter(|line| line.starts_with("args=bind "))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        reloads,
+        vec![format!(
+            "args=bind command ./sites/porto reload {{}} | cwd={} | job=",
+            workspace.canonicalize().unwrap().display()
+        )]
+    );
+    drop(runtime);
+}

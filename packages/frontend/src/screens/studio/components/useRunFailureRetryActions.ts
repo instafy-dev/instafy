@@ -212,11 +212,11 @@ export function useRunFailureRetryActions({
       }
       // A continuation of a browser card shows a one-line notice in place of
       // the task it sent, a press of Let Octo continue the button's words in
-      // place of its prompt, and a hand-back a notice in place of its claim
-      // on the browser turn: Try again sends that task again, presses the
-      // button again, or sends the hand-back again. Never the words shown,
-      // which alone would reach Octo as a chat turn with no page, or as the
-      // person's request with nothing the browser turn found.
+      // place of its prompt, and a hand-back is stored with words of its own
+      // in place of its claim on the browser turn: Try again sends that task
+      // again, presses the button again, or sends the hand-back again. Never
+      // those words, which alone would reach Octo as a chat turn with no
+      // page, or as the person's request with nothing the browser turn found.
       const browserCard = readBrowserRequestOf(promptMessage) !== null;
       const handBack = readBrowserHandBackOf(promptMessage) !== null;
       const browserContinuation = browserCard || handBack || isLetOctoContinuePrompt(promptMessage);

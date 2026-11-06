@@ -28,10 +28,14 @@ ARG GZIP_MIN_VERSION=1.13-1+deb13u1
 ARG PCRE2_MIN_VERSION=10.46-1~deb13u2
 ARG SQLITE3_MIN_VERSION=3.46.1-7+deb13u2
 ARG PERL_BASE_MIN_VERSION=5.40.1-6+deb13u1
+# apt 3.0.4 fixes CVE-2026-109518; installing another package does not upgrade it.
+ARG APT_MIN_VERSION=3.0.4
 RUN apt-get update && apt-get install -y --no-install-recommends \
+      apt \
       bsdutils \
       ca-certificates \
       gzip \
+      libapt-pkg7.0 \
       libpcre2-8-0 \
       libsqlite3-0 \
       login \
@@ -40,10 +44,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       util-linux \
     && test -n "${GZIP_MIN_VERSION}" && test -n "${PCRE2_MIN_VERSION}" \
     && test -n "${SQLITE3_MIN_VERSION}" && test -n "${PERL_BASE_MIN_VERSION}" \
+    && test -n "${APT_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' gzip)" ge "${GZIP_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libpcre2-8-0)" ge "${PCRE2_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libsqlite3-0)" ge "${SQLITE3_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' perl-base)" ge "${PERL_BASE_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge "${APT_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libapt-pkg7.0)" ge "${APT_MIN_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 ARG BUILD_ARTIFACT_DIR=release
 COPY --from=builder /src/packages/git-service/target/${BUILD_ARTIFACT_DIR}/git-edge /usr/local/bin/git-edge

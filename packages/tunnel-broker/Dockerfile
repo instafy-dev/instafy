@@ -52,18 +52,25 @@ RUN set -eux; \
 
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime
 LABEL org.opencontainers.image.source="https://github.com/instafy-dev/instafy"
-# Explicitly refresh inherited PCRE2 and perl-base; installing another package does not upgrade them.
+# Explicitly refresh inherited PCRE2, perl-base and apt; installing another package does not upgrade them.
 ARG PCRE2_MIN_VERSION=10.42-1+deb12u1
 ARG PERL_BASE_MIN_VERSION=5.36.0-7+deb12u4
+# apt 2.6.2 fixes CVE-2026-109518.
+ARG APT_MIN_VERSION=2.6.2
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
+      apt \
       libssl3 \
       ca-certificates \
+      libapt-pkg6.0 \
       libpcre2-8-0 \
       perl-base \
   && test -n "${PCRE2_MIN_VERSION}" && test -n "${PERL_BASE_MIN_VERSION}" \
+  && test -n "${APT_MIN_VERSION}" \
   && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libpcre2-8-0)" ge "${PCRE2_MIN_VERSION}" \
   && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' perl-base)" ge "${PERL_BASE_MIN_VERSION}" \
+  && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge "${APT_MIN_VERSION}" \
+  && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libapt-pkg6.0)" ge "${APT_MIN_VERSION}" \
   && rm -rf /var/lib/apt/lists/*
 RUN useradd -u 10001 -r -M tunnel-broker
 WORKDIR /app

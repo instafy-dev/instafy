@@ -9,7 +9,10 @@ use anyhow::{Context, Result};
 use crate::config::GitShardConfig;
 use crate::error::ServiceError;
 
-const INIT_COMMIT_MESSAGE: &str = "instafy: init";
+/// The title History lists for a new space's first version. The runtime
+/// recognizes the seed by it, or by its earlier title `instafy: init`
+/// (runtime-agent `learn.rs`), with its author and its being the only commit.
+const INIT_COMMIT_MESSAGE: &str = "Space created";
 
 const INSTAFY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -687,6 +690,10 @@ mod tests {
         let repo_str = repo_path
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("repo path is not valid utf-8"))?;
+
+        // History lists the seed as the space's first version, in plain words.
+        let subject = String::from_utf8(run_git_stdout(repo_str, &["log", "-1", "--format=%s"])?)?;
+        assert_eq!(subject.trim(), "Space created");
 
         let names = String::from_utf8(run_git_stdout(
             repo_str,

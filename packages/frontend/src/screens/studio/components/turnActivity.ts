@@ -264,10 +264,14 @@ export function checkActivity(value: unknown): StepActivity | null {
 
 /**
  * The activity a runtime attached to this step: only at the top level of an
- * assistant message the agent wrote for this turn's job, never one a person
- * recorded or one nested in its details.
+ * assistant message the agent wrote for this turn's job (or, for a row of
+ * more than one turn, for one of its jobs), never one a person recorded or
+ * one nested in its details.
  */
-export function readStepActivity(message: ChatMessage, jobId: string | null): StepActivity | null {
+export function readStepActivity(
+  message: ChatMessage,
+  jobId: string | readonly string[] | null,
+): StepActivity | null {
   if (message.role !== "assistant" || !isRecord(message.metadata)) {
     return null;
   }
@@ -275,7 +279,8 @@ export function readStepActivity(message: ChatMessage, jobId: string | null): St
   if (metadata.source !== "agent") {
     return null;
   }
-  if (jobId && (typeof metadata.jobId !== "string" || metadata.jobId.trim() !== jobId)) {
+  const jobIds = typeof jobId === "string" ? (jobId ? [jobId] : []) : (jobId ?? []);
+  if (jobIds.length > 0 && (typeof metadata.jobId !== "string" || !jobIds.includes(metadata.jobId.trim()))) {
     return null;
   }
   return checkActivity(metadata.activity);
@@ -311,7 +316,11 @@ export type TurnStep = {
 export type DetailItem =
   | { kind: "step"; id: string; step: TurnStep }
   | { kind: "update"; id: string; message: ChatMessage }
-  /** A browser prompt the person answered, or left: "You allowed a search on visitlisboa.com". */
+  /**
+   * A browser prompt the person answered, or left: "You allowed a search on
+   * visitlisboa.com". Also what the browser did on its own during a step,
+   * for the person's privacy: "Declined cookies on frame.work".
+   */
   | { kind: "approval"; id: string; text: string };
 
 export type BrowserApprovalOutcome = "allowed" | "denied" | "expired";
@@ -341,6 +350,8 @@ export type TurnActivity = {
   summary: string | null;
   stepCount: number;
   details: DetailItem[];
+  /** Someone stopped the turn: its done line says so at once. */
+  stopped?: true;
 };
 
 /** The line before the model has begun, and before its first step. */
@@ -442,6 +453,27 @@ function endedEntry(activity: StepActivity): ActivityEntry | null {
   return known.find((entry) => entry.role !== "quiet") ?? known[0] ?? null;
 }
 
+/**
+ * Whether a step that worked counts an entry whose own result is not the
+ * step's: a command of what the step says it did that ran in a loop, or
+ * beside a run of the same command the step's result is about ("uw add-point
+ * A; uw add-point B"). It counts without a number ("looked up places"), never
+ * as one, and never in a step that failed. Any other such command (a read
+ * before a last command of another kind, a check whose error may stand)
+ * counts for nothing.
+ */
+function countsWithoutItsOwnResult(entry: ActivityEntry, activity: StepActivity, state: StepState): boolean {
+  return (
+    entry.result === "unknown" &&
+    entry.role === "content" &&
+    state === "done" &&
+    (entry.count === null ||
+      [activity, ...activity.also].some(
+        (other) => other !== entry && other.key === entry.key && other.result !== "unknown",
+      ))
+  );
+}
+
 // Steps no runtime labelled (an unlisted command, an older runtime) read as
 // what is sure of their kind, the words the line's own neutral count uses. An
 // unlabelled command may read a file, but as often stops a site by its
@@ -477,7 +509,7 @@ function plural(count: number, one: string, many: string): string {
  * so it is not counted either; when no other step is left, the line says what
  * was tried: "Tried running a command".
  */
-function neutralCounts(allSteps: TurnStep[]): string | null {
+function neutralCounts(allSteps: TurnStep[]): string[] {
   const counted = allSteps.filter((step) => !step.plumbing);
   const steps = counted.filter((step) => step.state !== "failed");
   const commands = steps.filter((step) => step.kind === "command").length;
@@ -501,13 +533,13 @@ function neutralCounts(allSteps: TurnStep[]): string | null {
     edited > 0 ? plural(edited, "edited a file", "edited {n} files") : null,
   ].filter((part): part is string => part !== null);
   if (parts.length > 0) {
-    return parts.join(", ");
+    return parts;
   }
   // A step the person said no to, or left, is named by its answer instead.
   const tried = counted.find(
     (step) => step.state === "failed" && step.activity?.approval !== "denied" && step.activity?.approval !== "expired",
   );
-  return tried ? triedWords(NEUTRAL_LABELS[tried.kind].live) : null;
+  return tried ? [triedWords(NEUTRAL_LABELS[tried.kind].live)] : [];
 }
 
 type Group = {
@@ -522,6 +554,8 @@ type Group = {
   pageKeys: Set<string> | null;
   /** Its steps that named no page key. */
   unkeyed: number;
+  /** One kind of browser step on more than two sites, as one group: how many sites. */
+  sites?: number;
 };
 
 // Browser groups that count pages, not steps: reading the same page twice is
@@ -530,6 +564,7 @@ const PAGE_COUNTED_KEYS = new Set(["browser/read", "browser/open"]);
 // A browser step taken before any site was known ("used the browser").
 const BROWSER_WITHOUT_SITE = "browser/use";
 const BROWSER_READ = "browser/read";
+const BROWSER_OPEN = "browser/open";
 // Browser steps that can take the tab to another page. A look at the page
 // before the first of them that worked is a look at the page the turn started
 // on, which another turn (or another chat) left there.
@@ -565,6 +600,9 @@ function groupCount(group: Group): number | null {
  */
 function groupWords(group: Group, previousHost: string | null): string {
   let done = group.entry.done as ActivityDone;
+  if (group.sites !== undefined) {
+    return doneWords(done, groupCount(group)).replace("{host}", `${group.sites} sites`);
+  }
   const host = group.entry.host;
   if (host && host === previousHost) {
     const trim = (form: string) => (form.endsWith(" on {host}") ? form.slice(0, -" on {host}".length) : form);
@@ -614,7 +652,7 @@ function sameStepOnTwoSites(first: Group, second: Group): string | null {
  * is left to say, the line names that look, which worked, and otherwise what
  * was tried ("Tried searching the web").
  */
-function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: string | null } {
+function summarizeGroups(steps: TurnStep[]): { phrases: string[]; firstHost: string | null } {
   const groups = new Map<string, Group>();
   // Looks at the page the browser was on when the turn began.
   const startPage = new Map<string, Group>();
@@ -629,12 +667,16 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
     const lookAtStartPage = firstMove === -1 || index < firstMove;
     // A step the person said no to, or left, is named by its answer instead.
     const declined = step.activity.approval === "denied" || step.activity.approval === "expired";
-    for (const entry of [step.activity, ...step.activity.also]) {
+    const activity = step.activity;
+    for (const ranEntry of [activity, ...activity.also]) {
       // A command the step's result is not about did what its words say, or
-      // did not: it neither counts nor is what the step tried.
-      if (entry.result === "unknown") {
+      // did not: it neither counts nor is what the step tried, unless the
+      // step worked and it ran in a loop or beside a run of the same command
+      // that worked; then it counts without a number ("looked up places").
+      if (ranEntry.result === "unknown" && !countsWithoutItsOwnResult(ranEntry, activity, step.state)) {
         continue;
       }
+      const entry: ActivityEntry = ranEntry.result === "unknown" ? { ...ranEntry, count: null } : ranEntry;
       if (step.state === "failed") {
         if (!tried && !declined && entry.role !== "quiet" && entry.live) {
           tried = entry;
@@ -692,14 +734,15 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
       }
     }
   });
-  const all = [...groups.values()];
-  const weight = (group: Group) => groupCount(group) ?? group.members;
   // "Used the browser" is a browser step before any site was known. Once a
   // step names its site it says nothing more: "Opened 2 pages on
   // visitlisboa.com", not "Used the browser, opened 2 pages on visitlisboa.com".
-  const namesASite = [...all, ...startPage.values()].some(
+  const namesASite = [...groups.values(), ...startPage.values()].some(
     (group) => group.entry.key.startsWith("browser/") && group.entry.host,
   );
+  mergeManySites(groups);
+  const all = [...groups.values()];
+  const weight = (group: Group) => groupCount(group) ?? group.members;
   const contentGroups = all.filter(
     (group) => group.entry.role === "content" && !(namesASite && group.entry.key === BROWSER_WITHOUT_SITE),
   );
@@ -764,17 +807,58 @@ function summarizeGroups(steps: TurnStep[]): { text: string | null; firstHost: s
     // before any step it tried that did not work.
     const looks = [...startPage.values()].sort((a, b) => a.first - b.first);
     return {
-      text: looks.map((group) => groupWords(group, null)).join(", "),
+      phrases: looks.map((group) => groupWords(group, null)),
       firstHost: looks[0].entry.host ?? null,
     };
   }
   if (phrases.length === 0 && tried?.live) {
-    return { text: triedWords(tried.live, tried.host), firstHost: tried.host ?? null };
+    return { phrases: [triedWords(tried.live, tried.host)], firstHost: tried.host ?? null };
   }
   return {
-    text: phrases.length > 0 ? phrases.join(", ") : null,
+    phrases,
     firstHost: shown.find((group) => group.entry.host)?.entry.host ?? null,
   };
+}
+
+/**
+ * Pages opened and read on more than two sites read as one phrase, counted
+ * across them: "Opened 22 pages on 4 sites", never two of the sites and
+ * nothing of the others, so the line counts every site Details lists. A page
+ * read is a page the browser had open, so the phrase says opened when the turn
+ * opened any; reads alone say read ("read 5 pages on 3 sites"). Only words
+ * that end with the site ("opened {n} pages on {host}") can say how many sites
+ * instead.
+ */
+function mergeManySites(groups: Map<string, Group>): void {
+  const pages: Array<[string, Group]> = [];
+  for (const [groupKey, group] of groups) {
+    const { entry } = group;
+    if (!PAGE_COUNTED_KEYS.has(entry.key) || entry.host === undefined || entry.role !== "content") continue;
+    const done = entry.done;
+    if (typeof done !== "object" || !done.other?.endsWith(" on {host}") || !done.some?.endsWith(" on {host}")) continue;
+    pages.push([groupKey, group]);
+  }
+  const sites = new Set(pages.map(([, group]) => group.entry.host));
+  if (sites.size <= 2) return;
+  const members = pages.map(([, group]) => group);
+  const named = members.find((group) => group.entry.key === BROWSER_OPEN) ?? members[0];
+  const pageKeys = new Set(members.flatMap((group) => [...(group.pageKeys ?? [])]));
+  const entry: ActivityEntry = { ...named.entry };
+  delete entry.host;
+  const merged: Group = {
+    entry,
+    known: members.reduce((sum, group) => sum + group.known, 0),
+    unknown: members.some((group) => group.unknown),
+    members: members.reduce((sum, group) => sum + group.members, 0),
+    first: Math.min(...members.map((group) => group.first)),
+    last: Math.max(...members.map((group) => group.last)),
+    paths: null,
+    pageKeys: pageKeys.size > 0 ? pageKeys : null,
+    unkeyed: members.reduce((sum, group) => sum + group.unkeyed, 0),
+    sites: sites.size,
+  };
+  for (const [groupKey] of pages) groups.delete(groupKey);
+  groups.set(`${entry.key}@sites`, merged);
 }
 
 type AnsweredApproval = {
@@ -927,6 +1011,22 @@ export function isBrowserToolStep(step: Pick<TurnStep, "kind" | "message" | "act
   return BROWSER_TOOL_SERVERS.has(server);
 }
 
+/**
+ * What the browser did on its own during a browser step that worked, each as
+ * a row of its own after the step in Details ("Declined cookies on
+ * frame.work"): the step's quiet `also` entries, which the line never names.
+ */
+function browserOwnRows(step: TurnStep, key: string): DetailItem[] {
+  if (step.state !== "done" || !step.activity || !isBrowserToolStep(step)) {
+    return [];
+  }
+  return step.activity.also.flatMap((entry): DetailItem[] =>
+    entry.role === "quiet" && entry.done
+      ? [{ kind: "approval", id: `${key}:${entry.key}`, text: capitalize(doneWords(entry.done, entry.count, entry.host)) }]
+      : [],
+  );
+}
+
 function isBrowserTabsStep(entry: ActivityEntry | null): boolean {
   return Boolean(entry?.key.startsWith("browser/") && entry.step === "tabs");
 }
@@ -965,7 +1065,13 @@ function stepLabel(kind: StepKind, message: ChatMessage, activity: StepActivity 
     return capitalize(BROWSER_TABS_LABEL.done);
   }
   if (entry?.done) {
-    return capitalize(doneWords(entry.done, entry.count, entry.host));
+    // The same command also ran where its own result is not known (earlier
+    // in the step, or in a loop): the step did it more than once, so it reads
+    // "Looked up places", never "Looked up a place".
+    const more = activity !== null && state === "done" &&
+      [activity, ...activity.also].some((other) => other !== entry && other.key === entry.key &&
+        countsWithoutItsOwnResult(other, activity, state));
+    return capitalize(doneWords(entry.done, more ? null : entry.count, entry.host));
   }
   if (unlabelledBrowserStep) {
     return capitalize(BROWSER_NEUTRAL_LABEL.done);
@@ -990,8 +1096,14 @@ function stepKindOf(message: ChatMessage): StepKind | null {
   return kind;
 }
 
+/** The job a step's message was written for. */
+function stepJobId(step: TurnStep): string | null {
+  const jobId = isRecord(step.message.metadata) ? step.message.metadata.jobId : null;
+  return typeof jobId === "string" && jobId.trim() ? jobId.trim() : null;
+}
+
 /** One step as Details shows it, or null when the message is not a step. */
-export function turnStepFromMessage(message: ChatMessage, jobId: string | null): TurnStep | null {
+export function turnStepFromMessage(message: ChatMessage, jobId: string | readonly string[] | null): TurnStep | null {
   const kind = stepKindOf(message);
   if (!kind) {
     return null;
@@ -1195,7 +1307,7 @@ export function readTurnStepsRecord(message: ChatMessage, jobId: string | null):
     if (!isRecord(value) || typeof value.type !== "string" || !STEP_TYPES[value.type]) {
       return null;
     }
-    const details: Record<string, unknown> = { itemId: `recorded-${index}` };
+    const details: Record<string, unknown> = { itemId: `recorded-${jobId}-${index}` };
     if (typeof value.status === "string") details.status = value.status;
     if (typeof value.exitCode === "number" && Number.isInteger(value.exitCode)) details.exitCode = value.exitCode;
     if (Array.isArray(value.paths)) details.paths = value.paths.filter((path) => typeof path === "string");
@@ -1221,6 +1333,12 @@ export function readTurnStepsRecord(message: ChatMessage, jobId: string | null):
 
 export type SummarizeTurnActivityOptions = {
   jobId: string | null;
+  /**
+   * The turns a row of more than one shows, oldest first (a browser turn,
+   * then the hand-back that went on from it): a step of any of them counts,
+   * and the done line names each one's part in turn.
+   */
+  turnJobIds?: readonly string[];
   phase: TurnActivityPhase;
   /** The person viewing can answer a request the turn waits on. */
   viewerCanAnswer?: boolean;
@@ -1244,6 +1362,8 @@ export function summarizeTurnActivity(
   options: SummarizeTurnActivityOptions,
 ): TurnActivity {
   const { jobId, phase } = options;
+  const turnJobIds = options.turnJobIds && options.turnJobIds.length > 1 ? options.turnJobIds : null;
+  const stepJobIds = turnJobIds ?? jobId;
   const stepIndexByKey = new Map<string, number>();
   const steps: TurnStep[] = [];
   // Where each step's newest message sits in the thread.
@@ -1271,7 +1391,7 @@ export function summarizeTurnActivity(
     if (kind) {
       newestOtherIndex = index;
       const key = stepKey(message, kind);
-      const step = turnStepFromMessage(message, jobId) as TurnStep;
+      const step = turnStepFromMessage(message, stepJobIds) as TurnStep;
       const existing = stepIndexByKey.get(key);
       if (existing !== undefined) {
         // The newest message of a step stands for it (started, then completed).
@@ -1286,7 +1406,7 @@ export function summarizeTurnActivity(
       return;
     }
     if (isRuntimeStatus(message)) {
-      const activity = readStepActivity(message, jobId);
+      const activity = readStepActivity(message, stepJobIds);
       if (activity) {
         newestStatus = { index, activity };
         if (activity.key === SAVE_KEY) {
@@ -1325,14 +1445,16 @@ export function summarizeTurnActivity(
     }
     const step = steps[stepIndexByKey.get(item.key) ?? 0];
     const approval = step.state === "running" ? null : stepAnsweredApproval(step.activity);
+    const own = browserOwnRows(step, item.key);
     if (!approval) {
-      return [{ kind: "step", id: item.key, step }];
+      return [{ kind: "step", id: item.key, step }, ...own];
     }
     answered.push(approval);
-    return [
-      { kind: "step", id: item.key, step },
-      { kind: "approval", id: `approval:${item.key}`, text: capitalize(approvalWords(approval, null)) },
-    ];
+    const answer: DetailItem = { kind: "approval", id: `approval:${item.key}`, text: capitalize(approvalWords(approval, null)) };
+    // A step the person said no to, or left, did not happen: its answer is
+    // its one row ("You said no to a click on httpbin.org"), never also a
+    // step that was tried.
+    return approval.outcome === "allowed" ? [{ kind: "step", id: item.key, step }, answer, ...own] : [answer];
   });
   if (answered.length === 0) {
     for (const approval of options.approvals ?? []) {
@@ -1384,9 +1506,20 @@ export function summarizeTurnActivity(
       live = THINKING_LINE;
     }
   } else {
-    const groups = summarizeGroups(byLastChange.map((index) => steps[index]));
-    const clause = approvalsClause(answered, groups.firstHost);
-    const done = [groups.text ?? neutralCounts(steps), clause].filter((part): part is string => Boolean(part)).join(" · ");
+    const ended = byLastChange.map((index) => steps[index]);
+    // A row of more than one turn reads as one answer: each turn's part
+    // leads with what it did most, in the order they ran ("Opened 4 pages on
+    // visitasevilla.es, built the map"). A part that did nothing to name
+    // leaves the line to the other.
+    const parts = (turnJobIds ? turnJobIds.map((turnJobId) => ended.filter((step) => stepJobId(step) === turnJobId)) : [ended])
+      .map((partSteps) => {
+        const groups = summarizeGroups(partSteps);
+        return { phrases: groups.phrases.length > 0 ? groups.phrases : neutralCounts(partSteps), firstHost: groups.firstHost };
+      })
+      .filter((part) => part.phrases.length > 0);
+    const phrases = parts.length > 1 ? parts.map((part) => part.phrases[0]!) : (parts[0]?.phrases ?? []);
+    const clause = approvalsClause(answered, parts[0]?.firstHost ?? null);
+    const done = [phrases.join(", "), clause].filter((part): part is string => Boolean(part)).join(" · ");
     if (phase === "cancelled") {
       summary = done ? `Stopped · ${done}` : "Stopped";
     } else {
@@ -1394,5 +1527,5 @@ export function summarizeTurnActivity(
     }
   }
 
-  return { live, summary, stepCount, details };
+  return { live, summary, stepCount, details, ...(phase === "cancelled" ? { stopped: true as const } : {}) };
 }

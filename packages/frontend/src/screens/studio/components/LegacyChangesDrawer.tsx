@@ -45,8 +45,10 @@ import {
   formatRelativeCommitTime,
   getStatusBadge,
   parseSavedVersionSubject,
+  withOneSpaceCreated,
 } from "./workspaceGitReviewShared";
 import { PROGRAMMATIC_FOCUS_CLASS, restoreLostFocus } from "./historyFocus";
+import { resolveHistoryAuthor } from "./versioningCopy";
 import { useWorkspaceAvailability } from "../../../workspace/WorkspaceAvailabilityProvider";
 
 const LARGE_CHANGESET_THRESHOLD = 150;
@@ -172,7 +174,7 @@ export function LegacyChangesDrawer({
   const visibleDirtyPaths = useMemo(() => dirtyPaths.map((entry) => entry.path), [dirtyPaths]);
   const supported = status?.supported === true;
   const dirtyCount = supported ? (status?.dirtyCount ?? dirtyPaths.length) : 0;
-  const historyEntries = history?.entries ?? [];
+  const historyEntries = useMemo(() => withOneSpaceCreated(history?.entries ?? []), [history?.entries]);
   const historySupported = history !== null && history.supported !== false;
   const historyHeadLabel =
     typeof history?.branch === "string" && history.branch.trim().length > 0
@@ -1551,9 +1553,13 @@ export function LegacyChangesDrawer({
                         <div className="flex flex-col gap-1">
                           {historyEntries.map((entry) => {
                             const parsed = parseSavedVersionSubject(entry.subject);
+                            // Instafy's own versions are titled in plain words now
+                            // ("Add a tip", "Space created"): its address marks them.
+                            const systemLabel =
+                              parsed.systemLabel ?? (resolveHistoryAuthor(entry).kind === "service" ? "Instafy" : null);
                             const expanded = expandedHistoryCommits.has(entry.commit);
                             const authorLabel = entry.authorName || entry.authorEmail || "Instafy";
-                            const showAuthorLabel = parsed.systemLabel === null;
+                            const showAuthorLabel = systemLabel === null;
                             return (
                               <div
                                 key={entry.commit}
@@ -1571,9 +1577,9 @@ export function LegacyChangesDrawer({
                                     data-testid="source-control-history-review"
                                   >
                                     <div className="flex min-w-0 flex-1 items-center gap-2">
-                                      {parsed.systemLabel ? (
+                                      {systemLabel ? (
                                         <span className="rounded-full border border-sky-300/70 bg-sky-50 px-2 py-0.5 text-3xs font-semibold uppercase tracking-[0.18em] text-sky-700 dark:border-sky-400/40 dark:bg-sky-500/10 dark:text-sky-200">
-                                          {parsed.systemLabel}
+                                          {systemLabel}
                                         </span>
                                       ) : null}
                                       {entry.resolvedBy ? (

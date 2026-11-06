@@ -195,6 +195,58 @@ try {
     await page.context().close();
   }
 
+  // ---------- 1b. blank: each block a page puts straight in its list keeps the theme's gap (two cards never touch),
+  // and a button, a segmented control, a picture or a sentence with a link keeps its own size and line ----------
+  {
+    const dir = makeSite("blank-two-cards", "blank");
+    fs.writeFileSync(path.join(dir, "app.js"), `(function () {
+  site.start({ data: null, render: function () {
+    site.head({ title: "Livraria visit" });
+    var h = site.h;
+    var picture = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='48' height='48'%3E%3Crect width='48' height='48' fill='%23888'/%3E%3C/svg%3E";
+    document.getElementById("list").replaceChildren(
+      h("section", { className: "card", id: "card-hours" }, h("h2", { text: "Opening hours" }), h("p", { text: "Daily, 09:00-19:30." })),
+      h("section", { className: "card", id: "card-route" }, h("h2", { text: "Getting there" }), h("p", { text: "A short walk from the station." })),
+      h("p", { className: "cap", id: "list-note", text: "Checked today." }),
+      h("ul", { className: "list", id: "list-rows" }, h("li", { text: "Ground floor" }), h("li", { text: "Upper floor" })),
+      h("div", { className: "seg", id: "list-seg", attrs: { role: "radiogroup", "aria-label": "Day" } },
+        h("label", null, h("input", { attrs: { type: "radio", name: "day", checked: true } }), h("span", { text: "Today" })),
+        h("label", null, h("input", { attrs: { type: "radio", name: "day" } }), h("span", { text: "Tomorrow" }))),
+      h("p", { className: "cap", id: "list-after", text: "Pick a day." }),
+      h("button", { className: "btn primary", id: "list-go", text: "Plan the visit", attrs: { type: "button" } }),
+      " Opens at ", h("a", { id: "list-link", attrs: { href: "#card-hours" }, text: "nine" }), ".",
+      h("img", { id: "list-pic", attrs: { alt: "", src: picture } }));
+  } });
+})();
+`);
+    const binder = await serve(dir);
+    for (const [width, height, size] of [[390, 844, "phone"], [1280, 800, "laptop"]]) {
+      const page = await open(`${binder.url}/`, { width, height });
+      await page.waitForFunction(() => document.getElementById("list-pic").complete);
+      const drawn = await page.evaluate(() => {
+        const box = (id) => document.getElementById(id).getBoundingClientRect();
+        const gap = (above, below) => Math.round(box(below).top - box(above).bottom);
+        const link = document.getElementById("list-link");
+        const words = document.createRange();
+        words.selectNodeContents(link.previousSibling);
+        return {
+          gaps: [gap("card-hours", "card-route"), gap("card-route", "list-note"), gap("list-note", "list-rows"),
+            gap("list-rows", "list-seg"), gap("list-seg", "list-after")],
+          narrower: ["list-go", "list-seg"].map((id) => box(id).width < box("list").width),
+          picture: [Math.round(box("list-pic").width), Math.round(box("list-pic").height)],
+          linkOnItsLine: Math.abs(Math.round(link.getBoundingClientRect().top - words.getBoundingClientRect().top)) <= 2,
+        };
+      });
+      eq(drawn.gaps, [12, 12, 12, 12, 12], `blank ${size}: each block in the list (cards, a line, a list, a segmented control) is 12 px under the one before`);
+      eq(drawn.narrower, [true, true], `blank ${size}: a button and a segmented control in the list keep their own width`);
+      eq(drawn.picture, [48, 48], `blank ${size}: a picture in the list keeps its own size`);
+      eq(drawn.linkOnItsLine, true, `blank ${size}: a link in a sentence in the list stays on the sentence's line`);
+      eq(page.errors, [], `blank ${size}: no console errors`);
+      if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `blank-two-cards-${size}.png`), fullPage: true });
+      await page.context().close();
+    }
+  }
+
   // ---------- 2. compare: query state, select, trust states, the row's one action ----------
   const compareDir = makeSite("compare-live", "compare", (data, dir) => {
     data.filter = { key: "price", max: 140, label: "Under $140", rest: "over $140" };
@@ -556,7 +608,7 @@ try {
       ok(/Not counted as €600 or less/.test(await page.locator("#group-unknown").innerText()), `${label}: and that they are not counted as within the limit`);
       ok(/1 more over €600 · Show/.test(await text(page)), `${label}: the row over the limit leaves one line`);
       const none = (await page.locator("#row-none").innerText()).replace(/\s+/g, " ");
-      ok(/Not listed/.test(none) && /checked 27 Oct( 2026)? on maker\.example ↗/.test(none), `${label}: a page without the price says so and cites it: ${none}`);
+      ok(/Not found/.test(none) && !/Not listed/.test(none) && /checked 27 Oct( 2026)? on maker\.example ↗/.test(none), `${label}: a page read without the price says where it was looked for and cites it: ${none}`);
       ok(!/—/.test(none), `${label}: a dash is never drawn as a value: ${none}`);
       const blocked = (await page.locator("#row-blocked").innerText()).replace(/\s+/g, " ");
       ok(/(Price unknown|Unknown) · shop-two\.example blocks automated price checks/.test(blocked), `${label}: a blocked shop says why: ${blocked}`);
@@ -982,9 +1034,9 @@ try {
     eq(await off.locator("button", { hasText: /Check/ }).count(), 0, "no check buttons without a binder");
     ok(await off.locator(".trust a", { hasText: /^Open .+ ↗$/ }).count() >= 1, "each row links its store instead");
     eq(await emptyLines(off), [], "no empty line before a store link in a price cell");
-    // looked for and not there is "Not listed" with where and when it was looked for; never a blank cell
+    // looked for and not found is "Not found" with where and when it was looked for; never a blank cell
     const b = await off.locator("#row-option-b").innerText();
-    ok(/Not listed · checked 17 Oct( 2026)? on example\.com ↗/.test(b.replace(/\s+/g, " ").replace(/listed checked/, "listed · checked")) && !/Not checked|Unknown/.test(b), `a value the source does not give: Not listed (${b.replace(/\s+/g, " ")})`);
+    ok(/Not found · checked 17 Oct( 2026)? on example\.com ↗/.test(b.replace(/\s+/g, " ").replace(/found checked/, "found · checked")) && !/Not checked|Unknown/.test(b), `a value not found on the source: Not found (${b.replace(/\s+/g, " ")})`);
     ok(await off.locator("#row-option-b td:nth-child(5) .trust a", { hasText: /^example\.com ↗$/ }).count() === 1, "it links the page that was read");
     // one link pattern at two weights: a cited source is quiet (caption colour), an action ("Open Store ↗") is in the
     // link colour; both are underlined
@@ -998,15 +1050,15 @@ try {
     eq(off.errors.filter((e) => !/404|Failed to load resource/.test(e)), [], "no script errors without a binder");
     await off.context().close();
 
-    // a caption too long for its cell breaks before a " · ", never inside "Not listed" ("Not" / "listed · …"):
+    // a caption too long for its cell breaks before a " · ", never inside "Not found" ("Not" / "found · …"):
     // a short part keeps its dot with it, so the break must come before the dot
     const longSrc = await staticServer(makeSite("long-source", "compare", (d) => ({ ...d, items: d.items.map((i) => i.ref !== "option:option-b" ? i : { ...i, facts: { ...i.facts, warranty: { ...i.facts.warranty, src: "Maker's product spec sheet" } } }) })));
     const ls = await open(`${longSrc}/`, { width: 1024, height: 800 });
     const lines = await ls.evaluate(() => {
-      const part = [...document.querySelectorAll("#row-option-b .trust .part")].find((p) => p.textContent === "Not listed");
+      const part = [...document.querySelectorAll("#row-option-b .trust .part")].find((p) => p.textContent === "Not found");
       return part ? part.getClientRects().length : -1;
     });
-    eq(lines, 1, "\"Not listed\" stays on one line when its source wraps");
+    eq(lines, 1, "\"Not found\" stays on one line when its source wraps");
     eq(await dotLines(ls), [], "a wrapped caption starts its new line without a dot, and no line ends in one");
     await ls.context().close();
     const lsPhone = await open(`${longSrc}/`, { width: 390, height: 844 });

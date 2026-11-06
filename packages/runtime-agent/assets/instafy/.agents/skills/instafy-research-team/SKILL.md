@@ -72,4 +72,4 @@ the existing limits, without changing assumptions or repeating other workers' co
   `instafy bind check <site> --expect "<items>"`. Add what is missing; one still missing is named in the reply with
   why. A failing check never holds the card back.
 - Reply per the hub's step 4. An item the page leaves out is said plainly, never a shorter list presented as the
-  answer; suggest "Add <item>" for it among the 2-3 suggested replies.
+  answer, and offer to add it.

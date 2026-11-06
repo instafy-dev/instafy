@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_PROJECT_AI_MODEL } from "../../../../ai/modelDefaults";
@@ -13,6 +13,7 @@ import {
   expectPersonCircle,
 } from "../../../../components/__tests__/octoCoinExpectations";
 import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
+import { toastArea, useToastAreaRef } from "../../../../status/toastClearance";
 import {
   clearChatParticipants,
   publishChatParticipants,
@@ -33,6 +34,12 @@ vi.mock("../../../../workspace/WorkspaceTabsProvider", async (importOriginal) =>
   ...(await importOriginal<typeof import("../../../../workspace/WorkspaceTabsProvider")>()),
   useWorkspaceTabs: () => ({ openConversationTab: vi.fn(), openPanelTab: vi.fn(), requestUrlPush: vi.fn() }),
 }));
+
+/** Studio's workspace, which the drawer lies over, as StudioLayout registers it for toasts. */
+function Workspace({ children }: { children?: ReactNode }) {
+  const ref = useToastAreaRef<HTMLDivElement>(true);
+  return <div ref={ref} data-testid="workspace">{children}</div>;
+}
 
 function snapshot(overrides: Partial<ChatParticipantsSnapshot> = {}): ChatParticipantsSnapshot {
   return {
@@ -378,6 +385,32 @@ describe("ParticipantsDrawer", () => {
     const drawer = container.querySelector('[data-testid="participants-drawer"]');
     expect(drawer?.textContent).not.toContain("Running");
     expect(container.querySelector('[data-testid="participants-drawer-summary"]')).toBeNull();
+  });
+
+  // Centred over the whole workspace, a toast in a 999 px window covered 176
+  // px of the open drawer.
+  it("keeps toasts left of it while it is open", async () => {
+    const box = (left: number, right: number) =>
+      ({ top: 0, bottom: 1041, left, right, width: right - left, height: 1041, x: left, y: 0, toJSON: () => ({}) }) as DOMRect;
+    // A 999 px window: the workspace starts right of a 304 px sidebar, and the
+    // drawer is its last 300 px.
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.dataset.testid === "workspace") return box(304, 999);
+      if (this.dataset.testid === "participants-drawer") return box(699, 999);
+      return box(0, 0);
+    });
+    await act(async () => {
+      publishChatParticipants(snapshot());
+    });
+    await act(async () => {
+      root.render(<Workspace><ParticipantsDrawer onClose={vi.fn()} /></Workspace>);
+    });
+    expect(toastArea()).toEqual({ left: 304, width: 395 });
+    await act(async () => {
+      root.render(<Workspace />);
+    });
+    expect(toastArea()).toEqual({ left: 304, width: 695 });
+    rect.mockRestore();
   });
 
   it("closes via the header button and Escape", async () => {

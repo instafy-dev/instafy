@@ -365,6 +365,18 @@ const SPACE_DELETED_CODE: &str = "space_deleted";
 #[error("the controller refused the runtime: its space was deleted")]
 pub struct SpaceDeleted;
 
+/// The controller's answer that a job is not this runtime's to run any more: its secrets
+/// request came back 400 (the job is not leased: a Stop cancelled it), 401 (its lease ended, or
+/// is another runtime's, once a renewed agent token was tried) or 404 (no such job). Its words
+/// say the lease was lost, which is how the job loop reads an error
+/// (`agent_executor::is_lease_lost`).
+#[derive(Debug, thiserror::Error)]
+#[error("job lease lost: agent secrets request failed: status={status} body={body}")]
+pub struct JobNoLongerLeased {
+    pub status: StatusCode,
+    pub body: String,
+}
+
 #[derive(Deserialize)]
 struct RefusalCode {
     code: Option<String>,
@@ -1313,6 +1325,12 @@ impl ControllerClient {
             }
         }
 
+        if matches!(
+            status,
+            StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND
+        ) {
+            return Err(JobNoLongerLeased { status, body: text }.into());
+        }
         if !status.is_success() {
             return Err(anyhow!(
                 "agent secrets request failed: status={} body={}",
@@ -1611,6 +1629,59 @@ impl ControllerClient {
             let text = response.text().await.unwrap_or_default();
             return Err(anyhow!(
                 "preview picture request failed: status={} body={}",
+                status,
+                text.chars().take(300).collect::<String>()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Drops the picture on the card of a preview this runtime serves, and
+    /// the page description that came with it (`DELETE
+    /// /projects/:id/previews/:previewId/thumbnail`), when a check of its
+    /// changed site kept no new picture: the card then shows the site's title
+    /// alone. With this runtime's own credential, as a picture is sent, and
+    /// tried again after a credential renewal only while `still_newest` says
+    /// no newer picture was taken meanwhile.
+    pub async fn clear_preview_picture(
+        &self,
+        project_id: Uuid,
+        preview_id: &str,
+        still_newest: crate::jobs::preview_pictures::StillNewest<'_>,
+    ) -> Result<()> {
+        if !crate::jobs::preview_pictures::is_preview_id(preview_id) {
+            return Err(anyhow!("not a preview id"));
+        }
+        let url = self.base_url.join(&format!(
+            "/projects/{project_id}/previews/{preview_id}/thumbnail"
+        ))?;
+        let send = |token: String| self.http.delete(url.clone()).bearer_auth(token).send();
+        let token = self.read_runtime_access_token().ok_or_else(|| {
+            anyhow!("this runtime has no credential to drop a preview's picture with")
+        })?;
+        let mut response = send(token)
+            .await
+            .context("preview picture drop request failed")?;
+        if matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) && self.refresh_credentials_once().await
+            && let Some(token) = self.read_runtime_access_token()
+        {
+            if !still_newest() {
+                return Err(anyhow!(
+                    "a newer picture of the preview was taken while its old one waited to be dropped"
+                ));
+            }
+            response = send(token)
+                .await
+                .context("preview picture drop retry request failed")?;
+        }
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "preview picture drop request failed: status={} body={}",
                 status,
                 text.chars().take(300).collect::<String>()
             ));
@@ -2135,6 +2206,76 @@ mod tests {
         assert!(
             client
                 .upload_preview_picture(project, "tun_01-map", &jpeg, None, &newer_since)
+                .await
+                .is_err()
+        );
+        renewal.await.unwrap();
+        assert_eq!(requests().len(), 1);
+        server.abort();
+    }
+
+    // A check of a changed site kept no picture: the card's old one is dropped
+    // with this runtime's own credential, as a picture is sent. A preview id
+    // that is not plain goes nowhere; a refused credential is renewed and the
+    // drop asked again once, and not at all when a newer picture was taken
+    // while it waited.
+    #[tokio::test]
+    async fn a_preview_picture_is_dropped_with_the_runtimes_own_credential() {
+        let stand_in = PictureStandIn::default();
+        let (client, server, _workspace) = picture_client(&stand_in).await;
+        let project = Uuid::new_v4();
+        let newest = || true;
+        let requests = || std::mem::take(&mut *stand_in.requests.lock().unwrap());
+        let refuse_next = |statuses: &[u16]| stand_in.statuses.lock().unwrap().extend(statuses);
+        let renew = |token: &'static str| {
+            let store = client.runtime_token_handle();
+            tokio::spawn(async move {
+                store.refresh_requested().await;
+                store.store(token.to_string());
+            })
+        };
+
+        client
+            .clear_preview_picture(project, "tun_01-map", &newest)
+            .await
+            .unwrap();
+        assert_eq!(
+            requests(),
+            vec![(
+                "DELETE".to_string(),
+                format!("/projects/{project}/previews/tun_01-map/thumbnail"),
+                "Bearer runtime-token".to_string(),
+                JsonValue::Null,
+            )]
+        );
+
+        assert!(
+            client
+                .clear_preview_picture(project, "../agent/complete", &newest)
+                .await
+                .is_err()
+        );
+        assert!(requests().is_empty());
+
+        refuse_next(&[401]);
+        let renewal = renew("renewed-token");
+        client
+            .clear_preview_picture(project, "tun_01-map", &newest)
+            .await
+            .unwrap();
+        renewal.await.unwrap();
+        let bearers: Vec<String> = requests().into_iter().map(|request| request.2).collect();
+        assert_eq!(
+            bearers,
+            vec!["Bearer runtime-token", "Bearer renewed-token"]
+        );
+
+        refuse_next(&[401]);
+        let renewal = renew("third-token");
+        let newer_since = || false;
+        assert!(
+            client
+                .clear_preview_picture(project, "tun_01-map", &newer_since)
                 .await
                 .is_err()
         );

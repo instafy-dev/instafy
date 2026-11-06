@@ -352,6 +352,61 @@ describe("conversation commands", () => {
     }
   });
 
+  async function searchWithController(conversations: MockConversation[], query: string, json = true) {
+    const projectId = randomUUID();
+    const server = startMockController(projectId, conversations);
+    await once(server, "listening");
+    try {
+      const address = server.address() as { port: number };
+      return await execCli([
+        "conversation", "search", query, "--space", projectId,
+        "--server-url", `http://127.0.0.1:${address.port}`,
+        "--access-token", "controller-token", ...(json ? ["--json"] : []),
+      ]);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+
+  it.each([1, 25])("returns no search matches among %i unrelated recent conversations", async (count) => {
+    const conversations = Array.from({ length: count }, () => ({
+      id: randomUUID(), title: "Fruit planning", preview: "Pears and apples",
+      messages: [{ role: "user", content: "Compare fruit varieties." }],
+    }));
+    const result = await searchWithController(conversations, "quasar_nonexistent");
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ query: "quasar_nonexistent", matches: [] });
+  });
+
+  it("prints a no-match message instead of unrelated conversations", async () => {
+    const result = await searchWithController([
+      { id: randomUUID(), title: "Fruit planning" },
+    ], "quasar_nonexistent", false);
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain('No conversations matched "quasar_nonexistent".');
+    expect(result.stdout).not.toContain("Fruit planning");
+  });
+
+  it.each(["", "   "])("rejects an empty search query %j", async (query) => {
+    const result = await searchWithController([{ id: randomUUID(), title: "Fruit planning" }], query);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Search query cannot be empty.");
+  });
+
+  it.each(["title", "preview"] as const)("keeps an older %s match without unrelated recent chats", async (field) => {
+    const matching = { id: randomUUID(), title: "Method notes", [field]: "Fruit varieties" };
+    const conversations = [
+      ...Array.from({ length: 25 }, () => ({ id: randomUUID(), title: "General planning" })),
+      matching,
+    ];
+    const result = await searchWithController(conversations, "fruit");
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout).matches).toEqual([
+      expect.objectContaining({ id: matching.id, matchedIn: [field] }),
+    ]);
+  });
+
   it("searches recent conversations using message content when title and preview do not match", async () => {
     const projectId = randomUUID();
     const conversations: MockConversation[] = [
@@ -401,6 +456,7 @@ describe("conversation commands", () => {
       expect(stdout).toContain('Matches for "fruit"');
       expect(stdout).toContain("Method notes");
       expect(stdout).toContain("match: messages");
+      expect(stdout).not.toContain("General planning");
     } finally {
       server.close();
     }
@@ -509,6 +565,44 @@ describe("conversation commands", () => {
       server.close();
     }
   }
+
+  it("rejects an unmatched title instead of showing the sole unrelated conversation", async () => {
+    const { other } = twoConversations();
+    const requests: string[] = [];
+    const result = await showWithEnv(randomUUID(), [other], ["quasar_nonexistent"], {}, requests);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain('No conversations matched "quasar_nonexistent".');
+    // Search may inspect recent messages, but must not then fetch them again as a selected chat.
+    expect(requests.filter((url) => url.includes("/messages"))).toHaveLength(1);
+  });
+
+  it("shows a conversation matched only by its recent messages", async () => {
+    const { current, other } = twoConversations();
+    const result = await showWithEnv(randomUUID(), [current, other], ["summarize"], {});
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      conversation: { id: other.id, matchedIn: ["messages"] },
+      messages: [{ content: "Please summarize the fruit ideas." }],
+    });
+  });
+
+  it("requires a choice between similarly matching titles", async () => {
+    const conversations = [
+      { id: randomUUID(), title: "Fruit planning" },
+      { id: randomUUID(), title: "Fruit recipes" },
+      { id: randomUUID(), title: "General planning" },
+    ];
+    const requests: string[] = [];
+    const result = await showWithEnv(randomUUID(), conversations, ["fruit"], {}, requests);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain('Multiple conversations match "fruit".');
+    expect(result.stderr).toContain(conversations[0].id);
+    expect(result.stderr).toContain(conversations[1].id);
+    expect(result.stderr).not.toContain(conversations[2].id);
+    expect(requests.filter((url) => url.includes("/messages"))).toHaveLength(0);
+  });
 
   it("shows the current conversation from INSTAFY_CONVERSATION_ID when no target is given", async () => {
     const projectId = randomUUID();

@@ -26,7 +26,7 @@ use crate::origins::{
 };
 use crate::project_memory_origin::{
     bootstrap_write_via_origin, read_origin_snapshot, BootstrapWriteOutcome, OriginBootstrapTarget,
-    OriginReadSnapshot, ProjectMemoryWriteFile,
+    OriginReadSnapshot, ProjectMemoryWriteFile, DEFAULTS_REFRESHED_TITLE, SPACE_CREATED_TITLE,
 };
 use crate::state::{
     publish_project_access_changed, publish_project_deleted, publish_project_signal, AppState,
@@ -6044,6 +6044,7 @@ async fn bootstrap_project_memory_scaffold(
                     300,
                 )?;
 
+                let title = project_memory_version_title(&first);
                 let outcome = bootstrap_write_via_origin(
                     &OriginBootstrapTarget {
                         http: &task_state.http_client,
@@ -6056,6 +6057,7 @@ async fn bootstrap_project_memory_scaffold(
                     lease_id,
                     &paths,
                     first,
+                    title,
                     plan_project_memory_writes,
                 )
                 .await?;
@@ -6151,6 +6153,21 @@ fn project_memory_bootstrap_paths() -> Vec<String> {
         )
         .map(str::to_string)
         .collect()
+}
+
+/// The title History lists for a bootstrap's write: a space's first, made
+/// before any bootstrap recorded what it wrote, is part of making the space;
+/// a later one brings the defaults' newer versions.
+fn project_memory_version_title(snapshot: &OriginReadSnapshot) -> &'static str {
+    if snapshot
+        .content(PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH)
+        .is_none()
+        && !snapshot.is_unreadable(PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH)
+    {
+        SPACE_CREATED_TITLE
+    } else {
+        DEFAULTS_REFRESHED_TITLE
+    }
 }
 
 /// What the bootstrap writes given what the origin holds: missing templates,
@@ -6762,6 +6779,7 @@ mod project_memory_bootstrap_tests {
         let first_plan = plan_project_memory_writes(&first).expect("first plan");
         assert!(first_plan.iter().any(|write| write.path == "AGENTS.md"));
 
+        let title = super::project_memory_version_title(&first);
         let outcome = bootstrap_write_via_origin(
             &target,
             "read-token",
@@ -6769,6 +6787,7 @@ mod project_memory_bootstrap_tests {
             Uuid::new_v4(),
             &paths,
             first,
+            title,
             plan_project_memory_writes,
         )
         .await
@@ -6830,6 +6849,7 @@ mod project_memory_bootstrap_tests {
             .await
             .expect("first read")
             .expect("revision served");
+        let title = super::project_memory_version_title(&first);
         bootstrap_write_via_origin(
             &target,
             "read-token",
@@ -6837,6 +6857,7 @@ mod project_memory_bootstrap_tests {
             Uuid::new_v4(),
             &paths,
             first,
+            title,
             plan_project_memory_writes,
         )
         .await
@@ -7235,6 +7256,42 @@ mod project_memory_bootstrap_tests {
         assert_eq!(origin.state.lock().unwrap().files["AGENTS.md"], theirs);
     }
 
+    /// History lists a space's first write of its managed files as part of
+    /// making the space, and a later one that brings newer defaults as such.
+    #[tokio::test]
+    async fn the_first_write_reads_space_created_and_a_later_one_defaults_refreshed() {
+        let origin = start(StubState::default()).await;
+        assert!(matches!(
+            bootstrap_against(&origin).await,
+            BootstrapWriteOutcome::Seeded { .. }
+        ));
+        // A newer INSTAFY.md ships: the space still holds what the first
+        // write put there, so the next bootstrap replaces it.
+        let older_write = "older template text\n";
+        {
+            let mut stub = origin.state.lock().unwrap();
+            assert_eq!(stub.applies.len(), 1);
+            assert_eq!(stub.applies[0]["commitMessage"], "Space created");
+            stub.files
+                .insert("INSTAFY.md".to_string(), older_write.to_string());
+            let mut managed: Value =
+                serde_json::from_str(&stub.files[PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH])
+                    .expect("managed state JSON");
+            managed["files"]["INSTAFY.md"]["appliedSha256"] = json!(sha256_hex(older_write));
+            stub.files.insert(
+                PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH.to_string(),
+                managed.to_string(),
+            );
+        }
+        assert!(matches!(
+            bootstrap_against(&origin).await,
+            BootstrapWriteOutcome::Seeded { .. }
+        ));
+        let stub = origin.state.lock().unwrap();
+        assert_eq!(stub.applies.len(), 2);
+        assert_eq!(stub.applies[1]["commitMessage"], "Defaults refreshed");
+    }
+
     #[tokio::test]
     async fn an_origin_that_ignores_expected_is_seeded_as_before() {
         // Today's gateway: no headers and `expected` is ignored.
@@ -7271,6 +7328,7 @@ mod project_memory_bootstrap_tests {
             .await
             .expect("first read")
             .expect("revision served");
+        let title = super::project_memory_version_title(&first);
         bootstrap_write_via_origin(
             &target,
             "read-token",
@@ -7278,6 +7336,7 @@ mod project_memory_bootstrap_tests {
             Uuid::new_v4(),
             &paths,
             first,
+            title,
             plan_project_memory_writes,
         )
         .await

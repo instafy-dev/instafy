@@ -1652,9 +1652,13 @@ POST goes out without the prompts for that site. Then a journey planner: under
 routine browsing it chooses a start and an end station by label with no prompt
 and nothing sent, the planner's own button asks once and the route is read; a
 list is named by its own label or the option it holds; a list the page posts
-when it changes reaches only the page's own site; and Ask mode asks for each
-choice, naming the option and the list, or the option alone for a list with no
-label. Last, other lists: one inside its own label is named by the label's own
+when it changes reaches only the page's own site; the same planner under a
+carousel that turns by itself between every snapshot and the step after it
+(which changes the page's snapshot id and nothing its reading lists) still has
+both stations chosen with the snapshot each step returned, a list that changed
+itself is refused by its name and counted, and the planner's button asks once
+with a snapshot from before a turn and the route is read; and Ask mode asks for each choice, naming the option and the
+list, or the option alone for a list with no label. Last, other lists: one inside its own label is named by the label's own
 words, a car list with a "Swift" is no payment field, a list that holds several
 options is left to the person, an option past the first thousand is found, a
 risky choice the person allows and a choice in Octo's own tab send no form
@@ -1691,9 +1695,51 @@ given another field, and the twin left once the one asked about went are not
 used: the step fails without a terminal code, says it asks the person again,
 and its failed command lists their yes and says it went unused (runtime-agent
 ends the run at the second, which its unit tests cover); asked again, the new
-prompt names the form as it is now. A take-over while the prompt waits still
+prompt names the form as it is now. The twin left once the copy Octo read went
+before the step is not used either: nobody is asked, and the step is refused
+by its name as one the page changed under. A take-over while the prompt waits still
 ends the step, and a page that left its site after the yes ends the run with
 `approval_stale`.
+
+After it, `scripts/shared-browser-page-reading-e2e.mjs` reads loopback pages
+whose parts a reading could hide. A details' summary and a tab out of the tab
+order are listed and say whether they are open or selected, and opening one
+reads what it showed, without a prompt; the radio button, box, radio link and
+list option shown chosen say so, and a field's highlighted suggestion does
+not; a planner's list and button waiting for its first field are listed as
+disabled, and a click, a choice or a pause for the person on them is refused
+at once with nothing sent or asked, as a sign-in's pause never names its
+password field turned off; a page of 170 taken seats lists its 80 free ones
+and its button; a
+text area is never named by what it holds. A frame of the page's site and one
+of another site are named by their site, canvases as pictures with no text, a
+tracking frame and an icon not at all, and no word of a frame is read; a
+random-looking frame site under a title with a credential word makes no secret
+screen. A long review with a skip link and a pinned header, the same review as
+a plain-text file, and one paragraph longer than a reading each read to their
+end in parts by following the cut line's scroll, every part within the
+reading's 12,000 characters, and a page whose part in view is out of a
+reading's reach says so. A page of 701 links lists its last one once scrolled
+down, counting those left out, and a closed list of 650 options never crowds
+its form's fields out. Password, card and code fields in a frame or a shadow
+root carry no value into the reading, a key in a shadow root's read-only
+field, or in a control's name the list leaves out, still makes a secret
+screen, and a code drawn in boxes of its own is masked. A section a page marks
+open is not listed, and a click whose middle lands on a form's button or a
+frame inside the control is refused with nothing sent or asked. A cookie banner
+is declined by the browser itself once a page settles, whether a step opened
+the page or Octo looked at it: its own reject button is pressed and never its
+accept or settings, in a banner named after cookies or whose own text speaks
+of them, the step says so once the banner is gone, and the reading is the page
+under it; a banner whose button takes no press yet is pressed and not said to
+be declined; a banner with no reject button, one in a frame, one on a page with
+a sign-in field or with a frame holding card fields, and a dialog about a
+privacy policy on the person's signed-in page that never speaks of cookies are
+left alone. A click under a consent notice the browser could not decline, or
+under a loading screen, is refused at once in words with no call log, and a
+cover that goes a moment after the page moves is waited for. The Personal
+Browser's page bridge, host and redaction have unit tests for the same frames,
+pictures, cut line, states, names, codes and count.
 
 The accompanying UI tests use production React controls with a synthetic native
 host to prove Take over waits for confirmed quiescence, keeps manual state across

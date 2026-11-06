@@ -90,6 +90,10 @@ export interface ChatMessageCommitRange {
   // "git" ranges only: every path the turn's save selected, which includes
   // files the turn changed without listing them (installs, generators).
   savedPaths?: string[];
+  // "git" ranges only: the origin the turn's save went through, which is the
+  // folder of the machine that ran the turn. An Undo of the saved version
+  // brings that folder to the version that undoes it.
+  originId?: string;
 }
 
 // Why the run that produced a message's file changes left them out of the

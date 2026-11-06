@@ -56,20 +56,38 @@ const approvalProtocol = globalThis.__instafyCreateSharedBrowserApprovalProtocol
   browserPageId: EXPECTED_BROWSER_PAGE_ID,
   timeoutMs: process.env.INSTAFY_SHARED_BROWSER_APPROVAL_TIMEOUT_MS,
 });
+// The controls a reading lists, the Personal Browser's kinds among them: a
+// details' summary, which opens its section, and the items of tabs, menus,
+// trees and open lists, which pages often take out of the tab order. A
+// control the page turned off is listed too, as `disabled`, so a button that
+// waits for a form's fields never reads as missing. An element is not listed
+// for `aria-expanded` alone: pages set it on the section a toggle opens too.
 const INTERACTIVE_SELECTOR = [
   "a[href]",
-  "button:not([disabled])",
-  "input:not([type=hidden]):not([disabled])",
-  "textarea:not([disabled])",
-  "select:not([disabled])",
+  "button",
+  "input:not([type=hidden])",
+  "textarea",
+  "select",
+  "details > summary",
   "[role=button]",
   "[role=link]",
   "[role=checkbox]",
   "[role=radio]",
+  "[role=switch]",
   "[role=combobox]",
+  "[role=tab]",
+  "[role=option]",
+  "[role=menuitem]",
+  "[role=menuitemcheckbox]",
+  "[role=menuitemradio]",
+  "[role=treeitem]",
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 const MAX_INTERACTIVE_ELEMENTS = 200;
+// How many of a page's controls one reading judges, in page order, so where a
+// page keeps its hidden ones (a closed list's options) never decides what the
+// list holds. Past it, controls are only counted.
+const MAX_JUDGED_CONTROLS = 5_000;
 const MAX_LABEL_CHARS = 240;
 const MAX_VISIBLE_TEXT_CHARS = 12_000;
 const MAX_URL_CHARS = 4_096;
@@ -95,9 +113,17 @@ const ALLOWED_PRESS_KEYS = new Set([
   " ",
   "Space",
 ]);
+// The words that name a cookie or consent banner's container (its id, class,
+// label or a dialog's title), for the page-side checks: the describer's
+// consent context and a click's cover (clickLandingInPage).
+const CONSENT_NAMES_SOURCE = "cookie|consent|gdpr|rgpd|dsgvo|privacy|datenschutz|privacidade|confidentialit";
 // Regular-expression sources the page-side checks need, the same ones Send
-// page uses. Values are tested in the page and only yes/no answers come back.
-const PAGE_POLICY_SOURCES = Object.freeze(pageCapture.pagePolicySources(redaction));
+// page uses, and the consent names. Values are tested in the page and only
+// yes/no answers come back.
+const PAGE_POLICY_SOURCES = Object.freeze({
+  ...pageCapture.pagePolicySources(redaction),
+  consentNames: CONSENT_NAMES_SOURCE,
+});
 // A document keeps this mark until a new page loads. It makes a page that was
 // a secret screen, or on which a credential step ran, stay withheld across the
 // separate controller processes of one run.
@@ -853,35 +879,167 @@ function shownRuleInPage() {
 // become line breaks and table cells tabs, as in innerText; a closed select
 // shows its chosen option as a word of its own, and one drawn open (a
 // listbox) the options it offers. Field values are never read, and open
-// shadow roots are read where they render.
+// shadow roots are read where they render. What a reading cannot read is
+// named where it shows: a frame by its site ("[frame not read: <site>]"), a
+// canvas as "[picture with no text]". A frame's site is an address, not page
+// text: the text holds a placeholder as long as its marker, and the markers
+// come back apart (`markers`), put in only after the page's own text is
+// masked and judged.
+//
+// A page with more text than `request.window` is read from where the person
+// scrolled it to: the window starts at the first line in view after lines
+// scrolled out above it, so scrolling reaches every part of a long page.
+// Text pinned in view (in a fixed or sticky box, such as a header) moves
+// neither, and a long run of text is kept as lines of at most about
+// SOFT_LINE_CHARS, split between words and joined by a space, each placed
+// where it is drawn, so a long paragraph or a page of plain text is read in
+// parts too. The answer is all the text read (at most `request.limit`
+// characters, from the window's start when that is further), where the window
+// starts and ends in it, how much text is above the window and below it,
+// whether the reading stopped before the page's end, and before the part in
+// view (`beyond`), and how far down the first line below the window is.
 function shownTextInPage(rule, request) {
   const doc = document;
-  if (!doc.body) return "";
+  const nothing = { text: "", start: 0, end: 0, above: 0, below: 0, more: false, beyond: false, scrollBy: null, markers: [] };
+  if (!doc.body) return nothing;
   const limit = Number.isSafeInteger(request && request.limit) ? request.limit : 60_000;
+  const windowChars = Number.isSafeInteger(request && request.window) ? Math.min(request.window, limit) : limit;
+  const SOFT_LINE_CHARS = 1_000;
+  const MAX_MARKERS = 50;
   const skipped = new Set([
-    "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "TEXTAREA", "INPUT", "IFRAME", "FRAME",
-    "OBJECT", "EMBED", "VIDEO", "AUDIO", "CANVAS",
+    "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "TEXTAREA", "INPUT", "VIDEO", "AUDIO",
   ]);
+  const unread = new Set(["IFRAME", "FRAME", "OBJECT", "EMBED", "CANVAS"]);
   const blockLevel = (display) =>
     display !== "table-cell" && /^(?:block|flex|grid|list-item|table|flow-root|-webkit-box)/.test(display);
   const range = doc.createRange();
+  // Whether an element is laid out in a fixed or sticky box: it stays in view
+  // as the page scrolls. One inside a box that scrolls on its own, within
+  // such a box (an app's panel), still moves as that box scrolls.
+  const pinnedBoxes = new Map();
+  const pinnedOf = (element) => {
+    const chain = [];
+    let pinned = false;
+    for (let node = element, depth = 0; rule.isElement(node) && depth < 512; node = rule.flatParent(node), depth += 1) {
+      if (pinnedBoxes.has(node)) {
+        pinned = pinnedBoxes.get(node);
+        break;
+      }
+      chain.push(node);
+      const style = rule.styleOf(node);
+      if (/^(?:auto|scroll|overlay)$/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 1) break;
+      if (style.position === "fixed" || style.position === "sticky") {
+        pinned = true;
+        break;
+      }
+    }
+    for (const node of chain) pinnedBoxes.set(node, pinned);
+    return pinned;
+  };
+  // Kept lines: their text, what joins them to the line before ("\n", or a
+  // space inside a long run of text), whether they lie all above the view,
+  // whether any of them scrolls with the page, and where their first part is
+  // drawn (a box, or a run of a text node, measured when needed).
   const lines = [];
   let line = "";
+  let joiner = "\n";
+  let lineAt = null;
+  let lineAbove = true;
+  let lineFlows = false;
   let size = 0;
-  const flush = () => {
+  // Characters walked past and not kept, before the kept lines.
+  let dropped = 0;
+  let walked = 0;
+  // "top" until a line lies above the view, then "above" until one is in it
+  // again: that line starts the window ("view", at `viewLine`). Only lines that
+  // scroll with the page count.
+  let state = "top";
+  let viewLine = 0;
+  // Characters kept from the window's first line on.
+  let fromView = 0;
+  let stopped = false;
+  const markers = [];
+  // `next` joins the line after this one: "\n", or " " inside a run of text.
+  const flush = (next = "\n") => {
     const finished = line.replace(/\s+$/, "");
     if (finished.trim()) {
-      lines.push(finished);
+      const above = lineFlows && lineAbove;
+      if (lineFlows && state === "top" && above) state = "above";
+      else if (lineFlows && state === "above" && !above) {
+        state = "view";
+        viewLine = lines.length;
+      }
+      lines.push({ text: finished, joiner, at: lineAt, above, flows: lineFlows });
       size += finished.length + 1;
+      walked += finished.length + 1;
+      if (state === "view") fromView += finished.length + 1;
+      // Before the view, and before the window when the kept text is full,
+      // the earliest lines make room.
+      while (size > limit && lines.length > 1 && (state === "above" || (state === "view" && viewLine > 0))) {
+        const first = lines.shift();
+        size -= first.text.length + 1;
+        dropped += first.text.length + 1;
+        if (state === "view") viewLine -= 1;
+      }
+      joiner = next;
+    } else if (next === "\n") {
+      joiner = "\n";
     }
     line = "";
+    lineAt = null;
+    lineAbove = true;
+    lineFlows = false;
+  };
+  const place = (above, at, pinned) => {
+    if (lineAt === null) lineAt = at;
+    if (!pinned) {
+      lineFlows = true;
+      lineAbove = lineAbove && above;
+    }
+  };
+  const topOf = (at) => {
+    if (!at) return null;
+    if (at.box) return at.box.top;
+    range.setStart(at.node, at.start);
+    range.setEnd(at.node, at.end);
+    return range.getBoundingClientRect().top;
   };
   const add = (value, preserve) => {
-    const next = preserve || (line.trim() && !/\s$/.test(line)) ? value : value.replace(/^ +/, "");
+    // Two noncharacters mark the window and the placeholders; page text holds neither.
+    const clean = value.replace(/[\uFFFE\uFFFF]/g, "");
+    const next = preserve || (line.trim() && !/\s$/.test(line)) ? clean : clean.replace(/^ +/, "");
     line += next;
   };
   const space = () => {
     if (line && !/\s$/.test(line)) line += " ";
+  };
+  const full = () =>
+    (state === "top" && size + line.length >= limit) ||
+    (state === "view" && fromView + line.length >= limit) ||
+    walked >= limit * 20;
+  // Where a long piece of text breaks next: before the space (any white space
+  // when it is not preserved) that starts a run of them, at most
+  // SOFT_LINE_CHARS on, else the first one after that; -1 when there is none.
+  const breakOf = (piece, from, preserve) => {
+    if (piece.length - from <= SOFT_LINE_CHARS) return -1;
+    const blank = preserve ? (character) => character === " " : (character) => /\s/.test(character);
+    let at = -1;
+    for (let index = from + SOFT_LINE_CHARS; index > from; index -= 1) {
+      if (blank(piece[index])) {
+        at = index;
+        break;
+      }
+    }
+    if (at < 0) {
+      for (let index = from + SOFT_LINE_CHARS + 1; index < piece.length; index += 1) {
+        if (blank(piece[index])) {
+          at = index;
+          break;
+        }
+      }
+    }
+    while (at > from && blank(piece[at - 1])) at -= 1;
+    return at > from ? at : -1;
   };
   const text = (node) => {
     const parent = rule.flatParent(node);
@@ -895,13 +1053,43 @@ function shownTextInPage(rule, request) {
     }
     if (!rule.textRendered(parent)) return;
     range.selectNodeContents(node);
-    if (!rule.reachable(range.getBoundingClientRect(), parent, "static", doc)) return;
+    const rect = range.getBoundingClientRect();
+    if (!rule.reachable(rect, parent, "static", doc)) return;
+    const pinned = pinnedOf(parent);
     const preserve = /^(?:pre|pre-wrap|break-spaces)$/.test(style.whiteSpace);
     const pieces = preserve || style.whiteSpace === "pre-line" ? raw.split("\n") : [raw];
-    pieces.forEach((piece, index) => {
+    // A text across the view's top edge is placed part by part; elsewhere each
+    // part lies where the whole text does.
+    const across = rect.top < 0 && rect.bottom > 0;
+    const aboveView = (start, end) => {
+      if (!across) return rect.bottom <= 0;
+      range.setStart(node, start);
+      range.setEnd(node, end);
+      const box = range.getBoundingClientRect();
+      return box.height > 0 && box.bottom <= 0;
+    };
+    let offset = 0;
+    for (let index = 0; index < pieces.length; index += 1) {
+      const piece = pieces[index];
       if (index > 0) flush();
-      add(preserve ? piece : piece.replace(/\s+/g, " "), preserve);
-    });
+      let from = 0;
+      do {
+        if (full()) {
+          stopped = true;
+          return;
+        }
+        const cut = breakOf(piece, from, preserve);
+        const to = cut < 0 ? piece.length : cut;
+        if (from > 0) flush(" ");
+        const value = piece.slice(from, to);
+        if (value.trim()) {
+          place(aboveView(offset + from, offset + to), { node, start: offset + from, end: offset + to }, pinned);
+        }
+        add(preserve ? value : value.replace(/\s+/g, " "), preserve);
+        from = cut < 0 ? piece.length : cut + 1;
+      } while (from < piece.length);
+      offset += piece.length + 1;
+    }
   };
   const select = (element) => {
     const chosen = element.multiple || element.size > 1
@@ -913,17 +1101,69 @@ function shownTextInPage(rule, request) {
       .join(", ");
     if (value && rule.elementShown(element)) {
       space();
+      const box = element.getBoundingClientRect();
+      place(box.bottom <= 0, { box }, pinnedOf(element));
       add(value, false);
       space();
     }
   };
+  // What a person sees where the reading cannot look: a frame, named by the
+  // site it shows, or a canvas, named by its own label. Too small to see (a
+  // tracking frame) is nothing.
+  const unreadPart = (element) => {
+    if (!rule.elementShown(element)) return "";
+    const rect = element.getBoundingClientRect();
+    if (element.tagName === "CANVAS") {
+      if (rect.width < 40 || rect.height < 40) return "";
+      const label = String(element.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim().slice(0, 80);
+      return label ? `[picture with no text: ${label}]` : "[picture with no text]";
+    }
+    if (rect.width < 16 || rect.height < 16) return "";
+    let site = "";
+    try {
+      const address = element.tagName === "OBJECT" ? element.data : element.src;
+      const url = new URL(address || "about:blank", doc.baseURI);
+      site = url.protocol === "http:" || url.protocol === "https:"
+        ? url.hostname
+        : url.protocol === "about:" ? doc.location.hostname : "";
+    } catch (_) {
+      site = "";
+    }
+    return site ? `[frame not read: ${site.slice(0, 253)}]` : "[frame not read]";
+  };
   const walk = (node, depth) => {
-    if (size + line.length >= limit || depth > 512) return;
+    if (stopped || depth > 512) return;
+    if (full()) {
+      stopped = true;
+      return;
+    }
     if (node.nodeType === 3) {
       text(node);
       return;
     }
     if (!rule.isElement(node) || skipped.has(node.tagName)) return;
+    if (unread.has(node.tagName)) {
+      const part = unreadPart(node);
+      if (part) {
+        flush();
+        const box = node.getBoundingClientRect();
+        place(box.bottom <= 0, { box }, pinnedOf(node));
+        if (node.tagName === "CANVAS" || part === "[frame not read]") {
+          // A canvas's label is page text, masked and judged as the rest is.
+          add(part, false);
+        } else if (markers.length < MAX_MARKERS) {
+          // A frame's site is an address, never page text: a placeholder of
+          // the marker's length holds its place (a noncharacter, the marker's
+          // number, and more noncharacters).
+          line += `\uFFFE${String.fromCharCode(0xE000 + markers.length)}${"\uFFFE".repeat(Math.max(0, part.length - 2))}`;
+          markers.push(part);
+        } else {
+          add("[frame not read]", false);
+        }
+        flush();
+      }
+      return;
+    }
     const style = rule.styleOf(node);
     // Hidden and transparent subtrees stay unseen whatever their contents say.
     if (style.display === "none" || rule.hiddenFromPeople(node) || Number.parseFloat(style.opacity) === 0) {
@@ -946,7 +1186,61 @@ function shownTextInPage(rule, request) {
   };
   walk(doc.body, 0);
   flush();
-  return lines.join("\n");
+  const offsets = [];
+  let total = 0;
+  for (const entry of lines) {
+    offsets.push(total);
+    total += entry.text.length + 1;
+  }
+  const textRead = lines.map((entry, index) => (index ? entry.joiner : "") + entry.text).join("");
+  const length = textRead.length;
+  if (dropped === 0 && !stopped && length <= windowChars) {
+    return { ...nothing, text: textRead, end: length, markers };
+  }
+  // The window's first line: the first in view after lines scrolled out
+  // above, else the top, else (all of it above the view) the last lines.
+  let first = state === "view" ? viewLine : 0;
+  if (state === "above") {
+    let room = 0;
+    first = lines.length;
+    while (first > 0 && room + lines[first - 1].text.length + 1 <= windowChars) {
+      first -= 1;
+      room += lines[first].text.length + 1;
+    }
+    first = Math.min(first, Math.max(lines.length - 1, 0));
+  }
+  let last = first;
+  let used = 0;
+  while (last < lines.length && used + lines[last].text.length + (last > first ? 1 : 0) <= windowChars) {
+    used += lines[last].text.length + (last > first ? 1 : 0);
+    last += 1;
+  }
+  const start = offsets[first] ?? 0;
+  let end = last > first ? start + used : Math.min(length, start + windowChars);
+  if (last === first && end < length) {
+    // One line longer than the window: cut between words.
+    const cut = textRead.lastIndexOf(" ", end);
+    if (cut > start + windowChars / 2) end = cut;
+  }
+  // How far down the next line that scrolls with the page is, when it is below.
+  let scrollBy = null;
+  for (let index = last > first ? last : lines.length; index < lines.length && index < last + 50; index += 1) {
+    if (!lines[index].flows) continue;
+    const top = topOf(lines[index].at);
+    scrollBy = Number.isFinite(top) && top > 0 ? Math.ceil(top) : null;
+    break;
+  }
+  return {
+    text: textRead,
+    start,
+    end,
+    above: dropped + start,
+    below: Math.max(0, length - end),
+    more: stopped,
+    beyond: stopped && state === "above",
+    scrollBy,
+    markers,
+  };
 }
 
 // Runs inside the page through Playwright, so it must not use anything from
@@ -954,8 +1248,9 @@ function shownTextInPage(rule, request) {
 // never field values; `policy` holds the structural facts the step classifier
 // needs, the same ones the Desktop Personal Browser collects. A control a
 // person cannot see is reported only as `shown: false` with its name, which
-// the secret-screen check still reads.
-function describeInPage(rule, forms, names, element, sources) {
+// the secret-screen check still reads; `mode: "name"` asks for that name alone,
+// for a control the list leaves out (listInPage).
+function describeInPage(rule, forms, names, element, sources, mode) {
   const bounded = (value, max = 2_000) =>
     typeof value === "string"
       ? value.replace(/\s+/g, " ").trim().slice(0, max)
@@ -1000,6 +1295,23 @@ function describeInPage(rule, forms, names, element, sources) {
       .map((id) => ownWords(element.ownerDocument?.getElementById(id)))
       .join(" "),
   );
+  // Every name the control may be known by, its text included, for the
+  // secret-screen check alone.
+  const checkedName = () => {
+    const image = element.querySelector("img[alt]");
+    return bounded(
+      [
+        element.getAttribute("aria-label"), ariaLabelledByText, labels,
+        element.getAttribute("placeholder"), element.getAttribute("title"),
+        element.textContent, element.getAttribute("name"),
+        element.getAttribute("data-bs-original-title"), element.getAttribute("data-original-title"),
+        element.getAttribute("data-tippy-content"), element.getAttribute("data-tooltip"),
+        image ? image.getAttribute("alt") : "",
+      ].filter((value) => typeof value === "string" && value.trim()).join(" "),
+      4_000,
+    );
+  };
+  if (mode === "name") return { name: checkedName() };
   let shown = true;
   try {
     shown = rule.elementShown(element);
@@ -1012,21 +1324,7 @@ function describeInPage(rule, forms, names, element, sources) {
     }
   }
   if (!shown) {
-    const image = element.querySelector("img[alt]");
-    return {
-      shown: false,
-      name: bounded(
-        [
-          element.getAttribute("aria-label"), ariaLabelledByText, labels,
-          element.getAttribute("placeholder"), element.getAttribute("title"),
-          element.textContent, element.getAttribute("name"),
-          element.getAttribute("data-bs-original-title"), element.getAttribute("data-original-title"),
-          element.getAttribute("data-tippy-content"), element.getAttribute("data-tooltip"),
-          image ? image.getAttribute("alt") : "",
-        ].filter((value) => typeof value === "string" && value.trim()).join(" "),
-        4_000,
-      ),
-    };
+    return { shown: false, name: checkedName() };
   }
   const ownForm =
     "form" in element && element.form
@@ -1177,7 +1475,7 @@ function describeInPage(rule, forms, names, element, sources) {
     // (the classifier's consent rejection and `step_refused_consent`). The
     // page's body and root are no banner, though a consent plugin may name
     // them after cookies ("cookies-not-set") while it waits for an answer.
-    const consentPattern = /cookie|consent|gdpr|rgpd|dsgvo|privacy|datenschutz|privacidade|confidentialit/i;
+    const consentPattern = new RegExp(sources.consentNames, "i");
     let consentContext = consentPattern.test(dialogLabel);
     const pageRoots = [element.ownerDocument?.body, element.ownerDocument?.documentElement];
     for (
@@ -1357,6 +1655,7 @@ function describeInPage(rule, forms, names, element, sources) {
     // The text beside it is read only for a control with no name of its own.
     let nearby = "";
     const ownText = (() => {
+      if (element instanceof HTMLTextAreaElement) return "";
       try {
         return names.shownTextOf(element, 80);
       } catch (_) {
@@ -1442,6 +1741,43 @@ function describeInPage(rule, forms, names, element, sources) {
     area = "";
   }
 
+  // Whether the page turned the control off (disabled, in a disabled
+  // fieldset, or aria-disabled), and whether it is the one of its group the
+  // page shows chosen: a box, radio button, switch or pressed toggle that is
+  // on (`checked`), or a tab, option or day marked selected (`selected`).
+  // Only these yes or no answers leave the page, never a field's value. In the
+  // list a field opens as a person types (a combobox's suggestions), the one
+  // marked selected is only the one the keys reach, not what the field holds,
+  // so it says nothing.
+  let disabled = false;
+  let checked = false;
+  let selected = false;
+  try {
+    const flag = (name) => bounded(element.getAttribute(name), 16).toLowerCase() === "true";
+    disabled = element.matches(":disabled") || flag("aria-disabled");
+    checked = element instanceof HTMLInputElement && (element.type === "checkbox" || element.type === "radio")
+      ? element.checked === true
+      : flag("aria-checked") || flag("aria-pressed");
+    const suggestion = () => {
+      const list = element.closest("[role=listbox], [role=tree], [role=grid]");
+      if (!list) return false;
+      if (list.closest("[role=combobox]")) return true;
+      if (!list.id) return false;
+      return Array.from(element.ownerDocument.querySelectorAll(
+        "[role=combobox][aria-controls], [role=combobox][aria-owns], input[aria-controls], input[aria-owns], [aria-autocomplete][aria-controls], [aria-autocomplete][aria-owns]",
+      ))
+        .slice(0, 200)
+        .some((field) => `${field.getAttribute("aria-controls") || ""} ${field.getAttribute("aria-owns") || ""}`
+          .split(/\s+/)
+          .includes(list.id));
+    };
+    selected = flag("aria-selected") && !suggestion();
+  } catch (_) {
+    disabled = false;
+    checked = false;
+    selected = false;
+  }
+
   // How many options a select's open list offers, counted as `choose` reads
   // them (selectOptionsInPage, by rule.optionOffered): an option the page
   // hides, alone or in a group, is left out. Only the number leaves the page
@@ -1458,11 +1794,28 @@ function describeInPage(rule, forms, names, element, sources) {
     optionCount = null;
   }
 
+  // Where the control is drawn, read in this same moment, so a reading lists
+  // the controls one moment of the page shows: a carousel that turns between
+  // two looks at the page drops no slide, and shifts no index after it.
+  let rect = null;
+  try {
+    if (element.getClientRects().length) {
+      const drawn = element.getBoundingClientRect();
+      rect = { x: drawn.left, y: drawn.top, width: drawn.width, height: drawn.height };
+    }
+  } catch (_) {
+    rect = null;
+  }
+
   return {
     shown: true,
     expanded,
     area,
     optionCount,
+    disabled,
+    checked,
+    selected,
+    rect,
     tag: bounded(element.tagName.toLowerCase(), 64),
     role: bounded(element.getAttribute("role"), 128),
     idAttribute: bounded(element.getAttribute("id")),
@@ -1488,10 +1841,12 @@ function describeInPage(rule, forms, names, element, sources) {
       ? `form ${formMethod} ${formAction} ${formText}`.slice(0, 2_000)
       : "",
     labels,
-    text: bounded(element.textContent || ""),
+    // A text area's text is what it holds, a value, never its name.
+    text: element instanceof HTMLTextAreaElement ? "" : bounded(element.textContent || ""),
     // The text the control draws: what textContent holds, less scripts,
     // styles, an svg's metadata, title and defs, and hidden parts.
     shownText: (() => {
+      if (element instanceof HTMLTextAreaElement) return "";
       try {
         return bounded(names.shownTextOf(element));
       } catch (_) {
@@ -1549,21 +1904,129 @@ const DESCRIBE_IN_PAGE = new Function(
   "...args",
   `return (${describeInPage})((${shownRuleInPage})(), (${formSubmission.formSubmissionRulesInPage})(), (${actionPolicy.controlNameRulesInPage})(), ...args);`,
 );
-// The same describer for every control of a page in one call: its source (over
-// 50 KB with the rules it carries) is sent and compiled once per read of the
-// page, not once per control. Each control is described on its own, as with
-// DESCRIBE_IN_PAGE, and one that cannot be described is null.
-const DESCRIBE_ALL_IN_PAGE = new Function(
-  "request",
-  `const describe = ${DESCRIBE_IN_PAGE};
-  return request.elements.map((element) => {
+// Runs inside the page (DESCRIBE_ALL_IN_PAGE). Which of the page's controls
+// the list holds, judged for all of them first: every one a person can see,
+// up to `request.limit`. When more are shown, those scrolled past, above the
+// view, are left out, and then those the page turned off, so scrolling down a
+// long page reaches every control on it and a page full of taken seats still
+// lists the free ones; past the limit the rest are left out in page order.
+// Neither depends on how many controls lie below the view. Each control the
+// list holds is described on its own (`describe`, DESCRIBE_IN_PAGE); every
+// other one is reported with its name alone, for the secret-screen check, as
+// `shown: false` or, shown and left out, `left: true`. One that cannot be
+// described is null.
+function listInPage(rule, describe, request) {
+  const elements = request.elements;
+  const glances = elements.map((element) => {
+    let shown = true;
     try {
-      return describe(element, request.sources);
+      shown = rule.elementShown(element);
+    } catch (_) {
+      try {
+        shown = element.checkVisibility({ checkVisibilityCSS: true, visibilityProperty: true }) !== false;
+      } catch (_) {
+        shown = true;
+      }
+    }
+    let above = false;
+    let off = false;
+    try {
+      above = element.getBoundingClientRect().bottom <= 0;
+      off = element.matches(":disabled") ||
+        String(element.getAttribute("aria-disabled") || "").trim().toLowerCase() === "true";
+    } catch (_) {
+      above = false;
+      off = false;
+    }
+    return { shown, above, off };
+  });
+  let kept = glances.flatMap((glance, ordinal) => (glance.shown ? [ordinal] : []));
+  if (kept.length > request.limit) kept = kept.filter((ordinal) => !glances[ordinal].above);
+  if (kept.length > request.limit) kept = kept.filter((ordinal) => !glances[ordinal].off);
+  const listed = new Set(kept.slice(0, request.limit));
+  return elements.map((element, ordinal) => {
+    try {
+      if (listed.has(ordinal)) return describe(element, request.sources);
+      const { name } = describe(element, request.sources, "name");
+      return glances[ordinal].shown ? { shown: true, left: true, name } : { shown: false, name };
     } catch (_) {
       return null;
     }
-  });`,
+  });
+}
+// The describer for every control of a page in one call: its source (over 50
+// KB with the rules it carries) is sent and compiled once per read of the
+// page, not once per control.
+const DESCRIBE_ALL_IN_PAGE = new Function(
+  "request",
+  `const describe = ${DESCRIBE_IN_PAGE};
+  return (${listInPage})((${shownRuleInPage})(), describe, request);`,
 );
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Where a click on `element` lands: Playwright clicks the
+// middle of its first part in view, and what is drawn there takes the click.
+// `other` is true when that is inside another control within this one (a
+// form's button in a section, an item of a list or menu it holds), or inside
+// a frame within it, which a reading never reads: the click would act on
+// something the step was not judged for. `covered` is true when it is
+// something outside the control (a notice, a dialog, a pinned bar), which
+// the click would go to instead; its own label is the control's. `consent`
+// says that cover is a cookie or consent notice: a container whose id, class,
+// label or title names it (`request.consent`, the describer's words), or a
+// small one close by whose text speaks of cookies.
+function clickLandingInPage(element, request) {
+  const view = element.ownerDocument.defaultView;
+  let point = null;
+  for (const rect of Array.from(element.getClientRects())) {
+    const left = Math.max(rect.left, 0);
+    const top = Math.max(rect.top, 0);
+    const right = Math.min(rect.right, view.innerWidth);
+    const bottom = Math.min(rect.bottom, view.innerHeight);
+    if (right > left && bottom > top && (right - left) * (bottom - top) > 0.99) {
+      point = { x: (left + right) / 2, y: (top + bottom) / 2 };
+      break;
+    }
+  }
+  if (!point) return { other: false };
+  const doc = element.ownerDocument;
+  let hit = doc.elementFromPoint(point.x, point.y);
+  for (let depth = 0; hit && hit.shadowRoot && depth < 32; depth += 1) {
+    const inner = hit.shadowRoot.elementFromPoint(point.x, point.y);
+    if (!inner || inner === hit) break;
+    hit = inner;
+  }
+  if (!hit) return { other: false };
+  const up = (node) => node.assignedSlot || node.parentElement || (node.parentNode && node.parentNode.host) || null;
+  let inside = false;
+  for (let node = hit, depth = 0; node && node.nodeType === 1 && depth < 512; depth += 1) {
+    if (node === element) return { other: inside };
+    const tag = String(node.tagName).toUpperCase();
+    if (tag === "LABEL" && node.control === element) return { other: false };
+    if (node.matches(request.selector) || ["IFRAME", "FRAME", "OBJECT", "EMBED"].includes(tag) || (tag === "LABEL" && node.control)) {
+      inside = true;
+    }
+    node = up(node);
+  }
+  const names = new RegExp(request.consent, "i");
+  const roots = [doc.body, doc.documentElement];
+  let consent = false;
+  for (let node = hit, depth = 0; node && node.nodeType === 1 && !roots.includes(node) && depth < 16 && !consent; node = up(node), depth += 1) {
+    const named = ["id", "class", "aria-label", "data-testid", "title", "name"]
+      .map((name) => node.getAttribute(name) || "")
+      .join(" ")
+      .slice(0, 400);
+    const labelledBy = String(node.getAttribute("aria-labelledby") || "")
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 8)
+      .map((id) => (doc.getElementById(id) && doc.getElementById(id).textContent) || "")
+      .join(" ")
+      .slice(0, 400);
+    const text = depth < 6 && typeof node.textContent === "string" ? node.textContent : "";
+    consent = names.test(named) || names.test(labelledBy) || (text.length <= 1_500 && /\bcookies?\b/i.test(text));
+  }
+  return { other: false, covered: true, consent };
+}
 const SHOWN_TEXT_IN_PAGE = withShownRule(shownTextInPage);
 const AREA_NAMES = new Set(["dialog", "menu", "tabs", "nav", "search", "header", "footer", "aside"]);
 
@@ -1582,7 +2045,13 @@ async function describeElement(locator, index, hiddenNames, described = undefine
     }
     return null;
   }
-  const box = await locator.boundingBox().catch(() => null);
+  // The box the page gave with the rest of the control's facts, when it gave
+  // one; Playwright's own look at it comes a moment later.
+  const drawn = attributes && attributes.rect;
+  const box = drawn && typeof drawn === "object" &&
+    [drawn.x, drawn.y, drawn.width, drawn.height].every((value) => Number.isFinite(value))
+    ? drawn
+    : await locator.boundingBox().catch(() => null);
   if (!attributes || !box) {
     return null;
   }
@@ -1649,6 +2118,9 @@ async function describeElement(locator, index, hiddenNames, described = undefine
     optionCount: Number.isSafeInteger(attributes.optionCount) && attributes.optionCount >= 0
       ? Math.min(attributes.optionCount, MAX_SELECT_OPTIONS)
       : null,
+    disabled: attributes.disabled === true,
+    checked: attributes.checked === true,
+    selected: attributes.selected === true,
     box: {
       x: Math.round(box.x),
       y: Math.round(box.y),
@@ -1807,12 +2279,12 @@ function quotedControlLabel(description) {
 }
 
 // What a step that fills a field did, in its result's `done`. A page's
-// reading never shows what is typed into a field, or whether a box is checked,
-// so the reading after such a step matches the one before it, and a turn that
-// could not tell the text went in gave up a form after its first field. The
-// line names the field, and how many characters went in and whether the field
-// holds them, never the text: it may be private. A select needs none: its
-// reading names the option it holds (`chosen`).
+// reading never shows what is typed into a field, so the reading after such a
+// step matches the one before it, and a turn that could not tell the text went
+// in gave up a form after its first field. The line names the field, and how
+// many characters went in and whether the field holds them, never the text: it
+// may be private. A select needs none: its reading names the option it holds
+// (`chosen`), as a box's names whether it is `checked`.
 const FIELD_READ_MS = 1_000;
 
 function characterCount(count) {
@@ -1857,7 +2329,7 @@ async function checkedLine(description, locator) {
   if (!isCheckableDescription(description)) return null;
   const checked = await within(FIELD_READ_MS, locator.isChecked().catch(() => null), null);
   if (typeof checked !== "boolean") return null;
-  return `Clicked ${quotedControlLabel(description)}, and it is ${checked ? "" : "not "}checked now. A page's reading never shows whether a box is checked.`;
+  return `Clicked ${quotedControlLabel(description)}, and it is ${checked ? "" : "not "}checked now.`;
 }
 
 // A prompt's label, with its category and tab, fits the approval's label
@@ -1945,37 +2417,47 @@ function choicePromptLabel(description, option) {
 
 // The controls a person can see, in document order. Snapshots and actions
 // both index this list, so an index means the same control in both. The page
-// is asked once for its controls and once to describe them all: asking for
-// each control on its own would send the describer again for every one, which
-// takes seconds on a page with a few hundred links, and a click or a choice
-// reads the page twice (its check, then its result).
-async function collectInteractiveElements(page, hiddenNames = null) {
-  const handles = (await page.locator(INTERACTIVE_SELECTOR).elementHandles())
-    .slice(0, MAX_INTERACTIVE_ELEMENTS * 3);
+// is asked once for its controls and once to judge and describe them all
+// (listInPage): asking for each control on its own would send the describer
+// again for every one, which takes seconds on a page with a few hundred
+// links, and a click or a choice reads the page twice (its check, then its
+// result). `hiddenNames` collects a name for each control a person cannot
+// see, and `leftNames` one for each control shown but left out, or past the
+// controls judged (empty): neither is in the list, both count for the
+// secret-screen check and in `omittedControls`.
+async function collectInteractiveElements(page, hiddenNames = null, leftNames = null) {
+  const matches = await page.locator(INTERACTIVE_SELECTOR).elementHandles();
+  const handles = matches.slice(0, MAX_JUDGED_CONTROLS);
+  if (leftNames) {
+    for (let ordinal = handles.length; ordinal < matches.length; ordinal += 1) leftNames.push("");
+  }
   const described = await page
-    .evaluate(DESCRIBE_ALL_IN_PAGE, { elements: handles, sources: PAGE_POLICY_SOURCES })
+    .evaluate(DESCRIBE_ALL_IN_PAGE, { elements: handles, sources: PAGE_POLICY_SOURCES, limit: MAX_INTERACTIVE_ELEMENTS })
     .catch(() => null);
   // A page that could not answer for all of them at once is asked for each
-  // control on its own.
+  // control on its own, in page order.
   const together = Array.isArray(described) && described.length === handles.length;
   const elements = [];
   for (let ordinal = 0; ordinal < handles.length; ordinal += 1) {
+    const entry = together ? described[ordinal] ?? null : undefined;
+    const name = entry && typeof entry.name === "string" ? entry.name.slice(0, 4_000) : "";
+    if (entry && entry.shown === false) {
+      if (hiddenNames) hiddenNames.push(name);
+      continue;
+    }
+    // The list holds at most MAX_INTERACTIVE_ELEMENTS, whatever the page answered.
+    if ((entry && entry.left === true) || elements.length >= MAX_INTERACTIVE_ELEMENTS) {
+      if (leftNames) leftNames.push(name);
+      continue;
+    }
     const locator = handles[ordinal];
     // The shown rule in describeInPage covers what Playwright's isVisible
     // checks (rendered, visibility visible, a box with a size).
-    const description = await describeElement(
-      locator,
-      elements.length,
-      hiddenNames,
-      together ? described[ordinal] ?? null : undefined,
-    );
+    const description = await describeElement(locator, elements.length, hiddenNames, entry);
     if (!description) {
       continue;
     }
     elements.push({ locator, description });
-    if (elements.length >= MAX_INTERACTIVE_ELEMENTS) {
-      break;
-    }
   }
   return elements;
 }
@@ -2097,6 +2579,40 @@ function recordObservedFields(snapshotId, url, interactive) {
   }
 }
 
+// Records the controls a reading lists, each by its target fingerprint, a
+// fingerprint of the text around it (aroundTextInPage: its card, its form's
+// labels) and the name the reading gave it, in any tab: a step is judged by
+// its own control against it (targetLocator), whether it asks the person or
+// not, as a step the person said yes to is judged by the control they were
+// asked about. Only the latest reading is kept; a step that names another
+// checks the whole page, as before.
+async function recordObservedControls(page, snapshotId, url, interactive, names) {
+  const arounds = await page
+    .evaluate(AROUND_ALL_IN_PAGE, {
+      kind: "around-all",
+      elements: interactive.map(({ locator }) => locator),
+      maxChars: AROUND_TEXT_MAX_CHARS,
+    })
+    .catch(() => null);
+  const aroundOf = (index) => {
+    const around = Array.isArray(arounds) && arounds.length === interactive.length ? arounds[index] : null;
+    return typeof around === "string" ? approvalProtocol.sha256(around.slice(0, AROUND_TEXT_MAX_CHARS)) : null;
+  };
+  try {
+    approvalProtocol.recordObservedControls(snapshotId, {
+      address: approvalProtocol.sha256(url),
+      pageId: activePageId,
+      controls: interactive.map(({ description }, index) => ({
+        target: targetFingerprint(description),
+        around: aroundOf(index),
+        name: typeof names[index] === "string" ? names[index] : "",
+      })),
+    });
+  } catch (_) {
+    // A step checks the whole page instead.
+  }
+}
+
 // Whether the fields a pause highlights are the ones Octo saw in the snapshot
 // it names: each at its index with the same label and kind, in a form that
 // sends to the same place, on the same address. The rest of the page may have
@@ -2117,7 +2633,9 @@ function humanInputFieldsAsObserved(url, interactive, body) {
 // the observation small; the box stays internal, where the visible cursor
 // uses it. A select says which option it holds (`chosen`), as a person sees it
 // closed, and how many options it has (`options`), so the one it holds never
-// reads as the whole list; `choose` sets it by any option's label.
+// reads as the whole list; `choose` sets it by any option's label. A control
+// that is on says so (`checked`, `selected`), as one the page turned off does
+// (`disabled`): each is there only when it is true.
 function publicElementDescription(description) {
   const entry = { index: description.index, label: description.label, tag: description.tag };
   for (const field of ["role", "href", "inputType", "autocomplete", "area", "chosen"]) {
@@ -2130,6 +2648,9 @@ function publicElementDescription(description) {
   }
   if (typeof description.expanded === "boolean") {
     entry.expanded = description.expanded;
+  }
+  for (const field of ["checked", "selected", "disabled"]) {
+    if (description[field] === true) entry[field] = true;
   }
   return entry;
 }
@@ -2263,25 +2784,344 @@ function assertReadStayedOnOneSite(page, startUrl) {
   }
 }
 
+// A page's text past this many characters is read from where it is scrolled
+// to (shownTextInPage), and lines around it say what is left out and how to
+// read it, within MAX_VISIBLE_TEXT_CHARS.
+const TEXT_MARKER_CHARS = 300;
+const TEXT_WINDOW_CHARS = MAX_VISIBLE_TEXT_CHARS - TEXT_MARKER_CHARS;
+// Marks the window in the text while it is masked, so the window is masked
+// as the whole text is (a key word above it still counts). It is a line of
+// its own, a noncharacter no page text holds and no rule masks.
+const TEXT_WINDOW_MARK = "\uFFFF\n";
+
+// The page's answer (shownTextInPage), bounded; null when it is not one. A
+// marker names a frame by its site, an address the page's text never holds.
+const MAX_TEXT_MARKERS = 50;
+const FRAME_MARKER_PATTERN = /^\[frame not read: \S{1,253}\]$/;
+function shownTextOf(raw) {
+  if (!raw || typeof raw !== "object" || typeof raw.text !== "string") return null;
+  const text = raw.text.slice(0, MAX_VISIBLE_TEXT_CHARS * 5);
+  const offset = (value) => (Number.isSafeInteger(value) && value >= 0 ? Math.min(value, text.length) : 0);
+  const count = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : 0);
+  const start = offset(raw.start);
+  return {
+    text,
+    start,
+    end: Math.max(start, offset(raw.end)),
+    above: count(raw.above),
+    below: count(raw.below),
+    more: raw.more === true,
+    beyond: raw.beyond === true,
+    scrollBy: Number.isSafeInteger(raw.scrollBy) && raw.scrollBy > 0 ? Math.min(raw.scrollBy, MAX_SCROLL_DELTA) : null,
+    markers: Array.isArray(raw.markers)
+      ? raw.markers.slice(0, MAX_TEXT_MARKERS).map((marker) => (typeof marker === "string" && FRAME_MARKER_PATTERN.test(marker) ? marker : ""))
+      : [],
+  };
+}
+
+function aboutCharacters(count) {
+  const rounded = count >= 1_000 ? Math.round(count / 100) * 100 : count;
+  return rounded.toLocaleString("en-US");
+}
+
+// The frames' markers, put in where their placeholders hold their place
+// (shownTextInPage), once the text around them is masked; a placeholder cut
+// short, or one with no marker, leaves nothing.
+function withFrameMarkers(text, shown) {
+  const markers = shown ? shown.markers : [];
+  return text.replace(/\uFFFE(?:([\uE000-\uE0FF])\uFFFE*)?/g, (_, mark) =>
+    (mark ? markers[mark.charCodeAt(0) - 0xE000] || "" : ""));
+}
+
+// The text a reading returns: all of it when it fits, else the window the
+// page chose, masked as the whole text was (`masked`), between lines that say
+// how much is left out above and below and how to scroll to it. When the
+// window cannot be masked exactly as the whole text was, the text is read from
+// its top instead. A page whose part in view is further down than a reading
+// reaches says so.
+function readingText(masked, shown, mask) {
+  const cutLine = (below, more, scrollBy, beyond) =>
+    beyond
+      ? "[Text cut here: the part of the page in view is further down than a reading reaches.]"
+      : `[Text cut here: ${
+        below > 0 ? `${more ? "over" : "about"} ${aboutCharacters(below)} more characters` : "more text follows"
+      }.${scrollBy ? ` Scroll down (y: ${scrollBy}) to read on.` : ""}]`;
+  const fromTop = () => {
+    if (masked.length <= MAX_VISIBLE_TEXT_CHARS) return masked;
+    const cut = masked.lastIndexOf("\n", TEXT_WINDOW_CHARS);
+    const end = cut > TEXT_WINDOW_CHARS / 2 ? cut : TEXT_WINDOW_CHARS;
+    return `${masked.slice(0, end)}\n${cutLine(masked.length - end, shown ? shown.more : false, null, false)}`;
+  };
+  if (!shown || (shown.start === 0 && shown.end >= shown.text.length && shown.above === 0 && !shown.more)) {
+    return fromTop();
+  }
+  const raw = shown.text;
+  // The end mark starts the line after the window, when there is one.
+  const end = raw[shown.end] === "\n" ? shown.end + 1 : shown.end;
+  const marked = `${raw.slice(0, shown.start)}${TEXT_WINDOW_MARK}${raw.slice(shown.start, end)}${TEXT_WINDOW_MARK}${raw.slice(end)}`;
+  let parts;
+  try {
+    parts = mask(marked).split(TEXT_WINDOW_MARK);
+  } catch (_) {
+    parts = [];
+  }
+  if (parts.length !== 3 || parts.join("") !== masked) return fromTop();
+  const shownWindow = parts[1].replace(/\n$/, "").slice(0, TEXT_WINDOW_CHARS);
+  return [
+    ...(shown.above > 0 ? [`[Text above not shown: about ${aboutCharacters(shown.above)} characters. Scroll up to read it.]`] : []),
+    shownWindow,
+    ...(shown.below > 0 || shown.more ? [cutLine(shown.below, shown.more, shown.scrollBy, shown.beyond)] : []),
+  ].join("\n");
+}
+
+// Set once the browser declined a page's cookie banner in this step
+// (declineCookieBanner): the step's activity says so (`declined: "cookies"`),
+// and the turn's Details list it.
+let declinedCookies = false;
+// The guard of the step that is running (guardStepDocuments), for a press the
+// browser makes while it reads the page.
+let runningStepGuard = null;
+// How long the browser's own press of a banner's refusal may wait for it.
+const DECLINE_CLICK_TIMEOUT_MS = 2_000;
+
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Whether `element` and one of `request.others` sit in one
+// cookie banner: the nearest container that holds both, below the page's
+// body, is a small part of the page, never a section that only happens to
+// hold two, and that banner speaks of cookies. It, or a container around it,
+// is named after them (its id, class, label or test id, or a dialog's title),
+// or its own text says "cookie": its text and that of the small containers
+// around it, up to its dialog. A dialog that speaks only of privacy or
+// consent (a policy to accept, a consent form) is no cookie banner, though
+// its buttons are judged as a banner's (the describer's consent context).
+function cookieBannerInPage(element, request) {
+  const doc = element.ownerDocument;
+  const roots = [doc.body, doc.documentElement];
+  const up = (node) => node.assignedSlot || node.parentElement || (node.parentNode && node.parentNode.host) || null;
+  const holds = (container, node) => {
+    for (let current = node, depth = 0; current && depth < 512; current = up(current), depth += 1) {
+      if (current === container) return true;
+    }
+    return false;
+  };
+  const others = Array.isArray(request && request.others) ? request.others : [];
+  let banner = null;
+  for (let node = up(element), depth = 0; node && node.nodeType === 1 && !roots.includes(node) && depth < 16; node = up(node), depth += 1) {
+    if (others.some((other) => other && holds(node, other))) {
+      banner = node;
+      break;
+    }
+  }
+  if (!banner || typeof banner.textContent !== "string" || banner.textContent.length > 4_000) return false;
+  const cookieName = /cookie/i;
+  const cookieText = /\bcookies?\b/i;
+  const labelledText = (node) => String(node.getAttribute("aria-labelledby") || "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 8)
+    .map((id) => {
+      const root = typeof node.getRootNode === "function" ? node.getRootNode() : doc;
+      const labelled = (root && typeof root.getElementById === "function" ? root.getElementById(id) : null) || doc.getElementById(id);
+      return (labelled && labelled.textContent) || "";
+    })
+    .join(" ")
+    .slice(0, 400);
+  const dialogSelector = "dialog, [role=dialog], [role=alertdialog], [aria-modal=true]";
+  let ownText = true;
+  for (let node = banner, depth = 0; node && node.nodeType === 1 && !roots.includes(node) && depth < 16; node = up(node), depth += 1) {
+    const named = [
+      ...["id", "class", "aria-label", "data-testid"].map((name) => node.getAttribute(name) || ""),
+      labelledText(node),
+    ].join(" ").slice(0, 800);
+    if (cookieName.test(named)) return true;
+    const dialog = typeof node.matches === "function" && node.matches(dialogSelector);
+    if (ownText) {
+      const text = typeof node.textContent === "string" ? node.textContent : "";
+      if ((node === banner || text.length <= 1_500) && cookieText.test(text)) return true;
+      const heading = dialog && typeof node.querySelector === "function"
+        ? node.querySelector("h1, h2, h3, h4, h5, h6, [role=heading]")
+        : null;
+      if (heading && cookieText.test(String(heading.textContent || "").slice(0, 400))) return true;
+      // The banner's text ends at its dialog, or where a container around it
+      // is no small part of the page any more.
+      if (dialog || text.length > 1_500) ownText = false;
+    }
+  }
+  return false;
+}
+
+// Words that name a field whose value is a payment detail, a password or a
+// code, in a frame element's own title, name, label or id: a payment
+// provider's card fields sit in such a frame (sensitiveFrameInPage).
+const SENSITIVE_FRAME_SOURCE =
+  "\\b(?:payments?|credit[\\s_-]*card|card[\\s_-]*(?:number|details|data|holder)|cvv|cvc|security[\\s_-]*code|expir\\w*|password|passcode|one[\\s_-]*time|verification[\\s_-]*code|iban)\\b";
+
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Whether the page holds a frame whose own element names
+// a payment, password or code field (`request.pattern`): a checkout's card
+// fields, which a reading never reads, sit in a payment provider's frame.
+// Only the frame elements' own attributes in this document are read, never
+// the frames.
+function sensitiveFrameInPage(request) {
+  const pattern = new RegExp(String(request && request.pattern), "i");
+  return Array.from(document.querySelectorAll("iframe, frame")).some((frame) =>
+    pattern.test(["title", "name", "aria-label", "id"].map((name) => frame.getAttribute(name) || "").join(" ").slice(0, 800)));
+}
+
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Whether a control is gone from what a person sees: out
+// of the page, or hidden, faded out or drawn with no size.
+function controlGoneInPage(element) {
+  if (!element.isConnected) return true;
+  if (typeof element.checkVisibility === "function") {
+    return !element.checkVisibility({ opacityProperty: true, visibilityProperty: true });
+  }
+  const box = element.getBoundingClientRect();
+  return box.width === 0 && box.height === 0;
+}
+
+// A field whose value is a password, a code, a payment detail or another
+// secret: typing or choosing there is the person's step.
+function sensitiveField(description, step = "type") {
+  const sensitiveAutocomplete = new Set([
+    "current-password",
+    "new-password",
+    "one-time-code",
+  ]);
+  const autocompleteTokens = String(description.autocomplete || "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  // A list is judged by its own names and its form, never its options: they
+  // are values ("Suzuki Swift" in a list of cars is no payment detail).
+  const content = step === "choose" ? listContent(description) : descriptionContent(description);
+  const sensitiveLabel =
+    /\b(password|passcode|pin|otp|2fa|mfa|one[- ]?time|verification[\s_-]*code|security[\s_-]*code|auth(?:entication)?[\s_-]*code|login[\s_-]*code|access[\s_-]*code|api[\s_-]*key|client[\s_-]*secret|secret|private[\s_-]*key|seed[\s_-]*phrase|recovery[\s_-]*phrase|wallet|credit[\s_-]*card|card[\s_-]*number|cvv|cvc|social[\s_-]*security|government[\s_-]*id|passport|driver(?:'s)?[\s_-]*licen[cs]e|tax[\s_-]*id|date[\s_-]*of[\s_-]*birth|birthdate|maiden[\s_-]*name|bank[\s_-]*account|routing[\s_-]*number|iban|swift)\b/i;
+  return (
+    String(description.inputType || "").toLowerCase() === "password" ||
+    autocompleteTokens.some(
+      (token) => sensitiveAutocomplete.has(token) || token.startsWith("cc-"),
+    ) ||
+    sensitiveLabel.test(content)
+  );
+}
+
+// A page with a sign-in, a payment or another secret field among its
+// controls: the browser presses nothing on it by itself.
+function holdsPersonalFields(interactive) {
+  return interactive.some(({ description }) =>
+    (EDITABLE_FIELD_TAGS.has(description.tag) && sensitiveField(description)) ||
+    actionPolicy.isSignInField(policyTarget(description)));
+}
+
+// Before Octo reads a page, the browser declines its cookie banner itself:
+// the banner's own refusal ("Reject all", "Reject", "Only necessary",
+// "Decline"), as the action policy tells a banner's refusal from its accept
+// (`consentRejection`), only beside a button of the same banner that accepts
+// (`step_refused_consent`), in a banner that speaks of cookies
+// (cookieBannerInPage). Never the accept, the settings or anything else on
+// it, never a link or a form's button, never one turned off or covered, and
+// never in a frame: a reading lists the page's own controls only. The caller
+// has ruled out a page that may show a secret or holds a sign-in or payment
+// field, and a page whose frame holds a payment, password or code field
+// (sensitiveFrameInPage) is left alone too. It shares nothing, so it asks
+// nobody in any mode, as Octo's own press of it never did, and no form may
+// leave the tab while it runs. The step says the banner was declined only
+// once its refusal is gone. True when it pressed one, so the page is read
+// again; a banner it could not press stays up.
+async function declineCookieBanner(page, interactive) {
+  const pageUrl = page.url();
+  // Only a control the describer found in a consent banner can be its
+  // refusal or its accept.
+  const judged = interactive
+    .filter((entry) => entry.description.policy?.consentContext === true)
+    .map((entry) => ({
+      entry,
+      step: classifyStep("click", entry.description, { pageUrl }),
+    }));
+  const accepts = judged
+    .filter(({ step }) => step.verdict === "refuse" && step.category === "consent")
+    .map(({ entry }) => entry.locator);
+  if (!accepts.length) return false;
+  const refusals = judged.filter(({ entry, step }) =>
+    step.verdict === "allow" &&
+    step.consentRejection === true &&
+    entry.description.disabled !== true &&
+    !resolvedTargetDestination(entry.description, pageUrl) &&
+    !stepFormSubmission(entry.description, "click") &&
+    !isFormSubmissionControl(entry.description));
+  if (!refusals.length) return false;
+  const framed = await page
+    .evaluate(sensitiveFrameInPage, { kind: "sensitive-frames", pattern: SENSITIVE_FRAME_SOURCE })
+    .catch(() => null);
+  if (framed !== false) return false;
+  for (const { entry } of refusals) {
+    const beside = await entry.locator
+      .evaluate(cookieBannerInPage, { kind: "cookie-banner", others: accepts })
+      .catch(() => false);
+    if (beside !== true) continue;
+    const landing = await clickLanding(entry);
+    if (!landing || landing.other || landing.covered) return false;
+    // A reading step's own guard holds the press; a look at the page has
+    // none, so one is set up for it.
+    const own = runningStepGuard === null;
+    const guard = own ? await guardStepDocuments(page) : runningStepGuard;
+    try {
+      approvalProtocol.authority();
+      assertStepOnTime();
+      guard.limitFormPosts([]);
+      const box = entry.description.box;
+      emitAction({
+        type: "click",
+        label: "Decline cookies",
+        url: pageUrl,
+        x: box.x + box.width / 2,
+        y: box.y + box.height / 2,
+        ...(await viewport(page)),
+      });
+      const pressed = await entry.locator
+        .click({ timeout: DECLINE_CLICK_TIMEOUT_MS })
+        .then(() => true, () => false);
+      if (!pressed) return false;
+      await settleAfterAction(page);
+      if (own) guard.assertNoneBlocked();
+      // A banner whose button took no press (its script not ready yet) is
+      // still up, and is not said to be declined.
+      const gone = await entry.locator
+        .evaluate(controlGoneInPage, { kind: "control-gone" })
+        .catch(() => true);
+      if (gone === true) declinedCookies = true;
+      return true;
+    } finally {
+      if (own) await guard.release();
+    }
+  }
+  return false;
+}
+
 // The model-facing view of the page: what a person can see of it. Text,
 // title, address, control names and link targets are masked on every site and
 // in every approval mode; a secret screen withholds the text and stays
 // withheld until a new page loads. Whether a page is a secret screen is still
 // judged on all of its rendered text and every control's name, seen or not.
-async function snapshot(page, { withhold = false } = {}) {
+// `decline`: the browser first declines the page's own cookie banner, once,
+// when it lists a refusal beside an accept (declineCookieBanner), and reads
+// the page again after it.
+async function snapshot(page, { withhold = false, decline = false } = {}) {
   const startUrl = page.url();
   refuseLinkOnlyPage(page);
   const hiddenNames = [];
-  const interactive = await collectInteractiveElements(page, hiddenNames);
+  const leftNames = [];
+  const interactive = await collectInteractiveElements(page, hiddenNames, leftNames);
   const rawUrl = page.url();
   const renderedText = await page
     .locator("body")
     .innerText({ timeout: 5_000 })
     .catch(() => "");
-  const shownText = await page
-    .evaluate(SHOWN_TEXT_IN_PAGE, { kind: "shown-text", limit: MAX_VISIBLE_TEXT_CHARS * 5 })
-    .catch(() => null);
-  const visibleText = typeof shownText === "string" ? shownText : renderedText;
+  const shownText = shownTextOf(await page
+    .evaluate(SHOWN_TEXT_IN_PAGE, { kind: "shown-text", limit: MAX_VISIBLE_TEXT_CHARS * 5, window: TEXT_WINDOW_CHARS })
+    .catch(() => null));
+  const visibleText = shownText ? shownText.text : renderedText;
   const title = await pageTitle(page);
   let signals = await pageSecretSignals(page);
   if (signals === null) {
@@ -2310,7 +3150,7 @@ async function snapshot(page, { withhold = false } = {}) {
   const observe = (forceWithhold) => {
     const shown = observeText(visibleText, shownNames, forceWithhold);
     if (shown.secretScreen) return shown;
-    const whole = observeText(renderedText, [...shownNames, ...hiddenNames], forceWithhold);
+    const whole = observeText(renderedText, [...shownNames, ...hiddenNames, ...leftNames], forceWithhold);
     return whole.secretScreen ? observeText(visibleText, shownNames, true) : shown;
   };
   let view;
@@ -2327,6 +3167,19 @@ async function snapshot(page, { withhold = false } = {}) {
   }
   if (detected) {
     await withholdDocument(page);
+  }
+  if (
+    decline &&
+    !view.secretScreen &&
+    !(withhold || carried || marked || checkFailed) &&
+    !holdsPersonalFields(interactive) &&
+    (await declineCookieBanner(page, interactive))
+  ) {
+    // The page after the press is read as any page a step left: one that
+    // moved to a site the run may not read says nothing of it.
+    if (isBlankPage(page)) return blankPageResult(page);
+    if (!siteApproved(page.url())) return approvalProtocol.redactedPageResult(tabField());
+    return await snapshot(page, { withhold });
   }
   // A page that is not blank but reads with no text and no controls has not
   // drawn yet (still loading, or hidden while it loads). It is answered as
@@ -2348,13 +3201,18 @@ async function snapshot(page, { withhold = false } = {}) {
   const signInHint = inAgentTab() || view.secretScreen ? null : signInHintOf(interactive);
   const snapshotId = snapshotFingerprint(rawUrl, interactive);
   recordObservedFields(snapshotId, rawUrl, interactive);
+  await recordObservedControls(page, snapshotId, rawUrl, interactive, view.names);
   return {
     snapshotId,
     browserPageId: EXPECTED_BROWSER_PAGE_ID,
     ...tabField(),
     url: view.url,
     title: view.title,
-    visibleText: view.text.slice(0, MAX_VISIBLE_TEXT_CHARS),
+    visibleText: view.secretScreen
+      ? ""
+      : withFrameMarkers(readingText(view.text, shownText, (text) => redaction.redactPageObservation({
+        url: rawUrl, title, text, names: shownNames, signals, withhold: false,
+      }).text), shownText),
     secretScreen: view.secretScreen,
     ...(view.message ? { message: view.message } : {}),
     interactiveElements: interactive.map(({ description }, index) =>
@@ -2374,11 +3232,15 @@ async function snapshot(page, { withhold = false } = {}) {
           ? strictlyMasked(Array.from(description.shownText || "").slice(0, MAX_LABEL_CHARS).join(""))
           : "",
         options: isSelectDescription(description) && !view.secretScreen ? description.optionCount : null,
+        // Which of a group is chosen, like the option a select holds: a
+        // secret screen says neither.
+        checked: description.checked === true && !view.secretScreen,
+        selected: description.selected === true && !view.secretScreen,
       }),
     ),
-    // How many controls were left out because a person cannot see them yet,
-    // so a cut list does not read as the whole page.
-    ...(hiddenNames.length ? { omittedControls: hiddenNames.length } : {}),
+    // How many controls were left out, because a person cannot see them yet
+    // or the list is full, so a cut list does not read as the whole page.
+    ...(hiddenNames.length + leftNames.length ? { omittedControls: hiddenNames.length + leftNames.length } : {}),
     ...(signInHint ? { signIn: signInHint } : {}),
   };
 }
@@ -2391,8 +3253,9 @@ async function snapshot(page, { withhold = false } = {}) {
 const SIGN_IN_WHEN = "If the person asked to sign in, or a step they asked for needs it,";
 
 function signInHintOf(interactive) {
+  // A field the page turned off is no field a person can fill yet.
   const fields = interactive
-    .filter(({ description }) => actionPolicy.isSignInField(policyTarget(description)))
+    .filter(({ description }) => description.disabled !== true && actionPolicy.isSignInField(policyTarget(description)))
     .map(({ description }) => description.index)
     .slice(0, 8);
   if (fields.length) {
@@ -2482,27 +3345,95 @@ async function emitNavigationResult(page) {
   });
 }
 
-// The control a step is for, by its index in the snapshot Octo observed: the
-// page must still read as that snapshot did (the run, the tab, the address and
-// every control), so the index names the control Octo saw. `asked` keeps what
-// the person is asked about, for approvedTarget: that very control, the page's
-// address and the text around the control.
+// The control a step is for, by its index in the snapshot Octo observed. On a
+// page that still reads as that snapshot did (the run, the tab, the address
+// and every control), the index names the control Octo saw. On one that
+// changed elsewhere since (a carousel's next slide, a clock), it still does
+// when the snapshot is the latest reading recorded (recordObservedControls),
+// the address and the tab are the same, and the control at that index has
+// the fingerprint and the text around it the reading recorded for it (a
+// look-alike that a carousel shows in its place, another product's "Add to
+// cart", is not it), and the controls that look like it are where the reading
+// listed them (alikeInPlace: with one of two copies of a form gone, the index
+// names the other): the check a step gets after the person says yes
+// (approvedTarget). A step that asks the person is judged the same way: its
+// prompt is built from that control as it is now, and approvedTarget checks
+// it again after the answer. A control that is not as the reading showed it
+// is refused by its reading's name. `asked` keeps what the person is asked
+// about, for approvedTarget: that very control, the page's address and the
+// text around the control.
 async function targetLocator(page, body) {
   const interactive = await collectInteractiveElements(page);
-  if (body.snapshotId !== snapshotFingerprint(page.url(), interactive)) {
-    pageChangedUnderStep = true;
-    throw new Error(
-      "Shared Browser snapshot is stale; take a fresh snapshot before acting",
-    );
-  }
   const target = interactive[body.index];
+  const place = target ? await controlPlace(target.locator) : null;
+  if (body.snapshotId !== snapshotFingerprint(page.url(), interactive)) {
+    const reading = recordedReading(page, body);
+    if (!reading) {
+      pageChangedUnderStep = true;
+      throw new Error(
+        "Shared Browser snapshot is stale; take a fresh snapshot before acting",
+      );
+    }
+    const read = reading.controls[body.index];
+    if (!read) {
+      throw new Error(
+        `Shared Browser element index ${body.index} is unavailable; take a fresh snapshot`,
+      );
+    }
+    if (!asRecorded(read, target, place) || !alikeInPlace(reading, read, interactive)) {
+      pageChangedUnderStep = true;
+      throw new Error(
+        `${read.name ? `"${read.name}"` : "The control this step is for"} changed after the snapshot this step names, so nothing was done. Take a fresh snapshot, and do the step again if it still fits the request.`,
+      );
+    }
+  }
   if (!target) {
     throw new Error(
       `Shared Browser element index ${body.index} is unavailable; take a fresh snapshot`,
     );
   }
-  const place = await controlPlace(target.locator);
-  return { ...target, asked: { locator: target.locator, url: page.url(), around: place ? place.around : null } };
+  return {
+    ...target,
+    asked: { locator: target.locator, url: page.url(), around: place ? place.around : null },
+  };
+}
+
+// The latest reading recorded (recordObservedControls), when it is the step's
+// own snapshot, of this tab at this address; null otherwise.
+function recordedReading(page, body) {
+  const reading = approvalProtocol.observedControls(body.snapshotId);
+  return reading &&
+    reading.pageId === activePageId &&
+    reading.address === approvalProtocol.sha256(page.url())
+    ? reading
+    : null;
+}
+
+// Whether `target`, with the text around it `place` (controlPlace), is the
+// control `read` recorded: the same fingerprint, and the same text around it
+// when the reading could tell.
+function asRecorded(read, target, place) {
+  return Boolean(
+    target &&
+    targetFingerprint(target.description) === read.target &&
+    (read.around === null || (place && approvalProtocol.sha256(place.around) === read.around)),
+  );
+}
+
+// Whether the controls that look like the step's own (the same fingerprint:
+// two copies of one form, one button in every row) are where the reading
+// listed them. When one came or went ahead of it, its index may name another
+// of them, which neither its fingerprint nor the text around it tells apart.
+function alikeInPlace(reading, read, interactive) {
+  const listed = [];
+  reading.controls.forEach((control, index) => {
+    if (control.target === read.target) listed.push(index);
+  });
+  const now = [];
+  interactive.forEach(({ description }, index) => {
+    if (targetFingerprint(description) === read.target) now.push(index);
+  });
+  return listed.length === now.length && listed.every((index, at) => index === now[at]);
 }
 
 // After the person's answer, the step acts on the control they were asked
@@ -2564,6 +3495,20 @@ function aroundTextInPage(element, request) {
 }
 
 const AROUND_TEXT_MAX_CHARS = 2_000;
+// The text around each of a reading's controls, in one call (`request.elements`
+// in page order): what aroundTextInPage gives each, or null for one it could
+// not judge.
+const AROUND_ALL_IN_PAGE = new Function(
+  "request",
+  `const around = ${aroundTextInPage};
+  return request.elements.map((element) => {
+    try {
+      return around(element, request).around;
+    } catch (_) {
+      return null;
+    }
+  });`,
+);
 async function controlPlace(locator) {
   const place = await locator
     .evaluate(aroundTextInPage, { kind: "around-text", maxChars: AROUND_TEXT_MAX_CHARS })
@@ -2581,11 +3526,12 @@ async function controlPlace(locator) {
 let changedAfterYes = false;
 
 // Set when a step was not done because the page changed under it while nobody
-// was asked: its snapshot no longer reads as the page, or the control or the
-// fields it was for are not there as they were. The failed command says so on
-// stdout, and runtime-agent counts such steps in a row, so a page that never
-// holds still (a live count, a ticker) ends that page instead of a loop of
-// snapshots.
+// was asked: the control or the fields it was for are not there as its
+// snapshot showed them, or the page no longer reads as a snapshot with no
+// record of its controls (targetLocator). The failed command says so on
+// stdout, and runtime-agent counts such steps in a row, so a control that
+// never holds still (a live count, a ticker) ends that page instead of a loop
+// of snapshots.
 let pageChangedUnderStep = false;
 
 // The control a step is for is not on the page as it was when the step was
@@ -2603,6 +3549,73 @@ function controlChanged() {
       ? "The page changed after the person said yes, and the control this step was for is not there as it was, so nothing was done. Take a fresh snapshot and do the step again if it still fits the request: it asks the person again."
       : "The page changed before this step ran, and the control it was for is not there as it was, so nothing was done. Take a fresh snapshot and do the step again if it still fits the request.",
   );
+}
+
+// How long a click waits for something over its control to go (a toast that
+// fades, a menu that closes) before it is refused, and how often it looks.
+const COVER_SETTLE_MS = 600;
+const COVER_LOOK_MS = 100;
+// The browser presses a cookie notice's own reject button once a page settles
+// (declineCookieBanner). A notice still over a control is one it could not
+// decline: one with no reject button, one on a page it presses nothing on,
+// or one that came after the page was read, which the next look declines
+// when it can.
+const CONSENT_COVER_MESSAGE =
+  "A cookie notice covers this page, and the browser could not decline it: read on under it, or open the place's own site.";
+
+async function clickLanding(target) {
+  const landing = await target.locator
+    .evaluate(clickLandingInPage, { kind: "click-landing", selector: INTERACTIVE_SELECTOR, consent: CONSENT_NAMES_SOURCE })
+    .catch(() => null);
+  return landing && typeof landing.other === "boolean" ? landing : null;
+}
+
+// A click lands where a person would click: the middle of the control in view.
+// When another control sits there inside it (a form's button in a section, an
+// item of a menu or tree it holds), or a frame, the click would act on that,
+// which the step was not judged or asked for, so nothing is done. When
+// something outside the control covers its middle (a cookie notice, a dialog,
+// a pinned bar), the click would go to that: the control is brought to the
+// middle of the view, past a pinned header, and a cover that is still there
+// after a short settle refuses the step at once, in words, where Playwright
+// would wait out its timeout.
+async function clickControlItself(page, target) {
+  await target.locator.scrollIntoViewIfNeeded();
+  let landing = await clickLanding(target);
+  if (landing && landing.covered === true) {
+    await target.locator
+      .evaluate((element) => element.scrollIntoView({ block: "center", inline: "center" }))
+      .catch(() => {});
+    landing = await clickLanding(target);
+  }
+  for (let waited = 0; landing && landing.covered === true && waited < COVER_SETTLE_MS; waited += COVER_LOOK_MS) {
+    await page.waitForTimeout(COVER_LOOK_MS).catch(() => {});
+    landing = await clickLanding(target);
+  }
+  if (!landing) throw controlChanged();
+  if (landing.other) {
+    throw new Error(
+      `A click in the middle of ${quotedControlLabel(target.description)} would land on something else inside it (another control, or a frame), so nothing was done. Click that control itself, or another control, from a fresh snapshot.`,
+    );
+  }
+  if (landing.covered === true) {
+    throw new Error(
+      landing.consent === true
+        ? CONSENT_COVER_MESSAGE
+        : `Something else on the page covers ${quotedControlLabel(target.description)}, so nothing was clicked. Take a fresh snapshot, and read on without it if it is still covered.`,
+    );
+  }
+  await target.locator.click();
+}
+
+// A control the page turned off (a reading lists it as `disabled`) takes no
+// step: a click or a key would do nothing, and a field would not take text.
+function assertControlOn(description) {
+  if (description.disabled === true) {
+    throw new Error(
+      `${quotedControlLabel(description)} is turned off on the page right now, so nothing was done. Take a fresh snapshot once the page turns it on, for example after filling in what it needs first.`,
+    );
+  }
 }
 
 function descriptionContent(description) {
@@ -2645,27 +3658,7 @@ function listContent(description) {
 // step that types into one, presses a key in one or chooses its option is
 // refused.
 function assertSafeTypeTarget(description, step = "type") {
-  const sensitiveAutocomplete = new Set([
-    "current-password",
-    "new-password",
-    "one-time-code",
-  ]);
-  const autocompleteTokens = String(description.autocomplete || "")
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(Boolean);
-  // A list is judged by its own names and its form, never its options: they
-  // are values ("Suzuki Swift" in a list of cars is no payment detail).
-  const content = step === "choose" ? listContent(description) : descriptionContent(description);
-  const sensitiveLabel =
-    /\b(password|passcode|pin|otp|2fa|mfa|one[- ]?time|verification[\s_-]*code|security[\s_-]*code|auth(?:entication)?[\s_-]*code|login[\s_-]*code|access[\s_-]*code|api[\s_-]*key|client[\s_-]*secret|secret|private[\s_-]*key|seed[\s_-]*phrase|recovery[\s_-]*phrase|wallet|credit[\s_-]*card|card[\s_-]*number|cvv|cvc|social[\s_-]*security|government[\s_-]*id|passport|driver(?:'s)?[\s_-]*licen[cs]e|tax[\s_-]*id|date[\s_-]*of[\s_-]*birth|birthdate|maiden[\s_-]*name|bank[\s_-]*account|routing[\s_-]*number|iban|swift)\b/i;
-  if (
-    String(description.inputType || "").toLowerCase() === "password" ||
-    autocompleteTokens.some(
-      (token) => sensitiveAutocomplete.has(token) || token.startsWith("cc-"),
-    ) ||
-    sensitiveLabel.test(content)
-  ) {
+  if (sensitiveField(description, step)) {
     refusedStep = "sensitive";
     throw new Error(
       step === "choose"
@@ -3162,7 +4155,7 @@ function stepActivity(page, step, approval = null) {
   } catch (_) {
     url = null;
   }
-  return { step, url, ...(approval ? { approval } : {}) };
+  return { step, url, ...(approval ? { approval } : {}), ...(declinedCookies ? { declined: "cookies" } : {}) };
 }
 
 // How a step was allowed: "once" when it waited on a prompt (its site's or
@@ -3516,7 +4509,7 @@ async function snapshotAfterStep(page, withholding) {
   if (withholding) {
     await withholdDocument(page);
   }
-  return await snapshotForResult(page, { withhold: withholding });
+  return await snapshotForResult(page, { withhold: withholding, decline: !withholding });
 }
 
 // Octo's tabs. Next to the page the person chose for the run, Octo may open
@@ -3796,7 +4789,7 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
       const settled = await resolveExpectedPage(browser);
       await emitNavigationResult(settled);
       return withActivity(
-        { openedTab: true, ...(await snapshotForResult(settled)) },
+        { openedTab: true, ...(await snapshotForResult(settled, { decline: true })) },
         stepActivity(settled, "open_tab", stepApproval()),
       );
     } catch (error) {
@@ -4103,6 +5096,7 @@ async function execute(browser, browserSession, method, requestPath, body) {
   }
   // Every step Octo takes, in any tab, is guarded the same way.
   const documents = await guardStepDocuments(page);
+  runningStepGuard = documents;
   try {
     const result = await executeOnPage(browser, method, requestPath, body, page, tabs, documents);
     documents.assertNoneBlocked();
@@ -4113,6 +5107,7 @@ async function execute(browser, browserSession, method, requestPath, body) {
     documents.assertNoneBlocked(error);
     throw await unansweredLoadFailure(error, documents);
   } finally {
+    runningStepGuard = null;
     await documents.release();
   }
 }
@@ -4421,7 +5416,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), approvedOrigin);
     await clearHumanInputHighlights(page);
-    const result = await snapshot(page);
+    const result = await snapshot(page, { decline: true });
     emitAction({
       type: "nav_result",
       label: result.title || result.url,
@@ -4454,6 +5449,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     if (selected.some((entry) => !entry || !EDITABLE_FIELD_TAGS.has(entry.description.tag))) {
       throw new Error("Human input targets must be observed editable fields");
     }
+    for (const entry of selected) assertControlOn(entry.description);
     await clearHumanInputHighlights(page);
     try {
       for (const entry of selected) {
@@ -4543,7 +5539,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     await settleAfterAction(page);
     page = await resolveExpectedPage(browser);
     await emitNavigationResult(page);
-    return withActivity(await snapshotForResult(page), stepActivity(page, "navigate", stepApproval()));
+    return withActivity(await snapshotForResult(page, { decline: true }), stepActivity(page, "navigate", stepApproval()));
   }
 
   if (method === "POST" && requestPath === "/v1/click") {
@@ -4555,6 +5551,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     let target = await targetLocator(page, body);
+    assertControlOn(target.description);
     const step = classifyStep("click", target.description, { pageUrl: page.url() });
     refuseUserStep(step);
     const approvedTargetFingerprint = targetFingerprint(target.description);
@@ -4625,7 +5622,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       ...size,
     });
     const beforeUrl = page.url();
-    await target.locator.click();
+    await clickControlItself(page, target);
     await settleAfterAction(page);
     page = await resolveExpectedPage(browser);
     await page.bringToFront();
@@ -4634,9 +5631,12 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       await emitNavigationResult(page);
     }
     const checked = moved ? null : await checkedLine(target.description, target.locator);
+    // A click that checks or unchecks a box, a radio button or a switch on the
+    // page it was on chooses an option: Details name it with the form's typing.
+    const chose = !moved && isCheckableDescription(target.description);
     return withActivity(
       { ...await snapshotAfterStep(page, withholding), ...(checked ? { done: checked } : {}) },
-      stepActivity(page, "click", stepApproval()),
+      stepActivity(page, chose ? "choose" : "click", stepApproval()),
     );
   }
 
@@ -4654,6 +5654,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     let target = await targetLocator(page, body);
+    assertControlOn(target.description);
     assertSafeTypeTarget(target.description);
     const submitting = body.submit === true;
     const typingStep = classifyStep("type", target.description, { pageUrl: page.url() });
@@ -4788,6 +5789,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     let target = await targetLocator(page, body);
+    assertControlOn(target.description);
     if (!isSelectDescription(target.description)) {
       throw new Error(
         "choose sets a list the page draws as a select, and this control is not one, so nothing was chosen. Click it to open it, then click the option, or type into it.",
@@ -4872,6 +5874,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     let target = await targetLocator(page, body);
+    assertControlOn(target.description);
     // Every key is target-bound. This prevents global Delete/Backspace or
     // navigation keystrokes from acting on a stale focused element, and keeps
     // sensitive/high-impact classification on the same fresh descriptor used
@@ -5001,6 +6004,20 @@ async function denyDownloads(browser) {
   return session;
 }
 
+// What a failed step says. A Playwright error carries its call log (each
+// retry, in terminal colours, naming the page's markup), which never reaches
+// Octo: only its first line does. An action Playwright gave up waiting on
+// says so in words.
+function stepFailureText(error) {
+  if (error && error.name === "TimeoutError") {
+    return "The page did not take this step in time, so it may not have happened. Take a fresh snapshot to see the page as it is now.";
+  }
+  const message = error && error.message ? String(error.message) : String(error);
+  const log = message.indexOf("\nCall log:");
+  // eslint-disable-next-line no-control-regex
+  return (log >= 0 ? message.slice(0, log) : message).replace(/\u001b\[[0-9;]*m/gu, "").trim();
+}
+
 async function main() {
   // The runtime agent runs `node - <method> <path> [body]` with this script on
   // stdin, so the arguments follow the "-".
@@ -5065,7 +6082,7 @@ main().then(
         })}\n`,
       ).catch(() => {});
     }
-    const message = error && error.message ? error.message : String(error);
+    const message = stepFailureText(error);
     // Errors reach the model and logs; browser errors can quote page markup.
     let masked = "Shared Browser command failed and its error could not be masked";
     try {

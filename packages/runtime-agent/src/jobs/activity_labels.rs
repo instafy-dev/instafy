@@ -215,8 +215,17 @@ const BROWSER_SEARCH: BuiltinLabel = BuiltinLabel {
         "searched {host}",
     ),
 };
-// Clicks, other keys, typing, choosing an option, sending a form that is not a search, scrolling,
-// tabs and status: the line names the pages and searches they lead to, not each step.
+// Typing into a field and choosing an option: filling in a form. A form's typing read "Browsed
+// httpbin.org ×8" in Details (a local test, Nov 5). Quiet as browsing is: the line names the pages
+// and searches it leads to.
+const BROWSER_FILL: BuiltinLabel = BuiltinLabel {
+    key: "browser/fill",
+    role: ActivityRole::Quiet,
+    live: "Filling in a form on {host}",
+    done: single("filled in a form on {host}"),
+};
+// Clicks, other keys, sending a form that is not a search, scrolling, tabs and status: the line
+// names the pages and searches they lead to, not each step.
 const BROWSER_BROWSE: BuiltinLabel = BuiltinLabel {
     key: "browser/browse",
     role: ActivityRole::Quiet,
@@ -256,6 +265,16 @@ const BROWSER_REFUSED_PRIVATE: BuiltinLabel = BuiltinLabel {
     role: ActivityRole::Quiet,
     live: "Entering private details on {host}",
     done: None,
+};
+// What the browser did on its own during a step (the controller's `declined`, kept by
+// shared_browser_activity): it declined the page's cookie banner. It rides along with the step's
+// own label, Details lists it after the step ("Declined cookies on frame.work"), and the line never
+// names it.
+const BROWSER_DECLINED_COOKIES: BuiltinLabel = BuiltinLabel {
+    key: "browser/declined-cookies",
+    role: ActivityRole::Quiet,
+    live: "Declining cookies on {host}",
+    done: single("declined cookies on {host}"),
 };
 const TOOL: BuiltinLabel = BuiltinLabel {
     key: "tool/use",
@@ -301,7 +320,8 @@ const LOOK_PROGRAMS: &[&str] = &[
     "test", "[", "sleep", "which", "stat", "realpath", "dirname", "basename",
 ];
 /// Programs that run the runtime's own memory script (`python AGENTS.py`), which only prints
-/// the workspace's memory: the start of a turn, as INSTAFY.md and `/learn` tell the model.
+/// the workspace's memory: the start of a `/learn` turn, as its prompt tells the model, or of a
+/// turn whose space still holds an edited memory file that says so.
 const MEMORY_SCRIPT_PROGRAMS: &[&str] = &["python", "python3"];
 /// `find` options that act on what it finds: deleting, running a command, writing a file.
 const FIND_ACTIONS: &[&str] = &[
@@ -1569,6 +1589,7 @@ pub fn browser_step_activity(step: &JsonValue) -> Option<JsonValue> {
         ("navigate" | "open_tab", Some(_), None) => &BROWSER_OPEN,
         ("snapshot", Some(_), None) => &BROWSER_READ,
         ("search", Some(_), None) => &BROWSER_SEARCH,
+        ("type" | "choose", Some(_), None) => &BROWSER_FILL,
         (_, Some(_), None) => &BROWSER_BROWSE,
     };
     let mut found = Found::builtin(label, Some(1));
@@ -1584,7 +1605,18 @@ pub fn browser_step_activity(step: &JsonValue) -> Option<JsonValue> {
             activity.insert(field.into(), value.clone());
         }
     }
-    activity.insert("also".into(), JsonValue::Array(Vec::new()));
+    // What the browser did on its own during the step rides along with it, on the step's site:
+    // the line never names it, and Details lists it after the step.
+    let mut also = Vec::new();
+    if let Some(host) = host
+        && facts.get("declined").and_then(JsonValue::as_str)
+            == Some(crate::shared_browser_activity::DECLINED_COOKIES)
+    {
+        let mut declined = Found::builtin(&BROWSER_DECLINED_COOKIES, Some(1)).entry_json();
+        declined.insert("host".into(), JsonValue::from(host));
+        also.push(JsonValue::Object(declined));
+    }
+    activity.insert("also".into(), JsonValue::Array(also));
     check_activity(&JsonValue::Object(activity))
 }
 
@@ -2292,7 +2324,8 @@ mod tests {
     }
 
     // A local test: a turn that only posted a browser card read "Ran a command" for
-    // `python AGENTS.py`, the runtime's own memory script, which INSTAFY.md tells the model to run.
+    // `python AGENTS.py`, the runtime's own memory script, which `INSTAFY.md` told the model to run
+    // (`/learn`'s prompt still does).
     #[test]
     fn the_memory_script_is_a_look() {
         let root = tempfile::tempdir().expect("tmp");
@@ -2548,8 +2581,8 @@ mod tests {
             ("open_tab", "browser/open", "content"),
             ("snapshot", "browser/read", "content"),
             ("click", "browser/browse", "quiet"),
-            ("type", "browser/browse", "quiet"),
-            ("choose", "browser/browse", "quiet"),
+            ("type", "browser/fill", "quiet"),
+            ("choose", "browser/fill", "quiet"),
             ("submit", "browser/browse", "quiet"),
             ("press", "browser/browse", "quiet"),
             ("scroll", "browser/browse", "quiet"),
@@ -2560,6 +2593,11 @@ mod tests {
             assert_eq!(activity["key"], json!(key), "{kind}");
             assert_eq!(activity["role"], json!(role), "{kind}");
         }
+        // Typing into a field or choosing an option is filling in a form, not browsing.
+        let typed = step(json!({"step": "type", "host": "httpbin.org", "approval": "routine"}));
+        assert_eq!(typed["live"], json!("Filling in a form on {host}"));
+        assert_eq!(typed["done"], json!("filled in a form on {host}"));
+        assert_eq!(typed["approval"], json!("routine"));
         // No host known yet: "Using the browser", with how the step was allowed.
         let unnamed = step(json!({"step": "type", "approval": "denied"}));
         assert_eq!(unnamed["key"], json!("browser/use"));
@@ -2635,6 +2673,43 @@ mod tests {
         let unnamed =
             browser_step_activity(&json!({"step": "click", "refused": "consent"})).unwrap();
         assert_eq!(unnamed["key"], json!("browser/use"));
+    }
+
+    // A local test (Nov 5): banners' "Reject all" and "Reject" were listed in five turns and
+    // pressed in none. The browser now declines a page's banner itself while it reads the page; Details says
+    // "Declined cookies on frame.work" after the step, and the step keeps its own label and its
+    // place on the line.
+    #[test]
+    fn a_banner_the_browser_declined_rides_along_with_its_step() {
+        let opened = browser_step_activity(&json!({
+            "step": "navigate", "host": "frame.work", "pageKey": "cccccccccccccccc", "declined": "cookies",
+        }))
+        .expect("labelled");
+        assert_eq!(opened["key"], json!("browser/open"));
+        assert_eq!(opened["role"], json!("content"));
+        assert_eq!(
+            opened["also"],
+            json!([{
+                "key": "browser/declined-cookies",
+                "role": "quiet",
+                "live": "Declining cookies on {host}",
+                "done": "declined cookies on {host}",
+                "count": 1,
+                "host": "frame.work",
+            }])
+        );
+        // The word is not itself part of the activity, and only the controller's own word counts.
+        assert!(opened.get("declined").is_none());
+        for facts in [
+            json!({"step": "navigate", "host": "frame.work", "declined": "Reject all"}),
+            json!({"step": "navigate", "host": "frame.work", "declined": true}),
+            json!({"step": "navigate", "host": "frame.work"}),
+            // With no site known, there is no site to name.
+            json!({"step": "navigate", "declined": "cookies"}),
+        ] {
+            let activity = browser_step_activity(&facts).expect("labelled");
+            assert_eq!(activity["also"], json!([]), "{facts}");
+        }
     }
 
     // A browser step that did not happen (the person said no, no answer came, a link-only site,

@@ -1564,6 +1564,14 @@ pub(crate) fn restore_commit_message(reference: &str) -> String {
     format!("{RESTORE_COMMIT_SUBJECT}\n\n{RESTORED_FROM_TRAILER}: {reference}\n")
 }
 
+/// The whole message of the commit an Undo or a Revert saves
+/// (`/git/revert-commit`, on a checkout and on the gateway): History lists it
+/// as `Undid "<the undone version's title>"`, and the body keeps git's own
+/// `This reverts commit <id>.` line, the mark of what it undid.
+pub(crate) fn revert_commit_message(subject: &str, commit: &str) -> String {
+    format!("Undid \"{subject}\"\n\nThis reverts commit {commit}.\n")
+}
+
 /// The whole message of a restore commit that leaves work of its ref there
 /// for the person to settle ([`PATH_ALIAS`], [`NOTHING_TO_KEEP`]): it names
 /// no ref, so no listing takes the ref for restored by it

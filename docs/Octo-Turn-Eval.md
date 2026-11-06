@@ -8,6 +8,9 @@ saved evidence into `report.md` and a bench rollup.
 It is a measurement, not a correctness test, and it spends real model quota: opt-in, never in PR CI. Run it before
 and after changing a skill, the routing preflight or the reply rules, or nightly.
 
+It runs what the stack runs. For the routing preflight alone, from a checkout and without a space, use the
+[routing check](#routing-check).
+
 | Piece | Path |
 |---|---|
 | Cases: one of each kind of ask, no particular skill pack needed | `packages/frontend/tests/playwright/bench/octo-turn-cases.json` |
@@ -177,3 +180,62 @@ The report shows credits charged next to the credits the tokens should have cost
   graded as the case says.
 - The model is read from the job payload's managed-AI label when present. Long run logs are compacted, and checks
   that depend on a command are then n/a. Card timing is sampled every 10 s.
+
+## Routing check
+
+The routing preflight decides how a message enters the runtime: one building turn (`direct`), Instafy's browser
+(`browser`), or the browser and then a build (`browser_then_build`). One reworded sentence in a skill can move a
+route while every wording test still passes. The routing check shows that before the change merges.
+
+Run it after a change to anything a turn reads and before merging: a skill or `AGENTS.md` under
+`packages/runtime-agent/assets/instafy/`, the run instructions (`packages/runtime-agent/src/codex.rs`), or a prompt
+section (`packages/runtime-agent/src/jobs/`, `packages/runtime-controller/src/`). Put its table in the pull request.
+A case that does worse than on main blocks the merge until it is fixed, or until a rerun shows it was unsteady.
+
+Everything a case reads comes from the checkout it runs in, except the request's environment context (the shell,
+today's date and the folder), which comes from the machine that runs it: compare dumps made on one machine. Its
+routing input is built by the job's own code, in a new space's folder that holds the files the checkout ships. It
+runs with the routing preflight's own run options and settings, on Instafy AI's model, and its answer is read by the
+job's own parser, as the job then acts on it. The cases are in
+`packages/runtime-agent/tests/fixtures/routing-check-cases.json`. Each has a message, the chat it was sent in (the
+history entries the runtime receives), the expected route and why. A case can also list the
+`workspaceFileChangeRequirement` values it accepts, what the routing preflight says the turn after it must change:
+after a Stop and an Undo, "keep going" must not require a change. Whether that turn then leaves the undone change
+alone, only a real turn shows.
+
+```bash
+# Offline, no model: every case builds and goes once through the routing preflight to a stand-in model.
+cargo test --manifest-path packages/runtime-agent/Cargo.toml --test routing_check
+
+# Each case's routing input, with no model: <case>.prompt.md and the whole request, <case>.request.json.
+cargo test --manifest-path packages/runtime-agent/Cargo.toml --test routing_check -- --dump "$PWD/tmp/routing-input"
+
+# The real model, 3 runs a case (--runs, --case <id>, --model, --json <file>).
+cargo test --manifest-path packages/runtime-agent/Cargo.toml --test routing_check -- --live http://127.0.0.1:8790/v1
+```
+
+Cargo runs the command in `packages/runtime-agent`, so a relative path starts there. To compare a branch with main,
+dump both and `diff -r` the folders. The stand-in, a dump's requests and `--live` need the code-mode host beside the
+test binary ("Code-mode-only models" in `DEV_SETUP.md`).
+
+The check runs in a child process with an emptied environment and a home of its own, and sends the model only an
+inert key, so it never reads a login, key or config of the machine. `--live` therefore needs an endpoint that serves
+the model without one: a stack's own proxy and each space's proxy serve only turns the controller started, and
+answer 401. The proxy run on its own does, with a login or key you give it, which then pays for the calls
+(`packages/openai-proxy-server/README.md`, "Running the proxy"). Give it a login no other proxy uses, since each
+refreshes the login it holds.
+
+A case passes when more than half of its runs give the expected route. Two of three is `unsteady`. A run that gets no
+answer (the endpoint failed or timed out) gives no route: a case it decides reads `no answer`, and a rerun settles it.
+The command exits 1 when any case is `WRONG`, and otherwise 2 when a case has no answer. A full run is 39 routing
+calls of about 9,000 tokens in and 130 out, about 5 seconds each. For example:
+
+| Case | Expected | Route per run | Verdict | The router's reason |
+|---|---|---|---|---|
+| map-trip | direct | direct, direct, direct | pass | A map request with no site to use first is direct: the map's skill finds and cites its own places. |
+| comparison-page | browser_then_build | browser_then_build, browser_then_build, direct | unsteady | The request asks for a comparison page, so it is research whose answer ends in a page. |
+| keep-going-open-route | browser_then_build | direct, direct, browser_then_build | WRONG | The last page change was undone, so this is not continuing an open change. |
+
+`--dump` and the stand-in show what the model is sent, not what it answers: only `--live` shows a route. The check
+covers the routing preflight alone, and its chats are fixed entries: a change to what the controller puts in a job's
+history reaches it only through the case file.

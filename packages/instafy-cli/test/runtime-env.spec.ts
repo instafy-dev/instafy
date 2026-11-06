@@ -98,4 +98,17 @@ describe("runtime docker launch", () => {
     expect(args.slice(0, 4)).toEqual(["run", "--detach", "--name", "instafy-runtime-test"]);
     expect(args).toContain("WORKSPACE_DIR=/workspace");
   });
+
+  it("runs the agent under an init that reaps what its tools leave behind", () => {
+    const args = buildRuntimeDockerRunArgs({
+      containerName: "instafy-runtime-test",
+      hostBindHost: "127.0.0.1",
+      hostPort: "54332",
+      workspace: "/tmp/instafy-workspace",
+      envArgs: [],
+      image: "instafy-runtime-agent:test",
+    });
+    expect(args.indexOf("--init")).toBeGreaterThan(-1);
+    expect(args.indexOf("--init")).toBeLessThan(args.indexOf("instafy-runtime-agent:test"));
+  });
 });

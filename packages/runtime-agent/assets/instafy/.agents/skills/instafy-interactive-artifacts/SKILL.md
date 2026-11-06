@@ -40,7 +40,7 @@ own kind of page.
   these are all of them or the latest, only when it says so. Facts carry their trust: `checked 17 Oct on maker.com`,
   `€549 at Shop · seen 17 Oct`, `checked 4 min ago`, `Estimate`, `Unknown`.
 - Options side by side: each value names the page it was read on and the day; one nobody found reads `Unknown` and
-  why ("no price on maker.com's page"), never a blank or a dash. A value cites only a page that gives it: a count of
+  why ("price not found on maker.com's page"), never a blank or a dash. A value cites only a page that gives it: a count of
   what you found cites only what it counts, so none found cites no page. A filter from a stated limit ("under €600")
   counts known values only: an item whose value is unknown is listed apart ("Price unknown"), never as within it, on
   the page, in the lede and in the reply. The starters do this with `site.byFilter`; a page you write uses it too. A
@@ -68,11 +68,13 @@ own kind of page.
    the phone screenshot.
 3. Never post preview, tunnel or localhost URLs. A public link only when the user asks for one:
    `instafy-frontend-previews`.
-4. After an edit no new card is needed; reload open viewers if the builder can (`instafy bind command <dir>
+4. After an edit no new card is needed; reload the open page if the builder can (`instafy bind command <dir>
    reload '{}'`). If the server stopped, rerun the same `instafy preview open`.
 
 ## 4. Reply
 
 2-5 lines in the user's terms: the verdict, what the page lets them do, what is unverified, and ONE `Assumed:` line
-for the defaults you chose. End with 2-3 short suggested replies they can send as-is (adjustments of what you
-assumed). The card speaks for itself: never point them to it. No file paths, commands or "validation passed".
+for the defaults you chose. A page they want to share says in one line who can open it (people in this space) and
+how to get a link anyone can open (ask for a public link), not as an assumption. The card speaks for itself: never
+point them to it or say it opened. No file paths, commands, "validation passed", "the provided read" or "updated for
+viewers".

@@ -1685,6 +1685,153 @@ async fn a_lane_an_older_runtime_named_ai_runs_again_under_its_name() -> anyhow:
 }
 
 #[tokio::test]
+async fn active_job_context_cards_recheck_private_sibling_membership() -> anyhow::Result<()> {
+    let chat = FaceChat::new("active job context card membership").await?;
+    let creator = Uuid::new_v4();
+    let result = chat.run(async {
+        ensure_test_user(&chat.state.pool, &creator).await?;
+        let other_root = Uuid::new_v4();
+        let db = chat.state.pool.get().await?;
+        db.execute(
+            "insert into org_memberships (org_id, user_id, role) values ($1, $2, 'builder')",
+            &[&chat.org, &creator],
+        )
+        .await?;
+        // The leased job keeps access to its public root. Only participation
+        // grants its subject access to another person's private sibling.
+        db.execute(
+            "update conversations set visibility = 'public' where id = $1",
+            &[&chat.root],
+        )
+        .await?;
+        db.execute(
+            "update conversations set created_by = $2 where id = $1",
+            &[&chat.thread, &creator],
+        )
+        .await?;
+        db.execute(
+            "insert into conversation_participants (conversation_id, user_id, role, added_by)
+             values ($1, $2, 'member', $3)",
+            &[&chat.thread, &chat.owner, &creator],
+        )
+        .await?;
+        db.execute(
+            "insert into conversations (id, project_id, created_by, metadata, visibility, root_conversation_id)
+             values ($1, $2, $3, '{}', 'public', $1)",
+            &[&other_root, &chat.project, &chat.owner],
+        )
+        .await?;
+        drop(db);
+
+        let app = crate::agent_contexts::router().with_state(chat.state.clone());
+        let uri = format!("/projects/{}/agent-contexts", chat.project);
+        let owner_token = chat.owner_token()?;
+        for (kind, scope) in [
+            ("conversation", chat.root),
+            ("conversation", chat.thread),
+            ("project", chat.project),
+            ("conversation", other_root),
+        ] {
+            let (status, card) = post(
+                app.clone(),
+                &uri,
+                &owner_token,
+                json!({
+                    "agent": "octo",
+                    "scopeKind": kind,
+                    "scopeId": scope,
+                    "context": "A saved context card for this scope.",
+                }),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{card}");
+        }
+        let job = chat.send(chat.root, "octo").await?;
+        let token = chat.job_token(&job).await?;
+        let scopes = |cards: &JsonValue| {
+            let mut scopes: Vec<String> = cards
+                .as_array()
+                .expect("context cards")
+                .iter()
+                .map(|card| card["scopeId"].as_str().expect("scope id").to_string())
+                .collect();
+            scopes.sort();
+            scopes
+        };
+        let mut allowed = vec![chat.root.to_string(), chat.project.to_string()];
+        allowed.sort();
+        let mut with_sibling = allowed.clone();
+        with_sibling.push(chat.thread.to_string());
+        with_sibling.sort();
+        let (status, cards) = get(app.clone(), &uri, &token).await?;
+        assert_eq!(status, StatusCode::OK, "{cards}");
+        assert_eq!(scopes(&cards), with_sibling);
+
+        chat.state
+            .pool
+            .get()
+            .await?
+            .execute(
+                "delete from conversation_participants where conversation_id = $1 and user_id = $2",
+                &[&chat.thread, &chat.owner],
+            )
+            .await?;
+        // Root linkage is not private-chat membership. The same live token
+        // still reads root/project cards; the revoked sibling and other root
+        // remain hidden.
+        let (status, cards) = get(app.clone(), &uri, &token).await?;
+        assert_eq!(status, StatusCode::OK, "{cards}");
+        assert_eq!(scopes(&cards), allowed);
+
+        let mut service_state = chat.state.clone();
+        service_state.config.service_runtime_user_id = Some(chat.owner);
+        let service_app = crate::agent_contexts::router().with_state(service_state);
+        // Configuring a service user does not elevate a human-initiated job.
+        let (status, cards) = get(service_app.clone(), &uri, &token).await?;
+        assert_eq!(status, StatusCode::OK, "{cards}");
+        assert_eq!(scopes(&cards), allowed);
+        let db = chat.state.pool.get().await?;
+        db.execute(
+            "update agent_jobs set payload = payload - 'user_id' where id = $1",
+            &[&job.id],
+        )
+        .await?;
+        drop(db);
+        // A controller-created service job has no human initiator. Its validated
+        // service subject can read the private sibling, still only in this root.
+        let (status, cards) = get(service_app, &uri, &token).await?;
+        assert_eq!(status, StatusCode::OK, "{cards}");
+        assert_eq!(scopes(&cards), with_sibling);
+
+        let db = chat.state.pool.get().await?;
+        db.execute(
+            "update agent_jobs set payload = jsonb_set(payload, '{user_id}', $2::jsonb) where id = $1",
+            &[&job.id, &PgJson(json!(chat.owner))],
+        )
+        .await?;
+        db.execute(
+            "insert into conversation_participants (conversation_id, user_id, role, added_by)
+             values ($1, $2, 'member', $3)",
+            &[&chat.thread, &chat.owner, &creator],
+        )
+        .await?;
+        drop(db);
+        let (status, cards) = get(app, &uri, &token).await?;
+        assert_eq!(status, StatusCode::OK, "{cards}");
+        assert_eq!(scopes(&cards), with_sibling);
+        Ok(())
+    })
+    .await;
+    chat.state
+        .pool
+        .get()
+        .await?
+        .execute("delete from auth.users where id = $1", &[&creator])
+        .await?;
+    result
+}
+
+#[tokio::test]
 async fn a_helpers_cards_go_to_its_lead_and_make_no_saved_agent() -> anyhow::Result<()> {
     let chat = FaceChat::new("a helper's context cards").await?;
     chat.run(async {

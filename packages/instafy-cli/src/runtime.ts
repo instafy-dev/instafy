@@ -611,7 +611,8 @@ function isProcessAlive(pid: number): boolean {
 
 /**
  * Capabilities a local runtime container drops, matching the runtime compose files: no
- * process inspection (SYS_PTRACE) and no raw or packet sockets (NET_RAW).
+ * process inspection (SYS_PTRACE) and no raw or packet sockets (NET_RAW). Like them, it runs
+ * under an init (`--init`) that reaps what the agent's tools leave behind.
  */
 export const RUNTIME_CONTAINER_DROPPED_CAPABILITIES = ["SYS_PTRACE", "NET_RAW"] as const;
 
@@ -628,6 +629,7 @@ export function buildRuntimeDockerRunArgs(params: {
     "--detach",
     "--name",
     params.containerName,
+    "--init",
     ...RUNTIME_CONTAINER_DROPPED_CAPABILITIES.flatMap((capability) => ["--cap-drop", capability]),
     "--add-host",
     "host.docker.internal:host-gateway",

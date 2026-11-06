@@ -101,6 +101,10 @@ const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 // of the page the person chose, so a pause on fields checks only the fields it
 // highlights; it is run-scoped too.
 //
+// `observed-controls.json` records the controls of Octo's latest reading of a
+// page, in any tab, so a step is judged by its own control, whether it asks the
+// person or not, not by every control on the page; it is run-scoped too.
+//
 // `tabs.json` lists the tabs Octo opened in the run (written by the
 // controller script) and `kept-tabs.json` the ones the person kept (written by
 // the origin). The guard reads both when the run ends, to close the rest.
@@ -118,12 +122,13 @@ const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 // tab record names the tab each run left open as its chat's page (see
 // `tab_kept_for_the_chat`), so every viewer of the chat finds that page, after
 // a reload or on another device too. Neither grants anything.
-const APPROVAL_FIXED_FILES: [&str; 10] = [
+const APPROVAL_FIXED_FILES: [&str; 11] = [
     "request.json",
     "decision.json",
     "state.json",
     "withhold-next.json",
     "observed-fields.json",
+    "observed-controls.json",
     AGENT_TABS_FILE,
     KEPT_AGENT_TABS_FILE,
     LEFTOVER_AGENT_TABS_FILE,
@@ -187,16 +192,19 @@ const CHANGED_AFTER_YES_LIMIT: u32 = 2;
 /// The terminal code a run ends on at [`CHANGED_AFTER_YES_LIMIT`].
 const CHANGED_AFTER_YES_CODE: &str = "approval_stale";
 /// Steps in a row that were not done because the page changed under them while
-/// nobody was asked (the controller's `pageChanged`): a snapshot the page no
-/// longer reads as, or a control or fields that are not there as they were.
-/// The first is looked at again, as the run's policy and the step's own error
-/// say. Two, so a page still drawing after it loaded gets one more snapshot,
-/// while a page that never holds still (a live count, a ticker in a link) ends
-/// that page within seconds instead of a loop of snapshots until the run's
-/// time runs out. It does not end the run: the turn opens the site's own page
-/// for the task from a link on it, else goes on to the next source. A step on
-/// a control of a fresh snapshot, or one that moves to another page or tab,
-/// starts the count again.
+/// nobody was asked (the controller's `pageChanged`): the control or fields a
+/// step is for are not there as its snapshot showed them, or the page no longer
+/// reads as a snapshot the controller kept no record of. A change elsewhere on
+/// the page (a carousel's next slide, a clock) leaves a step standing, whether
+/// it asks the person or not, since it is judged by its own control. The first
+/// is looked at again, as the run's policy and the step's own error say. Two, so a
+/// page still drawing after it loaded gets one more snapshot, while a control
+/// that never holds still (a live count, a ticker in a link) ends that page
+/// within seconds instead of a loop of snapshots until the run's time runs
+/// out. It does not end the run: the turn opens the site's own page for the
+/// task from a link on it, else goes on to the next source. A step on a control
+/// of a fresh snapshot, or one that moves to another page or tab, starts the
+/// count again.
 const PAGE_CHANGED_STREAK_LIMIT: u32 = 2;
 /// What a step answers at [`PAGE_CHANGED_STREAK_LIMIT`], in place of the
 /// controller's "take a fresh snapshot". A home page's form that keeps
@@ -3301,7 +3309,7 @@ pub(crate) fn shared_browser_mcp_tools() -> Vec<Tool> {
         Tool::new(
             Cow::Borrowed("snapshot"),
             Cow::Borrowed(
-                "Read what a person can see on the page: title, URL, visible text, and indexed interactive elements. Controls a person cannot see yet, such as those in closed menus and drawers, are left out; `omittedControls` counts them, and opening a menu or scrolling may reveal them. `expanded` tells whether a toggle is open, `area` is the part of the page a control sits in, a select's `chosen` is the option it holds and `options` how many it has, and links on the page's own site are paths. With `tabId`, that tab becomes the one later tools act on first.",
+                "Read what a person can see on the page: title, URL, visible text, and indexed interactive elements. Controls a person cannot see yet, such as those in closed menus and drawers, are left out, as are those past the first 200; `omittedControls` counts them, and opening a menu or scrolling may reveal them. `expanded` tells whether a toggle is open, `area` is the part of the page a control sits in, a select's `chosen` is the option it holds and `options` how many it has, `checked` and `selected` mark what the page shows chosen and `disabled` a control it turned off (each only when true), and links on the page's own site are paths. With `tabId`, that tab becomes the one later tools act on first.",
             ),
             schema(json!({
                 "type": "object",

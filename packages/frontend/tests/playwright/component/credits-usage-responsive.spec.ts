@@ -62,7 +62,6 @@ async function mountUsageRates(page: Page, options: { containerWidth?: number } 
             usageRateRows: ${JSON.stringify(usageRateRows)},
             managedAiUsage: ${JSON.stringify(managedAiUsage)},
             unitLabel: "credits",
-            displayCurrency: "USD",
           }),
         ),
       ),
@@ -137,12 +136,13 @@ test.describe("credits usage responsive layout", () => {
 
     await expect(activeServices).toContainText("Credits/min");
     await expect(activeServices).toContainText("Billing interval");
-    await expect(activeServices).toContainText("Not metered");
+    // A service that costs nothing a minute is no rate, and a person pays in
+    // credits, never in dollars per million tokens.
+    await expect(activeServices).not.toContainText("Not metered");
+    await expect(activeServices).not.toContainText("Hosted runtime");
     await expect(promptUsage).toContainText("Reserve");
-    await expect(promptUsage).toContainText("Token pricing");
-    await expect(promptUsage).toContainText("Input $1.25/1M");
-    await expect(promptUsage).toContainText("Cached $0.13/1M");
-    await expect(promptUsage).toContainText("Output $10/1M");
+    await expect(promptUsage).toContainText("From 12 credits a message");
+    await expect(promptUsage).not.toContainText("/1M");
     await expectNoHorizontalOverflow(page);
   });
 

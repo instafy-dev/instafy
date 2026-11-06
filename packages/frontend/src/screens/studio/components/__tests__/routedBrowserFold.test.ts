@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   forgetPromptsSentFromThisPageForTests,
+  recordRunsStartedByPromptSentFromThisPage,
   recordSendFailedForPromptSentFromThisPage,
   rememberPromptSentFromThisPage,
 } from "../../../../conversations/sentPromptRegistry";
@@ -12,7 +13,7 @@ import {
   BROWSER_HAND_BACK_RECORD_KEY,
   isBrowserNoticePrompt,
 } from "../browserHandBack";
-import { shouldDisplayChatMessage, synthesizeAgentJobThreadMessages } from "../chatMessagePresentation";
+import { readPendingHandBack, shouldDisplayChatMessage, synthesizeAgentJobThreadMessages } from "../chatMessagePresentation";
 import { resolveRoutedBrowserFold } from "../routedBrowserFold";
 
 // A message that names the browser goes straight to it: its job posts only a
@@ -256,10 +257,81 @@ describe("a message the browser turn handed to the building turn", () => {
     expect(listed(messages)).toEqual(["ask", "reason"]);
   });
 
-  it("keeps a hand-back of what a browser turn found as it was", () => {
+});
+
+// The browser turn read pages, and the hand-back took what it found back to
+// the building turn: one answer, in the browser turn's row.
+describe("a browser turn whose findings a hand-back took to the building turn", () => {
+  afterEach(() => forgetPromptsSentFromThisPageForTests());
+  const sent = handBack(false);
+
+  it("reads as the person's message and one row: no notice, and the building turn's steps and reply in that row", () => {
+    // The copy this page sent knows the run its dispatch started; the stored
+    // one names it.
+    rememberPromptSentFromThisPage(sent);
+    recordRunsStartedByPromptSentFromThisPage(sent, [BUILDING_RUN, BUILDING_JOB]);
+    for (const stored of [false, true]) {
+      const messages = [ask, routedCard(), continuation(), step, reply, handBack(stored), buildingStep, buildingReply];
+      const fold = resolveRoutedBrowserFold(messages);
+      expect(fold.hiddenPromptIds.has("hand-back")).toBe(true);
+      expect(fold.handBacksByBrowserJobId.get(BROWSER_JOB)).toEqual([
+        { promptId: "hand-back", runId: BUILDING_RUN, jobId: BUILDING_JOB },
+      ]);
+      expect(listed(messages)).toEqual(["ask", `agent-job-thread:${BROWSER_JOB}`]);
+    }
     const messages = [ask, routedCard(), continuation(), step, reply, handBack(true), buildingStep, buildingReply];
-    expect(resolveRoutedBrowserFold(messages).hiddenPromptIds.has("hand-back")).toBe(false);
-    expect(listed(messages)).toContain("hand-back");
+    expect(turnOf(messages, BROWSER_JOB)).toEqual(["step", "reply", "building-step", "building-reply"]);
+    const row = synthesizeAgentJobThreadMessages(messages, messages.filter(shouldDisplayChatMessage))[1]!;
+    // The row follows the newest of its turns, and names both.
+    expect(row.metadata).toMatchObject({ jobId: BUILDING_JOB, turnJobIds: [BROWSER_JOB, BUILDING_JOB] });
+    expect(readPendingHandBack(row)).toBeNull();
+  });
+
+  it("stands for the hand-back's turn until that turn shows something, and not once its run ended without it", () => {
+    const sentNow = [ask, routedCard(), continuation(), step, reply, handBack(true)];
+    expect(listed(sentNow)).toEqual(["ask", `agent-job-thread:${BROWSER_JOB}`]);
+    const row = synthesizeAgentJobThreadMessages(sentNow, sentNow.filter(shouldDisplayChatMessage))[1]!;
+    expect(readPendingHandBack(row)).toEqual({ runId: BUILDING_RUN });
+    expect(row.metadata).toMatchObject({ jobId: BROWSER_JOB });
+    // Its run was stopped before its job wrote anything: the stop notice says so.
+    const stopped = message({
+      id: "building-stopped",
+      content: "Stopped (1 run canceled.)",
+      timestamp: 7,
+      metadata: { runId: BUILDING_RUN, source: "controller", kind: "run_cancellation",
+        details: { runIds: [BUILDING_RUN], outcome: "canceled", runStatus: "canceled" } },
+    });
+    const ended = [...sentNow, stopped];
+    const endedRow = synthesizeAgentJobThreadMessages(ended, ended.filter(shouldDisplayChatMessage))[1]!;
+    expect(readPendingHandBack(endedRow)).toBeNull();
+  });
+
+  it("shows nothing of a hand-back whose dispatch failed, and the browser turn stays the last word", () => {
+    rememberPromptSentFromThisPage(sent);
+    recordSendFailedForPromptSentFromThisPage(sent);
+    const messages = [ask, routedCard(), continuation(), step, reply, sent];
+    expect(listed(messages)).toEqual(["ask", `agent-job-thread:${BROWSER_JOB}`]);
+    const row = synthesizeAgentJobThreadMessages(messages, messages.filter(shouldDisplayChatMessage))[1]!;
+    expect(readPendingHandBack(row)).toBeNull();
+    expect(row.metadata).not.toHaveProperty("turnJobIds");
+  });
+
+  // The building turn failed: its failure, with its Try again, is the row's.
+  it("keeps a failed hand-back's failure in that row, also one posted for its run alone", () => {
+    const failed = message({
+      id: "building-failed",
+      content: "Instafy AI isn't answering right now.",
+      timestamp: 8,
+      messageType: "error",
+      metadata: { jobId: BUILDING_JOB, runId: BUILDING_RUN, source: "agent", outcome: "failed", messageType: "error" },
+    });
+    const withJob = [ask, routedCard(), continuation(), step, reply, handBack(true), buildingStep, failed];
+    expect(listed(withJob)).toEqual(["ask", `agent-job-thread:${BROWSER_JOB}`]);
+    expect(turnOf(withJob, BROWSER_JOB)).toEqual(["step", "reply", "building-step", "building-failed"]);
+    const runAlone = message({ ...failed, id: "run-failed", metadata: { runId: BUILDING_RUN, source: "agent", outcome: "failed", messageType: "error" } });
+    const withoutJob = [ask, routedCard(), continuation(), step, reply, handBack(true), runAlone];
+    expect(listed(withoutJob)).toEqual(["ask", `agent-job-thread:${BROWSER_JOB}`]);
+    expect(turnOf(withoutJob, BROWSER_JOB)).toEqual(["step", "reply", "run-failed"]);
   });
 });
 

@@ -28,7 +28,6 @@ describe("CreditsUsageRates", () => {
         usageRateRows={[]}
         managedAiUsage={{ ...managedAiUsage, provider: "openai" }}
         unitLabel="credits"
-        displayCurrency="USD"
       />,
     );
     const legacy = renderToStaticMarkup(
@@ -36,7 +35,6 @@ describe("CreditsUsageRates", () => {
         usageRateRows={[]}
         managedAiUsage={managedAiUsage}
         unitLabel="credits"
-        displayCurrency="USD"
       />,
     );
 
@@ -55,7 +53,6 @@ describe("CreditsUsageRates", () => {
         usageRateRows={[]}
         managedAiUsage={{ ...managedAiUsage, creditsPerPrompt }}
         unitLabel="credits"
-        displayCurrency="USD"
       />,
     ).replace(/\s+/g, " ");
 
@@ -64,5 +61,17 @@ describe("CreditsUsageRates", () => {
     expect(rates(1)).not.toMatch(/\/prompt|1 credits|reserve prompt debit|reconciled|ledger|token-based/i);
     expect(rates(2)).toContain("From 2 credits a message");
     expect(rates(2)).toContain("Each message holds 2 credits, then costs what it used.");
+  });
+
+  // Usage read like an operator's page: "In $0.10/1M Cached $0.01/1M Out
+  // $0.50/1M" under the message's price. A person pays in credits.
+  it("names no price per million tokens", () => {
+    const markup = renderToStaticMarkup(
+      <CreditsUsageRates usageRateRows={[]} managedAiUsage={managedAiUsage} unitLabel="credits" />,
+    ).replace(/\s+/g, " ");
+    expect(markup).toContain("From 1 credit a message");
+    expect(markup).not.toMatch(/\/1M|Token pricing|\$|Cached|Input|Output/);
+    // With no service that costs anything a minute, there is no table of them.
+    expect(markup).not.toContain("Active services");
   });
 });

@@ -456,6 +456,46 @@ Two steps never ask, in Ask too:
   must not be a link or send a form, and its step lets no form post leave the
   tab, not even to the page's own site. The same words outside a banner (a
   document editor's "Reject all") still ask.
+- **The browser declines a banner itself.** Before Octo reads a page that a
+  step opened or left the tab on, or a page it looks at, the controller presses
+  the banner's own refusal itself, once: a button with a refusal's words, as
+  above, beside a control of the same banner (the nearest container holding
+  both is a small part of the page) whose words accept, which is refused as
+  `step_refused_consent`, in a banner that speaks of cookies. That banner, or
+  a container around it, is named after them (its id, class, label or test
+  id, or a dialog's title), or its own text says "cookie": a dialog that
+  speaks only of privacy or consent (a policy to accept, whose "Decline" may
+  close an account) is no cookie banner, and the browser leaves it to the
+  turn. Never the accept, the settings or anything else on the banner, never
+  a link, a form's button, a control turned off or one something covers,
+  never in a frame (a reading lists the page's own controls only), never on a
+  page that may show a secret or holds a sign-in, password, code or payment
+  field among the controls a reading lists, and never on a page with a frame
+  whose own element (its title, name, label or id) names a payment, card,
+  password or code field, as a payment provider's card fields sit in one (the
+  frame itself is never read). It asks nobody in any mode, no form post may
+  leave the tab while it runs (a look at the page gets a step's guard of its
+  own for the press), and the action feed shows it as "Decline cookies". Once
+  the banner's refusal is gone after the press (out of the page or hidden),
+  the step's activity says so (`declined: "cookies"`) and Details list
+  "Declined cookies on <site>" after the step; a banner whose button took no
+  press (its script not ready yet) stays up and is not said to be declined.
+  Octo reads the page as it is after the press. A banner with no refusal of
+  its own stays up, and Octo reads on under it.
+- **A covered click is refused at once.** A click whose control has something
+  outside it over its middle (a notice, a dialog, a loading screen) would go
+  to that instead. The control is brought to the middle of the view, past a
+  pinned header, and a cover still there after about 600 ms refuses the step
+  at once, in words: a cookie or consent notice says "A cookie notice covers
+  this page, and the browser could not decline it: read on under it, or open
+  the place's own site." (it may have no reject button, sit on a page the
+  browser presses nothing on, or have come after the page was read, which the
+  next look declines when it can), any other cover that something covers the
+  control and to take a fresh snapshot. Before, such a click waited out Playwright's 15-second
+  timeout and returned its call log. A cover that goes within that moment (a
+  toast that fades) is waited for. No failed step carries Playwright's call
+  log: only its first line, and an action Playwright gave up waiting on says
+  that the page did not take the step in time.
 - **A cookie banner's accept is refused.** In the same banner, a control or a
   link whose words accept, agree or consent ("Accept all", "I agree", "Agree
   and close", "Consent", "Alle akzeptieren", "Einwilligen", "aceitar e
@@ -814,8 +854,30 @@ skill, whatever its words: the router loads a skill by the words of a request,
 and a browser turn's often has none of the skill's ("Now find how to get there
 by tram", or a task that names an address). On a fresh thread the skill loads
 first of the turn's skills, so the snapshot's budget never runs out before it,
-and whole, but for its "Routing preflight", which only the routing step reads.
-Besides it the turn is told of, and loads when its words route them, only the
+and whole, but for its "Routing preflight", which only the routing step reads
+(no turn's snapshot carries that section), and the sections its front matter
+names for a turn with no shell (`no_shell_omits`: the card a building turn hands
+the person, what the skill is for, the browsers' names, and where a turn with a
+shell reads more). A turn that carries on the person's own message, which the
+routing step sent to the browser, also leaves out the sections named for it
+(`routed_omits`): no card listed its reads, so it reads nothing of reading a
+card's list ("Several reads in one card"), while what a page's text may start
+and which pages end a read are in the "Core rules" every browser turn reads.
+Every skill a browser turn loads leaves out the sections it names the same way:
+the `instafy-web-research` skill's readers (and what `instafy web read` marks,
+reports and returns, its budget, and how a turn without the browser skill
+prints "Finding a page"), searches (a search for reviews, and a search result's
+item that no page names, "not checked", included), guided links and rules for
+building pages and datasets, for one, while its rules for what a page's text
+may start and what a search may hold, a site's own search box included, reach
+every reader. Nor does a browser turn read a skill's front matter, the router's
+own fields, its routing words among them ("web search" is one of the research
+skill's). Of the space's `AGENTS.md`, a browser turn reads its "Replies", as a
+restored one does, when the file is a copy Instafy ships; a copy the space
+edited, or one with no such section, comes whole. Of `INSTAFY.md` it reads
+nothing while the file is a copy Instafy ships, whose snapshot, constants and
+workflows are placeholders; a copy the space filled in or edited comes whole.
+Besides it the turn loads, when its words route them, only the
 skills it can use with no shell (runtime-agent `usable_with_no_shell`): not the
 space's memory, routing and team skills (`context_kind` `root`, `meta` or
 `learned_index`), not a skill that runs code of its own (a `scripts/` folder, or
@@ -823,17 +885,20 @@ a skill pack whose manifest names commands, such as the map pack), and not the
 runtime's own skills that build, run commands or plan a team
 (`SHELL_TURN_SKILLS`). Every other skill its words route loads, one the space
 added or imported included; a skill it cannot use takes no routing place from
-one it can, and its skills index lists only the ones it can use. Its browser
-skill counts against the snapshot's budget as much as a routed skill does, so
-those keep their room beside it. Nor is it told how to run a command, change a
-file, or start a team plan or a goal, since a browser turn's only tools are its
-browser's: its request leaves those lines out, its client context gives the
-person's time zone without the commands that take one, and a Shared Browser
-thread begins on base instructions without the structured lane's paragraphs on
-the command tool and file writes (`SHARED_BROWSER_BASE_INSTRUCTIONS`), which it
-keeps when a later run resumes it, as a thread begun before keeps its own. The
-space's `AGENTS.md` and `INSTAFY.md`, and a skill it can use, may still name
-commands that other turns run. What other turns read of the skill when they
+one it can, and it reads no skills index, since it cannot open a skill file.
+Its browser skill counts against the snapshot's budget as much as a routed
+skill does, so those keep their room beside it. Nor is it told how to run a
+command, change a file, or start a team plan or a goal, since a browser turn's
+only tools are its browser's: its request leaves those lines out, its contract
+gives its answer's shape alone, with none of the building turns' cards
+(secrets, integrations, location), skill setups or Octo's device and camera
+capabilities, its client context gives the person's time zone without the
+commands that take one, and a Shared Browser thread begins on base
+instructions without the structured lane's paragraphs on the command tool and
+file writes (`SHARED_BROWSER_BASE_INSTRUCTIONS`), which it keeps when a later
+run resumes it, as a thread begun before keeps its own. A space's own
+`INSTAFY.md`, and a skill it can use, may still name commands that other turns
+run. What other turns read of the skill when they
 need it (how to write a learned block and the cues a run reports for one, the
 owner-local `observe` tool, the Personal Browser's own notes, and what a script
 that drives a browser keeps in mind) is in its
@@ -844,28 +909,33 @@ the skill's "Finding a page" section again, from the space's own copy. A chat's
 browser thread holds only its browser turns: each starts from what it is asked
 (the person's words or a card's task), and a new or lost browser thread is
 given the chat's earlier browser turns, never Octo's building turns, files or
-command output. Codex withdraws the space's `AGENTS.md` from a
+command output, and after them which of the requests those turns were asked the
+person stopped, or undid the change of, since the first of those turns; a
+restored one is given those since its own last turn
+([Chat activity](Chat-Activity.md#a-stopped-turns-changes)). Codex withdraws the space's `AGENTS.md` from a
 turn without the workspace, so it is given that file's "Replies" too (how a reply
 reads: plain words, no error codes, file paths or inside words, "not checked" on
-a fact no page read this turn states, and only steps the turn started). The
+a fact no page read this turn states, where it looked for what it didn't find or
+which page it didn't reach, never that a site or page lacks it, and only steps
+the turn started). The
 "Finding a page" section, which the
 `instafy-web-research` skill points to (a research turn without the browser
 skill prints just that section with one command), says how every reader finds a
-page: an address the person, a skill or a search result gave, a link on a page
-read (its links printed with its text), or the official site's home page, never
-a search engine or a guessed path; a missing page's own site search; a page
+page: an address the person or a skill gave, a link on a page read (its links
+printed with its text), or the official site's home page (for reviews, a
+reviewer's own site), never a search engine or a guessed path (a turn that
+searches opens a result's page too, by the research skill's "Searching"); a
+missing page's own site search; a page
 that fails (busy, blank or an
 error page such as a 504) sends the turn to the place's own site at once, in the
 same turn, and then to another official source; facts from a place's
 own page, and a route from the operator's journey planner with its stations
 chosen, for the day and time the person travels (a daytime hour when they gave
-none) and saying which, not a listing or a kiosk page; "not checked", or
-nothing, for anything not read this turn (how far, how to get there, what is
-best included); a comparison's models, those a page's menu names
-included, each read on
-its own page; and a cookie banner's refusal, so the banner does not cover the
-page. A sign-in, a bot check, a paywall or a refused read ends that page, never
-the task: nothing a turn carries tells it to stop there, so neither a card's
+none) and saying which, not a listing or a kiosk page; a comparison's models,
+those a page's menu names included, each read on
+its own page. A cookie banner is the browser's own: it declines one with its
+own reject button before Octo reads the page (above). A sign-in, a bot check,
+a paywall or a refused read ends that page, never the task: nothing a turn carries tells it to stop there, so neither a card's
 task nor the reply rules end the research after a failed page. A browser turn's
 own run text says the same: a failed or refused page ends that page, not the
 task, so the turn goes on to the next source in the same turn and says in plain
@@ -1587,21 +1657,46 @@ the observed page. The selected CDP target is part of that fingerprint, so even
 two tabs with identical URLs and DOM cannot replay each other's snapshots. The
 controller recomputes that fingerprint before it judges or asks about a step and
 uses a concrete element handle, so reordered or relabeled DOM cannot silently
-retarget an action. A step whose snapshot no longer reads as the page (one
-still drawing after it loaded, say) fails without ending the run, and the
-policy says to take another snapshot: a stale target or a changed page is
-looked at again, and only an approval's own outcome is final. The controller
-says so on its stdout (`pageChanged`, for a step nobody was asked about whose
-snapshot, control or fields changed under it), and runtime-agent counts such
-steps until a step on a fresh snapshot's control, or one that moves to another
-page or tab, goes through (a look at the page or a scroll between them does
-not count). The second answers that the page keeps changing, which ends that
-page, not the run, so a page that never holds still (a live count, a ticker in
-a link) sends the turn on instead of a loop of snapshots: to the site's own
-page for the task, from a link on the page (its menu: a planner, a search
-page), else to the next source. A home page's planner form that kept changing
-had sent a turn back to a site that had not answered, while the planner's own
-page, linked from that home page, held still.
+retarget an action. That fingerprint holds what a reading does not show (each
+control's classes, hidden names and values), so a page reads differently once
+a carousel turns or a clock ticks, though every control it lists reads the
+same. A reading lists the controls one moment of the page shows: each
+control's box comes from the same look as the rest of its facts, so a
+carousel that turns while the page is read drops no slide from the list and
+moves no index after it. A step is therefore judged by its own control: each reading records,
+in the run's approval directory (`observed-controls.json`, the latest reading
+only, in any tab), the target fingerprint of every control it lists, a
+fingerprint of the text around it (its card, its form's labels) and the name
+it gave it, and a step goes ahead when the address and the tab are the same
+and the control at its index has the fingerprint and the text around it that
+reading recorded, the check a step already gets after the person says yes
+(below): a look-alike a carousel shows in its place, around another product's
+text, is not it. The controls that look like it (the same fingerprint: two
+copies of one form, one button in every row) must also be where the reading
+listed them, since with one of them gone or a new one ahead of it the index
+names another, which neither fingerprint nor text tells apart. A step that asks the person is judged the same way: its
+prompt is built from that control as it is now, and the control is checked
+again after the answer, so a planner's button that sends its form asks once
+however often a carousel beside it turns. A control that changed is refused
+before anyone is asked, named as the reading named it (`"End" changed after
+the snapshot this step names`). A step on a snapshot with no record (an older
+one) is judged whole, as before. Any of these fails without ending the run,
+and the policy says to take another snapshot: a stale target or a changed
+page is looked at again, and only an approval's own outcome is final. The
+controller says so on its stdout (`pageChanged`, for a step whose control or
+fields changed under it before anyone was asked, or whose snapshot with no
+record no longer reads as the page), and runtime-agent counts such steps until
+a step on a fresh snapshot's control, or one that moves to another page or
+tab, goes through (a look at the page or a scroll between them does not
+count). The second answers that the page keeps changing, which ends that
+page, not the run, so a control that never holds still (a live count, a
+ticker in a link) sends the turn on instead of a loop of snapshots: to the
+site's own page for the task, from a link on the page (its menu: a planner, a
+search page), else to the next source. A home page's planner form that kept
+changing had sent a turn back to a site that had not answered, while the
+planner's own page, linked from that home page, held still; and a planner
+under a carousel was refused twice while none of its controls had changed,
+which ended the page.
 Once the person has answered the step's prompt, the page
 elsewhere may have changed by itself while they read it (a carousel's slide, a
 clock, a live count), so the step checks the control they were asked about
@@ -1648,11 +1743,39 @@ shows up in the click's own result: after an action the controller waits, at
 most a second, for running transitions and animations that end, so a menu that
 opens with a transition is observed where it lands. `omittedControls` counts
 the controls left out, so a list cut short by a closed menu, or by a box the
-page scrolls itself, does not read as the whole page.
+page scrolls itself, does not read as the whole page; it counts the controls
+past the list's 200 too. Every control the page has (up to 5,000) is judged
+before the list is chosen, so a closed list's hundreds of options never crowd
+a form's fields and button out of it. When a page shows more than 200, the
+ones scrolled past, above the view, are left out, then the ones the page
+turned off, so scrolling down a long page reaches every control on it and a
+page full of taken seats still lists the free ones; neither depends on how
+many controls lie below the view.
+The list holds what a person operates on such pages: a details' summary
+(`expanded` says whether its section is open), the tabs, options, menu items
+and tree items pages often take out of the tab order, and a switch. An element
+is not listed for `aria-expanded` alone: pages set it on the section a toggle
+opens too. A control the page
+turned off (disabled, inside a disabled fieldset, or `aria-disabled`) is
+listed with `disabled`, so a button that waits for a form's fields never reads
+as missing, and a click, typing, a choice or a key on it is refused at once
+with nothing sent or asked; nor is the person asked to fill it
+(`request_human_input`, a sign-in's fields). `checked` marks the box, radio button, switch or
+pressed toggle that is on, and `selected` the tab, option or day the page marks
+selected; each of these three is there only when it is true, and a secret
+screen gives neither `checked` nor `selected`. In the list a field opens as a
+person types (a combobox's suggestions), the option marked selected is only
+the one the keys reach, not what the field holds, so it carries no `selected`.
+A text area is named by its label, or the words beside it, never by what it
+holds. A click lands where a person would click, the middle of the control in
+view; when another control sits there inside it (a form's button in a
+section, an item of a menu or tree it holds), or a frame, the click would act
+on that, which the step was not judged or asked for, so nothing is clicked and
+the step says so.
 Snapshots and actions build the list with the same function, so indices and the
 `snapshotId` agree. Whether a page is a secret screen is still judged on all of
-its rendered text and every control's name, seen or not, so leaving hidden
-parts out never lifts withholding. Each control carries only its non-empty
+its rendered text and every control's name, seen or not and listed or left out,
+so leaving parts out never lifts withholding. Each control carries only its non-empty
 fields; `expanded` reports a toggle's state and `area` the part of the page it
 sits in (`header`, `nav`, `menu`, `dialog`, `tabs`, `search`, `footer` or
 `aside`), and a link on the page's own site is given as its path. `navigate`
@@ -1665,14 +1788,40 @@ hides, alone or in a group: one rule counts them, reads them and lets `choose`
 pick them), so the one it holds never reads as the whole list; a closed
 select's option names come only from `choose`, which lists them when a name
 misses. A secret screen gives neither field. A snapshot
-never shows what is typed into a field or whether a box is checked, so the
-reading after such a step matches the one before it, and a turn that could not
-tell its text went in gave up a form after its first field. A `type` step's
-result says what it did in `done` instead: the field, how many characters went
-in, and whether the field holds them, read only to be counted ("Typed 12
-characters into "Customer name:", and the field holds them."), never the text,
-which may be private. A click on a checkbox, a radio button or a switch says
-whether it is checked now. The control's
+never shows what is typed into a field, so the reading after such a step
+matches the one before it, and a turn that could not tell its text went in gave
+up a form after its first field. A `type` step's result says what it did in
+`done` instead: the field, how many characters went in, and whether the field
+holds them, read only to be counted ("Typed 12 characters into "Customer
+name:", and the field holds them."), never the text, which may be private. A
+click on a checkbox, a radio button or a switch says whether it is checked now.
+
+What the text cannot hold is named where a person sees it: a frame (an
+`iframe`, `frame`, `object` or `embed`) as "[frame not read: <site>]", by the
+site it shows, and a canvas, such as a map or a chart, as "[picture with no
+text]" (with its label when it has one). A frame's page is never read, so a
+booking engine, a payment form or a video in one never reads as missing, and
+a field in it never reaches the reading; one too small to see (a tracking
+frame) is nothing. A frame's site is an address, never page text: it is put
+in after the text is masked and judged, so a random-looking ad server's name
+makes no secret screen. A canvas's label is page text and is masked as the
+rest is. A page with more text than the reading holds is read from
+where it is scrolled to: the text starts at the first line in view after the
+lines scrolled past, and text pinned in view (a fixed or sticky header) moves
+neither, so a skip link or a banner that scrolls away before a pinned header
+changes nothing. A long run of text (a paragraph, a plain-text page or a
+`<pre>`) is kept as lines of about a thousand characters, split between words
+and placed where each is drawn, so it is read in parts too. Lines in
+brackets say how much is above ("[Text above not shown: about 21,400
+characters. Scroll up to read it.]") and below, and how far to scroll to read
+on ("[Text cut here: about 18,600 more characters. Scroll down (y: 1562) to
+read on.]"), within the reading's 12,000 characters. A page whose part in view
+is further down than a reading walks (over a million characters) says so
+("[Text cut here: the part of the page in view is further down than a reading
+reaches.]"). The text between them is masked exactly as the whole page's text
+is; when it cannot be, the page is read from its top with the cut line. `scripts/shared-browser-page-reading-e2e.mjs`
+shows each of these in Chromium. A closed shadow root is read by neither the
+text nor the list. The control's
 box stays inside the controller for the visible cursor, and the step's result
 is its structured content, with one line as its text (see above).
 On the page the person chose, a page with sign-in fields (a password or
@@ -2432,9 +2581,11 @@ unless the policy is `"covered"`.
   and the browser turn's reply is the answer. When a browser turn that
   continued a building card finishes and read at least one page, Studio sends
   one ordinary turn back to the building lane, "Continue building
-  with what the browser turn found.", shown as the notice "Octo continued with
-  what it found in the browser" and naming the browser job in
-  `continuesFromBrowserJob`. It does so only in the tab that sent both the
+  with what the browser turn found.", stored with the words "Octo continued
+  with what it found in the browser" and naming the browser job in
+  `continuesFromBrowserJob`. The chat draws none of it: the hand-back's turn
+  joins the browser turn's row, so the person's message gets one answer, with
+  one line, one reply and the card ([Chat activity](Chat-Activity.md)). It does so only in the tab that sent both the
   card's prompt and the browser continuation, when nobody wrote after the
   browser turn, the turn succeeded within the last ten minutes and did not
   stop for the person (`request_human_input`, or a step whose approval ended
@@ -2443,7 +2594,9 @@ unless the policy is `"covered"`.
   `browserHandBack` with what the browser turn was asked (at most 2,000
   characters), for a card the routing step posted the message's own words as
   `personRequest` (from that message's job, at most 8,000 characters; the
-  building turn reads them as the person's request), and every finding line of
+  building turn reads them as its latest request, in place of Studio's words,
+  which it read right after a turn the person had stopped and took for a
+  request to carry that turn on), and every finding line of
   its final reply as a labelled finding `{url, title, facts, readAt, viewer}`
   (plus `stopped` for a page that was not read: `login`, `captcha`, `paywall`,
   `blocked`, `robots`, `download`, `secret` or `link-only`, and any other reason
@@ -2451,7 +2604,11 @@ unless the policy is `"covered"`.
   finding lines (each page once, a later line for it adding its facts, and a
   page's facts at most 2,000 characters, whole facts in order, the rest
   counted as `factsLeftOut`; only a reply without any falls back to the
-  addresses on its lines), `readAt` and `viewer` from the job, and an
+  addresses on its lines), `viewer` from the job, `readAt` from when the
+  chat's browser last read that page (the latest completed step of that
+  viewer's browser in the chat that left a tab on it, by the browser turn's
+  end, matched by the page key the step's activity carries, so a page an
+  earlier browser turn read keeps its own time; else the turn's end), and an
   address on a loopback, private, link-local or local-only host is never a
   finding. None of the browser turn's own words go with findings that list
   what their pages showed, not even a first line that says a page stopped it
@@ -2475,8 +2632,8 @@ unless the policy is `"covered"`.
   never as a send-queue entry. An earlier hand-back of the same browser turn
   that failed, was stopped or expired neither counts as Octo having continued
   nor as a prompt sent after the browser turn: "Try again" on a failed one
-  sends the hand-back again, its claim and Studio's words, never the notice
-  the chat shows for it. A hand-back resumes the building lane of the turn
+  sends the hand-back again, its claim and Studio's words, never the words
+  its prompt is stored with. A hand-back resumes the building lane of the turn
   whose card the browser turn carried on: it goes to that turn's agent alone,
   whichever agents its send names, and writes no more than that turn could,
   with no write intent when that turn had none and only its owned paths when
@@ -2507,7 +2664,8 @@ unless the policy is `"covered"`.
   carries on the person's own message with its reply alone: the message is in
   that replay already). A Let Octo
   continue press reads as one line there, not as Studio's instructions in the
-  person's name. It takes no
+  person's name, and a hand-back's own stored words read as nothing there and
+  in the routing step's history: the person's message is in it already. It takes no
   routing step: its route is decided (build in this chat), and the findings it
   builds from are in its own prompt, which a routing step never sees. So it
   runs in the lane a routed build runs in: it edits the space and ends in plain
@@ -2527,7 +2685,9 @@ unless the policy is `"covered"`.
   A browser turn that continues a building card is asked to end its reply
   with one finding per page, one JSON object per line, as the browser skill
   writes them, each fact under a page it read that states it rather than one
-  that only quotes it. Those lines are for Octo: the runtime takes every line
+  that only quotes it, and a value it looked for on a page and didn't find
+  under that page as where it looked ("runtime not found on this page"), never
+  that the page lacks it. Those lines are for Octo: the runtime takes every line
   the controller would read as a finding out of the reply the person reads, and
   posts them as one note of the turn
   (`details.browserFindings: {pages, pagesRead}`), where the controller reads
@@ -2545,11 +2705,12 @@ unless the policy is `"covered"`.
   as a desktop app's own runtime ahead of its controller, posts "Finished in
   the browser." in place of the words, as earlier runtimes did. So does a turn
   whose every page stopped it and that wrote no words of its own: no hand-back
-  follows a turn that read no page. The browser turn is told that the
-  building turn cannot open the browser, so it reads what the request needs
-  before it ends:
-  each item's own page and, for reviews, the review pages a page it read links
-  to, else a reviewer's own site. Right before the request it reads its part
+  follows a turn that read no page. The building turn cannot open the
+  browser, so the browser turn reads what the request needs before it ends:
+  each item's own page from the links it read and, for reviews, each
+  reviewer's own site, by its address or its own search box, since the turn has
+  no web search, as "Finding a page" says for every reader.
+  Right before the request it reads its part
   of it in plain words: the reading, every page the request needs, while what
   the request asks Octo to make is the building turn's part, from its finding
   lines, so it never stops because it cannot make that, and it says nothing
@@ -2612,7 +2773,7 @@ unless the policy is `"covered"`.
   for a card the routing step posted; it stamps `buildRequest` with the
   message's own words as `personRequest`, an empty reply and no findings. The
   chat shows neither the card nor, once the hand-back is in it, the browser
-  turn or the hand-back's notice: the person reads their message and then the
+  turn or the hand-back's prompt: the person reads their message and then the
   building turn. The building turn reads those words as the person's request
   and makes what they ask, reading any public page it needs itself. A refusal
   because the conversation moved on (someone wrote after the browser turn, or
@@ -2637,7 +2798,11 @@ The view shows one state at a time, derived from its status and the kind of
 failure it stored with its error (`hostedBrowserViewState`): one sentence,
 at most one button, and a neutral status pill. While opening, the view's
 sentence is the one loading signal on screen; the pill says **Starting…** only
-to screen readers (`startingShownInView`).
+to screen readers (`startingShownInView`). Back in a chat whose browser this
+page showed before, restored rather than opened by a press and with no turn of
+the chat on its way, nothing is starting: the view finds that browser again
+and says nothing while it does, neither the sentence nor the pill, unless that
+takes longer than the grace a picture on its way has (1.5 s).
 
 | State | Sentence | Button | Pill |
 |---|---|---|---|

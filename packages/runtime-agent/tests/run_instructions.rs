@@ -1742,12 +1742,8 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "browser work goes on whether or not it found its answer",
             ),
             (
-                "- A bare \"keep going\" never carries on a change the person stopped or undid.\n",
-                "a bare \"keep going\" never carries on a change the person stopped or undid",
-            ),
-            (
-                "a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked or not confirmed, such as a route); when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`.",
-                "a bare \"keep going\" carries on what the chat left open",
+                "a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked or not confirmed, such as a route), never a change the person stopped or undid; when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`.",
+                "a bare \"keep going\" carries on what the chat left open, never a change the person stopped or undid",
             ),
             (
                 "So is research whose answer ends in a page (a comparison, prices, a route), from the first message.",
@@ -1977,14 +1973,17 @@ fn check_messages_the_browser_could_not_make(harness: &Harness) -> Result<()> {
         !first.contains("Instafy routing preflight."),
         "M3 began with a routing call"
     );
+    // The person's words are its latest request, never Studio's words for a hand-back.
     ensure!(
-        first.contains(&format!(
-            "The person's request, which went to Instafy's browser first:\n[[M1]] {M_MAP}\n"
-        )),
-        "M3 did not read the person's message as their request"
+        first.contains(&format!("\n\nLatest user request:\n[[M1]] {M_MAP}")),
+        "M3 did not read the person's message as its latest request"
     );
     ensure!(
-        first.contains("Instafy's browser opened no page for it"),
+        !first.contains(HAND_BACK),
+        "M3 read Studio's words for a hand-back"
+    );
+    ensure!(
+        first.contains("Instafy's browser opened no page for the latest request"),
         "M3 was not told the browser opened no page"
     );
     ensure!(
@@ -2706,9 +2705,12 @@ fn check_browser_turns_are_told_only_what_they_can_use(harness: &Harness) -> Res
                 if message.contains("\nProject memory snapshot (from workspace; already loaded):\n")
                 {
                     fresh_browser_threads += 1;
+                    // Its browser skill's last section a browser turn reads, and none of those it
+                    // leaves out (the routing step's, and a building turn's card).
                     ensure!(
-                        message.contains("## Good outputs")
-                            && !message.contains("## Routing preflight"),
+                        message.contains("## Default decision order")
+                            && !message.contains("## Routing preflight")
+                            && !message.contains("## Open or resume from Chat"),
                         "{}#{index} does not carry the browser skill whole",
                         turn.label
                     );
@@ -2781,15 +2783,16 @@ fn check_browser_turns_go_on_past_a_page(harness: &Harness) -> Result<()> {
                 !text.contains("a stale target, a changed page"),
                 "{label}#{index} reads a stale target or a changed page as final"
             );
-            // The turn's own reply rules say the same.
+            // Its browser skill's "Finding a page" says what comes next, on a new thread and a
+            // restored one; its reply rules no longer say it a third way.
             let input = input_text(request);
             ensure!(
-                input.contains("If a browser tool fails or refuses a page, that ends that page, not the task: go on to the next source in this turn."),
-                "{label}#{index} never read that a failed page ends that page in its reply rules"
+                input.contains("A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn."),
+                "{label}#{index} never read what comes after a failed page"
             );
             ensure!(
-                !input.contains("If a browser tool fails, say in plain words"),
-                "{label}#{index} reads a failed browser tool as the end of the turn"
+                !input.contains("If a browser tool fails"),
+                "{label}#{index} reads a failed browser tool in its reply rules"
             );
         }
     }
@@ -3263,7 +3266,10 @@ fn outside_page_data(text: &str) -> String {
 }
 
 /// The start a turn's first request shares with its thread's latest earlier request on the same
-/// instructions, tools and output format: that request's turn and the share of the input.
+/// instructions, tools and output format: that request's turn and the share of that request's
+/// input this one starts with. Measured against the later request instead, the share fell with a
+/// shorter first request although the later one still started with all of it (a browser turn's
+/// first request a third shorter: its next turn started with every token of it, 81% of its own).
 fn start_share<'a>(harness: &'a Harness, label: &str) -> Option<(&'a str, usize)> {
     let turn = harness.turn(label);
     let request = first_sampling_request(turn);
@@ -3290,7 +3296,7 @@ fn start_share<'a>(harness: &'a Harness, label: &str) -> Option<(&'a str, usize)
         .count();
     Some((
         earlier_label,
-        100 * input_bytes(&input[..shared]) / input_bytes(&input).max(1),
+        100 * input_bytes(&input[..shared]) / input_bytes(&earlier_input).max(1),
     ))
 }
 

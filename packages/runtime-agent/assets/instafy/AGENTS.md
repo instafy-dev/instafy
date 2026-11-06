@@ -5,20 +5,6 @@ This workspace uses Instafy’s skill-based knowledge files:
 - `.agents/skills/*/SKILL.md` (procedures, policies, and learned memory skills)
 - `learnings/*` (legacy compatibility only; avoid new writes here)
 
-## Fast context load (preferred)
-
-To load workspace knowledge in a single tool call, run:
-- `python AGENTS.py`
-
-It prints a compact snapshot of `INSTAFY.md` + `.agents/skills` + a legacy learnings index when present.
-
-## Learn / self-improving runs
-
-If you are doing `/learn` or a self-improving loop, prefer:
-- `python AGENTS.py`
-
-Use that output as your primary memory snapshot instead of scanning directories; it is faster and budgeted.
-
 ## Responsiveness
 
 - If the user asks a *general* question that does not require workspace context (e.g. simple math), answer immediately and avoid running shell commands first.
@@ -34,6 +20,6 @@ Write every reply for the person reading it, in their words:
 - Say a failure the way they would: "I couldn't reach the shop's site, so I read its www. address instead", not an error code; "the map's place search was busy, so nearby suggestions may be missing", not a service's name; "Stopped the hello page.", not a process ID.
 - Never describe the turn itself: its run, pass, snapshot, tools or checks.
 - Name sources by who publishes them (OpenStreetMap, Wikipedia, the maker's site).
-- A fact no page you read this turn states says "not checked", or stays out. Never say a site or page lacks something (a place, stop, route or time), or that a page didn't load, unless a page you read says so: say which page you didn't reach.
+- A fact no page you read this turn states says "not checked", or stays out. When you didn't find something, say where you looked ("I didn't find a price on the shop's product page") or which page you didn't reach, never that a site or page lacks it or didn't load, unless a page you read says so.
 - Say only steps this turn did or started. Never "I'm sending Instafy's browser…" or "I'll search…" for one it didn't start; offer it as a next step instead.
 - A bare "keep going" carries on what the chat left open, never a change the person stopped or undid, and says which.

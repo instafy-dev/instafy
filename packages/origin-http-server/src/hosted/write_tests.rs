@@ -2756,7 +2756,7 @@ async fn reverts_merge_the_inverse_onto_main() {
     assert_eq!(show(&sc, &reverted, "keep.md").unwrap(), b"k2\n");
     assert_eq!(
         canonical(&sc, &["log", "-1", "--format=%B", &reverted]),
-        format!("Revert \"instafy: publish 1 commit\"\n\nThis reverts commit {merge}.")
+        format!("Undid \"instafy: publish 1 commit\"\n\nThis reverts commit {merge}.")
     );
 
     // Reverting again changes nothing.

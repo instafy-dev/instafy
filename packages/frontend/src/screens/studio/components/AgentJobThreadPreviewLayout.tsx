@@ -471,9 +471,11 @@ export function AgentJobThreadPreviewLayout({
     "";
   // While the turn runs, a label holds until the next one has lasted: a step
   // that ends at once, a short pause between steps, or the last step before
-  // the done line (or the failure block), never flashes past.
+  // the done line (or the failure block), never flashes past. A Stop's done
+  // line says at once that it stopped: held behind a "Thinking…" that had just
+  // come up, "Stopped" showed 1.4 s after the press (a local test, Nov 5).
   const lineLive = activity.live !== null;
-  const lineText = useSteadyActivityLabel(activityText, lineLive);
+  const lineText = useSteadyActivityLabel(activityText, lineLive, activity.stopped === true);
   // A retry that replaced a failed turn holding focus takes it, in the same
   // commit: its line, or its own failure block's first control.
   useLayoutEffect(() => {

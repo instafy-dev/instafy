@@ -90,6 +90,20 @@ describe("reference search (Wikipedia, Wikivoyage, Wikidata)", () => {
     expect(catalog.providers.get("wikidata-official-site")).toMatchObject({ langInHost: false, host: "query.wikidata.org", attribution: "Wikidata, CC0" });
   });
 
+  // A turn with no time limit has a start and no deadline: a map turn's reference search there came back "runs only
+  // in Octo's turns" (a local test, Nov 5).
+  it("searches in a turn with no time limit", async () => {
+    const { requests, transport } = wikimedia();
+    // Such a turn lasts while the folder the runtime made for its job is there.
+    const folder = path.join(base, "instafy-turns", "job-1");
+    fs.mkdirSync(folder, { recursive: true });
+    const { INSTAFY_TURN_DEADLINE: _limit, ...unlimited } = turnEnv(caseNo, { INSTAFY_STEP_TIMINGS_FILE: path.join(folder, "step-timings.ndjson") });
+    const report = await reference("Seville Cathedral official site", unlimited, transport);
+    expect(report).toMatchObject({ status: "ok", chain: "reference-search" });
+    expect(report.count).toBeGreaterThan(0);
+    expect(requests).toHaveLength(3);
+  });
+
   it("asks each source once and maps its fields, with the source's attribution on every result", async () => {
     const { requests, transport } = wikimedia();
     const report = await reference("Belém Tower", turnEnv(), transport);

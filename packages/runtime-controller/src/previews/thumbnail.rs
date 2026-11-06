@@ -19,7 +19,10 @@
 //! keeps it in memory only. Never a Storage object, a public or signed URL,
 //! a notification or part of a message: the card names the preview by id.
 //! Each upload publishes `preview.thumbnail_updated` (ids and the version
-//! only) to the audience `preview.wake` has.
+//! only) to the audience `preview.wake` has. The same runtime drops the
+//! picture (`DELETE …/thumbnail`) when a check of its changed site could keep
+//! no new one, so no card shows what the site no longer is; the event then
+//! carries no version.
 
 use std::time::Duration;
 
@@ -470,23 +473,22 @@ async fn enforce_upload_rate(state: &AppState, grant: &PreviewGrant) -> ApiResul
     Ok(())
 }
 
-/// `PUT /projects/:id/previews/:pid/thumbnail`: the preview's own runtime
-/// replaces its picture.
-#[instrument(skip(state, headers, body))]
-pub(super) async fn put_preview_thumbnail(
-    State(state): State<AppState>,
-    Path(params): Path<PreviewPath>,
-    headers: HeaderMap,
-    Json(body): Json<ThumbnailUploadBody>,
-) -> ApiResult<Json<ThumbnailView>> {
-    ensure_previews_available(&state).await?;
+/// The open preview whose picture the caller may change: only the runtime
+/// that serves it, with a job or machine token bound to it, as `/ready`
+/// checks; never a person.
+async fn preview_for_its_runtime(
+    state: &AppState,
+    params: &PreviewPath,
+    headers: &HeaderMap,
+) -> ApiResult<(Uuid, PreviewGrant)> {
+    ensure_previews_available(state).await?;
     let project_id = parse_required_uuid(&params.project_id, "projectId")?;
-    let caller = identify_preview_caller(&state, &headers, &project_id).await?;
+    let caller = identify_preview_caller(state, headers, &project_id).await?;
     let grant = load_preview_grant(&state.pool, &project_id, &params.preview_id).await?;
     match &caller {
         PreviewCaller::Human(_) => {
             return Err(forbidden(
-                "only the runtime that serves a preview uploads its picture",
+                "only the runtime that serves a preview changes its picture",
             ));
         }
         PreviewCaller::Job { runtime_id, .. } if grant.record.runtime_id != Some(*runtime_id) => {
@@ -509,6 +511,19 @@ pub(super) async fn put_preview_thumbnail(
             Json(ApiError::new("this preview is closed")),
         ));
     }
+    Ok((project_id, grant))
+}
+
+/// `PUT /projects/:id/previews/:pid/thumbnail`: the preview's own runtime
+/// replaces its picture.
+#[instrument(skip(state, headers, body))]
+pub(super) async fn put_preview_thumbnail(
+    State(state): State<AppState>,
+    Path(params): Path<PreviewPath>,
+    headers: HeaderMap,
+    Json(body): Json<ThumbnailUploadBody>,
+) -> ApiResult<Json<ThumbnailView>> {
+    let (project_id, grant) = preview_for_its_runtime(&state, &params, &headers).await?;
 
     let claimed = ImageFormat::from_content_type(&body.content_type)
         .ok_or_else(|| bad_request("contentType must be image/jpeg, image/png or image/webp"))?;
@@ -597,17 +612,59 @@ pub(super) async fn put_preview_thumbnail(
         height: image.height,
         captured_at: captured_at.to_rfc3339(),
     };
-    publish_thumbnail_event(&state, &project_id, &grant, &view.version);
+    publish_thumbnail_event(&state, &project_id, &grant, Some(&view.version));
     Ok(Json(view))
+}
+
+/// `DELETE /projects/:id/previews/:pid/thumbnail`: the preview's own runtime
+/// drops its picture, and the page description read with it, when a check of
+/// its changed site could keep no new one (a blank page, one that never said
+/// it was ready): the card then shows the site's title alone, never a picture
+/// of what the site no longer is. Counted with the uploads. The event says
+/// the picture is gone (`version: null`).
+#[instrument(skip(state, headers))]
+pub(super) async fn delete_preview_thumbnail(
+    State(state): State<AppState>,
+    Path(params): Path<PreviewPath>,
+    headers: HeaderMap,
+) -> ApiResult<StatusCode> {
+    let (project_id, grant) = preview_for_its_runtime(&state, &params, &headers).await?;
+    enforce_upload_rate(&state, &grant).await?;
+    let connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
+    let dropped = match connection
+        .execute(
+            "delete from runtime_preview_thumbnails where project_id = $1 and tunnel_id = $2",
+            &[&project_id, &grant.record.tunnel_id],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) if is_undefined_table(&error) => 0,
+        Err(error) => {
+            return Err(internal_error(format!(
+                "failed to drop the preview picture: {error}"
+            )))
+        }
+    };
+    drop(connection);
+    if dropped > 0 {
+        publish_thumbnail_event(&state, &project_id, &grant, None);
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `preview.thumbnail_updated` carries the preview's conversation (as the
 /// event's conversation id) and runtime, as `preview.wake` does, so the
 /// private-conversation and private-runtime filters on `/events` apply. It
-/// carries no picture and no description.
+/// carries no picture and no description: the new picture's version, or
+/// null once the preview has none.
 pub(super) fn thumbnail_event_data(
     preview_id: &str,
-    version: &str,
+    version: Option<&str>,
     runtime_id: Option<Uuid>,
 ) -> serde_json::Value {
     let mut data = json!({ "previewId": preview_id, "version": version });
@@ -621,7 +678,7 @@ fn publish_thumbnail_event(
     state: &AppState,
     project_id: &Uuid,
     grant: &PreviewGrant,
-    version: &str,
+    version: Option<&str>,
 ) {
     let conversation_id = grant
         .preview_str("conversationId")

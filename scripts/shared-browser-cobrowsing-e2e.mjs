@@ -820,10 +820,11 @@ export async function runSharedBrowserCobrowsingFixture() {
       .slice(0, 200 - shellControls.length);
     assert.deepEqual(erp.interactiveElements.filter((entry) => !entry.area).map((entry) => entry.label), receiptControls,
       "Controls other than the receipts' took the limit");
-    // The count of controls left out: the closed account menu and the
-    // collapsed sections' links.
+    // The count of controls left out: the closed account menu, the
+    // collapsed sections' links, and the receipts' controls past the limit.
     assert.equal(erp.omittedControls,
-      ERP_ACCOUNT.length + ERP_SECTIONS.flatMap(([, items]) => items).length - ERP_SECTIONS[1][1].length);
+      ERP_ACCOUNT.length + ERP_SECTIONS.flatMap(([, items]) => items).length - ERP_SECTIONS[1][1].length +
+        shellControls.length + receiptRow(0).length * 50 - 200);
     for (const entry of erp.interactiveElements) {
       assert.equal("box" in entry, false, "A control's box reached the model");
       assert.ok(Object.values(entry).every((value) => value !== "" && value !== null), `Empty field in ${JSON.stringify(entry)}`);
@@ -984,6 +985,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     // (scripts/shared-browser-allowed-step-e2e.mjs).
     const { runSharedBrowserAllowedStepFixture } = await import("./shared-browser-allowed-step-e2e.mjs");
     console.log(JSON.stringify(await runSharedBrowserAllowedStepFixture(), null, 2));
+    // And that a page's reading says what it cannot read and what is chosen
+    // or turned off, and reads a long page to its end by scrolling
+    // (scripts/shared-browser-page-reading-e2e.mjs).
+    const { runSharedBrowserPageReadingFixture } = await import("./shared-browser-page-reading-e2e.mjs");
+    console.log(JSON.stringify(await runSharedBrowserPageReadingFixture(), null, 2));
   }).catch((error) => {
     fs.mkdirSync(resultDirectory, { recursive: true });
     fs.writeFileSync(path.join(resultDirectory, "result.json"), `${JSON.stringify({ status: "failed", fixtureVersion: 1 })}\n`);

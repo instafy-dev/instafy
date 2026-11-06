@@ -101,6 +101,9 @@ mod human_profile_http_tests;
 #[path = "agent_profile_http_tests.rs"]
 mod agent_profile_http_tests;
 
+#[path = "agent_context_http_tests.rs"]
+mod agent_context_http_tests;
+
 #[path = "message_search_http_tests.rs"]
 mod message_search_http_tests;
 
@@ -24342,6 +24345,114 @@ async fn dispatch_prompt_preserves_write_scope_metadata_for_agent_thread() -> an
     Ok(())
 }
 
+/// History is the whole space's, so every job says who can read the chat it
+/// runs in, and the runtime titles a version with the person's words only
+/// for one everyone reads. A thread takes no visibility from the chat it is a
+/// thread of, so a thread of a private chat counts as private; and the
+/// sender's own word for it is never taken.
+#[tokio::test]
+async fn a_job_says_whether_everyone_in_the_space_reads_its_chat() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping chat visibility test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let project_id = Uuid::new_v4();
+    let shared_chat = Uuid::new_v4();
+    let private_chat = Uuid::new_v4();
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "INSERT INTO projects (id, project_type, status) VALUES ($1, 'customer', 'active')",
+                &[&project_id],
+            )
+            .await?;
+        for (conversation, visibility) in [(shared_chat, "public"), (private_chat, "private")] {
+            connection
+                .execute(
+                    "INSERT INTO conversations (id, project_id, metadata, visibility)
+                     VALUES ($1, $2, '{}'::jsonb, $3)",
+                    &[&conversation, &project_id, &visibility],
+                )
+                .await?;
+        }
+    }
+
+    let state = build_test_state(
+        pool.clone(),
+        build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "dispatch-chat-visibility",
+        ),
+    );
+    let context = RequestContext {
+        user_id: None,
+        is_service_role: true,
+        scoped_claims: None,
+    };
+    // The chat, the chat a new thread is a thread of, and who reads it.
+    for (conversation_id, parent, expected) in [
+        (shared_chat, None, "public"),
+        (private_chat, None, "private"),
+        (Uuid::new_v4(), Some(shared_chat), "public"),
+        (Uuid::new_v4(), Some(private_chat), "private"),
+    ] {
+        let mut metadata = json!({
+            "conversationVisibility": "public",
+            "agentSelection": { "active": ["octo"], "mentions": ["octo"] },
+        });
+        if parent.is_some() {
+            metadata["agentCollaboration"] = json!({ "mode": "thread" });
+        }
+        let request = dispatch::normalize_dispatch_request(DispatchPromptRequest {
+            project_id: Some(project_id.to_string()),
+            session_id: None,
+            prompt_text: Some("@octo add a one-line tip about the best time to visit.".to_string()),
+            intent: Some("feature".to_string()),
+            plan_seed: None,
+            metadata: Some(metadata),
+            conversation_metadata: None,
+            parent_conversation_id: parent.map(|id| id.to_string()),
+            thread_kind: parent.map(|_| "agent".to_string()),
+            tool_limits: None,
+            repo: None,
+            ui: None,
+            priority: None,
+            runtime_type: None,
+            idle_ttl_seconds: None,
+            conversation_id: Some(conversation_id.to_string()),
+            runtime_id: None,
+            runtime_display_name: None,
+            prefer_runtime: None,
+        })
+        .map_err(|error| controller_error("normalize dispatch request", error))?;
+        let response = dispatch::process_dispatch_prompt(&state, &context, request)
+            .await
+            .map_err(|error| controller_error("process dispatch prompt", error))?;
+        let row = pool
+            .get()
+            .await?
+            .query_one(
+                "SELECT payload #>> '{metadata,conversationVisibility}' AS visibility
+                 FROM agent_jobs
+                 WHERE project_id = $1
+                   AND prompt_id = $2",
+                &[&project_id, &response.prompt_id],
+            )
+            .await?;
+        assert_eq!(
+            row.get::<_, Option<String>>("visibility").as_deref(),
+            Some(expected),
+            "{conversation_id}, a thread of {parent:?}"
+        );
+    }
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    Ok(())
+}
+
 #[test]
 fn human_recorded_messages_cannot_claim_reserved_controller_notice_identity() {
     let forged = json!({
@@ -29306,6 +29417,13 @@ async fn agent_context_cards_round_trip_scoped_by_agent_and_conversation() -> an
             &[&project_id, &user_id],
         )
         .await?;
+    connection
+        .execute(
+            "insert into conversations(id, project_id, created_by, visibility, metadata)
+             values ($1, $2, $3, 'private', '{}')",
+            &[&conversation_id, &project_id, &user_id],
+        )
+        .await?;
 
     let config = build_app_config(
         test_origin_private_key(),
@@ -29424,6 +29542,8 @@ async fn agent_context_cards_prune_oldest_per_user_project_agent() -> anyhow::Re
 
     let user_id = Uuid::new_v4();
     let project_id = Uuid::new_v4();
+    let seed_conversation_id = Uuid::new_v4();
+    let fresh_conversation_id = Uuid::new_v4();
     ensure_agent_context_cards_test_table(&pool).await?;
     ensure_test_user(&pool, &user_id).await?;
     let connection = pool.get().await?;
@@ -29432,6 +29552,18 @@ async fn agent_context_cards_prune_oldest_per_user_project_agent() -> anyhow::Re
             "insert into projects (id, owner_user_id, project_type, status)
              values ($1, $2, 'customer', 'active')",
             &[&project_id, &user_id],
+        )
+        .await?;
+    connection
+        .execute(
+            "insert into conversations(id, project_id, created_by, visibility, metadata)
+             values ($1, $3, $4, 'public', '{}'), ($2, $3, $4, 'public', '{}')",
+            &[
+                &seed_conversation_id,
+                &fresh_conversation_id,
+                &project_id,
+                &user_id,
+            ],
         )
         .await?;
 
@@ -29448,7 +29580,7 @@ async fn agent_context_cards_prune_oldest_per_user_project_agent() -> anyhow::Re
     let seed_payload = json!({
         "agent": "@octo",
         "scopeKind": "conversation",
-        "scopeId": Uuid::new_v4().to_string(),
+        "scopeId": seed_conversation_id.to_string(),
         "title": "Seed",
         "context": "Seed context card."
     });
@@ -29504,7 +29636,7 @@ async fn agent_context_cards_prune_oldest_per_user_project_agent() -> anyhow::Re
         )
         .await?;
 
-    let fresh_scope_id = Uuid::new_v4().to_string();
+    let fresh_scope_id = fresh_conversation_id.to_string();
     let fresh_payload = json!({
         "agent": "@octo",
         "scopeKind": "conversation",

@@ -24,16 +24,28 @@
 //! `instafy preview open` records each preview in the CLI's state file
 //! (`~/.instafy/cli-preview-state.json`): its id, port and path, the folder its
 //! site's server runs from (`siteDir`), when the site was last pictured for
-//! the card (`pictureAt`, milliseconds since the epoch, whether or not a
-//! picture came of it) and whether it was opened with `--no-thumbnail`. A
-//! preview without a recorded folder, or opened with `--no-thumbnail`, is
-//! left alone; one without a picture time counts every change as newer.
+//! the card (`pictureAt`, milliseconds since the epoch: a picture was taken,
+//! or `open` tried and took none) and whether it was opened with
+//! `--no-thumbnail`. A preview without a recorded folder, or opened with
+//! `--no-thumbnail`, is left alone; one without a picture time counts every
+//! change as newer. A check that keeps no picture records nothing, so a
+//! turn whose own check of its change kept none still has its site checked
+//! here.
+//!
+//! A check that ran and kept no new picture (a blank page, one that never
+//! said it was ready, a redirect, one that did not load) leaves the card with
+//! a picture of the site before the change: the runtime then drops it, with
+//! the page description that came with it, unless a picture was taken since
+//! the check began, and logs the check's first problem in the check's own
+//! words, never the page's text. The card then shows no picture.
 //!
 //! A person's Undo puts a site's files back with no turn (`/git/revert` on
 //! this machine's origin), so no turn sends the site's reload either. The
 //! runtime sends it then, as a turn would, to every open view of each site
 //! the Undo changed, and then pictures those sites again
-//! ([`picture_sites_people_revert`]).
+//! ([`picture_sites_people_revert`]). It does the same for a change a Stop
+//! kept: the stopped turn never got to its own reload
+//! ([`reload_and_picture_changed_sites`]).
 
 use std::ffi::OsString;
 use std::future::Future;
@@ -81,6 +93,12 @@ const MAX_RELOADS: usize = 8;
 const RELOAD_TIMEOUT: Duration = Duration::from_secs(10);
 /// What the reload command prints (its binder's answer) is small.
 const MAX_RELOAD_ANSWER_BYTES: u64 = 16 * 1024;
+/// The file in a check's folder its report (`--json`) is printed to; read
+/// once the check is done, when it is at most this big.
+const REPORT_FILE: &str = "report.json";
+const MAX_CHECK_REPORT_BYTES: u64 = 256 * 1024;
+/// The most of a check's own words that go into the log, each.
+const MAX_CHECK_WORDS: usize = 100;
 
 /// One open preview whose card's picture is older than a change this turn
 /// made to its site.
@@ -116,6 +134,16 @@ pub(crate) trait PictureSender: Send + Sync {
         picture: &'a CardPicture,
         still_newest: StillNewest<'a>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
+
+    /// Drops the card's picture and the facts that came with it, while
+    /// `still_newest` says no newer picture was taken: a check of the changed
+    /// site kept no new one, so the old one shows what the site no longer is.
+    fn clear<'a>(
+        &'a self,
+        project_id: Uuid,
+        preview_id: &'a str,
+        still_newest: StillNewest<'a>,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 }
 
 impl PictureSender for crate::controller::ControllerClient {
@@ -133,6 +161,15 @@ impl PictureSender for crate::controller::ControllerClient {
             picture.description.as_deref(),
             still_newest,
         ))
+    }
+
+    fn clear<'a>(
+        &'a self,
+        project_id: Uuid,
+        preview_id: &'a str,
+        still_newest: StillNewest<'a>,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        Box::pin(self.clear_preview_picture(project_id, preview_id, still_newest))
     }
 }
 
@@ -198,13 +235,9 @@ pub(crate) fn files_reverted_hook() -> Option<origin_http_server::routes::FilesR
 }
 
 /// After a person's revert, from the folder a turn of that space runs in
-/// (`workspace_dir_of`): sends each open site it changed its reload, so every
-/// open view shows the files as the Undo left them ([`reload_reverted_sites`]),
-/// then, as a turn checks its site after its reload, pictures again, with
-/// `sender` (this runtime's own credential), each open preview whose site it
-/// changed after it was last pictured: a check's own page never takes the
-/// reload halfway through its picture. Once per process; the checks are the
-/// ones a turn's end runs, within the same time.
+/// (`workspace_dir_of`): reloads and pictures again each open site it changed
+/// ([`reload_and_picture_changed_sites`]), with `sender` (this runtime's own
+/// credential). Once per process.
 pub(crate) fn picture_sites_people_revert(
     workspace_dir_of: impl Fn(&Uuid) -> std::path::PathBuf + Send + 'static,
     sender: Arc<dyn PictureSender>,
@@ -217,25 +250,40 @@ pub(crate) fn picture_sites_people_revert(
         while let Some(reverted) = reverted_rx.recv().await {
             let reverted: origin_http_server::routes::FilesReverted = reverted;
             let project_id = reverted.project_id;
-            let workspace_dir = workspace_dir_of(&project_id);
-            let changed = workspace_paths(reverted.paths);
-            let sender = sender.clone();
-            tokio::spawn(async move {
-                reload_reverted_sites(&workspace_dir, &project_id, &changed).await;
-                PictureRetake::start_for_paths(
-                    &workspace_dir,
-                    project_id,
-                    changed,
-                    None,
-                    Some(sender),
-                )
-                .detach();
-            });
+            reload_and_picture_changed_sites(
+                workspace_dir_of(&project_id),
+                project_id,
+                workspace_paths(reverted.paths),
+                Some(sender.clone()),
+            );
         }
     });
 }
 
-/// The folders of the sites a person's revert changed (`changed`, places in
+/// Files of a space changed with no turn to tell the pages people have open
+/// (a person's Undo, or a change a Stop kept before its turn's own reload):
+/// sends each open site they changed its reload, so every open view shows the
+/// files as they are now ([`reload_reverted_sites`]), then, as a turn checks
+/// its site after its reload, pictures again, with `sender`, each open
+/// preview whose site changed after it was last pictured: a check's own page
+/// never takes the reload halfway through its picture. It goes on by itself;
+/// the checks are the ones a turn's end runs, within the same time.
+pub(super) fn reload_and_picture_changed_sites(
+    workspace_dir: std::path::PathBuf,
+    project_id: Uuid,
+    changed: Vec<String>,
+    sender: Option<Arc<dyn PictureSender>>,
+) {
+    if changed.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        reload_reverted_sites(&workspace_dir, &project_id, &changed).await;
+        PictureRetake::start_for_paths(&workspace_dir, project_id, changed, None, sender).detach();
+    });
+}
+
+/// The folders of the sites an Undo or a Stop changed (`changed`, places in
 /// the workspace) that someone may have open: the previews in `state` (the
 /// CLI's state file) that this machine has open for `project_id`, with a
 /// tunnel client still running, whose folder holds a changed path. As for a
@@ -305,10 +353,10 @@ pub(super) fn reverted_sites(
     sites
 }
 
-/// Sends each open site a person's revert changed ([`reverted_sites`]) its
+/// Sends each open site an Undo or a Stop changed ([`reverted_sites`]) its
 /// reload, the one a turn sends after it changes a bound site (`instafy bind
 /// command <site> reload '{}'`): every open view of it, on every device,
-/// loads the page again, so nobody keeps seeing a change the person undid.
+/// loads the page again, so nobody keeps seeing what the site no longer is.
 /// The binder that serves the site's folder takes it; a site no binder serves
 /// gets nothing this way. A map that `uw host` serves reloads its open views
 /// itself when the Undo puts back its earlier reload stamp: the map skill's
@@ -362,7 +410,7 @@ async fn send_reload(workspace_dir: &Path, site: &str, environment: &[(OsString,
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            warn!(site, %error, "could not send the reload of a site an Undo changed");
+            warn!(site, %error, "could not send the reload of a changed site");
             return;
         }
     };
@@ -394,23 +442,20 @@ async fn send_reload(workspace_dir: &Path, site: &str, environment: &[(OsString,
             info!(
                 site,
                 ?viewers,
-                "sent the reload of a site an Undo changed to its open views"
+                "sent the reload of a changed site to its open views"
             );
         }
         Ok((Ok(status), _)) => info!(
             site,
             exit_code = ?status.code(),
-            "no binder took the reload of a site an Undo changed (none serves it)"
+            "no binder took the reload of a changed site (none serves it)"
         ),
         Ok((Err(error), _)) => warn!(
             site,
             %error,
-            "could not send the reload of a site an Undo changed"
+            "could not send the reload of a changed site"
         ),
-        Err(_) => warn!(
-            site,
-            "sending the reload of a site an Undo changed ran out of time"
-        ),
+        Err(_) => warn!(site, "sending the reload of a changed site ran out of time"),
     }
 }
 
@@ -700,8 +745,9 @@ fn check_environment() -> Vec<(OsString, OsString)> {
 /// Checks each open preview whose site this turn changed after it was last
 /// pictured, which takes the card's picture again, and sends each picture
 /// taken. It runs the same `instafy preview check` a turn runs, at the desktop
-/// size only, from the workspace; a check that fails, runs out of time or is
-/// stopped leaves the card's picture as it was.
+/// size only, from the workspace. A check that looked at the page and kept no
+/// picture drops the card's old one ([`drop_stale_picture`]); one that fails,
+/// runs out of time or is stopped leaves the card's picture as it was.
 async fn retake_stale_pictures(
     workspace_dir: &Path,
     project_id: &Uuid,
@@ -724,10 +770,15 @@ async fn retake_stale_pictures(
         if left < budget.min_left || cancel.as_ref().is_some_and(JobCancelSignal::is_canceled) {
             break;
         }
-        let Some(taken) =
-            check_preview(workspace_dir, &preview, left, cancel.as_ref(), environment).await
-        else {
-            continue;
+        let taken = match check_preview(workspace_dir, &preview, left, cancel.as_ref(), environment)
+            .await
+        {
+            Checked::Picture(taken) => taken,
+            Checked::NoPicture { started_ms } => {
+                drop_stale_picture(project_id, &state_file, &preview, started_ms, sender).await;
+                continue;
+            }
+            Checked::Unknown => continue,
         };
         // A picture taken since (the next turn's own check, which records its
         // time before it sends) is newer: this one is not sent, nor sent
@@ -770,6 +821,49 @@ async fn retake_stale_pictures(
     }
 }
 
+/// A check of a preview's changed site looked at the page and kept no
+/// picture of it, so the card's picture shows the site as it was: the card
+/// drops it, with the page description that came with it. Not once a picture
+/// was taken since the check began (another check, which records its time
+/// before it sends); the check itself, keeping none, recorded nothing.
+async fn drop_stale_picture(
+    project_id: &Uuid,
+    state_file: &Path,
+    preview: &StalePicture,
+    started_ms: f64,
+    sender: &dyn PictureSender,
+) {
+    let still_newest = || !newer_picture_taken(state_file, &preview.preview_id, started_ms);
+    if !still_newest() {
+        info!(
+            port = preview.port,
+            "a newer picture of an open preview was taken since its check; its card keeps it"
+        );
+        return;
+    }
+    match tokio::time::timeout(
+        SEND_TIMEOUT,
+        sender.clear(*project_id, &preview.preview_id, &still_newest),
+    )
+    .await
+    {
+        Ok(Ok(())) => info!(
+            port = preview.port,
+            path = %preview.path,
+            "the check of an open preview's changed site kept no picture; its card dropped the old one"
+        ),
+        Ok(Err(error)) => warn!(
+            port = preview.port,
+            %error,
+            "could not drop the old picture of an open preview whose check kept none"
+        ),
+        Err(_) => warn!(
+            port = preview.port,
+            "dropping the old picture of an open preview ran out of time"
+        ),
+    }
+}
+
 async fn read_state(state_file: &Path) -> Option<JsonValue> {
     let text = tokio::fs::read_to_string(state_file).await.ok()?;
     serde_json::from_str::<JsonValue>(&text).ok()
@@ -803,17 +897,123 @@ struct TakenPicture {
     taken_at: f64,
 }
 
+/// What one end-of-turn check came to.
+#[derive(Debug)]
+enum Checked {
+    /// It kept a picture for the card.
+    Picture(TakenPicture),
+    /// It looked at the page and kept no picture of it. It started at
+    /// `started_ms` (ms since the epoch), before it began loading the page.
+    NoPicture { started_ms: f64 },
+    /// It did not finish (it ran out of time, was stopped or could not run),
+    /// or could not look at the page (nothing answered, no browser): the card
+    /// keeps what it has.
+    Unknown,
+}
+
+/// What a check's report (`--json`) says of the card's picture and of the
+/// page, in the check's own words only: never the page's text, an address, a
+/// title or anything else the page put there, so a log line can hold it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct CheckReport {
+    /// It looked at the page and kept no picture of it (its `thumbnail` was
+    /// skipped or failed).
+    pub(super) kept_no_picture: bool,
+    /// Why it kept none.
+    pub(super) picture: Option<String>,
+    /// Its first problem: the kind of the first error it listed, with a
+    /// blank page's reason.
+    pub(super) problem: Option<String>,
+}
+
+impl CheckReport {
+    /// Reads what a check printed with `--json`; nothing from anything else.
+    pub(super) fn read(printed: &[u8]) -> Self {
+        let Ok(report) = serde_json::from_slice::<JsonValue>(printed) else {
+            return Self::default();
+        };
+        // A report of the page has its sizes; a check that could not look
+        // at one (nothing answered, no browser) prints only its error.
+        let Some(viewports) = report.get("viewports").and_then(JsonValue::as_array) else {
+            return Self::default();
+        };
+        let kept_no_picture = matches!(
+            report.get("thumbnail").and_then(JsonValue::as_str),
+            Some("skipped" | "failed")
+        );
+        let picture = if kept_no_picture {
+            report
+                .get("thumbnailReason")
+                .and_then(JsonValue::as_str)
+                .and_then(check_words)
+        } else {
+            None
+        };
+        let problem = viewports
+            .iter()
+            .filter_map(|viewport| viewport.get("errors").and_then(JsonValue::as_array))
+            .flatten()
+            .find_map(JsonValue::as_str)
+            .and_then(|error| match error.split_once(": ") {
+                // Its reason is the check's own words.
+                Some(("blank page", reason)) => {
+                    Some(format!("blank page: {}", check_words(reason)?))
+                }
+                // What follows the kind is the page's (its message, an
+                // address): only the kind is kept.
+                Some((kind, _)) => check_words(kind),
+                None => check_words(error),
+            });
+        Self {
+            kept_no_picture,
+            picture,
+            problem,
+        }
+    }
+}
+
+/// The start of a line of the check's own: up to the first character it
+/// never writes itself, an address or a clause about the card, at most
+/// [`MAX_CHECK_WORDS`] characters. None when nothing is left.
+fn check_words(text: &str) -> Option<String> {
+    let mut words: String = text
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | ',' | '\'' | '-'))
+        .take(MAX_CHECK_WORDS)
+        .collect();
+    for stop in ["http", ", so "] {
+        if let Some(at) = words.find(stop) {
+            words.truncate(at);
+        }
+    }
+    let words = words
+        .trim()
+        .trim_end_matches(|c| matches!(c, ',' | '.' | '-'))
+        .trim();
+    (!words.is_empty()).then(|| words.to_string())
+}
+
+/// Milliseconds since the epoch, as the CLI records a picture's time.
+fn now_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_millis() as f64)
+        .unwrap_or(0.0)
+}
+
 /// Runs one `instafy preview check` for a preview's picture, for at most
-/// `left`, or until the turn is stopped, and reads the picture it kept.
+/// `left`, or until the turn is stopped, and reads the picture it kept, or
+/// its report when it kept none. Its exit, and its first problem, go in the
+/// log.
 async fn check_preview(
     workspace_dir: &Path,
     preview: &StalePicture,
     left: Duration,
     cancel: Option<&JobCancelSignal>,
     environment: &[(OsString, OsString)],
-) -> Option<TakenPicture> {
-    // The check's screenshots and the picture it keeps go to a folder of
-    // their own, removed with it.
+) -> Checked {
+    // The check's screenshots, the picture it keeps and its report go to a
+    // folder of their own, removed with it.
     let screenshots = match tempfile::Builder::new()
         .prefix("instafy-preview-picture-")
         .tempdir()
@@ -821,10 +1021,21 @@ async fn check_preview(
         Ok(dir) => dir,
         Err(error) => {
             warn!(%error, "no folder for an open preview's end-of-turn check; its card keeps its picture");
-            return None;
+            return Checked::Unknown;
         }
     };
     let picture_file = screenshots.path().join(PICTURE_FILE);
+    let report_file = screenshots.path().join(REPORT_FILE);
+    // A file, not a pipe: a helper the check leaves behind can never hold its
+    // end open, and the check never waits on anyone reading it.
+    let report_out = match std::fs::File::create(&report_file) {
+        Ok(file) => file,
+        Err(error) => {
+            warn!(%error, "no file for an open preview's end-of-turn check; its card keeps its picture");
+            return Checked::Unknown;
+        }
+    };
+    let started_ms = now_ms();
     let mut command = Command::new("instafy");
     command
         .args([
@@ -847,7 +1058,7 @@ async fn check_preview(
         .env_clear()
         .envs(environment.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::from(report_out))
         .stderr(Stdio::null())
         .kill_on_drop(true);
     // The check leads a process group of its own, so the helpers it starts
@@ -858,7 +1069,7 @@ async fn check_preview(
         Ok(child) => child,
         Err(error) => {
             warn!(port = preview.port, %error, "could not check an open preview after the turn; its card keeps its picture");
-            return None;
+            return Checked::Unknown;
         }
     };
     let mut check = CheckGroup(child.id().and_then(|pid| i32::try_from(pid).ok()));
@@ -871,13 +1082,30 @@ async fn check_preview(
     let finished = tokio::select! {
         status = child.wait() => match status {
             Ok(status) => {
-                info!(
-                    port = preview.port,
-                    path = %preview.path,
-                    exit_code = ?status.code(),
-                    "checked an open preview whose site the turn changed, for its card's picture"
-                );
-                true
+                let report = read_small(&report_file, MAX_CHECK_REPORT_BYTES)
+                    .await
+                    .map(|printed| CheckReport::read(&printed))
+                    .unwrap_or_default();
+                let problem = report.problem.as_deref().unwrap_or("none");
+                if report.kept_no_picture {
+                    info!(
+                        port = preview.port,
+                        path = %preview.path,
+                        exit_code = ?status.code(),
+                        problem,
+                        no_picture = report.picture.as_deref().unwrap_or("no reason given"),
+                        "checked an open preview whose site the turn changed, for its card's picture"
+                    );
+                } else {
+                    info!(
+                        port = preview.port,
+                        path = %preview.path,
+                        exit_code = ?status.code(),
+                        problem,
+                        "checked an open preview whose site the turn changed, for its card's picture"
+                    );
+                }
+                Some(report)
             }
             Err(error) => {
                 warn!(
@@ -885,7 +1113,7 @@ async fn check_preview(
                     %error,
                     "could not check an open preview after the turn; its card keeps its picture"
                 );
-                false
+                None
             }
         },
         () = tokio::time::sleep(left) => {
@@ -893,14 +1121,14 @@ async fn check_preview(
                 port = preview.port,
                 "checking an open preview after the turn ran out of time; its card keeps its picture"
             );
-            false
+            None
         }
         () = stopped => {
             info!(
                 port = preview.port,
                 "the turn was stopped while its open preview was checked; its card keeps its picture"
             );
-            false
+            None
         }
     };
     let stopped = check.stop();
@@ -911,10 +1139,14 @@ async fn check_preview(
     if let Some(pgid) = stopped {
         reap_group(pgid).await;
     }
-    if !finished {
-        return None;
+    let Some(report) = finished else {
+        return Checked::Unknown;
+    };
+    match read_kept_picture(&picture_file, &preview.preview_id).await {
+        Some(taken) => Checked::Picture(taken),
+        None if report.kept_no_picture => Checked::NoPicture { started_ms },
+        None => Checked::Unknown,
     }
-    read_kept_picture(&picture_file, &preview.preview_id).await
 }
 
 /// The picture a check kept for `preview_id`, with what it wrote beside it:
@@ -1090,7 +1322,8 @@ mod tests {
     fn a_picture_taken_or_tried_after_the_change_stays() {
         let dir = workspace();
         let project = Uuid::new_v4();
-        // The turn's own check ran after its last change.
+        // The turn's own check took a picture after its last change, or the
+        // site's preview was opened after it and could take none.
         let picture_after = now_ms() + 60_000.0;
         let state = json!({ "version": 1, "previews": [
             entry(&project, json!({ "pictureAt": picture_after })),
@@ -1470,6 +1703,8 @@ mod tests {
         sent: std::sync::Mutex<Vec<(Uuid, String, CardPicture)>>,
         newer_while_sending: std::sync::Mutex<Option<std::path::PathBuf>>,
         still_newest_after: std::sync::Mutex<Vec<bool>>,
+        /// The cards whose old picture was dropped.
+        cleared: std::sync::Mutex<Vec<(Uuid, String)>>,
     }
 
     impl PictureSender for SentPictures {
@@ -1497,11 +1732,28 @@ mod tests {
                 .push((project_id, preview_id.to_string(), picture.clone()));
             Box::pin(async { Ok(()) })
         }
+
+        fn clear<'a>(
+            &'a self,
+            project_id: Uuid,
+            preview_id: &'a str,
+            _still_newest: StillNewest<'a>,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
+            self.cleared
+                .lock()
+                .unwrap()
+                .push((project_id, preview_id.to_string()));
+            Box::pin(async { Ok(()) })
+        }
     }
 
     impl SentPictures {
         fn take(&self) -> Vec<(Uuid, String, CardPicture)> {
             std::mem::take(&mut *self.sent.lock().unwrap())
+        }
+
+        fn take_cleared(&self) -> Vec<(Uuid, String)> {
+            std::mem::take(&mut *self.cleared.lock().unwrap())
         }
     }
 
@@ -2125,5 +2377,299 @@ exit 1
             matches!((answered, first_check), (Some(answered), Some(check)) if answered < check),
             "{lines:#?}"
         );
+    }
+
+    fn report(json: JsonValue) -> CheckReport {
+        CheckReport::read(json.to_string().as_bytes())
+    }
+
+    // What the log keeps of a check that kept no picture is the check's own
+    // words: why it kept none and the kind of its first problem, never what
+    // the page wrote (its console, its errors, its title), an address or a
+    // secret, and never more than a line.
+    #[test]
+    fn a_checks_report_gives_its_own_words_never_the_pages() {
+        assert_eq!(
+            report(json!({
+                "ok": false,
+                "url": "http://127.0.0.1:4173/?token=secret-token",
+                "title": "Guest list: Ana and Ben",
+                "viewports": [{ "name": "desktop", "errors": [
+                    "blank page: the screen is a single colour",
+                    "console.error: the guest list is Ana and Ben",
+                ] }],
+                "problems": 2,
+                "thumbnail": "skipped",
+                "thumbnailReason": "the page looked blank",
+            })),
+            CheckReport {
+                kept_no_picture: true,
+                picture: Some("the page looked blank".to_string()),
+                problem: Some("blank page: the screen is a single colour".to_string()),
+            }
+        );
+        for (error, kind) in [
+            (
+                "console.error: the guest list is Ana and Ben",
+                "console.error",
+            ),
+            (
+                "uncaught: TypeError: token sk-secret is not valid",
+                "uncaught",
+            ),
+            ("HTTP 404: /data/stays.geojson?key=secret", "HTTP 404"),
+            (
+                "request failed: /tiles/1/2/3.pbf (net::ERR_FAILED)",
+                "request failed",
+            ),
+            (
+                "the page did not load: page.goto: Timeout 10000ms exceeded",
+                "the page did not load",
+            ),
+            (
+                "blank page: the site refuses to be framed (X-Frame-Options or CSP frame-ancestors), so the frame stays empty",
+                "blank page: the site refuses to be framed",
+            ),
+        ] {
+            let read =
+                report(json!({ "viewports": [{ "errors": [error] }], "thumbnail": "saved" }));
+            assert_eq!(read.problem.as_deref(), Some(kind), "{error}");
+            assert!(!read.kept_no_picture);
+        }
+        for (reason, words) in [
+            (
+                "the page never said it was ready, so the card keeps its picture",
+                "the page never said it was ready",
+            ),
+            (
+                "a redirect led to https://copy.example/page?q=secret (a link-only site), which a picture never shows",
+                "a redirect led to",
+            ),
+            (
+                "the picture could not be taken: Protocol error (Page.captureScreenshot)",
+                "the picture could not be taken",
+            ),
+        ] {
+            let read = report(
+                json!({ "viewports": [], "thumbnail": "skipped", "thumbnailReason": reason }),
+            );
+            assert_eq!(read.picture.as_deref(), Some(words), "{reason}");
+            assert!(read.kept_no_picture);
+        }
+        // A line, however long the reason.
+        let long = report(
+            json!({ "viewports": [{ "errors": [format!("blank page: {}", "x".repeat(500))] }] }),
+        );
+        assert!(
+            long.problem
+                .as_deref()
+                .is_some_and(|problem| problem.len() <= "blank page: ".len() + MAX_CHECK_WORDS),
+            "{long:?}"
+        );
+        // Nothing to drop for a check that kept a picture, or one that could not
+        // look at the page at all, or anything that is not a report.
+        assert!(
+            !report(json!({ "viewports": [{ "errors": [] }], "thumbnail": "saved" }))
+                .kept_no_picture
+        );
+        assert!(!report(json!({ "viewports": [{ "errors": [] }] })).kept_no_picture);
+        assert_eq!(
+            report(
+                json!({ "ok": false, "exitCode": 2, "error": "Nothing answers on port 4173", "thumbnail": "skipped" })
+            ),
+            CheckReport::default()
+        );
+        assert_eq!(CheckReport::read(b"not a report"), CheckReport::default());
+    }
+
+    // A local test, Nov 5: for 7.5 minutes a map's card showed its blank
+    // starter over the finished map. The check after the turn exited with
+    // problems and kept no picture, and the runtime threw its report away,
+    // so nothing said why. Now the card's old picture goes, and the log says
+    // why in the check's words. Not when another check, begun moments after
+    // this one, took a picture, nor when the check could not tell.
+    #[cfg(unix)]
+    #[test]
+    fn a_check_that_keeps_no_picture_drops_the_cards_old_one() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD_MARKER: &str = "INSTAFY_PREVIEW_NO_PICTURE_TEST_CHILD";
+        const TEST_NAME: &str =
+            "jobs::preview_pictures::tests::a_check_that_keeps_no_picture_drops_the_cards_old_one";
+
+        // HOME and PATH are process-wide: run in a test process of its own.
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            let sandbox = tempfile::tempdir().unwrap();
+            let bin = sandbox.path().join("bin");
+            let home = sandbox.path().join("home");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::create_dir_all(home.join(".instafy")).unwrap();
+            // A stand-in `instafy preview check`: it keeps no picture,
+            // records nothing, as the CLI does then, and prints its report.
+            // On 4182 another check of its preview, begun three seconds
+            // after this one, records the picture it took; on 4183 it prints
+            // nothing it could tell from.
+            std::fs::write(
+                bin.join("instafy"),
+                format!(
+                    r#"#!/bin/sh
+port=
+while [ $# -gt 0 ]; do
+  case "$1" in --port) port=$2; shift ;; esac
+  shift
+done
+[ "$port" = 4182 ] && cp '{newer}' "$HOME/.instafy/cli-preview-state.json"
+[ "$port" = 4183 ] && exit 1
+printf '%s\n' '{{"ok":false,"url":"http://127.0.0.1:'"$port"'/?token=secret-token","title":"Guest list","viewports":[{{"name":"desktop","errors":["blank page: the screen is a single colour","console.error: the guest list is Ana and Ben"]}}],"problems":2,"thumbnail":"skipped","thumbnailReason":"the page looked blank"}}'
+exit 1
+"#,
+                    newer = sandbox.path().join("newer-state.json").display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(bin.join("instafy"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST_NAME, "--nocapture"])
+                .env(CHILD_MARKER, sandbox.path())
+                .env("HOME", &home)
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        bin.display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                )
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .contains("test result: ok. 1 passed"),
+                "stdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let sandbox = std::path::PathBuf::from(std::env::var_os(CHILD_MARKER).unwrap());
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        let workspace = sandbox.join("workspace");
+        for site in ["seville", "porto", "lisbon"] {
+            std::fs::create_dir_all(workspace.join("sites").join(site)).unwrap();
+            std::fs::write(workspace.join("sites").join(site).join("index.html"), "x").unwrap();
+        }
+        let project = Uuid::new_v4();
+        let picture_before = now_ms() - 60_000.0;
+        let preview = |id: &str, port: u16, site: &str, picture_at: f64| {
+            entry(
+                &project,
+                json!({
+                    "previewId": id,
+                    "localPort": port,
+                    "pid": std::process::id(),
+                    "siteDir": format!("sites/{site}"),
+                    "pictureAt": picture_at,
+                }),
+            )
+        };
+        let state = |porto_picture_at: f64| {
+            json!({ "version": 1, "previews": [
+                preview("preview-seville", 4181, "seville", picture_before),
+                preview("preview-porto", 4182, "porto", porto_picture_at),
+                preview("preview-lisbon", 4183, "lisbon", picture_before),
+            ]})
+        };
+        std::fs::write(
+            home.join(PREVIEW_STATE_RELATIVE_PATH),
+            state(picture_before).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            sandbox.join("newer-state.json"),
+            state(now_ms() + 3_000.0).to_string(),
+        )
+        .unwrap();
+
+        let logs = Logs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish();
+        let sent = Arc::new(SentPictures::default());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(retake_stale_pictures(
+                &workspace,
+                &project,
+                &[
+                    "sites/seville/index.html".to_string(),
+                    "sites/porto/index.html".to_string(),
+                    "sites/lisbon/index.html".to_string(),
+                ],
+                None,
+                Budget {
+                    total: Duration::from_secs(60),
+                    min_left: Duration::from_secs(1),
+                },
+                &check_environment(),
+                sent.as_ref(),
+            ));
+        });
+
+        // Only the card whose check kept no picture, with no newer one since,
+        // drops its old picture; none gets one.
+        assert_eq!(
+            sent.take_cleared(),
+            vec![(project, "preview-seville".to_string())]
+        );
+        assert!(sent.take().is_empty());
+        let logged = logs.text();
+        assert!(
+            logged.contains("blank page: the screen is a single colour")
+                && logged.contains("the page looked blank"),
+            "{logged}"
+        );
+        // Nothing the page wrote: its console, its address, its title.
+        for page_words in ["Ana and Ben", "?token=", "Guest list"] {
+            assert!(
+                !logged.contains(page_words),
+                "the log holds what the page wrote"
+            );
+        }
+        assert!(logged.lines().all(|line| line.len() <= 600), "{logged}");
+    }
+
+    /// What the runtime logged, as a test reads it.
+    #[derive(Clone, Default)]
+    struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Logs {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl std::io::Write for Logs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
     }
 }
