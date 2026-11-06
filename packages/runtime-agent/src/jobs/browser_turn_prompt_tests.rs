@@ -1364,7 +1364,7 @@ fn a_stop_and_an_undo_stay_taken_back_in_the_next_turns_prompts() {
         building_thread,
     );
     let stop_line = format!(
-        "\n- [2026-11-05T22:55:46.134Z] The person stopped “{BEFORE_YOU_GO}”; don't carry it on unless they ask again."
+        "\n- [2026-11-05T22:55:46.134Z] The person stopped “{BEFORE_YOU_GO}”: make nothing it asked for (no section, heading or wording of it, even to hold something else) unless they ask again."
     );
     let latest = format!("\n\nLatest user request:\n{TIP}");
     let stop_at = prompt
@@ -1410,7 +1410,7 @@ fn a_stop_and_an_undo_stay_taken_back_in_the_next_turns_prompts() {
         browser_thread,
     );
     let taken_back = format!(
-        "\n- [2026-11-05T22:56:56.821Z] The person stopped “{TIP}”; don't carry it on unless they ask again.\n- [2026-11-05T22:58:41.471Z] The person undid the change from “{TIP}”"
+        "\n- [2026-11-05T22:56:56.821Z] The person stopped “{TIP}”: make nothing it asked for (no section, heading or wording of it, even to hold something else) unless they ask again.\n- [2026-11-05T22:58:41.471Z] The person undid the change from “{TIP}”"
     );
     assert!(prompt.contains(&taken_back), "{prompt}");
     // Its own turn for the tip read the section's Stop already.
