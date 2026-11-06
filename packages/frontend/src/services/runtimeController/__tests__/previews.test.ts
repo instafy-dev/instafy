@@ -210,6 +210,10 @@ describe("site preview controller client", () => {
     }
     expect(mapSitePreviewThumbnailEvent({ previewId: PREVIEW_ID, version: "0123456789abcdef", runtimeId: "r" })).toEqual({ previewId: PREVIEW_ID, version: "0123456789abcdef" });
     expect(mapSitePreviewThumbnailEvent({ previewId: PREVIEW_ID, version: "javascript:alert(1)" })).toBeNull();
+    // The preview's picture is gone: its site changed and no new one could be kept.
+    expect(mapSitePreviewThumbnailEvent({ previewId: PREVIEW_ID, version: null, runtimeId: "r" })).toEqual({ previewId: PREVIEW_ID, version: null });
+    expect(mapSitePreviewThumbnailEvent({ previewId: PREVIEW_ID })).toBeNull();
+    expect(mapSitePreviewThumbnailEvent({ version: null })).toBeNull();
   });
 
   it("fetches a preview's picture with the person's session, never caching it on disk, and reads refusals", async () => {

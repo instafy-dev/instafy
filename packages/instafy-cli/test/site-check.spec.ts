@@ -699,12 +699,10 @@ describe.skipIf(!browserOk)("preview check: in a browser", () => {
     expect(formatSiteCheck(r)).toMatch(/✓ phone 390×844, light mode: .*phone\.png/);
   });
 
-  // A turn that ends after its own check tried, and failed, to picture the site is not checked again for nothing.
-  it("a picture the check could not take is recorded as tried, and nothing is uploaded", { timeout: 90_000 }, async () => {
+  // A picture the check could not take is never sent, and the report says why.
+  it("a picture the check could not take is not uploaded, and the report says why", { timeout: 90_000 }, async () => {
     const port = await serve({ "/": { body: `<!doctype html><title>Nothing yet</title><body style="margin:0;background:#fff"></body>` } });
-    const tried: Array<{ port: number; path: string; takenAt: number }> = [];
     const uploads: number[] = [];
-    const before = Date.now();
     const out: string[] = [];
     await runPreviewCheckCli(
       { port: String(port), desktop: true, out: path.join(tmp, "tried"), json: true },
@@ -717,15 +715,10 @@ describe.skipIf(!browserOk)("preview check: in a browser", () => {
           uploads.push(image.length);
           return { status: "uploaded" };
         },
-        pictureTried: async (input) => {
-          tried.push(input);
-        },
       },
     );
     expect(JSON.parse(out[0]!)).toMatchObject({ thumbnail: "skipped", thumbnailReason: "the page looked blank" });
     expect(uploads).toEqual([]);
-    expect(tried).toEqual([{ port, path: "/", takenAt: expect.any(Number) }]);
-    expect(tried[0]!.takenAt).toBeGreaterThanOrEqual(before);
   });
 });
 

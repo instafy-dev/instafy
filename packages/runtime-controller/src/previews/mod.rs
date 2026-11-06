@@ -162,6 +162,7 @@ pub(crate) fn router() -> Router<AppState> {
             "/projects/:project_id/previews/:preview_id/thumbnail",
             put(thumbnail::put_preview_thumbnail)
                 .get(thumbnail::get_preview_thumbnail)
+                .delete(thumbnail::delete_preview_thumbnail)
                 .layer(DefaultBodyLimit::max(
                     thumbnail::THUMBNAIL_UPLOAD_MAX_BODY_BYTES,
                 )),

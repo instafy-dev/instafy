@@ -802,6 +802,14 @@ describe("useRuntimeControllerSync controller access results", () => {
       });
       expect(pictureEvent).toHaveBeenCalledOnce();
       expect((pictureEvent.mock.calls[0][0] as CustomEvent).detail).toEqual({ previewId: "preview-1", version: "0123456789abcdef" });
+
+      // A check of the changed site kept no picture: the card hears its old
+      // one is gone.
+      await act(async () => {
+        subscription?.onEvent?.({ kind: "preview.thumbnail_updated", project_id: "project-current", data: { previewId: "preview-1", version: null, runtimeId: "runtime-1" } });
+      });
+      expect(pictureEvent).toHaveBeenCalledTimes(2);
+      expect((pictureEvent.mock.calls[1][0] as CustomEvent).detail).toEqual({ previewId: "preview-1", version: null });
     } finally {
       window.removeEventListener(SITE_PREVIEW_THUMBNAIL_EVENT, pictureEvent);
     }
