@@ -34,6 +34,10 @@ pub struct BrowserRun {
 pub(super) const LET_OCTO_CONTINUE_PROMPT: &str = "Continue the previous browser task on this same page. I may have used the browser while I had control. Take a fresh snapshot before acting; do not reuse old target indices or request, reveal, or repeat any values I may have entered.";
 /// How a replay names that press: one line, not Studio's instructions in the person's name.
 pub(super) const LET_OCTO_CONTINUE_LINE: &str = "The person let Octo continue in the browser.";
+/// What a hand-back is stored with, whatever it carries on (runtime-controller
+/// `browser_hand_back::HAND_BACK_PROMPT`, pinned by `browser_hand_back_fixtures.json`): Studio's
+/// words, never the person's. A replay leaves it out ([`is_hand_back_prompt`]).
+pub(super) const HAND_BACK_PROMPT: &str = "Continue building with what the browser turn found.";
 /// How much of a browser turn's request and reply the building lane's replay quotes, as a
 /// building job's lease bounds the browser turns since its last turn (runtime-controller
 /// `browser_hand_back.rs`).
@@ -56,21 +60,43 @@ pub struct PromptConversationContext {
 /// (runtime-controller `change_undone.rs`): "The person undid the change from “…”". It is an
 /// entry of the history like any other, so routing and a new or lost thread's replay read it.
 const CHANGE_UNDONE_KIND: &str = "change_undone";
-/// At most this many of the chat's latest undo lines reach a restored building thread.
-const UNDONE_CHANGES_MAX: usize = 5;
-/// What a restored building thread reads before the undo lines it has not seen: an Undo is no
-/// turn of the thread's, so its own context never showed one.
-const UNDONE_CHANGES_NOTE: &str = "\n\nThe person also used Undo in this chat, outside any turn, so the restored thread does not show it. Those changes were taken back on purpose (newest last):";
+/// The notice the controller records when the person presses Stop (runtime-controller
+/// `conversation_stop.rs`): "Stopped this run.", naming the runs it stopped.
+const RUN_CANCELLATION_KIND: &str = "run_cancellation";
+/// At most this many of the chat's latest Undo and Stop lines reach a restored thread.
+const TAKEN_BACK_MAX: usize = 5;
+/// What a restored thread reads before the Undo and Stop lines it has not seen. An Undo is no
+/// turn of any thread's, and a Stop ends a turn of either lane, or one before it reached a thread:
+/// a restored browser thread never heard of an Undo, and its next turn asked to build the undone
+/// tip again; a hand-back read right after a stopped turn built what the person had stopped
+/// (a local test, Nov 5).
+const TAKEN_BACK_NOTE: &str =
+    "\n\nSince this thread's last turn, the person took these back on purpose (newest last):";
 
-/// Whether a history entry is the line an Undo left. Only the controller writes one: a message
-/// a client records never keeps that `kind`, and an entry without the controller's `source` is
-/// no Undo of anyone's.
+/// Whether an entry is the controller's own: the line an Undo left, a Stop's notice. A message a
+/// client records never keeps the controller's `source`, so a line that only says so is no Undo
+/// or Stop of anyone's.
+fn is_controller_line(entry: &JsonValue, kind: &str) -> bool {
+    entry
+        .pointer("/metadata/source")
+        .and_then(JsonValue::as_str)
+        == Some("controller")
+        && entry.pointer("/metadata/kind").and_then(JsonValue::as_str) == Some(kind)
+}
+
+/// Whether a history entry is the line an Undo left.
 fn is_undo_line(entry: &JsonValue) -> bool {
-    entry.pointer("/metadata/kind").and_then(JsonValue::as_str) == Some(CHANGE_UNDONE_KIND)
+    is_controller_line(entry, CHANGE_UNDONE_KIND)
+}
+
+/// Whether a history entry is the notice of the person's Stop (`stopRequested`), not of a run the
+/// controller ended for another reason.
+fn is_stop_notice(entry: &JsonValue) -> bool {
+    is_controller_line(entry, RUN_CANCELLATION_KIND)
         && entry
-            .pointer("/metadata/source")
-            .and_then(JsonValue::as_str)
-            == Some("controller")
+            .pointer("/metadata/details/stopRequested")
+            .and_then(JsonValue::as_bool)
+            == Some(true)
 }
 
 /// Whether an assistant entry is the card the routing step posts for a message it sends to the
@@ -82,23 +108,109 @@ fn is_routed_browser_card(entry: &JsonValue) -> bool {
         == Some(true)
 }
 
-/// The undo lines a restored building thread has not seen, oldest first, each with when the
-/// person undid it: those since its last turn began. Its last turn is the newest run with a
-/// reply of the building lane in the history (not a browser turn's, nor a routed card's); a turn
-/// reads the chat's undo lines only when its prompt is built, so an Undo during or after that
-/// turn never reached the thread, and one before it did. The newest [`UNDONE_CHANGES_MAX`].
-fn undone_change_lines(history: Option<&JsonValue>) -> Vec<String> {
+/// Whether an entry is a hand-back's stored prompt: Studio's words, which the person never typed
+/// ([`HAND_BACK_PROMPT`]). The person's message the hand-back carries on is an entry before it,
+/// and the reply after it says what was built.
+fn is_hand_back_prompt(entry: &JsonValue) -> bool {
+    entry_text(entry, "role") == Some("user")
+        && entry_text(entry, "content") == Some(HAND_BACK_PROMPT)
+}
+
+/// The card job a browser turn's request, or a hand-back of what such a turn found, carries on.
+fn card_job_of(entry: &JsonValue) -> Option<&str> {
+    let hand_back = [
+        "/metadata/browserHandBack/cardJobId",
+        "/metadata/prompt_metadata/browserHandBack/cardJobId",
+    ]
+    .into_iter()
+    .find_map(|pointer| entry.pointer(pointer).and_then(JsonValue::as_str));
+    hand_back
+        .or_else(|| {
+            entry
+                .pointer("/metadata/prompt_metadata/browserRequestOf")
+                .and_then(JsonValue::as_str)?
+                .trim()
+                .strip_prefix("job:")
+        })
+        .map(str::trim)
+        .filter(|card| !card.is_empty())
+}
+
+/// Whether an entry is a message the person wrote in the building lane: neither a browser turn's
+/// request nor a hand-back's stored prompt.
+fn is_person_message(entry: &JsonValue) -> bool {
+    entry_text(entry, "role") == Some("user")
+        && !is_browser_entry(entry)
+        && !is_hand_back_prompt(entry)
+}
+
+/// The person's own words of a request their Stop ended in `run`: its message, or, for a browser
+/// turn or a hand-back that carried on a card, the message that card answered. The browser turn
+/// of a card the routing step posted for the person's message asks their words, as the controller
+/// checked on its send; any other card is a building turn's, whose reply names its job, and the
+/// message of that turn's run is the person's. None when the history does not show them: no
+/// line then, never someone else's words in the person's name.
+fn stopped_request<'a>(entries: &'a [JsonValue], run: &str) -> Option<&'a str> {
+    let at = entries.iter().position(|entry| {
+        entry_text(entry, "role") == Some("user") && entry_text(entry, "runId") == Some(run)
+    })?;
+    let first = &entries[at];
+    if is_person_message(first) {
+        return entry_text(first, "content");
+    }
+    let card = card_job_of(first)?;
+    let carries_on_the_card = |entry: &JsonValue| {
+        is_browser_entry(entry)
+            && entry_text(entry, "role") == Some("user")
+            && card_job_of(entry).is_some_and(|other| other.eq_ignore_ascii_case(card))
+    };
+    if let Some(routed) = entries[..=at].iter().rev().find(|entry| {
+        carries_on_the_card(entry)
+            && entry
+                .pointer("/metadata/prompt_metadata")
+                .is_some_and(super::browser_hand_back::carries_on_a_routed_card)
+    }) {
+        return entry_text(routed, "content");
+    }
+    // Only Octo's messages name their job; a person's message metadata is the client's.
+    let card_run = entries.iter().find_map(|entry| {
+        (entry_text(entry, "role") == Some("assistant")
+            && entry
+                .pointer("/metadata/jobId")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|job| job.trim().eq_ignore_ascii_case(card)))
+        .then(|| entry_text(entry, "runId"))
+        .flatten()
+    })?;
+    entries
+        .iter()
+        .find(|entry| entry_text(entry, "runId") == Some(card_run) && is_person_message(entry))
+        .and_then(|entry| entry_text(entry, "content"))
+}
+
+/// The Undo and Stop lines a restored thread of `lane` has not seen, oldest first, each with
+/// when the person did it: those since its last turn began. Its last turn is the newest run with
+/// a reply of its lane in the history: a browser turn's for the browser lane, any other for the
+/// building lane, never a routed card's (that run's routing step ran no turn of a thread) nor the
+/// controller's own lines. A turn reads these lines only when its prompt is built, so an Undo or
+/// a Stop during or after that turn never reached the thread, and one before it did. A Stop's
+/// line names each request it ended in the person's words ([`stopped_request`]). The newest
+/// [`TAKEN_BACK_MAX`], and how many of them are Undos.
+fn taken_back_lines(history: Option<&JsonValue>, lane: ThreadLane) -> (Vec<String>, usize) {
     let Some(JsonValue::Array(entries)) = history else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
     let last_turn = entries
         .iter()
         .rev()
         .filter(|entry| {
             entry_text(entry, "role") == Some("assistant")
-                && !is_browser_entry(entry)
+                && is_browser_entry(entry) == (lane == ThreadLane::SharedBrowser)
                 && !is_routed_browser_card(entry)
-                && !is_undo_line(entry)
+                && entry
+                    .pointer("/metadata/source")
+                    .and_then(JsonValue::as_str)
+                    != Some("controller")
         })
         .find_map(|entry| entry_text(entry, "runId"));
     let since = last_turn
@@ -108,21 +220,56 @@ fn undone_change_lines(history: Option<&JsonValue>) -> Vec<String> {
                 .position(|entry| entry_text(entry, "runId") == Some(run))
         })
         .unwrap_or(0);
-    let mut lines: Vec<String> = entries
-        .iter()
-        .skip(since)
-        .filter(|entry| is_undo_line(entry))
-        .filter_map(|entry| {
-            let line = compact_content(entry_text(entry, "content")?, 400);
-            Some(match entry_text(entry, "createdAt") {
-                Some(at) => format!("[{at}] {line}"),
-                None => line,
+    let dated = |entry: &JsonValue, line: String| match entry_text(entry, "createdAt") {
+        Some(at) => format!("[{at}] {line}"),
+        None => line,
+    };
+    let mut lines: Vec<(bool, String)> = Vec::new();
+    for entry in &entries[since.min(entries.len())..] {
+        if is_undo_line(entry) {
+            if let Some(content) = entry_text(entry, "content") {
+                lines.push((true, dated(entry, compact_content(content, 400))));
+            }
+            continue;
+        }
+        if !is_stop_notice(entry) {
+            continue;
+        }
+        let listed: Vec<&str> = entry
+            .pointer("/metadata/details/runIds")
+            .and_then(JsonValue::as_array)
+            .map(|runs| {
+                runs.iter()
+                    .filter_map(JsonValue::as_str)
+                    .map(str::trim)
+                    .collect()
             })
-        })
-        .collect();
-    let keep_from = lines.len().saturating_sub(UNDONE_CHANGES_MAX);
+            .unwrap_or_default();
+        let runs = if listed.is_empty() {
+            entry_text(entry, "runId").into_iter().collect()
+        } else {
+            listed
+        };
+        let mut named: Vec<&str> = Vec::new();
+        for words in runs
+            .into_iter()
+            .filter_map(|run| stopped_request(entries, run))
+        {
+            if named.contains(&words) {
+                continue;
+            }
+            named.push(words);
+            let line = format!(
+                "The person stopped “{}”; leave it undone unless they ask again.",
+                compact_content(words, 300)
+            );
+            lines.push((false, dated(entry, line)));
+        }
+    }
+    let keep_from = lines.len().saturating_sub(TAKEN_BACK_MAX);
     lines.drain(..keep_from);
-    lines
+    let undos = lines.iter().filter(|(undo, _)| *undo).count();
+    (lines.into_iter().map(|(_, line)| line).collect(), undos)
 }
 
 pub fn parse_conversation_history(value: Option<&JsonValue>) -> Vec<ConversationTurn> {
@@ -262,7 +409,8 @@ impl BrowserRunEntries {
 /// - The building lane reads every turn, each browser turn as one quoted block of page data
 ///   ([`BrowserRun`]), never as the person's words or its own. A browser turn that carries on
 ///   the person's own message quotes no request: the message is in the history already
-///   ([`repeated_person_messages`]).
+///   ([`repeated_person_messages`]). A hand-back's stored prompt is no turn of the person's,
+///   and reads as none ([`is_hand_back_prompt`]).
 fn parse_lane_history(value: Option<&JsonValue>, lane: ThreadLane) -> Vec<ConversationTurn> {
     let Some(JsonValue::Array(entries)) = value else {
         return Vec::new();
@@ -318,7 +466,7 @@ fn parse_lane_history(value: Option<&JsonValue>, lane: ThreadLane) -> Vec<Conver
         }
         if !is_browser_entry(entry) {
             flush(&mut run, &mut turns);
-            if lane == ThreadLane::Building {
+            if lane == ThreadLane::Building && !is_hand_back_prompt(entry) {
                 turns.extend(parse_conversation_history(Some(&JsonValue::Array(vec![
                     entry.clone(),
                 ]))));
@@ -405,14 +553,12 @@ pub fn build_prompt_conversation_context(
 
     if stateful_thread_restored {
         let mut section_text = "The provider thread was restored successfully, so the full prior conversation is already present in the model state. Focus on the latest user request below and reuse the existing thread context instead of asking the user to repeat themselves.".to_string();
-        // An Undo is no turn of the thread's, so the restored thread never saw one.
-        let undone = match lane {
-            ThreadLane::Building => undone_change_lines(history_value),
-            ThreadLane::SharedBrowser => Vec::new(),
-        };
-        if !undone.is_empty() {
-            section_text.push_str(UNDONE_CHANGES_NOTE);
-            for line in &undone {
+        // An Undo is no turn of the thread's, and a Stop may end another lane's turn or one that
+        // never reached this thread, so the restored thread never saw them.
+        let (taken_back, undone) = taken_back_lines(history_value, lane);
+        if !taken_back.is_empty() {
+            section_text.push_str(TAKEN_BACK_NOTE);
+            for line in &taken_back {
                 section_text.push_str("\n- ");
                 section_text.push_str(line);
             }
@@ -430,7 +576,8 @@ pub fn build_prompt_conversation_context(
                 "estimatedHistoryTokens": estimate_token_count(&section_text),
                 "historyTargetTokens": 0,
                 "modelContextWindow": model_context_window,
-                "undoneChanges": undone.len(),
+                "undoneChanges": undone,
+                "stoppedRequests": taken_back.len() - undone,
             }),
             section_text,
         };
@@ -484,7 +631,9 @@ pub fn build_prompt_conversation_context(
 /// Routing runs on a new provider turn. Supply ordinary stateless history, not
 /// a restored-thread assertion or arbitrary controller/history metadata. The person's message
 /// reads once, never again as the request of the browser turn it went to
-/// ([`repeated_person_messages`]).
+/// ([`repeated_person_messages`]), and a hand-back's stored prompt not at all: it read "User:
+/// Continue building with what the browser turn found." in the person's name
+/// ([`is_hand_back_prompt`]).
 pub(super) fn build_routing_conversation_context(
     history_value: Option<&JsonValue>,
 ) -> PromptConversationContext {
@@ -494,7 +643,7 @@ pub(super) fn build_routing_conversation_context(
         .into_iter()
         .flatten()
         .enumerate()
-        .filter(|(index, _)| !repeated.contains(index))
+        .filter(|(index, entry)| !repeated.contains(index) && !is_hand_back_prompt(entry))
         .filter_map(|(_, entry)| {
             let role = entry.get("role")?.as_str()?;
             let content = entry.get("content")?.as_str()?.trim();
@@ -1172,7 +1321,10 @@ mod tests {
                 "{line}"
             );
         }
-        assert_eq!(context.metrics["includedTurns"], 6);
+        // The hand-back's stored words are no turn: the person, two browser blocks, the build's
+        // reply, and nothing of Studio's in between.
+        assert!(!text.contains(HAND_BACK_PROMPT), "{text}");
+        assert_eq!(context.metrics["includedTurns"], 5);
 
         // The compacted form quotes them the same way, each block still whole.
         let long_turn = |index: usize| json!({"role": "user", "content": format!("Turn {index} {}", "x".repeat(2_000))});
@@ -1329,7 +1481,7 @@ mod tests {
         );
     }
 
-    // Studio and the controller pin the same prompt (browser_hand_back_fixtures.json).
+    // Studio and the controller pin the same prompts (browser_hand_back_fixtures.json).
     #[test]
     fn the_let_octo_continue_prompt_is_studios() {
         let fixtures: JsonValue = serde_json::from_str(include_str!(
@@ -1339,6 +1491,248 @@ mod tests {
         assert_eq!(
             json!(LET_OCTO_CONTINUE_PROMPT),
             fixtures["letOctoContinuePrompt"]
+        );
+        assert_eq!(json!(HAND_BACK_PROMPT), fixtures["handBackPrompt"]);
+    }
+
+    /// A chat as the controller sends it, from a recorded local test (Nov 5): two messages sent
+    /// straight to the browser, a page a hand-back built from the second's findings, a section
+    /// the person stopped, a tip whose hand-back the person stopped during its save, and that
+    /// tip's Undo. Octo's replies name their jobs.
+    fn chat_with_stops_and_an_undo() -> Vec<JsonValue> {
+        let routed = |words: &str, run: &str, card: &str, at: &str| {
+            json!({
+                "role": "user", "content": words, "runId": run, "lane": "browser", "createdAt": at,
+                "metadata": {"prompt_metadata": {
+                    "browserTransport": "shared",
+                    "browserRequestOf": format!("job:{card}"),
+                    "browserAutoStarted": true,
+                    "browserCardTurn": {"version": 1, "cardJobId": card, "routed": true},
+                }},
+            })
+        };
+        let hand_back = |run: &str, card: &str, at: &str| {
+            json!({
+                "role": "user", "content": HAND_BACK_PROMPT, "runId": run, "createdAt": at,
+                "metadata": {"browserHandBack": {"version": 1, "cardJobId": card, "browserJobId": "browser-job"}},
+            })
+        };
+        let stopped = |run: &str, at: &str| {
+            json!({
+                "role": "assistant", "content": "Stopped this run.", "runId": run, "createdAt": at,
+                "metadata": {"source": "controller", "kind": "run_cancellation", "details": {
+                    "reason": "Stopped", "runIds": [run], "jobIds": [format!("job-{run}")], "stopRequested": true,
+                }},
+            })
+        };
+        vec![
+            json!({"role": "user", "content": "Now find how to get there by metro from São Bento.", "runId": "run-3", "createdAt": "2026-11-05T22:50:42Z"}),
+            routed(
+                "Now find how to get there by metro from São Bento.",
+                "run-4",
+                "card-3",
+                "2026-11-05T22:50:47Z",
+            ),
+            json!({"role": "assistant", "content": "I couldn't confirm a metro route from São Bento.", "runId": "run-4", "lane": "browser", "createdAt": "2026-11-05T22:51:35Z", "metadata": {"jobId": "job-run-4"}}),
+            json!({"role": "user", "content": "Put the hours and the metro route on a small page I can share.", "runId": "run-5", "createdAt": "2026-11-05T22:52:23Z"}),
+            routed(
+                "Put the hours and the metro route on a small page I can share.",
+                "run-6",
+                "card-5",
+                "2026-11-05T22:52:28Z",
+            ),
+            json!({"role": "assistant", "content": "", "runId": "run-6", "lane": "browser", "createdAt": "2026-11-05T22:52:53Z", "metadata": {"jobId": "job-run-6"}}),
+            hand_back("run-7", "card-5", "2026-11-05T22:52:54Z"),
+            json!({"role": "assistant", "content": "I built a small page with the bookstore's daily hours.", "runId": "run-7", "createdAt": "2026-11-05T22:54:06Z", "metadata": {"jobId": "job-run-7"}}),
+            json!({"role": "user", "content": "Add a short \"Before you go\" section to that page.", "runId": "run-8", "createdAt": "2026-11-05T22:55:34Z"}),
+            stopped("run-8", "2026-11-05T22:55:46Z"),
+            json!({"role": "user", "content": "Add a one-line tip about the best time to visit.", "runId": "run-9", "createdAt": "2026-11-05T22:56:18Z"}),
+            routed(
+                "Add a one-line tip about the best time to visit.",
+                "run-10",
+                "card-9",
+                "2026-11-05T22:56:23Z",
+            ),
+            json!({"role": "assistant", "content": "", "runId": "run-10", "lane": "browser", "createdAt": "2026-11-05T22:56:40Z", "metadata": {"jobId": "job-run-10"}}),
+            hand_back("run-11", "card-9", "2026-11-05T22:56:40.7Z"),
+            stopped("run-11", "2026-11-05T22:56:56Z"),
+            json!({"role": "assistant", "content": "Applied file changes: sites/livraria-lello/app.js", "runId": "run-11", "createdAt": "2026-11-05T22:56:58Z", "metadata": {"kind": "update"}}),
+            json!({
+                "role": "assistant",
+                "content": "The person undid the change from “Add a one-line tip about the best time to visit.”",
+                "createdAt": "2026-11-05T22:58:41Z",
+                "metadata": {"source": "controller", "kind": "change_undone", "presentation": {"hidden": true}},
+            }),
+        ]
+    }
+
+    const BEFORE_YOU_GO_STOPPED: &str = "[2026-11-05T22:55:46Z] The person stopped “Add a short \"Before you go\" section to that page.”; leave it undone unless they ask again.";
+    const TIP_STOPPED: &str = "[2026-11-05T22:56:56Z] The person stopped “Add a one-line tip about the best time to visit.”; leave it undone unless they ask again.";
+    const TIP_UNDONE: &str = "[2026-11-05T22:58:41Z] The person undid the change from “Add a one-line tip about the best time to visit.”";
+
+    /// What a restored thread of `lane` reads of the chat up to `entries`.
+    fn restored_note(entries: &[JsonValue], lane: ThreadLane) -> PromptConversationContext {
+        let state = match lane {
+            ThreadLane::Building => {
+                json!({"threadId": "building-thread", "historyReplayRequired": false})
+            }
+            ThreadLane::SharedBrowser => json!({"sharedBrowserThreadId": "browser-thread"}),
+        };
+        build_prompt_conversation_context(Some(&json!(entries)), Some(&state), lane)
+    }
+
+    /// A Stop reaches the restored thread of each lane that had not seen it, as a line in the
+    /// person's own words. A recorded local test, Nov 5: the tip's hand-back ran on the building
+    /// thread right after the turn the person stopped, read "Continue building with what the
+    /// browser turn found." as its request and built the stopped section; after the tip's Undo,
+    /// the browser thread, which had heard of neither, asked to build the tip again. The building
+    /// thread reads the stopped section before the tip's hand-back; the browser thread reads the
+    /// tip's Stop and its Undo before "keep going", and not the section, which its own turn for
+    /// the tip had read already.
+    #[test]
+    fn a_restored_thread_of_either_lane_reads_what_the_person_stopped_and_undid() {
+        let chat = chat_with_stops_and_an_undo();
+        // The tip's hand-back, on the page's building thread.
+        let before_tip_hand_back = &chat[..14];
+        let building = restored_note(before_tip_hand_back, ThreadLane::Building);
+        let text = &building.section_text;
+        assert!(text.contains(TAKEN_BACK_NOTE), "{text}");
+        assert!(
+            text.ends_with(&format!("\n- {BEFORE_YOU_GO_STOPPED}")),
+            "{text}"
+        );
+        assert_eq!(building.metrics["stoppedRequests"], json!(1));
+        assert_eq!(building.metrics["undoneChanges"], json!(0));
+        // The tip's own browser turn, on the chat's browser thread, read the section's Stop.
+        let tip_browser_turn = &chat[..12];
+        let browser = restored_note(tip_browser_turn, ThreadLane::SharedBrowser);
+        assert!(
+            browser
+                .section_text
+                .ends_with(&format!("\n- {BEFORE_YOU_GO_STOPPED}")),
+            "{}",
+            browser.section_text
+        );
+
+        // "keep going": the browser thread's last turn was the tip's, so it reads the tip's Stop,
+        // named in the person's words though a hand-back's run was stopped, and its Undo.
+        let browser = restored_note(&chat, ThreadLane::SharedBrowser);
+        let text = &browser.section_text;
+        assert!(
+            text.ends_with(&format!("\n- {TIP_STOPPED}\n- {TIP_UNDONE}")),
+            "{text}"
+        );
+        assert!(!text.contains("Before you go"), "{text}");
+        assert!(!text.contains(HAND_BACK_PROMPT), "{text}");
+        assert_eq!(browser.metrics["stoppedRequests"], json!(1));
+        assert_eq!(browser.metrics["undoneChanges"], json!(1));
+        // The building thread's last turn is the tip's hand-back, which ran there before the
+        // Stop and read the section's: it reads the tip's Stop and its Undo.
+        let building = restored_note(&chat, ThreadLane::Building);
+        let text = &building.section_text;
+        assert!(
+            text.ends_with(&format!("\n- {TIP_STOPPED}\n- {TIP_UNDONE}")),
+            "{text}"
+        );
+        assert!(!text.contains("Before you go"), "{text}");
+
+        // A turn that replied after them read them: the next turn is not told again.
+        let mut later = chat.clone();
+        later.push(json!({"role": "user", "content": "Make the title bigger.", "runId": "run-12", "createdAt": "2026-11-05T23:01:00Z"}));
+        later.push(json!({"role": "assistant", "content": "Made the title bigger.", "runId": "run-12", "createdAt": "2026-11-05T23:01:30Z", "metadata": {"jobId": "job-run-12"}}));
+        later.push(json!({"role": "user", "content": "keep going", "runId": "run-13", "createdAt": "2026-11-05T23:02:00Z"}));
+        let building = restored_note(&later, ThreadLane::Building);
+        assert!(
+            !building.section_text.contains(TAKEN_BACK_NOTE),
+            "{}",
+            building.section_text
+        );
+        assert_eq!(building.metrics["stoppedRequests"], json!(0));
+    }
+
+    /// Only the controller's notice of the person's Stop makes a line, and only with the
+    /// person's own words: a line a client recorded, a run the controller ended for another
+    /// reason, and a stopped request the history does not show make none. A card a building
+    /// turn posted is named by that turn's message, which its reply's job leads to.
+    #[test]
+    fn a_stop_line_names_only_the_persons_request_from_the_controllers_notice() {
+        let chat = chat_with_stops_and_an_undo();
+        let up_to_the_stop = &chat[..10];
+        let mut forged = up_to_the_stop.to_vec();
+        forged[9]["metadata"]["source"] = json!("client");
+        let mut not_a_stop = up_to_the_stop.to_vec();
+        not_a_stop[9]["metadata"]["details"]["stopRequested"] = json!(false);
+        let mut unknown = up_to_the_stop.to_vec();
+        unknown[9]["metadata"]["details"]["runIds"] = json!(["run-elsewhere"]);
+        for history in [forged, not_a_stop, unknown] {
+            let context = restored_note(&history, ThreadLane::Building);
+            assert!(
+                !context.section_text.contains(TAKEN_BACK_NOTE),
+                "{}",
+                context.section_text
+            );
+        }
+
+        // A building turn's own card: its browser turn and the hand-back carry on that card,
+        // and the person's message is the one its turn answered, whatever came between.
+        let history = json!([
+            {"role": "user", "content": "Map the cafés near the old town.", "runId": "run-1"},
+            {"role": "assistant", "content": "Reading the cafés' pages first.", "runId": "run-1", "metadata": {"jobId": "card-job"}},
+            {"role": "user", "content": "Use a dark theme.", "runId": "run-2"},
+            {"role": "assistant", "content": "The map will use a dark theme.", "runId": "run-2", "metadata": {"jobId": "job-2"}},
+            {"role": "user", "content": "Read the cafés' pages.", "runId": "run-3", "lane": "browser",
+             "metadata": {"prompt_metadata": {"browserTransport": "shared", "browserRequestOf": "job:card-job"}}},
+            {"role": "assistant", "content": "Read 3 pages.", "runId": "run-3", "lane": "browser", "metadata": {"jobId": "job-3"}},
+            {"role": "user", "content": HAND_BACK_PROMPT, "runId": "run-4",
+             "metadata": {"browserHandBack": {"version": 1, "cardJobId": "card-job", "browserJobId": "job-3"}}},
+            {"role": "assistant", "content": "Stopped this run.", "runId": "run-4", "createdAt": "2026-11-05T10:00:00Z",
+             "metadata": {"source": "controller", "kind": "run_cancellation", "details": {"runIds": ["run-4"], "stopRequested": true}}},
+        ]);
+        let context = restored_note(history.as_array().unwrap(), ThreadLane::Building);
+        assert!(
+            context.section_text.ends_with(
+                "\n- [2026-11-05T10:00:00Z] The person stopped “Map the cafés near the old town.”; leave it undone unless they ask again."
+            ),
+            "{}",
+            context.section_text
+        );
+    }
+
+    /// A hand-back is stored with Studio's words, which the person never typed. The routing step
+    /// read them as "User: Continue building with what the browser turn found." right after the
+    /// person's own message, and a new building thread's replay read them as the person's turn;
+    /// neither reads them now. The person's message is in the chat once, and the reply after the
+    /// hand-back says what it built.
+    #[test]
+    fn a_hand_backs_stored_words_are_no_turn_of_the_persons() {
+        let chat = json!(chat_with_stops_and_an_undo());
+        let routing = build_routing_conversation_context(Some(&chat));
+        let building = build_prompt_conversation_context(Some(&chat), None, ThreadLane::Building);
+        let browser =
+            build_prompt_conversation_context(Some(&chat), None, ThreadLane::SharedBrowser);
+        for text in [
+            &routing.section_text,
+            &building.section_text,
+            &browser.section_text,
+        ] {
+            assert!(!text.contains(HAND_BACK_PROMPT), "{text}");
+        }
+        for text in [&routing.section_text, &building.section_text] {
+            assert_eq!(
+                text.matches("Put the hours and the metro route on a small page I can share.")
+                    .count(),
+                1,
+                "{text}"
+            );
+            assert!(text.contains("I built a small page with the bookstore's daily hours."));
+            assert!(text.contains("Stopped this run."), "{text}");
+        }
+        // Words a person typed that only look like it stay theirs.
+        let typed = json!([{"role": "user", "content": "Continue building with what the browser turn found, please."}]);
+        assert!(
+            build_routing_conversation_context(Some(&typed))
+                .section_text
+                .contains("found, please.")
         );
     }
 

@@ -4358,6 +4358,17 @@ fn should_run_agent_routing_preflight_for_execution(job: &LeaseJob, prompt_text:
     !is_bounded_job(job) && should_run_agent_routing_preflight(job, prompt_text)
 }
 
+/// Ends a job whose lease is gone (a Stop cancelled it, and its heartbeat or a refused request
+/// said so) before it does any more: before its folder is brought up to date, its routing step
+/// asks a model, or its thread is restored and its prompt written into it. Its error says the
+/// lease was lost, so the job loop reports nothing for it.
+fn ensure_lease_held(cancel_signal: Option<&JobCancelSignal>, before: &str) -> Result<()> {
+    if cancel_signal.is_some_and(JobCancelSignal::is_canceled) {
+        bail!("job lease lost {before}");
+    }
+    Ok(())
+}
+
 fn ensure_bounded_job_uses_bounded_lane(
     job: &LeaseJob,
     prompt_text: &str,
@@ -6929,6 +6940,10 @@ impl JobProcessor {
         // parallelism should come from multiple runtimes until the allowed credentials become
         // per-run config instead of global env.
         let _job_process_env_guard = JOB_PROCESS_ENV_LOCK.lock().await;
+        ensure_lease_held(
+            cancel_signal.as_ref(),
+            "before the folder was brought up to date",
+        )?;
         let _proxy_env = proxy_envelope.map(ProxyEnvGuard::new);
         let _controller_token_env = self.guard_controller_token(registration, job).await?;
         // Verified separately and intentionally never exported to the Codex
@@ -7290,6 +7305,7 @@ impl JobProcessor {
             let preflight_options =
                 self.routing_preflight_options(job, task_usage, turn_files, cancel_signal.clone());
             let _codex_guard = CODEX_EXECUTION_LOCK.lock().await;
+            ensure_lease_held(cancel_signal.as_ref(), "before its routing step")?;
             match codex
                 .execute_with_options(&request.prompt, None, preflight_options)
                 .await
@@ -7792,6 +7808,10 @@ impl JobProcessor {
             turn_start.record(&workspace_dir, status);
         }
         let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
+        ensure_lease_held(
+            cancel_signal.as_ref(),
+            "before its thread was restored and its prompt written",
+        )?;
         let shared_browser_action_log_before =
             explicit_shared_browser_execution.then(crate::shared_browser::action_log_len);
 
@@ -11097,7 +11117,11 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             );
         }
 
-        let latest_request_section = format!("\n\nLatest user request:\n{trimmed_prompt}");
+        // A hand-back's stored words are the controller's one line; the person's own words, when
+        // it carries them, are what it asks (`browser_hand_back::person_request`).
+        let latest_request = browser_hand_back::person_request(job.payload.get("metadata"))
+            .unwrap_or(trimmed_prompt);
+        let latest_request_section = format!("\n\nLatest user request:\n{latest_request}");
         append_prompt_section(
             &mut prompt,
             &mut prompt_section_metrics,

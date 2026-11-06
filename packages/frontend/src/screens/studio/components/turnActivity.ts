@@ -346,6 +346,8 @@ export type TurnActivity = {
   summary: string | null;
   stepCount: number;
   details: DetailItem[];
+  /** Someone stopped the turn: its done line says so at once. */
+  stopped?: true;
 };
 
 /** The line before the model has begun, and before its first step. */
@@ -1500,5 +1502,5 @@ export function summarizeTurnActivity(
     }
   }
 
-  return { live, summary, stepCount, details };
+  return { live, summary, stepCount, details, ...(phase === "cancelled" ? { stopped: true as const } : {}) };
 }

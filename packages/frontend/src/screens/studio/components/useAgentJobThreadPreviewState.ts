@@ -7,6 +7,7 @@ import type { AgentJobThreadPreviewLayoutProps } from "./AgentJobThreadPreviewLa
 import {
   isAgentStatusMessage,
   newestTurnMessages,
+  readHandBackRunId,
   readPendingHandBack,
   readTurnJobIds,
   runMatchesThreadJobId,
@@ -207,6 +208,9 @@ export function useAgentJobThreadPreviewState({
   const pendingHandBack = readPendingHandBack(message);
   const handBackPending = pendingHandBack !== null;
   const pendingHandBackRunId = pendingHandBack?.runId ?? "";
+  // Or that hand-back's run ended before its job showed anything (a Stop in the gap after the
+  // browser turn): the row stands for that run, whose end is the row's.
+  const endedHandBackRunId = handBackPending ? null : readHandBackRunId(message);
   const threadLocalId = typeof metadata?.threadLocalId === "string" ? metadata.threadLocalId.trim() : "";
   const rawThreadMessages = metadata?.threadMessages;
   const fallbackThreadMessages = useMemo(() => coerceThreadMessages(rawThreadMessages), [rawThreadMessages]);
@@ -433,22 +437,34 @@ export function useAgentJobThreadPreviewState({
   );
   // Someone stopped this run (Take over, Stop): its record says canceled, or
   // the conversation's stop notice names its job. Its updates just end, so
-  // without this it read "Status unavailable" once they went quiet.
+  // without this it read "Status unavailable" once they went quiet. A
+  // hand-back stopped before its job showed anything stopped the row, though
+  // the browser turn before it finished: its run's record or the notice says
+  // so. Read as the browser turn's, the row said only what that turn did (a
+  // local test, Nov 5).
   const isStoppedRun = useMemo(() => {
+    const conversationsToRead = threadConversation && threadConversation !== activeConversation
+      ? [activeConversation, threadConversation]
+      : [activeConversation];
+    const stopNotices = () => conversationsToRead.flatMap((conversation) =>
+      (conversation?.messages ?? [])
+        .filter((candidate) => getControllerConversationNoticeKind(candidate) === "run_cancellation")
+        .map(readChatRunStopNotice));
+    if (
+      endedHandBackRunId &&
+      (Object.values(runs ?? {}).some((run) => run.status === "canceled" && run.id === endedHandBackRunId) ||
+        stopNotices().some((notice) => notice.runIds.includes(endedHandBackRunId)))
+    ) {
+      return true;
+    }
     if (!jobId || runStatus.phase === "completed") {
       return false;
     }
     if (Object.values(runs ?? {}).some((run) => run.status === "canceled" && runMatchesThreadJobId(run, jobId))) {
       return true;
     }
-    const conversationsToRead = threadConversation && threadConversation !== activeConversation
-      ? [activeConversation, threadConversation]
-      : [activeConversation];
-    return conversationsToRead.some((conversation) =>
-      (conversation?.messages ?? []).some((candidate) =>
-        getControllerConversationNoticeKind(candidate) === "run_cancellation" &&
-        readChatRunStopNotice(candidate).jobIds.includes(jobId)));
-  }, [activeConversation, jobId, runStatus.phase, runs, threadConversation]);
+    return stopNotices().some((notice) => notice.jobIds.includes(jobId));
+  }, [activeConversation, endedHandBackRunId, jobId, runStatus.phase, runs, threadConversation]);
   const isStaleRunningStatus = runStatus.phase === "running" && !isThreadRunInFlight && !hasRecentThreadActivity;
   const isCompleted =
     runStatus.phase === "completed" || isPlanOnlyThread || terminalProxyErrorMessage !== null || isStoppedRun;

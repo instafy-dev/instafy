@@ -1742,12 +1742,8 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "browser work goes on whether or not it found its answer",
             ),
             (
-                "- A bare \"keep going\" never carries on a change the person stopped or undid.\n",
-                "a bare \"keep going\" never carries on a change the person stopped or undid",
-            ),
-            (
-                "a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked or not confirmed, such as a route); when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`.",
-                "a bare \"keep going\" carries on what the chat left open",
+                "a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked or not confirmed, such as a route), never a change the person stopped or undid; when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`.",
+                "a bare \"keep going\" carries on what the chat left open, never a change the person stopped or undid",
             ),
             (
                 "So is research whose answer ends in a page (a comparison, prices, a route), from the first message.",
@@ -1977,14 +1973,17 @@ fn check_messages_the_browser_could_not_make(harness: &Harness) -> Result<()> {
         !first.contains("Instafy routing preflight."),
         "M3 began with a routing call"
     );
+    // The person's words are its latest request, never Studio's words for a hand-back.
     ensure!(
-        first.contains(&format!(
-            "The person's request, which went to Instafy's browser first:\n[[M1]] {M_MAP}\n"
-        )),
-        "M3 did not read the person's message as their request"
+        first.contains(&format!("\n\nLatest user request:\n[[M1]] {M_MAP}")),
+        "M3 did not read the person's message as its latest request"
     );
     ensure!(
-        first.contains("Instafy's browser opened no page for it"),
+        !first.contains(HAND_BACK),
+        "M3 read Studio's words for a hand-back"
+    );
+    ensure!(
+        first.contains("Instafy's browser opened no page for the latest request"),
         "M3 was not told the browser opened no page"
     );
     ensure!(

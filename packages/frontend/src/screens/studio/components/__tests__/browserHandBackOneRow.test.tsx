@@ -376,6 +376,53 @@ describe("a message Octo answers in its browser and then builds from what it fou
     expect(view.lines).toEqual(["Stopped · opened 4 pages on visitasevilla.es, ran 2 commands"]);
   });
 
+  // A local test, Nov 5: the person pressed Stop in the gap between the browser turn and its
+  // hand-back. The hand-back's run ended before its job showed anything, and the row read only
+  // what the browser turn did ("Opened 3 pages on frame.work, read 2 pages"), never that it
+  // stopped, also after a reload.
+  it("reads as stopped when the person stops the hand-back before its turn showed anything", async () => {
+    const stoppedAt = Date.parse("2026-11-04T08:11:54.000Z");
+    const notice: ChatMessage = {
+      id: "stop-notice",
+      role: "assistant",
+      authorId: null,
+      content: "Stopped this run.",
+      timestamp: stoppedAt,
+      files: null,
+      messageType: "run_cancellation",
+      metadata: {
+        source: "controller",
+        kind: "run_cancellation",
+        runId: SEVILLE_BUILD.runId,
+        details: {
+          stopRequested: true,
+          actorUserId: PERSON,
+          agentHandles: ["octo"],
+          jobIds: [SEVILLE_BUILD.jobId],
+          runIds: [SEVILLE_BUILD.runId],
+          runStatus: "canceled",
+        },
+      },
+    };
+    const chat = [...chatOf(CHATS.seville).filter((message) => message.timestamp < stoppedAt), notice];
+    mocks.activeConversation = { controllerId: CONVERSATION, messages: chat };
+    const view = await show(chat, stoppedAt + 1_000);
+    expect(view.turns).toHaveLength(1);
+    expect(view.lines).toEqual(["Stopped · opened 4 pages on visitasevilla.es"]);
+    // A failure posted for the hand-back's run alone is no Stop: the row says what failed.
+    const failure: ChatMessage = {
+      ...notice,
+      id: "hand-back-failed",
+      content: "Instafy AI isn't answering right now.",
+      messageType: "error",
+      metadata: { runId: SEVILLE_BUILD.runId, source: "agent", outcome: "failed", messageType: "error" },
+    };
+    const failed = [...chatOf(CHATS.seville).filter((message) => message.timestamp < stoppedAt), failure];
+    mocks.activeConversation = { controllerId: CONVERSATION, messages: failed };
+    const view2 = await show(failed, stoppedAt + 1_000);
+    expect(view2.lines.some((line) => line.startsWith("Stopped"))).toBe(false);
+  });
+
   it("shows the building turn's failure in the row, also one posted for its run alone", async () => {
     const failedAt = Date.parse("2026-11-04T08:12:21.000Z");
     const failure = (jobId: string | null): ChatMessage => ({

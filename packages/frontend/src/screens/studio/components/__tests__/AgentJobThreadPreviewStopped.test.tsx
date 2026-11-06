@@ -332,4 +332,33 @@ describe("a run a person stopped", () => {
     expect(container.textContent).not.toContain("Status unavailable");
     expect(container.textContent).toContain("Stopped");
   });
+
+  // A local test, Nov 5: the person pressed Stop as the line went to "Thinking…", and the line
+  // said "Stopped" 1.4 s later: a running label holds before the next one, and the done line
+  // waited out the hold. A Stop's line comes at once.
+  it("says Stopped as soon as the turn is stopped, not after the running line's hold", async () => {
+    const run = (status: string) => ({
+      [RUN_ID]: {
+        id: RUN_ID, projectId: "project-1", sessionId: null, conversationId: null, promptId: null, runType: "prompt",
+        status, progress: 0, progressStage: null, previewUrl: null, lastMessage: null,
+        metadata: { jobId: JOB_ID }, createdAt: null, updatedAt: null,
+      },
+    });
+    const card: ChatMessage = {
+      ...threadCard(),
+      metadata: {
+        messageType: "agent_job_thread",
+        jobId: JOB_ID,
+        agent: { handle: "octo" },
+        threadMessages: [commandUpdate("00000000-0000-4000-8000-000000000007", "sed -n '1,220p' sites/porto/app.js", 3_000)],
+      },
+    };
+    live.runs = run("in_progress");
+    await act(async () => root.render(<Thread message={card} />));
+    const line = () => container.querySelector('[data-testid="turn-activity-line"]')?.textContent;
+    expect(line()).toBe("Thinking…");
+    live.runs = run("canceled");
+    await act(async () => root.render(<Thread message={{ ...card }} />));
+    expect(line()).toBe("Stopped · ran a command");
+  });
 });

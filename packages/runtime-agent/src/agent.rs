@@ -21,7 +21,7 @@ use crate::active_turn_input::{
     ActiveTurnInputCancellation, ActiveTurnInputOutcome, ActiveTurnInputReceiver,
     ActiveTurnInputSender, active_turn_input_channel,
 };
-use crate::agent_executor::{AgentExecutor, TurnEnd};
+use crate::agent_executor::{AgentExecutor, TurnEnd, is_lease_lost};
 use crate::config::Config;
 use crate::controller::{
     AgentSecretInventoryItem, ControllerClient, JobSecrets, LeaseError, LeaseJob, Registration,
@@ -1376,6 +1376,11 @@ impl RuntimeAgent {
                 .context("heartbeat during job handling failed")
             {
                 warn!(?error, job_id = %job.id, "heartbeat failed");
+                // The lease is gone already (a Stop cancelled the job as it was leased): nothing
+                // of the job runs. Any other failure is a passing one, and the job goes on.
+                if is_lease_lost(&error) {
+                    lease_lost_signal.cancel();
+                }
             }
         }
 
@@ -1418,8 +1423,41 @@ impl RuntimeAgent {
             AgentRuntimeSettings::default()
         } else {
             let fetched = client.fetch_job_secrets(registration, job.id, true).await;
+            // The controller says the job is no longer this runtime's (`JobNoLongerLeased`).
+            if fetched.as_ref().is_err_and(is_lease_lost) {
+                lease_lost_signal.cancel();
+            }
             install_fetched_job_secrets(&secret_env_keys, fetched, job.id)
         };
+        // A job whose lease the first heartbeat or the secrets request found gone, or that the
+        // heartbeat lost since, ends here: before its folder is refreshed, its thread restored or
+        // its prompt written into it. A Stop pressed between a browser turn and its hand-back
+        // cancelled the hand-back as it was leased, and the turn went on past both answers, set
+        // the chat's building thread to another model and wrote the cancelled request into it
+        // (a local test, Nov 5).
+        if let Some(end) = TurnEnd::before_run(&lease_lost_signal) {
+            info!(
+                job_id = %job.id,
+                "job lease was lost before its turn began; skipping job"
+            );
+            turn.end(end);
+            if let Some(task) = periodic_heartbeat.take() {
+                task.shutdown().await;
+            }
+            if !parallel_scoped {
+                apply_job_secrets(
+                    &secret_env_keys,
+                    &JobSecrets {
+                        env: HashMap::new(),
+                        inventory: Vec::new(),
+                        inventory_complete: true,
+                        runtime_settings: AgentRuntimeSettings::default(),
+                        research_budget: Default::default(),
+                    },
+                );
+            }
+            return Ok(());
+        }
 
         let secrets_refresh_seconds = resolve_secrets_refresh_interval_seconds();
         if secrets_refresh_seconds > 0 && !parallel_scoped {

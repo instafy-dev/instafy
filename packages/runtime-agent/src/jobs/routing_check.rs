@@ -811,7 +811,11 @@ mod tests {
             );
             for entry in &case.history {
                 let content = entry["content"].as_str().unwrap().trim();
-                if !content.is_empty() {
+                // A hand-back's stored prompt is Studio's words, not the person's: the chat
+                // leaves it out.
+                if content == super::super::conversation_context::HAND_BACK_PROMPT {
+                    assert!(!chat.contains(content), "{}: {chat}", case.id);
+                } else if !content.is_empty() {
                     assert!(chat.contains(content), "{}: {content}", case.id);
                 }
             }
@@ -825,19 +829,75 @@ mod tests {
         assert_eq!(read(&first).matches(&first.message).count(), 1);
 
         // A chat's message sent straight to the browser is stored again as that browser turn's
-        // request, and is read once; an empty reply is not read.
+        // request, and is read once; an empty reply, and the hand-back's stored prompt, are not
+        // read.
         let fill_in = case(&cases, "comparison-fill-in");
         let request = fill_in.history[0]["content"].as_str().unwrap();
         assert_eq!(read(&fill_in).matches(request).count(), 1);
         let input = routing_input(&fill_in, workspace.path()).unwrap();
-        assert_eq!(input.history_metrics["includedTurns"], json!(4));
-        assert_eq!(input.history_metrics["ignoredEntries"], json!(2));
+        assert_eq!(input.history_metrics["includedTurns"], json!(3));
+        assert_eq!(input.history_metrics["ignoredEntries"], json!(3));
 
         // A Stop and an Undo reach the routing step as the chat shows them.
         let undone = case(&cases, "keep-going-after-stop-and-undo");
         let chat = read(&undone);
         assert!(chat.contains("Stopped this run."), "{chat}");
         assert!(chat.contains("The person undid the change from"), "{chat}");
+    }
+
+    /// After the person stopped one change and stopped and undid another, a bare "keep going"
+    /// whose page marks the route not confirmed reads the `browser` route's line, which says it
+    /// never carries on a change the person stopped or undid, and no rule of its own ahead of the
+    /// routes: in a recorded local test (Nov 5) that rule sent it to the browser alone, whose
+    /// turn set nothing on the planner. It reads the chat as the person had it: their messages,
+    /// the Stops and the Undo, and none of the words a hand-back is stored with. So does the
+    /// message before it, a page asked for in a chat that confirmed nothing yet.
+    #[test]
+    fn keep_going_after_a_stop_and_an_undo_reads_the_route_line_and_the_chat_as_it_was() {
+        let cases = shipped();
+        let workspace = tempdir().unwrap();
+        prepare_workspace(workspace.path()).unwrap();
+        let hand_back = super::super::conversation_context::HAND_BACK_PROMPT;
+        for id in [
+            "page-from-unconfirmed-findings",
+            "keep-going-route-open-after-stop-and-undo",
+        ] {
+            let case = case(&cases, id);
+            assert_eq!(case.expected(), "browser_then_build", "{id}");
+            let input = routing_input(&case, workspace.path()).unwrap();
+            assert!(input.browser_routes_offered, "{id}");
+            assert!(
+                input.prompt.contains(
+                    "such as a route), never a change the person stopped or undid; when a page here shows it"
+                ),
+                "{id}: {}",
+                input.prompt
+            );
+            assert!(
+                !input.prompt.contains(
+                    "- A bare \"keep going\" never carries on a change the person stopped or undid."
+                ),
+                "{id}"
+            );
+            assert!(!input.prompt.contains(hand_back), "{id}");
+        }
+        let keep_going = case(&cases, "keep-going-route-open-after-stop-and-undo");
+        assert_eq!(
+            keep_going
+                .history
+                .iter()
+                .filter(|entry| entry["content"] == hand_back)
+                .count(),
+            2
+        );
+        let input = routing_input(&keep_going, workspace.path()).unwrap();
+        assert_eq!(input.prompt.matches("Stopped this run.").count(), 2);
+        assert!(input.prompt.contains(
+            "The person undid the change from \u{201c}Add a one-line tip about the best time to visit.\u{201d}"
+        ));
+        // Four requests sent on to the browser, two empty replies and two hand-backs' words.
+        assert_eq!(input.history_metrics["ignoredEntries"], json!(8));
+        assert_eq!(input.history_metrics["includedTurns"], json!(13));
     }
 
     /// The routing input is the job's, reading the browser skill's routing section from the

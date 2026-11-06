@@ -2509,7 +2509,9 @@ unless the policy is `"covered"`.
   `browserHandBack` with what the browser turn was asked (at most 2,000
   characters), for a card the routing step posted the message's own words as
   `personRequest` (from that message's job, at most 8,000 characters; the
-  building turn reads them as the person's request), and every finding line of
+  building turn reads them as its latest request, in place of Studio's words,
+  which it read right after a turn the person had stopped and took for a
+  request to carry that turn on), and every finding line of
   its final reply as a labelled finding `{url, title, facts, readAt, viewer}`
   (plus `stopped` for a page that was not read: `login`, `captcha`, `paywall`,
   `blocked`, `robots`, `download`, `secret` or `link-only`, and any other reason
@@ -2573,7 +2575,8 @@ unless the policy is `"covered"`.
   carries on the person's own message with its reply alone: the message is in
   that replay already). A Let Octo
   continue press reads as one line there, not as Studio's instructions in the
-  person's name. It takes no
+  person's name, and a hand-back's own stored words read as nothing there and
+  in the routing step's history: the person's message is in it already. It takes no
   routing step: its route is decided (build in this chat), and the findings it
   builds from are in its own prompt, which a routing step never sees. So it
   runs in the lane a routed build runs in: it edits the space and ends in plain

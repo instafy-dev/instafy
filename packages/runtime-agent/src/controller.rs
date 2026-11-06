@@ -365,6 +365,18 @@ const SPACE_DELETED_CODE: &str = "space_deleted";
 #[error("the controller refused the runtime: its space was deleted")]
 pub struct SpaceDeleted;
 
+/// The controller's answer that a job is not this runtime's to run any more: its secrets
+/// request came back 400 (the job is not leased: a Stop cancelled it), 401 (its lease ended, or
+/// is another runtime's, once a renewed agent token was tried) or 404 (no such job). Its words
+/// say the lease was lost, which is how the job loop reads an error
+/// (`agent_executor::is_lease_lost`).
+#[derive(Debug, thiserror::Error)]
+#[error("job lease lost: agent secrets request failed: status={status} body={body}")]
+pub struct JobNoLongerLeased {
+    pub status: StatusCode,
+    pub body: String,
+}
+
 #[derive(Deserialize)]
 struct RefusalCode {
     code: Option<String>,
@@ -1313,6 +1325,12 @@ impl ControllerClient {
             }
         }
 
+        if matches!(
+            status,
+            StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND
+        ) {
+            return Err(JobNoLongerLeased { status, body: text }.into());
+        }
         if !status.is_success() {
             return Err(anyhow!(
                 "agent secrets request failed: status={} body={}",

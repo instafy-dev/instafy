@@ -18,6 +18,9 @@ struct StandIn {
     requests: Arc<Mutex<Vec<serde_json::Value>>>,
     runtime_settings: Arc<Mutex<AgentRuntimeSettings>>,
     secrets_fetches: Arc<AtomicUsize>,
+    /// The job is not leased any more: its secrets request is refused, as the controller
+    /// refuses a cancelled job's.
+    not_leased: Arc<AtomicBool>,
 }
 
 async fn heartbeat(State(stand_in): State<StandIn>) -> axum::response::Response {
@@ -30,11 +33,20 @@ async fn heartbeat(State(stand_in): State<StandIn>) -> axum::response::Response 
     }
 }
 
-async fn secrets(State(stand_in): State<StandIn>) -> Json<serde_json::Value> {
+async fn secrets(State(stand_in): State<StandIn>) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
     stand_in.secrets_fetches.fetch_add(1, Ordering::SeqCst);
+    if stand_in.not_leased.load(Ordering::SeqCst) {
+        return (
+            AxumStatusCode::BAD_REQUEST,
+            Json(json!({"message": "job is not leased"})),
+        )
+            .into_response();
+    }
     Json(
         json!({ "env": {}, "inventory": [], "runtimeSettings": *stand_in.runtime_settings.lock() }),
     )
+    .into_response()
 }
 
 async fn complete(
@@ -330,6 +342,138 @@ async fn the_job_loop_records_whether_a_turn_was_interrupted() {
         1,
         "the lost job is not completed"
     );
+}
+
+/// Runs `work` on a thread with the production worker's stack, as a leased job runs.
+fn on_a_worker_stack<F: std::future::Future<Output = ()> + Send + 'static>(work: F) {
+    const WORKER_STACK: usize = 16 * 1024 * 1024;
+    std::thread::Builder::new()
+        .stack_size(WORKER_STACK)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .thread_stack_size(WORKER_STACK)
+                .build()
+                .unwrap()
+                .block_on(work)
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// A job whose lease is gone when this runtime picks it up (the person pressed Stop as it was
+/// leased) does nothing at all: no folder brought up to date, no thread restored, no prompt
+/// written into one, no report. In a recorded local test (Nov 5), a hand-back stopped in the
+/// gap after its browser turn heard so twice, from its first heartbeat ("agent job lease is no
+/// longer active") and from its secrets request ("job is not leased"), went on past both, and
+/// wrote the cancelled request into the chat's building thread before its next heartbeat
+/// stopped it. Either answer alone ends it now. The job here is one that otherwise completes at
+/// once.
+#[test]
+fn a_job_whose_lease_is_gone_when_it_starts_does_nothing() {
+    on_a_worker_stack(async {
+        for (heartbeat_refused, secrets_refused) in [(true, false), (false, true), (true, true)] {
+            let harness = Harness::start().await;
+            harness
+                .stand_in
+                .lease_lost
+                .store(heartbeat_refused, Ordering::SeqCst);
+            harness
+                .stand_in
+                .not_leased
+                .store(secrets_refused, Ordering::SeqCst);
+            let executor = Arc::new(AgentExecutor::new(harness.config.clone()));
+            let mut job = harness.job();
+            job.payload = json!({
+                "prompt_text": "/mcp list",
+                "metadata": {"execution_mode": "apply"}
+            });
+            let client = harness.client.clone();
+            let registration = harness.registration.clone();
+            let task_executor = executor.clone();
+            tokio::spawn(async move {
+                RuntimeAgent::handle_job(
+                    client,
+                    task_executor,
+                    &registration,
+                    job,
+                    60,
+                    Arc::new(Mutex::new(HashSet::new())),
+                )
+                .await
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            let case = format!(
+                "heartbeat refused: {heartbeat_refused}, secrets refused: {secrets_refused}"
+            );
+            assert!(
+                harness.stand_in.requests.lock().is_empty(),
+                "{case}: {:?}",
+                harness.stand_in.requests.lock()
+            );
+            assert_eq!(
+                harness.stand_in.completions.load(Ordering::SeqCst),
+                0,
+                "{case}"
+            );
+            assert!(executor.turn_interrupted(), "{case}");
+            // A heartbeat that says so ends it before its secrets are asked for.
+            assert_eq!(
+                harness.stand_in.secrets_fetches.load(Ordering::SeqCst),
+                usize::from(!heartbeat_refused),
+                "{case}"
+            );
+            assert_eq!(crate::job_runtime_settings::current(), None, "{case}");
+        }
+    });
+}
+
+/// Nor does a job its heartbeat finds gone while it gets ready: its turn ends before the folder
+/// is brought up to date, and so before its thread or its prompt.
+#[test]
+fn a_job_whose_lease_is_lost_before_its_turn_ends_with_a_lost_lease() {
+    on_a_worker_stack(async {
+        let harness = Harness::start().await;
+        let processor = JobProcessor::new(harness.config.clone());
+        let mut job = harness.job();
+        job.payload = json!({
+            "prompt_text": "/mcp list",
+            "metadata": {"execution_mode": "apply"}
+        });
+        let lost = JobCancelSignal::new();
+        lost.cancel();
+        let result = processor
+            .run_apply_job(&harness.registration, &job, true, None, Some(lost), None)
+            .await;
+        let error = match result {
+            Ok(execution) => panic!("the turn ran: {}", execution.summary),
+            Err(error) => error,
+        };
+        assert!(crate::agent_executor::is_lease_lost(&error), "{error:#}");
+        assert!(
+            error
+                .to_string()
+                .contains("before the folder was brought up to date"),
+            "{error:#}"
+        );
+        // A job whose lease holds runs as before.
+        let execution = processor
+            .run_apply_job(
+                &harness.registration,
+                &job,
+                true,
+                None,
+                Some(JobCancelSignal::new()),
+                None,
+            )
+            .await
+            .expect("the turn runs");
+        assert!(!execution.summary.is_empty());
+    });
 }
 
 fn question_execution() -> JobExecution {

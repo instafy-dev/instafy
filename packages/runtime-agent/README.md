@@ -12,7 +12,9 @@ Rust binary that runs inside the hosted runtime container. Responsibilities:
 - Execute Codex workflows (headless) for each leased job.
 - Collect Codex event logs and return artifacts via `/agent/complete`.
 - Heartbeat each running job every second: a Stop cancels the job on the controller, and the turn
-  learns of it from its next heartbeat. A stopped turn that already changed files sends one end
+  learns of it from its next heartbeat. A job whose first heartbeat or secrets request says it is
+  no longer leased (a Stop as it was leased) ends there, before its folder is brought up to date,
+  its thread restored or its prompt written, and reports nothing. A stopped turn that already changed files sends one end
   report of them via `/agent/stopped`, as does one whose completion the controller refused because
   a Stop reached it while it saved (see [Chat activity](../../docs/Chat-Activity.md#a-stopped-turns-changes)).
 - Stop per-job heartbeat and secret-refresh requests when cleanup begins, including requests
