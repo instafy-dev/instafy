@@ -8219,7 +8219,9 @@ impl JobProcessor {
                 &workspace_dir,
                 coordination_files,
                 commit_to_workspace,
-            )?;
+                git_status_before.as_ref(),
+            )
+            .await?;
             let normalized_files_len = normalized_files.len();
             (normalized_files, normalized_files_len)
         } else {
@@ -8227,7 +8229,9 @@ impl JobProcessor {
                 &workspace_dir,
                 outcome.files,
                 commit_to_workspace,
-            )?;
+                git_status_before.as_ref(),
+            )
+            .await?;
             let normalized_files_len = normalized_files.len();
             (normalized_files, normalized_files_len)
         };
@@ -8758,6 +8762,7 @@ impl JobProcessor {
             routing_recovery::wait(job_id, &cancel_signal.clone().unwrap_or_default()).await?;
 
             let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
+            let retry_git_status_before = collect_git_status_porcelain(&workspace_dir).await;
             let shared_browser_action_log_before_retry =
                 explicit_shared_browser_execution.then(crate::shared_browser::action_log_len);
             let _client_timezone_guard =
@@ -8888,7 +8893,9 @@ impl JobProcessor {
                     &workspace_dir,
                     coordination_files,
                     commit_to_workspace,
-                )?;
+                    retry_git_status_before.as_ref(),
+                )
+                .await?;
                 let retry_normalized_files_len = retry_normalized_files.len();
                 (retry_normalized_files, retry_normalized_files_len)
             } else {
@@ -8896,7 +8903,9 @@ impl JobProcessor {
                     &workspace_dir,
                     retry_reported_files,
                     commit_to_workspace,
-                )?;
+                    retry_git_status_before.as_ref(),
+                )
+                .await?;
                 let retry_normalized_files_len = retry_normalized_files.len();
                 (retry_normalized_files, retry_normalized_files_len)
             };
@@ -13987,15 +13996,57 @@ fn normalize_codex_files(
     Ok(normalized)
 }
 
-fn normalize_codex_files_for_commit(
+async fn normalize_codex_files_for_commit(
     workspace_dir: &Path,
-    files: Vec<CodexFileDescriptor>,
+    mut files: Vec<CodexFileDescriptor>,
     commit_to_workspace: bool,
+    before: Option<&HashMap<String, GitStatusEntry>>,
 ) -> Result<Vec<CodexFileDescriptor>> {
     if !commit_to_workspace {
         return Ok(Vec::new());
     }
 
+    // Inline files are a fallback for generation without a tool write, not a
+    // second edit after tools have written and verified the workspace. Compare
+    // this attempt's fingerprints, including already-dirty files and paths that
+    // disappeared from status, before applying any final-response content.
+    if !files.is_empty()
+        && let Some(before) = before
+        && let Some(after) = collect_git_status_porcelain(workspace_dir).await
+    {
+        let changed_paths = before
+            .keys()
+            .chain(after.keys())
+            .filter(|path| before.get(*path) != after.get(*path))
+            .map(PathBuf::from)
+            .collect::<HashSet<_>>();
+        for file in &mut files {
+            let Some(relative) = sanitize_codex_workspace_path(workspace_dir, &file.workspace_path)
+            else {
+                continue;
+            };
+            if file.is_read_reference()
+                || !changed_paths
+                    .iter()
+                    .any(|path| relative.starts_with(path) || path.starts_with(&relative))
+            {
+                continue;
+            }
+            file.content = None;
+            file.content_base64 = None;
+            let kind = if !workspace_dir.join(&relative).exists() {
+                "deleted"
+            } else if after
+                .get(relative.to_string_lossy().as_ref())
+                .is_some_and(|status| status.code == "??" || status.code.contains('A'))
+            {
+                "created"
+            } else {
+                "changed"
+            };
+            file.change = FileChangeDescriptor::parse(json!({ "type": kind }));
+        }
+    }
     normalize_codex_files(workspace_dir, files)
 }
 
@@ -27708,14 +27759,16 @@ mod tests {
         assert!(!reported_workspace_file_changes_missing(true, 0, 0));
     }
 
-    #[test]
-    fn conditional_write_still_rejects_reported_files_that_do_not_exist() {
+    #[tokio::test]
+    async fn conditional_write_still_rejects_reported_files_that_do_not_exist() {
         let tmp = tempdir().unwrap();
         let workspace = tmp.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
         let claimed =
             parse_file_descriptor(&json!({"path":"missing.rs","type":"changed"})).unwrap();
-        let files = normalize_codex_files_for_commit(&workspace, vec![claimed], true).unwrap();
+        let files = normalize_codex_files_for_commit(&workspace, vec![claimed], true, None)
+            .await
+            .unwrap();
         let tracking = tracks_workspace_file_changes(
             true,
             false,
@@ -35172,26 +35225,60 @@ mod tests {
     }
 
     #[test]
-    fn parse_codex_actions_supports_goal_update() {
-        let payload = json!({
-            "actions": [
-                {
-                    "type": "goal_update",
-                    "status": "completed",
-                    "progressSummary": "Validated and pushed."
-                }
-            ]
-        });
+    fn strict_goal_actions_reach_the_controller_with_their_lifecycle_fields() {
+        let schema = crate::codex::default_final_output_json_schema();
+        let action_schema = &schema["properties"]["actions"]["items"];
+        let properties = action_schema["properties"].as_object().unwrap();
+        let required = action_schema["required"].as_array().unwrap();
+        assert_eq!(action_schema["additionalProperties"], false);
+        assert_eq!(properties.len(), required.len());
 
-        let actions = parse_codex_actions(&payload);
-        assert_eq!(actions.len(), 1);
-        match &actions[0] {
-            CodexAction::GoalUpdate { details, content } => {
-                assert_eq!(details["status"], json!("completed"));
-                assert_eq!(details["progressSummary"], json!("Validated and pushed."));
-                assert_eq!(content, "Goal completed: Validated and pushed.");
+        // Model output must fit the actual decoder grammar: every required
+        // field is present and unrelated action fields are null. A sparse
+        // hand-written action hid the bug where status could not be emitted.
+        for fields in [
+            json!({"status":"completed","progressSummary":"Regression passed."}),
+            json!({"status":"active","objective":"Finish the review",
+                "doneWhen":"Changes are verified","stopWhen":"Access is unavailable"}),
+            json!({"status":"blocked","progressSummary":"Required access is unavailable."}),
+            json!({"status":"paused"}),
+            json!({"status":"canceled"}),
+            json!({"operation":"clear"}),
+        ] {
+            let mut action = required
+                .iter()
+                .map(|key| {
+                    let key = key.as_str().unwrap();
+                    assert!(properties.contains_key(key));
+                    (key.to_owned(), JsonValue::Null)
+                })
+                .collect::<JsonMap<String, JsonValue>>();
+            action.insert("type".into(), json!("goal_update"));
+            for (key, value) in fields.as_object().unwrap() {
+                let field_schema = properties.get(key).expect("goal field must be encodable");
+                assert_eq!(field_schema["type"], json!(["string", "null"]));
+                if let Some(choices) = field_schema.get("enum") {
+                    assert!(choices.as_array().unwrap().contains(value));
+                }
+                action.insert(key.clone(), value.clone());
             }
-            _ => panic!("expected goal update action"),
+            let outcome = extract_codex_outcome(&json!({
+                "summary":"Current goal result.","code":null,"files":[],"actions":[action],
+            }))
+            .unwrap();
+            let messages = build_final_messages_from_outcome(&outcome, None);
+            let message = messages
+                .iter()
+                .find(|message| message.message_type.as_deref() == Some("goal_update"))
+                .expect("controller goal message");
+            let metadata = message.metadata.as_ref().unwrap();
+            for (key, value) in fields.as_object().unwrap() {
+                assert_eq!(&metadata["details"][key], value, "{key}");
+            }
+            if fields["status"] == "completed" {
+                assert_eq!(message.content, "Goal completed: Regression passed.");
+                assert_eq!(metadata["presentation"]["hidden"], false);
+            }
         }
     }
 
@@ -36305,8 +36392,86 @@ mod tests {
         assert_eq!(fs::read_to_string(&above).unwrap(), "hello world");
     }
 
-    #[test]
-    fn non_commit_runs_ignore_reported_files_without_writing_inline_content() {
+    #[tokio::test]
+    async fn native_workspace_changes_take_precedence_over_final_file_snapshots() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path();
+        let initialized = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(workspace)
+            .output()
+            .unwrap();
+        assert!(initialized.status.success());
+        fs::write(workspace.join("dirty.json"), r#"{"ok":false}"#).unwrap();
+        fs::write(workspace.join("removed.json"), "old file").unwrap();
+        fs::write(workspace.join("inline.txt"), "old content").unwrap();
+        let before = collect_git_status_porcelain(workspace).await.unwrap();
+
+        // These are actual tool edits, including a rewrite of an already-dirty
+        // file whose porcelain code remains unchanged and an untracked deletion.
+        let verified = r#"{"ok":true}"#;
+        fs::write(workspace.join("new.json"), verified).unwrap();
+        fs::write(workspace.join("dirty.json"), verified).unwrap();
+        fs::remove_file(workspace.join("removed.json")).unwrap();
+        fs::create_dir(workspace.join("kept")).unwrap();
+        fs::write(workspace.join("kept/child.json"), verified).unwrap();
+        let files = [
+            json!({ "path": workspace.join("new.json"), "change": "created", "content": "{\"ok:true}" }),
+            json!({ "path": "dirty.json", "change": "deleted", "contentBase64": "invalid base64" }),
+            json!({ "path": "removed.json", "change": "created", "content": "resurrected" }),
+            json!({ "path": "kept", "change": "deleted" }),
+            json!({ "path": "inline.txt", "change": "changed", "content": "inline edit" }),
+            json!({ "path": "inline-new.txt", "change": "created", "content": "inline creation" }),
+        ]
+        .iter()
+        .map(|value| parse_file_descriptor(value).unwrap())
+        .collect();
+        let normalized = normalize_codex_files_for_commit(workspace, files, true, Some(&before))
+            .await
+            .unwrap();
+
+        for path in ["new.json", "dirty.json", "kept/child.json"] {
+            assert_eq!(fs::read_to_string(workspace.join(path)).unwrap(), verified);
+        }
+        assert!(!workspace.join("removed.json").exists());
+        assert_eq!(
+            fs::read_to_string(workspace.join("inline.txt")).unwrap(),
+            "inline edit"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("inline-new.txt")).unwrap(),
+            "inline creation"
+        );
+        for file in &normalized[..4] {
+            assert!(file.content.is_none() && file.content_base64.is_none());
+        }
+        assert!(matches!(
+            normalized[0].change.as_ref().unwrap().kind,
+            FileChangeKind::Created
+        ));
+        assert!(matches!(
+            normalized[2].change.as_ref().unwrap().kind,
+            FileChangeKind::Deleted
+        ));
+
+        // A recovery attempt gets a fresh baseline. It can still intentionally
+        // edit a prior attempt's file using the inline-only fallback.
+        let retry_before = collect_git_status_porcelain(workspace).await.unwrap();
+        let retry_file = parse_file_descriptor(&json!({
+            "path": "new.json", "change": "changed", "content": "{\"ok\":\"retry\"}"
+        }))
+        .unwrap();
+        normalize_codex_files_for_commit(workspace, vec![retry_file], true, Some(&retry_before))
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.join("new.json")).unwrap(),
+            r#"{"ok":"retry"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn non_commit_runs_ignore_reported_files_without_writing_inline_content() {
         let tmp = tempdir().unwrap();
         let project_dir = tmp.path().join("proj");
         fs::create_dir_all(&project_dir).unwrap();
@@ -36322,14 +36487,16 @@ mod tests {
             change: None,
         }];
 
-        let normalized = normalize_codex_files_for_commit(&project_dir, files, false).unwrap();
+        let normalized = normalize_codex_files_for_commit(&project_dir, files, false, None)
+            .await
+            .unwrap();
 
         assert!(normalized.is_empty());
         assert!(!project_dir.join("notes.txt").exists());
     }
 
-    #[test]
-    fn commit_runs_apply_reported_inline_files_without_explicit_file_expectation() {
+    #[tokio::test]
+    async fn commit_runs_apply_reported_inline_files_without_explicit_file_expectation() {
         let tmp = tempdir().unwrap();
         let project_dir = tmp.path().join("proj");
         fs::create_dir_all(&project_dir).unwrap();
@@ -36349,7 +36516,9 @@ mod tests {
             }),
         }];
 
-        let normalized = normalize_codex_files_for_commit(&project_dir, files, true).unwrap();
+        let normalized = normalize_codex_files_for_commit(&project_dir, files, true, None)
+            .await
+            .unwrap();
 
         assert_eq!(normalized.len(), 1);
         assert_eq!(
@@ -36358,8 +36527,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn commit_runs_overwrite_existing_files_from_reported_inline_content() {
+    #[tokio::test]
+    async fn commit_runs_overwrite_existing_files_from_reported_inline_content() {
         let tmp = tempdir().unwrap();
         let project_dir = tmp.path().join("proj");
         fs::create_dir_all(&project_dir).unwrap();
@@ -36380,7 +36549,9 @@ mod tests {
             }),
         }];
 
-        let normalized = normalize_codex_files_for_commit(&project_dir, files, true).unwrap();
+        let normalized = normalize_codex_files_for_commit(&project_dir, files, true, None)
+            .await
+            .unwrap();
 
         assert_eq!(normalized.len(), 1);
         assert_eq!(
