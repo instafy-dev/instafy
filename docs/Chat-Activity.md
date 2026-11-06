@@ -251,12 +251,14 @@ Undo under a saved change saves a new version that reverses it, on the space's o
 that version is saved, the card says so and the chat's history gets its line (below); then the
 machine's folder, which serves the page the person sees, follows that version (`POST /git/revert
 {paths, saved}` on the folder's own origin), as the refresh before a turn would. That folder is on
-the machine the change was saved from (the origin its save went through), else on the space's one
-ready machine, and only then on the one the space's turns run on now, which a space whose machine
-nobody chose has none of until a chat opens Instafy's browser. The folder moves only when it holds
-no unpublished work and no local edit is in the way, keeps every local edit, and pushes nothing.
-Neither the card nor the line waits for the folder. A Desktop folder is where the version was
-saved, so it holds it already.
+the machine the change was saved from (the origin its save went through) while that machine is
+ready, else on the space's one ready machine, and only then on the one the space's turns run on
+now, which a space whose machine nobody chose has none of until a chat opens Instafy's browser. A
+machine that stopped answering keeps its folder's origin until it is swept, and any folder that
+answers can follow a saved version. The folder moves only when it holds no unpublished work and no
+local edit is in the way, keeps every local edit, and pushes nothing. Neither the card nor the
+line waits for the folder. A Desktop folder is where the version was saved, so it holds it
+already.
 
 Either Undo changes a site's files with no turn, so no turn tells the pages people have open, and a
 change a Stop kept never got its turn's reload. Once the folder holds the files as the Undo (or the

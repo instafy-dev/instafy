@@ -124,15 +124,15 @@ A member can **Present** a site whose page says it can share its view, and the o
   and the reserved preview ports), never the turn's granted secrets. A picture older than one taken since (the next
   turn's own check, which records when it took its picture before it sends it) is not sent, nor sent again after the
   runtime's credential is renewed. So a turn that stopped before its own check still leaves the card showing the site
-  as it left it, and a turn whose own check came after its last change adds nothing. A check that looked at the page
-  and kept no picture (a blank page, one that never said it was ready, a redirect, one that did not load) leaves a
-  picture of the site from before the change, so the runtime drops it, with the page description read with it, unless
-  a picture was taken since the check began: the card then shows no picture, and under its title only a `--summary`
-  the turn gave. That holds when the turn's own check after its change kept none too, since that check recorded
-  nothing. The runtime logs why, in the check's own words (its reason and the kind of its first problem, never the
-  page's text, title or an address). The check's screenshots, picture and report go to a folder removed after it, and
-  a check that fails, runs out of time or is stopped ends with every helper it started and leaves the old picture. A
-  preview with no recorded folder or id, or opened with `--no-thumbnail`, is left alone.
+  as it left it, and a turn whose own check took a picture after its last change adds nothing. A check that looked at
+  the page and kept no picture (a blank page, one that never said it was ready, a redirect, one that did not load)
+  leaves a picture of the site from before the change, so the runtime drops it, with the page description read with
+  it, unless a picture was taken since the check began: the card then shows no picture, and under its title only a
+  `--summary` the turn gave. That holds when the turn's own check after its change kept none too, since that check
+  recorded nothing. The runtime logs why, in the check's own words (its reason and the kind of its first problem,
+  never the page's text, title or an address). The check's screenshots, picture and report go to a folder removed
+  after it, and a check that fails, runs out of time or is stopped ends with every helper it started and leaves the
+  old picture. A preview with no recorded folder or id, or opened with `--no-thumbnail`, is left alone.
 - **What the capture may load.** Only the site's own loopback origin directly. Every other request goes through the
   image's `browser-egress-proxy`, an instance of its own on a free loopback port: public addresses on ports 80 and
   443 only, connected to the address it checked. Another loopback port, `localhost` names, private, link-local,
