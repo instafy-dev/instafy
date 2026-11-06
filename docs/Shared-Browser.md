@@ -1643,7 +1643,10 @@ uses a concrete element handle, so reordered or relabeled DOM cannot silently
 retarget an action. That fingerprint holds what a reading does not show (each
 control's classes, hidden names and values), so a page reads differently once
 a carousel turns or a clock ticks, though every control it lists reads the
-same. A step is therefore judged by its own control: each reading records,
+same. A reading lists the controls one moment of the page shows: each
+control's box comes from the same look as the rest of its facts, so a
+carousel that turns while the page is read drops no slide from the list and
+moves no index after it. A step is therefore judged by its own control: each reading records,
 in the run's approval directory (`observed-controls.json`, the latest reading
 only, in any tab), the target fingerprint of every control it lists, a
 fingerprint of the text around it (its card, its form's labels) and the name

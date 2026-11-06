@@ -2581,11 +2581,11 @@ function recordObservedFields(snapshotId, url, interactive) {
 
 // Records the controls a reading lists, each by its target fingerprint, a
 // fingerprint of the text around it (aroundTextInPage: its card, its form's
-// labels) and the name the reading gave it, in any tab: a step nobody is asked
-// about is judged by its own control against it (targetLocator), as a step
-// the person said yes to is judged by the control they were asked about. Only
-// the latest reading is kept; a step that names another checks the whole
-// page, as before.
+// labels) and the name the reading gave it, in any tab: a step is judged by
+// its own control against it (targetLocator), whether it asks the person or
+// not, as a step the person said yes to is judged by the control they were
+// asked about. Only the latest reading is kept; a step that names another
+// checks the whole page, as before.
 async function recordObservedControls(page, snapshotId, url, interactive, names) {
   const arounds = await page
     .evaluate(AROUND_ALL_IN_PAGE, {

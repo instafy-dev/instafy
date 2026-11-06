@@ -487,7 +487,9 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   step for what it was: "Tried accepting cookies on metrodoporto.pt", not "Tried browsing
   metrodoporto.pt". Any other word names nothing.
 - **What the browser did on its own.** A step after which the browser declined the page's cookie
-  banner itself, before Octo read the page, carries `"declined": "cookies"` in its activity;
+  banner itself, before Octo read the page, carries `"declined": "cookies"` in its activity, once
+  the banner's refusal is gone after the press (a banner whose button took no press is not said
+  to be declined);
   runtime-agent keeps that one word as a sixth fact and adds a quiet `also` entry to the step's
   own label on the step's site, and Studio lists that entry as a row of its own in Details,
   after the step: "Declined cookies on frame.work". The line never names it, and a step that

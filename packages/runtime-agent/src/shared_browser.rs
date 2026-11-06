@@ -102,8 +102,8 @@ const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 // highlights; it is run-scoped too.
 //
 // `observed-controls.json` records the controls of Octo's latest reading of a
-// page, in any tab, so a step nobody is asked about is judged by its own
-// control, not by every control on the page; it is run-scoped too.
+// page, in any tab, so a step is judged by its own control, whether it asks the
+// person or not, not by every control on the page; it is run-scoped too.
 //
 // `tabs.json` lists the tabs Octo opened in the run (written by the
 // controller script) and `kept-tabs.json` the ones the person kept (written by
