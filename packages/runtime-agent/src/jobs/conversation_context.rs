@@ -194,7 +194,15 @@ fn is_person_message(entry: &JsonValue) -> bool {
 /// change they undid ([`persons_request_at`]). None when the history does not show them: no line
 /// then, never someone else's words (Studio's, a card's) in the person's name.
 fn persons_request_in<'a>(entries: &'a [JsonValue], run: &str) -> Option<&'a str> {
-    persons_request_at(entries, run).and_then(|at| entry_text(&entries[at], "content"))
+    let at = persons_request_at(entries, run)?;
+    let words = entry_text(&entries[at], "content")?;
+    // A routed card's task, when the person's own message is not in the history: their words,
+    // never the routing step's summary line after them.
+    Some(if is_browser_entry(&entries[at]) {
+        super::browser_request::routed_task_words(words).trim_end()
+    } else {
+        words
+    })
 }
 
 /// Where the history holds the person's own words of the request `run` carried out: its
@@ -239,7 +247,9 @@ fn persons_request_at(entries: &[JsonValue], run: &str) -> Option<usize> {
                 .pointer("/metadata/prompt_metadata")
                 .is_some_and(super::browser_hand_back::carries_on_a_routed_card)
     }) {
-        let words = entry_text(&entries[routed], "content");
+        let words = entry_text(&entries[routed], "content")
+            .map(super::browser_request::routed_task_words)
+            .map(str::trim_end);
         return Some(
             entries[..routed]
                 .iter()
@@ -608,6 +618,79 @@ fn is_browser_entry(entry: &JsonValue) -> bool {
     entry.get("lane").and_then(JsonValue::as_str) == Some("browser")
 }
 
+/// Whether a chat's history holds a browser turn.
+pub(super) fn has_browser_turn(entries: &[JsonValue]) -> bool {
+    entries.iter().any(is_browser_entry)
+}
+
+/// Rows that are not the conversation itself, as Studio's `NON_CONVERSATIONAL_MESSAGE_TYPES`
+/// (`browserAutoStart.ts`) lists them.
+const NON_CONVERSATIONAL_TYPES: [&str; 13] = [
+    "command_execution",
+    "mcp_tool_call",
+    "web_search",
+    "file_change",
+    "status",
+    "token_usage",
+    "reasoning",
+    "learn_router",
+    "todo_list",
+    "browser_decision",
+    "error",
+    RUN_CANCELLATION_KIND,
+    "runtime_alert",
+];
+
+/// What the person could have read in a chat's history, as Studio counts what a card's task may
+/// name before it opens the card by itself (`browserAutoStartAddressesSeen`): their messages,
+/// never a browser turn's request or a hand-back's stored prompt, and Octo's replies, never a
+/// command, a tool call, a progress or status line, an error, a notice, a card or a hidden row.
+/// Studio counts only the viewer's own messages; the history does not say who wrote each, so
+/// every participant's counts here, and Studio still decides whether the card opens by itself.
+pub(super) fn read_by_the_person(entries: &[JsonValue]) -> Vec<&str> {
+    let lower = |entry: &JsonValue, pointer: &str| {
+        entry
+            .pointer(pointer)
+            .and_then(JsonValue::as_str)
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+    };
+    let conversational = |entry: &JsonValue| {
+        let hidden = [
+            "/metadata/presentation/hidden",
+            "/metadata/details/presentation/hidden",
+        ]
+        .iter()
+        .any(|pointer| entry.pointer(pointer) == Some(&JsonValue::Bool(true)));
+        let kinds = [
+            "/metadata/messageType",
+            "/metadata/message_type",
+            "/metadata/details/messageType",
+            "/metadata/details/message_type",
+            "/metadata/details/type",
+            "/metadata/kind",
+        ];
+        let not_conversation = kinds
+            .iter()
+            .filter_map(|pointer| lower(entry, *pointer))
+            .any(|kind| {
+                kind == "update"
+                    || kind.ends_with("_request")
+                    || NON_CONVERSATIONAL_TYPES.contains(&kind.as_str())
+            });
+        match entry_text(entry, "role") {
+            Some("user") => !hidden && !is_browser_entry(entry) && !is_hand_back_prompt(entry),
+            Some("assistant") => !hidden && !not_conversation,
+            _ => false,
+        }
+    };
+    entries
+        .iter()
+        .filter(|entry| conversational(*entry))
+        .filter_map(|entry| entry_text(entry, "content"))
+        .collect()
+}
+
 fn entry_text<'a>(entry: &'a JsonValue, key: &str) -> Option<&'a str> {
     entry
         .get(key)
@@ -618,13 +701,25 @@ fn entry_text<'a>(entry: &'a JsonValue, key: &str) -> Option<&'a str> {
 
 /// The entries that repeat the person's message: each request of a browser turn that carries
 /// on the card the routing step posted for that message, when the message itself is in the
-/// history before it. Its words are the message's, sent once more as that turn's task, which
-/// the controller checked on its send (`browserCardTurn.routed`,
+/// history before it. Its words are the message's, sent once more as that turn's task (in a chat
+/// that had no browser turn, with the routing step's summary line after them:
+/// [`super::browser_request::routed_task`]), which the controller checked on its send (`browserCardTurn.routed`,
 /// [`super::browser_hand_back::carries_on_a_routed_card`]). Routing and the building lane read
 /// the message once, from the person's own entry; the browser lane, which reads no other entry,
 /// reads it as that turn's request. Read twice, the next message's routing read "User: Compare
-/// the three latest Framework laptops…" twice (a local test, Nov 3).
+/// the three latest Framework laptops…" twice (a local test, Nov 3). Try again sends that task
+/// once more, for the card the routing step posted, which the controller stamps only on the first
+/// turn that carries it on: read as the person's, it put the routing step's summary line in their
+/// name in the next message's routing (a local test, Nov 6).
 fn repeated_person_messages(entries: &[JsonValue]) -> HashSet<usize> {
+    let routed_cards: HashSet<String> = entries
+        .iter()
+        .filter(|entry| {
+            entry_text(entry, "role") == Some("assistant") && is_routed_browser_card(entry)
+        })
+        .filter_map(|entry| entry.pointer("/metadata/jobId").and_then(JsonValue::as_str))
+        .map(|job| job.trim().to_ascii_lowercase())
+        .collect();
     let mut said: HashSet<&str> = HashSet::new();
     let mut repeated = HashSet::new();
     for (index, entry) in entries.iter().enumerate() {
@@ -636,10 +731,12 @@ fn repeated_person_messages(entries: &[JsonValue]) -> HashSet<usize> {
         };
         if !is_browser_entry(entry) {
             said.insert(content);
-        } else if said.contains(content)
-            && entry
+        } else if said.contains(super::browser_request::routed_task_words(content).trim_end())
+            && (entry
                 .pointer("/metadata/prompt_metadata")
                 .is_some_and(super::browser_hand_back::carries_on_a_routed_card)
+                || card_job_of(entry)
+                    .is_some_and(|card| routed_cards.contains(&card.to_ascii_lowercase())))
         {
             repeated.insert(index);
         }
@@ -1800,6 +1897,97 @@ mod tests {
         ] {
             assert_eq!(text.matches(words).count(), 1, "{text}");
         }
+    }
+
+    /// In a chat with no browser turn yet, a routed card's task ends with what the routing step
+    /// said the message carries on (`browser_request::routed_task`). Routing and a building
+    /// thread still read the person's message once, a new browser thread reads the whole task as
+    /// that turn's request, and a Stop of that turn names only the person's words: the line is
+    /// the routing step's, never theirs.
+    #[test]
+    fn a_routed_request_with_what_it_carries_on_reads_once_and_stops_in_the_persons_words() {
+        let words = "Fill in what's still missing.";
+        let task = format!(
+            "{words}\n\nWhat this carries on: \"Continue the laptop comparison, then build its page.\""
+        );
+        let mut request = routed_browser_request(
+            &task,
+            json!({"version": 1, "cardJobId": "card-1", "routed": true}),
+        );
+        request["createdAt"] = json!("2026-11-06T09:41:35Z");
+        let history = vec![
+            json!({"role": "user", "content": "Compare the three latest laptops, as a comparison page.", "runId": "run-0", "createdAt": "2026-11-06T09:37:53Z"}),
+            json!({"role": "user", "content": words, "runId": "run-1", "createdAt": "2026-11-06T09:41:26Z"}),
+            request,
+            stop_notice("run-2", "2026-11-06T09:41:50Z"),
+        ];
+        let routing = build_routing_conversation_context(Some(&json!(history))).section_text;
+        let building =
+            build_prompt_conversation_context(Some(&json!(history)), None, ThreadLane::Building)
+                .section_text;
+        for text in [&routing, &building] {
+            assert_eq!(text.matches(words).count(), 1, "{text}");
+            assert!(!text.contains("What this carries on"), "{text}");
+        }
+        // Before its Stop, which leaves a stopped turn's request out of the lane's replay.
+        let browser = build_prompt_conversation_context(
+            Some(&json!(history[..3].to_vec())),
+            None,
+            ThreadLane::SharedBrowser,
+        )
+        .section_text;
+        assert!(browser.contains(&task), "{browser}");
+        let stopped = restored_note(&history, ThreadLane::Building).section_text;
+        assert!(
+            stopped.contains(&format!("\u{201c}{words}\u{201d}")),
+            "{stopped}"
+        );
+        assert!(!stopped.contains("What this carries on"), "{stopped}");
+    }
+
+    /// Try again sends a routed card's task once more, and the controller stamps only the first
+    /// turn that carries a card on, so Try again's request has no stamp. It still repeats the
+    /// person's message: routing and a building thread read their words once and never the
+    /// routing step's summary line in their name, and the browser thread reads the whole task.
+    #[test]
+    fn try_again_on_a_routed_card_repeats_the_persons_message() {
+        let words = "Fill in what's still missing.";
+        let task = format!(
+            "{words}\n\nWhat this carries on: \"Continue the laptop comparison, then build its page.\""
+        );
+        let mut first = routed_browser_request(
+            &task,
+            json!({"version": 1, "cardJobId": "card-1", "routed": true}),
+        );
+        first["createdAt"] = json!("2026-11-06T09:41:34Z");
+        let failed = |run: &str, at: &str| json!({"role": "assistant", "content": "Octo didn't open a page in the browser, so this turn stopped.", "runId": run, "lane": "browser", "createdAt": at});
+        let history = vec![
+            json!({"role": "user", "content": "Compare the three latest laptops, as a comparison page.", "runId": "run-0", "createdAt": "2026-11-06T09:37:53Z"}),
+            json!({"role": "assistant", "content": "I couldn't read the maker's pages. Please send them.", "runId": "run-0", "createdAt": "2026-11-06T09:39:36Z"}),
+            json!({"role": "user", "content": words, "runId": "run-1", "createdAt": "2026-11-06T09:41:26Z"}),
+            json!({"role": "assistant", "content": "Continue this task in Instafy's browser.", "runId": "run-1", "createdAt": "2026-11-06T09:41:31Z",
+                   "metadata": {"jobId": "card-1", "messageType": "action_request", "details": {"browserRequest": {"task": task, "routed": true}}}}),
+            first,
+            failed("run-2", "2026-11-06T09:42:10Z"),
+            json!({"role": "user", "content": task, "runId": "run-3", "lane": "browser", "createdAt": "2026-11-06T09:42:58Z",
+                   "metadata": {"prompt_metadata": {"browserTransport": "shared", "browserRequestOf": "job:card-1"}}}),
+            failed("run-3", "2026-11-06T09:43:28Z"),
+        ];
+        let routing = build_routing_conversation_context(Some(&json!(history))).section_text;
+        let building =
+            build_prompt_conversation_context(Some(&json!(history)), None, ThreadLane::Building)
+                .section_text;
+        for text in [&routing, &building] {
+            assert_eq!(text.matches(words).count(), 1, "{text}");
+            assert!(!text.contains("What this carries on"), "{text}");
+        }
+        let browser = build_prompt_conversation_context(
+            Some(&json!(history)),
+            None,
+            ThreadLane::SharedBrowser,
+        )
+        .section_text;
+        assert_eq!(browser.matches(&task).count(), 2, "{browser}");
     }
 
     /// Only the lane's own thread makes the prompt say the thread holds the chat so far: a

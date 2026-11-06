@@ -331,8 +331,9 @@ left the person nothing: no reply or note, no step that worked and no file writt
 command, a tool call, a web search or a file change, and it worked unless its last report is a
 failure or a command's non-zero exit (one whose end never arrived counts, since it may have
 worked). Looking at the browser's tabs, its state or
-the page it is on (`list_tabs`, `status`, `snapshot`) is not a step that worked, and neither is the
-routing pre-observation the runtime runs itself before the model. Such a turn gets its reserve and
+the page it is on (`list_tabs`, `status`, `snapshot`), or at what the turn's tools offer (Codex's
+`list_mcp_resources`, `list_mcp_resource_templates` and `read_mcp_resource`), is not a step that
+worked, and neither is the routing pre-observation the runtime runs itself before the model. Such a turn gets its reserve and
 its daily prompt slot back (refund reason `failed_turn_without_result`), and its tokens are not
 charged, even though its model ran: a browser turn whose every page failed to open is one. A turn
 the sweep fails after its machine was lost is judged the same way, whether or not a runtime held
@@ -428,7 +429,8 @@ browser turn, and the hand-back when the card continues building.
 
 A message the routing step sends straight to Instafy's browser runs no model turn of its own: its
 job posts the browser card alone, so it costs its reserve (1 credit by default), and the routing
-step is not billed. That card's task is the person's own words, so its browser turn is not a card's
+step is not billed. That card's task is the person's own words (with, in a chat with no browser
+turn yet, a line on what they carry on), so its browser turn is not a card's
 browser turn above but the person's own turn, charged as any turn they send: looking at the page and
 replying is charged too, and it is refunded only when it fails and leaves them nothing ("Failed
 turns" above). It uses two prompt slots, three with a hand-back. A message typed right after a

@@ -579,6 +579,9 @@ struct Spec {
     /// The routing step runs first and sends the message straight to Instafy's browser, with
     /// `continueBuilding` when set: the job ends with its routed card.
     routed: Option<bool>,
+    /// The chat's entries as the controller lists them on the job's lease, when the turn reads
+    /// them (`conversation_history`).
+    history: Option<Value>,
 }
 
 impl Spec {
@@ -595,6 +598,7 @@ impl Spec {
             prompt: None,
             metadata: json!({}),
             routed: None,
+            history: None,
         }
     }
 
@@ -612,6 +616,11 @@ impl Spec {
 
     fn with_metadata(mut self, metadata: Value) -> Self {
         self.metadata = metadata;
+        self
+    }
+
+    fn with_history(mut self, history: Value) -> Self {
+        self.history = Some(history);
         self
     }
 
@@ -762,6 +771,9 @@ impl Harness {
             },
             "lease_attempts": 1,
         });
+        if let Some(history) = &spec.history {
+            job["payload"]["conversation_history"] = history.clone();
+        }
         if spec.lane == Lane::Granted {
             job["grants"] = json!([{
                 "providerId": "example-device",
@@ -1635,6 +1647,7 @@ async fn run_browser_flows(harness: &mut Harness) {
 
     run_follow_ups_from_the_chat(harness).await;
     run_messages_the_browser_could_not_make(harness).await;
+    run_a_fill_in_after_a_reply(harness).await;
 }
 
 /// What a message typed in the chat right after a browser turn asks (chain N). A local test,
@@ -1720,10 +1733,9 @@ async fn run_follow_ups_from_the_chat(harness: &mut Harness) {
 /// (ix) Chain N: a message typed in the chat right after a browser turn. The routing step reads
 /// the browser skill's lines that keep a message that carries on this chat's browser work in the
 /// browser, also when public pages could answer it and whether or not that work found its answer,
-/// that a bare "keep going" carries on what the chat left open and never a change the person
+/// that a bare "keep going" carries on what a page here left open and never a change the person
 /// stopped or undid, that send research ending in a page to the browser from the first message,
-/// and that keep a request to make something from what the chat already found, or with no site to
-/// use first, out of it. Each browser turn is told that it reads pages in Instafy's browser
+/// and that keep a map, or a page made only from what the chat already found, out of it. Each browser turn is told that it reads pages in Instafy's browser
 /// and Octo builds in the chat, never only that it is read-only, with no write-scope guardrail,
 /// mode or rationale above that line. The page is one building turn,
 /// which reads every browser turn as page data and none outside it.
@@ -1738,20 +1750,20 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "a message carrying on the chat's browser work goes to the browser",
             ),
             (
-                "or it carries on browser work this chat started, whether or not that found the answer:",
+                "or it carries on browser work this chat started, whether or not that found the answer.",
                 "browser work goes on whether or not it found its answer",
             ),
             (
-                "a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked or not confirmed, such as a route), never a change the person stopped or undid; when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`.",
-                "a bare \"keep going\" carries on what the chat left open, never a change the person stopped or undid",
+                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on, never a change the person stopped or undid.",
+                "a bare \"keep going\" carries on what a page here left open, never a change the person stopped or undid",
             ),
             (
                 "So is research whose answer ends in a page (a comparison, prices, a route), from the first message.",
                 "research ending in a page goes to the browser from the first message",
             ),
             (
-                "A request to make one with no site to use first (\"on a map\", \"put this on a page\") is `direct`: a map's skill finds and cites its places itself. So is one made from what this chat already found.",
-                "a request to make something with no site to use first, or from what the chat found, stays direct",
+                "A map (\"on a map\") is `direct`: its skill finds and cites its places itself. So is a page made only from what this chat already found.",
+                "a map, or a page made only from what the chat found, stays direct",
             ),
         ] {
             ensure!(
@@ -1838,6 +1850,117 @@ fn answer_with(summary: &str, actions: &[(&str, Option<&str>, Option<&str>)]) ->
         })
         .collect();
     json!({"summary": summary, "code": null, "files": [], "actions": actions})
+}
+
+/// Chain L: research that ends in a page, asked once in a chat with no browser turn yet, as a
+/// local test sent it (Nov 6): its building turn could not read the maker's pages and asked the
+/// person for them, and "Fill in what's still missing." then went to the browser, whose turns,
+/// given those words alone on a blank page, could not tell what was missing, nor could Try
+/// again's.
+const L_COMPARE: &str = "Compare the three latest laptops of one maker: processor, battery, weight and price, with two independent reviews each, as a comparison page.";
+const L_REPLY: &str = "I couldn't verify which three models are latest: the maker's site blocks automated reads. Please send the product and review pages you want compared.";
+const L_FILL_IN: &str = "Fill in what's still missing.";
+/// What the routing step said the fill-in asks, having read the whole chat.
+const L_SUMMARY: &str = "Continue the laptop comparison research in the browser, then build the comparison page from the findings.";
+
+/// L: the comparison's reply, then the fill-in, which the routing step sends to the browser with
+/// a build after it. L1's routed card carries the fill-in's words and the routing step's summary;
+/// L2 is its browser turn, which opens no page, is tried again in the browser and fails; L3 is
+/// Try again, which sends the card's task once more, on a chat whose browser lane now holds L2.
+async fn run_a_fill_in_after_a_reply(harness: &mut Harness) {
+    let cl = Uuid::new_v4();
+    let mut history = vec![
+        json!({"role": "user", "content": L_COMPARE, "runId": "run-l0", "createdAt": "2026-11-06T09:37:53.512Z"}),
+        json!({"role": "assistant", "content": L_REPLY, "runId": "run-l0", "createdAt": "2026-11-06T09:39:36.257Z"}),
+        json!({"role": "user", "content": format!("[[L1]] {L_FILL_IN}"), "runId": "run-l1", "createdAt": "2026-11-06T09:41:26.392Z"}),
+    ];
+    let mut r1 = Spec::new(cl, Lane::Default, None)
+        .asking(L_FILL_IN)
+        .routed(true)
+        .with_history(json!(history));
+    let mut route = browser_route(true);
+    route["summary"] = json!(L_SUMMARY);
+    r1.script = vec![Step::Routing(route)];
+    let state = harness.run("L1", r1).await;
+    let card = harness.turn("L1").job_id;
+    let task = harness
+        .turn("L1")
+        .final_messages
+        .first()
+        .and_then(|card| card["metadata"]["details"]["browserRequest"]["task"].as_str())
+        .unwrap_or(L_FILL_IN)
+        .to_string();
+    let task: &'static str = Box::leak(task.into_boxed_str());
+    let mut metadata = routed_card_turn(card);
+    metadata["browserHandsBack"] = json!(true);
+    history.push(json!({
+        "role": "user", "content": format!("[[L2]] {task}"), "runId": "run-l2", "lane": "browser",
+        "createdAt": "2026-11-06T09:41:34.976Z", "metadata": {"prompt_metadata": metadata.clone()},
+    }));
+    let r2 = harness
+        .run(
+            "L2",
+            Spec::new(cl, Lane::Shared("page-l"), state.clone())
+                .asking(task)
+                .with_metadata(metadata.clone())
+                .with_history(json!(history)),
+        )
+        .await;
+    history.push(json!({
+        "role": "assistant", "content": "I can't tell what's still missing.", "runId": "run-l2",
+        "lane": "browser", "createdAt": "2026-11-06T09:42:10.929Z",
+    }));
+    history.push(json!({
+        "role": "user", "content": format!("[[L3]] {task}"), "runId": "run-l3", "lane": "browser",
+        "createdAt": "2026-11-06T09:42:58.525Z", "metadata": {"prompt_metadata": metadata.clone()},
+    }));
+    harness
+        .run(
+            "L3",
+            Spec::new(cl, Lane::Shared("page-l"), r2.or(state))
+                .asking(task)
+                .with_metadata(metadata)
+                .with_history(json!(history)),
+        )
+        .await;
+}
+
+/// (xiv) Chain L: the fill-in's card carries the routing step's summary after the person's words,
+/// as one quoted line, and every model request of its browser turn, of that turn's retry in the
+/// browser and of Try again reads it with the words. The browser turn that opened no page says
+/// that it didn't, not that it couldn't: Instafy's browser had opened.
+fn check_a_fill_in_after_a_reply(harness: &Harness) -> Result<()> {
+    let r1 = harness.turn("L1");
+    ensure!(r1.routed, "L1 was not sent straight to the browser");
+    let line = format!("What this carries on: \"{L_SUMMARY}\"");
+    let card = r1.final_messages.first().context("L1 posted no card")?;
+    let request = &card["metadata"]["details"]["browserRequest"];
+    ensure!(
+        request["task"] == json!(format!("[[L1]] {L_FILL_IN}\n\n{line}"))
+            && request["continueBuilding"] == true,
+        "L1's card: {request}"
+    );
+    for label in ["L2", "L3"] {
+        let turn = harness.turn(label);
+        let mut requests = 0;
+        for (index, request) in sampling_requests(turn) {
+            requests += 1;
+            let text = input_text(request);
+            ensure!(
+                text.contains(&format!("[[L1]] {L_FILL_IN}\n\n{line}")),
+                "{label}#{index} never read what the fill-in carries on"
+            );
+        }
+        ensure!(requests > 0, "{label} made no model request");
+        ensure!(
+            turn.outcome.as_ref().is_err_and(|error| {
+                error.contains("Octo didn't open a page in the browser, so this turn stopped.")
+            }),
+            "{label}: {:?}",
+            turn.outcome
+        );
+    }
+    Ok(())
 }
 
 /// M: messages the routing step sent straight to the browser. M2 carries on M1's routed card,
@@ -2010,7 +2133,7 @@ fn check_messages_the_browser_could_not_make(harness: &Harness) -> Result<()> {
     ensure!(
         m5.outcome
             .as_ref()
-            .is_err_and(|error| error.contains("Octo couldn't open a page in the browser")),
+            .is_err_and(|error| error.contains("Octo didn't open a page in the browser")),
         "M5: {:?}",
         m5.outcome
     );
@@ -2632,6 +2755,7 @@ fn check(harness: &Harness) -> Result<()> {
     check_browser_turns_go_on_past_a_page(harness)?;
     // (xi) A message the browser turn asked Octo to make.
     check_messages_the_browser_could_not_make(harness)?;
+    check_a_fill_in_after_a_reply(harness)?;
     // (xii) What a browser turn is told it can do.
     check_browser_turns_are_told_only_what_they_can_use(harness)?;
     // (xiii) The tools a browser turn is given, by the names its run text gives them.
