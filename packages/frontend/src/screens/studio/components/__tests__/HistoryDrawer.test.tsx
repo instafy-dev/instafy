@@ -612,6 +612,64 @@ describe("HistoryDrawer", () => {
     expect(container.querySelector('[class*="uppercase"]')).toBeNull();
   });
 
+  // A local test, Nov 5: a new space's History ended with two "Space created"
+  // rows, its seed and the first write of its default files.
+  it("lists a new space's setup versions as one Space created, the newest", async () => {
+    mocks.fetchHistory.mockResolvedValueOnce(
+      page([
+        historyEntry(1, { subject: "Plan 3 days in Seville for a first visit" }),
+        historyEntry(2, { subject: "Space created", authorName: "Instafy user" }),
+        historyEntry(3, { subject: "Space created", authorName: "Instafy", authorEmail: "origin@instafy.dev" }),
+      ]),
+    );
+    await render();
+    const summaries = Array.from(container.querySelectorAll('[data-testid="source-control-history-summary"]'))
+      .map((row) => row.textContent);
+    expect(summaries).toEqual(["Plan 3 days in Seville for a first visit", "Space created"]);
+    // The row kept is the newest setup version, which holds the space as its setup left it.
+    const rows = Array.from(container.querySelectorAll('[data-testid="source-control-history-entry"]'));
+    expect(rows[1]?.querySelector('[data-testid="history-author"]')?.textContent).toBe("Instafy user");
+    await act(async () => rows[1]?.querySelector<HTMLButtonElement>('[data-testid="source-control-history-review"]')?.click());
+    expect(mocks.openGitReviewTab).toHaveBeenCalledWith(expect.objectContaining({ commit: hex(2) }));
+  });
+
+  // Show more names and focuses only rows it shows: it said "Loaded 3 more
+  // saved versions." for two new rows when the last page held both setup
+  // versions, and lost focus when a page held only the older one.
+  it("counts only the rows Show more adds when setup versions come with them", async () => {
+    const first = Array.from({ length: 20 }, (_, index) => historyEntry(index + 1));
+    mocks.fetchHistory.mockResolvedValueOnce(page(first, { hasMore: true }));
+    await render();
+    mocks.fetchHistory.mockResolvedValueOnce(page([
+      historyEntry(21),
+      historyEntry(22, { subject: "Space created" }),
+      historyEntry(23, { subject: "Space created" }),
+    ]));
+    await act(async () => q<HTMLButtonElement>(container, "history-show-more")?.click());
+    await flush();
+    expect(container.querySelectorAll('[data-testid="source-control-history-entry"]')).toHaveLength(22);
+    expect(q(container, "history-status")?.textContent).toBe("Loaded 2 more saved versions.");
+    expect(document.activeElement?.textContent).toContain("Update file-21.txt");
+    expect(q(container, "history-show-more")).toBeNull();
+  });
+
+  it("says there are no more versions when Show more brings only an older setup version", async () => {
+    const first = [...Array.from({ length: 19 }, (_, index) => historyEntry(index + 1)), historyEntry(20, { subject: "Space created" })];
+    mocks.fetchHistory.mockResolvedValueOnce(page(first, { hasMore: true }));
+    await render();
+    mocks.fetchHistory.mockResolvedValueOnce(page([historyEntry(21, { subject: "Space created" })]));
+    const more = q<HTMLButtonElement>(container, "history-show-more");
+    await act(async () => more?.focus());
+    await act(async () => more?.click());
+    await flush();
+    expect(container.querySelectorAll('[data-testid="source-control-history-entry"]')).toHaveLength(20);
+    expect(q(container, "history-status")?.textContent).toBe("No more saved versions.");
+    expect(q(container, "history-show-more")).toBeNull();
+    expect(document.activeElement).toBe(
+      Array.from(container.querySelectorAll("h3")).find((heading) => heading.textContent === "Saved versions"),
+    );
+  });
+
   it("opens a saved version review pinned to the origin", async () => {
     await render();
     await act(async () => q<HTMLButtonElement>(container, "source-control-history-review")?.click());

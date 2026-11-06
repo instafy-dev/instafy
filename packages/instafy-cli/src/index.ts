@@ -38,7 +38,6 @@ import {
   previewOpen,
   printPreviewList,
   printPreviewOpen,
-  recordCheckPictureTried,
   saveCheckPicture,
   uploadCheckThumbnail,
 } from "./preview.js";
@@ -2251,7 +2250,6 @@ registerPreviewCheckCommand(previewCommand, {
   hasOpenPreview: hasOpenPreviewFor,
   uploadThumbnail: uploadCheckThumbnail,
   savePicture: saveCheckPicture,
-  pictureTried: recordCheckPictureTried,
 });
 
 const webCommand = registerWebSearchCommand(registerWebLinkCommand(registerWebCommand(program)));

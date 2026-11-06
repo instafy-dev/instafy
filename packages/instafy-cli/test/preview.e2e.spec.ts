@@ -1324,9 +1324,10 @@ describe.skipIf(!browserOk)("instafy preview: the card's picture, in a browser",
   }, 240000);
 
   // `--no-thumbnail` promises a card with no picture of the site, so a check of that preview (Octo's own, or the one
-  // the runtime runs when a turn ends) takes none. A check that could not take a picture records when it tried: the
-  // end of a turn does not try the unchanged site again.
-  it("check takes no picture for a preview opened with --no-thumbnail, and records a picture it could not take", async () => {
+  // the runtime runs when a turn ends) takes none. A check that could not take a picture records nothing: the card
+  // still shows the site as it was before the change, so the end of the turn checks the changed site again, and drops
+  // that picture when it can take none either.
+  it("check takes no picture for a preview opened with --no-thumbnail, and records nothing for a picture it could not take", async () => {
     const projectId = randomUUID();
     const controller = await startMockController({ projectId });
     const sitePort = await startPage();
@@ -1341,7 +1342,9 @@ describe.skipIf(!browserOk)("instafy preview: the card's picture, in a browser",
       previewId, projectId, title: "Lisbon weekend", localPort, path: "/", controllerUrl: controller.url,
       pid: 999999, logFile: path.join(home, "log"), workdir: path.join(home, "wd"), startedAt: new Date().toISOString(), ...extra,
     });
-    writeState(home, [entry("preview-1", sitePort, { noThumbnail: true }), entry("preview-2", blankPort)]);
+    // The card's picture is of the site from before the change.
+    const pictured = Date.now() - 60_000;
+    writeState(home, [entry("preview-1", sitePort, { noThumbnail: true }), entry("preview-2", blankPort, { pictureAt: pictured })]);
     const env = { ...browserEnv, INSTAFY_ACCESS_TOKEN: "test-token" };
 
     const none = await execCli(["preview", "check", "--port", String(sitePort), "--json"], home, env);
@@ -1350,11 +1353,15 @@ describe.skipIf(!browserOk)("instafy preview: the card's picture, in a browser",
     expect(thumbnailPuts(controller.captures)).toHaveLength(0);
     expect(readState(home).previews[0]).not.toHaveProperty("pictureAt");
 
-    const before = Date.now();
     const blank = await execCli(["preview", "check", "--port", String(blankPort), "--desktop", "--json"], home, env);
     expect(JSON.parse(blank.stdout)).toMatchObject({ thumbnail: "skipped", thumbnailReason: "the page looked blank" });
     expect(thumbnailPuts(controller.captures)).toHaveLength(0);
-    expect(readState(home).previews[1]!.pictureAt).toBeGreaterThanOrEqual(before);
-    expect(readState(home).previews[1]!.pictureAt).toBeLessThanOrEqual(Date.now());
+    expect(readState(home).previews[1]!.pictureAt).toBe(pictured);
+    // Nor does the check the runtime runs when a turn ends, which keeps the picture for it to send.
+    const file = path.join(home, "card.jpg");
+    const kept = await execCli(["preview", "check", "--port", String(blankPort), "--desktop", "--picture-to", file, "--json"], home, browserEnv);
+    expect(JSON.parse(kept.stdout)).toMatchObject({ thumbnail: "skipped", thumbnailReason: "the page looked blank" });
+    expect(fs.existsSync(file)).toBe(false);
+    expect(readState(home).previews[1]!.pictureAt).toBe(pictured);
   }, 240000);
 });

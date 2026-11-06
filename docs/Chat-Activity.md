@@ -25,10 +25,10 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 | A runtime status is the newest thing | `Saving your changes…`, `Trying again…` (the runtime sending the turn's request again), until anything newer arrives. A retry for evidence the answer lacked (a look the routing step asked for) reads `Working…`, since nothing failed that the person saw. A dropped stream that Codex sends again by itself has no words: nothing says when the resent stream is back, so the line keeps its step, then says `Thinking…` as after any pause. A step still running from before the turn's save never names the line again; after a retry, it does |
 | The model is working with no step running, after the turn's first step | `Thinking…` (never its reasoning titles or notes), once there has been no step for 3 seconds; until then the line keeps the step before it |
 | A request in the turn waits on the person viewing | `Waiting for you`, only for the person who can answer: a Shared Browser prompt of the turn's run ([Browser prompts](#browser-prompts)) |
-| Done | what it made leads (the latest outcome), then the two "what it did" groups that did most (pages, places, files; the later one when they tie): `Built the map, read 6 pages, looked up 14 places`. One kind of browser step on more than two sites reads as one phrase, its pages counted across them: a comparison's research that opened pages on frame.work, pcworld.com, phoronix.com and tomshardware.com reads `Opened 17 pages on 4 sites`, never two of the sites and nothing of the others (only words that end with the site, such as `opened {n} pages on {host}`, can say how many sites instead). On two sites it names both, the one it did most first: `Opened 6 pages on frame.work, opened 2 pages on phoronix.com`, not the last site it happened to open. When one other site did as much as the second group named, and the first place is clear, the line names both, in the order they ran: `Opened phoronix.com and pcworld.com, read 4 pages on frame.work` (words that would read as one page on both stay apart: `Read a page on phoronix.com, read a page on pcworld.com, …`); with more sites tied, the later one keeps the place. When the step that answered (the last group) is one of the two, it leads; otherwise the bigger leads. On one site the two read in the order they ran, so the tram follow-up reads `Opened carris.pt, read a page`, not `Opened metrolisboa.pt, opened carris.pt`; on another site the page that answered leads: `Read a page on carris.pt, opened 2 pages on metrolisboa.pt`. Only a step that ended counts: one still running when the turn ended found nothing yet, whatever its label's `when` says. Of a step's commands, only those its exit status is about count (its last command, and those joined to it with `&&`; see "Matching a command"): a step that read two sources before its last command worked never adds "read 2 sources". In a step that worked, a command of what the step did that ran in a loop, or beside a run of the same command its result is about, counts without a number: a map turn whose six places were pinned in one loop reads `Built the map, looked up places`, never as if it pinned one, and a step of two add-points is `Looked up places` in Details. The steps are read in the order they last changed (a step that started before another and ended after it is the later one), as the chat's thread holds them and as the controller stores them with the reply, so the line reads the same when the reply lands. Then, after ` · `, what the person answered to the turn's browser prompts. A turn that opened or stopped a preview names the later of the two, and a site stopped and opened again reads `Opened a preview`. The preview card already says a preview opened, so `Opened a preview` shows only when no other step of the turn finished; no card says a site stopped, so a turn that made nothing else leads with it: `Stopped the preview, edited a file`. A step that failed never counts; when nothing else is left to say, the line says what was tried: `Tried searching the web`. A look at the page a browser turn started on, before its first step that took the tab elsewhere, never leads: the tram follow-up reads `Opened metrolisboa.pt`, not `Read a page on visitlisboa.com, opened metrolisboa.pt`; only a turn that did nothing else names it |
+| Done | what it made leads (the latest outcome), then the two "what it did" groups that did most (pages, places, files; the later one when they tie): `Built the map, read 6 pages, looked up 14 places`. Pages opened and read on more than two sites read as one phrase, counted across them, so the line counts every site Details lists: a comparison's research that opened pages on frame.work, pcworld.com, phoronix.com and tomshardware.com and read two on pcmag.com reads `Opened 19 pages on 5 sites`, never some of the sites and nothing of the others. A page read is a page the browser had open, so the phrase says opened when the turn opened any page, and pages only read say so: `Read 5 pages on 3 sites` (only words that end with the site, such as `opened {n} pages on {host}`, can say how many sites instead). On two sites it names both, the one it did most first: `Opened 6 pages on frame.work, opened 2 pages on phoronix.com`, not the last site it happened to open. When one other group did as much as the second one named, and the first place is clear, the line names both, in the order they ran: `Searched phoronix.com, opened pcworld.com, opened 4 pages on frame.work`, and the same step on two sites is one phrase when its words name the site as what was done (`Opened phoronix.com and pcworld.com, …`); with more groups tied, the later one keeps the place. When the step that answered (the last group) is one of the two, it leads; otherwise the bigger leads. On one site the two read in the order they ran, so the tram follow-up reads `Opened carris.pt, read a page`, not `Opened metrolisboa.pt, opened carris.pt`; on another site the page that answered leads: `Read a page on carris.pt, opened 2 pages on metrolisboa.pt`. Only a step that ended counts: one still running when the turn ended found nothing yet, whatever its label's `when` says. Of a step's commands, only those its exit status is about count (its last command, and those joined to it with `&&`; see "Matching a command"): a step that read two sources before its last command worked never adds "read 2 sources". In a step that worked, a command of what the step did that ran in a loop, or beside a run of the same command its result is about, counts without a number: a map turn whose six places were pinned in one loop reads `Built the map, looked up places`, never as if it pinned one, and a step of two add-points is `Looked up places` in Details. The steps are read in the order they last changed (a step that started before another and ended after it is the later one), as the chat's thread holds them and as the controller stores them with the reply, so the line reads the same when the reply lands. Then, after ` · `, what the person answered to the turn's browser prompts. A turn that opened or stopped a preview names the later of the two, and a site stopped and opened again reads `Opened a preview`. The preview card already says a preview opened, so `Opened a preview` shows only when no other step of the turn finished; no card says a site stopped, so a turn that made nothing else leads with it: `Stopped the preview, edited a file`. A step that failed never counts; when nothing else is left to say, the line says what was tried: `Tried searching the web`. A look at the page a browser turn started on, before its first step that took the tab elsewhere, never leads: the tram follow-up reads `Opened metrolisboa.pt`, not `Read a page on visitlisboa.com, opened metrolisboa.pt`; only a turn that did nothing else names it |
 | Done, nothing labelled | a neutral count: `Ran 5 commands`, `Ran 3 commands, used 2 tools`, `Edited 4 files`; a look around the workspace (`pwd`, `ls`, `cat`, `rg --files`) is not counted, so a turn that only looked and answered, or only posted a card, has no line. A step that failed is not counted either (a command that exited with an error, as its own exit code says): a turn whose `jq` was missing and whose `python` answered reads `Ran a command`. When every step failed, the line says what was tried, `Tried running a command`, unless the person said no to it (its answer names it) |
 | A message sent straight to Instafy's browser | `Opening Instafy's browser…` while Studio opens it, from the moment the routing step's card lands (Studio opens it once that step's run has ended, and decides it before), then the browser turn's own line: one turn and one Octo row under the person's message, with no card, no notice and no `Starting…` under that line (`routedBrowserFold.ts`, `typingIndicatorState.ts`, `useChatBrowserRequest.ts`). A card Studio cannot open by itself shows as any card does, with its button, and leaves as any card does once the person presses it; once its browser turn fails or is stopped before it shows anything, the person's message and that turn's own failure or Stopped line remain |
-| A browser turn and the hand-back that took what it found back to the building turn | one answer: one Octo row, the browser turn's, with one line, one reply and the card. The line is the browser turn's while it reads, `Thinking…` from the moment the hand-back goes until its turn's first step, then the building turn's: the row's run is the newest turn's, so between the building turn's steps it never reads as done, and a Stop there reads `Stopped · opened 4 pages on visitasevilla.es, ran 2 commands`. Once done, the line names each turn's part in turn: `Opened 4 pages on visitasevilla.es, built the map`. Details lists both turns' steps; the reply, the card and the files are the building turn's. The hand-back's prompt shows nothing (no line across the chat), no `Starting…` shows under the row, the composer's Stop stops whichever turn runs, and a hand-back that fails shows its failure and Try again in that row (`routedBrowserFold.ts`, `synthesizeAgentJobThreadMessages`) |
+| A browser turn and the hand-back that took what it found back to the building turn | one answer: one Octo row, the browser turn's, with one line, one reply and the card. The line is the browser turn's while it reads, `Thinking…` from the moment the hand-back goes until its turn's first step, then the building turn's: the row's run is the newest turn's, so between the building turn's steps it never reads as done, and a Stop there reads `Stopped · opened 4 pages on visitasevilla.es, ran 2 commands`, as does a Stop in the gap before the building turn showed anything (`Stopped · opened 4 pages on visitasevilla.es`). Once done, the line names each turn's part in turn: `Opened 4 pages on visitasevilla.es, built the map`. Details lists both turns' steps; the reply, the card and the files are the building turn's. The hand-back's prompt shows nothing (no line across the chat), no `Starting…` shows under the row, the composer's Stop stops whichever turn runs, and a hand-back that fails shows its failure and Try again in that row (`routedBrowserFold.ts`, `synthesizeAgentJobThreadMessages`) |
 | A turn asked for Instafy's browser (`request_browser`) | the card, with its button, the site it is for and the reason, only while it needs the person. While Studio opens it by itself, `Opening Instafy's browser…` in its place, with no box. Once the browser opened for it, by Studio or by the person's press, the card leaves the chat, also after a reload: the continuation's one line ("Octo opened Instafy's browser for …", or "Opened Instafy's browser for …" after a press) and the browser turn's own line are the record. A card a newer card followed leaves too |
 | Done, no step but notes, a plan or a thread in Details | a neutral count, so Details opens: `Wrote 2 notes`, `Made a plan, wrote a note`, `Started a thread` (`detailsOnlySummary`; never the notes' own words; reasoning titles alone give no line, and a status the runtime wrote itself, such as a retry, is no note) |
 | Done, nothing of its own after a retry | `Took two tries` (`Took three tries`, …), so Details opens on the first try |
@@ -38,7 +38,8 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 - While the turn runs, the line changes only to a label that has lasted: each one it shows stays at
   least 1.2 seconds, and a label replaced before its turn came is never shown, so a step that ends
   at once never flashes past (`useSteadyActivityLabel.ts`). The last one holds as long before the
-  done line takes its place. `Waiting for you` shows at once, and goes at once when the person
+  done line takes its place, except a Stop's: `Stopped · …` shows as soon as the turn is stopped.
+  `Waiting for you` shows at once, and goes at once when the person
   answered. The typing row before the turn's own line uses the same rule and says `Starting…`
   until then (a run held for an approval, and a long context rewrite, say so instead), and a
   screen reader hears the label it shows, never one it holds back. Its runtime-busy notice, which
@@ -224,49 +225,56 @@ these changes were saved"), and a later turn saves only what it changes itself. 
 while it saved shows what that save left, with its version.
 
 The step stays in the history later turns read, so a turn that goes on, or undoes it, knows what
-the stopped turn left. A preview whose site the turn changed is pictured again.
+the stopped turn left. The turn never got to its own reload, so every view open on a site it changed
+loads it again, as after an Undo (below), and the site's preview is pictured again.
 
 Undo under a stopped turn's unsaved files puts them back as the saved version has them, in the
 folder the turn ran in, with no message and no turn, behind Studio's own "Undo this change?"
 dialog. The report of a turn that lost its lease says what the turn left in each file (its blob id,
 or null for a file it removed) and which of them the folder already held changed when the turn
-began (`undo` on its `apply/files` artifact, with the machine that ran it). Studio puts nothing back
-and says why, with the agent's Undo offered instead, when a later turn of the chat changed one of
-the files, or when the turn found one already changed (the person's own edit, an earlier turn's
+began (`undo` on its `apply/files` artifact, with the machine that ran it). Studio puts nothing
+back and says why, with the agent's Undo offered instead, when a later turn of the chat changed one
+of the files, or when the turn found one already changed (the person's own edit, an earlier turn's
 unsaved work): putting it back as saved would take that back too. Otherwise it asks that folder's
-own origin (`POST /git/revert {paths, keep: true, expected}`, on the machine that ran the turn, else
-the space's machine now, or the Desktop folder's), which checks each file under its locks: one that
-no longer holds what the turn left (a turn still running, a turn in another chat, the person's own
-edit) refuses the whole Undo, and one that reads as saved is left alone. The origin keeps what it
-undoes on an `undone` recovery ref, which the next save, refresh or stop pushes, so History then
-lists it under Unsaved work, as a saved change's Undo keeps the version it undid. The machine
-then reloads and pictures those files' sites (below). A failed save, and a turn
-whose Stop came after its model was done, keep the Undo that asks the agent, as does a file the
-space's history leaves out (tmp, dependencies), which stays as it is. "Ask the agent to undo it"
-sends a message in the person's name that names the change by its time, never by an id.
+own origin (`POST /git/revert {paths, keep: true, expected}`, on the machine that ran the turn,
+else the space's one ready machine, else the one its turns run on now, or the Desktop folder's),
+which checks each file under its locks: one that no longer holds what the turn left (a turn still
+running, a turn in another chat, the person's own edit) refuses the whole Undo, and one that reads
+as saved is left alone. The origin keeps what it undoes on an `undone` recovery ref, which the next
+save, refresh or stop pushes, so History then lists it under Unsaved work, as a saved change's Undo
+keeps the version it undid. The machine then reloads and pictures those files' sites (below). A
+failed save, and a turn whose Stop came after its model was done, keep the Undo that asks the
+agent, as does a file the space's history leaves out (tmp, dependencies), which stays as it is.
+"Ask the agent to undo it" sends a message in the person's name that names the change by its time,
+never by an id.
 
 Undo under a saved change saves a new version that reverses it, on the space's own origin. Once
 that version is saved, the card says so and the chat's history gets its line (below); then the
 machine's folder, which serves the page the person sees, follows that version (`POST /git/revert
-{paths, saved}` on the folder's own origin), as the refresh before a turn would: it moves only when
-it holds no unpublished work and no local edit is in the way, keeps every local edit, and pushes
-nothing. Neither the card nor the line waits for the folder. A Desktop folder is where the version
-was saved, so it holds it already.
+{paths, saved}` on the folder's own origin), as the refresh before a turn would. That folder is on
+the machine the change was saved from (the origin its save went through) while that machine is
+ready, else on the space's one ready machine, and only then on the one the space's turns run on
+now, which a space whose machine nobody chose has none of until a chat opens Instafy's browser. A
+machine that stopped answering keeps its folder's origin until it is swept, and any folder that
+answers can follow a saved version. The folder moves only when it holds no unpublished work and no
+local edit is in the way, keeps every local edit, and pushes nothing. Neither the card nor the
+line waits for the folder. A Desktop folder is where the version was saved, so it holds it
+already.
 
-Either Undo changes a site's files with no turn, so no turn tells the pages people have open. Once
-the folder holds the files as the Undo left them, the machine does, for each site whose open
-preview's folder holds one of them (`jobs/preview_pictures.rs`), in a turn's order: it sends the
-site's reload, the one a turn sends after it changes a bound site (`instafy bind command <site>
-reload '{}'`, from the workspace, with no credential), so every open view of the page, on every
-device, loads it again; then it pictures the site again for its card, so the check's own page never
-takes that reload halfway. The binder that serves the site takes the reload. A map that `uw host`
-serves takes none, and needs none when the Undo puts back the map's earlier reload stamp: the map
-skill's last step (`uw reload`) writes one into `data/version.json`, the change's save keeps it,
-and the host watches that file and reloads every open view itself when it changes. A map change
-made without that step, and a plain folder no binder serves, show the Undo after their Reload. The
-machine runs no `uw reload` for an Undo: it writes `data/version.json`, a change no save takes after
-an Undo, which a stop would keep as unsaved work and which the next Undo's folder follow would
-refuse to move past.
+Either Undo changes a site's files with no turn, so no turn tells the pages people have open, and a
+change a Stop kept never got its turn's reload. Once the folder holds the files as the Undo (or the
+Stop) left them, the machine does, for each site whose open preview's folder holds one of them
+(`jobs/preview_pictures.rs`), in a turn's order: it sends the site's reload, the one a turn sends
+after it changes a bound site (`instafy bind command <site> reload '{}'`, from the workspace, with
+no credential), so every open view of the page, on every device, loads it again; then it pictures
+the site again for its card, so the check's own page never takes that reload halfway. The binder
+that serves the site takes the reload. A map that `uw host` serves takes none, and needs none when
+the Undo puts back the map's earlier reload stamp: the map skill's last step (`uw reload`) writes
+one into `data/version.json`, the change's save keeps it, and the host watches that file and
+reloads every open view itself when it changes. A map change made without that step, and a plain
+folder no binder serves, show the Undo after their Reload. The machine runs no `uw reload` for an
+Undo: it writes `data/version.json`, a change no save takes after an Undo, which a stop would keep
+as unsaved work and which the next Undo's folder follow would refuse to move past.
 
 An Undo that worked leaves one line in the chat's history, in the controller's words: "The person
 undid the change from “…”", quoting the person's request that made the change (`POST
@@ -280,13 +288,26 @@ line is kept out of the transcript: no bubble, no notification, never unread and
 preview on Home, and no turn, so no credit and no daily message. Only the controller writes it: a
 message a member records never keeps that `kind`, and Studio and the runtime read a line only with
 the controller's `source`. The routing step and every later turn read it with the history, and the
-first building turn on a restored thread after the Undo, whose thread never saw it, reads it after
-its restore note; so "keep going" carries on what is still open, never the change the person took
-back. The files the line names read as undone in their row, which then offers no Undo for them and
+first turn on a restored thread of either lane after the Undo, whose thread never saw it, reads it
+after its restore note; so "keep going" carries on what is still open, never the change the person
+took back. The files the line names read as undone in their row, which then offers no Undo for them and
 no stop's Continue, after a reload or a switch of chats too; a file it does not name keeps its state
 (Not saved, say). A row whose files are all undone reads `Undone ›`, its files folded behind it,
 whatever the row read before (`Changed the site`, a file's name); one with some of them undone counts
 them (`Edited 3 files · 1 undone`).
+
+A Stop reaches a restored thread the same way. From the controller's notice of a press of Stop
+(the one notice that names who pressed it), the first turn on each thread after it reads "The
+person stopped “…”; don't carry it on unless they ask again.", naming the request in the person's
+words: for a browser turn or a hand-back, the message its card carried on, and for a Continue under
+an earlier Stop, the request it continued. The line says nothing of what the turn changed before
+the press, which stays until the person undoes it. A browser thread reads a Stop's or an Undo's
+line only for a request one of the chat's browser turns was asked: it reads nothing else of the
+chat, so the words of a message that stayed with Octo never reach a turn a page can ask to type
+them. One that is new, or lost, replays only the chat's browser turns, and reads those lines since
+the first of them after its replay. A Continue under the Stop asks for the request again, so no
+turn after it reads that line; and "Send now" on a queued message, which interrupts the reply it
+waited behind, is no Stop.
 
 A turn's save takes the space's lease, and a Stop can end the job while that save holds it. The
 stopped job may still release its own lease (releasing grants nothing, and its token does nothing
@@ -429,7 +450,9 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   the step waited on a prompt (its site's or its own) and the person allowed it, `routine` when
   routine browsing took an acting step without one, `free` for a site's own search
   ([Shared Browser](Shared-Browser.md#human-approval-policy)), and absent when the step needed no
-  answer.
+  answer. A click that checks or unchecks a box, a radio button or a switch, and leaves the tab
+  on its page, chose an option: its `step` is `choose`, so a form's clicks on its size and
+  toppings read as filling the form in, with its typing, in one row of Details.
 - **runtime-agent keeps four facts** (`shared_browser_activity.rs`), when the tool call ends:
   `step` (one of `navigate`, `open_tab`, `snapshot`, `search`, `submit`, `click`, `type`,
   `choose`, `press`, `scroll`, `tabs`, `status`); `host`, the address's domain in lower case without a
@@ -476,7 +499,8 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   | `navigate`, `open_tab` | Opening {host} | opened {host} / opened {n} pages on {host} / opened pages on {host} | content |
   | `snapshot` | Reading {host} | read a page on {host} / read {n} pages on {host} / read pages on {host} | content |
   | `search` (typing with submit, or Enter, in a search field) | Searching {host} | searched {host} / searched {host} {n} times / searched {host} | content |
-  | `submit`, `click`, `type`, `choose`, `press`, `scroll`, `tabs`, `status` | Browsing {host} | browsed {host} (Details only) | quiet |
+  | `type`, `choose` (and a click that checks a box or a radio button) | Filling in a form on {host} | filled in a form on {host} (Details only) | quiet |
+  | `submit`, `click`, `press`, `scroll`, `tabs`, `status` | Browsing {host} | browsed {host} (Details only) | quiet |
   | a step refused as the person's: `consent`, `sign_in`, `upload`, `reveal_secret`, `sensitive` | Accepting cookies on {host}, Signing in on {host}, Choosing a file on {host}, Showing a password or key on {host}, Entering private details on {host} | none: it never happens (Details: "Tried accepting cookies on {host}") | quiet |
   | beside a step: the browser declined the page's banner (`declined: "cookies"`), in `also` | Declining cookies on {host} | declined cookies on {host} (Details only, its own row) | quiet |
   | no host known yet | Using the browser | used the browser | content |

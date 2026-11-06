@@ -21,7 +21,13 @@ const {
   recordChangeUndone: vi.fn(),
   showStatus: vi.fn(),
   runtimeState: {
-    runtimeStatuses: [] as Array<{ runtimeId: string; origin?: { originId: string; status: string; protocols: string[] } }>,
+    effectiveRuntimeId: "runtime-1" as string | null,
+    runtimeStatuses: [] as Array<{
+      runtimeId: string;
+      status?: string;
+      health?: string;
+      origin?: { originId: string; status: string; protocols: string[] };
+    }>,
   },
   versioningState: { mode: "stateless", originId: "gateway-origin" },
 }));
@@ -44,7 +50,7 @@ vi.mock("../../../../services/runtimeController/changeUndone", () => ({ recordCh
 
 vi.mock("../../../../runtime/useRuntime", () => ({
   useRuntime: () => ({
-    effectiveRuntimeId: "runtime-1",
+    effectiveRuntimeId: runtimeState.effectiveRuntimeId,
     runtimeReady: true,
     runtimeStatuses: runtimeState.runtimeStatuses,
     desktopOrigin: null,
@@ -99,6 +105,23 @@ const SAVED: ChatMessage = {
   metadata: { jobId: "job-saved", runId: "run-saved" },
 };
 
+// A note a turn added to a map with the map skill's last step, which writes
+// the map's reload stamp: its save, from the folder of the machine that ran
+// the turn.
+const STOPS = "sites/seville/data/stops.geojson";
+const STAMP = "sites/seville/data/version.json";
+const TURN_ORIGIN = "5d1a3c1e-3f0b-4a8e-9a65-2f1f0c6d7e01";
+const OTHER_ORIGIN = "8b2e4f6a-1c3d-4e5f-8a9b-0c1d2e3f4a5b";
+const MAP_NOTE: ChatMessage = {
+  id: "msg-map-note",
+  role: "assistant",
+  content: "",
+  timestamp: 1_000,
+  files: [fileChange(STOPS), fileChange(STAMP)],
+  commitRange: { base: BASE, head: HEAD, source: "git", savedPaths: [STOPS, STAMP], originId: TURN_ORIGIN },
+  metadata: { jobId: "job-note", runId: "run-note" },
+};
+
 // The line the controller records once the person undid it.
 const UNDO_LINE: ChatMessage = {
   id: "msg-undo-line",
@@ -148,6 +171,7 @@ describe("Undo of a saved change", () => {
     revertWorkspaceGitPaths.mockResolvedValue({ ok: true, reverted: [APP], removed: [] });
     recordChangeUndone.mockResolvedValue(true);
     // The space's machine serves the folder the page comes from.
+    runtimeState.effectiveRuntimeId = "runtime-1";
     runtimeState.runtimeStatuses = [
       { runtimeId: "runtime-1", origin: { originId: "runtime-origin", status: "online", protocols: ["http"] } },
     ];
@@ -241,6 +265,90 @@ describe("Undo of a saved change", () => {
     // One line in the chat's history, for the next turn and its routing.
     expect(recordChangeUndone).toHaveBeenCalledWith({ projectId: "p1", messageId: SAVED.id, paths: [APP] });
     expect(undoChip()).toBeNull();
+  });
+
+  // A local test, Nov 5: a map's note was undone in 0.6 s, but its machine
+  // kept the note for 5 minutes and both open maps kept showing it. The chat
+  // had never opened Instafy's browser and nobody had chosen a machine, so
+  // the space had no current machine, and the folder never followed. The
+  // folder that follows is the one the change was saved from. With the map's
+  // reload stamp back as it was, the map's host reloads every open view.
+  it("brings a map's folder back, reload stamp included, on the machine that saved the change", async () => {
+    runtimeState.effectiveRuntimeId = null;
+    runtimeState.runtimeStatuses = [
+      { runtimeId: "runtime-2", status: "ready", health: "online", origin: { originId: OTHER_ORIGIN, status: "online", protocols: ["http"] } },
+      { runtimeId: "runtime-1", status: "ready", health: "online", origin: { originId: TURN_ORIGIN, status: "online", protocols: ["http"] } },
+    ];
+    fetchWorkspaceGitHistoryReview.mockResolvedValue({
+      supported: true,
+      commit: HEAD,
+      entries: [
+        { path: STOPS, code: "M", embeddedRepoRoot: null },
+        { path: STAMP, code: "M", embeddedRepoRoot: null },
+      ],
+      busy: false,
+      error: null,
+    });
+    await renderRow([MAP_NOTE], MAP_NOTE);
+    await undo();
+
+    expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(1);
+    expect(revertWorkspaceGitPaths).toHaveBeenCalledTimes(1);
+    expect(revertWorkspaceGitPaths.mock.calls[0]?.[0]).toMatchObject({
+      projectId: "p1",
+      paths: [STOPS, STAMP],
+      originId: TURN_ORIGIN,
+      runtimeId: "runtime-1",
+      routing: "default",
+      saved: UNDONE,
+    });
+  });
+
+  // A machine that stopped answering long ago keeps its folder's origin until
+  // it is swept: the folder of a machine that answers follows instead.
+  it("passes over the machine that saved the change once it no longer answers", async () => {
+    runtimeState.effectiveRuntimeId = "runtime-2";
+    runtimeState.runtimeStatuses = [
+      { runtimeId: "runtime-1", status: "ready", health: "offline", origin: { originId: TURN_ORIGIN, status: "online", protocols: ["http"] } },
+      { runtimeId: "runtime-2", status: "ready", health: "online", origin: { originId: OTHER_ORIGIN, status: "online", protocols: ["http"] } },
+    ];
+    fetchWorkspaceGitHistoryReview.mockResolvedValue({
+      supported: true,
+      commit: HEAD,
+      entries: [
+        { path: STOPS, code: "M", embeddedRepoRoot: null },
+        { path: STAMP, code: "M", embeddedRepoRoot: null },
+      ],
+      busy: false,
+      error: null,
+    });
+    await renderRow([MAP_NOTE], MAP_NOTE);
+    await undo();
+
+    expect(revertWorkspaceGitPaths).toHaveBeenCalledTimes(1);
+    expect(revertWorkspaceGitPaths.mock.calls[0]?.[0]).toMatchObject({
+      paths: [STOPS, STAMP],
+      originId: OTHER_ORIGIN,
+      runtimeId: "runtime-2",
+      saved: UNDONE,
+    });
+  });
+
+  it("follows on the space's one ready machine when the change does not say where it was saved", async () => {
+    runtimeState.effectiveRuntimeId = null;
+    runtimeState.runtimeStatuses = [
+      { runtimeId: "runtime-1", status: "ready", health: "online", origin: { originId: "runtime-origin", status: "online", protocols: ["http"] } },
+    ];
+    await renderRow();
+    await undo();
+
+    expect(revertWorkspaceGitPaths).toHaveBeenCalledTimes(1);
+    expect(revertWorkspaceGitPaths.mock.calls[0]?.[0]).toMatchObject({
+      paths: [APP],
+      originId: "runtime-origin",
+      runtimeId: "runtime-1",
+      saved: UNDONE,
+    });
   });
 
   it("leaves a Desktop folder alone: the version was saved there", async () => {

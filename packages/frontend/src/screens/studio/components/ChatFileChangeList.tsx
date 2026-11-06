@@ -45,7 +45,7 @@ import {
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
 import { useChatSite } from "./chatSiteContext";
 import { normalizeUndonePath, useChatLaterChanges } from "./chatLaterChanges";
-import { isFolderRevertablePath, runtimeFolderOriginId } from "./unsavedChangeRevert";
+import { isFolderRevertablePath, runtimeFolderOriginId, undoFolderRuntimeId } from "./unsavedChangeRevert";
 
 const {
   fetchDiff: fetchWorkspaceGitDiffFromController,
@@ -979,11 +979,9 @@ export function ChatFileChangeList({
       unsavedRevertEntries.every(({ file }) => file.folderUndo),
   );
   // That folder's origin: a Desktop space's folder, or the machine that ran
-  // the turn, else the one the space's turns run on now (the origin checks
-  // the files either way).
+  // the turn (`undoFolderRuntimeId`; the origin checks the files either way).
   const turnRuntimeId = unsavedRevertEntries.find(({ file }) => file.folderUndo?.runtimeId)?.file.folderUndo?.runtimeId ?? null;
-  const folderRuntimeId =
-    turnRuntimeId && runtimeFolderOriginId(runtimeStatuses, turnRuntimeId) ? turnRuntimeId : effectiveRuntimeId ?? null;
+  const folderRuntimeId = undoFolderRuntimeId(runtimeStatuses, { runtimeId: turnRuntimeId }, effectiveRuntimeId);
   const folderOriginId =
     versioning.mode === "desktop" ? versioning.originId : runtimeFolderOriginId(runtimeStatuses, folderRuntimeId);
   const canUndo = canRevertChange || unsavedUndo;
@@ -1344,9 +1342,10 @@ export function ChatFileChangeList({
   // refresh does (`/git/revert` with `saved` on the folder's own origin): it
   // keeps every local edit, moves only when nothing is in the way, and its
   // machine then sends the page's reload to every view open on it and
-  // pictures it again. A Desktop folder is where the version was saved, so it
-  // holds it already.
-  const savedFolderRuntimeId = effectiveRuntimeId ?? null;
+  // pictures it again. That folder is on the machine the change was saved
+  // from (`undoFolderRuntimeId`), as for the Undo of a change no save took. A
+  // Desktop folder is where the version was saved, so it holds it already.
+  const savedFolderRuntimeId = undoFolderRuntimeId(runtimeStatuses, { originId: revertRange?.originId }, effectiveRuntimeId);
   const savedFolderOriginId =
     versioning.mode === "desktop" ? null : runtimeFolderOriginId(runtimeStatuses, savedFolderRuntimeId);
   const followSavedRevertInFolder = useCallback(

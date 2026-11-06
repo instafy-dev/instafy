@@ -1,28 +1,34 @@
 import { useCallback, useLayoutEffect, useState, useSyncExternalStore, type CSSProperties } from "react";
 import type { UNSTABLE_ToastQueue } from "react-aria-components";
 import type { StatusToast } from "./StatusProvider";
-import { subscribeToastClearance, toastClearanceBottom } from "./toastClearance";
+import { subscribeToastClearance, toastArea, toastClearanceBottom } from "./toastClearance";
 
 /** Track only while feedback is visible, including passive confirmations. */
 export function useToastPlacement(queue: UNSTABLE_ToastQueue<StatusToast>, confirmationVisible = false): CSSProperties {
   const subscribe = useCallback((onChange: () => void) => queue.subscribe(onChange), [queue]);
   const queued = useSyncExternalStore(subscribe, () => queue.visibleToasts.length > 0, () => false);
   const showing = queued || confirmationVisible;
-  const [position, setPosition] = useState({ clearance: 0, viewportTop: 0, viewportBottom: 0, aboveWindowBottom: false });
+  const [position, setPosition] = useState({
+    clearance: 0, viewportTop: 0, viewportBottom: 0, aboveWindowBottom: false, areaLeft: null as number | null, areaWidth: 0,
+  });
   useLayoutEffect(() => {
     if (!showing) return;
     const measure = () => {
       const viewport = window.visualViewport;
       const viewportTop = viewport?.offsetTop ?? 0;
       const viewportBottom = viewportTop + (viewport?.height ?? window.innerHeight);
+      const area = toastArea();
       const next = {
         clearance: toastClearanceBottom(),
         viewportTop,
         viewportBottom,
         aboveWindowBottom: viewportBottom < window.innerHeight - 1,
+        areaLeft: area?.left ?? null,
+        areaWidth: area?.width ?? 0,
       };
       setPosition(previous => previous.clearance === next.clearance && previous.viewportTop === next.viewportTop
-        && previous.viewportBottom === next.viewportBottom && previous.aboveWindowBottom === next.aboveWindowBottom ? previous : next);
+        && previous.viewportBottom === next.viewportBottom && previous.aboveWindowBottom === next.aboveWindowBottom
+        && previous.areaLeft === next.areaLeft && previous.areaWidth === next.areaWidth ? previous : next);
     };
     measure();
     const unsubscribe = subscribeToastClearance(measure);
@@ -57,5 +63,7 @@ export function useToastPlacement(queue: UNSTABLE_ToastQueue<StatusToast>, confi
   return {
     top,
     maxHeight: `max(0px, calc(${bottomEdge} - ${top}))`,
+    // Over Studio's workspace, never over the navigation beside it.
+    ...(position.areaLeft !== null ? { left: `${position.areaLeft}px`, right: "auto", width: `${position.areaWidth}px` } : {}),
   };
 }
