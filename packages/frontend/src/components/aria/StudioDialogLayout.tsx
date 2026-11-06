@@ -12,6 +12,8 @@ type StudioDialogHeaderProps = {
   onClose?: (() => void) | null;
   closeLabel?: string;
   closeButtonDisabled?: boolean;
+  /** Keep a decision or question readable in narrow confirmation dialogs. */
+  wrapTitle?: boolean;
   className?: string;
   titleClassName?: string;
   descriptionClassName?: string;
@@ -25,6 +27,7 @@ export function StudioDialogHeader({
   onClose = null,
   closeLabel = "Close dialog",
   closeButtonDisabled = false,
+  wrapTitle = false,
   className,
   titleClassName,
   descriptionClassName,
@@ -50,7 +53,7 @@ export function StudioDialogHeader({
               as="h2"
               variant="subtitle"
               tone="primary"
-              className={["truncate", titleClassName].filter(Boolean).join(" ")}
+              className={[wrapTitle ? "break-words" : "truncate", titleClassName].filter(Boolean).join(" ")}
             >
               {title}
             </Text>

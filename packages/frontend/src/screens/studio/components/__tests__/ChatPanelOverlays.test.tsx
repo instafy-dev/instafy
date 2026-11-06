@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatImageLightboxOverlay, ChatMessageMenuOverlay } from "../ChatPanelOverlays";
@@ -144,9 +144,9 @@ describe("ChatPanelOverlays", () => {
     });
 
     expect(document.body.textContent).toContain("Message stats");
-    expect(document.body.textContent).toContain("Input 120");
-    expect(document.body.textContent).toContain("Cached 30");
-    expect(document.body.textContent).toContain("Output 10");
+    const values = Object.fromEntries(Array.from(document.querySelectorAll("dt"))
+      .map((label) => [label.textContent, label.nextElementSibling?.textContent]));
+    expect(values).toMatchObject({ Input: "120", Cached: "30", Output: "10", Prompt: "900", "Window used": "8%" });
     expect(document.body.textContent).toContain("Stateless replay");
   });
 
@@ -278,4 +278,39 @@ describe("ChatPanelOverlays", () => {
     await act(async () => { await new Promise(requestAnimationFrame); });
     expect(document.activeElement).toBe(trigger);
   });
+  it("uses arrows between actions and returns focus from stats before dismissing", async () => {
+    const onClose = vi.fn();
+    const onCopyTokenUsage = vi.fn();
+    const documentEscape = vi.fn();
+    function Menu() {
+      const [view, setView] = useState<"actions" | "token_usage">("actions");
+      return <ChatMessageMenuOverlay {...emptyActions()} messageMenu={{ ...actionsMenu, view }}
+        onClose={onClose} onCopyTokenUsage={onCopyTokenUsage}
+        selectedMessageTokenUsage={{ inputTokens: 20, cachedInputTokens: 3, outputTokens: 7, context: null }}
+        onShowTokenUsageView={() => setView("token_usage")} onShowActionsView={() => setView("actions")} />;
+    }
+    await act(async () => root.render(<Menu />));
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    const buttons = () => Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'));
+    await act(async () => buttons()[0].focus());
+    await act(async () => document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true })));
+    const statsAction = document.activeElement as HTMLButtonElement;
+    expect(statsAction.textContent).toBe("Message stats…");
+    await act(async () => statsAction.click());
+    expect(document.activeElement?.getAttribute("aria-label")).toBe("Back to message actions");
+    await act(async () => buttons().find((button) => button.textContent === "Copy stats")?.click());
+    expect(onCopyTokenUsage).toHaveBeenCalledOnce();
+    document.addEventListener("keydown", documentEscape);
+    try {
+      await act(async () => document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+      expect(document.activeElement?.textContent).toBe("Message stats…");
+      expect(onClose).not.toHaveBeenCalled();
+      expect(documentEscape).not.toHaveBeenCalled();
+      await act(async () => document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+      expect(onClose).toHaveBeenCalledOnce();
+    } finally {
+      document.removeEventListener("keydown", documentEscape);
+    }
+  });
+
 });

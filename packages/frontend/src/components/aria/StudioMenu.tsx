@@ -1,3 +1,4 @@
+import { forwardRef, type KeyboardEvent } from "react";
 import {
   Button,
   Menu,
@@ -10,6 +11,20 @@ import {
   type SeparatorProps,
 } from "react-aria-components";
 import { STUDIO_MENU_ARIA_ROW_CLASS } from "./studioMenuStyles";
+
+/** Dialog menus retain Tab navigation; arrows move between their enabled actions. */
+export function moveStudioMenuActionFocus(event: KeyboardEvent<HTMLElement>) {
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) || event.defaultPrevented) return;
+  const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>(
+    'button:not([disabled]):not([aria-disabled="true"])',
+  ));
+  if (!rows.length) return;
+  const index = rows.indexOf(document.activeElement as HTMLButtonElement);
+  const next = event.key === "Home" ? 0 : event.key === "End" ? rows.length - 1
+    : event.key === "ArrowDown" ? (index + 1) % rows.length : index <= 0 ? rows.length - 1 : index - 1;
+  rows[next]?.focus();
+  event.preventDefault();
+}
 
 const MENU_BASE = "outline-none";
 // React Aria renders an hr. Its preflight border would cover the divider fill
@@ -44,15 +59,16 @@ export function StudioMenuItem<T extends object>({ className, ...props }: MenuIt
 /** Menu-row presentation for actions inside a dialog or drill-in panel.
  * Keep button semantics and the owner's focus navigation instead of requiring
  * an ARIA Menu collection for mixed, multi-page content. */
-export function StudioMenuAction({ className, ...props }: ButtonProps) {
+export const StudioMenuAction = forwardRef<HTMLButtonElement, ButtonProps>(function StudioMenuAction({ className, ...props }, ref) {
   return (
     <Button
       type="button"
       {...props}
+      ref={ref}
       className={composeRenderProps(className, (value) => mergeClassName(STUDIO_MENU_ARIA_ROW_CLASS, value))}
     />
   );
-}
+});
 
 export function StudioMenuSeparator({ className, ...props }: SeparatorProps) {
   return (
