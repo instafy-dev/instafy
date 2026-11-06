@@ -52,15 +52,20 @@ export type ControllerSitePreview = {
 /** What the controller says about a preview's picture. The bytes come from `getSitePreviewThumbnail`. */
 export type SitePreviewThumbnail = { version: string; width: number; height: number; capturedAt: string | null };
 
-/** `preview.thumbnail_updated`: a preview has a new picture. Ids and the version only. */
+/**
+ * `preview.thumbnail_updated`: a preview has a new picture, or (`version: null`) none any more, because a check of its
+ * changed site could keep no new one. Ids and the version only.
+ */
 export const SITE_PREVIEW_THUMBNAIL_EVENT = "instafy:preview-thumbnail-updated";
-export type SitePreviewThumbnailEventDetail = { previewId: string; version: string };
+export type SitePreviewThumbnailEventDetail = { previewId: string; version: string | null };
 
 export function mapSitePreviewThumbnailEvent(value: unknown): SitePreviewThumbnailEventDetail | null {
   if (!isRecord(value)) return null;
   const previewId = readString(value.previewId);
+  if (!previewId) return null;
+  if (value.version === null) return { previewId, version: null };
   const version = readString(value.version);
-  return previewId && version && THUMBNAIL_VERSION.test(version) ? { previewId, version } : null;
+  return version && THUMBNAIL_VERSION.test(version) ? { previewId, version } : null;
 }
 
 /** A member-only capability address. Keep it in memory only: never store, log or show it. */

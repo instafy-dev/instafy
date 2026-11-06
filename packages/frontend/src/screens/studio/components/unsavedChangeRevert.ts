@@ -1,4 +1,5 @@
 import type { ControllerRuntimeStatusEntry } from "../../../sdk/instafy";
+import { runtimeEntryIsReady } from "../../../runtime/utils/runtimeEntry";
 
 // Undo of a change a Stop left unsaved (the turn's save never ran): there is
 // no version to revert, so Undo puts the files back in the folder the turn
@@ -19,6 +20,31 @@ export function runtimeFolderOriginId(
   const origin = (statuses ?? []).find((entry) => entry.runtimeId === runtimeId)?.origin;
   const originId = typeof origin?.originId === "string" ? origin.originId.trim() : "";
   return originId && origin?.status !== "released" ? originId : null;
+}
+
+/**
+ * The machine whose folder an Undo changes, for either Undo: the one that ran
+ * the change's turn while it still serves its folder (named by the stopped
+ * turn's report, or by the origin the turn's save went through), else the
+ * space's one ready machine that serves a folder, and only then the one the
+ * space's turns run on now. That last one is often none: a space whose
+ * machine nobody chose has none until a chat opens Instafy's browser.
+ */
+export function undoFolderRuntimeId(
+  statuses: readonly ControllerRuntimeStatusEntry[] | null | undefined,
+  turn: { runtimeId?: string | null; originId?: string | null },
+  effectiveRuntimeId: string | null | undefined,
+): string | null {
+  const entries = statuses ?? [];
+  if (turn.runtimeId && runtimeFolderOriginId(entries, turn.runtimeId)) return turn.runtimeId;
+  const turnOrigin = turn.originId?.trim();
+  const ranTheTurn = turnOrigin
+    ? entries.find((entry) => runtimeFolderOriginId(entries, entry.runtimeId) === turnOrigin)
+    : undefined;
+  if (ranTheTurn) return ranTheTurn.runtimeId;
+  const ready = entries.filter((entry) => runtimeEntryIsReady(entry) && runtimeFolderOriginId(entries, entry.runtimeId));
+  if (ready.length === 1) return ready[0]!.runtimeId;
+  return effectiveRuntimeId ?? null;
 }
 
 /** Paths the folder's origin never puts back: its own metadata and repositories. */

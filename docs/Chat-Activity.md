@@ -224,7 +224,8 @@ these changes were saved"), and a later turn saves only what it changes itself. 
 while it saved shows what that save left, with its version.
 
 The step stays in the history later turns read, so a turn that goes on, or undoes it, knows what
-the stopped turn left. A preview whose site the turn changed is pictured again.
+the stopped turn left. The turn never got to its own reload, so every view open on a site it changed
+loads it again, as after an Undo (below), and the site's preview is pictured again.
 
 Undo under a stopped turn's unsaved files puts them back as the saved version has them, in the
 folder the turn ran in, with no message and no turn, behind Studio's own "Undo this change?"
@@ -235,7 +236,8 @@ and says why, with the agent's Undo offered instead, when a later turn of the ch
 the files, or when the turn found one already changed (the person's own edit, an earlier turn's
 unsaved work): putting it back as saved would take that back too. Otherwise it asks that folder's
 own origin (`POST /git/revert {paths, keep: true, expected}`, on the machine that ran the turn, else
-the space's machine now, or the Desktop folder's), which checks each file under its locks: one that
+the space's one ready machine, else the one its turns run on now, or the Desktop folder's), which
+checks each file under its locks: one that
 no longer holds what the turn left (a turn still running, a turn in another chat, the person's own
 edit) refuses the whole Undo, and one that reads as saved is left alone. The origin keeps what it
 undoes on an `undone` recovery ref, which the next save, refresh or stop pushes, so History then
@@ -248,13 +250,17 @@ sends a message in the person's name that names the change by its time, never by
 Undo under a saved change saves a new version that reverses it, on the space's own origin. Once
 that version is saved, the card says so and the chat's history gets its line (below); then the
 machine's folder, which serves the page the person sees, follows that version (`POST /git/revert
-{paths, saved}` on the folder's own origin), as the refresh before a turn would: it moves only when
+{paths, saved}` on the folder's own origin), as the refresh before a turn would. That folder is on
+the machine the change was saved from (the origin its save went through), else on the space's one
+ready machine, and only then on the one the space's turns run on now, which a space whose machine
+nobody chose has none of until a chat opens Instafy's browser. The folder moves only when
 it holds no unpublished work and no local edit is in the way, keeps every local edit, and pushes
 nothing. Neither the card nor the line waits for the folder. A Desktop folder is where the version
 was saved, so it holds it already.
 
-Either Undo changes a site's files with no turn, so no turn tells the pages people have open. Once
-the folder holds the files as the Undo left them, the machine does, for each site whose open
+Either Undo changes a site's files with no turn, so no turn tells the pages people have open, and a
+change a Stop kept never got its turn's reload. Once the folder holds the files as the Undo (or the
+Stop) left them, the machine does, for each site whose open
 preview's folder holds one of them (`jobs/preview_pictures.rs`), in a turn's order: it sends the
 site's reload, the one a turn sends after it changes a bound site (`instafy bind command <site>
 reload '{}'`, from the workspace, with no credential), so every open view of the page, on every
