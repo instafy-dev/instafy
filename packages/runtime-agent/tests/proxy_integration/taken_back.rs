@@ -28,7 +28,7 @@ fn a_stopped_request_stays_stopped_in_the_next_hand_back_via_proxy() -> Result<(
     if std::env::var(CHILD).as_deref() != Ok("1") {
         return run_isolated_fixture(
             CHILD,
-            "taken_back::a_stopped_request_stays_stopped_in_the_next_hand_back_via_proxy",
+            "browser_hand_back::taken_back::a_stopped_request_stays_stopped_in_the_next_hand_back_via_proxy",
             "taken-back",
         );
     }
