@@ -44,9 +44,10 @@
 //! does not try it again in the browser
 //! ([`hands_the_message_to_the_building_turn`]): the turn posts no reply and
 //! ends with a Details note ([`build_request_note`]). One that answered in
-//! words alone is tried again once, as any browser turn that opened no page
-//! is, and that try is asked to decide first ([`BUILD_REQUEST_RETRY_LINE`]):
-//! its build request hands the message back the same way. As soon as such a
+//! words alone opened no page, and ends as any such turn does: in Instafy's
+//! browser at once, and on the person's device after one more try, which is
+//! asked to decide first ([`BUILD_REQUEST_RETRY_LINE`]) and whose build
+//! request hands the message back the same way. As soon as such a
 //! turn ends, the controller sends the hand-back itself, in the person's name
 //! (runtime-controller `browser_hand_back::hand_back_build_request`), checks
 //! it and stamps the record with `buildRequest` and the message's words, and
@@ -145,14 +146,15 @@ const BUILD_REQUEST_RECORD_KEY: &str = "buildRequest";
 /// request for a map said it could not make one, and the browser retry then
 /// made it browse instead. It decides before any browser step, because the
 /// browser's run text sends a turn that finds a blank page to the official
-/// site of what the task is about, and a turn that opened a page hands
-/// nothing back.
+/// site of what the task names, and a turn that opened a page hands nothing
+/// back.
 pub(super) const BUILD_REQUEST_LINE: &str = "- When the person's message only asks Octo to make or change something in this space (a page, a map, a table) and needs no website first, decide so before any browser step and open no page, blank or not: answer with the action `{type: 'request_build'}` alone, and Octo makes it in the chat.\n";
 
-/// What the browser retry of such a turn reads first, ahead of its own
-/// requirement to open a page: a turn that answered in words alone that it
-/// could not make the thing asked for gets one more chance to say so with the
-/// build request, which hands the message back instead of browsing.
+/// What the Personal Browser's retry of such a turn reads first, ahead of its
+/// own requirement to use the browser: a turn that answered in words alone
+/// that it could not make the thing asked for gets one more chance to say so
+/// with the build request, which hands the message back instead of browsing.
+/// A Shared Browser turn that opened no page is not tried again.
 pub(super) const BUILD_REQUEST_RETRY_LINE: &str = "- First, as this turn's prompt says: when the person's message only asks Octo to make or change something in this space and needs no website first, answer with the action `{type: 'request_build'}` alone, with no browser step. Every other request:\n";
 
 fn metadata_string<'a>(metadata: &'a JsonValue, keys: &[&str]) -> Option<&'a str> {
@@ -227,10 +229,10 @@ fn answer_asks_for_a_build(final_json: &JsonValue) -> bool {
 }
 
 /// Whether a browser turn that opened no page hands the person's message to
-/// the building turn, in place of the runtime's retry in the browser: it
-/// carries on the person's own message ([`carries_on_a_routed_card`]) and its
-/// answer asks Octo to make it ([`answer_asks_for_a_build`]). Any other turn
-/// that opened no page is tried again in the browser, as before.
+/// the building turn, in place of failing: it carries on the person's own
+/// message ([`carries_on_a_routed_card`]) and its answer asks Octo to make it
+/// ([`answer_asks_for_a_build`]). Any other Shared Browser turn that opened no
+/// page ends there.
 pub(super) fn hands_the_message_to_the_building_turn(
     job: &LeaseJob,
     final_json: &JsonValue,
@@ -241,7 +243,7 @@ pub(super) fn hands_the_message_to_the_building_turn(
         && answer_asks_for_a_build(final_json)
 }
 
-/// The line a browser retry of `job` reads first: [`BUILD_REQUEST_RETRY_LINE`]
+/// The line the Personal Browser's retry of `job` reads first: [`BUILD_REQUEST_RETRY_LINE`]
 /// when the turn is offered the build request ([`offers_the_build_request`]),
 /// and nothing for any other turn, whose build request would hand nothing back
 /// or which has a build after it already.

@@ -406,7 +406,7 @@ fn a_browser_turn_that_answers_in_words_may_open_a_reviewers_own_site() {
         );
         assert!(
             prompt.contains(
-                "or the home page of the official site the task is about (for reviews, a reviewer's own site). Never a search engine or a guessed path."
+                "or the home page of the official site of what the task names (for reviews, a reviewer's own site). Never a search engine or a guessed path."
             ),
             "{transport}"
         );
