@@ -9709,7 +9709,8 @@ impl JobProcessor {
                     &interim_messages,
                     output.browser_secret_screen,
                 );
-                let second = read_the_unread_pages(
+                // Boxed, so the job's own future does not grow by the pass's run.
+                let second = Box::pin(read_the_unread_pages(
                     &codex,
                     job,
                     UnreadPagesPass {
@@ -9725,7 +9726,7 @@ impl JobProcessor {
                     },
                     &mut retry_outcome.summary,
                     task_usage,
-                )
+                ))
                 .await;
                 let mut pages = output.browser_pages.clone();
                 for page in retry_output.browser_pages.iter().chain(&second.pages) {
@@ -9800,7 +9801,8 @@ impl JobProcessor {
                 &interim_messages,
                 output.browser_secret_screen,
             );
-            let second = read_the_unread_pages(
+            // Boxed, so the job's own future does not grow by the pass's run.
+            let second = Box::pin(read_the_unread_pages(
                 &codex,
                 job,
                 UnreadPagesPass {
@@ -9815,7 +9817,7 @@ impl JobProcessor {
                 },
                 &mut outcome.summary,
                 task_usage,
-            )
+            ))
             .await;
             let mut pages = output.browser_pages.clone();
             for page in second.pages {
