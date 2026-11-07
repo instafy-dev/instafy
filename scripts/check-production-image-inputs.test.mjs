@@ -171,8 +171,9 @@ test("runtime image inputs reject the vulnerable Chromium and Go crypto baseline
   );
 
   const webrtcSenderModule = read("packages/browser-webrtc-sender/go.mod");
-  assert.match(webrtcSenderModule, /^\s*golang\.org\/x\/crypto v0\.57\.0 \/\/ indirect$/mu);
-  assert.match(webrtcSenderModule, /^\s*golang\.org\/x\/net v0\.60\.0 \/\/ indirect$/mu);
+  assert.match(webrtcSenderModule, /^\s*golang\.org\/x\/crypto v0\.58\.0 \/\/ indirect$/mu);
+  // x/net 0.62.0 fixes CVE-2026-78661 in the sender's HTML parser dependency.
+  assert.match(webrtcSenderModule, /^\s*golang\.org\/x\/net v0\.62\.0 \/\/ indirect$/mu);
 });
 
 test("base runtime explicitly refreshes inherited gzip, PCRE2, SQLite and apt and rejects obsolete versions", () => {
@@ -283,7 +284,7 @@ test("affected runtime images refresh every util-linux security binary", () => {
   }
 });
 
-test("provider service pins the complete Docker CLI toolchain", () => {
+test("provider service pins the complete Docker CLI toolchain and patched base libraries", () => {
   const relativePath = "docker/provider-service/Dockerfile";
   const source = read(relativePath);
 
@@ -291,6 +292,8 @@ test("provider service pins the complete Docker CLI toolchain", () => {
     source,
     /^FROM alpine:3\.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40$/mu,
   );
+  assert.equal(argumentDefaults(source).get("MUSL_MIN_VERSION"), "1.2.5-r24");
+  assert.equal(argumentDefaults(source).get("ZLIB_MIN_VERSION"), "1.3.2-r1");
   assert.equal(argumentDefaults(source).get("OPENSSL_VERSION"), "3.5.9-r0");
   assert.equal(argumentDefaults(source).get("DOCKER_CLI_VERSION"), "29.5.2-r0");
   assert.equal(argumentDefaults(source).get("DOCKER_BUILDX_VERSION"), "0.30.1-r6");
@@ -298,6 +301,9 @@ test("provider service pins the complete Docker CLI toolchain", () => {
   assertOrdered(
     source,
     relativePath,
+    '"musl>=${MUSL_MIN_VERSION}"',
+    '"musl-utils>=${MUSL_MIN_VERSION}"',
+    '"zlib>=${ZLIB_MIN_VERSION}"',
     '"libcrypto3=${OPENSSL_VERSION}"',
     '"libssl3=${OPENSSL_VERSION}"',
     '"docker-cli=${DOCKER_CLI_VERSION}"',

@@ -15,11 +15,18 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --manifest-path packages/runtime-provider-service/Cargo.toml --locked
 
 FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
+# Security floors, not exact pins, so the build keeps working when Alpine moves on:
+# musl 1.2.5-r24 fixes CVE-2026-107891 and zlib 1.3.2-r1 fixes CVE-2026-85091.
+ARG MUSL_MIN_VERSION=1.2.5-r24
+ARG ZLIB_MIN_VERSION=1.3.2-r1
 ARG OPENSSL_VERSION=3.5.9-r0
 ARG DOCKER_CLI_VERSION=29.5.2-r0
 ARG DOCKER_BUILDX_VERSION=0.30.1-r6
 ARG DOCKER_COMPOSE_VERSION=2.40.3-r6
 RUN apk add --no-cache \
+    "musl>=${MUSL_MIN_VERSION}" \
+    "musl-utils>=${MUSL_MIN_VERSION}" \
+    "zlib>=${ZLIB_MIN_VERSION}" \
     "libcrypto3=${OPENSSL_VERSION}" \
     "libssl3=${OPENSSL_VERSION}" \
     "docker-cli=${DOCKER_CLI_VERSION}" \
