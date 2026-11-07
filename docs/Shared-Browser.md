@@ -1342,10 +1342,11 @@ person's own words, and no reply. In a chat with earlier turns but no browser
 turn yet, the words are followed by one quoted line, "What this carries on:
 …", with the routing step's summary, since the browser turn reads nothing of
 those turns. The section asks that summary to name the items, place or site the
-chat names, and what to find: one that named no laptop sent its browser turn to
-a blank page with nothing to look up (a local test, Nov 6). Like any card's
-task, the line names no address the person could not have seen in the chat, and
-is left out when it would. Studio opens it as it opens any card, and
+chat names, by name and not by address, and what to find: one that named no
+laptop sent its browser turn to a blank page with nothing to look up (a local
+test, Nov 6). Like any card's task, the line names no address the person could
+not have seen in the chat, and is left out when it would, so the summary names
+a site by its name. Studio opens it as it opens any card, and
 the chat reads it as one turn: the turn's line says "Opening Instafy's
 browser…" until the browser turn shows something, and neither the card nor
 the continuation is shown. The chat keeps the continuation as any card's, as

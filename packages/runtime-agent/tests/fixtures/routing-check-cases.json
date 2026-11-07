@@ -1,5 +1,5 @@
 {
-  "about": "Messages with the chat they were sent in, and the route the routing step should give each. The routing check builds each case's routing input with the runtime's own code and asks the routing model. history holds the chat's earlier entries as the runtime receives them; the message is added after them. Nine cases were sent in a recorded local test, each with the entries its routing step received there: map-trip, comparison-page, comparison-fill-in, page-from-findings, browser-named, browser-follow-up, keep-going-open-route, browser-sign-in and browser-form. keep-going-after-stop-and-undo was not: its chat is keep-going-open-route's up to the first Undo, with the route exchange taken out, the request and reply that named the route edited to match, and that reply's offer of more cut. page-from-unconfirmed-findings and keep-going-route-open-after-stop-and-undo were sent in a later recorded local test, each with the entries its routing step received there, a path's space id replaced as in keep-going-open-route. comparison-fill-in-after-a-reply and keep-going-unconfirmed-route-after-stops-and-undo were sent in a third recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-findings-with-the-route-unconfirmed and keep-going-after-a-page-made-from-findings were sent in a fourth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. map-weekend was sent in none of them, and plain-answer and rewrite-names-a-map come from the Octo turn eval's cases.",
+  "about": "Messages with the chat they were sent in, and the route the routing step should give each. The routing check builds each case's routing input with the runtime's own code and asks the routing model. history holds the chat's earlier entries as the runtime receives them; the message is added after them. Nine cases were sent in a recorded local test, each with the entries its routing step received there: map-trip, comparison-page, comparison-fill-in, page-from-findings, browser-named, browser-follow-up, keep-going-open-route, browser-sign-in and browser-form. keep-going-after-stop-and-undo was not: its chat is keep-going-open-route's up to the first Undo, with the route exchange taken out, the request and reply that named the route edited to match, and that reply's offer of more cut. page-from-unconfirmed-findings and keep-going-route-open-after-stop-and-undo were sent in a later recorded local test, each with the entries its routing step received there, a path's space id replaced as in keep-going-open-route. comparison-fill-in-after-a-reply and keep-going-unconfirmed-route-after-stops-and-undo were sent in a third recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-findings-with-the-route-unconfirmed and keep-going-after-a-page-made-from-findings were sent in a fourth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-confirmed-findings was not sent: its chat is browser-follow-up's, with a message that asks for a page of the hours alone. map-weekend was sent in none of them, and plain-answer and rewrite-names-a-map come from the Octo turn eval's cases.",
   "cases": [
     {
       "id": "map-trip",
@@ -159,6 +159,52 @@
         "route": "browser_then_build"
       },
       "why": "The hours came from Visit Porto, but no reply here confirmed the metro route: a page made only from what this chat found and confirmed is one building turn, and this one needs the route first."
+    },
+    {
+      "id": "page-from-confirmed-findings",
+      "history": [
+        {
+          "role": "user",
+          "content": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+          "runId": "run-1",
+          "createdAt": "2026-11-04T08:29:02.706Z"
+        },
+        {
+          "role": "user",
+          "content": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-04T08:29:08.663Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Livraria Lello is listed as open daily from 09:00 to 19:30. Visit Porto notes it is closed on January 1, Easter Sunday, May 1, June 24, and December 25. [Visit Porto](https://visitporto.travel/en-GB/poi/621629fd8e037700019c3258)",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-04T08:30:22.839Z"
+        }
+      ],
+      "message": "Put the hours on a small page I can share.",
+      "expect": {
+        "route": "direct",
+        "workspaceFileChangeRequirement": [
+          "required"
+        ]
+      },
+      "why": "The hours came from Visit Porto, and the page asks for nothing else: a page made only from what this chat found and confirmed is one building turn, and the page is files that turn must make. page-from-findings is the same chat with the metro route asked for too, and not confirmed."
     },
     {
       "id": "browser-named",
@@ -570,7 +616,7 @@
       "expect": {
         "route": "browser_then_build"
       },
-      "why": "No reply in this chat confirmed the hours or the route: the browser reads them first, and Octo then makes the page. page-from-findings is the same message in a chat whose reply gave the hours."
+      "why": "No reply in this chat confirmed the hours or the route: the browser reads them first, and Octo then makes the page. page-from-confirmed-findings is a page asked for in a chat that confirmed all it needs."
     },
     {
       "id": "keep-going-route-open-after-stop-and-undo",

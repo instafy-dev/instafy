@@ -531,9 +531,11 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // in a reply-only turn, and the routing step's `summary` went with the person's words in a
     // chat with no browser turn yet.
     include_str!("legacy/browser-automation-v33.md"),
-    // From before the routing step's `summary` named the items, place or site the chat names
-    // and what to find, a bare "keep going" said nothing of a change the person stopped or
-    // undid, and a page stayed `direct` only when made from what the chat found and confirmed.
+    // From before the routing step's `summary` named, by name and not by address, the items,
+    // place or site the chat names and what to find, a bare "keep going" said nothing of a
+    // change the person stopped or undid, a page stayed `direct` only when made from what the
+    // chat found and confirmed, and a page with no address given was the official site of what
+    // the task names.
     include_str!("legacy/browser-automation-v34.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a

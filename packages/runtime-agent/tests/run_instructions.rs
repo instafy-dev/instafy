@@ -1822,6 +1822,9 @@ const M_MAP_REPLY: &str = "I can't build the map in this turn because the requir
 const M_HOURS: &str = "Find the old bookshop's opening hours on the city's tourism site.";
 /// The requirement a browser turn that opened no page was once tried again with.
 const SHARED_BROWSER_RETRY: &str = "IMPORTANT SHARED BROWSER RETRY REQUIREMENT";
+/// An answer that is the model's service failing, not the turn: a passing upstream error.
+const M_UPSTREAM_ERROR: &str = "unexpected status 502 Bad Gateway: upstream request failed";
+const M_NOTHING_OPENED: &str = "I couldn't find the bookshop's hours.";
 
 /// The metadata of the Shared Browser turn that carries on the routed card the turn `card` posted:
 /// Studio's continuation, and the controller's check that it asks the card's task, the person's own
@@ -1937,7 +1940,7 @@ fn check_a_fill_in_after_a_reply(harness: &Harness) -> Result<()> {
     ensure!(r1.routed, "L1 was not sent straight to the browser");
     ensure!(
         input_text(first_sampling_request(r1)).contains(
-            "with your `summary` while this chat has no browser turn: name in it the items, place or site this chat names, and what to find."
+            "with your `summary` while this chat has no browser turn: name in it the items, place or site this chat names (by name, not an address), and what to find."
         ),
         "L1's routing call was never told what its summary names"
     );
@@ -1986,7 +1989,9 @@ fn check_a_fill_in_after_a_reply(harness: &Harness) -> Result<()> {
 /// reads the message's words and nothing of M2. M5 carries on M4's, opens no page and answers in
 /// words alone: it fails at once, with no retry in the browser. M7 carries on M6's map and says in
 /// words alone that it cannot make it: it ends as M5 does, its prompt having offered the build
-/// request before any browser step.
+/// request before any browser step. M8 is Try again on M5's card, whose first answer is a passing
+/// upstream error: the model's service, not the turn, left it without a page, so it runs once
+/// more with its own request and nothing added, and ends as M5 does when that opens no page.
 async fn run_messages_the_browser_could_not_make(harness: &mut Harness) {
     let cm = Uuid::new_v4();
     let m1 = harness
@@ -2034,7 +2039,8 @@ async fn run_messages_the_browser_could_not_make(harness: &mut Harness) {
                 .routed(false),
         )
         .await;
-    let card = harness.turn("M4").job_id;
+    let hours_card = harness.turn("M4").job_id;
+    let card = hours_card;
     let m5 = harness
         .run(
             "M5",
@@ -2057,13 +2063,24 @@ async fn run_messages_the_browser_could_not_make(harness: &mut Harness) {
     m7.script = vec![Step::Answer(answer_with(M_MAP_REPLY, &[]))];
     // It ends by itself: no thread to make up for it.
     m7.emulate_success = false;
-    harness.run("M7", m7).await;
+    let m7 = harness.run("M7", m7).await;
+
+    let mut m8 = Spec::new(cm, Lane::Shared("page-m"), m7)
+        .asking(M_HOURS)
+        .with_metadata(routed_card_turn(hours_card));
+    m8.script = vec![
+        Step::Answer(answer_with(M_UPSTREAM_ERROR, &[])),
+        Step::Answer(answer_with(M_NOTHING_OPENED, &[])),
+    ];
+    m8.emulate_success = false;
+    harness.run("M8", m8).await;
 }
 
 /// (xi) Chain M: a browser turn that carries on the person's own message, opened no page and asks
 /// Octo to make it hands the message to one building turn, with no retry in the browser and
 /// nothing of its answer; one that opened no page for another reason fails at once, with no retry
-/// in the browser either.
+/// in the browser either, unless a passing upstream error ended it (M8): that runs it once more,
+/// with its own request alone.
 fn check_messages_the_browser_could_not_make(harness: &Harness) -> Result<()> {
     let m2 = harness.turn("M2");
     let requests: Vec<&Value> = sampling_requests(m2).map(|(_, request)| request).collect();
@@ -2165,6 +2182,45 @@ fn check_messages_the_browser_could_not_make(harness: &Harness) -> Result<()> {
             turn.final_messages
         );
     }
+
+    // M8: a passing upstream error ran the turn once more, with its own request and nothing
+    // added: no requirement that sends it to a page the task does not name.
+    let m8 = harness.turn("M8");
+    let requests: Vec<&Value> = sampling_requests(m8).map(|(_, request)| request).collect();
+    ensure!(
+        requests.len() == 2,
+        "M8 made {} model requests: a passing upstream error was not tried again",
+        requests.len()
+    );
+    let request = format!("[[M8]] {M_HOURS}");
+    for (index, sent) in requests.iter().enumerate() {
+        let text = input_text(sent);
+        ensure!(text.contains(&request), "M8#{index} never read its request");
+        for added in [SHARED_BROWSER_RETRY, "Retry the latest user request now."] {
+            ensure!(!text.contains(added), "M8#{index} read {added:?}");
+        }
+    }
+    let own_request = |sent: &Value| {
+        sent["input"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(item_text)
+            .filter(|text| text.contains(&request))
+            .last()
+    };
+    ensure!(
+        own_request(requests[1]) == own_request(requests[0]),
+        "M8's retry did not send its own request again: {:?}",
+        own_request(requests[1])
+    );
+    ensure!(
+        m8.outcome
+            .as_ref()
+            .is_err_and(|error| error.contains("Octo didn't open a page in the browser")),
+        "M8: {:?}",
+        m8.outcome
+    );
     Ok(())
 }
 

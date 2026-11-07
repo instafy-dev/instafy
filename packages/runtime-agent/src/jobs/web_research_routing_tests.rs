@@ -930,7 +930,7 @@ fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_b
     for words in [
         "`browser`",
         "`browser_then_build`",
-        "sees only those words and this chat's earlier browser turns, with your `summary` while this chat has no browser turn: name in it the items, place or site this chat names, and what to find.",
+        "sees only those words and this chat's earlier browser turns, with your `summary` while this chat has no browser turn: name in it the items, place or site this chat names (by name, not an address), and what to find.",
         "Stay `direct`, even when the message names Instafy's browser",
         "what only this space or another chat holds",
         "the site runs in this space",
@@ -1086,7 +1086,7 @@ fn a_follow_up_goes_to_the_browser_only_with_what_its_browser_work_found() {
         + 1;
     let section = &BROWSER_SKILL[start..];
     assert!(section.contains(
-        "That browser turn sees only those words and this chat's earlier browser turns, with your `summary` while this chat has no browser turn: name in it the items, place or site this chat names, and what to find."
+        "That browser turn sees only those words and this chat's earlier browser turns, with your `summary` while this chat has no browser turn: name in it the items, place or site this chat names (by name, not an address), and what to find."
     ));
     let stay = section
         .lines()
@@ -1245,7 +1245,7 @@ fn a_turn_prints_a_pages_links_with_its_text() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(
-        "- Open an address the person or a skill gave, a link on a page you read (print a page's links with its text), or the home page of the official site the task is about (for reviews, a reviewer's own site). Never a search engine or a guessed path."
+        "- Open an address the person or a skill gave, a link on a page you read (print a page's links with its text), or the home page of the official site of what the task names (for reviews, a reviewer's own site). Never a search engine or a guessed path."
     ));
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
 
@@ -1785,7 +1785,7 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
     for needle in [
         "## Finding a page",
         "For every reader, browser or not:",
-        "Open an address the person or a skill gave, a link on a page you read (print a page's links with its text), or the home page of the official site the task is about (for reviews, a reviewer's own site).",
+        "Open an address the person or a skill gave, a link on a page you read (print a page's links with its text), or the home page of the official site of what the task names (for reviews, a reviewer's own site).",
         "Never a search engine or a guessed path.",
         "A page that says it is missing (\"not found\", \"are you lost?\"): use that site's own search box or menu.",
         "A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.",
@@ -2579,7 +2579,7 @@ fn research_ending_in_a_page_browses_first_and_keep_going_with_a_page_builds() {
     );
     assert!(!stay.contains("changes nothing here"), "{stay}");
     assert!(section.contains(
-        "That browser turn sees only those words and this chat's earlier browser turns, with your `summary` while this chat has no browser turn: name in it the items, place or site this chat names, and what to find."
+        "That browser turn sees only those words and this chat's earlier browser turns, with your `summary` while this chat has no browser turn: name in it the items, place or site this chat names (by name, not an address), and what to find."
     ));
     for gone in [
         "with no site to use first",
@@ -2679,7 +2679,7 @@ fn a_routed_browser_part_is_told_what_to_find_and_an_unconfirmed_page_browses_fi
     let section = BROWSER_SKILL[start..].trim_end();
     assert!(
         section.contains(
-            "That browser turn sees only those words and this chat's earlier browser turns, with your `summary` while this chat has no browser turn: name in it the items, place or site this chat names, and what to find."
+            "That browser turn sees only those words and this chat's earlier browser turns, with your `summary` while this chat has no browser turn: name in it the items, place or site this chat names (by name, not an address), and what to find."
         ),
         "{section}"
     );

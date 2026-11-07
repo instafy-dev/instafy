@@ -943,7 +943,7 @@ mod tests {
             assert!(input.browser_routes_offered, "{}", case.id);
             assert!(input.prompt.contains(line), "{}: {}", case.id, input.prompt);
             assert!(input.prompt.contains(
-                "That browser turn sees only those words and this chat's earlier browser turns, with your `summary` while this chat has no browser turn: name in it the items, place or site this chat names, and what to find."
+                "That browser turn sees only those words and this chat's earlier browser turns, with your `summary` while this chat has no browser turn: name in it the items, place or site this chat names (by name, not an address), and what to find."
             ));
             assert_eq!(
                 input.history_metrics["includedTurns"],
@@ -1014,6 +1014,37 @@ mod tests {
         assert_eq!(
             case(&cases, "map-trip").expected(),
             "direct (change: required)"
+        );
+    }
+
+    /// A page stays `direct` when this chat found and confirmed all it needs: the hours from the
+    /// tourism site, asked for on a page alone. Every other page from findings here waits for the
+    /// metro route no reply confirmed, so without this case a routing step that sent each such
+    /// page to the browser first would pass them all.
+    #[test]
+    fn a_page_of_what_the_chat_found_and_confirmed_stays_direct() {
+        let cases = shipped();
+        let workspace = tempdir().unwrap();
+        prepare_workspace(workspace.path()).unwrap();
+        let page = case(&cases, "page-from-confirmed-findings");
+        assert_eq!(page.expected(), "direct (change: required)");
+        let input = routing_input(&page, workspace.path()).unwrap();
+        assert!(input.browser_routes_offered);
+        assert!(
+            input.prompt.contains(
+                "So is a page made only from what this chat already found and confirmed."
+            ),
+            "{}",
+            input.prompt
+        );
+        // The chat as the routing step reads it: the request, the browser's reply and the
+        // message, the request sent on to the browser left out.
+        assert_eq!(input.history_metrics["includedTurns"], json!(3));
+        assert_eq!(input.history_metrics["ignoredEntries"], json!(1));
+        assert!(
+            input
+                .prompt
+                .contains("Livraria Lello is listed as open daily from 09:00 to 19:30.")
         );
     }
 

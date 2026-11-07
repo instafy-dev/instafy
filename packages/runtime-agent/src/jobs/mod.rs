@@ -231,7 +231,8 @@ const REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND: &str = "codex/required-changes-no
 /// it did not make, and the turn fails.
 const NO_FILE_CHANGES_MARKER: &str = "NO_FILE_CHANGES";
 
-/// Added to the recovery prompt of a required change that is still missing.
+/// Added to a required change's prompt, and once more, last, to its recovery
+/// prompt when the change is still missing.
 const NO_FILE_CHANGES_REPORT_REQUIREMENT: &str = "\n\nIMPORTANT NO-CHANGE REPORT REQUIREMENT:\n\
 - If you end this attempt without changing any file, say in plain words what you found, what you need from the person, or what blocks the change, and end that reply with a separate last line that is exactly `NO_FILE_CHANGES` (as the last line of the `summary` text when you answer in JSON). The runtime removes that line before the person reads your reply.\n\
 - Never add that line when you changed files, and never say a change was made when it was not.\n";
@@ -8226,6 +8227,16 @@ impl JobProcessor {
         let mut outcome = extract_codex_outcome(&output.final_json)?;
         user_input_request::validate_outcome_scope(job, &outcome)?;
         outcome.read_files = normalize_codex_read_files(&workspace_dir, outcome.read_files);
+        // The runtime's no-change line: a required change's prompt asks for it, and a turn's
+        // provider thread can keep it from an earlier prompt. It leaves the reply before anything
+        // reads or shows it (a plan card carries the reply's words), so the person never reads it.
+        let reported_no_file_changes = match take_no_file_changes_marker(&outcome.summary) {
+            Some(summary) => {
+                outcome.summary = summary;
+                true
+            }
+            None => false,
+        };
         let clean_ambient_decline = clean_ambient_participation_decline(
             job,
             &output.final_json,
@@ -8355,15 +8366,6 @@ impl JobProcessor {
         )
         .await?
             == 0;
-        // The runtime's no-change line: a required change's prompt asks for it, and a turn's
-        // provider thread can keep it from an earlier prompt. The person never reads it.
-        let reported_no_file_changes = match take_no_file_changes_marker(&outcome.summary) {
-            Some(summary) => {
-                outcome.summary = summary;
-                true
-            }
-            None => false,
-        };
 
         // Learning prompts require that we mention `INSTAFY.md` in the final summary (even when no
         // updates were needed). Relying on the model to follow this requirement is brittle, and
@@ -8455,9 +8457,11 @@ impl JobProcessor {
         // a site it guessed (a local test, Nov 6). It ends below, unless the browser or the
         // model's service failed it (a step that never reached the browser, or a passing
         // upstream error), which runs it again with its own request.
-        let shared_browser_turn_ends_without_a_page = shared_browser_execution_missing
-            && !transient_upstream_summary_failure
-            && !shared_browser_step_never_reached_the_browser(&interim_messages);
+        let shared_browser_turn_ends_without_a_page = shared_browser_no_page_ends_the_turn(
+            shared_browser_execution_missing,
+            transient_upstream_summary_failure,
+            &interim_messages,
+        );
         let evidence_recovery_plan = routing_recovery::plan(
             evidence_requirements,
             observed_evidence,
@@ -8775,11 +8779,10 @@ impl JobProcessor {
                 }
             }
             // A required change is still missing: the recovery pass may end
-            // without one only by saying so. A retry built on the turn's own
-            // prompt read that line there already.
-            if workspace_file_changes_missing
-                && !retry_prompt.contains(NO_FILE_CHANGES_REPORT_REQUIREMENT)
-            {
+            // without one only by saying so. The line comes last, after the
+            // retry's own requirement to make the change, which overrides
+            // what comes before it, the turn's own copy of the line included.
+            if workspace_file_changes_missing {
                 retry_prompt.push_str(NO_FILE_CHANGES_REPORT_REQUIREMENT);
             }
             let mut retry_prompt_context = prompt_context.clone();
@@ -13154,10 +13157,19 @@ fn augment_summary_for_onboarding_actions(summary: &mut String, actions: &[Codex
         return;
     }
 
-    if !summary.trim().is_empty() {
-        summary.push_str("\n\n");
+    // The runtime's no-change line stays last, for the caller that reads it: a
+    // required change that only asks for a connection says why and ends with it.
+    let marked = take_no_file_changes_marker(summary);
+    let mut reply = marked.clone().unwrap_or_else(|| std::mem::take(summary));
+    if !reply.trim().is_empty() {
+        reply.push_str("\n\n");
     }
-    summary.push_str(&guidance_lines.join("\n"));
+    reply.push_str(&guidance_lines.join("\n"));
+    if marked.is_some() {
+        reply.push('\n');
+        reply.push_str(NO_FILE_CHANGES_MARKER);
+    }
+    *summary = reply;
 }
 
 fn push_unique_ci(values: &mut Vec<String>, candidate: &str) {
@@ -14470,6 +14482,20 @@ const SHARED_BROWSER_NO_PAGE_RETRY_STATUS: &str =
     "Trying again: Octo hadn't opened a page in the browser yet.";
 const PERSONAL_BROWSER_NOT_USED_RETRY_STATUS: &str =
     "Trying again: Octo hadn't used the browser on this device yet.";
+
+/// Whether a Shared Browser turn that opened no page (`execution_missing`) ends
+/// there, with no retry: always, unless the browser or the model's service left
+/// it without a page (a passing upstream error, or a step that never reached the
+/// browser), which runs it once more with its own request.
+fn shared_browser_no_page_ends_the_turn(
+    execution_missing: bool,
+    transient_upstream_failure: bool,
+    messages: &[JobMessage],
+) -> bool {
+    execution_missing
+        && !transient_upstream_failure
+        && !shared_browser_step_never_reached_the_browser(messages)
+}
 
 /// Whether a step of the turn could not reach Instafy's browser at all
 /// (`browserUnavailable`: one slow connect, a browser starting again): the
@@ -29089,6 +29115,21 @@ mod tests {
             );
         }
         assert!(!shared_browser_step_never_reached_the_browser(&[]));
+
+        // The turn ends at once, whatever it looked at or answered, unless the browser or the
+        // model's service left it without a page: a step that never reached the browser, or a
+        // passing upstream error.
+        let looked = step("instafy_shared_browser", "status", "completed", false);
+        let unreachable = step("instafy_shared_browser", "navigate", "failed", true);
+        assert!(shared_browser_no_page_ends_the_turn(true, false, &looked));
+        assert!(shared_browser_no_page_ends_the_turn(true, false, &[]));
+        assert!(!shared_browser_no_page_ends_the_turn(
+            true,
+            false,
+            &unreachable
+        ));
+        assert!(!shared_browser_no_page_ends_the_turn(true, true, &looked));
+        assert!(!shared_browser_no_page_ends_the_turn(false, false, &looked));
     }
 
     #[test]
@@ -36704,6 +36745,40 @@ mod tests {
             summary.contains("I connected Example. Retry now."),
             "expected explicit retry phrase in summary: {summary}"
         );
+    }
+
+    /// A required change that only asks for a connection says why and ends with the runtime's
+    /// no-change line, as its prompt asks. The guidance goes above that line, which stays last:
+    /// after it, the line went unread, so the reply was taken for one that promised a change, ran
+    /// again on a thread of its own, and failed with the card and its steps lost.
+    #[test]
+    fn onboarding_guidance_keeps_the_no_change_line_last() {
+        let reply = "Your payments are in Example, which isn't connected to this space yet.";
+        let mut summary = format!("{reply}\n\n{NO_FILE_CHANGES_MARKER}");
+        let actions = vec![CodexAction::RequestIntegration {
+            provider: "example".to_string(),
+            description: None,
+            required_scopes: Vec::new(),
+            capabilities: Vec::new(),
+            auth_methods: Vec::new(),
+            suggested_secret_names: Vec::new(),
+            suggested_secrets: Vec::new(),
+            agent_handles: Vec::new(),
+        }];
+
+        augment_summary_for_onboarding_actions(&mut summary, &actions);
+
+        assert!(
+            summary.ends_with(&format!("\n{NO_FILE_CHANGES_MARKER}")),
+            "{summary}"
+        );
+        let read = take_no_file_changes_marker(&summary).expect("the line is read");
+        assert!(read.starts_with(reply), "{read}");
+        assert!(
+            read.ends_with("Then reply `I connected Example. Retry now.` and I will verify the connection and continue your request."),
+            "{read}"
+        );
+        assert!(!read.contains(NO_FILE_CHANGES_MARKER), "{read}");
     }
 
     #[test]
