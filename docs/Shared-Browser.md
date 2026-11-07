@@ -791,7 +791,7 @@ read, so that page would go into this chat's reply and Details):
   browser advertises it as `controls.newPage` in
   `GET /browser/capabilities`. The turn
   then starts on a blank page, and its blank-page rule takes it to the task's
-  address or the official site of what the task is about.
+  address or the official site of what the task names.
 - **The chat's Browser view shows that tab, and only that tab.** When the view
   comes on screen for a chat, and when the chat gets a new tab, Studio brings
   the chat's tab to the front, once this person holds the browser's control
@@ -1310,16 +1310,18 @@ from the first message too, while research answered in a reply (facts, a
 price, opening hours, reviews) stays with Octo, whose turn reads public pages
 itself. Only a map ("on a map") stays with Octo, since a map's skill finds
 and cites its places itself, and so does a page made only from what the chat
-already found. A comparison that named no site to use first once stayed with
+already found and confirmed: a page that needs what no reply here confirmed,
+such as a route, is `browser_then_build`. A comparison that named no site to use first once stayed with
 Octo too, under a rule written for maps, and its building turn, which must
 change files and so cannot ask for the browser, met a maker's robots.txt and
 no search key (a local test, Nov 6). A message that carries on the chat's
 browser work goes on there, whether or not that work found its answer, and a
 bare "keep going" is `browser_then_build` when a page here marks something not
 checked or not confirmed, such as a route, or an earlier message asked for a
-page not made yet; it never carries on a change the person stopped or undid.
-The turn that carries it on reads the same in `AGENTS.md`'s "Replies", and says
-which. A message that names the browser still stays with Octo when the browser
+page not made yet. The turn that carries it on reads in `AGENTS.md`'s "Replies"
+that it never carries on a change the person stopped or undid, and says which;
+the routing section no longer says so, since a real "keep going" stayed with
+Octo on that clause (a local test, Nov 6). A message that names the browser still stays with Octo when the browser
 turn could not do it alone: it sees only the person's words (with the routing
 step's summary of what they carry on while the chat has no browser turn) and
 the chat's earlier browser turns, so a message whose browser part needs what
@@ -1339,8 +1341,11 @@ no model turn of its own: it posts one card marked `routed`, whose task is the
 person's own words, and no reply. In a chat with earlier turns but no browser
 turn yet, the words are followed by one quoted line, "What this carries on:
 …", with the routing step's summary, since the browser turn reads nothing of
-those turns; like any card's task, the line names no address the person could
-not have seen in the chat, and is left out when it would. Studio opens it as it opens any card, and
+those turns. The section asks that summary to name the items, place or site the
+chat names, and what to find: one that named no laptop sent its browser turn to
+a blank page with nothing to look up (a local test, Nov 6). Like any card's
+task, the line names no address the person could not have seen in the chat, and
+is left out when it would. Studio opens it as it opens any card, and
 the chat reads it as one turn: the turn's line says "Opening Instafy's
 browser…" until the browser turn shows something, and neither the card nor
 the continuation is shown. The chat keeps the continuation as any card's, as
@@ -1904,12 +1909,13 @@ new-tab page (`chrome://newtab/` or `chrome://new-tab-page/`). `status` and
 `snapshot` report these pages as `blank: true` with a constant, empty
 observation: nothing is read from the page, no origin is approved, no action can
 target it, and the observation is not written to the action log, so it is not
-evidence of browser work. The agent's policy, the blank observation itself and
-the retry all tell it to call `navigate` first: with the address the task names,
-or, when the task names none (a research or comparison card carries no address),
-with the official site of what the task is about. A turn that stops on a blank
-page with no step the browser answered (below) is retried once with that
-instruction, and `navigate` asks for the site's approval as usual. Every other
+evidence of browser work. The agent's policy and the blank observation itself
+both tell it to call `navigate` first: with the address the task names, or, when
+the task names none (a research or comparison card carries no address), with the
+official site of what the task names, and `navigate` asks for the site's approval
+as usual. A task that names nothing to look up ends at once, with no page opened:
+no site is guessed for it. Such a turn fails as below, and as a failed turn that
+left nothing, it gets its credits back (`docs/Credits-Billing.md`). Every other
 page without an http(s) origin (`data:`, `about:srcdoc`, a blank page with a
 fragment, other browser-internal pages) still fails closed with
 `[origin_not_approvable]`. That error is not a consent
@@ -1929,14 +1935,16 @@ could not reach the browser at all is no such answer (its result is marked
 `browserUnavailable`), so that turn is still retried; a second one in a row
 ends the run instead. A tool
 event from another MCP server, a status-only narration, or prose success is not
-accepted. Missing evidence gets one browser-specific retry that again requires
-the bounded server and a fresh snapshot, except for a browser turn that carries
-on the person's own message and asked Octo to make it: that message goes to the
-building turn instead (see "Hand-back"). If the retry still has no instrumented
-action evidence, the job fails closed instead of presenting an unverified prose
-success. The person reads one plain sentence for it ("Octo didn't open a page
-in the browser, so this turn stopped."); the artifact beside it keeps the
-machine-readable reason.
+accepted. A turn with no such evidence is not run again in the browser: told to
+open "the official site of what the task is about", that retry once took a task
+that named nothing to a site it guessed. Only a turn whose step never reached
+the browser, or that a passing upstream error ended, runs once more, with its own
+request and nothing added. A browser turn that carries on the person's own
+message and asked Octo to make it hands that message to the building turn
+instead (see "Hand-back"). Any other turn with no instrumented action evidence
+fails closed instead of presenting an unverified prose success. The person reads
+one plain sentence for it ("Octo didn't open a page in the browser, so this turn
+stopped."); the artifact beside it keeps the machine-readable reason.
 
 Page content is untrusted. Browser-only turns therefore have no local execution
 environment, project MCP servers, web search, plugins, image generation, child
@@ -2798,9 +2806,10 @@ unless the policy is `"covered"`.
   ends "I haven't made it yet: ask me to, and I'll use what I found." A browser turn cannot make it, so the runtime does not try it
   again in the browser: the turn posts no reply and nothing of its answer, and
   ends with a Details note (`browserBuildRequest`) that Studio leaves out of
-  Details. One that answered in words alone is tried again once, as any browser
-  turn that opened no page is; that try reads the build request first, and its
-  build request ends the turn the same way instead of failing it. The person's
+  Details. One that answered in words alone opened no page and fails as any
+  such turn does; on the person's device, its one retry reads the build request
+  first, and that build request ends the turn the same way instead of failing
+  it. The person's
   message has no answer until the building turn gives one, so the controller
   sends this hand-back itself, in the name of the person who sent the browser
   turn, as soon as that turn's completion is committed
@@ -2820,7 +2829,7 @@ unless the policy is `"covered"`.
   because the conversation moved on (someone wrote after the browser turn, or
   the building lane is busy) changes nothing; any other refusal (no prompts or
   credits left) leaves its plain reason as the browser turn's reply. Any other
-  browser turn that opened no page is tried again in the browser, as before.
+  browser turn that opened no page fails, with no retry in the browser.
 - **Stale pins.** A pin to a session that is gone moves to the space's own live
   browser when there is one.
 - **Clear data restarts the same machine.** The controller call is unchanged.

@@ -227,8 +227,8 @@ refreshes the login it holds.
 
 A case passes when more than half of its runs give the expected route. Two of three is `unsteady`. A run that gets no
 answer (the endpoint failed or timed out) gives no route: a case it decides reads `no answer`, and a rerun settles it.
-The command exits 1 when any case is `WRONG`, and otherwise 2 when a case has no answer. A full run is 39 routing
-calls of about 9,000 tokens in and 130 out, about 5 seconds each. For example:
+The command exits 1 when any case is `WRONG`, and otherwise 2 when a case has no answer. A full run is 3 routing
+calls a case, each of about 9,000 tokens in and 130 out and about 5 seconds. For example:
 
 | Case | Expected | Route per run | Verdict | The router's reason |
 |---|---|---|---|---|

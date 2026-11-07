@@ -157,9 +157,10 @@ for receipt limitations and compatibility behavior.
 The preflight's `workspaceFileChangeRequirement` distinguishes `none` (no mutation requested),
 `conditional` (edit only when review or validation warrants it), and `required` (success needs
 an actual change). Conditional work can finish with a justified no-change result. A required
-write gets one recovery pass; when that pass still changes nothing, its reply stands only when
-it ends with the line `NO_FILE_CHANGES` (removed before anyone reads it), and any other such
-reply, or one that lists a file missing from disk, fails the turn. Every turn that saves to the
+write's prompt asks a reply that changes nothing to say why and end with the line
+`NO_FILE_CHANGES` (removed before anyone reads it); such a reply stands as the turn's result.
+Any other reply that changes nothing gets one recovery pass, and when that pass still changes
+nothing without the line, or a reply lists a file missing from disk, the turn fails. Every turn that saves to the
 workspace lists the files it changed on disk. These are completion requirements, not write
 permissions: controller `writeIntent` and write scopes remain authoritative. Legacy Boolean
 decisions remain readable, and artifacts retain `requiresWorkspaceFileChanges`, true only

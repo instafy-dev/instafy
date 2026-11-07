@@ -374,8 +374,8 @@ async fn responses(
             };
         }
         // The routing preflight reads a follow-up as a file write, and every
-        // answer is a step for the person with no file. Once the recovery
-        // prompt asks for it, the answer reports that it changed nothing.
+        // answer is a step for the person with no file. Once the prompt asks
+        // for it, the answer reports that it changed nothing.
         "skill_setup_write_guess" | "chat_write_guess" => {
             if ordinal == 1 {
                 return answer(
@@ -1298,17 +1298,20 @@ scenario_test!(
     "skill_setup_write_guess",
     2
 );
-// The same request, verdict and answer outside a skill setup is retried once
-// for its missing file change. The answer, a question for the person, then
-// stands instead of failing the turn.
+// The same request, verdict and answer outside a skill setup: the turn's own
+// prompt asks a reply that changes nothing to say so, and the answer, a
+// question for the person, stands on the first attempt, with no recovery pass
+// to ask the same again (Nov 6: a "keep going" that changed nothing and said
+// why was asked again on a thread of its own).
 scenario_test!(
-    chat_answer_without_a_file_change_stands_after_one_recovery_pass,
+    chat_answer_without_a_file_change_stands_on_its_first_attempt,
     "chat_write_guess",
-    3
+    2
 );
 // Oct 28: a turn read as a required change could verify nothing, built
-// nothing and said why. Its recovery pass ran the observation and said the
-// same. The reply stands; the turn is not failed and resent.
+// nothing and said why. Its recovery pass, for the observation it skipped,
+// ran it and said the same. The reply stands; the turn is not failed and
+// resent.
 scenario_test!(
     blocked_write_turn_reply_stands_after_one_recovery_pass,
     "chat_write_blocked",
@@ -1936,9 +1939,10 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
     let phases: Vec<_> = calls.iter().map(|call| call["phase"].as_str()).collect();
     let expected_phases = match scenario {
         "routing" => vec![Some("routing")],
+        // A chat answer that changed nothing and said why stands on its first
+        // attempt: no recovery pass.
         "retry_usage"
         | "failed_recovery_usage"
-        | "chat_write_guess"
         | "chat_write_blocked"
         | "chat_write_claimed_files"
         | "chat_write_unmade_change" => {
@@ -2017,9 +2021,9 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
         );
         return Ok(());
     }
-    // A required change the recovery pass still did not make, and the reply
-    // said so: the reply stands without the runtime's line, and the turn
-    // records that it stood.
+    // A required change the turn did not make, and the reply said so: the
+    // reply stands without the runtime's line, and the turn records that it
+    // stood. The chat answer stands on its first attempt, with no retry.
     if let Some(expected) = match scenario {
         "chat_write_guess" => Some(SETUP_STEP_ANSWER),
         "chat_write_blocked" => Some(BLOCKED_ANSWER),
@@ -2042,6 +2046,19 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
                 .any(|artifact| artifact["kind"] == "codex/required-changes-not-made"),
             "{scenario}: the turn must record that its reply stood without the change"
         );
+        if scenario == "chat_write_guess" {
+            assert!(
+                !execution
+                    .messages
+                    .iter()
+                    .chain(execution.final_messages.iter())
+                    .any(|message| message
+                        .metadata
+                        .as_ref()
+                        .is_some_and(|metadata| metadata["kind"] == "codex_retry")),
+                "a reply that changed nothing and said why must not be retried"
+            );
+        }
         return Ok(());
     }
     // A reply that claims a file it never wrote still fails the turn.

@@ -4939,7 +4939,20 @@ fn blank_page_is_observed_as_blank_without_any_approval_or_page_content() {
     assert_eq!(payload["visibleText"], "");
     assert_eq!(payload["originApproved"], false);
     assert_eq!(payload["interactiveElements"], json!([]));
-    assert!(payload["message"].as_str().unwrap().contains("navigate"));
+    // It says where to go: the address the task names, or the official site of what it names.
+    // A task that names nothing ends at once: given "the official site of what the task is
+    // about", a routed task that named no laptop opened nvidia.com (a local test, Nov 6).
+    let message = payload["message"].as_str().unwrap();
+    assert!(message.contains("navigate"), "{message}");
+    assert!(
+        message.contains("with the official site of what the task names;"),
+        "{message}"
+    );
+    assert!(
+        message.contains("A task that names nothing to look up ends at once, with no page opened."),
+        "{message}"
+    );
+    assert!(!message.contains("what the task is about"), "{message}");
     let raw = String::from_utf8_lossy(&output.stdout);
     assert!(!raw.contains("Script-written"));
     assert_no_canary("blank snapshot", &raw);
@@ -4949,8 +4962,8 @@ fn blank_page_is_observed_as_blank_without_any_approval_or_page_content() {
     .expect("approval state JSON");
     assert_eq!(state["approvedOrigins"], json!([]));
     assert_ne!(state["routineBrowsingAllowed"], true);
-    // A blank observation is not action evidence, so a turn that stops on it
-    // is retried with the instruction to navigate.
+    // A blank observation is not action evidence: a turn that stops on it
+    // opened no page.
     assert_eq!(
         fixture.action_log(),
         "",

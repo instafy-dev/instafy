@@ -641,7 +641,7 @@ mod tests {
         assert_eq!(verdict(3, 2, 5), Verdict::Unsteady);
 
         let cases = shipped();
-        let map = case(&cases, "map-trip");
+        let map = case(&cases, "map-weekend");
         let run = |route: &str| Run {
             answer: Some(Answer {
                 route: route.to_string(),
@@ -694,7 +694,9 @@ mod tests {
             ],
         );
         assert!(
-            table.contains("| map-trip | direct | direct, direct, direct | pass | routed direct |"),
+            table.contains(
+                "| map-weekend | direct | direct, direct, direct | pass | routed direct |"
+            ),
             "{table}"
         );
         assert!(
@@ -739,7 +741,7 @@ mod tests {
         assert_eq!(verdict(0, 0, 0), Verdict::NoAnswer);
 
         let cases = shipped();
-        let map = case(&cases, "map-trip");
+        let map = case(&cases, "map-weekend");
         let failed = Run {
             answer: None,
             error: Some("Connection failed: error sending request".to_string()),
@@ -764,7 +766,7 @@ mod tests {
         );
         assert!(
             table.contains(
-                "| map-trip | direct | error, error, error | no answer | Connection failed: error sending request |"
+                "| map-weekend | direct | error, error, error | no answer | Connection failed: error sending request |"
             ),
             "{table}"
         );
@@ -846,9 +848,9 @@ mod tests {
     }
 
     /// After the person stopped one change and stopped and undid another, a bare "keep going"
-    /// whose page marks the route not confirmed reads the `browser` route's line, which says it
-    /// never carries on a change the person stopped or undid, and no rule of its own ahead of the
-    /// routes: in a recorded local test (Nov 5) that rule sent it to the browser alone, whose
+    /// whose page marks the route not confirmed reads the line that says what it carries on, and
+    /// no rule against a change the person stopped or undid ahead of the routes: in a recorded
+    /// local test (Nov 5) that rule sent it to the browser alone, whose
     /// turn set nothing on the planner. It reads the chat as the person had it: their messages,
     /// the Stops and the Undo, and none of the words a hand-back is stored with. So does the
     /// message before it, a page asked for in a chat that confirmed nothing yet.
@@ -931,7 +933,7 @@ mod tests {
             ),
             (
                 &keep_going,
-                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on, never a change the person stopped or undid.",
+                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on.",
                 13,
                 5,
             ),
@@ -941,7 +943,7 @@ mod tests {
             assert!(input.browser_routes_offered, "{}", case.id);
             assert!(input.prompt.contains(line), "{}: {}", case.id, input.prompt);
             assert!(input.prompt.contains(
-                "That browser turn sees only those words, with your `summary` while this chat has no browser turn"
+                "That browser turn sees only those words and this chat's earlier browser turns, with your `summary` while this chat has no browser turn: name in it the items, place or site this chat names, and what to find."
             ));
             assert_eq!(
                 input.history_metrics["includedTurns"],
@@ -958,6 +960,61 @@ mod tests {
         }
         let input = routing_input(&keep_going, workspace.path()).unwrap();
         assert_eq!(input.prompt.matches("Stopped this run.").count(), 2);
+    }
+
+    /// Two messages of a fourth recorded local test (Nov 6), each with the entries its routing
+    /// step received there, both `browser_then_build`: a page asked for while the chat had found
+    /// the hours but not confirmed the metro route, and a bare "keep going" after that page, a
+    /// stopped section and a tip stopped and undid. Each input reads the routing section's line
+    /// for it and the chat as the routing step read it there: four and twelve entries, and the
+    /// two requests sent on to the browser left out. And the map trip's turn must make files.
+    #[test]
+    fn a_page_and_keep_going_with_the_route_unconfirmed_read_their_lines() {
+        let cases = shipped();
+        let workspace = tempdir().unwrap();
+        prepare_workspace(workspace.path()).unwrap();
+        let page = case(&cases, "page-from-findings-with-the-route-unconfirmed");
+        let keep_going = case(&cases, "keep-going-after-a-page-made-from-findings");
+        for (case, line, included) in [
+            (
+                &page,
+                "So is a page made only from what this chat already found and confirmed.",
+                5,
+            ),
+            (
+                &keep_going,
+                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on.",
+                13,
+            ),
+        ] {
+            assert_eq!(case.expected(), "browser_then_build", "{}", case.id);
+            let input = routing_input(case, workspace.path()).unwrap();
+            assert!(input.browser_routes_offered, "{}", case.id);
+            assert!(input.prompt.contains(line), "{}: {}", case.id, input.prompt);
+            assert!(!input.prompt.contains("stopped or undid"), "{}", case.id);
+            assert_eq!(
+                input.history_metrics["includedTurns"],
+                json!(included),
+                "{}",
+                case.id
+            );
+            assert_eq!(
+                input.history_metrics["ignoredEntries"],
+                json!(2),
+                "{}",
+                case.id
+            );
+        }
+        let input = routing_input(&keep_going, workspace.path()).unwrap();
+        assert_eq!(input.prompt.matches("Stopped this run.").count(), 2);
+        assert_eq!(input.prompt.matches("Applied file changes:").count(), 1);
+        assert!(input.prompt.contains(
+            "The person undid the change from \u{201c}Add a one-line tip about the best time to visit.\u{201d}"
+        ));
+        assert_eq!(
+            case(&cases, "map-trip").expected(),
+            "direct (change: required)"
+        );
     }
 
     /// The routing input is the job's, reading the browser skill's routing section from the

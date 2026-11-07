@@ -1,13 +1,16 @@
 {
-  "about": "Messages with the chat they were sent in, and the route the routing step should give each. The routing check builds each case's routing input with the runtime's own code and asks the routing model. history holds the chat's earlier entries as the runtime receives them; the message is added after them. Nine cases were sent in a recorded local test, each with the entries its routing step received there: map-trip, comparison-page, comparison-fill-in, page-from-findings, browser-named, browser-follow-up, keep-going-open-route, browser-sign-in and browser-form. keep-going-after-stop-and-undo was not: its chat is keep-going-open-route's up to the first Undo, with the route exchange taken out, the request and reply that named the route edited to match, and that reply's offer of more cut. page-from-unconfirmed-findings and keep-going-route-open-after-stop-and-undo were sent in a later recorded local test, each with the entries its routing step received there, a path's space id replaced as in keep-going-open-route. comparison-fill-in-after-a-reply and keep-going-unconfirmed-route-after-stops-and-undo were sent in a third recorded local test, each with the entries its routing step received there, a path's space id replaced as before. map-weekend was sent in none of them, and plain-answer and rewrite-names-a-map come from the Octo turn eval's cases.",
+  "about": "Messages with the chat they were sent in, and the route the routing step should give each. The routing check builds each case's routing input with the runtime's own code and asks the routing model. history holds the chat's earlier entries as the runtime receives them; the message is added after them. Nine cases were sent in a recorded local test, each with the entries its routing step received there: map-trip, comparison-page, comparison-fill-in, page-from-findings, browser-named, browser-follow-up, keep-going-open-route, browser-sign-in and browser-form. keep-going-after-stop-and-undo was not: its chat is keep-going-open-route's up to the first Undo, with the route exchange taken out, the request and reply that named the route edited to match, and that reply's offer of more cut. page-from-unconfirmed-findings and keep-going-route-open-after-stop-and-undo were sent in a later recorded local test, each with the entries its routing step received there, a path's space id replaced as in keep-going-open-route. comparison-fill-in-after-a-reply and keep-going-unconfirmed-route-after-stops-and-undo were sent in a third recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-findings-with-the-route-unconfirmed and keep-going-after-a-page-made-from-findings were sent in a fourth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. map-weekend was sent in none of them, and plain-answer and rewrite-names-a-map come from the Octo turn eval's cases.",
   "cases": [
     {
       "id": "map-trip",
       "message": "Plan 3 days in Seville for a first visit: where to stay, what to see each day, on a map.",
       "expect": {
-        "route": "direct"
+        "route": "direct",
+        "workspaceFileChangeRequirement": [
+          "required"
+        ]
       },
-      "why": "A trip asked for on a map is one building turn: the map's skill finds and cites its own places."
+      "why": "A trip asked for on a map is one building turn: the map's skill finds and cites its own places, and the map is files that turn must make."
     },
     {
       "id": "map-weekend",
@@ -153,9 +156,9 @@
       ],
       "message": "Put the hours and the metro route on a small page I can share.",
       "expect": {
-        "route": "direct"
+        "route": "browser_then_build"
       },
-      "why": "A page made from what this chat already found is one building turn. In the recorded chat the route was not confirmed."
+      "why": "The hours came from Visit Porto, but no reply here confirmed the metro route: a page made only from what this chat found and confirmed is one building turn, and this one needs the route first."
     },
     {
       "id": "browser-named",
@@ -970,6 +973,221 @@
         "route": "browser_then_build"
       },
       "why": "The page here marks the metro route not confirmed, and the replies say it is unverified. A tip and a section the person stopped, one of them undone, are not carried on."
+    },
+    {
+      "id": "page-from-findings-with-the-route-unconfirmed",
+      "history": [
+        {
+          "role": "user",
+          "content": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+          "runId": "run-1",
+          "createdAt": "2026-11-06T19:01:59.408Z"
+        },
+        {
+          "role": "user",
+          "content": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-06T19:02:05.432Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Livraria Lello is open daily from 9:00 a.m. to 7:30 p.m., according to its official site, checked November 6, 2026. I couldn't reach Visit Porto's site, so I checked the bookstore's own page instead.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-06T19:02:46.879Z"
+        },
+        {
+          "role": "user",
+          "content": "Now find how to get there by metro from São Bento.",
+          "runId": "run-3",
+          "createdAt": "2026-11-06T19:03:26.297Z"
+        },
+        {
+          "role": "user",
+          "content": "Now find how to get there by metro from São Bento.",
+          "runId": "run-4",
+          "lane": "browser",
+          "createdAt": "2026-11-06T19:03:31.365Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-3",
+              "browserAutoStarted": true,
+              "dispatchContent": "Now find how to get there by metro from São Bento.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-3",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "The metro operator’s journey planner let me choose São Bento as the start and Aliados as the destination, the nearest metro station option to Livraria Lello. I couldn’t run the planner from my reading tab, so I can’t confirm the exact route or timing. From Aliados, Livraria Lello is a short walk uphill to Rua das Carmelitas, 144.",
+          "runId": "run-4",
+          "lane": "browser",
+          "createdAt": "2026-11-06T19:04:10.970Z"
+        }
+      ],
+      "message": "Put the hours and the metro route on a small page I can share.",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "The hours came from the bookshop's own site, but no reply here confirmed the metro route: the planner was not run. A page made only from what this chat found and confirmed is one building turn; this one needs the route first, so the browser reads it and Octo then makes the page."
+    },
+    {
+      "id": "keep-going-after-a-page-made-from-findings",
+      "history": [
+        {
+          "role": "user",
+          "content": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+          "runId": "run-1",
+          "createdAt": "2026-11-06T19:01:59.408Z"
+        },
+        {
+          "role": "user",
+          "content": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-06T19:02:05.432Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Livraria Lello is open daily from 9:00 a.m. to 7:30 p.m., according to its official site, checked November 6, 2026. I couldn't reach Visit Porto's site, so I checked the bookstore's own page instead.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-06T19:02:46.879Z"
+        },
+        {
+          "role": "user",
+          "content": "Now find how to get there by metro from São Bento.",
+          "runId": "run-3",
+          "createdAt": "2026-11-06T19:03:26.297Z"
+        },
+        {
+          "role": "user",
+          "content": "Now find how to get there by metro from São Bento.",
+          "runId": "run-4",
+          "lane": "browser",
+          "createdAt": "2026-11-06T19:03:31.365Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-3",
+              "browserAutoStarted": true,
+              "dispatchContent": "Now find how to get there by metro from São Bento.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-3",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "The metro operator’s journey planner let me choose São Bento as the start and Aliados as the destination, the nearest metro station option to Livraria Lello. I couldn’t run the planner from my reading tab, so I can’t confirm the exact route or timing. From Aliados, Livraria Lello is a short walk uphill to Rua das Carmelitas, 144.",
+          "runId": "run-4",
+          "lane": "browser",
+          "createdAt": "2026-11-06T19:04:10.970Z"
+        },
+        {
+          "role": "user",
+          "content": "Put the hours and the metro route on a small page I can share.",
+          "runId": "run-5",
+          "createdAt": "2026-11-06T19:05:08.034Z"
+        },
+        {
+          "role": "assistant",
+          "content": "I made a small visit page with Livraria Lello’s daily hours and the metro option from São Bento. The exact metro route and travel time are unconfirmed, so the page suggests checking the operator’s planner before setting out.\n\nPeople in this space can open the page. Ask for a public link if you want anyone with the link to access it.",
+          "runId": "run-5",
+          "createdAt": "2026-11-06T19:06:46.472Z"
+        },
+        {
+          "role": "user",
+          "content": "Add a short \"Before you go\" section to that page.",
+          "runId": "run-6",
+          "createdAt": "2026-11-06T19:08:15.028Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Stopped this run.",
+          "runId": "run-6",
+          "createdAt": "2026-11-06T19:08:27.415Z",
+          "metadata": {
+            "kind": "run_cancellation"
+          }
+        },
+        {
+          "role": "user",
+          "content": "Add a one-line tip about the best time to visit.",
+          "runId": "run-7",
+          "createdAt": "2026-11-06T19:09:06.642Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Stopped this run.",
+          "runId": "run-7",
+          "createdAt": "2026-11-06T19:09:27.233Z",
+          "metadata": {
+            "kind": "run_cancellation"
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Applied file changes: /workspace/00000000-0000-4000-8000-000000000001/sites/porto-lello/index.html",
+          "runId": "run-7",
+          "createdAt": "2026-11-06T19:09:29.177Z",
+          "metadata": {
+            "kind": "update"
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "The person undid the change from “Add a one-line tip about the best time to visit.”",
+          "createdAt": "2026-11-06T19:10:15.086Z",
+          "metadata": {
+            "source": "controller",
+            "kind": "change_undone",
+            "presentation": {
+              "hidden": true
+            }
+          }
+        }
+      ],
+      "message": "keep going",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "The page this chat made from what it found marks the metro route unconfirmed, and its replies say so: a bare \"keep going\" carries that on in the browser, and Octo then changes the page. The section the person stopped and the tip they stopped and undid are not carried on."
     },
     {
       "id": "browser-sign-in",

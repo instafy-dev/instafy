@@ -7798,6 +7798,13 @@ impl JobProcessor {
             pending.append_deferred_context(reply, &mut prompt);
             enrich_prompt_context_metrics(&mut prompt_context, &prompt);
         }
+        // A required change: a reply that changes nothing on purpose says why and ends with the
+        // runtime's line, and then stands as the turn's result, with no recovery pass to ask the
+        // same again (`reported_no_file_changes` below).
+        if expects_workspace_file_changes {
+            prompt.push_str(NO_FILE_CHANGES_REPORT_REQUIREMENT);
+            enrich_prompt_context_metrics(&mut prompt_context, &prompt);
+        }
         ensure_ambient_participation_prompt_context(job, &mut prompt, &mut prompt_context);
         if provider_thread_not_restorable && let Some(metrics) = prompt_context.as_object_mut() {
             metrics.insert(
@@ -8344,12 +8351,15 @@ impl JobProcessor {
         )
         .await?
             == 0;
-        // A turn's provider thread keeps an earlier recovery prompt, so a
-        // first answer can end with the runtime's no-change line too; the
-        // person never reads it.
-        if let Some(summary) = take_no_file_changes_marker(&outcome.summary) {
-            outcome.summary = summary;
-        }
+        // The runtime's no-change line: a required change's prompt asks for it, and a turn's
+        // provider thread can keep it from an earlier prompt. The person never reads it.
+        let reported_no_file_changes = match take_no_file_changes_marker(&outcome.summary) {
+            Some(summary) => {
+                outcome.summary = summary;
+                true
+            }
+            None => false,
+        };
 
         // Learning prompts require that we mention `INSTAFY.md` in the final summary (even when no
         // updates were needed). Relying on the model to follow this requirement is brittle, and
@@ -8436,6 +8446,14 @@ impl JobProcessor {
                 shared_browser_action_log_before,
                 crate::shared_browser::action_log_len(),
             );
+        // A Shared Browser turn that opened no page is not run again: told to open "the official
+        // site of what the task is about", the retry of a routed task that named nothing opened
+        // a site it guessed (a local test, Nov 6). It ends below, unless the browser or the
+        // model's service failed it (a step that never reached the browser, or a passing
+        // upstream error), which runs it again with its own request.
+        let shared_browser_turn_ends_without_a_page = shared_browser_execution_missing
+            && !transient_upstream_summary_failure
+            && !shared_browser_step_never_reached_the_browser(&interim_messages);
         let evidence_recovery_plan = routing_recovery::plan(
             evidence_requirements,
             observed_evidence,
@@ -8474,11 +8492,30 @@ impl JobProcessor {
         let workspace_file_changes_missing = expects_workspace_file_changes_after_actions
             && outcome.files.is_empty()
             && !workspace_file_changes_satisfied_by_patch_apply;
+        // A required change that changed nothing and says why (an answer, a question for the
+        // person, or what blocks the work) is the turn's result, as after a recovery pass: that
+        // pass, on a thread of its own, asked the same again (a local test, Nov 6: "keep going"
+        // answered that it left out the tip the person undid, and the retry's draft showed for
+        // 2 s before the same answer).
+        let required_changes_not_made = workspace_file_changes_missing && reported_no_file_changes;
+        let workspace_file_changes_missing =
+            workspace_file_changes_missing && !reported_no_file_changes;
+        if required_changes_not_made {
+            tracing::info!(
+                job_id = %job_id,
+                "no file change, and the reply says so; keeping it"
+            );
+            artifacts.push(json!({
+                "kind": REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND,
+                "metadata": { "reason": "no_change_reported" },
+            }));
+        }
 
         // A browser turn that hands the person's message to the building turn
         // has its answer: no reason to run it again.
         let recovery_retry_required = !clean_ambient_decline
             && !hands_the_message_to_the_building_turn
+            && !shared_browser_turn_ends_without_a_page
             && (reported_file_changes_missing
                 || workspace_file_changes_missing
                 || codex_fallback_summary_kind.is_some()
@@ -8511,6 +8548,19 @@ impl JobProcessor {
                 message: "The turn ended without an answer. It was not run again, because it may \
                           already have acted."
                     .into(),
+                artifacts,
+            }
+            .into());
+        }
+        if !run_once && shared_browser_turn_ends_without_a_page {
+            artifacts.push(json!({
+                "kind": "browser/execution-missing",
+                "metadata": {
+                    "reason": "missing_instrumented_shared_browser_actions",
+                }
+            }));
+            return Err(JobFailureWithArtifacts {
+                message: SHARED_BROWSER_NO_PAGE_FAILURE.to_string(),
                 artifacts,
             }
             .into());
@@ -8608,10 +8658,9 @@ impl JobProcessor {
                     browser_hand_back::build_request_retry_line(job)
                 )
             } else if shared_browser_execution_missing {
-                shared_browser_execution_retry_prompt(
-                    &prompt,
-                    browser_hand_back::build_request_retry_line(job),
-                )
+                // The browser or the model's service failed the turn: its own request again,
+                // with nothing that sends it to a page the task does not name.
+                prompt.to_string()
             } else if command_execution_missing {
                 evidence_recovery_plan.map_or_else(
                     || prompt.to_string(),
@@ -8722,8 +8771,11 @@ impl JobProcessor {
                 }
             }
             // A required change is still missing: the recovery pass may end
-            // without one only by saying so.
-            if workspace_file_changes_missing {
+            // without one only by saying so. A retry built on the turn's own
+            // prompt read that line there already.
+            if workspace_file_changes_missing
+                && !retry_prompt.contains(NO_FILE_CHANGES_REPORT_REQUIREMENT)
+            {
                 retry_prompt.push_str(NO_FILE_CHANGES_REPORT_REQUIREMENT);
             }
             let mut retry_prompt_context = prompt_context.clone();
@@ -9094,8 +9146,8 @@ impl JobProcessor {
             // message, opened no page and asks Octo to make what the message
             // asks: the message goes to the building turn, as after a first
             // attempt that did, and the turn does not fail for the page it
-            // never opened. A first attempt that said so in words alone gets
-            // here, its retry asked to decide first
+            // never opened. A Personal Browser turn's first attempt that said
+            // so in words alone gets here, its retry asked to decide first
             // (`browser_hand_back::build_request_retry_line`).
             let retry_hands_the_message_to_the_building_turn =
                 (retry_shared_browser_execution_missing
@@ -14348,37 +14400,42 @@ fn turn_that_cannot_save(
     })
 }
 
-/// What the person reads when a browser turn ended, after its retry, without
-/// having used the browser: plain words, shown inline on the failed turn
-/// (Studio keeps a reason that names the AI vendor or a tool behind Details).
-/// The artifact beside it keeps the machine-readable reason.
+/// What the person reads when a browser turn ended without having used the
+/// browser: plain words, shown inline on the failed turn (Studio keeps a
+/// reason that names the AI vendor or a tool behind Details). The artifact
+/// beside it keeps the machine-readable reason.
 const SHARED_BROWSER_NO_PAGE_FAILURE: &str =
     "Octo didn't open a page in the browser, so this turn stopped.";
 const PERSONAL_BROWSER_NOT_USED_FAILURE: &str =
     "Octo couldn't use the browser on this device, so this turn stopped.";
-/// The status a retry for the same reason leaves in Details.
+/// The status a retry leaves in Details: a Shared Browser turn whose step
+/// never reached the browser, or that a passing upstream error ended, runs
+/// again with its own request.
 const SHARED_BROWSER_NO_PAGE_RETRY_STATUS: &str =
     "Trying again: Octo hadn't opened a page in the browser yet.";
 const PERSONAL_BROWSER_NOT_USED_RETRY_STATUS: &str =
     "Trying again: Octo hadn't used the browser on this device yet.";
 
-/// `build_request` is what a retry of a browser turn that carries on the
-/// person's own message reads first ([`browser_hand_back::build_request_retry_line`]).
-fn shared_browser_execution_retry_prompt(prompt: &str, build_request: &str) -> String {
-    // A browser that has just started is on a blank page: the snapshot says so
-    // and the agent has to navigate before there is anything to act on. A
-    // task that names no address (research, a comparison) gets no address
-    // from its card either, so the agent picks the page to start from.
-    format!(
-        "{prompt}\n\nIMPORTANT SHARED BROWSER RETRY REQUIREMENT:\n\
-        - Your previous response did not produce any instrumented Shared Browser action evidence.\n\
-        {build_request}\
-        - Use `instafy_shared_browser.snapshot` now. If it reports a blank page, call `instafy_shared_browser.navigate` before anything else: with the http(s) address the task names, or, when it names none, with the official site of what the task is about. A blank page is never a reason to stop.\n\
-        - Complete the requested interaction with the same dedicated MCP server and fresh snapshot indices.\n\
-        - Do not use shell, Playwright, direct CDP, or merely narrate the action.\n\
-        - Finish only after the controller response provides the final observed page title and URL.\n\n\
-        Retry the latest user request now."
-    )
+/// Whether a step of the turn could not reach Instafy's browser at all
+/// (`browserUnavailable`: one slow connect, a browser starting again): the
+/// browser, not the turn, left it without a page.
+fn shared_browser_step_never_reached_the_browser(messages: &[JobMessage]) -> bool {
+    messages.iter().any(|message| {
+        message
+            .message_type
+            .as_deref()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("mcp_tool_call"))
+            && message.metadata.as_ref().is_some_and(|metadata| {
+                metadata
+                    .get("server")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|server| server.eq_ignore_ascii_case("instafy_shared_browser"))
+                    && metadata
+                        .get("browserUnavailable")
+                        .and_then(JsonValue::as_bool)
+                        == Some(true)
+            })
+    })
 }
 
 fn codex_plain_write_task_retry_prompt(prompt: &str) -> String {
@@ -28896,32 +28953,55 @@ mod tests {
         ));
     }
 
+    /// A Shared Browser turn that opened no page runs again only when a step of it never reached
+    /// the browser (`browserUnavailable`): the browser, not the turn, left it without a page. A
+    /// look at a blank page, a listing of the turn's tools or an answer in words alone end the
+    /// turn: told to open "the official site of what the task is about", the retry of a routed
+    /// task that named nothing opened a site it guessed (a local test, Nov 6).
     #[test]
-    fn shared_browser_retry_prompt_navigates_away_from_a_blank_page() {
-        let retry = shared_browser_execution_retry_prompt("Open https://app.example.test", "");
-        assert!(retry.starts_with("Open https://app.example.test\n\n"));
-        assert!(retry.contains("Use `instafy_shared_browser.snapshot` now."));
-        assert!(retry.contains(
-            "If it reports a blank page, call `instafy_shared_browser.navigate` before anything else: with the http(s) address the task names"
-        ));
-        assert!(retry.ends_with("Retry the latest user request now."));
-    }
-
-    #[test]
-    fn shared_browser_retry_prompt_opens_a_page_for_a_task_that_names_no_address() {
-        // Drive, Oct 28: a research card named no address, the browser had
-        // just started on a blank tab, and both attempts stopped there ("the
-        // task provides no page address to open"), so the turn failed.
-        let retry = shared_browser_execution_retry_prompt(
-            "Research the three latest robot vacuums under 600 euros and build a comparison page.",
-            "",
-        );
-        assert!(
-            retry.contains(
-                "or, when it names none, with the official site of what the task is about"
-            )
-        );
-        assert!(retry.contains("A blank page is never a reason to stop."));
+    fn only_a_step_that_never_reached_the_browser_runs_a_turn_with_no_page_again() {
+        let step = |server: &str, tool: &str, status: &str, unreachable: bool| {
+            let mut item = json!({
+                "id": format!("call-{server}-{tool}"),
+                "type": "mcp_tool_call",
+                "server": server,
+                "tool": tool,
+                "status": status,
+            });
+            if unreachable {
+                item["browserUnavailable"] = json!(true);
+            }
+            extract_codex_messages(&[json!({"type": "item.completed", "item": item})])
+        };
+        for tool in ["navigate", "open_tab", "snapshot", "status"] {
+            assert!(
+                shared_browser_step_never_reached_the_browser(&step(
+                    "instafy_shared_browser",
+                    tool,
+                    "failed",
+                    true
+                )),
+                "{tool}"
+            );
+        }
+        for (server, tool, status, unreachable) in [
+            ("instafy_shared_browser", "status", "completed", false),
+            ("instafy_shared_browser", "snapshot", "completed", false),
+            ("instafy_shared_browser", "navigate", "failed", false),
+            ("codex", "list_mcp_resources", "completed", false),
+            ("another_server", "navigate", "failed", true),
+        ] {
+            assert!(
+                !shared_browser_step_never_reached_the_browser(&step(
+                    server,
+                    tool,
+                    status,
+                    unreachable
+                )),
+                "{server}/{tool} {status}"
+            );
+        }
+        assert!(!shared_browser_step_never_reached_the_browser(&[]));
     }
 
     #[test]
@@ -34400,7 +34480,7 @@ mod tests {
             )
         );
         // It decides before any browser step: the run text sends a turn that
-        // finds a blank page to the official site of what the task is about,
+        // finds a blank page to the official site of what the task names,
         // and a turn that opened a page hands nothing back.
         assert!(
             browser_hand_back::BUILD_REQUEST_LINE
@@ -34408,14 +34488,13 @@ mod tests {
         );
     }
 
-    /// A browser turn that carries on the person's own message and opened no page is tried
-    /// again once in the browser, as any is, unless its answer asked Octo to make the message.
-    /// That retry reads the build request first, ahead of its own requirement to open a page: a
-    /// first answer that said in words alone it could not make the map (as one did in a local
-    /// test, Oct 31) gets one more chance to hand the message back, where the retry's
-    /// requirement alone would send it to a website. A retry of any other turn reads nothing of
-    /// it: its build request would hand nothing back, or, for a turn whose findings go back to
-    /// the building turn, a build comes after it already.
+    /// A Personal Browser turn that carries on the person's own message and did not use the
+    /// browser is tried again once, unless its answer asked Octo to make the message, and that
+    /// retry reads the build request first: a first answer that said in words alone it could not
+    /// make the map (as one did in a local test, Oct 31) gets one more chance to hand the message
+    /// back. A retry of any other turn reads nothing of it: its build request would hand nothing
+    /// back, or, for a turn whose findings go back to the building turn, a build comes after it
+    /// already. A Shared Browser turn that opened no page is not tried again at all.
     #[test]
     fn the_browser_retry_of_a_routed_turn_reads_the_build_request_first() {
         let job = |routed: JsonValue| {
@@ -34423,7 +34502,7 @@ mod tests {
                 Some("feature"),
                 json!({
                     "metadata": {
-                        "browserTransport": "shared",
+                        "browserTransport": "desktop-personal",
                         "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
                         "browserCardTurn": {"version": 1, "routed": routed},
                     }
@@ -34434,7 +34513,7 @@ mod tests {
             Some("feature"),
             json!({
                 "metadata": {
-                    "browserTransport": "shared",
+                    "browserTransport": "desktop-personal",
                     "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
                     "browserHandsBack": true,
                     "browserCardTurn": {"version": 1, "routed": true},
@@ -34447,25 +34526,17 @@ mod tests {
         );
         let line = browser_hand_back::build_request_retry_line(&job(json!(true)));
         assert_eq!(line, browser_hand_back::BUILD_REQUEST_RETRY_LINE);
-        let retry = shared_browser_execution_retry_prompt("Plan three days, on a map.", line);
-        let decide = retry
-            .find("answer with the action `{type: 'request_build'}` alone, with no browser step.")
-            .expect("the build request");
-        let navigate = retry
-            .find("Use `instafy_shared_browser.snapshot` now.")
-            .expect("the retry requirement");
-        assert!(decide < navigate, "{retry}");
         assert!(
-            retry.contains("Every other request:\n- Use `instafy_shared_browser.snapshot` now.")
+            line.contains(
+                "answer with the action `{type: 'request_build'}` alone, with no browser step."
+            ),
+            "{line}"
         );
         // It points to the turn's prompt: a browser turn reads no write-scope guardrail.
-        assert!(!retry.contains("write-scope"), "{retry}");
+        assert!(!line.contains("write-scope"), "{line}");
         for stamp in [json!(false), json!("true"), JsonValue::Null] {
             assert_eq!(browser_hand_back::build_request_retry_line(&job(stamp)), "");
         }
-        let plain = shared_browser_execution_retry_prompt("Open https://app.example.test", "");
-        assert!(!plain.contains("request_build"), "{plain}");
-        assert!(plain.contains("action evidence.\n- Use `instafy_shared_browser.snapshot` now."));
     }
 
     #[test]
