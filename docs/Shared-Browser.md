@@ -497,16 +497,24 @@ Two steps never ask, in Ask too:
   the official site of the place or service the task is about." (it may have no reject button, sit on a page the
   browser presses nothing on, or have come after the page was read, which the
   next look declines when it can), any other cover that something covers the
-  control, names it by its tag, role and name from the same look (the nearest
-  element around the click's point that has a role or a name or is a control,
-  such as a page's own date picker or a carousel's slide: `Something else on
-  the page covers "Plan your journey" (<div role="dialog"> named "Choose a
-  time"), so nothing was clicked.`; the name is left out on a page that may
-  show a secret, as a list's options are), and says to take a fresh snapshot
-  and try once more, never to read on without it: a planner's button the
-  person allowed was refused under a cover nobody could name, and the turn
-  gave up. A step the person allowed that a cover refused asks them again on
-  the next try. Before, such a click waited out Playwright's 15-second
+  control, names it by its tag, role and label from the same look (the
+  nearest element around the click's point that has a role or a label or is a
+  control, such as a page's own date picker or a carousel's slide: `Something
+  else on the page covers "Plan your journey" (<div role="dialog"> named
+  "Choose a time"), so nothing was clicked.`; the label is only one the page
+  gives it, its `aria-label`, `aria-labelledby`, `title` or `alt`, never its
+  text, which can hold a style sheet or words nobody sees, and it is left out
+  on a page that may show a secret, as a list's options are), and says to
+  take a fresh snapshot and try once more, never to read on without it: a
+  planner's button the person allowed was refused under a cover nobody could
+  name, and the turn gave up. It says so once for each control on a page: the
+  page keeps a mark of the refusal (on its document, which the page cannot
+  take away and a new page loads without), and a later try of that control on
+  that page is looked at before anyone is asked. One a cover still takes is
+  then refused with `Something else on the page still covers … Leave this
+  step to the person and tell them what covers it.`, with no prompt, so a
+  cover that stays never turns into a chain of prompts; once the cover goes,
+  the try asks as usual. Before, such a click waited out Playwright's 15-second
   timeout and returned its call log. A cover that goes within that moment (a
   toast that fades) is waited for. No failed step carries Playwright's call
   log: only its first line, and an action Playwright gave up waiting on says
@@ -1035,14 +1043,17 @@ Browser has tabs of its own (see Personal-Browser.md).
   a named risky step (purchase, message, download, sign-out and the others), an
   activation key, a risky address, a step that may show a secret and a manual
   field handoff are refused there in every mode, before any prompt. A refused
-  button, form post or activation key says where to take it instead: "Open
-  this page in the chat's own tab with navigate … and take the step there; the
-  browser asks the person as usual." (a turn that read a journey planner in
-  its own tab stopped at the planner's button and replied that it couldn't run
-  it). Typing into a field the person fills, a choice and a risky address are
-  still left to the person, a sign-in is refused before this in its own words,
-  and a manual field handoff still says to stop at a sign-in or form and tell
-  the person.
+  button, form post or activation key with no named risk says where to take it
+  instead: "Open this page in the chat's own tab with navigate … and take the
+  step there; the browser asks the person as usual." (a turn that read a
+  journey planner in its own tab stopped at the planner's button and replied
+  that it couldn't run it). A named risk (a purchase, a money transfer, a
+  message, an access or key change, a download, a deletion or sign-out, a step
+  that may show a secret), typing into a field the person fills, a choice and a
+  risky address are still left to the person ("Leave it to the person, or take
+  it on the page they chose when they asked for it."), a sign-in is refused
+  before this in its own words, and a manual field handoff still says to stop
+  at a sign-in or form and tell the person.
 - **Never a link-only site, in any tab.** A `no-agents` site on the
   web-research skill's link-only list (its terms bar AI agents or automated
   access; a site with no kind, or an unknown one, counts; runtime-agent embeds
@@ -1471,11 +1482,16 @@ next runs on the same browser and into no other chat's: a runtime that starts
 again carries none.
 
 **An address no message and no page gave is never opened.** `navigate` and
-`open_tab` open a path past a site's root only when the person's message or the
-turn's task named it (the job's `prompt_text`: each `http(s)://` address in it,
-and each site name with a path written without a scheme), or a page the chat's
-browser turns read gave it: the page's own address, its links, and the
-addresses its text spells out. Any other is refused at once, before any prompt
+`open_tab` open a path past a site's root only when the person's messages or the
+turn's task named it (the job's `prompt_text` and the person's own entries in
+its `conversation_history`: each `http(s)://` address in them, and each site
+name with a path written without a scheme; a parenthesis is part of an address
+only when the address opens it, as in `/wiki/Mercury_(planet)`), or a page the
+chat's browser turns read gave it: the page's own address, its links, and the
+addresses its text spells out, read by the same rule. The chat's browser turns
+in the history (`lane: "browser"`: what each was asked, its reply and its
+finding lines) count too, so a runtime that started again still opens the
+pages they read; a building turn's own replies give nothing. Any other is refused at once, before any prompt
 or load, with "No message and no page Octo read gave this address, so it was
 not opened: Octo opens only addresses it was given. Open <the site> and follow
 its links to the page, or use the site's own search." A turn opened two article
@@ -1488,10 +1504,10 @@ port other than the scheme's own, and the path without a trailing slash,
 whatever its query or fragment. The run's approval directory keeps them as
 fingerprints (`given.json`, the first 32 hex digits of the SHA-256 of each
 site and path, at most 4,000, newest last): runtime-agent starts it with the
-addresses the task names and those the chat's earlier runs on this browser
-were given, the controller script adds each page the run reads, and
-runtime-agent carries them, in memory, into the chat's next runs and into no
-other chat's. A run without the record (one runtime-agent did not start)
+addresses the task and the history name and those the chat's earlier runs on
+this browser were given, the controller script adds each page the run reads,
+and runtime-agent carries them, in memory, into the chat's next runs and into
+no other chat's. A run without the record (one runtime-agent did not start)
 refuses nothing.
 
 Whether the site answered is judged by the load's own request,

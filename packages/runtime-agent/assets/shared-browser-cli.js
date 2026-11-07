@@ -478,20 +478,24 @@ function labelAddress(rawUrl) {
 // takes without asking (reading, plain links, menus, ordinary clicks, typing
 // that does not submit). A submission, a purchase, a message, a download, a
 // commit button, an activation key or a risky address is refused there in
-// every mode, before any prompt. A button or a form post is sent to the chat's
-// own tab, where the browser asks the person as it does for any such step: a
-// turn that read a journey planner in its own tab stopped at the planner's
-// button and replied that it couldn't run it. A field the person fills, a
-// choice and a risky address are left to the person. A sign-in is refused
-// before this, in its own words.
+// every mode, before any prompt. A button, a form post or an activation key
+// (`step`) with no named risk is sent to the chat's own tab, where the browser
+// asks the person as it does for any such step: a turn that read a journey
+// planner in its own tab stopped at the planner's button and replied that it
+// couldn't run it. A named risk (a purchase, a message, a deletion or
+// sign-out, a download, an access or key change, a step that may show a
+// secret), a field the person fills, a choice and a risky address are left to
+// the person. A sign-in is refused before this, in its own words.
 const OWN_TAB_READING_MESSAGE =
   "Octo's own tabs are for reading, so this step was not performed there. Leave it to the person, or take it on the page they chose when they asked for it.";
 const OWN_TAB_STEP_MESSAGE =
   "Octo's own tabs don't take this step, so nothing was done there. Open this page in the chat's own tab with navigate (its tabId is the one list_tabs shows opened by the person) and take the step there; the browser asks the person as usual.";
 
-function refuseUnlessReadingStep(readingStep, message = OWN_TAB_READING_MESSAGE) {
+function refuseUnlessReadingStep(readingStep, step = null) {
   if (inAgentTab() && !readingStep) {
-    throw new Error(message);
+    throw new Error(
+      step && !ROUTINE_CONFIRMED_CATEGORIES.has(step.category) ? OWN_TAB_STEP_MESSAGE : OWN_TAB_READING_MESSAGE,
+    );
   }
 }
 
@@ -1982,9 +1986,11 @@ const DESCRIBE_ALL_IN_PAGE = new Function(
 // says that cover is a cookie or consent notice: a container whose id, class,
 // label or title names it (`request.consent`, the describer's words), or a
 // small one close by whose text speaks of cookies. `cover` names what is
-// there: the tag, role and name of the nearest element around the point that
-// has a role, a name or is a control (a picker's dialog, not one of its days;
-// a carousel's link), else of the element there.
+// there: the tag, role and label of the nearest element around the point that
+// has a role, a label or is a control (a picker's dialog, not one of its days;
+// a carousel's link), else of the element there. Its label is only what the
+// page gives it as one (aria-label, aria-labelledby, title, alt), never its
+// text: that can hold what no reading shows (a style sheet, a hidden part).
 function clickLandingInPage(element, request) {
   const view = element.ownerDocument.defaultView;
   let point = null;
@@ -2051,7 +2057,6 @@ function clickLandingInPage(element, request) {
     .slice(0, 8)
     .map((id) => (doc.getElementById(id) && doc.getElementById(id).textContent) || "")
     .join(" ");
-  const picture = cover.querySelector("img[alt]");
   const coverName = roots.includes(cover)
     ? ""
     : [
@@ -2059,8 +2064,6 @@ function clickLandingInPage(element, request) {
       labelledText,
       cover.getAttribute("title"),
       cover.getAttribute("alt"),
-      typeof cover.textContent === "string" ? cover.textContent.slice(0, 2_000) : "",
-      picture && picture.getAttribute("alt"),
     ].map(squeeze).find(Boolean) || "";
   return {
     other: false,
@@ -3674,6 +3677,19 @@ async function clickLanding(target) {
 // after a short settle refuses the step at once, in words, where Playwright
 // would wait out its timeout.
 async function clickControlItself(page, target) {
+  const landing = await settledLanding(page, target);
+  if (landing.other) {
+    throw new Error(
+      `A click in the middle of ${quotedControlLabel(target.description)} would land on something else inside it (another control, or a frame), so nothing was done. Click that control itself, or another control, from a fresh snapshot.`,
+    );
+  }
+  await refuseCovered(page, target, landing);
+  await target.locator.click();
+}
+
+// Where a click on the control lands, once it is in view and what covers it
+// had a moment to go.
+async function settledLanding(page, target) {
   await target.locator.scrollIntoViewIfNeeded();
   let landing = await clickLanding(target);
   if (landing && landing.covered === true) {
@@ -3687,25 +3703,64 @@ async function clickControlItself(page, target) {
     landing = await clickLanding(target);
   }
   if (!landing) throw controlChanged();
-  if (landing.other) {
-    throw new Error(
-      `A click in the middle of ${quotedControlLabel(target.description)} would land on something else inside it (another control, or a frame), so nothing was done. Click that control itself, or another control, from a fresh snapshot.`,
-    );
-  }
-  if (landing.covered === true) {
-    throw new Error(
-      landing.consent === true
-        ? CONSENT_COVER_MESSAGE
-        : `Something else on the page covers ${quotedControlLabel(target.description)}${await coverWords(page, landing.cover)}, so nothing was clicked. Take a fresh snapshot and try once more.`,
-    );
-  }
-  await target.locator.click();
+  return landing;
 }
 
-// What covers a control, for a covered click's words: the tag, role and name
+// A covered click is refused in words that name the cover. The first time a
+// cover takes a control on its page, they say to try once more, and the page
+// keeps a mark of it (coveredBefore); the next time, the step is left to the
+// person. Told only to try again, a turn would ask the person again at every
+// try under a cover that stays.
+async function refuseCovered(page, target, landing) {
+  if (landing.covered !== true) return;
+  if (landing.consent === true) throw new Error(CONSENT_COVER_MESSAGE);
+  const control = quotedControlLabel(target.description);
+  const cover = await coverWords(page, landing.cover);
+  throw new Error(
+    (await coveredBefore(target, { mark: true }))
+      ? `Something else on the page still covers ${control}${cover}, so nothing was clicked. Leave this step to the person and tell them what covers it.`
+      : `Something else on the page covers ${control}${cover}, so nothing was clicked. Take a fresh snapshot and try once more.`,
+  );
+}
+
+// A control a cover took once on its page is looked at again before anyone
+// is asked: one a cover still takes is left to the person at once, so the
+// person is never asked again for a click that cannot land.
+async function refuseStillCovered(page, target) {
+  if (!(await coveredBefore(target))) return;
+  const landing = await settledLanding(page, target);
+  if (!landing.other) await refuseCovered(page, target, landing);
+}
+
+// Runs inside the page. Whether a cover took the control on this page before,
+// marking it now with `request.mark`. The mark is the document's, like the
+// withheld mark (withholdDocumentInPage): the page cannot take it away, and a
+// new page loads without it. A document the page froze reads as marked.
+function coveredBeforeInPage(element, request) {
+  const doc = element.ownerDocument;
+  const key = Symbol.for(request.key);
+  const before = Object.getOwnPropertyDescriptor(doc, key) !== undefined || !Object.isExtensible(doc);
+  if (!before && request.mark === true) Object.defineProperty(doc, key, { value: true });
+  return before;
+}
+
+const COVERED_CONTROL_KEY = "instafy.sharedBrowser.coveredControl";
+// A page that cannot be asked counts as marked.
+async function coveredBefore(target, { mark = false } = {}) {
+  const before = await target.locator
+    .evaluate(coveredBeforeInPage, {
+      kind: "covered-mark",
+      key: `${COVERED_CONTROL_KEY}.${targetFingerprint(target.description)}`,
+      mark,
+    })
+    .catch(() => true);
+  return before === true;
+}
+
+// What covers a control, for a covered click's words: the tag, role and label
 // the page gives it ("<div role=\"dialog\"> named \"Choose a time\"", a page's
 // own date picker), so the next try can close it or wait for it to go. The
-// name is the page's text: it is left out on a page that may show a secret,
+// label is the page's words: it is left out on a page that may show a secret,
 // as a list's options are.
 async function coverWords(page, cover) {
   const tag = typeof cover?.tag === "string" && /^[a-z][a-z0-9-]{0,40}$/.test(cover.tag) ? cover.tag : "";
@@ -5157,7 +5212,6 @@ function refuseUngivenAddress(url) {
 // Keeps the addresses a page gives, for refuseUngivenAddress: its own, its
 // links' and the addresses its text spells out. A page that may show a secret
 // gives them too: only their fingerprints are kept.
-const TEXT_ADDRESS_PATTERN = /https?:\/\/[^\s"'<>()[\]{}]+/giu;
 function rememberGivenAddresses(rawUrl, interactive, text) {
   const links = interactive.map(({ description }) => {
     try {
@@ -5166,8 +5220,45 @@ function rememberGivenAddresses(rawUrl, interactive, text) {
       return null;
     }
   });
-  const spelled = Array.from(String(text || "").matchAll(TEXT_ADDRESS_PATTERN), (match) => match[0].replace(/[.,;:!?]+$/u, ""));
-  approvalProtocol.rememberGiven([rawUrl, ...links, ...spelled].filter(Boolean));
+  approvalProtocol.rememberGiven([rawUrl, ...links, ...addressesInText(text)].filter(Boolean));
+}
+
+// The addresses a text spells out, read as runtime-agent reads a task's
+// (`given_addresses_in_text`): each http(s) address, and each site name with a
+// path written without a scheme ("visitporto.travel/en/lello"), read as https.
+const ADDRESS_WORD_DELIMITERS = /[\s<>"'`[\]{}“”‘’«»]+/u;
+const SITE_NAME_LABEL = /^[A-Za-z0-9-]+$/u;
+function addressesInText(text) {
+  const addresses = [];
+  for (const word of String(text || "").slice(0, 64 * 1024).split(ADDRESS_WORD_DELIMITERS)) {
+    const start = word.search(/https?:\/\//iu);
+    if (start >= 0) {
+      addresses.push(addressEnd(word.slice(start)));
+    } else if (!word.includes("://")) {
+      const address = addressEnd(word.replace(/^\(+/u, ""));
+      const slash = address.indexOf("/");
+      const labels = slash > 0 ? address.slice(0, slash).split(".") : [];
+      if (
+        labels.length >= 2 &&
+        labels.every((label) => SITE_NAME_LABEL.test(label)) &&
+        /^[A-Za-z]{2,}$/u.test(labels.at(-1))
+      ) {
+        addresses.push(`https://${address}`);
+      }
+    }
+  }
+  return addresses;
+}
+
+// An address as a sentence holds it, less the sentence's own marks after it
+// and a closing parenthesis it does not open itself: "(see
+// https://example.org/a)", but "https://en.wikipedia.org/wiki/Mercury_(planet)".
+function addressEnd(word) {
+  let address = word.replace(/[.,;:!?]+$/u, "");
+  while (address.endsWith(")") && address.split(")").length > address.split("(").length) {
+    address = address.slice(0, -1).replace(/[.,;:!?]+$/u, "");
+  }
+  return address;
 }
 
 // Stops what the page is still loading, as the browser's stop button does; true
@@ -5721,7 +5812,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       assertMayOpen(rawDestination);
     }
     refuseNewWindowOrNestedSubmission(clickSubmission);
-    refuseUnlessReadingStep(readingStep, OWN_TAB_STEP_MESSAGE);
+    refuseUnlessReadingStep(readingStep, step);
+    await refuseStillCovered(page, target);
     if (
       destination.destinationOrigin &&
       destination.destinationOrigin !== sourceOrigin
@@ -5831,7 +5923,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const freeSearch = submitting && documents !== null && (await freeSiteSearch(page, target, body.text));
     const readingStep = freeSearch ||
       (!submitting && routineCovers(step, target.description, { consequential: false }));
-    refuseUnlessReadingStep(readingStep, submitting ? OWN_TAB_STEP_MESSAGE : OWN_TAB_READING_MESSAGE);
+    refuseUnlessReadingStep(readingStep, submitting ? step : null);
     const approvedTargetFingerprint = targetFingerprint(target.description);
     const destination = approvalProtocol.destinationBinding(rawDestination);
     if (submitting) {
@@ -6052,7 +6144,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // browsing; every other activation key asks.
     const freeSearch = pressKey === "Enter" && documents !== null && (await freeSiteSearch(page, target, null));
     const readingStep = freeSearch || (!activationKey && routineCovers(step, target.description));
-    refuseUnlessReadingStep(readingStep, activationKey ? OWN_TAB_STEP_MESSAGE : OWN_TAB_READING_MESSAGE);
+    refuseUnlessReadingStep(readingStep, activationKey ? step : null);
     const destination = approvalProtocol.destinationBinding(rawDestination);
     if (activationKey) {
       if (

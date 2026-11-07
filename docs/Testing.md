@@ -1699,10 +1699,13 @@ prompt names the form as it is now. The twin left once the copy Octo read went
 before the step is not used either: nobody is asked, and the step is refused
 by its name as one the page changed under. A take-over while the prompt waits still
 ends the step, and a page that left its site after the yes ends the run with
-`approval_stale`. The planner's button under the page's own time picker, or
-under a carousel's slide laid over the page, is refused at once after the yes,
-naming the cover by its tag, role and name, with nothing sent; once the cover
-goes, the next try asks again and runs.
+`approval_stale`. The planner's button under the page's own time picker,
+under a carousel's slide laid over the page, or under a banner with no name
+whose markup holds a style sheet and hidden words, is refused at once after the
+yes, naming the cover by its tag, role and label and never by its text, with
+nothing sent; once the cover goes, the next try asks again and runs. Under a
+cover that stays, the first refusal says to try once more, and every later try
+on that page is left to the person before anyone is asked.
 
 After it, `scripts/shared-browser-page-reading-e2e.mjs` reads loopback pages
 whose parts a reading could hide. A details' summary and a tab out of the tab
@@ -1741,7 +1744,7 @@ a sign-in field or with a frame holding card fields, and a dialog about a
 privacy policy on the person's signed-in page that never speaks of cookies are
 left alone. A click under a consent notice the browser could not decline, or
 under a loading screen, is refused at once in words with no call log (the
-loading screen named by its tag and the text it shows, with "try once more"),
+loading screen named by its tag alone, with "try once more"),
 and a cover that goes a moment after the page moves is waited for. A cookie notice
 with a settings link and an accept but no reject is the person's step: a click
 under it and a press of its accept are refused in the same words, which the

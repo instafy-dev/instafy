@@ -709,6 +709,11 @@ const bodyTextFor = (currentUrl, targetId) => {
     return `Script-written blank ${CANARY}`;
   }
   if (mode === "canary-text") return `Order note ${CANARY} for the fixture`;
+  // A page whose text spells out addresses, one without a scheme and one
+  // with a parenthesis of its own, inside a parenthesis of the sentence's.
+  if (mode === "spelled-addresses") {
+    return "Fixture page\nTickets: www.reviews.example/laptops/four.\nBackground (see https://en.wikipedia.org/wiki/Mercury_(planet)).";
+  }
   if (mode === "secret-screen" || mode === "station-list-secret-screen" || mode === "cookie-banner-secret") return `Production key ${CANARY}`;
   // innerText also holds text a person cannot see, such as a collapsed menu.
   if (mode === "hidden-controls") return "Fixture page\nKontenplan";
@@ -3679,16 +3684,33 @@ async fn an_address_that_did_not_answer_is_not_opened_again_in_that_chat_for_ten
     end_chat_browser_run(run);
 }
 
-/// A chat's browser run as runtime-agent starts it, with its record of the
-/// addresses it was given: those `task` names and those the chat's earlier
-/// runs were given.
+/// A chat's browser run as runtime-agent starts it for a job with `payload`
+/// (`acquire`'s own run start), with its record of the addresses it was given:
+/// those the job's task and the chat's history name and those the chat's
+/// earlier runs were given.
 fn chat_browser_run_given(
     fixture: &EmbeddedControllerFixture,
     chat: Uuid,
-    task: &str,
+    payload: JsonValue,
 ) -> (SharedBrowserAgentControlGuard, JobCancelSignal) {
-    let (guard, cancel_signal) = chat_browser_run(fixture, chat, unix_time_millis());
-    guard.start_given_addresses(&given_addresses_in_text(task));
+    let cancel_signal = JobCancelSignal::new();
+    let mut guard = SharedBrowserAgentControlGuard::acquire_with_path(
+        fixture.authority_path.clone(),
+        fixture.approval_dir.clone(),
+        ApprovalStart::Routine,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        "page-target",
+        "Octo",
+        cancel_signal.clone(),
+        Duration::from_secs(60),
+    )
+    .expect("a chat's browser run");
+    guard.start_chat_records(
+        Some(chat),
+        unix_time_millis(),
+        &given_addresses_from_payload(&payload),
+    );
     (guard, cancel_signal)
 }
 
@@ -3731,7 +3753,7 @@ async fn an_address_no_message_or_page_gave_is_not_opened() {
     let run = chat_browser_run_given(
         &fixture,
         chat,
-        "Compare the laptops (read https://www.reviews.example/laptops/one?ref=chat and reviews.example/laptops/two).",
+        json!({ "prompt_text": "Compare the laptops (read https://www.reviews.example/laptops/one?ref=chat and reviews.example/laptops/two)." }),
     );
     // A made-up review on the same site: refused, and nothing loads, in the
     // chat's own tab and as a tab of Octo's own.
@@ -3779,15 +3801,55 @@ async fn an_address_no_message_or_page_gave_is_not_opened() {
     end_chat_browser_run(run);
 
     // The chat's next turn opens what the earlier one was given.
-    let run = chat_browser_run_given(&fixture, chat, "Fill in what's still missing.");
+    let run = chat_browser_run_given(
+        &fixture,
+        chat,
+        json!({ "prompt_text": "Fill in what's still missing." }),
+    );
     payload_of(&navigate("https://example.test/reports/q3"));
     payload_of(&navigate("https://reviews.example/laptops/one"));
     end_chat_browser_run(run);
 
     // Another chat's turn was given none of it.
-    let run = chat_browser_run_given(&fixture, Uuid::new_v4(), "Read the report.");
+    let run = chat_browser_run_given(
+        &fixture,
+        Uuid::new_v4(),
+        json!({ "prompt_text": "Read the report." }),
+    );
     let words = failure(&navigate("https://example.test/reports/q3"));
     assert!(words.contains(&made_up("https://example.test")), "{words}");
+    // A page gives the addresses its text spells out, with a scheme or
+    // without, a parenthesis that is part of one included.
+    payload_of(&fixture.call("spelled-addresses", "GET", "/v1/snapshot", None));
+    payload_of(&navigate("https://www.reviews.example/laptops/four"));
+    payload_of(&navigate("https://en.wikipedia.org/wiki/Mercury_(planet)"));
+    end_chat_browser_run(run);
+
+    // A chat's history gives what the person said in it and what its browser
+    // turns were asked and read, as a runtime that started again finds it
+    // (another chat here: nothing in this process carries over to it). A
+    // building turn's own reply gives nothing.
+    let run = chat_browser_run_given(
+        &fixture,
+        Uuid::new_v4(),
+        json!({
+            "prompt_text": "Use the browser to check its battery.",
+            "conversation_history": [
+                { "role": "user", "content": "Here's the review: https://reviews.example/laptops/five" },
+                { "role": "assistant", "content": "Its maker's page is https://maker.example/laptops/five, I think." },
+                { "role": "user", "lane": "browser", "content": "Read the maker's specs." },
+                {
+                    "role": "assistant",
+                    "lane": "browser",
+                    "content": "{\"url\": \"https://maker.example/laptops/five/specs\", \"title\": \"Specs\", \"facts\": [\"Battery: 61 Wh\"]}",
+                },
+            ],
+        }),
+    );
+    payload_of(&navigate("https://reviews.example/laptops/five"));
+    payload_of(&navigate("https://maker.example/laptops/five/specs"));
+    let words = failure(&navigate("https://maker.example/laptops/five"));
+    assert!(words.contains(&made_up("https://maker.example")), "{words}");
     end_chat_browser_run(run);
 }
 
@@ -3823,6 +3885,18 @@ fn a_tasks_addresses_are_kept_by_their_site_and_path() {
     assert_eq!(
         given_addresses_from_payload(&json!({ "prompt_text": "Open https://example.test/a b" })),
         vec![key("example.test/a")]
+    );
+    // A parenthesis is part of an address only when the address opens it.
+    assert_eq!(
+        given_addresses_in_text(
+            "Read https://en.wikipedia.org/wiki/Mercury_(planet). (See https://example.org/a), (visitporto.travel/en/lello) and https://example.org/b_(c))."
+        ),
+        vec![
+            key("en.wikipedia.org/wiki/Mercury_(planet)"),
+            key("example.org/a"),
+            key("visitporto.travel/en/lello"),
+            key("example.org/b_(c)"),
+        ]
     );
 }
 
@@ -8754,7 +8828,8 @@ fn a_routine_start_reads_headlines_whose_verb_is_also_a_button_word() {
         assert!(requests.is_empty(), "{mode} asked: {requests:?}");
     }
     // The same words where a button puts its verb still ask, so Octo's tab
-    // refuses them.
+    // refuses them, and leaves a deletion, a payment and a message to the
+    // person.
     for mode in [
         "button:Elimina account",
         "button:Paga ora",
@@ -8764,7 +8839,7 @@ fn a_routine_start_reads_headlines_whose_verb_is_also_a_button_word() {
         let (output, requests) =
             fixture.call_deciding(mode, "POST", "/v1/click", Some(&body), &["deny"]);
         let refused = failure_of(&output);
-        assert!(refused.contains(OWN_TAB_STEP_WORDS), "{mode}: {refused}");
+        assert!(refused.contains(OWN_TAB_READING_WORDS), "{mode}: {refused}");
         assert!(requests.is_empty(), "{mode} asked: {requests:?}");
     }
 }
@@ -9859,6 +9934,8 @@ fn the_continued_run_is_read_from_studio_metadata_and_nothing_else_names_one() {
 
 /// What a step Octo's own tabs do not take answers: where to take it instead.
 const OWN_TAB_STEP_WORDS: &str = "Octo's own tabs don't take this step, so nothing was done there. Open this page in the chat's own tab with navigate (its tabId is the one list_tabs shows opened by the person) and take the step there; the browser asks the person as usual.";
+/// What a step with a named risk in Octo's own tabs answers: it is the person's.
+const OWN_TAB_READING_WORDS: &str = "Octo's own tabs are for reading, so this step was not performed there. Leave it to the person, or take it on the page they chose when they asked for it.";
 
 #[test]
 fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
@@ -9873,17 +9950,51 @@ fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
             .to_string()
     };
 
-    for (mode, path, extra) in [
-        ("form-submit-input", "/v1/click", json!({})),
-        ("save-button", "/v1/click", json!({})),
-        ("export-link", "/v1/click", json!({})),
-        ("invite-button", "/v1/click", json!({})),
+    // A step with no named risk (a form post, a commit button, a search sent
+    // by typing, an activation key) is sent to the chat's own tab, where the
+    // browser asks the person as usual: a turn that read a journey planner in
+    // its own tab stopped at the planner's button and never ran it. A named
+    // risk (a download, an access change, a key change) stays the person's,
+    // in the words it had.
+    for (mode, path, extra, words) in [
+        (
+            "form-submit-input",
+            "/v1/click",
+            json!({}),
+            OWN_TAB_STEP_WORDS,
+        ),
+        ("save-button", "/v1/click", json!({}), OWN_TAB_STEP_WORDS),
         (
             "safe",
             "/v1/type",
             json!({ "text": "hotels near the station", "submit": true }),
+            OWN_TAB_STEP_WORDS,
         ),
-        ("safe", "/v1/press", json!({ "key": "Enter" })),
+        (
+            "safe",
+            "/v1/press",
+            json!({ "key": "Enter" }),
+            OWN_TAB_STEP_WORDS,
+        ),
+        ("export-link", "/v1/click", json!({}), OWN_TAB_READING_WORDS),
+        (
+            "invite-button",
+            "/v1/click",
+            json!({}),
+            OWN_TAB_READING_WORDS,
+        ),
+        (
+            "generate-key",
+            "/v1/click",
+            json!({}),
+            OWN_TAB_READING_WORDS,
+        ),
+        (
+            "invite-button",
+            "/v1/press",
+            json!({ "key": "Enter" }),
+            OWN_TAB_READING_WORDS,
+        ),
     ] {
         let snapshot_id = snapshot_in(mode);
         let mut body = json!({ "index": 0, "snapshotId": snapshot_id });
@@ -9893,14 +10004,13 @@ fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
         let (output, requests) =
             fixture.call_deciding(mode, "POST", path, Some(&body.to_string()), &["allow_once"]);
         let error = failure_of(&output);
-        // It sends the step to the chat's own tab, where the browser asks the
-        // person as usual: a turn that read a journey planner in its own tab
-        // stopped at the planner's button and never ran it.
-        assert!(error.contains(OWN_TAB_STEP_WORDS), "{mode} {path}: {error}");
-        assert!(
-            !error.contains("Leave it to the person"),
-            "{mode} {path}: {error}"
-        );
+        assert!(error.contains(words), "{mode} {path}: {error}");
+        let other = if words == OWN_TAB_STEP_WORDS {
+            OWN_TAB_READING_WORDS
+        } else {
+            OWN_TAB_STEP_WORDS
+        };
+        assert!(!error.contains(other), "{mode} {path}: {error}");
         assert!(requests.is_empty(), "{mode} {path} asked: {requests:?}");
     }
     assert!(
@@ -9932,10 +10042,7 @@ fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
         Some(r#"{"url":"https://example.test/logout"}"#),
     ));
     // A risky address is left to the person, in the words it had.
-    assert!(
-        risky.contains("Octo's own tabs are for reading, so this step was not performed there. Leave it to the person, or take it on the page they chose when they asked for it."),
-        "{risky}"
-    );
+    assert!(risky.contains(OWN_TAB_READING_WORDS), "{risky}");
 
     // Reading steps still run there: typing that does not submit, a plain click.
     let typed = payload_of(

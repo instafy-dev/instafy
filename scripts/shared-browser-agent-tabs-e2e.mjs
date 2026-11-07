@@ -171,9 +171,10 @@ export async function runSharedBrowserAgentTabsFixture() {
     const reviewer = await listenSite("reviews", reviewRoutes);
     servers.push(reviewer.server);
     const reviewsSite = `http://reviews.test:${reviewer.server.address().port}`;
+    reviewRoutes["/wiki/Mercury_(planet)"] = { title: "Mercury", body: "<p>The smallest planet.</p>" };
     reviewRoutes["/"] = {
       title: "Reviews",
-      body: `<p><a href="/laptops/one">Laptop One review</a></p><p>Our Laptop Two review is at ${reviewsSite}/laptops/two.</p>`,
+      body: `<p><a href="/laptops/one">Laptop One review</a></p><p>Our Laptop Two review is at ${reviewsSite}/laptops/two.</p><p>Background (see ${reviewsSite}/wiki/Mercury_(planet)).</p>`,
     };
 
     context = await chromium.launchPersistentContext(profileDirectory, {
@@ -333,13 +334,15 @@ export async function runSharedBrowserAgentTabsFixture() {
     assert.equal(navigation.at(-1).pageId, firstTab, "The action feed shows the step in Octo's tab");
 
     // 2. Octo's tabs are for reading: a form submission is refused before
-    // any prompt, and the site never receives it. The refusal says to take
-    // the step in the chat's own tab (see 14).
+    // any prompt, and the site never receives it. An order is a purchase, a
+    // named risk, so it is left to the person; a step with no named risk is
+    // sent to the chat's own tab (see 14).
     const before = prompts.length;
     const snapshot = await ok("GET", "/v1/snapshot");
     const order = snapshot.interactiveElements.find((element) => element.label === "Place order");
     assert.ok(order, "The order button is observed");
-    await refused(OWN_TAB_STEP, "POST", "/v1/click", { index: order.index, snapshotId: snapshot.snapshotId }, ["allow_once"]);
+    const orderWords = await refused(/Octo's own tabs are for reading, so this step was not performed there\. Leave it to the person/u, "POST", "/v1/click", { index: order.index, snapshotId: snapshot.snapshotId }, ["allow_once"]);
+    assert.doesNotMatch(orderWords, OWN_TAB_STEP);
     assert.equal(prompts.length, before, "A refused step shows no prompt");
     assert.ok(!sources.requests.some((request) => request.startsWith("POST")), "The site received no submission");
 
@@ -654,7 +657,11 @@ export async function runSharedBrowserAgentTabsFixture() {
     await ok("POST", "/v1/navigate", { url: `${reviewsSite}/laptops/two` }, []);
     const named = await ok("POST", "/v1/navigate", { url: `${reviewsSite}/laptops/named?from=chat` }, []);
     assert.match(named.visibleText, /Battery: 10 hours/u);
-    assert.deepEqual(reviewer.requests, ["GET /", "GET /laptops/one", "GET /laptops/two", "GET /laptops/named?from=chat"]);
+    // An address whose own parenthesis the text spells out, inside one of the
+    // sentence's.
+    const planet = await ok("POST", "/v1/navigate", { url: `${reviewsSite}/wiki/Mercury_(planet)` }, []);
+    assert.match(planet.visibleText, /The smallest planet/u);
+    assert.deepEqual(reviewer.requests, ["GET /", "GET /laptops/one", "GET /laptops/two", "GET /laptops/named?from=chat", "GET /wiki/Mercury_(planet)"]);
     // The refusals that come before it stay as they were: a link-only site
     // keeps its own words, and an address on no public site (the fixture's
     // loopback pages) is left to the browser's network rules.
@@ -691,7 +698,7 @@ export async function runSharedBrowserAgentTabsFixture() {
         "a plain navigation asks at most once, and its prompt names the exact page",
         "take over mid-prompt, Let Octo continue keeps the page's approvals, and one answer completes an approved navigation",
         "a planner's button in Octo's tab is refused before any prompt, saying to take the step in the chat's own tab, where navigate with its tabId opens the planner and the button asks once and runs",
-        "an address no message and no page gave is refused by navigate and open_tab before any prompt or load; the site's root, a page's link, an address its text spells out and one the task named open; a link-only site and a loopback address are judged as before",
+        "an address no message and no page gave is refused by navigate and open_tab before any prompt or load; the site's root, a page's link, addresses its text spells out (one with a parenthesis of its own) and one the task named open; a link-only site and a loopback address are judged as before",
       ],
       limitations: [
         "No model, Studio UI, origin keep endpoint or runtime shutdown guard; those are unit-tested.",

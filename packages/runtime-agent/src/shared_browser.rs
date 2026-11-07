@@ -1038,9 +1038,10 @@ fn write_unanswered_addresses(
 /// when one of them gave it, so a turn never opens an address it made up (one
 /// opened two article addresses it guessed on a reviewer's site, and waited 20
 /// seconds on one of them). The guard starts it with the addresses the run's
-/// task names ([`given_addresses_from_payload`]) and those the chat's earlier
-/// runs on this browser were given; the controller script adds each page the
-/// run reads, its own address and its links. Kept as fingerprints
+/// task, the person's messages and the chat's browser turns name
+/// ([`given_addresses_from_payload`]) and those the chat's earlier runs on this
+/// browser were given; the controller script adds each page the run reads, its
+/// own address, its links and the addresses its text spells out. Kept as fingerprints
 /// ([`given_address_key`]), newest last. `assets/shared-browser-approval.js`
 /// holds the same bounds and key.
 const GIVEN_ADDRESSES_FILE: &str = "given.json";
@@ -1054,8 +1055,9 @@ const MAX_TASK_TEXT_BYTES: usize = 64 * 1024;
 
 /// The addresses each chat's runs were given, by approval directory and chat,
 /// the chat that ran last at the end. Kept in this process only: a runtime
-/// that starts again carries nothing, and a turn then finds a page again from
-/// its site's root.
+/// that starts again has only what the chat's history names
+/// ([`given_addresses_from_payload`]), and a turn finds any other page again
+/// from its site's root.
 static GIVEN_ADDRESSES: Mutex<Vec<((PathBuf, Uuid), Vec<String>)>> = Mutex::new(Vec::new());
 
 /// The fingerprint a given address is kept by: the first 32 hex digits of the
@@ -1087,21 +1089,37 @@ fn given_address_key(url: &reqwest::Url) -> Option<String> {
     )
 }
 
-/// The fingerprints of the addresses a browser turn's task names (the job's
-/// `prompt_text`: the person's message, or the task a card or the routing step
-/// wrote for the browser). A site's root needs none: it always opens.
+/// The fingerprints of the addresses a browser turn was given before it
+/// starts: those its task names (the job's `prompt_text`: the person's message,
+/// or the task a card or the routing step wrote for the browser), those the
+/// person's earlier messages in the chat name, and those of the chat's browser
+/// turns (`lane: "browser"` entries: what each was asked, its reply and its
+/// finding lines, the pages it read), which a runtime that started again no
+/// longer holds. A building turn's own replies give none. A site's root needs
+/// none: it always opens.
 pub fn given_addresses_from_payload(payload: &JsonValue) -> Vec<String> {
-    given_addresses_in_text(
-        payload
-            .get("prompt_text")
-            .and_then(JsonValue::as_str)
-            .unwrap_or_default(),
+    let text = |entry: &JsonValue, key: &str| entry.get(key).and_then(JsonValue::as_str);
+    let earlier = payload
+        .get("conversation_history")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| {
+            text(entry, "role") == Some("user") || text(entry, "lane") == Some("browser")
+        })
+        .filter_map(|entry| text(entry, "content"));
+    let task = text(payload, "prompt_text").unwrap_or_default();
+    newest_given_addresses(
+        earlier
+            .chain(std::iter::once(task))
+            .flat_map(given_addresses_in_text),
     )
 }
 
 /// The fingerprints of the addresses `text` names: each `http(s)://` address,
 /// and each site name with a path written without one
-/// ("visitporto.travel/en/lello"), read as `https`.
+/// ("visitporto.travel/en/lello"), read as `https`. The controller script reads
+/// the addresses a page's text spells out the same way (`addressesInText`).
 fn given_addresses_in_text(text: &str) -> Vec<String> {
     let mut end = text.len().min(MAX_TASK_TEXT_BYTES);
     while !text.is_char_boundary(end) {
@@ -1115,8 +1133,6 @@ fn given_addresses_in_text(text: &str) -> Vec<String> {
                     | '"'
                     | '\''
                     | '`'
-                    | '('
-                    | ')'
                     | '['
                     | ']'
                     | '{'
@@ -1131,18 +1147,19 @@ fn given_addresses_in_text(text: &str) -> Vec<String> {
     };
     let mut keys = Vec::new();
     for word in text[..end].split(delimiter) {
-        let word = word.trim_end_matches(['.', ',', ';', ':', '!', '?']);
         let lower = word.to_ascii_lowercase();
         let scheme_at = ["http://", "https://"]
             .iter()
             .filter_map(|scheme| lower.find(scheme))
             .min();
         let address = match scheme_at {
-            Some(start) => reqwest::Url::parse(&word[start..]).ok(),
-            None if !word.contains("://") && word.contains('/') => {
+            Some(start) => reqwest::Url::parse(address_end(&word[start..])).ok(),
+            None if !word.contains("://") => {
+                let word = address_end(word.trim_start_matches('('));
                 let host = word.split('/').next().unwrap_or_default();
                 let labels: Vec<&str> = host.split('.').collect();
-                let site_name = labels.len() >= 2
+                let site_name = word.contains('/')
+                    && labels.len() >= 2
                     && labels.iter().all(|label| {
                         !label.is_empty()
                             && label
@@ -1165,6 +1182,18 @@ fn given_addresses_in_text(text: &str) -> Vec<String> {
         }
     }
     newest_given_addresses(keys)
+}
+
+/// An address as a sentence holds it, less the sentence's own marks after it
+/// and a closing parenthesis it does not open itself: "(see
+/// https://example.org/a)", but "https://en.wikipedia.org/wiki/Mercury_(planet)".
+fn address_end(word: &str) -> &str {
+    let marks = ['.', ',', ';', ':', '!', '?'];
+    let mut address = word.trim_end_matches(marks);
+    while address.ends_with(')') && address.matches(')').count() > address.matches('(').count() {
+        address = address[..address.len() - 1].trim_end_matches(marks);
+    }
+    address
 }
 
 /// One entry for each address of `addresses` (where it came last), newest
@@ -1575,8 +1604,8 @@ impl SharedBrowserAgentControlGuard {
     /// Studio's Let Octo continue names: its grants carry over only as
     /// [`take_continued_run_grants`] allows. `chat` is the job's conversation,
     /// whose addresses that did not answer the run starts with, and whose
-    /// given addresses it starts with beside `given`, those its own task names
-    /// ([`given_addresses_from_payload`]).
+    /// given addresses it starts with beside `given`, those its own task and
+    /// its chat's history name ([`given_addresses_from_payload`]).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn acquire(
         run_id: Uuid,
@@ -1601,16 +1630,24 @@ impl SharedBrowserAgentControlGuard {
             cancel_signal,
         )?;
         guard.start_window_watch();
-        guard.carry_unanswered_addresses(chat, unix_time_millis());
-        guard.start_given_addresses(given);
+        guard.start_chat_records(chat, unix_time_millis(), given);
         Ok(guard)
     }
 
-    /// Starts the run's record of the addresses it was given: those its own
-    /// task names and those its chat's earlier runs on this browser were
-    /// given. Every run has one, empty or not: the controller script refuses a
-    /// made-up address only in a run that has it, so one that cannot be
-    /// written leaves the run without that check.
+    /// Starts the run's records of its chat: the addresses that did not answer
+    /// in the chat's earlier runs ([`Self::carry_unanswered_addresses`]), and
+    /// the addresses the run was given ([`Self::start_given_addresses`]).
+    fn start_chat_records(&mut self, chat: Option<Uuid>, now_ms: u64, given: &[String]) {
+        self.carry_unanswered_addresses(chat, now_ms);
+        self.start_given_addresses(given);
+    }
+
+    /// Starts the run's record of the addresses it was given: `given` (those
+    /// its task and its chat's history name, [`given_addresses_from_payload`])
+    /// and those its chat's earlier runs on this browser were given. Every run
+    /// has one, empty or not: the controller script refuses a made-up address
+    /// only in a run that has it, so one that cannot be written leaves the run
+    /// without that check.
     fn start_given_addresses(&self, task: &[String]) {
         let earlier = self
             .chat

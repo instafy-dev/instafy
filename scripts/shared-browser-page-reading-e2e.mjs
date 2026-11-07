@@ -843,10 +843,11 @@ export async function runSharedBrowserPageReadingFixture() {
     reading = await read("/reading/covered");
     const underCover = await runTool("POST", "/v1/click", { index: control(reading, "All lines").index, snapshotId: reading.snapshotId });
     assert.equal(underCover.code, 1, underCover.stdout);
-    // It names the cover, by its tag and the name it shows, and says to try
-    // once more, never to read on without it.
+    // It names the cover by its tag (a loading screen has no label, and its
+    // text is never read for one), and says to try once more, never to read
+    // on without it.
     assert.ok(
-      underCover.stderr.includes('Something else on the page covers "All lines" (<div> named "Loading departures"), so nothing was clicked. Take a fresh snapshot and try once more.'),
+      underCover.stderr.includes('Something else on the page covers "All lines" (<div>), so nothing was clicked. Take a fresh snapshot and try once more.'),
       underCover.stderr,
     );
     assert.doesNotMatch(underCover.stderr, /read on without it/u);
