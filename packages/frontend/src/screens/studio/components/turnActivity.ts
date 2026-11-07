@@ -554,7 +554,7 @@ type Group = {
   pageKeys: Set<string> | null;
   /** Its steps that named no page key. */
   unkeyed: number;
-  /** One kind of browser step on more than two sites, as one group: how many sites. */
+  /** Pages opened and read on more than one site, as one group: how many sites. */
   sites?: number;
 };
 
@@ -615,25 +615,6 @@ function groupWords(group: Group, previousHost: string | null): string {
       };
   }
   return doneWords(done, groupCount(group), host);
-}
-
-/**
- * One phrase for the same step done once on each of two sites, when its words
- * name the site as what was done ("opened {host}": "opened phoronix.com and
- * pcworld.com"); null for words that would read as one page on both ("read a
- * page on {host}"), or for two different steps.
- */
-function sameStepOnTwoSites(first: Group, second: Group): string | null {
-  const done = first.entry.done as ActivityDone;
-  const once = typeof done === "string" ? done : done.one;
-  if (
-    first.entry.key !== second.entry.key || !first.entry.host || !second.entry.host ||
-    groupCount(first) !== 1 || groupCount(second) !== 1 ||
-    !once.endsWith("{host}") || once.endsWith(" on {host}")
-  ) {
-    return null;
-  }
-  return once.replace("{host}", `${displayActivityHost(first.entry.host)} and ${displayActivityHost(second.entry.host)}`);
 }
 
 /**
@@ -740,7 +721,7 @@ function summarizeGroups(steps: TurnStep[]): { phrases: string[]; firstHost: str
   const namesASite = [...groups.values(), ...startPage.values()].some(
     (group) => group.entry.key.startsWith("browser/") && group.entry.host,
   );
-  mergeManySites(groups);
+  mergePages(groups);
   const all = [...groups.values()];
   const weight = (group: Group) => groupCount(group) ?? group.members;
   const contentGroups = all.filter(
@@ -770,8 +751,8 @@ function summarizeGroups(steps: TurnStep[]): { phrases: string[]; firstHost: str
   // A site the turn did as much on as the second one the line names lost its
   // place only to the later one: when it is the only one, and the first place
   // is clear, the line names it too, beside that site, in the order they ran
-  // ("Opened phoronix.com and pcworld.com, opened 4 pages on frame.work").
-  // With more of them, none is picked over the others.
+  // ("Searched phoronix.com, searched pcworld.com, opened 4 pages on
+  // frame.work"). With more of them, none is picked over the others.
   const tiedWithNext = next ? ranked.slice(2).filter((group) => weight(group) === weight(next)) : [];
   const tie = tiedWithNext.length === 1 && weight(most) > weight(next) &&
     next.entry.host !== undefined && tiedWithNext[0].entry.host !== undefined
@@ -787,18 +768,7 @@ function summarizeGroups(steps: TurnStep[]): { phrases: string[]; firstHost: str
   const namesResult = result === PREVIEW_OPENED ? shown.length === 0 : outcome.length === 0;
   const phrases: string[] = result && namesResult ? [result] : [];
   let previousHost: string | null = null;
-  for (let index = 0; index < shown.length; index += 1) {
-    const group = shown[index];
-    const pair = shown[index + 1];
-    const together = tie && pair && ((group === next && pair === tie) || (group === tie && pair === next))
-      ? sameStepOnTwoSites(group, pair)
-      : null;
-    if (together) {
-      phrases.push(together);
-      previousHost = null;
-      index += 1;
-      continue;
-    }
+  for (const group of shown) {
     phrases.push(groupWords(group, previousHost));
     previousHost = group.entry.host ?? null;
   }
@@ -821,15 +791,16 @@ function summarizeGroups(steps: TurnStep[]): { phrases: string[]; firstHost: str
 }
 
 /**
- * Pages opened and read on more than two sites read as one phrase, counted
- * across them: "Opened 22 pages on 4 sites", never two of the sites and
- * nothing of the others, so the line counts every site Details lists. A page
- * read is a page the browser had open, so the phrase says opened when the turn
- * opened any; reads alone say read ("read 5 pages on 3 sites"). Only words
- * that end with the site ("opened {n} pages on {host}") can say how many sites
- * instead.
+ * Pages opened and read read as one phrase, counted across their sites:
+ * "Opened 22 pages on 4 sites", "opened 3 pages on 2 sites", never some of
+ * the sites and nothing of the others, so the line counts every site Details
+ * lists; one site's opens and reads are one phrase too ("opened 3 pages on
+ * frame.work"). A page read is a page the browser had open, so the phrase says
+ * opened when the turn opened any; reads alone say read ("read 5 pages on 3
+ * sites"). Only words that end with the site ("opened {n} pages on {host}")
+ * can say how many sites instead.
  */
-function mergeManySites(groups: Map<string, Group>): void {
+function mergePages(groups: Map<string, Group>): void {
   const pages: Array<[string, Group]> = [];
   for (const [groupKey, group] of groups) {
     const { entry } = group;
@@ -838,13 +809,13 @@ function mergeManySites(groups: Map<string, Group>): void {
     if (typeof done !== "object" || !done.other?.endsWith(" on {host}") || !done.some?.endsWith(" on {host}")) continue;
     pages.push([groupKey, group]);
   }
+  if (pages.length < 2) return;
   const sites = new Set(pages.map(([, group]) => group.entry.host));
-  if (sites.size <= 2) return;
   const members = pages.map(([, group]) => group);
   const named = members.find((group) => group.entry.key === BROWSER_OPEN) ?? members[0];
   const pageKeys = new Set(members.flatMap((group) => [...(group.pageKeys ?? [])]));
   const entry: ActivityEntry = { ...named.entry };
-  delete entry.host;
+  if (sites.size > 1) delete entry.host;
   const merged: Group = {
     entry,
     known: members.reduce((sum, group) => sum + group.known, 0),
@@ -855,10 +826,10 @@ function mergeManySites(groups: Map<string, Group>): void {
     paths: null,
     pageKeys: pageKeys.size > 0 ? pageKeys : null,
     unkeyed: members.reduce((sum, group) => sum + group.unkeyed, 0),
-    sites: sites.size,
+    ...(sites.size > 1 ? { sites: sites.size } : {}),
   };
   for (const [groupKey] of pages) groups.delete(groupKey);
-  groups.set(`${entry.key}@sites`, merged);
+  groups.set(sites.size > 1 ? `${entry.key}@sites` : `${entry.key}@${entry.host}`, merged);
 }
 
 type AnsweredApproval = {

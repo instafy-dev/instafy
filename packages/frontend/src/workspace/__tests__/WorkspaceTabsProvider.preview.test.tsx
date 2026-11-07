@@ -255,6 +255,8 @@ describe("conversation preview tabs", () => {
     await openPreview("b");
     await render(props);
     await act(async () => api.openJobThreadTab({ conversationId: "b", jobId: "run-b" }));
+    // Named for what it shows, as the message menu's "Open steps in a tab" says.
+    expect(api.activeTab).toMatchObject({ kind: "jobThread", title: "Steps" });
     const runId = api.activeTabId;
     await act(async () => api.openConversationTab("a", { restoreWorkspace: true }));
     expect(api.activeTabId).toBe(reviewId);

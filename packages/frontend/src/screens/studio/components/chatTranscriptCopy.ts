@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatMessageFileChange } from "../types";
+import { readRowStopNotice } from "./chatMessagePresentation";
 
 const THREAD_COPY_EXCLUDED_TYPES = new Set([
   "command_execution",
@@ -162,7 +163,15 @@ export function resolveCopyableMessageContent(message: ChatMessage): string {
 }
 
 export function formatConversationTranscript(messages: ChatMessage[]): string {
+  const listed = new Set(messages.map((message) => message.id));
   return messages
+    // A stopped turn's row holds the notice of its Stop (foldStopNotices): the
+    // copy still says the turn was stopped, after it, as the chat stored it,
+    // once (a chat opened at that notice lists it too).
+    .flatMap((message) => {
+      const stopNotice = readRowStopNotice(message);
+      return stopNotice && !listed.has(stopNotice.id) ? [message, stopNotice] : [message];
+    })
     .map((message) => {
       const content = resolveCopyableMessageContent(message);
       if (!content) {

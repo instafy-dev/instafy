@@ -7,8 +7,9 @@ import { isRecoverableRuntimeStartAlert as runtimeStartAlertIsRecoverable } from
 import { normalizeAssistantStatusText } from "./assistantStatusHeuristics";
 import { isEmptyCommandExecution } from "./chatContentHelpers";
 import { extractMessageDetails, getMessageType, isHiddenByPresentation } from "./chatMessageMetadata";
+import { getControllerConversationNoticeKind, readChatRunStopNotice } from "./controllerConversationNotice";
 import { isGenericProgressLabel, THREAD_ACTION_CARD_TYPES } from "./threadPreviewHelpers";
-import { readEarlierAttempts, resolveAutomaticRetryFold } from "./automaticRetryFold";
+import { readEarlierAttempts, readPendingRetry, resolveAutomaticRetryFold } from "./automaticRetryFold";
 import { resolveRoutedBrowserFold } from "./routedBrowserFold";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -702,7 +703,53 @@ export function synthesizeAgentJobThreadMessages(
     });
   });
 
-  return output;
+  return foldStopNotices(output);
+}
+
+/**
+ * A Stop's notice joins the row of the turn it stopped, so a stopped turn is
+ * one row: "Stopped · opened 5 pages on frame.work ›  Continue". It goes to the
+ * newest row whose turn it names: the row's newest job, the hand-back that
+ * ended before its job showed anything, or the resend of a failed turn that
+ * has shown nothing yet (the row's "Trying again…"). A notice no row stands
+ * for (a turn stopped before it showed anything) keeps a row of its own.
+ */
+function foldStopNotices(rows: ChatMessage[]): ChatMessage[] {
+  const folded = new Set<string>();
+  const next = [...rows];
+  for (const notice of rows) {
+    if (getControllerConversationNoticeKind(notice) !== "run_cancellation") continue;
+    const stopped = readChatRunStopNotice(notice);
+    for (let index = next.length - 1; index >= 0; index -= 1) {
+      const row = next[index]!;
+      if ((getMessageType(row) ?? "").trim().toLowerCase() !== "agent_job_thread") continue;
+      const jobId = extractAgentJobId(row);
+      const handBackRunId = readHandBackRunId(row);
+      const retry = readPendingRetry(row);
+      const named = Boolean(jobId && stopped.jobIds.includes(jobId)) ||
+        Boolean(handBackRunId && stopped.runIds.includes(handBackRunId)) ||
+        Boolean(retry?.jobId && stopped.jobIds.includes(retry.jobId)) ||
+        Boolean(retry?.runId && stopped.runIds.includes(retry.runId));
+      if (!named) continue;
+      next[index] = { ...row, metadata: { ...(row.metadata ?? {}), [STOP_NOTICE_METADATA_KEY]: notice } };
+      folded.add(notice.id);
+      break;
+    }
+  }
+  return folded.size > 0 ? next.filter((message) => !folded.has(message.id)) : rows;
+}
+
+/**
+ * Metadata on a turn's row (`agent_job_thread`): the notice of the Stop of the
+ * turn it shows (foldStopNotices). The row says who stopped it, when it was
+ * someone else, and offers Continue.
+ */
+export const STOP_NOTICE_METADATA_KEY = "stopNotice";
+
+/** The notice of the Stop of the turn a row shows, or null. */
+export function readRowStopNotice(message: Pick<ChatMessage, "metadata">): ChatMessage | null {
+  const notice = message.metadata && isRecord(message.metadata) ? message.metadata[STOP_NOTICE_METADATA_KEY] : null;
+  return notice && isRecord(notice) && typeof notice.id === "string" ? (notice as unknown as ChatMessage) : null;
 }
 
 /**
@@ -822,5 +869,9 @@ export function agentJobThreadAcknowledgementIds(message: ChatMessage): string[]
     if (type && AGENT_JOB_THREAD_TIMELINE_TYPES.has(type)) continue;
     ids.push(candidate.id);
   }
-  return [...new Set(ids)];
+  // The notice of the Stop the row shows (foldStopNotices) is the chat's
+  // newest message once the turn stopped: until it is read, Home lists the
+  // chat as one with news, though its own row is gone.
+  const stopNotice = readRowStopNotice(message);
+  return [...new Set(stopNotice ? [stopNotice.id, ...ids] : ids)];
 }

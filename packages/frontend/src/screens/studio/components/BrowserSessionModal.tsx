@@ -43,6 +43,7 @@ import { useBrowserSessionActions } from "./useBrowserSessionActions";
 import { useExpandedBrowserViewport } from "./useExpandedBrowserViewport";
 import { BrowserCursorOverlay } from "./BrowserCursorOverlay";
 import { observeBrowserRfbFrames } from "./browserSessionRfbFrame";
+import { browserSessionPageIsPlaceholder } from "./browserSessionPages";
 import { BrowserExpandButton } from "./BrowserExpandButton";
 import {
   BrowserHumanInputContinue,
@@ -3415,6 +3416,10 @@ export function BrowserSessionModal({
         : `${effectiveAgentControlOwner.displayName} is opening ${browserReadingHost(agentPage)}…`
       : `${effectiveAgentControlOwner.displayName} is using the browser`
     : null;
+  // A blank tab in front, with nobody on the way to a page: the stage says so
+  // in its own colours, never with the browser's white blank page.
+  const blankPageShown = viewLive && stageShowsPage && sharedBrowserActivePage !== null &&
+    browserSessionPageIsPlaceholder(sharedBrowserActivePage) && !agentArrivalNote && !agentWhereabouts;
   // Around a live page the stage follows the theme like the chrome above it
   // and the composer below: black under a page in light mode read as dark
   // chrome on a phone, where the page leaves bands above and below it.
@@ -3871,6 +3876,14 @@ export function BrowserSessionModal({
                 onOccupiedHeightChange={setMobileKeyboardOccupiedHeight}
               />
             </>
+          ) : null}
+          {!shouldCollapseDocked && blankPageShown ? (
+            <div
+              className="absolute inset-0 flex items-center justify-center bg-slate-100 p-4 text-center dark:bg-slate-950"
+              data-testid="browser-session-blank-page"
+            >
+              <Text variant="body" tone="muted">No page open</Text>
+            </div>
           ) : null}
           {reconnectingNoteShown ? <BrowserSessionReconnecting /> : null}
           {/* Where Octo is going, or that it is on a site, already says what the stage waits for. */}

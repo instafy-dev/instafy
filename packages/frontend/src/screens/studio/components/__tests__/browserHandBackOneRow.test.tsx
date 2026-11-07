@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mapControllerMessageToChat } from "../../../../conversations/conversationMessageUtils";
@@ -22,6 +22,9 @@ import {
 import { isBrowserNoticePrompt } from "../browserHandBack";
 import { resolveTypingAgentLanes } from "../chatAssistantIdentity";
 import { ChatTypingRows } from "../ChatTypingRows";
+import { ChatRunStopNoticeProvider } from "../ChatRunStopNotice";
+import { useChatRunStopContinuation } from "../useChatRunStopContinuation";
+import type { SubmitMessageFn } from "../useChatSubmitFlow";
 import { collapseLifecycleMessages, shouldDisplayChatMessage, synthesizeAgentJobThreadMessages } from "../chatMessagePresentation";
 import { ConversationMessageRows } from "../ConversationMessageRows";
 import { routedBrowserWaitingKeys } from "../routedBrowserFold";
@@ -106,6 +109,14 @@ function runsAt(chat: ChatMessage[], now: number): RunRecord[] {
   }));
 }
 
+/** ChatPanel's Stop context: who reads the chat, and Continue for its newest stopped turn. */
+function StopNotices({ options, children }: {
+  options: Parameters<typeof useChatRunStopContinuation>[0];
+  children: ReactNode;
+}) {
+  return <ChatRunStopNoticeProvider value={useChatRunStopContinuation(options)}>{children}</ChatRunStopNoticeProvider>;
+}
+
 /**
  * Whether a face shows at a width: phone hides the gutter and shows inline
  * faces; desktop does the reverse (as routedBrowserTurnOneRow.test.tsx reads it).
@@ -159,7 +170,13 @@ describe("a message Octo answers in its browser and then builds from what it fou
    * (collapse, display, job threads and folds), the reply drafts placed in
    * their turns, and the typing row under it, with the inputs ChatPanel gives each.
    */
-  async function show(chat: ChatMessage[], now: number, drafts: ReplyDraft[] = [], given?: { runs: RunRecord[] }) {
+  async function show(
+    chat: ChatMessage[],
+    now: number,
+    drafts: ReplyDraft[] = [],
+    given?: { runs: RunRecord[] },
+    stop?: { submit: SubmitMessageFn; viewerUserId?: string; labels?: ReadonlyMap<string, string> },
+  ) {
     vi.setSystemTime(now);
     const messages = chat.filter((message) => message.timestamp <= now);
     const runs = given?.runs ?? runsAt(chat, now);
@@ -184,10 +201,23 @@ describe("a message Octo answers in its browser and then builds from what it fou
       newestCardKey: newestBrowserRequestKey(messages),
     };
     const runIds = new Map(runs.map((run) => [run.id, OCTO]));
+    const withStops = (rows: ReactNode) => stop ? (
+      <StopNotices options={{
+        conversationId: CONVERSATION,
+        viewerUserId: stop.viewerUserId ?? PERSON,
+        humanLabelByUserId: stop.labels ?? new Map(),
+        canWrite: true,
+        busy: false,
+        messages,
+        hasNewer: false,
+        queuedSends: [],
+        submitMessage: stop.submit,
+      }}>{rows}</StopNotices>
+    ) : rows;
     await act(async () => {
       root.render(
         <BrowserRequestHostContext.Provider value={host}>
-          <ConversationMessageRows
+          {withStops(<ConversationMessageRows
             messages={placeReplyDrafts(displayed, visibleDrafts)}
             currentUserId={PERSON}
             chatClientSessionId="session-1"
@@ -205,7 +235,7 @@ describe("a message Octo answers in its browser and then builds from what it fou
             onRequestActionsAtPoint={vi.fn()}
             onCancelTerminalCommand={null}
             onMessageContextMenu={vi.fn()}
-          />
+          />)}
           <ChatTypingRows
             peerTypingLabel={null}
             isAssistantTyping={isAssistantTyping}
@@ -422,6 +452,104 @@ describe("a message Octo answers in its browser and then builds from what it fou
     mocks.activeConversation = { controllerId: CONVERSATION, messages: failed };
     const view2 = await show(failed, stoppedAt + 1_000);
     expect(view2.lines.some((line) => line.startsWith("Stopped"))).toBe(false);
+  });
+
+  // A local test, Nov 6: one Stop showed twice, as the turn's own "Stopped ·
+  // opened 5 pages on frame.work ›" and, under it, a row of its own: "You
+  // asked Octo to stop. Continue". A stopped turn is one row, with Continue
+  // in it; who stopped it shows only when it was someone else.
+  it("shows a stopped turn as one row, with Continue in it", async () => {
+    const stoppedAt = Date.parse("2026-11-04T08:11:54.000Z");
+    const notice = (actorUserId: string): ChatMessage => ({
+      id: "stop-notice",
+      role: "assistant",
+      authorId: null,
+      content: "Stopped this run.",
+      timestamp: stoppedAt,
+      files: null,
+      messageType: "run_cancellation",
+      metadata: {
+        source: "controller",
+        kind: "run_cancellation",
+        runId: SEVILLE_BUILD.runId,
+        details: {
+          stopRequested: true,
+          actorUserId,
+          agentHandles: ["octo"],
+          jobIds: [SEVILLE_BUILD.jobId],
+          runIds: [SEVILLE_BUILD.runId],
+          runStatus: "canceled",
+        },
+      },
+    });
+    const before = chatOf(CHATS.seville).filter((message) => message.timestamp < stoppedAt);
+    const chat = [...before, notice(PERSON)];
+    mocks.activeConversation = { controllerId: CONVERSATION, messages: chat };
+    const submit = vi.fn<SubmitMessageFn>().mockResolvedValue(true);
+    const view = await show(chat, stoppedAt + 1_000, [], undefined, { submit });
+    expect(view.turns).toHaveLength(1);
+    expect(view.lines).toEqual(["Stopped · opened 4 pages on visitasevilla.es"]);
+    expect(container.textContent).not.toContain("You asked Octo to stop.");
+    expect(container.querySelector('[data-testid="chat-run-stop-notice"]')).toBeNull();
+    const turn = view.turns[0]!;
+    expect(container.querySelectorAll('[data-testid="chat-run-stop-continue"]')).toHaveLength(1);
+    const continueButton = turn.querySelector<HTMLElement>('[data-testid="chat-run-stop-continue"]');
+    expect(continueButton).not.toBeNull();
+    expect(turn.querySelector('[data-testid="chat-run-stopped-by"]')).toBeNull();
+    // The line is no live region: a screen reader hears the Stop from the row.
+    const heard = (row: HTMLElement) => Array.from(row.querySelectorAll('[role="status"]')).map((element) => element.textContent);
+    expect(heard(turn)).toContain("Stopped");
+    // Continue sends what it sent from the notice's own row.
+    await act(async () => {
+      continueButton!.click();
+    });
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledWith({
+      message: "Continue the stopped turn from its current state. Check what has already finished before proceeding; do not repeat completed actions.",
+      editorState: null,
+      targetAgentHandles: ["octo"],
+      metadata: { continuedStopMessageId: "stop-notice", continuedRunIds: [SEVILLE_BUILD.runId] },
+    }, expect.objectContaining({ automatic: true, intent: "send" }));
+
+    // Someone else's Stop names them, in the same row.
+    const theirs = [...before, notice("person-2")];
+    mocks.activeConversation = { controllerId: CONVERSATION, messages: theirs };
+    const view2 = await show(theirs, stoppedAt + 1_000, [], undefined, {
+      submit, labels: new Map([["person-2", "Sam"]]),
+    });
+    expect(view2.turns).toHaveLength(1);
+    expect(view2.turns[0]!.querySelector('[data-testid="chat-run-stopped-by"]')?.textContent).toBe("Sam stopped this");
+    expect(heard(view2.turns[0]!)).toEqual(expect.arrayContaining(["Sam stopped this"]));
+    expect(heard(view2.turns[0]!)).not.toContain("Stopped");
+    expect(container.textContent).not.toContain("asked Octo to stop");
+  });
+
+  // A local test, Nov 6: a browser turn whose finding said a page stopped it
+  // kept its own words as its reply. As the building turn ended, the row
+  // showed those words for a moment in place of the building turn's reply.
+  it("never shows the browser turn's own reply in place of the building turn's", async () => {
+    const BROWSER_WORDS = "I couldn't read one review: its page didn't load.";
+    const builtAt = Date.parse("2026-11-04T08:13:48.609Z");
+    const chat = chatOf(CHATS.seville).map((message) => {
+      const jobId = message.metadata?.jobId;
+      const outcome = message.metadata?.outcome;
+      if (outcome !== "succeeded") return message;
+      // The browser turn's reply has words; the building turn's has come in
+      // before its words did.
+      if (jobId === SEVILLE_BUILD.jobId) return { ...message, content: "" };
+      return { ...message, content: BROWSER_WORDS };
+    });
+    const ended = await show(chat, builtAt + 100);
+    expect(ended.turns).toHaveLength(1);
+    expect(ended.lines).toEqual(["Opened 4 pages on visitasevilla.es, built the map"]);
+    expect(ended.turns[0]!.textContent).not.toContain(BROWSER_WORDS);
+    // Its words came in: they are the row's reply.
+    const replied = chat.map((message) => message.metadata?.jobId === SEVILLE_BUILD.jobId && message.metadata?.outcome === "succeeded"
+      ? { ...message, content: "I built a three-day Seville map." }
+      : message);
+    const done = await show(replied, builtAt + 300);
+    expect(done.turns[0]!.textContent).toContain("I built a three-day Seville map.");
+    expect(done.turns[0]!.textContent).not.toContain(BROWSER_WORDS);
   });
 
   it("shows the building turn's failure in the row, also one posted for its run alone", async () => {

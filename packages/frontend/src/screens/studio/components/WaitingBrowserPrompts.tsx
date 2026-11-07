@@ -262,6 +262,8 @@ export function WaitingBrowserPrompts({
           nonPreemptive: true,
           actionLabel: "View",
           onAction: () => onViewRef.current({ conversationId: target.conversationId, localId: chat?.localId ?? null }),
+          // A press on its words opens the chat too: it names the chat.
+          actionOnPress: true,
         },
       );
     }

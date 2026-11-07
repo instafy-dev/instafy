@@ -62,6 +62,7 @@ function waitingPrompt() {
 }
 
 let status: StatusContextValue | null = null;
+const onView = vi.fn();
 
 function Studio() {
   status = useStatus();
@@ -74,7 +75,7 @@ function Studio() {
         runs={{ [runA]: browserRun() }}
         chats={chats}
         chatOnScreen={chatB}
-        onView={() => {}}
+        onView={onView}
         onWaitingChange={() => {}}
       />
       <Status />
@@ -92,6 +93,7 @@ describe("the waiting-prompt toast, with Studio's own toasts", () => {
   beforeEach(async () => {
     vi.useFakeTimers();
     for (const mock of Object.values(mocks)) mock.mockReset();
+    onView.mockReset();
     mocks.requestAccessToken.mockResolvedValue({ token: "view-token", endpoint: "https://origin.example.test", expiresIn: 300 });
     mocks.fetchPendingApproval.mockImplementation(async () => waitingPrompt());
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -109,6 +111,16 @@ describe("the waiting-prompt toast, with Studio's own toasts", () => {
     document.body.replaceChildren();
     vi.useRealTimers();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  // A local test, Nov 6: a press on the toast's words did nothing; only View
+  // opened the chat it names.
+  it("opens the chat it names on a press of its words, as View does", async () => {
+    const words = document.querySelector<HTMLElement>('[data-testid="status-toast-message"]');
+    expect(words?.textContent).toBe(WAITING);
+    await act(async () => words!.click());
+    expect(onView).toHaveBeenCalledTimes(1);
+    expect(onView).toHaveBeenCalledWith({ conversationId: chatA, localId: "local-a" });
   });
 
   // An active decision keeps its place. Other feedback waits until the person

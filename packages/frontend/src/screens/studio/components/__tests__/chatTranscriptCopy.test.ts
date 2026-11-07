@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import { mapControllerMessageToChat } from "../../../../conversations/conversationMessageUtils";
 import type { ChatMessage } from "../../types";
+import { collapseLifecycleMessages, shouldDisplayChatMessage, synthesizeAgentJobThreadMessages } from "../chatMessagePresentation";
 import { formatConversationTranscript, resolveCopyableMessageContent } from "../chatTranscriptCopy";
+import { revealCanonicalMessageTarget } from "../messageContextPresentation";
 
 function createMessage(overrides: Partial<ChatMessage>): ChatMessage {
   return {
@@ -168,5 +170,39 @@ describe("chatTranscriptCopy", () => {
     ]);
 
     expect(transcript).toBe("User: Read my notes back to me.\n\nAssistant: The notes list three open tasks.");
+  });
+
+  // A stopped turn is one row, which holds the notice of its Stop: the copy
+  // still says the turn was stopped, as when the notice had a row of its own.
+  it("says a stopped turn was stopped", () => {
+    const messages = [
+      createMessage({ id: "user-1", role: "user", content: "Plan 3 days in Seville.", timestamp: 1 }),
+      createMessage({
+        id: "step-1",
+        content: "/bin/bash -lc ls",
+        timestamp: 2,
+        messageType: "command_execution",
+        metadata: {
+          jobId: "job-1", runId: "run-1", kind: "update", outcome: "in_progress", messageType: "command_execution",
+          details: { kind: "codex_command_execution", status: "completed", itemId: "exec-1" },
+        },
+      }),
+      createMessage({
+        id: "stop-1",
+        content: "Stopped this run.",
+        timestamp: 3,
+        metadata: {
+          source: "controller", kind: "run_cancellation", runId: "run-1",
+          details: { stopRequested: true, actorUserId: "person-1", agentHandles: ["octo"], jobIds: ["job-1"], runIds: ["run-1"] },
+        },
+      }),
+    ];
+    const collapsed = collapseLifecycleMessages(messages);
+    const rows = synthesizeAgentJobThreadMessages(collapsed, collapsed.filter(shouldDisplayChatMessage));
+    expect(rows.map((row) => row.id)).toEqual(["user-1", "agent-job-thread:job-1"]);
+    expect(formatConversationTranscript(rows)).toBe("User: Plan 3 days in Seville.\n\nAssistant: Stopped this run.");
+    // Opened at that notice (a search result), the chat lists it beside its row: copied once.
+    const opened = revealCanonicalMessageTarget(rows, collapsed, "stop-1");
+    expect(formatConversationTranscript(opened)).toBe("User: Plan 3 days in Seville.\n\nAssistant: Stopped this run.");
   });
 });

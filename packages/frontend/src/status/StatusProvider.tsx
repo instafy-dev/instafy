@@ -15,6 +15,8 @@ export interface StatusToast {
   presentation: StatusPresentation;
   actionLabel?: string;
   onAction?: (() => void) | null;
+  /** Pressing the toast's words runs its action too (`StatusToastOptions.actionOnPress`). */
+  actionOnPress?: boolean;
   /** App-owned reading timer; absent for persistent and absolute-deadline notices. */
   readingDuration?: number;
   /** Presentation-only update identity and focus registration. */
@@ -27,6 +29,13 @@ export interface StatusToastOptions {
   id?: string;
   actionLabel?: string;
   onAction?: () => void;
+  /**
+   * Pressing the toast's words runs its action too, as a press on a
+   * notification does. Only for an action that opens something (View), never
+   * one that changes anything (Undo). The action's button stays the control a
+   * keyboard and a screen reader reach.
+   */
+  actionOnPress?: boolean;
   onClose?: () => void;
   /** Called only after this toast becomes visible, never while it is queued. */
   onShow?: () => void;
@@ -275,6 +284,7 @@ export function StatusProvider({ children }: { children: ReactNode }) {
         presentation,
         actionLabel: options?.actionLabel,
         onAction: options?.onAction ?? null,
+        ...(hasAction && options?.actionOnPress ? { actionOnPress: true } : {}),
         readingDuration: resolvedDuration > 0 && expiresAt === undefined ? resolvedDuration : undefined,
       };
       const toast: PendingStatusToast = {

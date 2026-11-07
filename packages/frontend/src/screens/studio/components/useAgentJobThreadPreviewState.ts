@@ -9,13 +9,13 @@ import {
   newestTurnMessages,
   readHandBackRunId,
   readPendingHandBack,
+  readRowStopNotice,
   readTurnJobIds,
   runMatchesThreadJobId,
   shouldDisplayChatMessage,
 } from "./chatMessagePresentation";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
-import { readChatRunStopNotice } from "./ChatRunStopNotice";
-import { getControllerConversationNoticeKind } from "./controllerConversationNotice";
+import { getControllerConversationNoticeKind, readChatRunStopNotice } from "./controllerConversationNotice";
 import { normalizeAssistantStatusText } from "./assistantStatusHeuristics";
 import { isThreadPreviewUnresolved } from "./threadPreviewState";
 import {
@@ -35,7 +35,7 @@ import { resolveThreadPreviewSafeInsetPx } from "./threadPreviewGeometry";
 import { resolveSpineToneFromStatus } from "./ThreadSpine";
 import { readTurnStepsRecord, summarizeTurnActivity, type TurnActivityPhase } from "./turnActivity";
 import { useTurnBrowserApproval } from "./turnBrowserApproval";
-import { isAutomaticRetryPending, readEarlierAttempts } from "./automaticRetryFold";
+import { isAutomaticRetryPending, readEarlierAttempts, readPendingRetry } from "./automaticRetryFold";
 import type { EarlierAttemptDetails } from "./AgentJobThreadPreviewLayout";
 import {
   hasFailedRunMetadata,
@@ -53,6 +53,39 @@ const CANCELLED_STATUSES = new Set(["canceled", "cancelled"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+type ConversationMessagesLike = { messages?: readonly ChatMessage[] } | null | undefined;
+
+/** The chats a row reads its Stops from: the open chat, and the thread's own when it is another. */
+function conversationsToRead(active: ConversationMessagesLike, thread: ConversationMessagesLike): ConversationMessagesLike[] {
+  return thread && thread !== active ? [active, thread] : [active];
+}
+
+/**
+ * Whether someone stopped a run (Take over, Stop): its record says canceled,
+ * or a stop notice of the chat names it, by its run or by its job.
+ */
+function stoppedByAnyone(
+  target: { runId: string | null; jobId: string | null },
+  runs: Readonly<Record<string, RunRecord>> | null | undefined,
+  conversations: readonly ConversationMessagesLike[],
+): boolean {
+  const { runId, jobId } = target;
+  if (!runId && !jobId) {
+    return false;
+  }
+  if (Object.values(runs ?? {}).some((run) => run.status === "canceled" &&
+    ((runId !== null && run.id === runId) || (jobId !== null && runMatchesThreadJobId(run, jobId))))) {
+    return true;
+  }
+  return conversations.some((conversation) => (conversation?.messages ?? []).some((candidate) => {
+    if (getControllerConversationNoticeKind(candidate) !== "run_cancellation") {
+      return false;
+    }
+    const notice = readChatRunStopNotice(candidate);
+    return (runId !== null && notice.runIds.includes(runId)) || (jobId !== null && notice.jobIds.includes(jobId));
+  }));
 }
 
 function messageType(message: ChatMessage): string {
@@ -237,8 +270,29 @@ export function useAgentJobThreadPreviewState({
   const [threadPreviewRootLeftPx, setThreadPreviewRootLeftPx] = useState(Number.POSITIVE_INFINITY);
   const [threadPreviewContainerLeftPx, setThreadPreviewContainerLeftPx] = useState(0);
 
+  // A failed turn whose resend has shown nothing yet reads "Trying again…"
+  // for that resend (automaticRetryFold.ts). Once someone stopped it, the row
+  // is the resend's, which did nothing: it reads "Stopped", with the Stop's
+  // Continue. Read as the failed turn's, it went on saying "Trying again…",
+  // and the Stop showed in a row of its own.
+  const pendingRetry = readPendingRetry(message);
+  const pendingRetryRunId = pendingRetry?.runId ?? null;
+  const pendingRetryJobId = pendingRetry?.jobId ?? null;
+  const retryStopped = useMemo(
+    () => stoppedByAnyone({ runId: pendingRetryRunId, jobId: pendingRetryJobId }, runs,
+      conversationsToRead(activeConversation, threadConversation)),
+    [activeConversation, pendingRetryJobId, pendingRetryRunId, runs, threadConversation],
+  );
+  // The row's run is its newest turn's: the reply a browser turn ended on
+  // never ends the building turn that went on from it, nor stands for its
+  // reply. Read as the row's, it showed in place of a reply that had not come
+  // in yet (a local test, Nov 6).
+  const runMessages = useMemo(
+    () => (retryStopped ? [] : newestTurnMessages(threadMessages, turnJobIds)),
+    [retryStopped, threadMessages, turnJobIds],
+  );
   const preview = useMemo(() => {
-    if (threadMessages.length === 0) {
+    if (runMessages.length === 0) {
       return "";
     }
     const isPreviewCandidate = (candidate: ChatMessage) => {
@@ -276,20 +330,20 @@ export function useAgentJobThreadPreviewState({
       return !["todo_list", "token_usage", "runtime_switch", "reasoning", "status"].includes(type);
     };
 
-    for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
-      const candidate = threadMessages[index];
+    for (let index = runMessages.length - 1; index >= 0; index -= 1) {
+      const candidate = runMessages[index];
       if (candidate.role === "assistant" && isPreviewCandidate(candidate)) {
         return candidate.content.trim();
       }
     }
-    for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
-      const candidate = threadMessages[index];
+    for (let index = runMessages.length - 1; index >= 0; index -= 1) {
+      const candidate = runMessages[index];
       if (isPreviewCandidate(candidate)) {
         return candidate.content.trim();
       }
     }
     return "";
-  }, [threadMessages]);
+  }, [runMessages]);
 
   const latestFileMessage = useMemo(() => {
     for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
@@ -342,9 +396,6 @@ export function useAgentJobThreadPreviewState({
     });
   }, [activeConversation?.messages, message.id, message.timestamp]);
 
-  // The row's run is its newest turn's: the reply a browser turn ended on
-  // never ends the building turn that went on from it.
-  const runMessages = useMemo(() => newestTurnMessages(threadMessages, turnJobIds), [threadMessages, turnJobIds]);
   const runStatus = useMemo(
     () =>
       handBackPending
@@ -432,8 +483,9 @@ export function useAgentJobThreadPreviewState({
   // quotes one ("Retrying: unexpected status 502 …") is progress, and a later
   // success supersedes any earlier error.
   const terminalProxyErrorMessage = useMemo(
-    () => resolveTerminalProxyErrorMessage(threadMessages, runStatus),
-    [runStatus, threadMessages],
+    // A stopped resend ended the row: the failed turn's error is no longer its end.
+    () => (retryStopped ? null : resolveTerminalProxyErrorMessage(threadMessages, runStatus)),
+    [retryStopped, runStatus, threadMessages],
   );
   // Someone stopped this run (Take over, Stop): its record says canceled, or
   // the conversation's stop notice names its job. Its updates just end, so
@@ -441,30 +493,21 @@ export function useAgentJobThreadPreviewState({
   // hand-back stopped before its job showed anything stopped the row, though
   // the browser turn before it finished: its run's record or the notice says
   // so. Read as the browser turn's, the row said only what that turn did (a
-  // local test, Nov 5).
+  // local test, Nov 5). So did a failed turn's resend stopped before it
+  // showed anything.
   const isStoppedRun = useMemo(() => {
-    const conversationsToRead = threadConversation && threadConversation !== activeConversation
-      ? [activeConversation, threadConversation]
-      : [activeConversation];
-    const stopNotices = () => conversationsToRead.flatMap((conversation) =>
-      (conversation?.messages ?? [])
-        .filter((candidate) => getControllerConversationNoticeKind(candidate) === "run_cancellation")
-        .map(readChatRunStopNotice));
-    if (
-      endedHandBackRunId &&
-      (Object.values(runs ?? {}).some((run) => run.status === "canceled" && run.id === endedHandBackRunId) ||
-        stopNotices().some((notice) => notice.runIds.includes(endedHandBackRunId)))
-    ) {
+    if (retryStopped) {
+      return true;
+    }
+    const conversations = conversationsToRead(activeConversation, threadConversation);
+    if (endedHandBackRunId && stoppedByAnyone({ runId: endedHandBackRunId, jobId: null }, runs, conversations)) {
       return true;
     }
     if (!jobId || runStatus.phase === "completed") {
       return false;
     }
-    if (Object.values(runs ?? {}).some((run) => run.status === "canceled" && runMatchesThreadJobId(run, jobId))) {
-      return true;
-    }
-    return stopNotices().some((notice) => notice.jobIds.includes(jobId));
-  }, [activeConversation, endedHandBackRunId, jobId, runStatus.phase, runs, threadConversation]);
+    return stoppedByAnyone({ runId: null, jobId }, runs, conversations);
+  }, [activeConversation, endedHandBackRunId, jobId, retryStopped, runStatus.phase, runs, threadConversation]);
   const isStaleRunningStatus = runStatus.phase === "running" && !isThreadRunInFlight && !hasRecentThreadActivity;
   const isCompleted =
     runStatus.phase === "completed" || isPlanOnlyThread || terminalProxyErrorMessage !== null || isStoppedRun;
@@ -499,7 +542,7 @@ export function useAgentJobThreadPreviewState({
     if (terminalProxyErrorMessage) {
       return terminalProxyErrorMessage;
     }
-    if (threadMessages.length === 0) {
+    if (runMessages.length === 0) {
       return null;
     }
     const excluded = new Set([
@@ -512,8 +555,8 @@ export function useAgentJobThreadPreviewState({
       "runtime_switch",
       "reasoning",
     ]);
-    for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
-      const candidate = threadMessages[index];
+    for (let index = runMessages.length - 1; index >= 0; index -= 1) {
+      const candidate = runMessages[index];
       if (candidate.role !== "assistant") {
         continue;
       }
@@ -549,7 +592,7 @@ export function useAgentJobThreadPreviewState({
       return candidate;
     }
     return null;
-  }, [terminalProxyErrorMessage, threadMessages]);
+  }, [runMessages, terminalProxyErrorMessage]);
 
   const [expandedUpdateIds, setExpandedUpdateIds] = useState<Record<string, boolean>>({});
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -805,7 +848,7 @@ export function useAgentJobThreadPreviewState({
     assistantAvatarMotion,
     activity,
     earlierAttempts,
-    autoRetryPending: isAutomaticRetryPending(message),
+    autoRetryPending: isAutomaticRetryPending(message) && !retryStopped,
     browserApproval: browserApproval.row,
     detailsOpen,
     cards,
@@ -816,6 +859,8 @@ export function useAgentJobThreadPreviewState({
     finalSummaryMessage,
     // The reply the model is writing, shown where the reply lands until it does.
     replyDraft: replyIsTheRuntimes ? null : readTurnReplyDraft(metadata),
+    // The Stop of this turn, for who made it and Continue beside the line.
+    stopNotice: readRowStopNotice(message),
     hasPreview: Boolean(preview),
     previewText: preview || (isCompleted ? (isStoppedRun && terminalProxyErrorMessage === null ? "Stopped." : "Completed.") : ""),
     isCompleted,

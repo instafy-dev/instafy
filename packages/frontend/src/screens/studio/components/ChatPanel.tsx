@@ -3706,8 +3706,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return resolveTokenUsageForMessage(messages, messageMenu.messageId);
   }, [messageMenu, messages]);
 
-  // "Open run thread in a tab" is a secondary action, so it lives in the message
-  // context menu (right-click / press-and-hold) rather than a persistent button.
+  // "Open steps in a tab" (every step of the turn, with each command's output)
+  // is a secondary action, so it lives in the message context menu
+  // (right-click / press-and-hold) rather than a persistent button.
   const openSelectedMessageThread = useMemo(() => {
     if (!selectedMessage) {
       return null;
@@ -6834,7 +6835,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         onSummarizeSelection={() => handleSelectionReplyAction("summarize")}
         onExplainSelection={() => handleSelectionReplyAction("explain_more")}
         onOpenThread={openSelectedMessageThread}
-        openThreadLabel="Open run thread"
+        openThreadLabel="Open steps in a tab"
       />
 
       <ChatImageLightboxOverlay
