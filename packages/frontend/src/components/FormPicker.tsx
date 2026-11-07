@@ -1,7 +1,7 @@
 import { forwardRef, type ReactNode } from "react";
-import { Button, composeRenderProps, type ButtonProps, type PopoverProps } from "react-aria-components";
+import { composeRenderProps, type ButtonProps, type PopoverProps } from "react-aria-components";
 import { ControlChevron } from "./ControlChevron";
-import { CONTROL_DEFAULT_SIZE, CONTROL_RADIUS_CLASSES, CONTROL_SIZE_CLASSES, CONTROL_TONE_CLASSES, CONTROL_TRIGGER_BASE } from "./controlStyles";
+import { ControlTrigger } from "./ControlTrigger";
 import { StudioPopover } from "./aria/StudioPopover";
 
 type FormPickerTriggerProps = Omit<ButtonProps, "children"> & {
@@ -15,16 +15,12 @@ export const FormPickerTrigger = forwardRef<HTMLButtonElement, FormPickerTrigger
   ref,
 ) {
   return (
-    <Button
+    <ControlTrigger
       {...props}
       ref={ref}
       aria-haspopup="menu"
       className={composeRenderProps(className, (extra) => [
-        CONTROL_TRIGGER_BASE,
-        CONTROL_SIZE_CLASSES[CONTROL_DEFAULT_SIZE],
-        CONTROL_RADIUS_CLASSES.xl,
-        CONTROL_TONE_CLASSES.default,
-        "w-full justify-between gap-2 data-[hovered]:bg-slate-50 dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)]",
+        "justify-between gap-2",
         extra,
       ].filter(Boolean).join(" "))}
     >
@@ -33,7 +29,7 @@ export const FormPickerTrigger = forwardRef<HTMLButtonElement, FormPickerTrigger
         <span className="truncate">{children}</span>
       </span>
       <ControlChevron />
-    </Button>
+    </ControlTrigger>
   );
 });
 

@@ -238,6 +238,31 @@ describe("BrowserAddressField", () => {
     expect(released).toHaveBeenCalled();
   });
 
+  it("reaches the history action by keyboard without committing a suggestion and restores field focus", async () => {
+    await type("bbc");
+    await key("ArrowDown");
+    await key("Tab");
+    const button = [...document.querySelectorAll("button")].find(el => el.textContent === "Clear recent sites")!;
+    expect(document.activeElement).toBe(button);
+    expect(input().value).toBe("bbc");
+    expect(input().getAttribute("aria-expanded")).toBe("true");
+    expect(navigate).not.toHaveBeenCalled();
+
+    await act(async () => button.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+    expect(document.activeElement).toBe(input());
+    expect(input().getAttribute("aria-expanded")).toBe("false");
+    expect(navigate).not.toHaveBeenCalled();
+
+    await key("ArrowDown");
+    await key("Tab");
+    const reopened = [...document.querySelectorAll("button")].find(el => el.textContent === "Clear recent sites")!;
+    await act(async () => reopened.click());
+    expect(clear).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(input());
+    expect(input().getAttribute("aria-expanded")).toBe("false");
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
   it("goes on Enter, with no Go button beside the field, as in every browser", async () => {
     expect(container.querySelector('[aria-label="Go"]')).toBeNull();
     expect(container.querySelector('[data-testid="test-browser-go"]')).toBeNull();
