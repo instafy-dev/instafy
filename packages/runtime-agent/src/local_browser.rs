@@ -428,10 +428,12 @@ impl ServerHandler for LocalBrowserMcpServer {
 }
 
 /// An observation's tool result: its payload as the structured content, with one line that
-/// says what it did as the text, or why the observation failed. Codex hands a call made outside
-/// a code cell the structured content alone, and a cell's `text(r)` prints the whole result, so
-/// either way the model reads the observation once, as it did twice when the text was the
-/// payload too.
+/// says what it did as the text, or why the observation failed, as the text and as the
+/// structured content's `error.reason`. Codex hands a call made outside a code cell the
+/// structured content alone, and a cell's `text(r)` prints the whole result, so either way the
+/// model reads the observation once, as it did twice when the text was the payload too; and a
+/// cell that prints `r.structuredContent`, as the text of a success tells it to, reads why one
+/// failed, never "undefined" (the Shared Browser's `failed_tool_result`).
 fn observation_result(outcome: Result<JsonValue>) -> CallToolResult {
     match outcome {
         Ok(payload) => {
@@ -441,9 +443,12 @@ fn observation_result(outcome: Result<JsonValue>) -> CallToolResult {
             result.structured_content = Some(payload);
             result
         }
-        Err(error) => CallToolResult::error(vec![ContentBlock::text(format!(
-            "Owner-local browser observation failed: {error:#}"
-        ))]),
+        Err(error) => {
+            let reason = format!("Owner-local browser observation failed: {error:#}");
+            let mut result = CallToolResult::error(vec![ContentBlock::text(reason.clone())]);
+            result.structured_content = Some(json!({ "error": { "reason": reason } }));
+            result
+        }
     }
 }
 
@@ -1330,13 +1335,12 @@ mod tests {
                 }),
             )
             .await;
+        let reason = "Owner-local browser observation failed: failed to launch the browser egress proxy: No such file or directory (os error 2)";
         assert_eq!(
             failed["result"],
             json!({
-                "content": [{
-                    "type": "text",
-                    "text": "Owner-local browser observation failed: failed to launch the browser egress proxy: No such file or directory (os error 2)",
-                }],
+                "content": [{ "type": "text", "text": reason }],
+                "structuredContent": { "error": { "reason": reason } },
                 "isError": true,
             }),
             "{failed}"

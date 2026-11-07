@@ -931,6 +931,12 @@ pub struct CodexRunOutput {
     /// its reply stays theirs (`jobs::browser_hand_back::stopped_for_the_person`). Kept out of
     /// `events`, as `browser_pages` is.
     pub browser_secret_screen: bool,
+    /// The addresses the browser refused to open for the run's own steps because no message and
+    /// no page the chat read gave them (`shared_browser::address_not_given`), once each, as the
+    /// steps asked for them: the turn never opened them, so no finding of it stands for one
+    /// (`jobs::browser_hand_back::leave_out_addresses_never_opened`). Kept out of `events`, as
+    /// `browser_pages` is.
+    pub browser_not_given: Vec<String>,
 }
 
 /// A failed turn keeps the protocol classification as well as its diagnostic message.
@@ -2886,6 +2892,7 @@ impl CodexClient {
                 native_image_inputs: input_images.len(),
                 browser_pages: aggregator.browser_pages().to_vec(),
                 browser_secret_screen: aggregator.browser_secret_screen(),
+                browser_not_given: aggregator.browser_not_given().to_vec(),
             })
         }
         .await;
@@ -5097,6 +5104,9 @@ pub(crate) struct CodexEventStreamAdapter {
     /// A browser step answered with a page that shows a secret
     /// (`CodexRunOutput::browser_secret_screen`); never projected.
     browser_secret_screen: bool,
+    /// The addresses the browser refused to open because nothing gave them
+    /// (`CodexRunOutput::browser_not_given`); never projected.
+    browser_not_given: Vec<String>,
 }
 
 /// For tests that do not look at usage. Nothing feeds this baseline store, so no turn reports
@@ -5126,6 +5136,7 @@ impl CodexEventStreamAdapter {
             last_browser_host: None,
             browser_pages: Vec::new(),
             browser_secret_screen: false,
+            browser_not_given: Vec::new(),
         }
     }
 
@@ -5137,6 +5148,11 @@ impl CodexEventStreamAdapter {
     /// Whether a browser step so far answered with a page that shows a secret.
     pub(crate) fn browser_secret_screen(&self) -> bool {
         self.browser_secret_screen
+    }
+
+    /// The addresses the browser refused to open so far because nothing gave them.
+    pub(crate) fn browser_not_given(&self) -> &[String] {
+        &self.browser_not_given
     }
 
     fn with_usage_attempt(mut self, usage_attempt: Option<UsageAttempt>, turn_id: &str) -> Self {
@@ -5371,6 +5387,17 @@ impl CodexEventStreamAdapter {
                         && !self.browser_pages.contains(&page)
                     {
                         self.browser_pages.push(page);
+                    }
+                    // An address the browser refused because no message or page gave it.
+                    if !tool_call.is_success()
+                        && let Some(address) = crate::shared_browser::address_not_given(
+                            &tool_call.invocation.tool,
+                            tool_call.invocation.arguments.as_ref(),
+                            payload,
+                        )
+                        && !self.browser_not_given.contains(&address)
+                    {
+                        self.browser_not_given.push(address);
                     }
                     // A page whose text the browser withheld because it shows a secret: the turn
                     // stops there for the person, whatever it then answers.
@@ -11268,6 +11295,79 @@ required = true
             ]
         );
         assert!(!adapter.browser_secret_screen());
+        assert!(adapter.browser_not_given().is_empty());
+    }
+
+    /// The addresses the browser refused to open because no message or page gave them, kept
+    /// for the turn's findings (`jobs::browser_hand_back::leave_out_addresses_never_opened`) and
+    /// never projected: each `navigate` or `open_tab` refused so, once, as it asked for the
+    /// address. Any other failure, and any other step, names none.
+    #[test]
+    fn the_adapter_keeps_the_addresses_the_browser_refused_as_not_given_unprojected() {
+        let mut adapter = CodexEventStreamAdapter::default();
+        let end = |call: usize, tool: &str, url: &str, code: Option<&str>| {
+            let mut error = json!({ "reason": "No message and no page Octo read gave this address, so it was not opened." });
+            if let Some(code) = code {
+                error["code"] = json!(code);
+            }
+            Event {
+                id: "evt_mcp_end".to_string(),
+                msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+                    call_id: format!("call_{call}"),
+                    invocation: McpInvocation {
+                        server: "instafy_shared_browser".to_string(),
+                        tool: tool.to_string(),
+                        arguments: Some(json!({ "url": url })),
+                    },
+                    connector_id: None,
+                    mcp_app_resource_uri: None,
+                    link_id: None,
+                    app_name: None,
+                    action_name: None,
+                    plugin_id: None,
+                    duration: Duration::from_millis(1),
+                    result: Ok(CallToolResult {
+                        content: vec![json!({"type": "text", "text": "refused"})],
+                        structured_content: Some(json!({ "error": error })),
+                        is_error: Some(true),
+                        meta: None,
+                    }),
+                    mcp_app_ui: None,
+                    read_only_hint: None,
+                    turn_id: "turn-1".to_string(),
+                }),
+            }
+        };
+        let search = "https://www.tomshardware.com/search?searchTerm=Framework%20Laptop%2012";
+        for event in [
+            end(1, "navigate", search, Some("address_not_given")),
+            end(
+                2,
+                "open_tab",
+                "https://reviews.example/laptop-12",
+                Some("address_not_given"),
+            ),
+            end(3, "navigate", search, Some("address_not_given")),
+            end(4, "navigate", "https://down.example/page", None),
+            end(
+                5,
+                "click",
+                "https://reviews.example/laptop-16",
+                Some("address_not_given"),
+            ),
+        ] {
+            for projected in adapter.collect(&event) {
+                assert!(!projected.to_string().contains("https://"), "{projected}");
+            }
+        }
+        assert_eq!(
+            adapter.browser_not_given(),
+            [
+                search.to_string(),
+                "https://reviews.example/laptop-12".to_string(),
+            ]
+        );
+        assert!(adapter.browser_pages().is_empty());
     }
 
     /// A browser step that answered with a page that shows a secret marks the run, which then

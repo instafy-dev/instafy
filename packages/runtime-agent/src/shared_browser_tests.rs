@@ -3333,9 +3333,10 @@ fn a_failed_step_keeps_the_persons_yes_in_its_result() {
         consent.structured_content.expect("structured"),
         json!({"activity": {"refused": "consent"}, "error": words})
     );
+    // With nothing said of its step, only its words.
     let plain = failed_call_result(&failure(""));
     assert_eq!(plain.is_error, Some(true));
-    assert_eq!(plain.structured_content, None);
+    assert_eq!(plain.structured_content, Some(json!({"error": words})));
     // A page the network did not deliver keeps its own plain reason beside it.
     let network: anyhow::Error = ControllerFailure {
         message: "page.goto: net::ERR_CONNECTION_REFUSED at https://example.test/".to_string(),
@@ -3419,6 +3420,110 @@ async fn a_failed_step_with_facts_still_tells_the_model_what_failed() {
     assert!(
         format!("{killed:#}").contains("no error details"),
         "{killed:#}"
+    );
+}
+
+/// A local test, Nov 7: a comparison's browser part printed each step's
+/// `r.structuredContent`, as a successful step's text tells it to, and read two
+/// refused addresses, a stale snapshot and the tab limit as "undefined". A
+/// refusal's own way on ("Open https://www.tomshardware.com/ and follow its
+/// links to the page") never reached it, and it wrote the refused address as a
+/// page that doesn't exist. Every failed step's structured content now holds
+/// its words (`error.reason`), whatever else it carries, and an address
+/// refused because nothing gave it says so as a fact (`error.code`).
+#[tokio::test]
+async fn no_failed_step_reads_as_undefined() {
+    use std::os::unix::process::ExitStatusExt;
+    let refused = "No message and no page Octo read gave this address, so it was not opened: Octo opens only addresses it was given. Open https://www.tomshardware.com/ and follow its links to the page, or use the site's own search.";
+    let failed = |stderr: &str, stdout: &str, exit: i32| {
+        failed_call_result(&controller_failure(
+            std::process::ExitStatus::from_raw(exit << 8),
+            format!("Shared Browser command failed: {stderr}").as_bytes(),
+            stdout.as_bytes(),
+        ))
+    };
+    for (result, words) in [
+        (failed(refused, "", 1), refused),
+        (
+            failed(
+                "Shared Browser snapshot is stale; take a fresh snapshot before acting",
+                "",
+                1,
+            ),
+            "Shared Browser snapshot is stale; take a fresh snapshot before acting",
+        ),
+        (
+            failed(
+                "Octo already has 3 tabs open, so no tab was opened. Close one with close_tab, or reuse one with select_tab and navigate.",
+                "",
+                1,
+            ),
+            "Octo already has 3 tabs open, so no tab was opened.",
+        ),
+        (
+            failed(
+                "A cookie notice covers this page, and the browser could not decline it. [step_refused_consent]",
+                r#"{"ok":false,"activity":{"refused":"consent"}}"#,
+                1,
+            ),
+            "A cookie notice covers this page, and the browser could not decline it. [step_refused_consent]",
+        ),
+        (
+            failed(
+                "Instafy's browser could not be reached",
+                "",
+                BROWSER_UNAVAILABLE_EXIT_CODE,
+            ),
+            "Instafy's browser could not be reached",
+        ),
+        (
+            failed(
+                "page.goto: net::ERR_NAME_NOT_RESOLVED at https://nowhere.example/",
+                "",
+                1,
+            ),
+            SITE_NOT_FOUND_REASON,
+        ),
+    ] {
+        let view = model_view(result).await;
+        let structured = view.structured.expect("r.structuredContent");
+        assert!(structured.contains(words), "{structured}");
+        let structured: JsonValue = serde_json::from_str(&structured).expect("JSON");
+        assert!(structured["error"]["reason"].is_string(), "{structured}");
+        assert!(view.direct.contains(words), "{}", view.direct);
+    }
+    // Only the refusal of an address nothing gave is that fact.
+    let refusal = failed(refused, "", 1);
+    assert_eq!(
+        refusal.structured_content.as_ref().unwrap()["error"]["code"],
+        ADDRESS_NOT_GIVEN_CODE
+    );
+    let stale = failed(
+        "Shared Browser snapshot is stale; take a fresh snapshot before acting",
+        "",
+        1,
+    );
+    assert!(
+        stale.structured_content.as_ref().unwrap()["error"]
+            .get("code")
+            .is_none()
+    );
+    // As the run's steps read it, by the address the step asked for.
+    let structured = refusal.structured_content.clone();
+    let asked =
+        json!({ "url": "https://www.tomshardware.com/search?searchTerm=Framework%20Laptop%2012" });
+    assert_eq!(
+        address_not_given("navigate", Some(&asked), structured.as_ref()).as_deref(),
+        Some("https://www.tomshardware.com/search?searchTerm=Framework%20Laptop%2012")
+    );
+    assert!(address_not_given("click", Some(&asked), structured.as_ref()).is_none());
+    assert!(
+        address_not_given("navigate", Some(&asked), stale.structured_content.as_ref()).is_none()
+    );
+    // The words are the controller's own refusal's.
+    assert!(
+        SHARED_BROWSER_SCRIPT
+            .contains(&format!("so it was not opened: {ADDRESS_NOT_GIVEN_WORDS}."))
     );
 }
 
@@ -12605,7 +12710,10 @@ fn network_codes_map_to_a_few_plain_reasons() {
         other.content[0].as_text().expect("text content").text,
         "Shared Browser snapshot is stale"
     );
-    assert_eq!(other.structured_content, None);
+    assert_eq!(
+        other.structured_content,
+        Some(json!({"error": {"reason": "Shared Browser snapshot is stale"}}))
+    );
 }
 
 #[test]
@@ -13401,11 +13509,12 @@ async fn mcp_wire_carries_each_kind_of_browser_result_whole() {
         })
     );
     // A failure says what the browser said of its step, with nothing before it, and a page the
-    // network did not deliver says so in plain words.
+    // network did not deliver says so in plain words: as its text and as its structured content.
     assert_eq!(
         wire_result(failed_tool_result("the run's tab closed")).await,
         json!({
             "content": [{ "type": "text", "text": "the run's tab closed" }],
+            "structuredContent": { "error": { "reason": "the run's tab closed" } },
             "isError": true,
         })
     );

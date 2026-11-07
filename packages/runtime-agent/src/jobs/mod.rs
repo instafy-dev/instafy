@@ -9994,6 +9994,15 @@ impl JobProcessor {
                         }
                         pages
                     },
+                    not_given: {
+                        let mut refused = output.browser_not_given.clone();
+                        for address in &retry_output.browser_not_given {
+                            if !refused.contains(address) {
+                                refused.push(address.clone());
+                            }
+                        }
+                        refused
+                    },
                     final_json: &retry_output.final_json,
                     progress: progress_sender.as_ref().filter(|_| streaming_active),
                     runtime_id: registration.runtime_id,
@@ -10062,6 +10071,7 @@ impl JobProcessor {
                 ),
                 refused_a_step: browser_hand_back::refused_a_step(&interim_messages),
                 pages: output.browser_pages.clone(),
+                not_given: output.browser_not_given.clone(),
                 final_json: &output.final_json,
                 progress: progress_sender.as_ref().filter(|_| streaming_active),
                 runtime_id: registration.runtime_id,
@@ -16264,6 +16274,9 @@ pub struct BrowserTurnAnswer<'a> {
     pub refused_a_step: bool,
     /// The pages its own steps opened (`CodexRunOutput::browser_pages`).
     pub pages: Vec<String>,
+    /// The addresses the browser refused to open for its steps because no message or page gave
+    /// them (`CodexRunOutput::browser_not_given`).
+    pub not_given: Vec<String>,
     /// Its answer as the model wrote it.
     pub final_json: &'a JsonValue,
     /// Where the turn's messages go as it works: a second pass's steps go there too, so the
@@ -16305,7 +16318,17 @@ pub async fn end_browser_turn_answer(
     task_usage: &TaskUsage,
 ) -> BrowserTurnEnd {
     let metadata = job.payload.get("metadata");
+    // An address the browser refused to open because nothing gave it is no page that stopped
+    // the turn: it stays in its unread line, for the second pass to find by the site's links.
+    browser_hand_back::leave_out_addresses_never_opened(summary, &answer.not_given, &answer.pages);
     let second = read_the_unread_pages(codex, job, &answer, summary, task_usage).await;
+    if !second.not_given.is_empty() {
+        let mut opened = answer.pages.clone();
+        opened.extend(second.pages.iter().cloned());
+        let mut refused = answer.not_given.clone();
+        refused.extend(second.not_given.iter().cloned());
+        browser_hand_back::leave_out_addresses_never_opened(summary, &refused, &opened);
+    }
     let mut ended = BrowserTurnEnd {
         artifacts: second.artifacts,
         messages: second.messages,
@@ -16409,12 +16432,16 @@ fn unread_pages_pass_options(
 }
 
 /// What the second pass of a browser turn added to it ([`read_the_unread_pages`]): its run log
-/// and answer, the messages of its steps, and whether it stopped on a step that is the person's.
+/// and answer, the messages of its steps, whether it stopped on a step that is the person's, and
+/// the pages its steps opened and the addresses the browser refused them because nothing gave
+/// them (`CodexRunOutput::browser_pages`, `CodexRunOutput::browser_not_given`).
 #[derive(Default)]
 struct UnreadPagesRead {
     artifacts: Vec<JsonValue>,
     messages: Vec<JobMessage>,
     stopped_for_the_person: bool,
+    pages: Vec<String>,
+    not_given: Vec<String>,
 }
 
 /// A browser turn whose findings go back to the building turn ends with the pages its request
@@ -16518,6 +16545,8 @@ async fn read_the_unread_pages(
         "payload": sanitize_codex_final_json(&output.final_json),
     }));
     read.messages = with_runtime_metadata_vec(extract_codex_messages(&output.events), &runtime_id);
+    read.pages = output.browser_pages.clone();
+    read.not_given = output.browser_not_given.clone();
     if let Some(progress) = turn.progress.filter(|_| streaming) {
         for message in read.messages.iter().skip(streamed) {
             if progress.sender.send(message.clone()).is_err() {
@@ -25012,6 +25041,7 @@ mod tests {
             native_image_inputs: 0,
             browser_pages: Vec::new(),
             browser_secret_screen: false,
+            browser_not_given: Vec::new(),
         }
     }
 
@@ -34502,6 +34532,7 @@ mod tests {
             native_image_inputs: 0,
             browser_pages: Vec::new(),
             browser_secret_screen: false,
+            browser_not_given: Vec::new(),
         };
         let outcome = CodexOutcome {
             summary: "ok".to_string(),

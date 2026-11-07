@@ -49,7 +49,7 @@ const BY_HAND: &str = "mkdir -p sites/laptops && printf '<!doctype html><title>T
 const BUILT_BY_HAND: &str =
     "Built a responsive comparison page at `sites/laptops/index.html` with the maker's figures.";
 /// How a hand-back cites what the browser found (runtime-agent `jobs/browser_hand_back.rs`).
-const CITE_LINE: &str = "\n- Cite a page only for a fact listed under it. A finding with `stopped` was not read: say which page and why, in plain words (`timed-out`: the site didn't answer in time; `no-page`: there is no page at that address), and do not try it another way.\n";
+const CITE_LINE: &str = "\n- Cite a page only for a fact listed under it. A finding with `stopped` was not read: say which page and why in plain words, never the stop's own word (`login`: the page asked to sign in; `captcha`: the page showed a check that a person is browsing; `paywall`: the page is behind a paywall; `blocked`: the page refused Instafy's browser; `robots`: the page asks automated browsers not to read it; `download`: the page was a file to download; `secret`: the page showed private details, so Octo stopped there; `link-only`: the page is on a site Octo only links to; `no-page`: the page doesn't exist at that address; `timed-out`: the page didn't answer in time; `covered`: the page was covered by a cookie notice or dialog the browser couldn't close; any other: the page couldn't be read), and do not try it another way.\n";
 /// What the lane of a routed build says (runtime-agent `jobs/mod.rs`).
 const WRITE_LANE: &str = "\nDirect workspace-change response contract:\n";
 const NO_ACTIONS: &str = "- Do not emit `multi_agent_plan`, goals, integrations, browser/location actions, or broad coordination metadata.";
