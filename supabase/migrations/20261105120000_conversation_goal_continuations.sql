@@ -3,7 +3,7 @@
 set local lock_timeout = '5s';
 create table public.conversation_goal_continuations (
     source_job_id uuid primary key references public.agent_jobs(id) on delete cascade,
-    conversation_id uuid not null references public.conversations(id) on delete cascade,
+    conversation_id uuid not null,
     goal_revision uuid not null,
     owner_user_id uuid not null,
     status text not null default 'pending'
