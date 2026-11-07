@@ -68,9 +68,10 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
   const UNANSWERED_MAX_BYTES = 8 * 1024;
   const MAX_UNANSWERED_ADDRESSES = 32;
   // The addresses a message or a page gave the chat's browser turns: the ones
-  // the person's message and the turn's task name (runtime-agent writes them
-  // when the run starts, with the ones the chat's earlier runs were given),
-  // and each page this run reads, its own address and its links. navigate and
+  // the person's messages and the turn's task name and the pages the chat's
+  // browser turns read (runtime-agent writes them when the run starts, with
+  // the ones the chat's earlier runs were given), and each page this run
+  // reads, its own address, its links and those its text spells out. navigate and
   // open_tab open a path past a site's root only when one of them gave it: a
   // turn opened article addresses it made up. Kept as fingerprints of the
   // address's site and path (givenAddressKey), newest last. runtime-agent
@@ -1306,8 +1307,8 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       return given !== null && !given.includes(givenAddressKey(rawUrl));
     }
 
-    // Keeps the addresses a page gave (its own and its links) in the run's
-    // record. Best effort: one that is not kept is refused later, and found
+    // Keeps the addresses a page gave (its own, its links and those its text
+    // spells out) in the run's record. Best effort: one that is not kept is refused later, and found
     // again from the site's root.
     function rememberGiven(rawUrls) {
       const keys = [...new Set(rawUrls.map(givenAddressKey).filter(Boolean))];

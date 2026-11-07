@@ -5195,9 +5195,9 @@ function refuseUnansweredAddress(url) {
 }
 
 // An address Octo made up is not opened: navigate and open_tab open a path
-// past a site's root only when the person's message, the turn's task or a
-// page the chat's browser turns read gave it (its own address or a link),
-// refused at once, before anything asks or loads. A turn opened two article
+// past a site's root only when the person's messages, the turn's task or a
+// page the chat's browser turns read gave it (its own address, a link or an
+// address its text spells out), refused at once, before anything asks or loads. A turn opened two article
 // addresses it guessed on a reviewer's site, one of which waited 20 seconds
 // for nothing. The site's root, and an address on no public site (left to the
 // browser's own network rules), always go on.
