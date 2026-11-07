@@ -50,8 +50,8 @@ own kind of page.
   ("No options yet") while a page you read named what to compare. An item whose own page wasn't opened is "not
   checked (its own page wasn't opened)" in the reply, and each of its unknown values has `"note": "its own page wasn't
   opened"`. The lede names the same missing items as the reply.
-- Asked for from what you already know, with nothing looked up: the compare starter with `"from": "memory"`, each
-  value only its `"v"`, from your own knowledge, never from the space's other pages. No `src`, `url` or `date`
+- Options asked for from what you already know, with nothing looked up: the compare starter with `"from": "memory"`,
+  each value only its `"v"`, from your own knowledge, never from the space's other pages. No `src`, `url` or `date`
   (`instafy bind check` fails them): the starter reads each value "<value>, not checked" and adds "From what Octo
   knows; nothing checked." to the lede.
 - Keep sort, filters and the open tab in the URL query and give rows ids, so links and Studio's Follow keep them.

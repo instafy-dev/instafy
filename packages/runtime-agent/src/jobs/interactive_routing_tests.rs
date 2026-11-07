@@ -636,7 +636,7 @@ fn a_page_from_what_octo_knows_says_so_and_its_rows_say_what_was_not_checked() {
     ));
     let previous = flat(include_str!("legacy/interactive-artifacts-v12.md"));
     for needle in [
-        "Asked for from what you already know, with nothing looked up: the compare starter with `\"from\": \"memory\"`, each value only its `\"v\"`, from your own knowledge, never from the space's other pages.",
+        "Options asked for from what you already know, with nothing looked up: the compare starter with `\"from\": \"memory\"`, each value only its `\"v\"`, from your own knowledge, never from the space's other pages.",
         "the starter reads each value \"<value>, not checked\" and adds \"From what Octo knows; nothing checked.\" to the lede.",
         "never from memory unless asked (above)",
         "An item whose own page wasn't opened is \"not checked (its own page wasn't opened)\" in the reply, and each of its unknown values has `\"note\": \"its own page wasn't opened\"`.",
