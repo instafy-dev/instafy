@@ -2649,8 +2649,10 @@ unless the policy is `"covered"`.
   request to carry that turn on), and every finding line of
   its final reply as a labelled finding `{url, title, facts, readAt, viewer}`
   (plus `stopped` for a page that was not read: `login`, `captcha`, `paywall`,
-  `blocked`, `robots`, `download`, `secret` or `link-only`, and any other reason
-  counts as `blocked`): the address, title and facts come from the reply's JSON
+  `blocked`, `robots`, `download`, `secret`, `link-only`, `no-page` for an
+  address with no page or `timed-out` for one that gave no answer in time, and
+  any other reason counts as `blocked`, so a page that never loaded is never
+  called blocked): the address, title and facts come from the reply's JSON
   finding lines (each page once, a later line for it adding its facts, and a
   page's facts at most 2,000 characters, whole facts in order, the rest
   counted as `factsLeftOut`; only a reply without any falls back to the
@@ -2667,15 +2669,17 @@ unless the policy is `"covered"`.
   and a map's browser turn wrote its first line as one paragraph with its
   advice in it. A reply whose lines list no fact (a turn that wrote none,
   whose note lists the pages it opened by address, or an older runtime's
-  reply) goes as it is (`reply`). The record fits the 12,000 characters the
+  reply) goes as it is (`reply`), for an older runtime: this one quotes no
+  `reply` to the building turn, only the findings, so a building turn reads a
+  browser turn's own words nowhere. The record fits the 12,000 characters the
   runtime quotes in one section, which an older runtime leaves out whole when
   it is over: whole lines in order, the reply's last lines left out first,
   then the last pages read and then the last pages that stopped the turn,
   with `replyTruncated` and `findingsLeftOut` saying so; a page read and the
   reply's first line always stay. What can never fit is left out before the
   record is fitted, so a long reply costs no more to fit than a short one.
-  The runtime does the same with a record over that size, and tells the
-  building turn never to guess what was left out. Only the person
+  The runtime leaves out the last whole findings of a record over that size
+  the same way, and tells the building turn never to guess what was left out. Only the person
   who ran the browser turn, and whose turn sent the card, can send it, once per
   browser turn, within 30 minutes, only while no prompt was sent in the
   conversation after the browser turn (`browser_hand_back_superseded`), and
@@ -2708,14 +2712,19 @@ unless the policy is `"covered"`.
   newest six of this agent's, never the one a hand-back's record carries, and
   whether older ones were left out), each with what it was asked and its reply
   with its finding lines put back (at most 6,000 characters), those findings
-  labelled like the record's. A building turn on a restored thread reads them
-  as one section of quoted page data; a new or lost building thread reads them
-  in its replay of the chat, each browser turn as one quoted block (one that
-  carries on the person's own message with its reply alone: the message is in
-  that replay already). A Let Octo
+  labelled like the record's. A building turn reads a browser turn only by its
+  findings, never by its reply's own words: a page people share once took
+  "nearest" and "a short walk uphill" from a metro turn's reply, which no page
+  said. On a restored thread it reads them as one section of quoted page data;
+  a new or lost building thread reads them in its replay of the chat, each
+  browser turn as one quoted block of its request and its findings (one that
+  carries on the person's own message with its findings alone: the message is
+  in that replay already), and a turn that listed none with none. A Let Octo
   continue press reads as one line there, not as Studio's instructions in the
   person's name, and a hand-back's own stored words read as nothing there and
-  in the routing step's history: the person's message is in it already. It takes no
+  in the routing step's history: the person's message is in it already. Nor
+  does a browser turn's findings note reach the routing step's history: it is
+  Details, and its lines quote page text. It takes no
   routing step: its route is decided (build in this chat), and the findings it
   builds from are in its own prompt, which a routing step never sees. So it
   runs in the lane a routed build runs in: it edits the space and ends in plain
@@ -2732,12 +2741,32 @@ unless the policy is `"covered"`.
   from a turn that may not send it, and one dropped as the reply is read (no
   task, a task over 8,000 characters or an unknown browser location), leaves a
   line in the runtime's log with the turn's job.
-  A browser turn that continues a building card is asked to end its reply
-  with one finding per page, one JSON object per line, as the browser skill
-  writes them, each fact under a page it read that states it rather than one
-  that only quotes it, and a value it looked for on a page and didn't find
+  Every browser turn is asked to end its reply with one finding per page, one
+  JSON object per line, each fact under a page it read that states it rather
+  than one that only quotes it, a value it looked for on a page and didn't find
   under that page as where it looked ("runtime not found on this page"), never
-  that the page lacks it. Those lines are for Octo: the runtime takes every line
+  that the page lacks it, and a page that stopped it as a stop with its word
+  (`no-page` and `timed-out` among them). A turn whose reply answers the person
+  drafts it as it writes, up to its first finding line. A browser turn that
+  continues a building card also ends with one line naming the pages its
+  request needs that it didn't open (`{"unread": [...]}`). When it names any,
+  the runtime runs the turn once more on its own thread, told only those
+  pages, before the build: once a turn, and never after a Stop, a pause for the
+  person, a step whose approval ended the turn, or a step the browser refused
+  as the person's own. Its steps show in the turn's line and Details as the
+  turn's own do, its words join the turn's (so a first line that said a page
+  stopped the turn stays) and its findings join the turn's, each pass's lines
+  its own: a second pass that wrote none adds the pages its steps opened, by
+  address, and a turn whose answer holds no finding line gets no second pass,
+  only the wrap-up pass below. A page its finding lines list already, read or
+  stopped at, is never one the second pass is told to read. A second pass that
+  stops for the person (a pause, a step's approval that ended it) ends the
+  turn with the words that say what they do next, which it posts, and its note
+  keeps every finding line in hand; no hand-back follows it. Its unread line
+  starts no third pass. The unread line is the runtime's alone: no
+  reply and no note keeps it. Told only to read every page the request needs, a
+  comparison's browser turn read three pages and ended, and the page was built
+  with four of its fifteen facts. Those lines are for Octo: the runtime takes every line
   the controller would read as a finding out of the reply the person reads, and
   posts them as one note of the turn
   (`details.browserFindings: {pages, pagesRead}`), where the controller reads
@@ -2769,11 +2798,13 @@ unless the policy is `"covered"`.
   person's own message, which asks for the page too: told only that it was
   read-only, a comparison's browser turn read the maker's home page and ended
   there. The building turn cites a page only for a
-  fact listed under it, and reads a reply that still goes as the browser
-  turn's words: a place or claim it names with no page under it is read on
-  its own page or left out. Such a browser turn that used the browser
-  and wrote no finding line would hand nothing back, however many pages it
-  read: it gets the runtime's wrap-up pass on its own thread, which holds those
+  fact listed under it, reads a page that stopped the browser turn as its stop
+  in plain words (`timed-out`: the site didn't answer in time; `no-page`:
+  there is no page at that address), and never reads the browser turn's own
+  words. A browser turn that used the browser and wrote no
+  finding line would leave a later building turn nothing of the pages it read,
+  and one that continues a building card would hand nothing back: it gets the
+  runtime's wrap-up pass on its own thread, which holds those
   pages, asked for the finding lines alone, and not billed, as a recovery retry
   is not (docs/Credits-Billing.md). The pass keeps the turn's browser tools,
   approvals and Stop, a message the person sends meanwhile never steers it,
@@ -2783,7 +2814,7 @@ unless the policy is `"covered"`.
   by the address the browser reported (the turn's activity messages still
   name only a page's host), so the hand-back still goes and the turn posts no
   words of its own; those lines list no fact, so the building turn cites none
-  of them for one, and the reply goes to it as it is. A turn that stopped on a step that is
+  of them for one, and none of the reply goes to it. A turn that stopped on a step that is
   the person's (it paused for their input on the page, a step's approval ended
   it, or a page it opened showed a secret) gets neither: its reply says what
   they do next, so it stays in the chat as the turn wrote it, and Studio sends

@@ -29,7 +29,7 @@ const REQUEST: &str = "Compare the three latest laptops from maker.example: proc
 /// The browser turn's answer, which promises a build and names no page.
 const PROMISED_BUILD: &str = "Read the maker's pages and two reviews. I'm passing the findings to the comparison-page build.";
 /// The opening of the wrap-up pass's request (runtime-agent `FINDING_LINES_PASS_PROMPT`).
-const PASS_OPENING: &str = "Your answer has no finding lines, and the building turn makes what the person asked for only from them.";
+const PASS_OPENING: &str = "Your answer has no finding lines, and Octo's later turns use what the pages showed only from them.";
 const READ_13: &str = r#"{"url": "https://maker.example/laptop-13", "title": "Laptop 13", "facts": ["Battery: 74 Wh"]}"#;
 const READ_REVIEW: &str = r#"{"url": "https://reviews.example/laptop-13", "title": "Laptop 13 review", "facts": ["Battery lasted 20 hours"]}"#;
 /// The pages the browser turn's own steps opened, as the run reports them.
@@ -83,9 +83,11 @@ fn a_wrap_up_pass_that_takes_a_step_is_not_used_via_proxy() -> Result<()> {
 }
 
 /// A hand-back turn in the browser on the person's device, run whole: it opened the maker's page
-/// and answered with a build request and no finding line. It is offered no build request, since
-/// a build comes after it. Its turn keeps no thread, so it gets no pass; its note holds its reply
-/// and the page that browser reported, so the hand-back goes, and it posts no words of its own.
+/// and answered with a build request, no finding line and an unread line. It is offered no build
+/// request, since a build comes after it. Its turn keeps no thread, so it gets no pass, and no
+/// second pass over the page it named unread, whose line the job takes out of its answer; its
+/// note holds its reply and the page that browser reported, so the hand-back goes, and it posts
+/// no words of its own.
 /// A routed turn that hands nothing back is offered the build request, and its own, asked for
 /// after it opened a page, is said in its reply: nothing acts on it.
 #[test]
@@ -198,7 +200,7 @@ struct Provider {
     requests: StdMutex<Vec<Value>>,
 }
 
-fn response(output: Value) -> axum::response::Response {
+pub(super) fn response(output: Value) -> axum::response::Response {
     Json(json!({
         "id":format!("resp_{}", Uuid::new_v4()),"object":"response","status":"completed",
         "model":"gpt-5.5",
@@ -228,7 +230,7 @@ fn command(id: &str, cmd: &str) -> axum::response::Response {
 }
 
 /// The model's call of a tool of the browser on the person's device.
-fn device_step(id: &str, tool: &str, arguments: Value) -> axum::response::Response {
+pub(super) fn device_step(id: &str, tool: &str, arguments: Value) -> axum::response::Response {
     response(json!({
         "id":format!("fc_{id}"),"type":"function_call","status":"completed",
         "call_id":format!("call_{id}"),"namespace":DEVICE_NAMESPACE,"name":tool,
@@ -236,7 +238,7 @@ fn device_step(id: &str, tool: &str, arguments: Value) -> axum::response::Respon
     }))
 }
 
-fn last_user_index(request: &Value) -> Option<usize> {
+pub(super) fn last_user_index(request: &Value) -> Option<usize> {
     request["input"]
         .as_array()?
         .iter()
@@ -257,7 +259,7 @@ fn last_user_text(request: &Value) -> String {
 }
 
 /// How many of its calls the run sent back the output of since its prompt.
-fn step_outputs(request: &Value) -> usize {
+pub(super) fn step_outputs(request: &Value) -> usize {
     let start = last_user_index(request).unwrap_or(0);
     request["input"]
         .as_array()
@@ -279,6 +281,11 @@ fn input_text(request: &Value) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// The last line of a device turn's answer: a page it didn't open (runtime-agent `UNREAD_LINE`).
+const DEVICE_UNREAD: &str = r#"{"unread": ["Laptop 16's own page"]}"#;
+/// The opening of a second pass's request (runtime-agent `unread_pages_prompt`).
+const SECOND_PASS_OPENING: &str = "Your unread line named pages this request still needs:";
 
 /// The words the runtime's retry of a browser turn on the person's device opens with.
 const DEVICE_RETRY: &str = "IMPORTANT PERSONAL BROWSER RETRY REQUIREMENT:";
@@ -329,7 +336,7 @@ async fn provider_request(
                 (Device::Pauses, _, _) => final_answer(PAUSE_WORDS, json!([])),
                 (Device::MeetsASecret, _, _) => final_answer(SECRET_WORDS, json!([])),
                 (Device::Reads | Device::ReadsOnRetry, _, _) => final_answer(
-                    PROMISED_BUILD,
+                    &format!("{PROMISED_BUILD}\n{DEVICE_UNREAD}"),
                     json!([{ "type": "request_build", "continueBuilding": true, "task": "Build the comparison page." }]),
                 ),
             }
@@ -548,15 +555,20 @@ async fn end_of_a_turn_with_its_thread(
                 thread: Some(thread.clone()),
                 used_the_browser: true,
                 stopped_for_the_person: false,
+                refused_a_step: false,
                 pages: pages.clone(),
                 final_json: &turn.final_json,
+                progress: None,
+                runtime_id: Uuid::nil(),
+                paused_already: false,
             },
             &mut summary,
             &task_usage,
         ),
     )
     .await
-    .context("the wrap-up pass timed out")?;
+    .context("the wrap-up pass timed out")?
+    .artifacts;
 
     let requests = state.requests.lock().unwrap().clone();
     let pass_requests = passes(state);
@@ -646,8 +658,9 @@ async fn end_of_a_turn_with_its_thread(
     );
     let passes_so_far = passes(state).len();
 
-    // A routed turn that hands nothing back gets no pass, and its build request, which nothing
-    // acts on after it opened pages, is said in its reply.
+    // A routed turn that hands nothing back gets the same pass, since a later building turn
+    // reads only its finding lines, and its build request, which nothing acts on after it opened
+    // pages, is said in its reply.
     let routed = browser_job(project_id, "shared", false);
     let mut summary = PROMISED_BUILD.to_string();
     let artifacts = end_browser_turn_answer(
@@ -658,20 +671,38 @@ async fn end_of_a_turn_with_its_thread(
             thread: Some(thread.clone()),
             used_the_browser: true,
             stopped_for_the_person: false,
+            refused_a_step: false,
             pages: pages.clone(),
             final_json: &turn.final_json,
+            progress: None,
+            runtime_id: Uuid::nil(),
+            paused_already: false,
         },
         &mut summary,
         &TaskUsage::default(),
     )
-    .await;
-    assert!(artifacts.is_empty(), "{artifacts:?}");
-    assert_eq!(summary, format!("{PROMISED_BUILD}\n\n{NOT_MADE}"));
-    assert_eq!(
-        passes(state).len(),
-        passes_so_far,
-        "no pass for a turn that hands nothing back"
+    .await
+    .artifacts;
+    assert!(
+        artifacts
+            .iter()
+            .any(|artifact| artifact["metadata"]["purpose"] == "finding-lines-wrap-up"),
+        "{artifacts:?}"
     );
+    assert_eq!(
+        summary,
+        format!("{PROMISED_BUILD}\n\n{lines}\n\n{NOT_MADE}")
+    );
+    assert!(
+        passes(state).len() > passes_so_far,
+        "a pass for a turn that hands nothing back too"
+    );
+    // The person reads its words and the line, and its note keeps the lines.
+    let mut ended = execution(summary);
+    move_findings_into_details(&routed, &mut ended);
+    assert_eq!(ended.summary, format!("{PROMISED_BUILD}\n\n{NOT_MADE}"));
+    assert_eq!(ended.final_messages[0].content, lines);
+    let passes_so_far = passes(state).len();
 
     // A turn that stopped on a step of the person's is left as it wrote it: no pass, no page
     // lines and no word about a build, whatever its answer asked.
@@ -686,13 +717,18 @@ async fn end_of_a_turn_with_its_thread(
                 thread: Some(thread.clone()),
                 used_the_browser: true,
                 stopped_for_the_person: true,
+                refused_a_step: false,
                 pages: pages.clone(),
                 final_json: &turn.final_json,
+                progress: None,
+                runtime_id: Uuid::nil(),
+                paused_already: false,
             },
             &mut summary,
             &TaskUsage::default(),
         )
-        .await;
+        .await
+        .artifacts;
         assert!(artifacts.is_empty(), "{artifacts:?}");
         assert_eq!(summary, words);
     }
@@ -705,10 +741,10 @@ async fn end_of_a_turn_with_its_thread(
 }
 
 /// The namespace the turn calls the browser on the person's device in.
-const DEVICE_NAMESPACE: &str = "mcp__instafy_personal_browser";
-const DEVICE_TOKEN: &str = "inert-finding-lines-device-token";
+pub(super) const DEVICE_NAMESPACE: &str = "mcp__instafy_personal_browser";
+pub(super) const DEVICE_TOKEN: &str = "inert-finding-lines-device-token";
 /// The page the turn opens there, and the address that browser reports for the step.
-const DEVICE_PAGE: &str = "https://maker.example/laptop-13";
+pub(super) const DEVICE_PAGE: &str = "https://maker.example/laptop-13";
 /// What a turn that paused for the person to sign in replies.
 const PAUSE_WORDS: &str = "Sign in on the highlighted fields in the browser on this device, then choose Let Octo continue.";
 /// What a turn whose page showed a secret replies.
@@ -716,13 +752,13 @@ const SECRET_WORDS: &str = "This page shows a key under \"API keys\". I didn't c
 
 /// The stand-in for the browser on the person's device: its tools, and each step's result with
 /// the page the step left the tab on, as that browser reports it.
-struct DeviceBrowser {
-    project_id: Uuid,
-    secret: bool,
-    calls: StdMutex<Vec<String>>,
+pub(super) struct DeviceBrowser {
+    pub(super) project_id: Uuid,
+    pub(super) secret: bool,
+    pub(super) calls: StdMutex<Vec<String>>,
 }
 
-async fn device_browser(
+pub(super) async fn device_browser(
     State(state): State<Arc<DeviceBrowser>>,
     headers: HeaderMap,
     Json(payload): Json<Value>,
@@ -901,8 +937,15 @@ async fn a_whole_device_turn(
             .all(|request| !last_user_text(request).contains(ROUTING_OPENING)),
         "a browser turn takes no routing step"
     );
-    // Its turn keeps no thread, so it gets no pass.
+    // Its turn keeps no thread, so it gets no pass, and no second pass over the page it named
+    // unread.
     assert!(passes(state).is_empty(), "no pass on the person's device");
+    assert!(
+        requests
+            .iter()
+            .all(|request| !last_user_text(request).contains(SECOND_PASS_OPENING)),
+        "no second pass on the person's device"
+    );
     // A routed turn whose findings go back to the building turn is offered no build request:
     // a build comes after it already.
     for request in &requests {
@@ -991,14 +1034,27 @@ async fn a_whole_device_turn(
                 "{request}"
             );
         }
-        assert!(
-            passes(state).is_empty(),
-            "no pass for a turn that hands nothing back"
+        assert!(passes(state).is_empty(), "no pass on the person's device");
+        // Its note keeps the page it opened, which a later building turn reads.
+        let line = format!("{{\"url\":\"{DEVICE_PAGE}\"}}");
+        assert_eq!(
+            answered.summary,
+            format!("{PROMISED_BUILD}\n\n{line}\n\n{NOT_MADE}")
         );
-        let said = format!("{PROMISED_BUILD}\n\n{NOT_MADE}");
-        assert_eq!(answered.summary, said);
         move_findings_into_details(&routed, &mut answered);
-        assert_eq!(answered.summary, said, "the person reads it");
+        assert_eq!(
+            answered.summary,
+            format!("{PROMISED_BUILD}\n\n{NOT_MADE}"),
+            "the person reads it"
+        );
+        assert!(
+            answered
+                .final_messages
+                .iter()
+                .any(|message| message.content == line),
+            "{:?}",
+            answered.final_messages
+        );
     }
 
     drop(browser_guard);
