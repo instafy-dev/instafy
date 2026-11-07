@@ -146,7 +146,7 @@
   /** link(url, text): the address may be either argument, so link("Maker", "https://maker.com") is the link a page
    * meant, and an address that can't be linked never shows as the words of one. */
   function link(url, text, cls) {
-    if (!isAddress(url) && isAddress(text)) { var named = url; url = text; text = named; }
+    if (!isAddress(url) && isAddress(text)) { var named = url; url = text; if (named != null && named !== "") text = named; }
     var href = safeUrl(url);
     if (!href) return h("span", { "class": cls || null, text: text });
     // the ↗ never wraps away from its words (the space before it sits in a no-wrap span)

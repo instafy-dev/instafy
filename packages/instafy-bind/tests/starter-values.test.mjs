@@ -869,7 +869,8 @@ test("site.link takes the https address from either argument, so a page to share
         site.link("The bookshop's own site", "https://bookshop.example/en/")),
       site.h("article", { "class": "card" }, site.h("p", { text: "Route not confirmed." }),
         site.link("https://metro.example/", "The metro's site")),
-      site.h("p", {}, site.link("Not a link", "http://plain.example/"), " ", site.link("javascript:alert(1)", "Not one either")));
+      site.h("p", {}, site.link("Not a link", "http://plain.example/"), " ", site.link("javascript:alert(1)", "Not one either")),
+      site.h("p", {}, site.link(undefined, "https://named-only.example/")));
   } });`;
   try {
     const { document } = await draw("share", null);
@@ -877,8 +878,10 @@ test("site.link takes the https address from either argument, so a page to share
     assert.deepEqual(links, [
       ["https://bookshop.example/en/", "The bookshop's own site ↗"],
       ["https://metro.example/", "The metro's site ↗"],
+      // an address with no name to go with it is its own link's words
+      ["https://named-only.example/", "https://named-only.example/ ↗"],
     ]);
-    const text = document.getElementById("list").textContent;
+    const text = document.getElementById("list").textContent.replace("https://named-only.example/ ↗", "");
     assert.doesNotMatch(text, /https:\/\//, `no address shown as words: ${text}`);
     assert.match(text, /Not a link/);
     assert.match(text, /Not one either/);
