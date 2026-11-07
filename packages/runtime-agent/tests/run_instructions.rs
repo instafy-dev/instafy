@@ -1287,8 +1287,9 @@ async fn run_every_chain(harness: &mut Harness) {
     let d1 = harness.run("D1", Spec::new(cd, Lane::Default, None)).await;
     harness.run("D2", Spec::new(cd, Lane::Granted, d1)).await;
 
-    // E: ordinary, then MCP, Summarize and a write turn, on one default thread, and back to
-    // an ordinary turn.
+    // E: ordinary, then MCP on the same default thread; then Summarize, a write turn and an
+    // ordinary turn again, each of which begins its requests otherwise and so starts a thread of
+    // its own from the chat's replay.
     let ce = Uuid::new_v4();
     let e1 = harness.run("E1", Spec::new(ce, Lane::Default, None)).await;
     let e2 = harness.run("E2", Spec::new(ce, Lane::Mcp, e1)).await;
@@ -1307,9 +1308,10 @@ async fn run_every_chain(harness: &mut Harness) {
         .await;
 
     // K: native compaction. K2 (Summarize) compacts mid-turn; K3 (ordinary) follows and ends
-    // above the compaction limit. K4 (a card's Shared Browser turn) starts the browser thread and
-    // ends above the limit too; K5 (ordinary) compacts the building thread before it starts, and
-    // K6 (the browser again) its browser thread.
+    // above the compaction limit. Each starts a thread of its own mode. K4 (a card's Shared
+    // Browser turn) starts the browser thread and ends above the limit too; K5 (ordinary)
+    // compacts K3's building thread before it starts, and K6 (the browser again) its browser
+    // thread.
     let ck = Uuid::new_v4();
     let k1 = harness.run("K1", Spec::new(ck, Lane::Default, None)).await;
     let mut k2 = Spec::new(ck, Lane::PlainFinal, k1);
@@ -1334,13 +1336,16 @@ async fn run_every_chain(harness: &mut Harness) {
 
     // R: a turn on a resumed thread fails before the model answers; the person's retry follows.
     let cr = Uuid::new_v4();
-    let r1 = harness.run("R1", Spec::new(cr, Lane::Default, None)).await;
+    let r1 = harness
+        .run("R1", Spec::new(cr, Lane::PlainFinal, None))
+        .await;
     let mut r5 = Spec::new(cr, Lane::PlainFinal, r1);
     r5.script = vec![Step::Fail502; 2];
     let r5 = harness.run("R5", r5).await;
     harness.run("R6", Spec::new(cr, Lane::PlainFinal, r5)).await;
 
-    // T: the API-key transport, a fresh thread, a resumed lane change and back.
+    // T: the API-key transport, a fresh thread, a lane change, which starts a thread of its own,
+    // and back.
     let ct = Uuid::new_v4();
     let mut t1 = Spec::new(ct, Lane::Default, None);
     t1.api_key = true;
@@ -1680,7 +1685,8 @@ fn follow_up_continuation(card: Uuid, continues: Option<Uuid>) -> Value {
 /// going" go through the routing step, which sends each straight to the browser: its card's turn
 /// goes on in the chat's tab from the browser turn before it. "Put the hours and the metro route
 /// on a small page I can share." is a building turn of its own, which reads the browser turns
-/// since its thread's last turn as page data.
+/// since its thread's last turn as page data. It runs in N0's mode, so it resumes N0's thread: a
+/// turn of another mode starts a thread of its own, whose replay quotes them (`thread_mode`).
 async fn run_follow_ups_from_the_chat(harness: &mut Harness) {
     let cn = Uuid::new_v4();
     let n0 = harness
@@ -1727,7 +1733,7 @@ async fn run_follow_ups_from_the_chat(harness: &mut Harness) {
         browser = harness.turn(label).run_id;
     }
     harness
-        .run("N7", Spec::new(cn, Lane::PlainWrite, state).asking(N_PAGE))
+        .run("N7", Spec::new(cn, Lane::Default, state).asking(N_PAGE))
         .await;
 }
 
@@ -2612,24 +2618,24 @@ fn check(harness: &Harness) -> Result<()> {
         ("D2", 2),
         ("E1", 1),
         ("E2", 2),
-        ("E3", 3),
-        ("E4", 4),
-        ("E5", 5),
+        ("E3", 1),
+        ("E4", 1),
+        ("E5", 1),
         ("P1", 1),
         ("P2", 1),
         ("P3", 1),
         ("K1", 1),
-        ("K2", 2),
-        ("K3", 2),
+        ("K2", 1),
+        ("K3", 1),
         ("K4", 1),
         ("K5", 1),
         ("K6", 1),
         ("R1", 1),
-        ("R5", 2),
-        ("R6", 2),
+        ("R5", 1),
+        ("R6", 1),
         ("T1", 1),
-        ("T2", 2),
-        ("T3", 3),
+        ("T2", 1),
+        ("T3", 1),
         ("O1", 1),
         ("O2", 1),
         ("O3", 1),
@@ -2708,8 +2714,9 @@ fn check(harness: &Harness) -> Result<()> {
     // A retry of a failed turn neither repeats nor loses that turn's text.
     for request in &harness.turn("R5").requests {
         ensure!(
-            run_blocks(request).len() == 2,
-            "an R5 request holds other than 2 run blocks"
+            run_blocks(request).len() == 1
+                && count(&instructions_text(request), "PLAIN_FINAL") == 1,
+            "an R5 request holds other than its thread's one run block"
         );
     }
     ensure!(

@@ -162,7 +162,8 @@ impl HeartbeatTask {
                         if let Err(error) = heartbeat {
                             let message = error.to_string();
                             if message.contains("heartbeat lease lost") {
-                                warn!(job_id = %job_id, %message, "job lease lost during heartbeat; stopping job");
+                                // How a Stop reaches a running job, most often: no fault.
+                                info!(job_id = %job_id, %message, "job lease lost during heartbeat; stopping job");
                                 if let Some(signal) = lease_lost_signal.as_ref() {
                                     signal.cancel();
                                 }
@@ -1375,11 +1376,13 @@ impl RuntimeAgent {
                 .await
                 .context("heartbeat during job handling failed")
             {
-                warn!(?error, job_id = %job.id, "heartbeat failed");
                 // The lease is gone already (a Stop cancelled the job as it was leased): nothing
                 // of the job runs. Any other failure is a passing one, and the job goes on.
                 if is_lease_lost(&error) {
+                    info!(?error, job_id = %job.id, "job lease lost at the first heartbeat");
                     lease_lost_signal.cancel();
+                } else {
+                    warn!(?error, job_id = %job.id, "heartbeat failed");
                 }
             }
         }
@@ -1514,6 +1517,9 @@ impl RuntimeAgent {
                     if let Some(task) = job_input_task.take() {
                         task.shutdown().await;
                     }
+                    if let Some(task) = periodic_heartbeat.take() {
+                        task.shutdown().await;
+                    }
                     Self::complete_job(
                         &client,
                         registration,
@@ -1560,6 +1566,12 @@ impl RuntimeAgent {
                     if let Some(task) = job_input_task.take() {
                         task.shutdown().await;
                     }
+                    // The turn is over, and its heartbeat ends before its report: the
+                    // controller ends the lease as it takes the report, so a heartbeat sent
+                    // meanwhile would read as a lost lease.
+                    if let Some(task) = periodic_heartbeat.take() {
+                        task.shutdown().await;
+                    }
                     end = TurnEnd::after_run(&execution_result);
                     match execution_result {
                         Ok(execution) => {
@@ -1581,9 +1593,6 @@ impl RuntimeAgent {
                                 info!(job_id = %job.id, "job cancelled; skipping completion");
                                 turn.end(end);
                                 executor.processor().cleanup_after_lease_lost(&job).await;
-                                if let Some(task) = periodic_heartbeat.take() {
-                                    task.shutdown().await;
-                                }
                                 if let Some(task) = periodic_secrets_refresh.take() {
                                     task.shutdown().await;
                                 }
@@ -1664,6 +1673,9 @@ impl RuntimeAgent {
                 warn!(job_id = %job.id, mode = %other.as_str(), "execution mode not supported yet");
                 let message = format!("execution mode '{}' is not yet implemented", other.as_str());
                 if let Some(task) = job_input_task.take() {
+                    task.shutdown().await;
+                }
+                if let Some(task) = periodic_heartbeat.take() {
                     task.shutdown().await;
                 }
                 if let Err(report_error) =

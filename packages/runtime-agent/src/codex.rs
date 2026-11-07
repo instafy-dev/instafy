@@ -3332,8 +3332,12 @@ pub(crate) const RETIRED_BROWSER_THREAD_KEYS: [&str; 4] = [
     CODEX_STATE_BROWSER_THREAD_RESTORE_SOURCE_KEY,
 ];
 
+/// The state key naming the mode the building lane's thread runs in
+/// (`jobs::leave_thread_begun_in_another_mode`). It goes with the thread's other keys.
+pub(crate) const BUILDING_THREAD_MODE_KEY: &str = "defaultThreadMode";
+
 /// Every state key of the building lane's thread.
-pub(crate) const BUILDING_THREAD_KEYS: [&str; 7] = [
+pub(crate) const BUILDING_THREAD_KEYS: [&str; 8] = [
     CODEX_STATE_DEFAULT_THREAD_ID_KEY,
     CODEX_STATE_LEGACY_THREAD_ID_KEY,
     CODEX_STATE_DEFAULT_ROLLOUT_PATH_KEY,
@@ -3341,6 +3345,7 @@ pub(crate) const BUILDING_THREAD_KEYS: [&str; 7] = [
     CODEX_STATE_DEFAULT_THREAD_RESTORE_FAILED_KEY,
     CODEX_STATE_DEFAULT_THREAD_RESTORE_SOURCE_KEY,
     CODEX_STATE_DEFAULT_HISTORY_REPLAY_REQUIRED_KEY,
+    BUILDING_THREAD_MODE_KEY,
 ];
 
 /// Every state key of the Shared Browser lane's thread.
