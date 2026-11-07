@@ -272,8 +272,10 @@ for (const width of [320, 360, 390]) {
       expect(target!.right).toBeLessThanOrEqual(width);
     }
     expect(geometry.tabPicker).not.toBeNull();
-    expect(geometry.tabPicker!.height).toBeGreaterThanOrEqual(44);
-    expect(geometry.tabPicker!.width).toBeGreaterThanOrEqual(44);
+    // A narrow viewport still has a fine pointer here: use the shared 32px
+    // toolbar target. The coarse-pointer cases below retain the 44px minimum.
+    expect(geometry.tabPicker!.height).toBeGreaterThanOrEqual(32);
+    expect(geometry.tabPicker!.width).toBeGreaterThanOrEqual(32);
     expect(geometry.tabPicker!.left).toBeGreaterThanOrEqual(0);
     expect(geometry.tabPicker!.right).toBeLessThanOrEqual(width);
     expect(geometry.tabPicker!.top).toBeGreaterThanOrEqual(geometry.chrome!.top);
