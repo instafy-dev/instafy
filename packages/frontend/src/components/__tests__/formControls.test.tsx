@@ -73,6 +73,30 @@ describe("shared form controls", () => {
     expect(trigger.getAttribute("aria-labelledby")?.split(" ")).toContain(labelId);
   });
 
+  it("keeps compact native pickers labelled, selectable and disabled without an extra button", async () => {
+    const changed = vi.fn();
+    const render = (disabled = false) => root.render(
+      <Select native nativeTrigger={<span>2</span>} aria-label="Browser tab" value="one"
+        disabled={disabled} onChange={event => changed(event.target.value)}>
+        <option value="one">First page</option><option value="two">Second page</option>
+      </Select>,
+    );
+    await act(async () => render());
+    const select = container.querySelector("select")!;
+    expect(select.getAttribute("aria-label")).toBe("Browser tab");
+    expect(select.value).toBe("one");
+    expect(container.querySelector("button")).toBeNull();
+    expect(container.querySelector('[aria-hidden="true"]')?.textContent).toBe("2");
+    await act(async () => {
+      select.value = "two";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(changed).toHaveBeenCalledExactlyOnceWith("two");
+    await act(async () => render(true));
+    expect(select.disabled).toBe(true);
+    expect(select.closest("label")?.hasAttribute("data-disabled")).toBe(true);
+  });
+
   it("respects explicit ARIA names and does not assign a Field label to another control", async () => {
     await act(async () => root.render(<>
       <Field label="Visible access" htmlFor="explicit-access" labelId="visible-label">

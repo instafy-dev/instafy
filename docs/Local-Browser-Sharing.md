@@ -35,6 +35,13 @@ picker explains shared-account behavior before requesting Explore. Options hold
 zoom, Expand/Minimize, Reload, Request control and Pan view. **Release** remains
 visible while controlling the source. Touch controls keep 44px targets.
 
+Connecting and recovery feedback use the shared theme-aware surface and typography.
+Reconnect remains focusable and pending until a new frame arrives or the attempt
+fails, and repeated presses cannot start parallel attempts. If it still has keyboard
+focus when the page arrives, focus returns to Following/Browsing in the toolbar.
+Moving focus elsewhere during the attempt is respected. Disconnection still clears
+the page, Explore state and control grant; a retry never restores old input authority.
+
 The compact layout was exercised in Electron, a constrained Chrome window and
 a physical iPhone 13 mini. In the same portrait phone viewport, persistent
 controls fell from 190px to 56px and the Explore page grew from 375×538 to
