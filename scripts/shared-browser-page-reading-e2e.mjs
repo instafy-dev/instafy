@@ -277,7 +277,7 @@ const BANNER = (name, extra = "", options = {}) => `<h1>Bookshop</h1><p>Open dai
 <p><a href="/reading/visit">Plan your visit</a></p>${extra}
 <div id="cookie-notice" role="dialog" aria-label="Cookie consent" style="position:fixed;left:0;right:0;bottom:0;padding:16px;background:#fff;border-top:1px solid #94a3b8">
 <p>We use cookies to understand how the shop is used.</p>
-<button type="button" id="customize">Customize</button> <button type="button" id="reject">Reject all</button> <button type="button" id="accept">Accept all</button>
+<button type="button" id="customize">Customize</button> <button type="button" id="reject">${options.reject ?? "Reject all"}</button> <button type="button" id="accept">${options.accept ?? "Accept all"}</button>
 </div>${bannerScript(name, options)}`;
 // A bar whose own names say nothing of cookies, whose text does, with a
 // plain "Reject" and "Accept" in a row of their own.
@@ -388,6 +388,10 @@ export async function runSharedBrowserPageReadingFixture() {
 <label>Password <input type="password" name="password" autocomplete="current-password"></label><button>Sign in</button></form>`)),
       "site.test /reading/banner-frame": page("Bookshop", `<h1>Bookshop</h1><iframe src="{frame}/banner" title="Cookie consent" width="500" height="160"></iframe>`),
       "site.test /reading/banner-in-text": page("Bookshop", BANNER_IN_TEXT),
+      // A banner whose refusal turns down only the optional cookies, as a
+      // maker's German page and an English one word it.
+      "site.test /reading/banner-optional-de": page("Bookshop", BANNER("bookshop_optional_de_consent", "", { reject: "Optionale Cookies ablehnen", accept: "Alle akzeptieren" })),
+      "site.test /reading/banner-optional-en": page("Bookshop", BANNER("bookshop_optional_en_consent", "", { reject: "Reject optional cookies", accept: "Accept all cookies" })),
       "site.test /reading/banner-late": page("Bookshop", BANNER("bookshop_late_consent", "", { late: true })),
       "site.test /reading/policy": page("Your account", POLICY),
       "site.test /reading/checkout": page("Checkout", BANNER("checkout_consent", CHECKOUT)),
@@ -778,6 +782,14 @@ export async function runSharedBrowserPageReadingFixture() {
     reading = await read("/reading/banner-in-text");
     assert.equal(await consentAnswer(), "rejected", "a banner that speaks of cookies in its text was left up");
     assert.equal(reading.activity.declined, "cookies");
+    // A refusal of the optional cookies is a refusal too: a maker's "Optionale
+    // Cookies ablehnen" was left up.
+    for (const [where, label] of [["/reading/banner-optional-de", "Optionale Cookies ablehnen"], ["/reading/banner-optional-en", "Reject optional cookies"]]) {
+      reading = await read(where);
+      assert.equal(await consentAnswer(), "rejected", `"${label}" was not pressed`);
+      assert.equal(reading.activity.declined, "cookies", label);
+      assert.ok(!labels(reading).includes(label), `${label} is still on the page Octo read`);
+    }
     // c. A banner on a page with a sign-in field, one in a frame, a notice
     // with no reject button, a dialog about a privacy policy on the person's
     // signed-in account page that never speaks of cookies, and a banner on a
@@ -831,7 +843,14 @@ export async function runSharedBrowserPageReadingFixture() {
     reading = await read("/reading/covered");
     const underCover = await runTool("POST", "/v1/click", { index: control(reading, "All lines").index, snapshotId: reading.snapshotId });
     assert.equal(underCover.code, 1, underCover.stdout);
-    assert.match(underCover.stderr, /Something else on the page covers "All lines", so nothing was clicked\. Take a fresh snapshot, and read on without it if it is still covered\./u);
+    // It names the cover by its tag (a loading screen has no label, and its
+    // text is never read for one), and says to try once more, never to read
+    // on without it.
+    assert.ok(
+      underCover.stderr.includes('Something else on the page covers "All lines" (<div>), so nothing was clicked. Take a fresh snapshot and try once more.'),
+      underCover.stderr,
+    );
+    assert.doesNotMatch(underCover.stderr, /read on without it/u);
     assert.doesNotMatch(underCover.stderr, /Call log|Timeout/u);
     // f. A cover that goes a moment after the page moves is waited for, and
     // the click is done.

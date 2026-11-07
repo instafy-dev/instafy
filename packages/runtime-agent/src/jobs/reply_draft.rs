@@ -46,13 +46,19 @@ pub(super) struct ReplyDraftStream {
     /// Bytes of the visible summary already in the draft.
     published: usize,
     allow_plain_text: bool,
+    /// A browser turn's: its reply ends with finding lines, which the draft never shows.
+    ends_at_finding_lines: bool,
     previous: String,
 }
 
 impl ReplyDraftStream {
     /// Starts a draft segment of its own, so text from an earlier attempt is
     /// replaced rather than extended.
-    pub(super) fn start(sender: ReplyDraftSender, allow_plain_text: bool) -> Self {
+    pub(super) fn start(
+        sender: ReplyDraftSender,
+        allow_plain_text: bool,
+        ends_at_finding_lines: bool,
+    ) -> Self {
         let mut stream = Self {
             sender,
             item_id: None,
@@ -60,6 +66,7 @@ impl ReplyDraftStream {
             reader: SummaryReader::default(),
             published: 0,
             allow_plain_text,
+            ends_at_finding_lines,
             previous: String::new(),
         };
         stream.restart();
@@ -147,7 +154,16 @@ impl ReplyDraftStream {
     }
 
     fn publish(&mut self, summary: &str) {
+        // A browser turn ends its reply with finding lines, which the runtime moves into a
+        // Details note (`browser_hand_back::move_findings_into_details`): the draft ends before
+        // the first of them, so none shows while it grows. Any other turn's reply may show a
+        // line of code that opens with a brace.
         let visible = summary.trim_start();
+        let visible = if self.ends_at_finding_lines {
+            before_a_json_line(visible)
+        } else {
+            visible
+        };
         // The runtime removes a final NO_FILE_CHANGES line from the durable
         // answer. Hold its prefixes too, so streaming cannot expose the marker.
         let last_line = visible.rsplit_once('\n');
@@ -175,6 +191,23 @@ impl ReplyDraftStream {
         self.sender.send_modify(|draft| draft.text.push_str(added));
         self.published = end;
     }
+}
+
+/// The text before its first line that opens a JSON object, after a list marker or backticks:
+/// a browser turn's finding line, or the start of one, which no person reads.
+fn before_a_json_line(text: &str) -> &str {
+    let mut start = 0;
+    for line in text.split_inclusive('\n') {
+        let opening = line
+            .trim_start()
+            .trim_start_matches(['-', '*', '\u{2022}', '`'])
+            .trim_start();
+        if opening.starts_with('{') {
+            return text[..start].trim_end();
+        }
+        start += line.len();
+    }
+    text
 }
 
 /// Whether a partial summary is, or could still grow into, the decline
@@ -570,7 +603,7 @@ mod tests {
     #[test]
     fn a_stream_drafts_the_growing_summary_and_restarts_on_another_item() {
         let (sender, receiver) = watch::channel(ReplyDraft::default());
-        let mut stream = ReplyDraftStream::start(sender, false);
+        let mut stream = ReplyDraftStream::start(sender, false, false);
         let first_segment = receiver.borrow().segment;
 
         stream.observe(&update("a", "{\"summary\":\" NO"));
@@ -603,15 +636,52 @@ mod tests {
 
         // Another attempt starts a segment of its own.
         let sender = stream.sender.clone();
-        let _retry = ReplyDraftStream::start(sender, false);
+        let _retry = ReplyDraftStream::start(sender, false, false);
         assert_eq!(receiver.borrow().segment, first_segment + 2);
         assert_eq!(receiver.borrow().text, "");
+    }
+
+    /// A browser turn ends its reply with finding lines, which the runtime moves into a Details
+    /// note: the draft stops before the first of them, so none shows while the turn writes it.
+    #[test]
+    fn a_browser_turns_finding_lines_never_reach_the_draft() {
+        let (sender, receiver) = watch::channel(ReplyDraft::default());
+        let mut stream = ReplyDraftStream::start(sender, false, true);
+        let words = "Livraria Lello is open daily from 9:00 to 19:30.";
+        let mut text = format!("{{\"summary\":\"{words}");
+        stream.observe(&update("a", &text));
+        assert_eq!(receiver.borrow().text, words);
+        for piece in [
+            r#"\n"#,
+            r#"{\"url\": \"https://lello.example/\""#,
+            r#", \"facts\": [\"Open daily\"]}"#,
+            r#"\n- `{\"url\": \"https://visit.example/\", \"stopped\": \"timed-out\"}`"#,
+            r#"\"}"#,
+        ] {
+            text.push_str(piece);
+            stream.observe(&update("a", &text));
+            assert_eq!(receiver.borrow().text.trim_end(), words, "{text}");
+        }
+    }
+
+    /// Any other turn's reply drafts its lines that open with a brace, a settings file or a
+    /// placeholder the reply names, as it writes them: no finding line ends it.
+    #[test]
+    fn a_building_turns_draft_shows_its_brace_lines() {
+        let (sender, receiver) = watch::channel(ReplyDraft::default());
+        let mut stream = ReplyDraftStream::start(sender, false, false);
+        let reply = r#"Here is the settings file:\n```json\n{\"theme\": \"dark\"}\n```\n`{title}` now shows the trip name."#;
+        stream.observe(&update("a", &format!("{{\"summary\":\"{reply}")));
+        assert_eq!(
+            receiver.borrow().text,
+            "Here is the settings file:\n```json\n{\"theme\": \"dark\"}\n```\n`{title}` now shows the trip name."
+        );
     }
 
     #[test]
     fn a_declined_answer_never_reaches_the_draft() {
         let (sender, receiver) = watch::channel(ReplyDraft::default());
-        let mut stream = ReplyDraftStream::start(sender, false);
+        let mut stream = ReplyDraftStream::start(sender, false, false);
         let mut text = String::new();
         for piece in [
             "{\"summ",
@@ -631,7 +701,7 @@ mod tests {
     #[test]
     fn a_long_draft_stops_growing_at_the_cap() {
         let (sender, receiver) = watch::channel(ReplyDraft::default());
-        let mut stream = ReplyDraftStream::start(sender, false);
+        let mut stream = ReplyDraftStream::start(sender, false, false);
         let long = "é".repeat(MAX_DRAFT_BYTES);
         stream.observe(&update("a", &format!("{{\"summary\":\"{long}")));
         let draft = receiver.borrow().text.clone();
@@ -641,7 +711,7 @@ mod tests {
     #[test]
     fn plain_final_prose_streams_but_commentary_and_json_contracts_do_not() {
         let (sender, receiver) = watch::channel(ReplyDraft::default());
-        let mut stream = ReplyDraftStream::start(sender, true);
+        let mut stream = ReplyDraftStream::start(sender, true, false);
         let event = |id: &str, text: &str, phase: &str| {
             json!({
                 "type":"item.updated", "item":{"id":id,"type":"agent_message","text":text,"phase":phase}
@@ -686,7 +756,7 @@ mod tests {
     #[test]
     fn replacements_retries_and_runtime_markers_do_not_append_stale_or_internal_text() {
         let (sender, receiver) = watch::channel(ReplyDraft::default());
-        let mut stream = ReplyDraftStream::start(sender, false);
+        let mut stream = ReplyDraftStream::start(sender, false, false);
         stream.observe(&update("a", r#"{"summary":"First answer"#));
         let segment = receiver.borrow().segment;
         stream.observe(&update("a", r#"{"summary":"Other answer"#));

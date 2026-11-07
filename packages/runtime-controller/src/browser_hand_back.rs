@@ -221,9 +221,11 @@ pub(crate) struct Finding {
 }
 
 /// The reasons a browser turn may give for a page it did not read, as the
-/// browser skill (`instafy-browser-automation`, "Several reads in one card")
-/// names them. Any other reason a finding gives is still a stop: `blocked`.
-pub(crate) const STOP_REASONS: [&str; 8] = [
+/// runtime asks for them (runtime-agent `jobs/browser_hand_back.rs`,
+/// `FINDING_LINES`): `no-page` for an address with no page and `timed-out`
+/// for one that gave no answer in time, so a page that never loaded is never
+/// called blocked. Any other reason a finding gives is still a stop: `blocked`.
+pub(crate) const STOP_REASONS: [&str; 10] = [
     "login",
     "captcha",
     "paywall",
@@ -232,6 +234,8 @@ pub(crate) const STOP_REASONS: [&str; 8] = [
     "download",
     "secret",
     "link-only",
+    "no-page",
+    "timed-out",
 ];
 const STOP_REASON_OTHER: &str = "blocked";
 
@@ -3055,6 +3059,43 @@ https://three.example.com\n\
                 &[],
                 None
             )]
+        );
+    }
+
+    /// A comparison's browser part opened a review address that got no
+    /// answer for 20 seconds and another that has no page, and, with no word
+    /// for either, wrote the first as `blocked`: the page the person shares
+    /// said the review was blocked (a local test, Nov 6). Each now keeps its
+    /// own word, which the building turn reads.
+    #[test]
+    fn a_page_that_never_loaded_is_not_called_blocked() {
+        let reply = [
+            "I also couldn't read the Laptop 12 review because its page remained busy.".to_string(),
+            json!({"url": "https://www.pcworld.com/article/3199054/framework-laptop-13-pro-review.html", "title": "Framework Laptop 13 Pro review", "facts": ["Battery capacity: 74Wh."]}).to_string(),
+            json!({"url": "https://www.pcworld.com/article/3200000/framework-laptop-12-review-wildcat-lake.html", "stopped": "timed-out"}).to_string(),
+            json!({"url": "https://www.pcworld.com/article/3201000/framework-laptop-16-review.html", "stopped": "no-page"}).to_string(),
+        ]
+        .join("\n");
+        let job = Uuid::new_v4();
+        let record = hand_back_record(
+            &job,
+            &job,
+            VIEWER_WORKSPACE,
+            Utc::now(),
+            "Fill in what's still missing.",
+            Some("Fill in what's still missing."),
+            &reply,
+        );
+        let stops: Vec<&JsonValue> = record["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .map(|finding| &finding["stopped"])
+            .collect();
+        assert_eq!(
+            stops,
+            [&JsonValue::Null, &json!("timed-out"), &json!("no-page")],
+            "{record}"
         );
     }
 
