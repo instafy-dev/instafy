@@ -1,6 +1,6 @@
 import { useCallback, useRef } from "react";
 import type { ChatMessage } from "../types";
-import { readChatRunStopNotice } from "./ChatRunStopNotice";
+import { readChatRunStopNotice } from "./controllerConversationNotice";
 import { readChangeUndone } from "./chatLaterChanges";
 import type { QueuedChatSendItem } from "./chatSendQueueStorage";
 import type { SubmitMessageFn } from "./useChatSubmitFlow";

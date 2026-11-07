@@ -9,13 +9,13 @@ import {
   newestTurnMessages,
   readHandBackRunId,
   readPendingHandBack,
+  readRowStopNotice,
   readTurnJobIds,
   runMatchesThreadJobId,
   shouldDisplayChatMessage,
 } from "./chatMessagePresentation";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
-import { readChatRunStopNotice } from "./ChatRunStopNotice";
-import { getControllerConversationNoticeKind } from "./controllerConversationNotice";
+import { getControllerConversationNoticeKind, readChatRunStopNotice } from "./controllerConversationNotice";
 import { normalizeAssistantStatusText } from "./assistantStatusHeuristics";
 import { isThreadPreviewUnresolved } from "./threadPreviewState";
 import {
@@ -237,8 +237,13 @@ export function useAgentJobThreadPreviewState({
   const [threadPreviewRootLeftPx, setThreadPreviewRootLeftPx] = useState(Number.POSITIVE_INFINITY);
   const [threadPreviewContainerLeftPx, setThreadPreviewContainerLeftPx] = useState(0);
 
+  // The row's run is its newest turn's: the reply a browser turn ended on
+  // never ends the building turn that went on from it, nor stands for its
+  // reply. Read as the row's, it showed in place of a reply that had not come
+  // in yet (a local test, Nov 6).
+  const runMessages = useMemo(() => newestTurnMessages(threadMessages, turnJobIds), [threadMessages, turnJobIds]);
   const preview = useMemo(() => {
-    if (threadMessages.length === 0) {
+    if (runMessages.length === 0) {
       return "";
     }
     const isPreviewCandidate = (candidate: ChatMessage) => {
@@ -276,20 +281,20 @@ export function useAgentJobThreadPreviewState({
       return !["todo_list", "token_usage", "runtime_switch", "reasoning", "status"].includes(type);
     };
 
-    for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
-      const candidate = threadMessages[index];
+    for (let index = runMessages.length - 1; index >= 0; index -= 1) {
+      const candidate = runMessages[index];
       if (candidate.role === "assistant" && isPreviewCandidate(candidate)) {
         return candidate.content.trim();
       }
     }
-    for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
-      const candidate = threadMessages[index];
+    for (let index = runMessages.length - 1; index >= 0; index -= 1) {
+      const candidate = runMessages[index];
       if (isPreviewCandidate(candidate)) {
         return candidate.content.trim();
       }
     }
     return "";
-  }, [threadMessages]);
+  }, [runMessages]);
 
   const latestFileMessage = useMemo(() => {
     for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
@@ -342,9 +347,6 @@ export function useAgentJobThreadPreviewState({
     });
   }, [activeConversation?.messages, message.id, message.timestamp]);
 
-  // The row's run is its newest turn's: the reply a browser turn ended on
-  // never ends the building turn that went on from it.
-  const runMessages = useMemo(() => newestTurnMessages(threadMessages, turnJobIds), [threadMessages, turnJobIds]);
   const runStatus = useMemo(
     () =>
       handBackPending
@@ -499,7 +501,7 @@ export function useAgentJobThreadPreviewState({
     if (terminalProxyErrorMessage) {
       return terminalProxyErrorMessage;
     }
-    if (threadMessages.length === 0) {
+    if (runMessages.length === 0) {
       return null;
     }
     const excluded = new Set([
@@ -512,8 +514,8 @@ export function useAgentJobThreadPreviewState({
       "runtime_switch",
       "reasoning",
     ]);
-    for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
-      const candidate = threadMessages[index];
+    for (let index = runMessages.length - 1; index >= 0; index -= 1) {
+      const candidate = runMessages[index];
       if (candidate.role !== "assistant") {
         continue;
       }
@@ -549,7 +551,7 @@ export function useAgentJobThreadPreviewState({
       return candidate;
     }
     return null;
-  }, [terminalProxyErrorMessage, threadMessages]);
+  }, [runMessages, terminalProxyErrorMessage]);
 
   const [expandedUpdateIds, setExpandedUpdateIds] = useState<Record<string, boolean>>({});
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -816,6 +818,8 @@ export function useAgentJobThreadPreviewState({
     finalSummaryMessage,
     // The reply the model is writing, shown where the reply lands until it does.
     replyDraft: replyIsTheRuntimes ? null : readTurnReplyDraft(metadata),
+    // The Stop of this turn, for who made it and Continue beside the line.
+    stopNotice: readRowStopNotice(message),
     hasPreview: Boolean(preview),
     previewText: preview || (isCompleted ? (isStoppedRun && terminalProxyErrorMessage === null ? "Stopped." : "Completed.") : ""),
     isCompleted,

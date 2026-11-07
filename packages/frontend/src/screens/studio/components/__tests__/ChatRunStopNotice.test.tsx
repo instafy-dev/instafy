@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../../types";
-import { ChatRunStopNotice, ChatRunStopNoticeProvider, chatRunStopNoticeText } from "../ChatRunStopNotice";
+import { ChatRunStopNotice, ChatRunStopNoticeProvider, stoppedByWords } from "../ChatRunStopNotice";
 import { useChatRunStopContinuation } from "../useChatRunStopContinuation";
 import type { SubmitMessageFn } from "../useChatSubmitFlow";
 
@@ -38,10 +38,18 @@ describe("persisted run stop notice", () => {
   });
   afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 
-  it("attributes the request without claiming that the executor has exited", () => {
-    expect(chatRunStopNoticeText(notice, "viewer")).toBe("You asked Octo and @scribe to stop.");
-    expect(chatRunStopNoticeText(notice, "other", new Map([["viewer", "Alex"]]))).toBe("Alex asked Octo and @scribe to stop.");
-    expect(chatRunStopNoticeText({ ...notice, metadata: null }, "viewer")).toBe("Run stopped.");
+  // The row of a stopped turn says "Stopped" itself: who stopped it is named
+  // only when it was someone else.
+  it("names who stopped the turn only when it was someone else", async () => {
+    expect(stoppedByWords(notice, "viewer")).toBeNull();
+    expect(stoppedByWords(notice, "other", new Map([["viewer", "Alex"]]))).toBe("Alex stopped this");
+    expect(stoppedByWords(notice, "other")).toBe("A teammate stopped this");
+    expect(stoppedByWords({ ...notice, metadata: null }, "viewer")).toBeNull();
+    // A turn stopped before it showed anything has only this row: it says Stopped.
+    await render();
+    expect(container.textContent).toBe("StoppedContinue");
+    await render({ viewerUserId: "other", humanLabelByUserId: new Map([["viewer", "Alex"]]) });
+    expect(container.textContent).toBe("StoppedAlex stopped thisContinue");
   });
   it("continues with a fresh targeted instruction, preserving the draft and preventing duplicate sends", async () => {
     submit.mockResolvedValue(true); await render();

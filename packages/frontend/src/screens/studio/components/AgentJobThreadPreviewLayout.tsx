@@ -38,6 +38,7 @@ import {
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { agentJobThreadAcknowledgementIds, shouldRenderLocalCapabilityStatusAsTimeline } from "./chatMessagePresentation";
 import { RunFailureMessageBody, takeFoldedRetryFocus, useRunFailureAutoRetryActive } from "./RunFailureNotice";
+import { ChatRunStopActions } from "./ChatRunStopNotice";
 import { isCompactionStatusText } from "./assistantStatusHeuristics";
 import type { AgentThreadBranchParticipant, AgentThreadBranchRow } from "./agentThreadBranchRows";
 import {
@@ -272,6 +273,11 @@ export type AgentJobThreadPreviewLayoutProps = {
   finalSummaryMessage: ChatMessage | null;
   /** The reply the model is writing: it grows in the reply's place until the reply lands. */
   replyDraft?: string | null;
+  /**
+   * The notice of the Stop of this turn: once the line says it stopped, who
+   * stopped it (when it was someone else) and Continue follow the line.
+   */
+  stopNotice?: ChatMessage | null;
   hasPreview: boolean;
   previewText: string;
   isCompleted: boolean;
@@ -318,6 +324,7 @@ export function AgentJobThreadPreviewLayout({
   expandedUpdateIds,
   finalSummaryMessage,
   replyDraft = null,
+  stopNotice = null,
   hasPreview,
   previewText,
   isCompleted,
@@ -476,6 +483,8 @@ export function AgentJobThreadPreviewLayout({
   // come up, "Stopped" showed 1.4 s after the press (a local test, Nov 5).
   const lineLive = activity.live !== null;
   const lineText = useSteadyActivityLabel(activityText, lineLive, activity.stopped === true);
+  // The Stop this row's line says the turn ended on.
+  const lineStopNotice = activity.stopped === true && !lineLive ? stopNotice : null;
   // A retry that replaced a failed turn holding focus takes it, in the same
   // commit: its line, or its own failure block's first control.
   useLayoutEffect(() => {
@@ -500,6 +509,17 @@ export function AgentJobThreadPreviewLayout({
   const showFailureBlock = runFailurePresentation !== null && !holdingLastLabel;
   const showActivityLine = lineText.length > 0 && (runFailurePresentation === null || holdingLastLabel);
   const showDetailsPanel = detailsOpen && activityLineOpensDetails;
+  const activityLine = (
+    <TurnActivityLine
+      text={lineText}
+      live={lineLive}
+      animate={shouldAnimateThreadLiveState}
+      interactive={activityLineOpensDetails}
+      detailsOpen={showDetailsPanel}
+      detailsId={detailsId}
+      onToggleDetails={onToggleDetails}
+    />
+  );
   // The turn's preview card: the files it created are that site.
   const madeSite = cards.some((card) => sitePreviewFromMessage(card) !== null);
   const normalizeThreadPlaceholderText = (value: string) =>
@@ -880,15 +900,15 @@ export function AgentJobThreadPreviewLayout({
         {showActivityLine ? (
           <div className="relative py-1">
             {renderThreadPreviewNotch()}
-            <TurnActivityLine
-              text={lineText}
-              live={lineLive}
-              animate={shouldAnimateThreadLiveState}
-              interactive={activityLineOpensDetails}
-              detailsOpen={showDetailsPanel}
-              detailsId={detailsId}
-              onToggleDetails={onToggleDetails}
-            />
+            {/* A stopped turn is one row: its line, then who stopped it when
+                it was someone else, and Continue, as a failed turn's block
+                holds its Try again. */}
+            {lineStopNotice ? (
+              <div className="flex min-w-0 flex-wrap items-center gap-x-2">
+                {activityLine}
+                <ChatRunStopActions notice={lineStopNotice} />
+              </div>
+            ) : activityLine}
           </div>
         ) : null}
 

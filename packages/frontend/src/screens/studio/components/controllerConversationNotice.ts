@@ -187,6 +187,28 @@ export function resolveControllerConversationNoticeAction(
   return { label: "Open Machines", kind: "open_machines" };
 }
 
+/**
+ * What the controller's notice of a Stop records (`conversation_stop.rs`):
+ * whether a person asked for it, who, and the agents, jobs and runs it
+ * stopped.
+ */
+export function readChatRunStopNotice(message: ChatMessage) {
+  const metadata = message.metadata;
+  const details = metadata && typeof metadata === "object" && "details" in metadata
+    && metadata.details && typeof metadata.details === "object" && !Array.isArray(metadata.details)
+    ? metadata.details as Record<string, unknown> : {};
+  const strings = (value: unknown) => Array.isArray(value)
+    ? [...new Set(value.filter((item): item is string => typeof item === "string" && item.trim().length > 0))]
+    : [];
+  return {
+    requested: details.stopRequested === true,
+    actorUserId: typeof details.actorUserId === "string" ? details.actorUserId : null,
+    handles: strings(details.agentHandles).filter((handle) => /^[a-z0-9][a-z0-9_-]*$/i.test(handle)),
+    runIds: strings(details.runIds),
+    jobIds: strings(details.jobIds),
+  };
+}
+
 export function getControllerConversationNoticeKind(
   message: ChatMessage,
 ): ControllerConversationNoticeKind | null {

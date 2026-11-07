@@ -961,7 +961,8 @@ describe("browser steps", () => {
       browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_A, step: "snapshot" }),
       browserStep(BROWSER_OPEN, { host: "visitlisboa.com", pageKey: PAGE_B, step: "navigate" }),
     ];
-    expect(summarize(messages).summary).toBe("Opened 2 pages on visitlisboa.com, read a page");
+    // A page read is one the browser had open: one site's opens and reads are one phrase.
+    expect(summarize(messages).summary).toBe("Opened 2 pages on visitlisboa.com");
     // Its row in Details says what it did in words.
     const first = summarize(messages).details[0];
     expect(first.kind === "step" && first.step.label).toBe("Looked at the tabs");
@@ -979,15 +980,17 @@ describe("browser steps", () => {
     expect(summarize(messages).summary).toBe("Searched visitlisboa.com, read 2 pages");
     // Another site keeps its name.
     const twoSites = [
-      browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_A, step: "navigate" }),
+      browserStep(BROWSER_SEARCH, { host: "carris.pt", pageKey: PAGE_A, step: "search" }),
       browserStep(BROWSER_READ, { host: "visitlisboa.com", pageKey: PAGE_B, step: "snapshot" }),
     ];
     // The page that answered leads.
-    expect(summarize(twoSites).summary).toBe("Read a page on visitlisboa.com, opened carris.pt");
+    expect(summarize(twoSites).summary).toBe("Read a page on visitlisboa.com, searched carris.pt");
   });
 
   // A local test: the tram turn read "Opened metrolisboa.pt, opened carris.pt",
-  // led by the page that did not help; Carris's trip planner answered.
+  // led by the page that did not help; Carris's trip planner answered. Pages
+  // on two sites now read as one phrase, as on more ("Opened 2 pages on 2
+  // sites"); another kind of step that answered still leads.
   it("lead with the step that answered, not the first page opened", () => {
     const messages = [
       browserStep(BROWSER_USE_TABS, { step: "tabs" }),
@@ -998,14 +1001,14 @@ describe("browser steps", () => {
       browserStep(BROWSER_READ, { host: "carris.pt", pageKey: PAGE_B, step: "snapshot" }),
       browserStep(BROWSER_BROWSE, { host: "carris.pt", step: "click" }),
     ];
-    expect(summarize(messages).summary).toBe("Opened carris.pt, read a page");
-    // On another site than the rest, the page that answered leads.
+    expect(summarize(messages).summary).toBe("Opened 2 pages on 2 sites");
+    // On another site than the rest, the step that answered leads.
     const elsewhere = [
       browserStep(BROWSER_OPEN, { host: "metrolisboa.pt", pageKey: PAGE_A, step: "navigate" }),
       browserStep(BROWSER_OPEN, { host: "metrolisboa.pt", pageKey: PAGE_B, step: "navigate" }),
-      browserStep(BROWSER_READ, { host: "carris.pt", pageKey: PAGE_B, step: "snapshot" }),
+      browserStep(BROWSER_SEARCH, { host: "carris.pt", step: "search" }),
     ];
-    expect(summarize(elsewhere).summary).toBe("Read a page on carris.pt, opened 2 pages on metrolisboa.pt");
+    expect(summarize(elsewhere).summary).toBe("Searched carris.pt, opened 2 pages on metrolisboa.pt");
   });
 
   // A local test: a comparison's browser turn read six pages on frame.work and
@@ -1033,12 +1036,12 @@ describe("browser steps", () => {
     expect(summarize(messages).summary).toBe("Opened 11 pages on 4 sites");
     expect(summarize([...messages, open("gizmodo.com", 31), open("gizmodo.com", 32)]).summary)
       .toBe("Opened 13 pages on 4 sites");
-    // On two sites the line names both, the bigger first, and the last site
-    // leads when it is one of them.
+    // On two sites too: every page counted across them, the one read on
+    // frame.work too.
     const twoSites = messages.slice(0, 11);
-    expect(summarize(twoSites).summary).toBe("Opened 6 pages on frame.work, opened 2 pages on phoronix.com");
+    expect(summarize(twoSites).summary).toBe("Opened 9 pages on 2 sites");
     expect(summarize([...twoSites, open("phoronix.com", 12), open("phoronix.com", 13), open("phoronix.com", 14), open("phoronix.com", 15), open("phoronix.com", 16)]).summary)
-      .toBe("Opened 7 pages on phoronix.com, opened 6 pages on frame.work");
+      .toBe("Opened 14 pages on 2 sites");
     // Details keeps every site.
     const labels = summarize(messages).details.map((item) => item.kind === "step" && item.step.label);
     for (const host of ["frame.work", "phoronix.com", "pcworld.com", "tomshardware.com", "gizmodo.com"]) {
@@ -1049,7 +1052,8 @@ describe("browser steps", () => {
   // A local test: a comparison's browser turn opened four pages on frame.work,
   // then a review on phoronix.com and one on pcworld.com. Its line read
   // "Opened pcworld.com, opened 4 pages on frame.work": the two reviews tied,
-  // and the later one took the place.
+  // and the later one took the place. Pages now count across their sites; a
+  // tie of other steps still names both.
   it("name both sites that tie for the line's second place", () => {
     const page = (n: number) => n.toString(16).padStart(16, "0");
     const open = (host: string, n: number) => browserStep(BROWSER_OPEN, { host, pageKey: page(n), step: "navigate" });
@@ -1060,16 +1064,16 @@ describe("browser steps", () => {
     // Opened on three sites: the pages counted across them.
     expect(summarize([...frame, open("phoronix.com", 10), open("pcworld.com", 20)]).summary)
       .toBe("Opened 6 pages on 3 sites");
-    // Pages opened on two sites, tied behind searches: both are named in one phrase.
+    // Pages opened on two sites, behind searches: counted across them.
     const search = (n: number) => browserStep(BROWSER_SEARCH, { host: "frame.work", pageKey: page(n), step: "search" });
     expect(summarize([search(1), search(2), search(3), search(4), open("phoronix.com", 10), open("pcworld.com", 20)]).summary)
-      .toBe("Opened phoronix.com and pcworld.com, searched frame.work 4 times");
-    // Two different steps that tie are both named.
-    const searched = browserStep(BROWSER_SEARCH, { host: "phoronix.com", pageKey: page(10), step: "search" });
-    expect(summarize([...frame, searched, open("pcworld.com", 20)]).summary)
-      .toBe("Searched phoronix.com, opened pcworld.com, opened 4 pages on frame.work");
+      .toBe("Opened 2 pages on 2 sites, searched frame.work 4 times");
+    // Two searches that tie are both named, in the order they ran.
+    const searched = (host: string, n: number) => browserStep(BROWSER_SEARCH, { host, pageKey: page(n), step: "search" });
+    expect(summarize([...frame, searched("phoronix.com", 10), searched("pcworld.com", 20)]).summary)
+      .toBe("Searched phoronix.com, searched pcworld.com, opened 4 pages on frame.work");
     // With more than one site tied for that place, none is picked over the others.
-    expect(summarize([...frame, searched, open("pcworld.com", 20), browserStep(BROWSER_SEARCH, { host: "gizmodo.com", pageKey: page(30), step: "search" })]).summary)
+    expect(summarize([...frame, searched("phoronix.com", 10), searched("pcworld.com", 20), searched("gizmodo.com", 30)]).summary)
       .toBe("Searched gizmodo.com, opened 4 pages on frame.work");
   });
 
@@ -1112,6 +1116,44 @@ describe("browser steps", () => {
     const clicked = browserStep(BROWSER_BROWSE, { host: "phoronix.com", step: "click" });
     expect(summarize([clicked, read("phoronix.com", 10), read("pcworld.com", 20), read("gizmodo.com", 30), read("gizmodo.com", 31)]).summary)
       .toBe("Read 4 pages on 3 sites");
+  });
+
+  // A local test, Nov 6: a comparison's browser turn opened two pages on
+  // frame.work and a review on phoronix.com, and its building turn edited the
+  // page. The row read "Opened phoronix.com, edited a file" while Details
+  // listed frame.work too, and a Stop after three pages on frame.work read
+  // "Stopped · read a page on frame.work, opened 2 pages".
+  it("say what Details list: pages on two sites as on more, one site's opens and reads as one phrase", () => {
+    const page = (n: number) => n.toString(16).padStart(16, "0");
+    const inJob = (message: ChatMessage, jobId: string): ChatMessage => ({
+      ...message,
+      metadata: { ...message.metadata, jobId },
+    });
+    const browser = [
+      browserStep(BROWSER_OPEN, { host: "frame.work", pageKey: page(1), step: "navigate" }),
+      browserStep(BROWSER_OPEN, { host: "frame.work", pageKey: page(2), step: "navigate" }),
+      browserStep(BROWSER_OPEN, { host: "phoronix.com", pageKey: page(3), step: "navigate" }),
+    ].map((message) => inJob(message, "browser-job"));
+    const edit = inJob(step(
+      "file_change",
+      { v: 1, key: "builtin/edit", role: "content", live: "Editing files", done: { one: "edited a file", other: "edited {n} files", some: "edited files" }, count: 1, also: [] },
+      { paths: ["sites/framework-laptops/data.json"] },
+    ), "build-job");
+    const row = summarizeTurnActivity([...browser, edit], {
+      jobId: "build-job",
+      turnJobIds: ["browser-job", "build-job"],
+      phase: "completed",
+    });
+    expect(row.summary).toBe("Opened 3 pages on 2 sites, edited a file");
+
+    // The first page answered when the time to open it ran out: a page read.
+    const warranty = [
+      browserStep(BROWSER_READ, { host: "frame.work", pageKey: page(12), step: "navigate" }),
+      browserStep(BROWSER_OPEN, { host: "frame.work", pageKey: page(13), step: "navigate" }),
+      browserStep(BROWSER_OPEN, { host: "frame.work", pageKey: page(16), step: "navigate" }),
+    ];
+    expect(summarize(warranty, "cancelled").summary).toBe("Stopped · opened 3 pages on frame.work");
+    expect(summarize(warranty).summary).toBe("Opened 3 pages on frame.work");
   });
 
   it("name the site while a step runs, and the browser before any site is known", () => {
@@ -1300,7 +1342,7 @@ describe("a look at the page a failed open left", () => {
       ["done", "Read a page on pcworld.com"],
       ["done", "Read a page on pcworld.com"],
     ]);
-    expect(summarize(messages).summary).toBe("Read a page on pcworld.com, opened frame.work");
+    expect(summarize(messages).summary).toBe("Opened 2 pages on 2 sites");
   });
 
   // A step the browser refused before it loaded anything (a link-only site, an
@@ -1571,7 +1613,7 @@ describe("answered browser prompts", () => {
       "Opened carris.pt · skipped a click on visitlisboa.com: no answer in time",
     );
     const site = browserStep(BROWSER_READ, { host: "carris.pt", pageKey: PAGE_B, step: "snapshot", approval: "once" });
-    expect(summarize([opened, site]).summary).toBe("Opened carris.pt, read a page · you allowed the site");
+    expect(summarize([opened, site]).summary).toBe("Opened 2 pages on carris.pt · you allowed the site");
     const google = browserStep({ key: "browser/use", role: "content", live: "Using the browser", done: "used the browser" }, { step: "navigate", approval: "denied" }, "failed");
     expect(summarize([google]).summary).toBe("You said no to opening a page");
   });

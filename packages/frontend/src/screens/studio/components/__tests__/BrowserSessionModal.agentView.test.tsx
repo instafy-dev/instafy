@@ -319,6 +319,20 @@ describe("Shared Browser view while Octo drives", () => {
     expect(mocks.rfb.at(-1)!.url).toMatch(/\/browser\/vnc\/view\?/);
   });
 
+  // A blank tab showed the browser's own white page in Studio's view.
+  it("shows its own empty state over a blank tab, and the page once one opens", async () => {
+    const blank = () => document.querySelector('[data-testid="browser-session-blank-page"]')?.textContent ?? null;
+    await act(async () => root.render(<Host agentHolds={false} pageUrl="about:blank" />));
+    await advance(1_000);
+    const driving = mocks.rfb.at(-1)!;
+    await act(async () => { driving.listeners.connect?.(); driving.frame(); });
+    await advance(100);
+    expect(blank()).toBe("No page open");
+    await act(async () => root.render(<Host agentHolds={false} />));
+    await advance(100);
+    expect(blank()).toBeNull();
+  });
+
   it("drops the still when the chat changes, and says where Octo is instead", async () => {
     await octoTakesControl({ agentPageIds: ["PAGE1"] });
     expect(still()).not.toBeNull();

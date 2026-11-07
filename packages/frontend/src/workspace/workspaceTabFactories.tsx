@@ -311,7 +311,8 @@ export function createTabForJobThread(params: {
   jobId: string;
   title?: string;
 }): WorkspaceJobThreadTabState {
-  const title = params.title?.trim() ? params.title.trim() : "Run";
+  // A turn's steps, as "Open steps in a tab" names them.
+  const title = params.title?.trim() ? params.title.trim() : "Steps";
   return {
     kind: "jobThread",
     id: getTabIdForJobThread(params.jobId),

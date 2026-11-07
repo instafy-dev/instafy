@@ -186,6 +186,24 @@ function sameRow(a: TurnStep, b: TurnStep): boolean {
   return first.detail === second.detail && first.mono === second.mono;
 }
 
+/**
+ * A read of the page `step` acted on: a look at a form between its fields
+ * ("Read a page on httpbin.org" between "Filled in a form on httpbin.org"
+ * steps) leaves them one row.
+ */
+function readsPageOf(read: TurnStep, step: TurnStep): boolean {
+  const looked = read.activity;
+  const acted = step.activity;
+  return (
+    read.state === "done" &&
+    looked?.key === "browser/read" &&
+    acted !== null &&
+    looked.host !== undefined &&
+    looked.host === acted.host &&
+    (looked.pageKey === undefined || acted.pageKey === undefined || looked.pageKey === acted.pageKey)
+  );
+}
+
 function OtherStepRow({ step, times = 1 }: { step: TurnStep; times?: number }) {
   const { detail, mono } = stepDescription(step);
   const icon =
@@ -264,13 +282,21 @@ export function TurnActivityDetails({ id, items, renderUpdate, footer }: TurnAct
     }
   }, [showAll]);
   // Steps in a row that read the same ("Browsed httpbin.org" nine times) are
-  // one row that says how many: "Browsed httpbin.org ×9". A command keeps its
-  // own row, since its output is behind it.
+  // one row that says how many: "Browsed httpbin.org ×9". A read of the same
+  // page between them does not split them: a form's steps are one row, and
+  // the read follows it. A command keeps its own row, since its output is
+  // behind it.
   const runs: Array<{ item: DetailItem; times: number }> = [];
   for (const item of visible) {
     const last = runs.at(-1);
+    const beforeLast = runs.at(-2);
     if (last && last.item.kind === "step" && item.kind === "step" && sameRow(last.item.step, item.step)) {
       last.times += 1;
+    } else if (
+      last?.item.kind === "step" && beforeLast?.item.kind === "step" && item.kind === "step" &&
+      sameRow(beforeLast.item.step, item.step) && readsPageOf(last.item.step, item.step)
+    ) {
+      beforeLast.times += 1;
     } else {
       runs.push({ item, times: 1 });
     }

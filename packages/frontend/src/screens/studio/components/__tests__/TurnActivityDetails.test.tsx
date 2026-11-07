@@ -232,4 +232,54 @@ describe("TurnActivityDetails", () => {
     expect(times?.querySelector('[aria-hidden="true"]')?.textContent).toBe("×9");
     expect(times?.querySelector(".sr-only")?.textContent).toBe("9 times");
   });
+
+  // A local test, Nov 6: the form showed as two rows, "Filled in a form on
+  // httpbin.org" and "… ×6", split by a read of the same page between them.
+  it("shows a form's steps as one row when a read of the same page comes between them", async () => {
+    const PAGE = "aaaaaaaaaaaaaaaa";
+    const read = (index: number, pageKey = PAGE, host = "httpbin.org") =>
+      toolItem(index, "instafy_shared_browser", "snapshot", {
+        key: "browser/read", role: "content", live: "Reading {host}",
+        done: { one: "read a page on {host}", other: "read {n} pages on {host}", some: "read pages on {host}" },
+        host, pageKey, step: "snapshot", when: "success",
+      });
+    const filled = (index: number) =>
+      toolItem(index, "instafy_shared_browser", "type", {
+        key: "browser/fill", role: "quiet", live: "Filling in a form on {host}", done: "filled in a form on {host}",
+        host: "httpbin.org", pageKey: PAGE, step: "type",
+      });
+    const opened = toolItem(0, "instafy_shared_browser", "navigate", {
+      key: "browser/open", role: "content", live: "Opening {host}",
+      done: { one: "opened {host}", other: "opened {n} pages on {host}", some: "opened pages on {host}" },
+      host: "httpbin.org", pageKey: PAGE, step: "navigate", when: "success",
+    });
+    const items: DetailItem[] = [
+      opened,
+      { kind: "approval", id: "approval:open", text: "You allowed opening httpbin.org" },
+      read(1),
+      filled(2),
+      read(3),
+      ...Array.from({ length: 6 }, (_, index) => filled(4 + index)),
+      { kind: "approval", id: "approval:click", text: "You said no to a click on httpbin.org" },
+    ];
+    await act(async () => {
+      root.render(<TurnActivityDetails id="details" items={items} renderUpdate={() => null} />);
+    });
+    expect([...container.querySelectorAll('[role="listitem"]')].map(shownText)).toEqual([
+      "Opened httpbin.org",
+      "You allowed opening httpbin.org",
+      "Read a page on httpbin.org",
+      "Filled in a form on httpbin.org×7",
+      "Read a page on httpbin.org",
+      "You said no to a click on httpbin.org",
+    ]);
+
+    // A read of another page, or of another site, still splits them.
+    for (const between of [read(3, "bbbbbbbbbbbbbbbb"), read(3, PAGE, "example.com")]) {
+      await act(async () => {
+        root.render(<TurnActivityDetails id="details" items={[filled(2), between, filled(4)]} renderUpdate={() => null} />);
+      });
+      expect([...container.querySelectorAll('[role="listitem"]')].map(shownText)).toHaveLength(3);
+    }
+  });
 });
