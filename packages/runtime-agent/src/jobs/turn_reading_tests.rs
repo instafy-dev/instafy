@@ -246,3 +246,72 @@ fn an_empty_learned_index_is_not_loaded() {
     let snapshot = format_project_memory_snapshot(tmp.path(), request).expect("snapshot");
     assert!(snapshot.text.contains("## Context: instafy-learned ("));
 }
+
+/// A building turn on a new thread reads each browser turn of its chat only by its findings,
+/// never by its reply's words. The page a local test (Nov 6) built from its Porto chat put the
+/// metro turn's "nearest metro station option" and "a short walk uphill" on the page people
+/// share, though no page that turn read said either; the hours turn's tourist-board site had
+/// given no answer in time, and the build reads that word for it, not "blocked".
+#[test]
+fn a_new_building_thread_reads_its_chats_browser_turns_only_by_their_findings() {
+    let tmp = tempdir().expect("temp dir");
+    let note = |run: &str, lines: &[JsonValue]| {
+        json!({
+            "role": "assistant",
+            "content": lines.iter().map(JsonValue::to_string).collect::<Vec<_>>().join("\n"),
+            "runId": run,
+            "lane": "browser",
+            "metadata": {"details": {"browserFindings": {"pages": lines.len(), "pagesRead": 1}}},
+        })
+    };
+    let hours =
+        "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.";
+    let metro = "Now find how to get there by metro from São Bento.";
+    let request = "Put the hours and the metro route on a small page I can share.";
+    let mut job = job(json!({}));
+    job.payload["conversation_history"] = json!([
+        {"role": "user", "content": hours, "runId": "run-1"},
+        {"role": "user", "content": hours, "runId": "run-1", "lane": "browser"},
+        {"role": "assistant", "content": "Livraria Lello is open daily from 9:00 a.m. to 7:30 p.m., according to its official site. I couldn't reach Visit Porto's site, so I checked the bookstore's own page instead.", "runId": "run-1", "lane": "browser"},
+        note("run-1", &[
+            json!({"url": "https://www.visitporto.travel/", "stopped": "timed-out"}),
+            json!({"url": "https://www.livrarialello.pt/en/", "title": "Livraria Lello", "facts": ["Open daily, 9:00 AM to 7:30 PM."]}),
+        ]),
+        {"role": "user", "content": metro, "runId": "run-2"},
+        {"role": "user", "content": metro, "runId": "run-2", "lane": "browser"},
+        {"role": "assistant", "content": "The metro operator's journey planner let me choose São Bento as the start and Aliados as the destination, the nearest metro station option to Livraria Lello. I couldn't run the planner from my reading tab, so I can't confirm the exact route or timing. From Aliados, Livraria Lello is a short walk uphill to Rua das Carmelitas, 144.", "runId": "run-2", "lane": "browser"},
+        note("run-2", &[
+            json!({"url": "https://en.metrodoporto.pt/", "title": "Metro do Porto", "facts": ["The journey planner lists São Bento and Aliados as stations."]}),
+        ]),
+    ]);
+    let processor = test_job_processor(tmp.path());
+    let (prompt, ..) = processor
+        .build_prompt_with_text(
+            &job.project_id.expect("project"),
+            &job,
+            tmp.path(),
+            request,
+            true,
+            None,
+            &[],
+            None,
+            None,
+        )
+        .expect("prompt should build");
+    for words in [
+        "nearest metro station option",
+        "a short walk uphill",
+        "my reading tab",
+        "according to its official site",
+    ] {
+        assert!(!prompt.contains(words), "{words}");
+    }
+    for finding in [
+        "Open daily, 9:00 AM to 7:30 PM.",
+        "The journey planner lists São Bento and Aliados as stations.",
+        r#""stopped":"timed-out""#,
+    ] {
+        assert!(prompt.contains(finding), "{finding}");
+    }
+    assert!(!prompt.contains(r#""stopped":"blocked""#));
+}

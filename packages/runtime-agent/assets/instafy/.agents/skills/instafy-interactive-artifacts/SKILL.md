@@ -3,12 +3,13 @@ name: instafy-interactive-artifacts
 description: Use when the answer should be a page the user taps through, not a long chat reply (map, ranking, comparison or shopping table, dashboard, quiz, timeline, planner, tracker, checklist). Picks the builder from the installed skills and shows the site in Studio with `instafy preview open`.
 context_kind: workflow
 context_parent: instafy-skill-router
-routing_keywords: interactive, map, maps, tap through, as a page, on a page, into a page, small page, simple page, one page, shareable page, dashboard, quiz, timeline, planner, tracker, calculator, comparison table, side by side, checklist, ranking, ranked, top 10, shortlist, compare, versus, shopping, cheapest, best price, where to buy, which to buy, should i buy, visualize, interaktiv, tidslinje, planerare, kalkylator, checklista, jämförelse, tablero, ダッシュボード
+routing_keywords: interactive, map, maps, tap through, as a page, on a page, into a page, small page, simple page, one page, shareable page, dashboard, quiz, timeline, planner, tracker, calculator, comparison, comparison table, side by side, checklist, ranking, ranked, top 10, shortlist, compare, versus, shopping, cheapest, best price, where to buy, which to buy, should i buy, visualize, interaktiv, tidslinje, planerare, kalkylator, checklista, jämförelse, tablero, ダッシュボード
 ---
 
 # Interactive artifacts
 
-The page holds the detail; chat holds a short reply. One site per request; follow-ups change the same site.
+The page holds the detail; chat holds a short reply. One site per request. A follow-up changes the site this chat
+made; a site another chat made changes only when the person names it, else start a new folder.
 Never stop to ask before building: a vague ask gets sensible defaults, stated in the reply.
 
 ## 1. Pick the builder
@@ -38,23 +39,30 @@ own kind of page.
 - One primary button per page; no search, filter or sort nobody asked for, and no sort by a value no row has. The
   lede: the verdict plus the biggest unknown, saying only what a page you read says: how many a page lists, or that
   these are all of them or the latest, only when it says so. Facts carry their trust: `checked 17 Oct on maker.com`,
-  `€549 at Shop · seen 17 Oct`, `checked 4 min ago`, `Estimate`, `Unknown`.
+  `€549 at Shop · seen 17 Oct`, `checked 4 min ago`, `Estimate`, `Unknown`. A tip no page gave is plain text, never
+  styled like a source line.
 - Options side by side: each value names the page it was read on and the day; one nobody found reads `Unknown` and
   why ("price not found on maker.com's page"), never a blank or a dash. A value cites only a page that gives it: a count of
   what you found cites only what it counts, so none found cites no page. A filter from a stated limit ("under €600")
   counts known values only: an item whose value is unknown is listed apart ("Price unknown"), never as within it, on
   the page, in the lede and in the reply. The starters do this with `site.byFilter`; a page you write uses it too. A
   candidate nothing could be read for is still a row, with `Unknown` in each cell: a page of options is never empty
-  ("No options yet") while a page you read named what to compare.
+  ("No options yet") while a page you read named what to compare. An item whose own page wasn't opened is "not
+  checked (its own page wasn't opened)" in the reply, and each of its unknown values has `"note": "its own page wasn't
+  opened"`. The lede names the same missing items as the reply.
+- Options asked for from what you already know, with nothing looked up: the compare starter with `"from": "memory"`,
+  each value only its `"v"`, from your own knowledge, never from the space's other pages. No `src`, `url`, `date`,
+  store or filter (`instafy bind check` fails them): the starter reads each value "<value>, not checked" and adds
+  "From what Octo knows; nothing checked." to the lede.
 - Keep sort, filters and the open tab in the URL query and give rows ids, so links and Studio's Follow keep them.
 - Every item the request names (stops, products, entries) is on the page, or the reply says plainly which is
   missing and why. Post the card first (step 3), then check with the builder skill's own check, else
   `instafy bind check <dir> --expect "<item>,<item>"` (it also lists blank values, values without their page or
   date, and a filter applied without `site.byFilter`), and fix what it lists. A failing check never holds the card
   back.
-- Facts come from pages you opened this turn, never from memory: the builder skill's source or fetch command when
-  it has one, else `instafy-web-research` (its "Comparing items" for prices and reviews per item) or Instafy's
-  browser (`instafy-browser-automation`). Keep each fact's link and date.
+- Facts come from pages you opened this turn, never from memory unless asked (above): the builder skill's source or
+  fetch command when it has one, else `instafy-web-research` (its "Comparing items" for prices and reviews per item)
+  or Instafy's browser (`instafy-browser-automation`). Keep each fact's link and date.
 - "Near me": never `navigator.geolocation` (Studio blocks it); `await instafyBind.location()` per
   `instafy-bound-sites`, with a typed place as a fallback.
 

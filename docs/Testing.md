@@ -1699,7 +1699,13 @@ prompt names the form as it is now. The twin left once the copy Octo read went
 before the step is not used either: nobody is asked, and the step is refused
 by its name as one the page changed under. A take-over while the prompt waits still
 ends the step, and a page that left its site after the yes ends the run with
-`approval_stale`.
+`approval_stale`. The planner's button under the page's own time picker,
+under a carousel's slide laid over the page, or under a banner with no name
+whose markup holds a style sheet and hidden words, is refused at once after the
+yes, naming the cover by its tag, role and label and never by its text, with
+nothing sent; once the cover goes, the next try asks again and runs. Under a
+cover that stays, the first refusal says to try once more, and every later try
+on that page is left to the person before anyone is asked.
 
 After it, `scripts/shared-browser-page-reading-e2e.mjs` reads loopback pages
 whose parts a reading could hide. A details' summary and a tab out of the tab
@@ -1730,14 +1736,16 @@ frame inside the control is refused with nothing sent or asked. A cookie banner
 is declined by the browser itself once a page settles, whether a step opened
 the page or Octo looked at it: its own reject button is pressed and never its
 accept or settings, in a banner named after cookies or whose own text speaks
-of them, the step says so once the banner is gone, and the reading is the page
-under it; a banner whose button takes no press yet is pressed and not said to
+of them (a refusal of only the optional cookies, "Optionale Cookies ablehnen"
+or "Reject optional cookies", too), the step says so once the banner is gone,
+and the reading is the page under it; a banner whose button takes no press yet is pressed and not said to
 be declined; a banner with no reject button, one in a frame, one on a page with
 a sign-in field or with a frame holding card fields, and a dialog about a
 privacy policy on the person's signed-in page that never speaks of cookies are
 left alone. A click under a consent notice the browser could not decline, or
-under a loading screen, is refused at once in words with no call log, and a
-cover that goes a moment after the page moves is waited for. A cookie notice
+under a loading screen, is refused at once in words with no call log (the
+loading screen named by its tag alone, with "try once more"),
+and a cover that goes a moment after the page moves is waited for. A cookie notice
 with a settings link and an accept but no reject is the person's step: a click
 under it and a press of its accept are refused in the same words, which the
 Personal Browser's policy gives too; a pause on its buttons highlights them as

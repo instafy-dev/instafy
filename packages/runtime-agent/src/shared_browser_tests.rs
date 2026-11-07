@@ -165,6 +165,8 @@ const special = {
   // dialog that is no notice, and a toast that fades within the click's settle.
   "click-covered-by-notice": { description: control("Show details") },
   "click-covered": { description: control("Show details") },
+  // The same button under a page's own date picker, which the look names.
+  "click-covered-by-picker": { description: control("Show details") },
   "click-cover-goes": { description: control("Show details") },
   // A click Playwright fails with its call log: a plain failure, and one it
   // gave up waiting on.
@@ -707,6 +709,11 @@ const bodyTextFor = (currentUrl, targetId) => {
     return `Script-written blank ${CANARY}`;
   }
   if (mode === "canary-text") return `Order note ${CANARY} for the fixture`;
+  // A page whose text spells out addresses, one without a scheme and one
+  // with a parenthesis of its own, inside a parenthesis of the sentence's.
+  if (mode === "spelled-addresses") {
+    return "Fixture page\nTickets: www.reviews.example/laptops/four.\nBackground (see https://en.wikipedia.org/wiki/Mercury_(planet)).";
+  }
   if (mode === "secret-screen" || mode === "station-list-secret-screen" || mode === "cookie-banner-secret") return `Production key ${CANARY}`;
   // innerText also holds text a person cannot see, such as a collapsed menu.
   if (mode === "hidden-controls") return "Fixture page\nKontenplan";
@@ -936,6 +943,9 @@ const makePage = (targetId, opened = null) => {
     if (mode === "click-lands-inside") return { other: true };
     if (mode === "click-covered-by-notice") return { other: false, covered: true, consent: true };
     if (mode === "click-covered") return { other: false, covered: true, consent: false };
+    if (mode === "click-covered-by-picker") {
+      return { other: false, covered: true, consent: false, cover: { tag: "div", role: "dialog", name: "Choose a  time" } };
+    }
     if (mode === "click-cover-goes" && landingLooks <= 2) return { other: false, covered: true, consent: false };
     return { other: false };
   };
@@ -3672,6 +3682,315 @@ async fn an_address_that_did_not_answer_is_not_opened_again_in_that_chat_for_ten
     assert!(failure(&navigate("https://down.example/")).contains(did_not_answer));
     assert_eq!(tries(), 4);
     end_chat_browser_run(run);
+}
+
+/// A chat's browser run as runtime-agent starts it for a job with `payload`
+/// (`acquire`'s own run start), with its record of the addresses it was given:
+/// those the job's task and the chat's history name and those the chat's
+/// earlier runs were given.
+fn chat_browser_run_given(
+    fixture: &EmbeddedControllerFixture,
+    chat: Uuid,
+    payload: JsonValue,
+) -> (SharedBrowserAgentControlGuard, JobCancelSignal) {
+    let cancel_signal = JobCancelSignal::new();
+    let mut guard = SharedBrowserAgentControlGuard::acquire_with_path(
+        fixture.authority_path.clone(),
+        fixture.approval_dir.clone(),
+        ApprovalStart::Routine,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        "page-target",
+        "Octo",
+        cancel_signal.clone(),
+        Duration::from_secs(60),
+    )
+    .expect("a chat's browser run");
+    guard.start_chat_records(
+        Some(chat),
+        unix_time_millis(),
+        &given_addresses_from_payload(&payload),
+    );
+    (guard, cancel_signal)
+}
+
+/// An address no message and no page gave is never opened: navigate and
+/// open_tab open a path past a site's root only when the run's task named it
+/// (with a scheme or without, its query and fragment aside) or a page the
+/// chat's browser turns read gave it, in this run or the chat's earlier ones.
+/// Any other is refused at once, before anything asks or loads, with where to
+/// go instead; a site's root always opens, and a link-only site keeps its own
+/// refusal. A turn opened two article addresses it made up on a reviewer's
+/// site, one of which waited 20 seconds for nothing.
+#[tokio::test]
+async fn an_address_no_message_or_page_gave_is_not_opened() {
+    let fixture = EmbeddedControllerFixture::new();
+    let chat = Uuid::new_v4();
+    let step = |mode: &str, path: &str, body: JsonValue| {
+        fixture
+            .command_for(mode, "page-target", "POST", path, Some(&body.to_string()))
+            .output()
+            .expect("run the controller")
+    };
+    let navigate = |url: &str| step("safe", "/v1/navigate", json!({ "url": url }));
+    // Whether a navigation to an address holding `part` went out.
+    let opened = |part: &str| {
+        fixture
+            .action_log()
+            .lines()
+            .any(|line| line.contains("\"type\":\"navigate\"") && line.contains(part))
+    };
+    let made_up = |site: &str| {
+        format!(
+            "No message and no page Octo read gave this address, so it was not opened: Octo opens only addresses it was given. Open {site}/ and follow its links to the page, or use the site's own search."
+        )
+    };
+    let failure = |output: &Output| {
+        assert!(!output.status.success());
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+
+    let run = chat_browser_run_given(
+        &fixture,
+        chat,
+        json!({ "prompt_text": "Compare the laptops (read https://www.reviews.example/laptops/one?ref=chat and reviews.example/laptops/two)." }),
+    );
+    // A made-up review on the same site: refused, and nothing loads, in the
+    // chat's own tab and as a tab of Octo's own.
+    let words = failure(&navigate("https://reviews.example/laptops/three"));
+    assert!(
+        words.contains(&made_up("https://reviews.example")),
+        "{words}"
+    );
+    let words = failure(&step(
+        "safe",
+        "/v1/tabs/open",
+        json!({ "url": "https://reviews.example/laptops/three" }),
+    ));
+    assert!(
+        words.contains(&made_up("https://reviews.example")),
+        "{words}"
+    );
+    assert!(!opened("laptops/three"));
+    assert_eq!(
+        std::fs::read_to_string(&fixture.opened_tabs).unwrap_or_default(),
+        ""
+    );
+    // The addresses the task names open, and so does the site's root.
+    for url in [
+        "https://reviews.example/laptops/one",
+        "https://www.reviews.example/laptops/two/#specs",
+        "https://reviews.example",
+    ] {
+        payload_of(&navigate(url));
+    }
+    assert!(opened("laptops/one") && opened("laptops/two"));
+    // A link-only site keeps its own refusal.
+    let words = failure(&navigate("https://www.booking.com/hotel/fixture.html"));
+    assert!(words.contains("Booking.com is link-only"), "{words}");
+    // A page's link opens once the page was read; a path beside it does not.
+    payload_of(&fixture.call("long-label-0", "GET", "/v1/snapshot", None));
+    payload_of(&navigate("https://example.test/reports/q3"));
+    let words = failure(&navigate("https://example.test/reports/q4"));
+    assert!(words.contains(&made_up("https://example.test")), "{words}");
+    // The record holds fingerprints, never the addresses.
+    let record = std::fs::read_to_string(fixture.approval_dir.join(GIVEN_ADDRESSES_FILE))
+        .expect("the run's record of the addresses it was given");
+    assert!(!record.contains("reviews.example"), "{record}");
+    assert!(!record.contains("reports"), "{record}");
+    end_chat_browser_run(run);
+
+    // The chat's next turn opens what the earlier one was given.
+    let run = chat_browser_run_given(
+        &fixture,
+        chat,
+        json!({ "prompt_text": "Fill in what's still missing." }),
+    );
+    payload_of(&navigate("https://example.test/reports/q3"));
+    payload_of(&navigate("https://reviews.example/laptops/one"));
+    end_chat_browser_run(run);
+
+    // Another chat's turn was given none of it.
+    let run = chat_browser_run_given(
+        &fixture,
+        Uuid::new_v4(),
+        json!({ "prompt_text": "Read the report." }),
+    );
+    let words = failure(&navigate("https://example.test/reports/q3"));
+    assert!(words.contains(&made_up("https://example.test")), "{words}");
+    end_chat_browser_run(run);
+}
+
+/// The words an address no message and no page gave is refused with.
+fn made_up_address_words(site: &str) -> String {
+    format!(
+        "No message and no page Octo read gave this address, so it was not opened: Octo opens only addresses it was given. Open {site}/ and follow its links to the page, or use the site's own search."
+    )
+}
+
+/// A page gives the addresses its text spells out, read as a task's are: with
+/// a scheme or without, and with a parenthesis of its own
+/// ("/wiki/Mercury_(planet)") inside one of the sentence's.
+#[tokio::test]
+async fn a_page_gives_the_addresses_its_text_spells_out() {
+    let fixture = EmbeddedControllerFixture::new();
+    let navigate = |url: &str| {
+        fixture
+            .command_for(
+                "safe",
+                "page-target",
+                "POST",
+                "/v1/navigate",
+                Some(&json!({ "url": url }).to_string()),
+            )
+            .output()
+            .expect("run the controller")
+    };
+    let spelled = [
+        (
+            "https://www.reviews.example/laptops/four",
+            "https://www.reviews.example",
+        ),
+        (
+            "https://en.wikipedia.org/wiki/Mercury_(planet)",
+            "https://en.wikipedia.org",
+        ),
+    ];
+    let run = chat_browser_run_given(
+        &fixture,
+        Uuid::new_v4(),
+        json!({ "prompt_text": "Read the page." }),
+    );
+    for (url, site) in spelled {
+        let words = failure_of(&navigate(url));
+        assert!(
+            words.contains(&made_up_address_words(site)),
+            "{url}: {words}"
+        );
+    }
+    payload_of(&fixture.call("spelled-addresses", "GET", "/v1/snapshot", None));
+    for (url, _) in spelled {
+        payload_of(&navigate(url));
+    }
+    end_chat_browser_run(run);
+}
+
+/// A chat's history gives the addresses the person named in it, those its
+/// browser turns were asked about and the pages they read (their finding
+/// lines), as a runtime that started again finds them, with nothing of the
+/// chat's earlier runs in its memory. No reply gives one by its words, and a
+/// page that stopped a turn was not read: a turn's findings listed an article
+/// address it made up as stopped.
+#[tokio::test]
+async fn a_chats_history_gives_what_the_person_and_its_browser_turns_named() {
+    let fixture = EmbeddedControllerFixture::new();
+    let navigate = |url: &str| {
+        fixture
+            .command_for(
+                "safe",
+                "page-target",
+                "POST",
+                "/v1/navigate",
+                Some(&json!({ "url": url }).to_string()),
+            )
+            .output()
+            .expect("run the controller")
+    };
+    let findings = [
+        json!({ "url": "https://maker.example/laptops/five/specs", "title": "Specs", "facts": ["Battery: 61 Wh"] }),
+        json!({ "url": "https://reviews.example/article/3200000/made-up.html", "stopped": "blocked" }),
+    ]
+    .map(|finding| finding.to_string())
+    .join("\n");
+    let run = chat_browser_run_given(
+        &fixture,
+        Uuid::new_v4(),
+        json!({
+            "prompt_text": "Use the browser to check its battery.",
+            "conversation_history": [
+                { "role": "user", "content": "Here's the review: https://reviews.example/laptops/five" },
+                { "role": "assistant", "content": "Its maker's page is https://maker.example/laptops/five, I think." },
+                { "role": "user", "lane": "browser", "content": "Read maker.example/laptops/five/press." },
+                { "role": "assistant", "lane": "browser", "content": "I read the specs; the manual is at https://maker.example/laptops/five/manual." },
+                { "role": "assistant", "lane": "browser", "content": findings },
+            ],
+        }),
+    );
+    for url in [
+        "https://reviews.example/laptops/five",
+        "https://maker.example/laptops/five/press",
+        "https://maker.example/laptops/five/specs",
+    ] {
+        payload_of(&navigate(url));
+    }
+    for (url, site) in [
+        (
+            "https://maker.example/laptops/five",
+            "https://maker.example",
+        ),
+        (
+            "https://maker.example/laptops/five/manual",
+            "https://maker.example",
+        ),
+        (
+            "https://reviews.example/article/3200000/made-up.html",
+            "https://reviews.example",
+        ),
+    ] {
+        let words = failure_of(&navigate(url));
+        assert!(
+            words.contains(&made_up_address_words(site)),
+            "{url}: {words}"
+        );
+    }
+    end_chat_browser_run(run);
+}
+
+/// The site and path a task's address is kept by match the approval script's
+/// (`givenAddressKey`): the host in lower case without `www.`, a port other
+/// than the scheme's own, the path without a trailing slash, and neither query
+/// nor fragment. A word that is no site with a path names nothing.
+#[test]
+fn a_tasks_addresses_are_kept_by_their_site_and_path() {
+    let key = |site_path: &str| approval_test_sha256(site_path)[..32].to_string();
+    assert_eq!(
+        given_addresses_in_text(
+            "Read <https://WWW.Reviews.example:443/Laptops/One/?a=1#b>, \"reviews.example:8443/x\" and [two](http://reviews.example/two)."
+        ),
+        vec![
+            key("reviews.example/Laptops/One"),
+            key("reviews.example/two"),
+        ]
+    );
+    assert_eq!(
+        given_addresses_in_text("Open visitporto.travel/en/lello, then www.livrarialello.pt/en/."),
+        vec![
+            key("visitporto.travel/en/lello"),
+            key("livrarialello.pt/en")
+        ]
+    );
+    assert!(
+        given_addresses_in_text(
+            "See src/main.rs, 1.5/2, e.g./this, name@example.com/x and ftp://example.com/file."
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        given_addresses_from_payload(&json!({ "prompt_text": "Open https://example.test/a b" })),
+        vec![key("example.test/a")]
+    );
+    // A parenthesis is part of an address only when the address opens it.
+    assert_eq!(
+        given_addresses_in_text(
+            "Read https://en.wikipedia.org/wiki/Mercury_(planet). (See https://example.org/a), (visitporto.travel/en/lello) and https://example.org/b_(c))."
+        ),
+        vec![
+            key("en.wikipedia.org/wiki/Mercury_(planet)"),
+            key("example.org/a"),
+            key("visitporto.travel/en/lello"),
+            key("example.org/b_(c)"),
+        ]
+    );
 }
 
 /// Only an address that waited for nothing for a while is refused later: a
@@ -8616,7 +8935,8 @@ fn a_routine_start_reads_headlines_whose_verb_is_also_a_button_word() {
         assert!(requests.is_empty(), "{mode} asked: {requests:?}");
     }
     // The same words where a button puts its verb still ask, so Octo's tab
-    // refuses them.
+    // refuses them, and leaves a deletion, a payment and a message to the
+    // person.
     for mode in [
         "button:Elimina account",
         "button:Paga ora",
@@ -8626,7 +8946,7 @@ fn a_routine_start_reads_headlines_whose_verb_is_also_a_button_word() {
         let (output, requests) =
             fixture.call_deciding(mode, "POST", "/v1/click", Some(&body), &["deny"]);
         let refused = failure_of(&output);
-        assert!(refused.contains("for reading"), "{mode}: {refused}");
+        assert!(refused.contains(OWN_TAB_READING_WORDS), "{mode}: {refused}");
         assert!(requests.is_empty(), "{mode} asked: {requests:?}");
     }
 }
@@ -9719,6 +10039,11 @@ fn the_continued_run_is_read_from_studio_metadata_and_nothing_else_names_one() {
     }
 }
 
+/// What a step Octo's own tabs do not take answers: where to take it instead.
+const OWN_TAB_STEP_WORDS: &str = "Octo's own tabs don't take this step, so nothing was done there. Open this page in the chat's own tab with navigate (its tabId is the one list_tabs shows opened by the person) and take the step there; the browser asks the person as usual.";
+/// What a step with a named risk in Octo's own tabs answers: it is the person's.
+const OWN_TAB_READING_WORDS: &str = "Octo's own tabs are for reading, so this step was not performed there. Leave it to the person, or take it on the page they chose when they asked for it.";
+
 #[test]
 fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
     let fixture = EmbeddedControllerFixture::new();
@@ -9732,17 +10057,51 @@ fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
             .to_string()
     };
 
-    for (mode, path, extra) in [
-        ("form-submit-input", "/v1/click", json!({})),
-        ("save-button", "/v1/click", json!({})),
-        ("export-link", "/v1/click", json!({})),
-        ("invite-button", "/v1/click", json!({})),
+    // A step with no named risk (a form post, a commit button, a search sent
+    // by typing, an activation key) is sent to the chat's own tab, where the
+    // browser asks the person as usual: a turn that read a journey planner in
+    // its own tab stopped at the planner's button and never ran it. A named
+    // risk (a download, an access change, a key change) stays the person's,
+    // in the words it had.
+    for (mode, path, extra, words) in [
+        (
+            "form-submit-input",
+            "/v1/click",
+            json!({}),
+            OWN_TAB_STEP_WORDS,
+        ),
+        ("save-button", "/v1/click", json!({}), OWN_TAB_STEP_WORDS),
         (
             "safe",
             "/v1/type",
             json!({ "text": "hotels near the station", "submit": true }),
+            OWN_TAB_STEP_WORDS,
         ),
-        ("safe", "/v1/press", json!({ "key": "Enter" })),
+        (
+            "safe",
+            "/v1/press",
+            json!({ "key": "Enter" }),
+            OWN_TAB_STEP_WORDS,
+        ),
+        ("export-link", "/v1/click", json!({}), OWN_TAB_READING_WORDS),
+        (
+            "invite-button",
+            "/v1/click",
+            json!({}),
+            OWN_TAB_READING_WORDS,
+        ),
+        (
+            "generate-key",
+            "/v1/click",
+            json!({}),
+            OWN_TAB_READING_WORDS,
+        ),
+        (
+            "invite-button",
+            "/v1/press",
+            json!({ "key": "Enter" }),
+            OWN_TAB_READING_WORDS,
+        ),
     ] {
         let snapshot_id = snapshot_in(mode);
         let mut body = json!({ "index": 0, "snapshotId": snapshot_id });
@@ -9752,7 +10111,13 @@ fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
         let (output, requests) =
             fixture.call_deciding(mode, "POST", path, Some(&body.to_string()), &["allow_once"]);
         let error = failure_of(&output);
-        assert!(error.contains("for reading"), "{mode} {path}: {error}");
+        assert!(error.contains(words), "{mode} {path}: {error}");
+        let other = if words == OWN_TAB_STEP_WORDS {
+            OWN_TAB_READING_WORDS
+        } else {
+            OWN_TAB_STEP_WORDS
+        };
+        assert!(!error.contains(other), "{mode} {path}: {error}");
         assert!(requests.is_empty(), "{mode} {path} asked: {requests:?}");
     }
     assert!(
@@ -9783,7 +10148,8 @@ fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
         "/v1/navigate",
         Some(r#"{"url":"https://example.test/logout"}"#),
     ));
-    assert!(risky.contains("for reading"), "{risky}");
+    // A risky address is left to the person, in the words it had.
+    assert!(risky.contains(OWN_TAB_READING_WORDS), "{risky}");
 
     // Reading steps still run there: typing that does not submit, a plain click.
     let typed = payload_of(
@@ -12624,8 +12990,8 @@ fn the_browser_declines_a_cookie_banner_itself() {
 /// A click whose control something outside it covers is refused at once, in words: a cookie
 /// notice the browser could not decline says so and where to go next (never that it has no
 /// reject button, which one on a sign-in page or with a reject link has), any other cover says
-/// what to do, and Playwright's call log never reaches Octo. A cover that goes within the click's
-/// short settle, such as a toast that fades, is no refusal.
+/// what to do, naming what covers the control, and Playwright's call log never reaches Octo. A
+/// cover that goes within the click's short settle, such as a toast that fades, is no refusal.
 #[test]
 fn a_covered_click_is_refused_at_once_in_words() {
     use std::time::{Duration, Instant};
@@ -12636,7 +13002,14 @@ fn a_covered_click_is_refused_at_once_in_words() {
         ),
         (
             "click-covered",
-            "Something else on the page covers \"Show details\", so nothing was clicked. Take a fresh snapshot, and read on without it if it is still covered.",
+            "Something else on the page covers \"Show details\", so nothing was clicked. Take a fresh snapshot and try once more.",
+        ),
+        // The cover is named by its tag, role and name, so the next try can
+        // close it or wait for it to go: a planner's button the person allowed
+        // was refused as covered by "something else", and the turn gave up.
+        (
+            "click-covered-by-picker",
+            "Something else on the page covers \"Show details\" (<div role=\"dialog\"> named \"Choose a time\"), so nothing was clicked. Take a fresh snapshot and try once more.",
         ),
     ] {
         let fixture = EmbeddedControllerFixture::new();

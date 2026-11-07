@@ -938,7 +938,13 @@ impl Harness {
                             "request": format!("[[{label}]] {prompt}"),
                             "reply": format!("Turn {label} completed."),
                             "replyTruncated": false,
-                            "findings": [],
+                            // A building turn reads a browser turn by its findings alone, as the
+                            // controller labels them from the reply's finding lines.
+                            "findings": [{
+                                "url": "https://museum.example/hours",
+                                "title": "Opening hours",
+                                "facts": [format!("Turn {label} completed.")],
+                            }],
                             "readAt": "2026-01-05T10:00:00Z",
                             "viewer": "Instafy's browser in the workspace",
                             "outcome": "succeeded",
@@ -3616,7 +3622,7 @@ fn check_lanes(harness: &Harness, costs: &[(String, f64)]) -> Result<()> {
             }
         }
     }
-    // A4 read A2's and A3's requests and replies, as page data.
+    // A4 read A2's and A3's requests and findings, as page data.
     let a4 = input_text(first_sampling_request(harness.turn("A4")));
     for words in ["[[A2]]", "[[A3]]", "Turn A3 completed."] {
         ensure!(a4.contains(words), "A4 never read {words}");

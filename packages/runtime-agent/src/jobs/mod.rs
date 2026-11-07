@@ -4011,6 +4011,14 @@ const WORKSPACE_IS_CURRENT_RULE: &str = "\
 - You are running in this space's workspace, so it is up. An earlier turn's failure or notice may be out of date: check what you see now before repeating it or its advice. Tell the person to reconnect or restart the workspace only if they ask how, or something you ran this turn shows it failing.\n\
 - In a skill setup, the workspace records its progress. If a file an earlier step saved is missing, say in one plain sentence that it is gone, without guessing why, then redo that step (ask its question again) and continue.\n";
 
+/// Whose page a turn changes. In a new chat, "Make a simple comparison page of … from what you
+/// already know" found another chat's researched comparison, read it and wrote its own over it,
+/// so that chat's page and card showed the new one. A page made for the person stays the page of
+/// the chat that made it, as the interactive artifacts skill also says; the person's own app or
+/// site is changed as asked, from any chat. Every turn that may write files reads this, whatever
+/// skill it reads and whichever form its answer takes.
+const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A follow-up changes the page this chat made; a page made for the person in another chat (a map, a comparison, a page to share) changes only when the person names it, else start a new folder.\n";
+
 /// True when a person in this conversation opened a skill setup with
 /// `/skills import ... --start` or `/skills start <name>` and the setup began.
 ///
@@ -7227,6 +7235,7 @@ impl JobProcessor {
                         .expect("Shared Browser execution must have a cancellation signal")
                         .clone(),
                     shared_browser_chat(job),
+                    &crate::shared_browser::given_addresses_from_payload(&job.payload),
                 )?,
             )
         } else {
@@ -8053,6 +8062,11 @@ impl JobProcessor {
         }
 
         let drafts_reply = drafts_reply_for_job(job, final_output_schema);
+        // A browser turn's draft ends before its finding lines, which no person reads.
+        let draft_ends_at_finding_lines = job
+            .payload
+            .get("metadata")
+            .is_some_and(browser_hand_back::is_browser_turn);
         let mut reply_draft = progress_sender
             .as_ref()
             .and_then(|progress| progress.reply_draft.clone())
@@ -8061,6 +8075,7 @@ impl JobProcessor {
                 reply_draft::ReplyDraftStream::start(
                     sender,
                     codex_run_options.allow_plain_text_final_fallback,
+                    draft_ends_at_finding_lines,
                 )
             });
 
@@ -8294,7 +8309,7 @@ impl JobProcessor {
             streaming_active = ctx.active && status_ok;
         }
 
-        let interim_messages = raw_interim_messages;
+        let mut interim_messages = raw_interim_messages;
         let first_shared_browser_terminal_consent_failure = explicit_shared_browser_execution
             .then(|| shared_browser_terminal_consent_failure(&interim_messages))
             .flatten();
@@ -8998,6 +9013,7 @@ impl JobProcessor {
                         reply_draft::ReplyDraftStream::start(
                             sender,
                             retry_codex_run_options.allow_plain_text_final_fallback,
+                            draft_ends_at_finding_lines,
                         )
                     });
                 let mut retry_event_handler = |event: &JsonValue| -> Result<()> {
@@ -9428,6 +9444,7 @@ impl JobProcessor {
                         reply_draft::ReplyDraftStream::start(
                             sender,
                             finalization_options.allow_plain_text_final_fallback,
+                            draft_ends_at_finding_lines,
                         )
                     });
                 let mut finalization_events = |event: &JsonValue| -> Result<()> {
@@ -9816,7 +9833,7 @@ impl JobProcessor {
                 ));
             }
 
-            let retry_messages = merge_skills_kickoff_into_execution(
+            let mut retry_messages = merge_skills_kickoff_into_execution(
                 skills_kickoff.take(),
                 streaming_active,
                 retry_messages,
@@ -9827,12 +9844,6 @@ impl JobProcessor {
                 && retry_shared_browser_terminal_consent_failure.is_none()
                 && !retry_hands_the_message_to_the_building_turn
             {
-                let mut pages = output.browser_pages.clone();
-                for page in &retry_output.browser_pages {
-                    if !pages.contains(page) {
-                        pages.push(page.clone());
-                    }
-                }
                 let answer = BrowserTurnAnswer {
                     options: &codex_run_options,
                     // An ephemeral retry keeps no thread: the first attempt's holds its pages.
@@ -9848,19 +9859,38 @@ impl JobProcessor {
                         &interim_messages,
                         output.browser_secret_screen,
                     ),
-                    pages,
+                    refused_a_step: browser_hand_back::refused_a_step(&retry_messages)
+                        || browser_hand_back::refused_a_step(&interim_messages),
+                    pages: {
+                        let mut pages = output.browser_pages.clone();
+                        for page in &retry_output.browser_pages {
+                            if !pages.contains(page) {
+                                pages.push(page.clone());
+                            }
+                        }
+                        pages
+                    },
                     final_json: &retry_output.final_json,
+                    progress: progress_sender.as_ref().filter(|_| streaming_active),
+                    runtime_id: registration.runtime_id,
+                    paused_already: last_reply_was_a_pause(job),
                 };
-                retry_artifacts.extend(
-                    end_browser_turn_answer(
-                        &codex,
-                        job,
-                        answer,
-                        &mut retry_outcome.summary,
-                        task_usage,
-                    )
-                    .await,
-                );
+                // Boxed, so the job's own future does not grow by its passes' runs.
+                let ended = Box::pin(end_browser_turn_answer(
+                    &codex,
+                    job,
+                    answer,
+                    &mut retry_outcome.summary,
+                    task_usage,
+                ))
+                .await;
+                retry_artifacts.extend(ended.artifacts);
+                retry_messages.extend(ended.messages);
+                // As after the turn's own run: steps a second pass could not stream are posted
+                // with the turn.
+                if let Some(progress) = progress_sender.as_ref() {
+                    streaming_active = streaming_active && progress.status.load(Ordering::SeqCst);
+                }
             }
             post_only_the_card(job, &mut retry_outcome);
             if retry_hands_the_message_to_the_building_turn {
@@ -9890,9 +9920,9 @@ impl JobProcessor {
             &mut artifacts,
         )?;
 
-        // A browser turn's answer as its hand-back reads it: its finding lines, from the wrap-up
-        // pass or the pages it opened when it wrote none, and a word for a build request nothing
-        // acts on.
+        // A browser turn's answer as its hand-back reads it: the pages it named unread, read in
+        // a second pass, its finding lines, from the wrap-up pass or the pages it opened when it
+        // wrote none, and a word for a build request nothing acts on.
         if (explicit_shared_browser_execution || explicit_personal_browser_execution)
             && first_shared_browser_terminal_consent_failure.is_none()
             && !hands_the_message_to_the_building_turn
@@ -9906,13 +9936,29 @@ impl JobProcessor {
                     &interim_messages,
                     output.browser_secret_screen,
                 ),
+                refused_a_step: browser_hand_back::refused_a_step(&interim_messages),
                 pages: output.browser_pages.clone(),
                 final_json: &output.final_json,
+                progress: progress_sender.as_ref().filter(|_| streaming_active),
+                runtime_id: registration.runtime_id,
+                paused_already: last_reply_was_a_pause(job),
             };
-            artifacts.extend(
-                end_browser_turn_answer(&codex, job, answer, &mut outcome.summary, task_usage)
-                    .await,
-            );
+            // Boxed, so the job's own future does not grow by its passes' runs.
+            let ended = Box::pin(end_browser_turn_answer(
+                &codex,
+                job,
+                answer,
+                &mut outcome.summary,
+                task_usage,
+            ))
+            .await;
+            artifacts.extend(ended.artifacts);
+            interim_messages.extend(ended.messages);
+            // As after the turn's own run: steps a second pass could not stream are posted with
+            // the turn.
+            if let Some(progress) = progress_sender.as_ref() {
+                streaming_active = streaming_active && progress.status.load(Ordering::SeqCst);
+            }
         }
 
         // No retry: the turn's result is settled, so its cards go out now,
@@ -10861,11 +10907,15 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 &mut prompt,
                 &mut prompt_section_metrics,
                 "studioRuntimeInvariants",
-                "\nDirect workspace-change invariants:\n\
-                - Use workspace-relative paths only. Never write outside the active workspace.\n\
-                - Do not create submodules or gitlinks unless the user explicitly asked for one.\n\
+                &[
+                    "\nDirect workspace-change invariants:\n\
+                - Use workspace-relative paths only. Never write outside the active workspace.\n",
+                    PAGE_OF_ITS_OWN_CHAT_RULE,
+                    "- Do not create submodules or gitlinks unless the user explicitly asked for one.\n\
                 - Imported or nested repositories are ordinary directories unless the user explicitly asks to preserve nested Git metadata.\n\
                 - Keep the final summary short: what changed and important caveats.\n",
+                ]
+                .concat(),
             );
             // The replies guide the reply line names. A turn that loads no memory snapshot (a
             // required change, a lookup of another chat, a turn on a restored thread) also runs
@@ -10936,15 +10986,24 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                     &mut prompt,
                     &mut prompt_section_metrics,
                     "studioRuntimeInvariants",
-                    "\nCurrent Studio runtime invariants:\n\
-                - Treat read-only as no workspace mutation. Safe inspection commands and CLI lookups are allowed when needed to answer.\n\
-                - Compact agent context cards are soft hints/cache for prior context, current work focus, and coordination direction. Use the relevant cards included in this prompt when present; otherwise query them with `instafy agents context list --json --query \"<topic>\"` when the latest request asks for prior project, coordination, audit, host, or hardware context.\n\
+                    &[
+                        "\nCurrent Studio runtime invariants:\n\
+                - Treat read-only as no workspace mutation. Safe inspection commands and CLI lookups are allowed when needed to answer.\n",
+                        // as the full constraints say to a turn that may write
+                        if metadata_requests_read_only_workspace(job.payload.get("metadata")) {
+                            ""
+                        } else {
+                            PAGE_OF_ITS_OWN_CHAT_RULE
+                        },
+                        "- Compact agent context cards are soft hints/cache for prior context, current work focus, and coordination direction. Use the relevant cards included in this prompt when present; otherwise query them with `instafy agents context list --json --query \"<topic>\"` when the latest request asks for prior project, coordination, audit, host, or hardware context.\n\
                 - Agent-to-agent conversations are first-class conversations. For unknown-focus follow-ups, lookup first, answer directly when evidence is sufficient, ask one clear prior thread when durable context matters, and do not poll all agents to discover soft focus.\n\
                 - For follow-ups about lanes, workers, files, or evidence, prefer the most recent matching user-visible evidence in this active conversation, but what you see in the workspace now beats earlier failure notices. Use older same-topic context cards or prior conversation search results only if current conversation evidence is absent or clearly not the target.\n\
                 - For current-conversation evidence-only follow-ups, do not search workspace files, source trees, `.instafy`, `.codex-runtime*`, `.codex-runtime-fallback`, or runtime logs. If restored provider context is insufficient, inspect only the active conversation with `instafy conversation show --include-threads --transcript --json`, which reads this conversation's id from the environment. Only if an older CLI reports a missing conversation argument, add the Conversation ID from Runtime context.\n\
                 - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n\
                 - Hardware/IO context card facts are not proof. Verify on the active runtime before claiming serial, BLE, USB, or flashing access.\n\
                 - If the active runtime cannot access host-native IO, say that a Desktop/CLI runtime on the attached machine is needed.\n",
+                    ]
+                    .concat(),
                 );
             }
         } else if cross_chat_context_lookup {
@@ -11153,6 +11212,14 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - If multiple secret inputs are required, include all names in `suggestedSecretNames` (ordered by setup priority).\n\
               Never include secret values or tokens in chat or JSON.\n\
             - When referencing UI onboarding/actions in `summary`, do not use positional wording (for example \"above\", \"below\", \"left\", \"right\"). Use position-agnostic wording like \"the integration action card in this message\".\n",
+            // A turn here may write files too (a goal's change, a page the routing step
+            // expected no change for), so it reads whose page it may change, as a
+            // direct workspace-change turn does.
+            if metadata_requests_read_only_workspace(job.payload.get("metadata")) {
+                ""
+            } else {
+                PAGE_OF_ITS_OWN_CHAT_RULE
+            },
             "- If the user asks you to create/edit/delete files, you MUST actually perform the filesystem changes in the workspace (prefer the `apply_patch` tool). Do not claim a file was changed unless it truly exists in the workspace.\n\
             - If you cannot apply file changes via tools, you MUST include the full post-change contents inline in the JSON `files` array using either `content` (UTF-8 text) or `contentBase64` (base64-encoded bytes). The runtime will write the files for you; this does not require `exec_command` or `shell`. Do not treat missing command tools as a blocker for file-only create/edit/delete requests when you can return inline `files[]` content.\n\
             - If you use `apply_patch`, follow the patch format exactly. Example (create a file):\n\
@@ -16065,35 +16132,59 @@ pub struct BrowserTurnAnswer<'a> {
     /// Whether it stopped on a step that is the person's
     /// (`browser_hand_back::stopped_for_the_person`): its reply is theirs, and stays as it is.
     pub stopped_for_the_person: bool,
+    /// Whether the browser refused one of its steps as the person's own
+    /// (`browser_hand_back::refused_a_step`).
+    pub refused_a_step: bool,
     /// The pages its own steps opened (`CodexRunOutput::browser_pages`).
     pub pages: Vec<String>,
     /// Its answer as the model wrote it.
     pub final_json: &'a JsonValue,
+    /// Where the turn's messages go as it works: a second pass's steps go there too, so the
+    /// turn's line and Details show them.
+    pub progress: Option<&'a JobProgress>,
+    /// The runtime the turn's messages name.
+    pub runtime_id: Uuid,
+    /// Whether Octo's last reply in the chat was already a pause for the person.
+    pub paused_already: bool,
+}
+
+/// What the end of a browser turn's answer adds to the turn ([`end_browser_turn_answer`]): the
+/// run logs and answers of its passes, which go after the turn's own, so the turn is billed from
+/// its first run only (docs/Credits-Billing.md), and the messages of a second pass's steps.
+#[derive(Default)]
+pub struct BrowserTurnEnd {
+    pub artifacts: Vec<JsonValue>,
+    pub messages: Vec<JobMessage>,
 }
 
 /// Ends the reply `summary` of a browser turn that is not handed to the building turn
 /// (`browser_hand_back::hands_the_message_to_the_building_turn`). A turn whose findings go back
-/// to the building turn, that used the browser and wrote no finding lines, gets the runtime's
-/// wrap-up pass on its own thread, asked for those lines only; with still none, its note holds
-/// its reply and the pages its own steps opened, so the hand-back still goes, and the turn posts
-/// no words of its own (`browser_hand_back::move_findings_into_details`). A turn on the browser
-/// on the person's device keeps no thread, so it gets no pass: the pages it opened, by address.
-/// A build request that nothing then acts on is said in the reply, never dropped without a word
-/// (`browser_hand_back::BUILD_NOT_MADE_LINE`). A turn that stopped for the person is left as it
-/// is: its reply says what they do next. Returns the pass's run log and answer, which go after
-/// the turn's own: a turn is billed from its first run's log, and like a recovery retry or the
-/// wrap-up after a missing answer, the pass is not billed (docs/Credits-Billing.md).
+/// to the building turn and that named pages it didn't open reads them first, in a second pass
+/// (`read_the_unread_pages`). A turn that used the browser and wrote no finding lines gets the
+/// runtime's wrap-up pass on its own thread, asked for those lines only; with still none, its
+/// note holds its reply and the pages its own steps opened, so a later building turn reads which
+/// pages it opened, a hand-back still goes, and a turn whose findings go back to the building
+/// turn posts no words of its own (`browser_hand_back::move_findings_into_details`). A turn on
+/// the browser on the person's device keeps no thread, so it gets no pass: the pages it opened,
+/// by address. A build request that nothing then acts on is said in the reply, never dropped
+/// without a word (`browser_hand_back::BUILD_NOT_MADE_LINE`). A turn that stopped for the person
+/// is left as it is: its reply says what they do next. Like a recovery retry or the wrap-up after
+/// a missing answer, neither pass is billed (docs/Credits-Billing.md).
 pub async fn end_browser_turn_answer(
     codex: &CodexClient,
     job: &LeaseJob,
     answer: BrowserTurnAnswer<'_>,
     summary: &mut String,
     task_usage: &TaskUsage,
-) -> Vec<JsonValue> {
+) -> BrowserTurnEnd {
     let metadata = job.payload.get("metadata");
-    let mut artifacts = Vec::new();
-    if answer.stopped_for_the_person {
-        return artifacts;
+    let second = read_the_unread_pages(codex, job, &answer, summary, task_usage).await;
+    let mut ended = BrowserTurnEnd {
+        artifacts: second.artifacts,
+        messages: second.messages,
+    };
+    if answer.stopped_for_the_person || second.stopped_for_the_person {
+        return ended;
     }
     let canceled = answer
         .options
@@ -16116,11 +16207,11 @@ pub async fn end_browser_turn_answer(
             match pass {
                 Ok(output) => {
                     let purpose = json!({ "purpose": "finding-lines-wrap-up" });
-                    artifacts.push(build_codex_run_log_artifact(
+                    ended.artifacts.push(build_codex_run_log_artifact(
                         &output.events,
                         Some(purpose.clone()),
                     ));
-                    artifacts.push(json!({
+                    ended.artifacts.push(json!({
                         "kind": "codex/final-json",
                         "metadata": purpose,
                         "payload": sanitize_codex_final_json(&output.final_json),
@@ -16168,7 +16259,182 @@ pub async fn end_browser_turn_answer(
             "a browser turn asked for a build that nothing acts on: its reply says it is not made yet"
         );
     }
-    artifacts
+    ended
+}
+
+/// The options of the second pass of a browser turn over the pages its unread line named
+/// (`browser_hand_back::UNREAD_LINE`): the turn's own run, resumed on its own thread with its
+/// browser, approvals and Stop, its effort and its time limit, and no images sent again. A
+/// message the person sends meanwhile does not steer it: the turn's own run took any.
+fn unread_pages_pass_options(
+    first_attempt: &CodexRunOptions,
+    thread: JsonValue,
+) -> CodexRunOptions {
+    let mut options = first_attempt.clone();
+    options.persist_conversation_thread = true;
+    options.provider_conversation_state = Some(thread);
+    options.input_images.clear();
+    options.turn_wrap_up = None;
+    // the note is the turn's own: the pass neither clears it nor hands the turn off
+    options.turn_continue_note = None;
+    options.active_turn_input = None;
+    options
+}
+
+/// What the second pass of a browser turn added to it ([`read_the_unread_pages`]): its run log
+/// and answer, the messages of its steps, and whether it stopped on a step that is the person's.
+#[derive(Default)]
+struct UnreadPagesRead {
+    artifacts: Vec<JsonValue>,
+    messages: Vec<JobMessage>,
+    stopped_for_the_person: bool,
+}
+
+/// A browser turn whose findings go back to the building turn ends with the pages its request
+/// needs that it didn't open (`browser_hand_back::UNREAD_LINE`). When it names any, the runtime
+/// runs the turn once more on its own thread, told only those pages, before the build, and adds
+/// what that second pass read to the turn's answer; the second pass's own unread line starts no
+/// third. Never after a Stop, nor when the turn stopped for the person (a sign-in or cookie
+/// pause, a step's approval that ended it, a secret) or the browser refused one of its steps as
+/// theirs: the page needs the person. Nor when its answer holds no finding line: the wrap-up
+/// pass asks for the lines of the pages it read ([`end_browser_turn_answer`]), and a second
+/// pass's lines would leave those pages out. The unread line itself is taken out of `summary` in
+/// any case: no person reads it. Told to read every page the request needs, a comparison's
+/// browser turn read three pages and ended, and the page was built with four of its fifteen facts
+/// (a local test, Nov 6). A pass that the person's Stop or a step's approval ends ends the turn
+/// as the turn's own run would have: a pause or an approval's end leaves the words that say what
+/// they do next, and the turn's note keeps every finding line in hand.
+async fn read_the_unread_pages(
+    codex: &CodexClient,
+    job: &LeaseJob,
+    turn: &BrowserTurnAnswer<'_>,
+    summary: &mut String,
+    task_usage: &TaskUsage,
+) -> UnreadPagesRead {
+    let mut read = UnreadPagesRead::default();
+    let pages = browser_hand_back::take_unread_pages(summary);
+    let canceled = turn
+        .options
+        .cancel_signal
+        .as_ref()
+        .is_some_and(JobCancelSignal::is_canceled);
+    let hands_back = job
+        .payload
+        .get("metadata")
+        .is_some_and(browser_hand_back::hands_back);
+    let Some(thread) = turn.thread.clone().filter(|_| {
+        hands_back
+            && !pages.is_empty()
+            && turn.used_the_browser
+            && !canceled
+            && !turn.stopped_for_the_person
+            && !turn.refused_a_step
+            && browser_hand_back::finding_lines_of(summary).is_some()
+    }) else {
+        return read;
+    };
+    tracing::info!(
+        job_id = %job.id,
+        pages = pages.len(),
+        "a browser turn named pages it didn't read: it reads them once more before the build"
+    );
+    let mut options = unread_pages_pass_options(turn.options, thread);
+    options.usage_observer = Some(task_usage.call(UsagePhase::Recovery));
+    let prompt = browser_hand_back::unread_pages_prompt(&pages);
+    let runtime_id = turn.runtime_id;
+    let mut events: Vec<JsonValue> = Vec::new();
+    let mut streamed = 0usize;
+    let mut streaming = turn.progress.is_some();
+    let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
+    let result = {
+        // Its steps show as the turn's own do, as it takes them.
+        let mut on_event = |event: &JsonValue| -> Result<()> {
+            let Some(progress) = turn.progress.filter(|_| streaming) else {
+                return Ok(());
+            };
+            events.push(event.clone());
+            let messages = with_runtime_metadata_vec(extract_codex_messages(&events), &runtime_id);
+            for message in messages.iter().skip(streamed) {
+                if progress.sender.send(message.clone()).is_err() {
+                    streaming = false;
+                    progress.status.store(false, Ordering::SeqCst);
+                    return Ok(());
+                }
+            }
+            streamed = messages.len();
+            Ok(())
+        };
+        codex
+            .execute_with_options(&prompt, Some(&mut on_event), options)
+            .await
+    };
+    drop(codex_guard);
+    let output = match result {
+        Ok(output) => output,
+        Err(error) => {
+            warn!(
+                job_id = %job.id,
+                error = %format!("{error:#}"),
+                "the browser turn's second pass over its unread pages failed"
+            );
+            return read;
+        }
+    };
+    let purpose = json!({ "purpose": "unread-pages" });
+    read.artifacts.push(build_codex_run_log_artifact(
+        &output.events,
+        Some(purpose.clone()),
+    ));
+    read.artifacts.push(json!({
+        "kind": "codex/final-json",
+        "metadata": purpose,
+        "payload": sanitize_codex_final_json(&output.final_json),
+    }));
+    read.messages = with_runtime_metadata_vec(extract_codex_messages(&output.events), &runtime_id);
+    if let Some(progress) = turn.progress.filter(|_| streaming) {
+        for message in read.messages.iter().skip(streamed) {
+            if progress.sender.send(message.clone()).is_err() {
+                progress.status.store(false, Ordering::SeqCst);
+                break;
+            }
+        }
+    }
+    let answer = output
+        .final_json
+        .get("summary")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    if let Some(code) = shared_browser_terminal_consent_failure(&read.messages) {
+        // As after the turn's own run: the step that asked is the person's to answer.
+        read.artifacts.push(json!({
+            "kind": "browser/terminal-consent",
+            "metadata": {
+                "transport": "shared",
+                "state": "blocked",
+                "code": code,
+                "retryable": false,
+            }
+        }));
+        let mut words = String::new();
+        apply_terminal_shared_browser_summary(
+            &mut words,
+            &mut None,
+            Some(code),
+            turn.paused_already,
+        );
+        browser_hand_back::stop_after_the_second_pass(summary, answer, Some(words.as_str()));
+        read.stopped_for_the_person = true;
+    } else if browser_hand_back::stopped_for_the_person(
+        &read.messages,
+        output.browser_secret_screen,
+    ) {
+        // Its own words say what the person does next.
+        browser_hand_back::stop_after_the_second_pass(summary, answer, None);
+        read.stopped_for_the_person = true;
+    } else {
+        browser_hand_back::add_the_second_pass(summary, answer, &output.browser_pages);
+    }
+    read
 }
 
 /// How many attached images a run's turn input carried as image input.
@@ -25356,8 +25622,8 @@ mod tests {
     }
 
     /// A building turn on a restored thread reads what the chat's browser turns found since its
-    /// last turn; on a new or lost thread its replay quotes them instead, and a browser turn
-    /// never reads them.
+    /// last turn, by their findings and never their replies' words; on a new or lost thread its
+    /// replay quotes them instead, and a browser turn never reads them.
     #[test]
     fn a_restored_building_prompt_carries_the_browser_turns_since() {
         let tmp = tempdir().expect("temp dir");
@@ -25365,7 +25631,15 @@ mod tests {
         let project_id = Uuid::new_v4();
         let since = json!([{
             "request": "Find the opening hours.",
-            "reply": "Open daily, 09:00 to 19:30.",
+            "reply": "Open daily, 09:00 to 19:30, a short walk uphill from the nearest station.",
+            "replyTruncated": false,
+            "findings": [{
+                "url": "https://lello.example/",
+                "title": "Hours",
+                "facts": ["Open daily, 09:00 to 19:30."],
+                "readAt": "2026-01-05T10:00:00Z",
+                "viewer": "Instafy's browser in the workspace",
+            }],
             "readAt": "2026-01-05T10:00:00Z",
             "viewer": "Instafy's browser in the workspace",
             "outcome": "succeeded",
@@ -25404,6 +25678,9 @@ mod tests {
             "{sections_of}"
         );
         assert!(prompt.contains("Open daily, 09:00 to 19:30."));
+        for words in ["short walk uphill", "nearest"] {
+            assert!(!prompt.contains(words), "{words}: {prompt}");
+        }
         let (_, fresh) = sections(json!({}), None);
         assert!(fresh.get("browserTurnsSince").is_none(), "{fresh}");
         let (_, browser) = sections(
