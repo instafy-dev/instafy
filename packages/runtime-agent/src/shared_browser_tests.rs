@@ -3875,10 +3875,12 @@ async fn a_page_gives_the_addresses_its_text_spells_out() {
     end_chat_browser_run(run);
 }
 
-/// A chat's history gives the addresses the person named in it and those its
-/// browser turns were asked about and read (their finding lines), as a runtime
-/// that started again finds them, with nothing of the chat's earlier runs in
-/// its memory. A building turn's own reply gives none.
+/// A chat's history gives the addresses the person named in it, those its
+/// browser turns were asked about and the pages they read (their finding
+/// lines), as a runtime that started again finds them, with nothing of the
+/// chat's earlier runs in its memory. No reply gives one by its words, and a
+/// page that stopped a turn was not read: a turn's findings listed an article
+/// address it made up as stopped.
 #[tokio::test]
 async fn a_chats_history_gives_what_the_person_and_its_browser_turns_named() {
     let fixture = EmbeddedControllerFixture::new();
@@ -3894,6 +3896,12 @@ async fn a_chats_history_gives_what_the_person_and_its_browser_turns_named() {
             .output()
             .expect("run the controller")
     };
+    let findings = [
+        json!({ "url": "https://maker.example/laptops/five/specs", "title": "Specs", "facts": ["Battery: 61 Wh"] }),
+        json!({ "url": "https://reviews.example/article/3200000/made-up.html", "stopped": "blocked" }),
+    ]
+    .map(|finding| finding.to_string())
+    .join("\n");
     let run = chat_browser_run_given(
         &fixture,
         Uuid::new_v4(),
@@ -3903,11 +3911,8 @@ async fn a_chats_history_gives_what_the_person_and_its_browser_turns_named() {
                 { "role": "user", "content": "Here's the review: https://reviews.example/laptops/five" },
                 { "role": "assistant", "content": "Its maker's page is https://maker.example/laptops/five, I think." },
                 { "role": "user", "lane": "browser", "content": "Read maker.example/laptops/five/press." },
-                {
-                    "role": "assistant",
-                    "lane": "browser",
-                    "content": "{\"url\": \"https://maker.example/laptops/five/specs\", \"title\": \"Specs\", \"facts\": [\"Battery: 61 Wh\"]}",
-                },
+                { "role": "assistant", "lane": "browser", "content": "I read the specs; the manual is at https://maker.example/laptops/five/manual." },
+                { "role": "assistant", "lane": "browser", "content": findings },
             ],
         }),
     );
@@ -3918,11 +3923,26 @@ async fn a_chats_history_gives_what_the_person_and_its_browser_turns_named() {
     ] {
         payload_of(&navigate(url));
     }
-    let words = failure_of(&navigate("https://maker.example/laptops/five"));
-    assert!(
-        words.contains(&made_up_address_words("https://maker.example")),
-        "{words}"
-    );
+    for (url, site) in [
+        (
+            "https://maker.example/laptops/five",
+            "https://maker.example",
+        ),
+        (
+            "https://maker.example/laptops/five/manual",
+            "https://maker.example",
+        ),
+        (
+            "https://reviews.example/article/3200000/made-up.html",
+            "https://reviews.example",
+        ),
+    ] {
+        let words = failure_of(&navigate(url));
+        assert!(
+            words.contains(&made_up_address_words(site)),
+            "{url}: {words}"
+        );
+    }
     end_chat_browser_run(run);
 }
 

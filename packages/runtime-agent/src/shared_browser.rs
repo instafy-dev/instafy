@@ -1092,30 +1092,59 @@ fn given_address_key(url: &reqwest::Url) -> Option<String> {
 /// The fingerprints of the addresses a browser turn was given before it
 /// starts: those its task names (the job's `prompt_text`: the person's message,
 /// or the task a card or the routing step wrote for the browser), those the
-/// person's earlier messages in the chat name, and those of the chat's browser
-/// turns (`lane: "browser"` entries: what each was asked, its reply and its
-/// finding lines, the pages it read), which a runtime that started again no
-/// longer holds. A building turn's own replies give none. A site's root needs
+/// person's messages and the chat's earlier browser tasks name (its
+/// `conversation_history` entries with `role: "user"`), and the pages the
+/// chat's browser turns read, by their finding lines ([`pages_read_in`]),
+/// which a runtime that started again no longer holds. No reply gives one by
+/// its words: a turn's reply can name an address it made up, and one that
+/// stopped it (a finding with `stopped`) was not read. A site's root needs
 /// none: it always opens.
 pub fn given_addresses_from_payload(payload: &JsonValue) -> Vec<String> {
     fn text<'a>(entry: &'a JsonValue, key: &str) -> Option<&'a str> {
         entry.get(key).and_then(JsonValue::as_str)
     }
-    let earlier = payload
+    let mut addresses = Vec::new();
+    for entry in payload
         .get("conversation_history")
         .and_then(JsonValue::as_array)
         .into_iter()
         .flatten()
-        .filter(|entry| {
-            text(entry, "role") == Some("user") || text(entry, "lane") == Some("browser")
+    {
+        let Some(content) = text(entry, "content") else {
+            continue;
+        };
+        if text(entry, "role") == Some("user") {
+            addresses.extend(given_addresses_in_text(content));
+        } else if text(entry, "lane") == Some("browser") {
+            addresses.extend(pages_read_in(content));
+        }
+    }
+    addresses.extend(given_addresses_in_text(
+        text(payload, "prompt_text").unwrap_or_default(),
+    ));
+    newest_given_addresses(addresses)
+}
+
+/// The fingerprints of the pages a browser turn's finding lines say it read
+/// (`{"url": …, "title": …, "facts": […]}`, one JSON object a line), never one
+/// that stopped it.
+fn pages_read_in(text: &str) -> Vec<String> {
+    let mut end = text.len().min(MAX_TASK_TEXT_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end]
+        .lines()
+        .filter_map(|line| serde_json::from_str::<JsonValue>(line.trim()).ok())
+        .filter(|finding| finding.get("stopped").is_none())
+        .filter_map(|finding| {
+            finding
+                .get("url")
+                .and_then(JsonValue::as_str)
+                .and_then(|url| reqwest::Url::parse(url).ok())
         })
-        .filter_map(|entry| text(entry, "content"));
-    let task = text(payload, "prompt_text").unwrap_or_default();
-    newest_given_addresses(
-        earlier
-            .chain(std::iter::once(task))
-            .flat_map(given_addresses_in_text),
-    )
+        .filter_map(|url| given_address_key(&url))
+        .collect()
 }
 
 /// The fingerprints of the addresses `text` names: each `http(s)://` address,

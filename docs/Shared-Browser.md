@@ -1483,15 +1483,17 @@ again carries none.
 
 **An address no message and no page gave is never opened.** `navigate` and
 `open_tab` open a path past a site's root only when the person's messages or the
-turn's task named it (the job's `prompt_text` and the person's own entries in
-its `conversation_history`: each `http(s)://` address in them, and each site
-name with a path written without a scheme; a parenthesis is part of an address
-only when the address opens it, as in `/wiki/Mercury_(planet)`), or a page the
-chat's browser turns read gave it: the page's own address, its links, and the
-addresses its text spells out, read by the same rule. The chat's browser turns
-in the history (`lane: "browser"`: what each was asked, its reply and its
-finding lines) count too, so a runtime that started again still opens the
-pages they read; a building turn's own replies give nothing. Any other is refused at once, before any prompt
+turn's task named it (the job's `prompt_text` and the `role: "user"` entries of
+its `conversation_history`, the person's messages and the chat's earlier
+browser tasks: each `http(s)://` address in them, and each site name with a
+path written without a scheme; a parenthesis is part of an address only when
+the address opens it, as in `/wiki/Mercury_(planet)`), or a page the chat's
+browser turns read gave it: the page's own address, its links, and the
+addresses its text spells out, read by the same rule. The pages the chat's
+browser turns read count by their finding lines in the history too (a line with
+a `url` and no `stopped`), so a runtime that started again still opens them. No
+reply gives an address by its words: a turn's findings listed an article
+address it made up as stopped. Any other is refused at once, before any prompt
 or load, with "No message and no page Octo read gave this address, so it was
 not opened: Octo opens only addresses it was given. Open <the site> and follow
 its links to the page, or use the site's own search." A turn opened two article
