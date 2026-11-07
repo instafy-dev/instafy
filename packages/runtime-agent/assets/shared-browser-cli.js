@@ -478,12 +478,17 @@ function labelAddress(rawUrl) {
 // takes without asking (reading, plain links, menus, ordinary clicks, typing
 // that does not submit). A submission, a purchase, a message, a download, a
 // commit button, an activation key or a risky address is refused there in
-// every mode, before any prompt.
+// every mode, before any prompt. The refusal sends the step to the chat's own
+// tab, where the browser asks the person as it does for any such step: a turn
+// that read a journey planner in its own tab stopped at the planner's button
+// and replied that it couldn't run it. A sign-in and the person's own fields
+// are refused before this, in their own words.
+const OWN_TAB_STEP_MESSAGE =
+  "Octo's own tabs don't take this step, so nothing was done there. Open this page in the chat's own tab with navigate (its tabId is the one list_tabs shows opened by the person) and take the step there; the browser asks the person as usual.";
+
 function refuseUnlessReadingStep(readingStep) {
   if (inAgentTab() && !readingStep) {
-    throw new Error(
-      "Octo's own tabs are for reading, so this step was not performed there. Leave it to the person, or take it on the page they chose when they asked for it.",
-    );
+    throw new Error(OWN_TAB_STEP_MESSAGE);
   }
 }
 
@@ -1973,7 +1978,10 @@ const DESCRIBE_ALL_IN_PAGE = new Function(
 // the click would go to instead; its own label is the control's. `consent`
 // says that cover is a cookie or consent notice: a container whose id, class,
 // label or title names it (`request.consent`, the describer's words), or a
-// small one close by whose text speaks of cookies.
+// small one close by whose text speaks of cookies. `cover` names what is
+// there: the tag, role and name of the nearest element around the point that
+// has a role, a name or is a control (a picker's dialog, not one of its days;
+// a carousel's link), else of the element there.
 function clickLandingInPage(element, request) {
   const view = element.ownerDocument.defaultView;
   let point = null;
@@ -2025,7 +2033,42 @@ function clickLandingInPage(element, request) {
     const text = depth < 6 && typeof node.textContent === "string" ? node.textContent : "";
     consent = names.test(named) || names.test(labelledBy) || (text.length <= 1_500 && /\bcookies?\b/i.test(text));
   }
-  return { other: false, covered: true, consent };
+  let cover = hit;
+  for (let node = hit, depth = 0; node && node.nodeType === 1 && !roots.includes(node) && depth < 8; node = up(node), depth += 1) {
+    if (node.getAttribute("role") || node.matches(request.selector) ||
+      ["aria-label", "aria-labelledby", "title", "alt"].some((name) => node.getAttribute(name))) {
+      cover = node;
+      break;
+    }
+  }
+  const squeeze = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 120);
+  const labelledText = String(cover.getAttribute("aria-labelledby") || "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 8)
+    .map((id) => (doc.getElementById(id) && doc.getElementById(id).textContent) || "")
+    .join(" ");
+  const picture = cover.querySelector("img[alt]");
+  const coverName = roots.includes(cover)
+    ? ""
+    : [
+      cover.getAttribute("aria-label"),
+      labelledText,
+      cover.getAttribute("title"),
+      cover.getAttribute("alt"),
+      typeof cover.textContent === "string" ? cover.textContent.slice(0, 2_000) : "",
+      picture && picture.getAttribute("alt"),
+    ].map(squeeze).find(Boolean) || "";
+  return {
+    other: false,
+    covered: true,
+    consent,
+    cover: {
+      tag: String(cover.tagName || "").toLowerCase(),
+      role: squeeze(cover.getAttribute("role")).split(" ")[0],
+      name: coverName,
+    },
+  };
 }
 const SHOWN_TEXT_IN_PAGE = withShownRule(shownTextInPage);
 const AREA_NAMES = new Set(["dialog", "menu", "tabs", "nav", "search", "header", "footer", "aside"]);
@@ -3248,6 +3291,7 @@ async function snapshot(page, { withhold = false, decline = false } = {}) {
   const snapshotId = snapshotFingerprint(rawUrl, interactive);
   recordObservedFields(snapshotId, rawUrl, interactive);
   await recordObservedControls(page, snapshotId, rawUrl, interactive, view.names);
+  rememberGivenAddresses(rawUrl, interactive, view.secretScreen ? "" : view.text);
   return {
     snapshotId,
     browserPageId: EXPECTED_BROWSER_PAGE_ID,
@@ -3649,10 +3693,25 @@ async function clickControlItself(page, target) {
     throw new Error(
       landing.consent === true
         ? CONSENT_COVER_MESSAGE
-        : `Something else on the page covers ${quotedControlLabel(target.description)}, so nothing was clicked. Take a fresh snapshot, and read on without it if it is still covered.`,
+        : `Something else on the page covers ${quotedControlLabel(target.description)}${await coverWords(page, landing.cover)}, so nothing was clicked. Take a fresh snapshot and try once more.`,
     );
   }
   await target.locator.click();
+}
+
+// What covers a control, for a covered click's words: the tag, role and name
+// the page gives it ("<div role=\"dialog\"> named \"Choose a time\"", a page's
+// own date picker), so the next try can close it or wait for it to go. The
+// name is the page's text: it is left out on a page that may show a secret,
+// as a list's options are.
+async function coverWords(page, cover) {
+  const tag = typeof cover?.tag === "string" && /^[a-z][a-z0-9-]{0,40}$/.test(cover.tag) ? cover.tag : "";
+  if (!tag) return "";
+  const role = typeof cover.role === "string" && /^[a-z]{2,24}$/.test(cover.role) ? cover.role : "";
+  const name = typeof cover.name === "string" && cover.name.trim() && (await pageTextMayBeNamed(page))
+    ? Array.from(cover.name.replace(/\s+/g, " ").trim()).slice(0, MAX_LABEL_CHARS).join("").replaceAll("\"", "'")
+    : "";
+  return ` (<${tag}${role ? ` role="${role}"` : ""}>${name ? ` named "${name}"` : ""})`;
 }
 
 // A control the page turned off (a reading lists it as `disabled`) takes no
@@ -4156,11 +4215,11 @@ function optionsText(options, total) {
   return `Its options: ${text}${more > 0 ? ` and ${more} more` : ""}.`;
 }
 
-// A list's options are the page's text: an answer names them only where a
-// snapshot would show that text, never on a page that is withheld, that may
-// show a secret (a credential context, a secret field, masked text beside a
-// reveal) or that could not be checked.
-async function optionsMayBeListed(page) {
+// A page's text (a list's options, what covers a control) goes into an
+// answer only where a snapshot would show that text, never on a page that is
+// withheld, that may show a secret (a credential context, a secret field,
+// masked text beside a reveal) or that could not be checked.
+async function pageTextMayBeNamed(page) {
   if (await documentWithheld(page)) return false;
   const signals = await pageSecretSignals(page);
   if (!signals || signals.credentialContext || signals.secretField || signals.maskedNearReveal) return false;
@@ -4177,7 +4236,7 @@ async function optionNamed(page, list, wanted, listName) {
   if (option) return option;
   const text = String(wanted).replace(/\s+/g, " ").trim();
   const name = listName ? `"${listName}"` : "this list";
-  const unlisted = (await optionsMayBeListed(page))
+  const unlisted = (await pageTextMayBeNamed(page))
     ? null
     : "This page may show a secret, so its options are not listed: leave this list to the person.";
   if (list.matches.length) {
@@ -4782,6 +4841,7 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
     const url = validateNavigationUrl(body.url, null);
     assertMayOpen(url);
     refuseUnansweredAddress(url);
+    refuseUngivenAddress(url);
     const step = classifyStep("navigate", null, { url });
     if (step.verdict === "ask" || CONSEQUENTIAL_ACTION_PATTERN.test(url)) {
       throw new Error(
@@ -5073,6 +5133,38 @@ function refuseUnansweredAddress(url) {
   if (approvalProtocol.didNotAnswerRecently(url)) {
     throw new Error(UNANSWERED_AGAIN_MESSAGE);
   }
+}
+
+// An address Octo made up is not opened: navigate and open_tab open a path
+// past a site's root only when the person's message, the turn's task or a
+// page the chat's browser turns read gave it (its own address or a link),
+// refused at once, before anything asks or loads. A turn opened two article
+// addresses it guessed on a reviewer's site, one of which waited 20 seconds
+// for nothing. The site's root, and an address on no public site (left to the
+// browser's own network rules), always go on.
+function refuseUngivenAddress(url) {
+  if (!actionPolicy.isPublicHost(new URL(url).hostname) || !approvalProtocol.addressNotGiven(url)) {
+    return;
+  }
+  throw new Error(
+    `No message and no page Octo read gave this address, so it was not opened: Octo opens only addresses it was given. Open ${new URL(url).origin}/ and follow its links to the page, or use the site's own search.`,
+  );
+}
+
+// Keeps the addresses a page gives, for refuseUngivenAddress: its own, its
+// links' and the addresses its text spells out. A page that may show a secret
+// gives them too: only their fingerprints are kept.
+const TEXT_ADDRESS_PATTERN = /https?:\/\/[^\s"'<>()[\]{}]+/giu;
+function rememberGivenAddresses(rawUrl, interactive, text) {
+  const links = interactive.map(({ description }) => {
+    try {
+      return description.href ? new URL(description.href, rawUrl).toString() : null;
+    } catch (_) {
+      return null;
+    }
+  });
+  const spelled = Array.from(String(text || "").matchAll(TEXT_ADDRESS_PATTERN), (match) => match[0].replace(/[.,;:!?]+$/u, ""));
+  approvalProtocol.rememberGiven([rawUrl, ...links, ...spelled].filter(Boolean));
 }
 
 // Stops what the page is still loading, as the browser's stop button does; true
@@ -5559,6 +5651,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const readingStep = step.verdict !== "ask" && !CONSEQUENTIAL_ACTION_PATTERN.test(url);
     assertMayOpen(url);
     refuseUnansweredAddress(url);
+    refuseUngivenAddress(url);
     refuseUnlessReadingStep(readingStep);
     // A plain address (a reading step) needs only its site's approval in this
     // tab: the site prompt names the exact address, and a site already

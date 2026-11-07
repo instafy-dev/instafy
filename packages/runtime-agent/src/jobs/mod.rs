@@ -7170,6 +7170,7 @@ impl JobProcessor {
                         .expect("Shared Browser execution must have a cancellation signal")
                         .clone(),
                     shared_browser_chat(job),
+                    &crate::shared_browser::given_addresses_from_payload(&job.payload),
                 )?,
             )
         } else {

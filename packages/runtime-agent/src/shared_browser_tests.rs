@@ -165,6 +165,8 @@ const special = {
   // dialog that is no notice, and a toast that fades within the click's settle.
   "click-covered-by-notice": { description: control("Show details") },
   "click-covered": { description: control("Show details") },
+  // The same button under a page's own date picker, which the look names.
+  "click-covered-by-picker": { description: control("Show details") },
   "click-cover-goes": { description: control("Show details") },
   // A click Playwright fails with its call log: a plain failure, and one it
   // gave up waiting on.
@@ -936,6 +938,9 @@ const makePage = (targetId, opened = null) => {
     if (mode === "click-lands-inside") return { other: true };
     if (mode === "click-covered-by-notice") return { other: false, covered: true, consent: true };
     if (mode === "click-covered") return { other: false, covered: true, consent: false };
+    if (mode === "click-covered-by-picker") {
+      return { other: false, covered: true, consent: false, cover: { tag: "div", role: "dialog", name: "Choose a  time" } };
+    }
     if (mode === "click-cover-goes" && landingLooks <= 2) return { other: false, covered: true, consent: false };
     return { other: false };
   };
@@ -3672,6 +3677,144 @@ async fn an_address_that_did_not_answer_is_not_opened_again_in_that_chat_for_ten
     assert!(failure(&navigate("https://down.example/")).contains(did_not_answer));
     assert_eq!(tries(), 4);
     end_chat_browser_run(run);
+}
+
+/// A chat's browser run as runtime-agent starts it, with its record of the
+/// addresses it was given: those `task` names and those the chat's earlier
+/// runs were given.
+fn chat_browser_run_given(
+    fixture: &EmbeddedControllerFixture,
+    chat: Uuid,
+    task: &str,
+) -> (SharedBrowserAgentControlGuard, JobCancelSignal) {
+    let (mut guard, cancel_signal) = chat_browser_run(fixture, chat, unix_time_millis());
+    guard.start_given_addresses(&given_addresses_in_text(task));
+    (guard, cancel_signal)
+}
+
+/// An address no message and no page gave is never opened: navigate and
+/// open_tab open a path past a site's root only when the run's task named it
+/// (with a scheme or without, its query and fragment aside) or a page the
+/// chat's browser turns read gave it, in this run or the chat's earlier ones.
+/// Any other is refused at once, before anything asks or loads, with where to
+/// go instead; a site's root always opens, and a link-only site keeps its own
+/// refusal. A turn opened two article addresses it made up on a reviewer's
+/// site, one of which waited 20 seconds for nothing.
+#[tokio::test]
+async fn an_address_no_message_or_page_gave_is_not_opened() {
+    let fixture = EmbeddedControllerFixture::new();
+    let chat = Uuid::new_v4();
+    let step = |mode: &str, path: &str, body: JsonValue| {
+        fixture
+            .command_for(mode, "page-target", "POST", path, Some(&body.to_string()))
+            .output()
+            .expect("run the controller")
+    };
+    let navigate = |url: &str| step("safe", "/v1/navigate", json!({ "url": url }));
+    // Whether a navigation to an address holding `part` went out.
+    let opened = |part: &str| {
+        fixture
+            .action_log()
+            .lines()
+            .any(|line| line.contains("\"type\":\"navigate\"") && line.contains(part))
+    };
+    let made_up = |site: &str| {
+        format!(
+            "No message and no page Octo read gave this address, so it was not opened: Octo opens only addresses it was given. Open {site}/ and follow its links to the page, or use the site's own search."
+        )
+    };
+    let failure = |output: &Output| {
+        assert!(!output.status.success());
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+
+    let run = chat_browser_run_given(
+        &fixture,
+        chat,
+        "Compare the laptops (read https://www.reviews.example/laptops/one?ref=chat and reviews.example/laptops/two).",
+    );
+    // A made-up review on the same site: refused, and nothing loads, in the
+    // chat's own tab and as a tab of Octo's own.
+    let words = failure(&navigate("https://reviews.example/laptops/three"));
+    assert!(words.contains(&made_up("https://reviews.example")), "{words}");
+    let words = failure(&step(
+        "safe",
+        "/v1/tabs/open",
+        json!({ "url": "https://reviews.example/laptops/three" }),
+    ));
+    assert!(words.contains(&made_up("https://reviews.example")), "{words}");
+    assert!(!opened("laptops/three"));
+    assert_eq!(
+        std::fs::read_to_string(&fixture.opened_tabs).unwrap_or_default(),
+        ""
+    );
+    // The addresses the task names open, and so does the site's root.
+    for url in [
+        "https://reviews.example/laptops/one",
+        "https://www.reviews.example/laptops/two/#specs",
+        "https://reviews.example",
+    ] {
+        payload_of(&navigate(url));
+    }
+    assert!(opened("laptops/one") && opened("laptops/two"));
+    // A link-only site keeps its own refusal.
+    let words = failure(&navigate("https://www.booking.com/hotel/fixture.html"));
+    assert!(words.contains("Booking.com is link-only"), "{words}");
+    // A page's link opens once the page was read; a path beside it does not.
+    payload_of(&fixture.call("long-label-0", "GET", "/v1/snapshot", None));
+    payload_of(&navigate("https://example.test/reports/q3"));
+    let words = failure(&navigate("https://example.test/reports/q4"));
+    assert!(words.contains(&made_up("https://example.test")), "{words}");
+    // The record holds fingerprints, never the addresses.
+    let record = std::fs::read_to_string(fixture.approval_dir.join(GIVEN_ADDRESSES_FILE))
+        .expect("the run's record of the addresses it was given");
+    assert!(!record.contains("reviews.example"), "{record}");
+    assert!(!record.contains("reports"), "{record}");
+    end_chat_browser_run(run);
+
+    // The chat's next turn opens what the earlier one was given.
+    let run = chat_browser_run_given(&fixture, chat, "Fill in what's still missing.");
+    payload_of(&navigate("https://example.test/reports/q3"));
+    payload_of(&navigate("https://reviews.example/laptops/one"));
+    end_chat_browser_run(run);
+
+    // Another chat's turn was given none of it.
+    let run = chat_browser_run_given(&fixture, Uuid::new_v4(), "Read the report.");
+    let words = failure(&navigate("https://example.test/reports/q3"));
+    assert!(words.contains(&made_up("https://example.test")), "{words}");
+    end_chat_browser_run(run);
+}
+
+/// The site and path a task's address is kept by match the approval script's
+/// (`givenAddressKey`): the host in lower case without `www.`, a port other
+/// than the scheme's own, the path without a trailing slash, and neither query
+/// nor fragment. A word that is no site with a path names nothing.
+#[test]
+fn a_tasks_addresses_are_kept_by_their_site_and_path() {
+    let key = |site_path: &str| approval_test_sha256(site_path)[..32].to_string();
+    assert_eq!(
+        given_addresses_in_text(
+            "Read <https://WWW.Reviews.example:443/Laptops/One/?a=1#b>, \"reviews.example:8443/x\" and [two](http://reviews.example/two)."
+        ),
+        vec![
+            key("reviews.example/Laptops/One"),
+            key("reviews.example/two"),
+        ]
+    );
+    assert_eq!(
+        given_addresses_in_text("Open visitporto.travel/en/lello, then www.livrarialello.pt/en/."),
+        vec![key("visitporto.travel/en/lello"), key("livrarialello.pt/en")]
+    );
+    assert!(
+        given_addresses_in_text(
+            "See src/main.rs, 1.5/2, e.g./this, name@example.com/x and ftp://example.com/file."
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        given_addresses_from_payload(&json!({ "prompt_text": "Open https://example.test/a b" })),
+        vec![key("example.test/a")]
+    );
 }
 
 /// Only an address that waited for nothing for a while is refused later: a
@@ -8612,7 +8755,7 @@ fn a_routine_start_reads_headlines_whose_verb_is_also_a_button_word() {
         let (output, requests) =
             fixture.call_deciding(mode, "POST", "/v1/click", Some(&body), &["deny"]);
         let refused = failure_of(&output);
-        assert!(refused.contains("for reading"), "{mode}: {refused}");
+        assert!(refused.contains(OWN_TAB_STEP_WORDS), "{mode}: {refused}");
         assert!(requests.is_empty(), "{mode} asked: {requests:?}");
     }
 }
@@ -9705,6 +9848,9 @@ fn the_continued_run_is_read_from_studio_metadata_and_nothing_else_names_one() {
     }
 }
 
+/// What a step Octo's own tabs do not take answers: where to take it instead.
+const OWN_TAB_STEP_WORDS: &str = "Octo's own tabs don't take this step, so nothing was done there. Open this page in the chat's own tab with navigate (its tabId is the one list_tabs shows opened by the person) and take the step there; the browser asks the person as usual.";
+
 #[test]
 fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
     let fixture = EmbeddedControllerFixture::new();
@@ -9738,7 +9884,11 @@ fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
         let (output, requests) =
             fixture.call_deciding(mode, "POST", path, Some(&body.to_string()), &["allow_once"]);
         let error = failure_of(&output);
-        assert!(error.contains("for reading"), "{mode} {path}: {error}");
+        // It sends the step to the chat's own tab, where the browser asks the
+        // person as usual: a turn that read a journey planner in its own tab
+        // stopped at the planner's button and never ran it.
+        assert!(error.contains(OWN_TAB_STEP_WORDS), "{mode} {path}: {error}");
+        assert!(!error.contains("Leave it to the person"), "{mode} {path}: {error}");
         assert!(requests.is_empty(), "{mode} {path} asked: {requests:?}");
     }
     assert!(
@@ -9769,7 +9919,7 @@ fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
         "/v1/navigate",
         Some(r#"{"url":"https://example.test/logout"}"#),
     ));
-    assert!(risky.contains("for reading"), "{risky}");
+    assert!(risky.contains(OWN_TAB_STEP_WORDS), "{risky}");
 
     // Reading steps still run there: typing that does not submit, a plain click.
     let typed = payload_of(
@@ -12610,8 +12760,8 @@ fn the_browser_declines_a_cookie_banner_itself() {
 /// A click whose control something outside it covers is refused at once, in words: a cookie
 /// notice the browser could not decline says so and where to go next (never that it has no
 /// reject button, which one on a sign-in page or with a reject link has), any other cover says
-/// what to do, and Playwright's call log never reaches Octo. A cover that goes within the click's
-/// short settle, such as a toast that fades, is no refusal.
+/// what to do, naming what covers the control, and Playwright's call log never reaches Octo. A
+/// cover that goes within the click's short settle, such as a toast that fades, is no refusal.
 #[test]
 fn a_covered_click_is_refused_at_once_in_words() {
     use std::time::{Duration, Instant};
@@ -12622,7 +12772,14 @@ fn a_covered_click_is_refused_at_once_in_words() {
         ),
         (
             "click-covered",
-            "Something else on the page covers \"Show details\", so nothing was clicked. Take a fresh snapshot, and read on without it if it is still covered.",
+            "Something else on the page covers \"Show details\", so nothing was clicked. Take a fresh snapshot and try once more.",
+        ),
+        // The cover is named by its tag, role and name, so the next try can
+        // close it or wait for it to go: a planner's button the person allowed
+        // was refused as covered by "something else", and the turn gave up.
+        (
+            "click-covered-by-picker",
+            "Something else on the page covers \"Show details\" (<div role=\"dialog\"> named \"Choose a time\"), so nothing was clicked. Take a fresh snapshot and try once more.",
         ),
     ] {
         let fixture = EmbeddedControllerFixture::new();

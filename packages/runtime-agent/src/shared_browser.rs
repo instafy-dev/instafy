@@ -114,6 +114,12 @@ const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 // run-scoped too: the guard starts it with what the chat's earlier runs left
 // and keeps what the run adds when the run ends (`UNANSWERED_ADDRESSES_FILE`).
 //
+// `given.json` names the addresses a message or a page gave the chat's browser
+// turns, the only paths past a site's root navigate and open_tab open. It is
+// run-scoped too: the guard starts it with the addresses the run's own task
+// names and those the chat's earlier runs were given, and keeps what the run
+// adds when the run ends (`GIVEN_ADDRESSES_FILE`).
+//
 // `leftover-tabs.json` and `chat-tabs.json` are the files that outlive a run.
 // The leftover record names Octo's tabs from an earlier run that could not be
 // closed yet (that run ended without a confirmed shutdown, or the browser did
@@ -122,7 +128,7 @@ const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 // tab record names the tab each run left open as its chat's page (see
 // `tab_kept_for_the_chat`), so every viewer of the chat finds that page, after
 // a reload or on another device too. Neither grants anything.
-const APPROVAL_FIXED_FILES: [&str; 11] = [
+const APPROVAL_FIXED_FILES: [&str; 12] = [
     "request.json",
     "decision.json",
     "state.json",
@@ -134,6 +140,7 @@ const APPROVAL_FIXED_FILES: [&str; 11] = [
     LEFTOVER_AGENT_TABS_FILE,
     CHAT_TABS_FILE,
     UNANSWERED_ADDRESSES_FILE,
+    GIVEN_ADDRESSES_FILE,
 ];
 const AGENT_TABS_FILE: &str = "tabs.json";
 const KEPT_AGENT_TABS_FILE: &str = "kept-tabs.json";
@@ -1026,6 +1033,215 @@ fn write_unanswered_addresses(
     )
 }
 
+/// The run's record of the addresses a message or a page gave its chat's
+/// browser turns: navigate and open_tab open a path past a site's root only
+/// when one of them gave it, so a turn never opens an address it made up (one
+/// opened two article addresses it guessed on a reviewer's site, and waited 20
+/// seconds on one of them). The guard starts it with the addresses the run's
+/// task names ([`given_addresses_from_payload`]) and those the chat's earlier
+/// runs on this browser were given; the controller script adds each page the
+/// run reads, its own address and its links. Kept as fingerprints
+/// ([`given_address_key`]), newest last. `assets/shared-browser-approval.js`
+/// holds the same bounds and key.
+const GIVEN_ADDRESSES_FILE: &str = "given.json";
+const GIVEN_ADDRESSES_MAX_BYTES: u64 = 192 * 1024;
+const MAX_GIVEN_ADDRESSES: usize = 4_000;
+/// Chats whose given addresses this process keeps; the one that ran last is
+/// kept longest.
+const MAX_GIVEN_CHATS: usize = 32;
+/// The most of a task's text read for the addresses it names.
+const MAX_TASK_TEXT_BYTES: usize = 64 * 1024;
+
+/// The addresses each chat's runs were given, by approval directory and chat,
+/// the chat that ran last at the end. Kept in this process only: a runtime
+/// that starts again carries nothing, and a turn then finds a page again from
+/// its site's root.
+static GIVEN_ADDRESSES: Mutex<Vec<((PathBuf, Uuid), Vec<String>)>> = Mutex::new(Vec::new());
+
+/// The fingerprint a given address is kept by: the first 32 hex digits of the
+/// SHA-256 of its site (the host in lower case without `www.`, and a port
+/// other than the scheme's own) and its path (without a trailing slash, `/`
+/// for the site's root). A page's links differ in their query and fragment,
+/// so neither counts. The approval script keys the addresses a page gives the
+/// same way (`givenAddressKey`).
+fn given_address_key(url: &reqwest::Url) -> Option<String> {
+    use sha2::Digest;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url.host_str()?.to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    let path = url.path().trim_end_matches('/');
+    let path = if path.is_empty() { "/" } else { path };
+    let port = url.port().map(|port| format!(":{port}")).unwrap_or_default();
+    let digest = sha2::Sha256::digest(format!("{host}{port}{path}").as_bytes());
+    Some(digest.iter().take(16).map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// The fingerprints of the addresses a browser turn's task names (the job's
+/// `prompt_text`: the person's message, or the task a card or the routing step
+/// wrote for the browser). A site's root needs none: it always opens.
+pub fn given_addresses_from_payload(payload: &JsonValue) -> Vec<String> {
+    given_addresses_in_text(
+        payload
+            .get("prompt_text")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default(),
+    )
+}
+
+/// The fingerprints of the addresses `text` names: each `http(s)://` address,
+/// and each site name with a path written without one
+/// ("visitporto.travel/en/lello"), read as `https`.
+fn given_addresses_in_text(text: &str) -> Vec<String> {
+    let mut end = text.len().min(MAX_TASK_TEXT_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let delimiter = |character: char| {
+        character.is_whitespace()
+            || matches!(
+                character,
+                '<' | '>' | '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '“' | '”' | '‘'
+                    | '’' | '«' | '»'
+            )
+    };
+    let mut keys = Vec::new();
+    for word in text[..end].split(delimiter) {
+        let word = word.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+        let lower = word.to_ascii_lowercase();
+        let address = match lower.find("http://").or_else(|| lower.find("https://")) {
+            Some(start) => reqwest::Url::parse(&word[start..]).ok(),
+            None if !word.contains("://") && word.contains('/') => {
+                let host = word.split('/').next().unwrap_or_default();
+                let labels: Vec<&str> = host.split('.').collect();
+                let site_name = labels.len() >= 2
+                    && labels.iter().all(|label| {
+                        !label.is_empty()
+                            && label
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    })
+                    && labels.last().is_some_and(|tld| {
+                        tld.len() >= 2 && tld.bytes().all(|byte| byte.is_ascii_alphabetic())
+                    });
+                site_name
+                    .then(|| reqwest::Url::parse(&format!("https://{word}")).ok())
+                    .flatten()
+            }
+            None => None,
+        };
+        if let Some(key) = address.as_ref().and_then(given_address_key)
+            && !keys.contains(&key)
+        {
+            keys.push(key);
+        }
+    }
+    newest_given_addresses(keys)
+}
+
+/// One entry for each address of `addresses` (where it came last), newest
+/// last, at most [`MAX_GIVEN_ADDRESSES`].
+fn newest_given_addresses(addresses: impl IntoIterator<Item = String>) -> Vec<String> {
+    let addresses: Vec<String> = addresses.into_iter().collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut newest: Vec<String> = addresses
+        .into_iter()
+        .rev()
+        .filter(|address| seen.insert(address.clone()))
+        .take(MAX_GIVEN_ADDRESSES)
+        .collect();
+    newest.reverse();
+    newest
+}
+
+/// The addresses `chat`'s earlier runs on this browser were given.
+fn given_addresses_of(approval_dir: &Path, chat: Uuid) -> Vec<String> {
+    let chats = GIVEN_ADDRESSES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = (approval_dir.to_path_buf(), chat);
+    chats
+        .iter()
+        .find(|(chat_key, _)| *chat_key == key)
+        .map(|(_, addresses)| addresses.clone())
+        .unwrap_or_default()
+}
+
+/// Keeps what a run of `chat` was given with what the chat had, the chat last.
+fn remember_given_addresses(approval_dir: &Path, chat: Uuid, addresses: Vec<String>) {
+    let mut chats = GIVEN_ADDRESSES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = (approval_dir.to_path_buf(), chat);
+    let earlier = chats
+        .iter()
+        .position(|(chat_key, _)| *chat_key == key)
+        .map(|index| chats.remove(index).1)
+        .unwrap_or_default();
+    let kept = newest_given_addresses(earlier.into_iter().chain(addresses));
+    if !kept.is_empty() {
+        chats.push((key, kept));
+    }
+    let excess = chats.len().saturating_sub(MAX_GIVEN_CHATS);
+    chats.drain(..excess);
+}
+
+/// The run's record of the addresses it was given, as the approval script
+/// writes it. One that is missing, bound to another run or not well formed
+/// names none.
+fn read_given_addresses(approval_dir: &Path, binding: &RunBinding) -> Vec<String> {
+    let Some(record) = read_run_record_bounded(
+        approval_dir,
+        GIVEN_ADDRESSES_FILE,
+        &[1],
+        binding,
+        GIVEN_ADDRESSES_MAX_BYTES,
+    )
+    .ok()
+    .flatten() else {
+        return Vec::new();
+    };
+    let Some(entries) = record.get("addresses").and_then(JsonValue::as_array) else {
+        return Vec::new();
+    };
+    newest_given_addresses(
+        entries
+            .iter()
+            .filter_map(JsonValue::as_str)
+            .filter(|address| {
+                address.len() == 32
+                    && address
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .map(str::to_string),
+    )
+}
+
+/// Starts the run's record of the addresses it was given, bound to the exact
+/// authority the marker carries.
+fn write_given_addresses(
+    approval_dir: &Path,
+    binding: &RunBinding,
+    addresses: &[String],
+) -> Result<()> {
+    let payload = serde_json::to_vec(&json!({
+        "version": 1,
+        "ownerId": binding.owner_id,
+        "runId": binding.run_id,
+        "initiatorUserId": binding.initiator_user_id,
+        "browserPageId": binding.browser_page_id,
+        "addresses": addresses,
+    }))?;
+    publish_private_file(
+        &approval_dir.join(format!(".instafy-approval-given-{}", Uuid::new_v4())),
+        &approval_dir.join(GIVEN_ADDRESSES_FILE),
+        &payload,
+        "Shared Browser record of the addresses the chat was given",
+    )
+}
+
 /// The run's own approval state, read the way the approval script writes it.
 /// A state that is missing, bound to another run or not well formed leaves
 /// nothing to carry.
@@ -1331,7 +1547,9 @@ impl SharedBrowserAgentControlGuard {
     /// before any Codex or MCP process starts. `continues_run_id` is the run
     /// Studio's Let Octo continue names: its grants carry over only as
     /// [`take_continued_run_grants`] allows. `chat` is the job's conversation,
-    /// whose addresses that did not answer the run starts with.
+    /// whose addresses that did not answer the run starts with, and whose
+    /// given addresses it starts with beside `given`, those its own task names
+    /// ([`given_addresses_from_payload`]).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn acquire(
         run_id: Uuid,
@@ -1342,6 +1560,7 @@ impl SharedBrowserAgentControlGuard {
         card_site_origins: &[String],
         cancel_signal: JobCancelSignal,
         chat: Option<Uuid>,
+        given: &[String],
     ) -> Result<Self> {
         let mut guard = Self::acquire_at(
             agent_control_file_path(),
@@ -1356,7 +1575,28 @@ impl SharedBrowserAgentControlGuard {
         )?;
         guard.start_window_watch();
         guard.carry_unanswered_addresses(chat, unix_time_millis());
+        guard.start_given_addresses(given);
         Ok(guard)
+    }
+
+    /// Starts the run's record of the addresses it was given: those its own
+    /// task names and those its chat's earlier runs on this browser were
+    /// given. Every run has one, empty or not: the controller script refuses a
+    /// made-up address only in a run that has it, so one that cannot be
+    /// written leaves the run without that check.
+    fn start_given_addresses(&mut self, task: &[String]) {
+        let earlier = self
+            .chat
+            .map(|chat| given_addresses_of(&self.approval_dir, chat))
+            .unwrap_or_default();
+        let addresses = newest_given_addresses(earlier.into_iter().chain(task.iter().cloned()));
+        if let Err(error) = write_given_addresses(&self.approval_dir, &self.binding(), &addresses)
+        {
+            tracing::warn!(
+                ?error,
+                "Shared Browser could not start the record of the addresses this run was given"
+            );
+        }
     }
 
     /// Starts the run's record of the addresses that did not answer with
@@ -2652,12 +2892,19 @@ impl Drop for SharedBrowserAgentControlGuard {
                     ..grants
                 }
             });
-            // The addresses that did not answer stay with the chat, read
-            // before the run's records are revoked.
+            // The addresses that did not answer, and those the chat was
+            // given, stay with the chat, read before the run's records are
+            // revoked.
             let unanswered = self.chat.map(|chat| {
                 (
                     chat,
                     read_unanswered_addresses(&self.approval_dir, &self.binding()),
+                )
+            });
+            let given = self.chat.map(|chat| {
+                (
+                    chat,
+                    read_given_addresses(&self.approval_dir, &self.binding()),
                 )
             });
             if let Err(error) = prepare_clean_approval_directory(&self.approval_dir) {
@@ -2702,6 +2949,9 @@ impl Drop for SharedBrowserAgentControlGuard {
                     addresses,
                     unix_time_millis(),
                 );
+            }
+            if let Some((chat, addresses)) = given {
+                remember_given_addresses(&self.approval_dir, chat, addresses);
             }
         } else {
             let reason = self

@@ -91,6 +91,24 @@ window.live = {
   fragment() { this.slide(); history.replaceState(null, "", "#slide-2"); },
   // A page that moves its own address on its site, its controls all the same.
   address() { history.pushState(null, "", "/journey/updated"); },
+  // Something the page draws over its form: its own time picker, a dialog of
+  // times, or a carousel's next slide, a link laid over the page. uncover()
+  // takes it away, as choosing a time or the carousel moving on does.
+  cover(kind) {
+    const over = document.createElement(kind === "picker" ? "div" : "a");
+    over.id = "cover";
+    over.style.cssText = "position:fixed;inset:0;display:block;background:#fff;font-size:32px";
+    if (kind === "picker") {
+      over.setAttribute("role", "dialog");
+      over.setAttribute("aria-label", "Choose a time");
+      over.innerHTML = "<ul><li>11:00</li><li>11:30</li><li>12:00</li><li>12:30</li><li>13:00</li><li>13:30</li><li>14:00</li></ul>";
+    } else {
+      over.href = "/news/3";
+      over.textContent = "Night service";
+    }
+    document.body.append(over);
+  },
+  uncover() { document.getElementById("cover").remove(); },
 };`);
 
 // A shop's carousel of offers, one shown at a time, each with the same "Add to
@@ -550,6 +568,43 @@ export async function runSharedBrowserAllowedStepFixture() {
       assert.deepEqual(sent(), []);
     });
 
+    // 6. Something the page draws covers the planner's button: its own time
+    // picker, or a carousel's slide laid over the page. The click the person
+    // allowed is refused at once, naming the cover by its tag, role and name,
+    // and nothing is sent. Once the cover goes, the next try asks again and
+    // runs. A planner's button the person allowed was refused under a cover
+    // nobody could name, with "read on without it", and the turn gave up.
+    for (const [name, kind, cover] of [
+      ["the page's own time picker", "picker", '(<div role="dialog"> named "Choose a time")'],
+      ["a carousel's slide", "slide", '(<a> named "Night service")'],
+    ]) {
+      await check(`a button under ${name}`, async () => {
+        freshRun();
+        const planned = await openPlanner("", ["allow_origin"]);
+        await runPage.evaluate((over) => window.live.cover(over), kind);
+        requests.length = 0;
+        const asked = prompts.length;
+        const covered = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"]);
+        assert.equal(covered.code, 1, `the covered step ran: ${covered.stdout}`);
+        assert.ok(
+          covered.stderr.includes(`Something else on the page covers "Plan your journey" ${cover}, so nothing was clicked. Take a fresh snapshot and try once more.`),
+          covered.stderr,
+        );
+        assert.doesNotMatch(covered.stderr, /read on without it|_non_retryable/u);
+        assert.equal(prompts.length, asked + 1, "the person was asked once");
+        // Details still list the person's yes.
+        assert.deepEqual(JSON.parse(covered.stdout), { ok: false, activity: { approval: "once" } });
+        assert.deepEqual(sent(), [], "something was sent under the cover");
+        await runPage.evaluate(() => window.live.uncover());
+        const looked = await ok("GET", "/v1/snapshot");
+        const again = await runTool("POST", "/v1/click", control(looked.payload, "Plan your journey"), ["allow_once"]);
+        assert.equal(again.code, 0, `the next try did not run: ${again.stderr}`);
+        assert.equal(prompts.length, asked + 2, "the next try asked again");
+        assert.match(prompts.at(-1).display.label, /Plan your journey/u);
+        assert.deepEqual(sent(), ["journeys.test GET /route?which=1&from=Central&to=Airport"]);
+      });
+    }
+
     const result = {
       status: "passed",
       fixtureVersion: 1,
@@ -561,6 +616,7 @@ export async function runSharedBrowserAllowedStepFixture() {
         "of two controls alike, the one asked about is used once the page changed or a look-alike appeared ahead of it, and on an unchanged page; never its twin once it went, after the yes or before anyone is asked",
         "a take-over while the prompt waits ends the step, and a yes then does nothing",
         "a page that left its site after the yes ends the run with the stale code, and the failed command lists the yes",
+        "a planner's button under the page's own time picker or a carousel's slide is refused at once after the yes, naming the cover by its tag, role and name, with nothing sent; once the cover goes, the next try asks again and runs",
       ],
       runs,
       limitations: ["No model, Studio UI, origin or runtime guard; those are unit-tested."],

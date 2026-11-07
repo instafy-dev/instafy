@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
@@ -40,6 +40,9 @@ const scriptSource = [
 ].join("\n");
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// What a step Octo's own tabs do not take answers: where to take it instead.
+const OWN_TAB_STEP = /Octo's own tabs don't take this step, so nothing was done there\. Open this page in the chat's own tab with navigate \(its tabId is the one list_tabs shows opened by the person\) and take the step there; the browser asks the person as usual\./u;
 
 function writeProtectedJson(destination, value) {
   const temporary = `${destination}.${randomUUID()}.tmp`;
@@ -116,6 +119,10 @@ export async function runSharedBrowserAgentTabsFixture() {
       "/timetable": { title: "Timetable", body: "<p>Trains leave every 20 minutes.</p><form method=\"post\" action=\"/order\"><button>Place order</button></form>" },
       "/hours": { title: "Opening hours", body: "<p>Open daily 9 to 17.</p>" },
       "/prices": { title: "Prices", body: "<p>Entry 12 EUR.</p>" },
+      // A journey planner whose button sends its form: a step Octo's own tabs
+      // do not take.
+      "/planner": { title: "Journey planner", body: "<form action=\"/route\" method=\"get\"><p><label>Start <select name=\"from\"><option>Central</option></select></label></p><p><label>End <select name=\"to\"><option>Airport</option></select></label></p><p><button>Plan your journey</button></p></form>" },
+      "/route?from=Central&to=Airport": { title: "Your route", body: "<p>Central to Airport: 2 stops, 24 minutes.</p>" },
       // A guessed address and a page that is gone: the site's own not-found
       // pages, and answers with no page at all, whose loads Chromium fails
       // itself.
@@ -151,6 +158,23 @@ export async function runSharedBrowserAgentTabsFixture() {
       "/tram-15": { title: "Tram 15", body: "<p>Tram 15 runs to the tower every 10 minutes.</p>" },
     });
     servers.push(transport.server);
+    // A reviewer's site, at a name of its own (mapped to loopback below):
+    // its home page links one review and spells out the address of another,
+    // and the task names a third. Its server records every request, so an
+    // address Octo made up is shown never to reach it.
+    const reviewRoutes = {
+      "/laptops/one": { title: "Laptop One review", body: "<p>Battery: 11 hours.</p>" },
+      "/laptops/two": { title: "Laptop Two review", body: "<p>Battery: 9 hours.</p>" },
+      "/laptops/three": { title: "Laptop Three review", body: "<p>Battery: 7 hours.</p>" },
+      "/laptops/named?from=chat": { title: "Laptop review", body: "<p>Battery: 10 hours.</p>" },
+    };
+    const reviewer = await listenSite("reviews", reviewRoutes);
+    servers.push(reviewer.server);
+    const reviewsSite = `http://reviews.test:${reviewer.server.address().port}`;
+    reviewRoutes["/"] = {
+      title: "Reviews",
+      body: `<p><a href="/laptops/one">Laptop One review</a></p><p>Our Laptop Two review is at ${reviewsSite}/laptops/two.</p>`,
+    };
 
     context = await chromium.launchPersistentContext(profileDirectory, {
       executablePath,
@@ -161,7 +185,7 @@ export async function runSharedBrowserAgentTabsFixture() {
       args: [
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=0",
-        "--host-resolver-rules=MAP www.nike.com 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+        "--host-resolver-rules=MAP www.nike.com 127.0.0.1, MAP reviews.test 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
       ],
     });
     const runPage = context.pages()[0];
@@ -309,12 +333,13 @@ export async function runSharedBrowserAgentTabsFixture() {
     assert.equal(navigation.at(-1).pageId, firstTab, "The action feed shows the step in Octo's tab");
 
     // 2. Octo's tabs are for reading: a form submission is refused before
-    // any prompt, and the site never receives it.
+    // any prompt, and the site never receives it. The refusal says to take
+    // the step in the chat's own tab (see 14).
     const before = prompts.length;
     const snapshot = await ok("GET", "/v1/snapshot");
     const order = snapshot.interactiveElements.find((element) => element.label === "Place order");
     assert.ok(order, "The order button is observed");
-    await refused(/for reading/, "POST", "/v1/click", { index: order.index, snapshotId: snapshot.snapshotId }, ["allow_once"]);
+    await refused(OWN_TAB_STEP, "POST", "/v1/click", { index: order.index, snapshotId: snapshot.snapshotId }, ["allow_once"]);
     assert.equal(prompts.length, before, "A refused step shows no prompt");
     assert.ok(!sources.requests.some((request) => request.startsWith("POST")), "The site received no submission");
 
@@ -566,6 +591,80 @@ export async function runSharedBrowserAgentTabsFixture() {
     const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
     assert.ok(version.Browser, "the browser still answers after the take-over and the continuation");
 
+    // 14. A journey planner read in Octo's own tab: its button is refused
+    // there before any prompt, and the refusal says to take the step in the
+    // chat's own tab. The turn does: navigate with that tab's id opens the
+    // planner there, and its button asks the person once and runs. A turn
+    // read a planner in its own tab, stopped at its button and replied that
+    // it couldn't run the planner from its reading tab.
+    startRun([]);
+    const plannerTab = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/planner` }, ["allow_origin"]);
+    const plan = (reading) => {
+      const button = reading.interactiveElements.find((element) => element.label === "Plan your journey");
+      assert.ok(button, "The planner's button is observed");
+      return { index: button.index, snapshotId: reading.snapshotId };
+    };
+    const promptsBeforePlanner = prompts.length;
+    const ownTabWords = await refused(OWN_TAB_STEP, "POST", "/v1/click", plan(plannerTab), ["allow_once"]);
+    assert.doesNotMatch(ownTabWords, /Leave it to the person|for reading/u);
+    assert.equal(prompts.length, promptsBeforePlanner, "The refused step asked");
+    assert.ok(!sources.requests.some((request) => request.startsWith("GET /route")), "The planner's form was sent from Octo's tab");
+    const chatTab = (await ok("GET", "/v1/tabs")).tabs.find((tab) => tab.openedBy === "person");
+    const plannerInChatTab = await ok("POST", "/v1/navigate", { url: `${sources.origin}/planner`, tabId: chatTab.tabId }, ["allow_origin"]);
+    assert.equal(plannerInChatTab.tabId, undefined, "The planner opened in Octo's tab again");
+    assert.equal(runPage.url(), `${sources.origin}/planner`);
+    const routed = await ok("POST", "/v1/click", plan(plannerInChatTab), ["allow_once"]);
+    assert.equal(prompts.length, promptsBeforePlanner + 2, "The chat's own tab asked for its site and the step, once each");
+    assert.match(prompts.at(-1).display.label, /Plan your journey/u);
+    assert.match(routed.visibleText, /2 stops, 24 minutes/u);
+    await ok("POST", "/v1/tabs/close", { tabId: plannerTab.tabId });
+
+    // 15. An address no message and no page gave is never opened.
+    // runtime-agent starts each run's record of the addresses its chat was
+    // given with those the task names (written here the same way: the task
+    // named one review), and each page the run reads adds its own address,
+    // its links and the addresses its text spells out. A made-up address is
+    // refused before any prompt or load, with where to go instead.
+    startRun([]);
+    const givenKey = (address) => {
+      const url = new URL(address);
+      const site = `${url.hostname.replace(/^www\./u, "")}${url.port ? `:${url.port}` : ""}`;
+      return createHash("sha256").update(`${site}${url.pathname.replace(/\/+$/u, "") || "/"}`).digest("hex").slice(0, 32);
+    };
+    const givenPath = path.join(approvalDirectory, "given.json");
+    writeProtectedJson(givenPath, {
+      version: 1, ownerId: authority.ownerId, runId: authority.runId,
+      initiatorUserId: authority.initiatorUserId, browserPageId: runPageId,
+      addresses: [givenKey(`${reviewsSite}/laptops/named`)],
+    });
+    const madeUp = `No message and no page Octo read gave this address, so it was not opened: Octo opens only addresses it was given. Open ${reviewsSite}/ and follow its links to the page, or use the site's own search.`;
+    const promptsBeforeMadeUp = prompts.length;
+    const pagesBeforeMadeUp = browserPages().length;
+    for (const requestPath of ["/v1/navigate", "/v1/tabs/open"]) {
+      const words = await refused(/./u, "POST", requestPath, { url: `${reviewsSite}/laptops/three` }, []);
+      assert.ok(words.includes(madeUp), `${requestPath}: ${words}`);
+    }
+    assert.equal(prompts.length, promptsBeforeMadeUp, "A made-up address asked");
+    assert.deepEqual(reviewer.requests, [], "A made-up address reached its site");
+    assert.equal(browserPages().length, pagesBeforeMadeUp, "A tab was opened for a made-up address");
+    // The site's root opens, and so do the link its home page gives, the
+    // address its text spells out and the one the task named.
+    await ok("POST", "/v1/navigate", { url: `${reviewsSite}/` }, ["allow_origin"]);
+    await ok("POST", "/v1/navigate", { url: "/laptops/one" }, []);
+    await ok("POST", "/v1/navigate", { url: `${reviewsSite}/laptops/two` }, []);
+    const named = await ok("POST", "/v1/navigate", { url: `${reviewsSite}/laptops/named?from=chat` }, []);
+    assert.match(named.visibleText, /Battery: 10 hours/u);
+    assert.deepEqual(reviewer.requests, ["GET /", "GET /laptops/one", "GET /laptops/two", "GET /laptops/named?from=chat"]);
+    // The refusals that come before it stay as they were: a link-only site
+    // keeps its own words, and an address on no public site (the fixture's
+    // loopback pages) is left to the browser's network rules.
+    await refused(/Booking\.com is link-only: Octo never opens it, in any tab/u, "POST", "/v1/navigate", { url: "https://www.booking.com/hotel/fixture.html" });
+    await ok("POST", "/v1/navigate", { url: `${sources.origin}/prices` }, ["allow_origin"]);
+    // The record keeps fingerprints, never the addresses.
+    const givenRecord = fs.readFileSync(givenPath, "utf8");
+    assert.ok(!givenRecord.includes("reviews.test") && !givenRecord.includes("laptops"), givenRecord);
+    assert.ok(JSON.parse(givenRecord).addresses.includes(givenKey(`${reviewsSite}/laptops/one`)));
+
     const actionLog = fs.readFileSync(actionsPath, "utf8");
     assert.ok(!actionLog.includes("booking.com/hotel"), "The link-only address never reached the action feed as a step");
     const result = {
@@ -591,6 +690,8 @@ export async function runSharedBrowserAgentTabsFixture() {
         "a page that frames a link-only site loads and Octo's step succeeds, reading nothing of the frame",
         "a plain navigation asks at most once, and its prompt names the exact page",
         "take over mid-prompt, Let Octo continue keeps the page's approvals, and one answer completes an approved navigation",
+        "a planner's button in Octo's tab is refused before any prompt, saying to take the step in the chat's own tab, where navigate with its tabId opens the planner and the button asks once and runs",
+        "an address no message and no page gave is refused by navigate and open_tab before any prompt or load; the site's root, a page's link, an address its text spells out and one the task named open; a link-only site and a loopback address are judged as before",
       ],
       limitations: [
         "No model, Studio UI, origin keep endpoint or runtime shutdown guard; those are unit-tested.",
