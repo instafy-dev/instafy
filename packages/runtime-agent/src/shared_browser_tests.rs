@@ -3849,7 +3849,7 @@ async fn a_page_gives_the_addresses_its_text_spells_out() {
     let spelled = [
         (
             "https://www.reviews.example/laptops/four",
-            "https://reviews.example",
+            "https://www.reviews.example",
         ),
         (
             "https://en.wikipedia.org/wiki/Mercury_(planet)",
