@@ -7969,6 +7969,11 @@ impl JobProcessor {
         }
 
         let drafts_reply = drafts_reply_for_job(job, final_output_schema);
+        // A browser turn's draft ends before its finding lines, which no person reads.
+        let draft_ends_at_finding_lines = job
+            .payload
+            .get("metadata")
+            .is_some_and(browser_hand_back::is_browser_turn);
         let mut reply_draft = progress_sender
             .as_ref()
             .and_then(|progress| progress.reply_draft.clone())
@@ -7977,6 +7982,7 @@ impl JobProcessor {
                 reply_draft::ReplyDraftStream::start(
                     sender,
                     codex_run_options.allow_plain_text_final_fallback,
+                    draft_ends_at_finding_lines,
                 )
             });
 
@@ -8867,6 +8873,7 @@ impl JobProcessor {
                         reply_draft::ReplyDraftStream::start(
                             sender,
                             retry_codex_run_options.allow_plain_text_final_fallback,
+                            draft_ends_at_finding_lines,
                         )
                     });
                 let mut retry_event_handler = |event: &JsonValue| -> Result<()> {
@@ -9297,6 +9304,7 @@ impl JobProcessor {
                         reply_draft::ReplyDraftStream::start(
                             sender,
                             finalization_options.allow_plain_text_final_fallback,
+                            draft_ends_at_finding_lines,
                         )
                     });
                 let mut finalization_events = |event: &JsonValue| -> Result<()> {
@@ -9696,69 +9704,53 @@ impl JobProcessor {
                 && retry_shared_browser_terminal_consent_failure.is_none()
                 && !retry_hands_the_message_to_the_building_turn
             {
-                // An ephemeral retry keeps no thread: the first attempt's holds its pages.
-                let thread = retry_provider_conversation_state
-                    .clone()
-                    .or_else(|| output_provider_conversation_state.clone());
-                let used_the_browser = !retry_shared_browser_execution_missing
-                    && !retry_personal_browser_execution_missing;
-                let stopped_for_the_person = browser_hand_back::stopped_for_the_person(
-                    &retry_messages,
-                    retry_output.browser_secret_screen,
-                ) || browser_hand_back::stopped_for_the_person(
-                    &interim_messages,
-                    output.browser_secret_screen,
-                );
-                // Boxed, so the job's own future does not grow by the pass's run.
-                let second = Box::pin(read_the_unread_pages(
+                let answer = BrowserTurnAnswer {
+                    options: &codex_run_options,
+                    // An ephemeral retry keeps no thread: the first attempt's holds its pages.
+                    thread: retry_provider_conversation_state
+                        .clone()
+                        .or_else(|| output_provider_conversation_state.clone()),
+                    used_the_browser: !retry_shared_browser_execution_missing
+                        && !retry_personal_browser_execution_missing,
+                    stopped_for_the_person: browser_hand_back::stopped_for_the_person(
+                        &retry_messages,
+                        retry_output.browser_secret_screen,
+                    ) || browser_hand_back::stopped_for_the_person(
+                        &interim_messages,
+                        output.browser_secret_screen,
+                    ),
+                    refused_a_step: browser_hand_back::refused_a_step(&retry_messages)
+                        || browser_hand_back::refused_a_step(&interim_messages),
+                    pages: {
+                        let mut pages = output.browser_pages.clone();
+                        for page in &retry_output.browser_pages {
+                            if !pages.contains(page) {
+                                pages.push(page.clone());
+                            }
+                        }
+                        pages
+                    },
+                    final_json: &retry_output.final_json,
+                    progress: progress_sender.as_ref().filter(|_| streaming_active),
+                    runtime_id: registration.runtime_id,
+                    paused_already: last_reply_was_a_pause(job),
+                };
+                // Boxed, so the job's own future does not grow by its passes' runs.
+                let ended = Box::pin(end_browser_turn_answer(
                     &codex,
                     job,
-                    UnreadPagesPass {
-                        options: &codex_run_options,
-                        thread: thread.clone(),
-                        used_the_browser,
-                        stopped_for_the_person,
-                        refused_a_step: browser_hand_back::refused_a_step(&retry_messages)
-                            || browser_hand_back::refused_a_step(&interim_messages),
-                        progress: progress_sender.as_ref().filter(|_| streaming_active),
-                        runtime_id: registration.runtime_id,
-                        paused_already: last_reply_was_a_pause(job),
-                    },
+                    answer,
                     &mut retry_outcome.summary,
                     task_usage,
                 ))
                 .await;
-                let mut pages = output.browser_pages.clone();
-                for page in retry_output.browser_pages.iter().chain(&second.pages) {
-                    if !pages.contains(page) {
-                        pages.push(page.clone());
-                    }
-                }
-                retry_artifacts.extend(second.artifacts);
-                retry_messages.extend(second.messages);
-                // As after the turn's own run: steps the pass could not stream are posted with
-                // the turn.
+                retry_artifacts.extend(ended.artifacts);
+                retry_messages.extend(ended.messages);
+                // As after the turn's own run: steps a second pass could not stream are posted
+                // with the turn.
                 if let Some(progress) = progress_sender.as_ref() {
                     streaming_active = streaming_active && progress.status.load(Ordering::SeqCst);
                 }
-                let answer = BrowserTurnAnswer {
-                    options: &codex_run_options,
-                    thread,
-                    used_the_browser,
-                    stopped_for_the_person: stopped_for_the_person || second.stopped_for_the_person,
-                    pages,
-                    final_json: &retry_output.final_json,
-                };
-                retry_artifacts.extend(
-                    end_browser_turn_answer(
-                        &codex,
-                        job,
-                        answer,
-                        &mut retry_outcome.summary,
-                        task_usage,
-                    )
-                    .await,
-                );
             }
             post_only_the_card(job, &mut retry_outcome);
             if retry_hands_the_message_to_the_building_turn {
@@ -9795,55 +9787,38 @@ impl JobProcessor {
             && first_shared_browser_terminal_consent_failure.is_none()
             && !hands_the_message_to_the_building_turn
         {
-            let used_the_browser =
-                !shared_browser_execution_missing && !personal_browser_execution_missing;
-            let stopped_for_the_person = browser_hand_back::stopped_for_the_person(
-                &interim_messages,
-                output.browser_secret_screen,
-            );
-            // Boxed, so the job's own future does not grow by the pass's run.
-            let second = Box::pin(read_the_unread_pages(
+            let answer = BrowserTurnAnswer {
+                options: &codex_run_options,
+                thread: output_provider_conversation_state.clone(),
+                used_the_browser: !shared_browser_execution_missing
+                    && !personal_browser_execution_missing,
+                stopped_for_the_person: browser_hand_back::stopped_for_the_person(
+                    &interim_messages,
+                    output.browser_secret_screen,
+                ),
+                refused_a_step: browser_hand_back::refused_a_step(&interim_messages),
+                pages: output.browser_pages.clone(),
+                final_json: &output.final_json,
+                progress: progress_sender.as_ref().filter(|_| streaming_active),
+                runtime_id: registration.runtime_id,
+                paused_already: last_reply_was_a_pause(job),
+            };
+            // Boxed, so the job's own future does not grow by its passes' runs.
+            let ended = Box::pin(end_browser_turn_answer(
                 &codex,
                 job,
-                UnreadPagesPass {
-                    options: &codex_run_options,
-                    thread: output_provider_conversation_state.clone(),
-                    used_the_browser,
-                    stopped_for_the_person,
-                    refused_a_step: browser_hand_back::refused_a_step(&interim_messages),
-                    progress: progress_sender.as_ref().filter(|_| streaming_active),
-                    runtime_id: registration.runtime_id,
-                    paused_already: last_reply_was_a_pause(job),
-                },
+                answer,
                 &mut outcome.summary,
                 task_usage,
             ))
             .await;
-            let mut pages = output.browser_pages.clone();
-            for page in second.pages {
-                if !pages.contains(&page) {
-                    pages.push(page);
-                }
-            }
-            artifacts.extend(second.artifacts);
-            interim_messages.extend(second.messages);
-            // As after the turn's own run: steps the pass could not stream are posted with the
-            // turn.
+            artifacts.extend(ended.artifacts);
+            interim_messages.extend(ended.messages);
+            // As after the turn's own run: steps a second pass could not stream are posted with
+            // the turn.
             if let Some(progress) = progress_sender.as_ref() {
                 streaming_active = streaming_active && progress.status.load(Ordering::SeqCst);
             }
-            let answer = BrowserTurnAnswer {
-                options: &codex_run_options,
-                thread: output_provider_conversation_state.clone(),
-                used_the_browser,
-                stopped_for_the_person: stopped_for_the_person || second.stopped_for_the_person,
-                pages,
-                final_json: &output.final_json,
-            };
-            artifacts.extend(
-                end_browser_turn_answer(&codex, job, answer, &mut outcome.summary, task_usage)
-                    .await,
-            );
         }
 
         // No retry: the turn's result is settled, so its cards go out now,
@@ -15956,36 +15931,59 @@ pub struct BrowserTurnAnswer<'a> {
     /// Whether it stopped on a step that is the person's
     /// (`browser_hand_back::stopped_for_the_person`): its reply is theirs, and stays as it is.
     pub stopped_for_the_person: bool,
+    /// Whether the browser refused one of its steps as the person's own
+    /// (`browser_hand_back::refused_a_step`).
+    pub refused_a_step: bool,
     /// The pages its own steps opened (`CodexRunOutput::browser_pages`).
     pub pages: Vec<String>,
     /// Its answer as the model wrote it.
     pub final_json: &'a JsonValue,
+    /// Where the turn's messages go as it works: a second pass's steps go there too, so the
+    /// turn's line and Details show them.
+    pub progress: Option<&'a JobProgress>,
+    /// The runtime the turn's messages name.
+    pub runtime_id: Uuid,
+    /// Whether Octo's last reply in the chat was already a pause for the person.
+    pub paused_already: bool,
+}
+
+/// What the end of a browser turn's answer adds to the turn ([`end_browser_turn_answer`]): the
+/// run logs and answers of its passes, which go after the turn's own, so the turn is billed from
+/// its first run only (docs/Credits-Billing.md), and the messages of a second pass's steps.
+#[derive(Default)]
+pub struct BrowserTurnEnd {
+    pub artifacts: Vec<JsonValue>,
+    pub messages: Vec<JobMessage>,
 }
 
 /// Ends the reply `summary` of a browser turn that is not handed to the building turn
-/// (`browser_hand_back::hands_the_message_to_the_building_turn`). A turn that used the browser
-/// and wrote no finding lines gets the runtime's wrap-up pass on its own thread, asked for those
-/// lines only; with still none, its note holds its reply and the pages its own steps opened, so
-/// a later building turn reads which pages it opened, a hand-back still goes, and a turn whose
-/// findings go back to the building turn posts no words of its own
-/// (`browser_hand_back::move_findings_into_details`). A turn on the browser
-/// on the person's device keeps no thread, so it gets no pass: the pages it opened, by address.
-/// A build request that nothing then acts on is said in the reply, never dropped without a word
-/// (`browser_hand_back::BUILD_NOT_MADE_LINE`). A turn that stopped for the person is left as it
-/// is: its reply says what they do next. Returns the pass's run log and answer, which go after
-/// the turn's own: a turn is billed from its first run's log, and like a recovery retry or the
-/// wrap-up after a missing answer, the pass is not billed (docs/Credits-Billing.md).
+/// (`browser_hand_back::hands_the_message_to_the_building_turn`). A turn whose findings go back
+/// to the building turn and that named pages it didn't open reads them first, in a second pass
+/// (`read_the_unread_pages`). A turn that used the browser and wrote no finding lines gets the
+/// runtime's wrap-up pass on its own thread, asked for those lines only; with still none, its
+/// note holds its reply and the pages its own steps opened, so a later building turn reads which
+/// pages it opened, a hand-back still goes, and a turn whose findings go back to the building
+/// turn posts no words of its own (`browser_hand_back::move_findings_into_details`). A turn on
+/// the browser on the person's device keeps no thread, so it gets no pass: the pages it opened,
+/// by address. A build request that nothing then acts on is said in the reply, never dropped
+/// without a word (`browser_hand_back::BUILD_NOT_MADE_LINE`). A turn that stopped for the person
+/// is left as it is: its reply says what they do next. Like a recovery retry or the wrap-up after
+/// a missing answer, neither pass is billed (docs/Credits-Billing.md).
 pub async fn end_browser_turn_answer(
     codex: &CodexClient,
     job: &LeaseJob,
     answer: BrowserTurnAnswer<'_>,
     summary: &mut String,
     task_usage: &TaskUsage,
-) -> Vec<JsonValue> {
+) -> BrowserTurnEnd {
     let metadata = job.payload.get("metadata");
-    let mut artifacts = Vec::new();
-    if answer.stopped_for_the_person {
-        return artifacts;
+    let second = read_the_unread_pages(codex, job, &answer, summary, task_usage).await;
+    let mut ended = BrowserTurnEnd {
+        artifacts: second.artifacts,
+        messages: second.messages,
+    };
+    if answer.stopped_for_the_person || second.stopped_for_the_person {
+        return ended;
     }
     let canceled = answer
         .options
@@ -16008,11 +16006,11 @@ pub async fn end_browser_turn_answer(
             match pass {
                 Ok(output) => {
                     let purpose = json!({ "purpose": "finding-lines-wrap-up" });
-                    artifacts.push(build_codex_run_log_artifact(
+                    ended.artifacts.push(build_codex_run_log_artifact(
                         &output.events,
                         Some(purpose.clone()),
                     ));
-                    artifacts.push(json!({
+                    ended.artifacts.push(json!({
                         "kind": "codex/final-json",
                         "metadata": purpose,
                         "payload": sanitize_codex_final_json(&output.final_json),
@@ -16060,7 +16058,7 @@ pub async fn end_browser_turn_answer(
             "a browser turn asked for a build that nothing acts on: its reply says it is not made yet"
         );
     }
-    artifacts
+    ended
 }
 
 /// The options of the second pass of a browser turn over the pages its unread line named
@@ -16082,40 +16080,13 @@ fn unread_pages_pass_options(
     options
 }
 
-/// A browser turn's answer as the runtime may read on from it
-/// ([`read_the_unread_pages`]).
-pub struct UnreadPagesPass<'a> {
-    /// The options of the turn's own run.
-    pub options: &'a CodexRunOptions,
-    /// That run's thread, which holds the pages the turn read.
-    pub thread: Option<JsonValue>,
-    /// Whether the turn used the browser at all.
-    pub used_the_browser: bool,
-    /// Whether it stopped on a step that is the person's: a sign-in or cookie pause, a step's
-    /// approval that ended it, a page showing a secret
-    /// (`browser_hand_back::stopped_for_the_person`).
-    pub stopped_for_the_person: bool,
-    /// Whether the browser refused one of its steps as the person's own
-    /// (`browser_hand_back::refused_a_step`).
-    pub refused_a_step: bool,
-    /// Where the turn's messages go as it works: the second pass's steps go there too, so the
-    /// turn's line and Details show them.
-    pub progress: Option<&'a JobProgress>,
-    /// The runtime the turn's messages name.
-    pub runtime_id: Uuid,
-    /// Whether Octo's last reply in the chat was already a pause for the person.
-    pub paused_already: bool,
-}
-
-/// What the second pass added to the turn: its run log and answer, which go after the turn's
-/// own, so the turn is billed from its first run only (docs/Credits-Billing.md); the messages of
-/// its steps; the pages they opened; and whether it stopped on a step that is the person's.
+/// What the second pass of a browser turn added to it ([`read_the_unread_pages`]): its run log
+/// and answer, the messages of its steps, and whether it stopped on a step that is the person's.
 #[derive(Default)]
-pub struct UnreadPagesRead {
-    pub artifacts: Vec<JsonValue>,
-    pub messages: Vec<JobMessage>,
-    pub pages: Vec<String>,
-    pub stopped_for_the_person: bool,
+struct UnreadPagesRead {
+    artifacts: Vec<JsonValue>,
+    messages: Vec<JobMessage>,
+    stopped_for_the_person: bool,
 }
 
 /// A browser turn whose findings go back to the building turn ends with the pages its request
@@ -16124,22 +16095,24 @@ pub struct UnreadPagesRead {
 /// what that second pass read to the turn's answer; the second pass's own unread line starts no
 /// third. Never after a Stop, nor when the turn stopped for the person (a sign-in or cookie
 /// pause, a step's approval that ended it, a secret) or the browser refused one of its steps as
-/// theirs: the page needs the person. The unread line itself is taken out of `summary` in any
-/// case: no person reads it. Told to read every page the request needs, a comparison's browser
-/// turn read three pages and ended, and the page was built with four of its fifteen facts (a
-/// local test, Nov 6). A pass that the person's Stop or a step's approval ends ends the turn as
-/// the turn's own run would have: a pause or an approval's end leaves the reply that says what
-/// they do next.
-pub async fn read_the_unread_pages(
+/// theirs: the page needs the person. Nor when its answer holds no finding line: the wrap-up
+/// pass asks for the lines of the pages it read ([`end_browser_turn_answer`]), and a second
+/// pass's lines would leave those pages out. The unread line itself is taken out of `summary` in
+/// any case: no person reads it. Told to read every page the request needs, a comparison's
+/// browser turn read three pages and ended, and the page was built with four of its fifteen facts
+/// (a local test, Nov 6). A pass that the person's Stop or a step's approval ends ends the turn
+/// as the turn's own run would have: a pause or an approval's end leaves the words that say what
+/// they do next, and the turn's note keeps every finding line in hand.
+async fn read_the_unread_pages(
     codex: &CodexClient,
     job: &LeaseJob,
-    pass: UnreadPagesPass<'_>,
+    turn: &BrowserTurnAnswer<'_>,
     summary: &mut String,
     task_usage: &TaskUsage,
 ) -> UnreadPagesRead {
     let mut read = UnreadPagesRead::default();
     let pages = browser_hand_back::take_unread_pages(summary);
-    let canceled = pass
+    let canceled = turn
         .options
         .cancel_signal
         .as_ref()
@@ -16148,13 +16121,14 @@ pub async fn read_the_unread_pages(
         .payload
         .get("metadata")
         .is_some_and(browser_hand_back::hands_back);
-    let Some(thread) = pass.thread.clone().filter(|_| {
+    let Some(thread) = turn.thread.clone().filter(|_| {
         hands_back
             && !pages.is_empty()
-            && pass.used_the_browser
+            && turn.used_the_browser
             && !canceled
-            && !pass.stopped_for_the_person
-            && !pass.refused_a_step
+            && !turn.stopped_for_the_person
+            && !turn.refused_a_step
+            && browser_hand_back::finding_lines_of(summary).is_some()
     }) else {
         return read;
     };
@@ -16163,18 +16137,18 @@ pub async fn read_the_unread_pages(
         pages = pages.len(),
         "a browser turn named pages it didn't read: it reads them once more before the build"
     );
-    let mut options = unread_pages_pass_options(pass.options, thread);
+    let mut options = unread_pages_pass_options(turn.options, thread);
     options.usage_observer = Some(task_usage.call(UsagePhase::Recovery));
     let prompt = browser_hand_back::unread_pages_prompt(&pages);
-    let runtime_id = pass.runtime_id;
+    let runtime_id = turn.runtime_id;
     let mut events: Vec<JsonValue> = Vec::new();
     let mut streamed = 0usize;
-    let mut streaming = pass.progress.is_some();
+    let mut streaming = turn.progress.is_some();
     let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
     let result = {
         // Its steps show as the turn's own do, as it takes them.
         let mut on_event = |event: &JsonValue| -> Result<()> {
-            let Some(progress) = pass.progress.filter(|_| streaming) else {
+            let Some(progress) = turn.progress.filter(|_| streaming) else {
                 return Ok(());
             };
             events.push(event.clone());
@@ -16216,7 +16190,7 @@ pub async fn read_the_unread_pages(
         "payload": sanitize_codex_final_json(&output.final_json),
     }));
     read.messages = with_runtime_metadata_vec(extract_codex_messages(&output.events), &runtime_id);
-    if let Some(progress) = pass.progress.filter(|_| streaming) {
+    if let Some(progress) = turn.progress.filter(|_| streaming) {
         for message in read.messages.iter().skip(streamed) {
             if progress.sender.send(message.clone()).is_err() {
                 progress.status.store(false, Ordering::SeqCst);
@@ -16224,7 +16198,6 @@ pub async fn read_the_unread_pages(
             }
         }
     }
-    read.pages = output.browser_pages.clone();
     let answer = output
         .final_json
         .get("summary")
@@ -16241,18 +16214,24 @@ pub async fn read_the_unread_pages(
                 "retryable": false,
             }
         }));
-        apply_terminal_shared_browser_summary(summary, &mut None, Some(code), pass.paused_already);
+        let mut words = String::new();
+        apply_terminal_shared_browser_summary(
+            &mut words,
+            &mut None,
+            Some(code),
+            turn.paused_already,
+        );
+        browser_hand_back::stop_after_the_second_pass(summary, answer, Some(words.as_str()));
         read.stopped_for_the_person = true;
     } else if browser_hand_back::stopped_for_the_person(
         &read.messages,
         output.browser_secret_screen,
     ) {
-        // Its reply says what the person does next.
-        *summary = answer.trim().to_string();
-        browser_hand_back::take_unread_pages(summary);
+        // Its own words say what the person does next.
+        browser_hand_back::stop_after_the_second_pass(summary, answer, None);
         read.stopped_for_the_person = true;
     } else {
-        browser_hand_back::add_the_second_pass(summary, answer);
+        browser_hand_back::add_the_second_pass(summary, answer, &output.browser_pages);
     }
     read
 }

@@ -1117,17 +1117,22 @@ fn push_taken_back(section_text: &mut String, note: &str, lines: &[String]) {
 /// reads once, never again as the request of the browser turn it went to
 /// ([`repeated_person_messages`]), and a hand-back's stored prompt not at all: it read "User:
 /// Continue building with what the browser turn found." in the person's name
-/// ([`is_hand_back_prompt`]).
+/// ([`is_hand_back_prompt`]). Nor does a browser turn's findings note, which every browser turn
+/// now posts ([`is_findings_note`]): it read as an assistant turn of page text with no fence.
 pub(super) fn build_routing_conversation_context(
     history_value: Option<&JsonValue>,
 ) -> PromptConversationContext {
     let entries = history_value.and_then(JsonValue::as_array);
     let repeated = entries.map_or_else(HashSet::new, |entries| repeated_person_messages(entries));
+    // A browser turn's findings note is Details, not the chat's words, and its lines quote page
+    // text: the routing step reads the browser turn's reply, never its note.
     let turns: Vec<JsonValue> = entries
         .into_iter()
         .flatten()
         .enumerate()
-        .filter(|(index, entry)| !repeated.contains(index) && !is_hand_back_prompt(entry))
+        .filter(|(index, entry)| {
+            !repeated.contains(index) && !is_hand_back_prompt(entry) && !is_findings_note(entry)
+        })
         .filter_map(|(_, entry)| {
             let role = entry.get("role")?.as_str()?;
             let content = entry.get("content")?.as_str()?.trim();
@@ -1869,6 +1874,27 @@ mod tests {
         assert!(BROWSER_RUNS_NOTE.contains("what it was asked and its findings"));
         assert!(BROWSER_RUNS_NOTE.contains("do not guess what they found"));
         assert!(!BROWSER_RUNS_NOTE.contains("reply that no page it read states"));
+    }
+
+    /// The routing step reads the chat's words, never a browser turn's findings note: Details,
+    /// whose lines quote page text with no fence. Every browser turn posts one now, so with them
+    /// the routing step would read each question's pages as Octo's own turns.
+    #[test]
+    fn the_routing_step_never_reads_a_browser_turns_findings_note() {
+        let with_notes = build_routing_conversation_context(Some(&porto_chat(true))).section_text;
+        let without = build_routing_conversation_context(Some(&porto_chat(false))).section_text;
+        assert_eq!(with_notes, without);
+        for page_text in [
+            "\"stopped\"",
+            "livrarialello.pt",
+            "The journey planner lists São Bento and Aliados as stations.",
+        ] {
+            assert!(!with_notes.contains(page_text), "{page_text}: {with_notes}");
+        }
+        assert!(
+            with_notes.contains("Put the hours and the metro route on a small page I can share."),
+            "{with_notes}"
+        );
     }
 
     /// A building thread that is new or lost reads every turn, and each browser turn only as

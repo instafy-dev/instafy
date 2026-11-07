@@ -6,17 +6,22 @@
 //! local test, Nov 6). The runtime runs the turn once more on its own thread, told only those
 //! pages, before the build. That second pass's own unread line starts no third, a Stop between
 //! the passes ends the message there, and a turn that paused for the person, had a step refused
-//! or answers a question gets no second pass.
+//! or answers a question gets no second pass. Nor does a turn whose answer holds no finding line:
+//! the wrap-up pass asks for the lines of the pages it read. Each pass's lines are its own: a
+//! second pass that wrote none keeps the pages it opened, and one that stopped for the person
+//! ends the turn with its words while the turn's note keeps the first pass's lines.
 //!
 //! The provider stands in for the model: the turn's answer reads two pages and names three
-//! unread, and the second pass reads those three and names one more unread.
+//! unread, and the second pass reads those three and names one more unread. In the last cases
+//! the second pass takes a step in a stand-in for the browser on the person's device
+//! (`finding_lines`), which its run is given as the turn's own run is.
 
+use super::finding_lines::{
+    DEVICE_PAGE, DEVICE_TOKEN, DeviceBrowser, device_browser, device_step, step_outputs,
+};
 use super::*;
 use runtime_agent::codex::CodexConfig;
-use runtime_agent::jobs::{
-    BrowserTurnAnswer, UnreadPagesPass, end_browser_turn_answer, move_findings_into_details,
-    read_the_unread_pages,
-};
+use runtime_agent::jobs::{BrowserTurnAnswer, end_browser_turn_answer, move_findings_into_details};
 use runtime_agent::task_usage::TaskUsage;
 use std::sync::Mutex as StdMutex;
 
@@ -28,7 +33,7 @@ const REQUEST: &str = "Compare the three latest laptops from maker.example: proc
 const SECOND_PASS_OPENING: &str = "Your unread line named pages this request still needs:";
 const FIRST_WORDS: &str = "Read 2 pages on maker.example.";
 const READ_HOME: &str = r#"{"url": "https://maker.example/", "title": "Laptops", "facts": ["Lists the Laptop 12, 13 and 16."]}"#;
-const READ_13: &str = r#"{"url": "https://maker.example/laptop-13", "title": "Laptop 13", "facts": ["Battery: 74 Wh"]}"#;
+const READ_13: &str = r#"{"url": "https://maker.example/laptops/13", "title": "Laptop 13", "facts": ["Battery: 74 Wh"]}"#;
 /// The pages the turn's unread line names.
 const UNREAD: [&str; 3] = [
     "Laptop 12's own page",
@@ -41,6 +46,13 @@ const READ_16: &str = r#"{"url": "https://maker.example/laptop-16", "title": "La
 const READ_12_REVIEW: &str = r#"{"url": "https://reviews.example/laptop-12", "title": "Laptop 12 review", "facts": ["Battery lasted 11 hours"]}"#;
 /// What the second pass names unread in its turn.
 const STILL_UNREAD: &str = "a second review of the Laptop 16";
+/// The opening of the wrap-up pass's request (runtime-agent `FINDING_LINES_PASS_PROMPT`).
+const PASS_OPENING: &str = "Your answer has no finding lines";
+/// What a second pass that paused for the person to sign in replies.
+const PAUSE_WORDS: &str =
+    "Sign in on the review site's highlighted fields, then choose Let Octo continue.";
+/// What a second pass that read the device's page replies, with no finding line.
+const SECOND_PROSE: &str = "I read the Laptop 12's own page.";
 
 fn unread_line(pages: &[&str]) -> String {
     json!({ "unread": pages }).to_string()
@@ -87,12 +99,70 @@ fn a_stop_between_the_passes_ends_the_message_via_proxy() -> Result<()> {
     run_on_a_large_stack(Case::StopBetween)
 }
 
+/// A turn whose answer names unread pages and no finding line gets no second pass: the wrap-up
+/// pass asks for the lines of the pages it read. Told those pages, a second pass's lines would
+/// have kept the wrap-up from asking, and the pages the turn read would reach no note and no
+/// build.
+#[test]
+fn a_turn_that_wrote_no_finding_line_gets_the_wrap_up_not_a_second_pass_via_proxy() -> Result<()> {
+    if std::env::var(CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(
+            CHILD,
+            "browser_hand_back::unread_pages::a_turn_that_wrote_no_finding_line_gets_the_wrap_up_not_a_second_pass_via_proxy",
+            "browser-unread-pages-no-lines",
+        );
+    }
+    run_on_a_large_stack(Case::FirstWritesNoLines)
+}
+
+/// A second pass that pauses for the person: they read what they do next, and the turn's note
+/// keeps the lines of the pages its first pass read, which a later building turn reads. Before,
+/// the pause's words replaced the turn's whole answer, and those pages were lost.
+#[test]
+fn a_second_pass_that_pauses_keeps_the_first_pass_findings_via_proxy() -> Result<()> {
+    if std::env::var(CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(
+            CHILD,
+            "browser_hand_back::unread_pages::a_second_pass_that_pauses_keeps_the_first_pass_findings_via_proxy",
+            "browser-unread-pages-pause",
+        );
+    }
+    run_on_a_large_stack(Case::SecondPassPauses)
+}
+
+/// A second pass that opens a page and answers with no finding line: the page its step opened
+/// joins the turn's lines, by address, as the end of a turn with none does.
+#[test]
+fn a_second_pass_with_no_finding_line_keeps_the_page_it_opened_via_proxy() -> Result<()> {
+    if std::env::var(CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(
+            CHILD,
+            "browser_hand_back::unread_pages::a_second_pass_with_no_finding_line_keeps_the_page_it_opened_via_proxy",
+            "browser-unread-pages-prose",
+        );
+    }
+    run_on_a_large_stack(Case::SecondPassWritesNoLines)
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Case {
     /// The turn names three unread pages, and nothing stops the second pass.
     Reads,
     /// The person presses Stop once the turn has answered.
     StopBetween,
+    /// The turn's answer names unread pages and holds no finding line.
+    FirstWritesNoLines,
+    /// The second pass pauses for the person to sign in, on the device's browser.
+    SecondPassPauses,
+    /// The second pass opens a page on the device's browser and writes no finding line.
+    SecondPassWritesNoLines,
+}
+
+impl Case {
+    /// Whether its second pass takes a step in the browser on the person's device.
+    fn on_the_device(self) -> bool {
+        matches!(self, Case::SecondPassPauses | Case::SecondPassWritesNoLines)
+    }
 }
 
 fn run_on_a_large_stack(case: Case) -> Result<()> {
@@ -113,6 +183,7 @@ fn run_on_a_large_stack(case: Case) -> Result<()> {
 }
 
 struct Provider {
+    case: Case,
     requests: StdMutex<Vec<Value>>,
 }
 
@@ -169,10 +240,28 @@ async fn provider_request(
         Some(format!("Bearer {PROVIDER_KEY}").as_str())
     );
     state.requests.lock().unwrap().push(body.clone());
-    if last_user_text(&body).contains(SECOND_PASS_OPENING) {
-        final_answer(&second_answer())
-    } else {
-        final_answer(&first_answer())
+    let turn = last_user_text(&body);
+    if turn.contains(PASS_OPENING) {
+        return final_answer(&format!("{READ_HOME}\n{READ_13}"));
+    }
+    if !turn.contains(SECOND_PASS_OPENING) {
+        return match state.case {
+            Case::FirstWritesNoLines => {
+                final_answer(&format!("{FIRST_WORDS}\n{}", unread_line(&UNREAD)))
+            }
+            _ => final_answer(&first_answer()),
+        };
+    }
+    match (state.case, step_outputs(&body)) {
+        (Case::SecondPassPauses, 0) => {
+            device_step("pause", "request_human_input", json!({ "indices": [0] }))
+        }
+        (Case::SecondPassPauses, _) => final_answer(PAUSE_WORDS),
+        (Case::SecondPassWritesNoLines, 0) => {
+            device_step("open", "navigate", json!({ "url": DEVICE_PAGE }))
+        }
+        (Case::SecondPassWritesNoLines, _) => final_answer(SECOND_PROSE),
+        _ => final_answer(&second_answer()),
     }
 }
 
@@ -257,6 +346,7 @@ async fn run_case(case: Case) -> Result<()> {
     ));
 
     let state = Arc::new(Provider {
+        case,
         requests: StdMutex::new(Vec::new()),
     });
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
@@ -295,8 +385,69 @@ async fn run_case(case: Case) -> Result<()> {
         format!("http://{proxy_address}/v1"),
     ));
 
-    two_passes(&workspace, project_id, &state, case).await?;
+    // The browser on the person's device, which a second pass that takes a step uses.
+    let mut device = None;
+    if case.on_the_device() {
+        let browser = Arc::new(DeviceBrowser {
+            project_id,
+            secret: false,
+            calls: StdMutex::new(Vec::new()),
+        });
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let app = Router::new()
+            .route("/mcp", post(device_browser))
+            .with_state(browser.clone());
+        let (browser_shutdown, browser_rx) = oneshot::channel();
+        let browser_task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = browser_rx.await;
+                })
+                .await
+        });
+        for (key, value) in [
+            (
+                "INSTAFY_PERSONAL_BROWSER_CONTROL_URL",
+                format!("http://{address}"),
+            ),
+            (
+                "INSTAFY_PERSONAL_BROWSER_CONTROL_TOKEN",
+                DEVICE_TOKEN.to_string(),
+            ),
+            (
+                "INSTAFY_PERSONAL_BROWSER_PROJECT_ID",
+                project_id.to_string(),
+            ),
+            (
+                "INSTAFY_RUNTIME_AGENT_BIN",
+                std::env::current_exe()?.to_string_lossy().into_owned(),
+            ),
+        ] {
+            settings.push(EnvGuard::set(key, value));
+        }
+        device = Some((browser, ChildGuard::new(browser_shutdown), browser_task));
+    }
 
+    match case {
+        Case::Reads | Case::StopBetween => two_passes(&workspace, project_id, &state, case).await?,
+        Case::FirstWritesNoLines => no_lines_no_second_pass(&workspace, project_id, &state).await?,
+        Case::SecondPassPauses | Case::SecondPassWritesNoLines => {
+            let calls = second_pass_on_the_device(&workspace, project_id, &state, case).await?;
+            let browser = &device.as_ref().context("the device's browser")?.0;
+            let expected = if case == Case::SecondPassPauses {
+                "request_human_input"
+            } else {
+                "navigate"
+            };
+            assert_eq!(*browser.calls.lock().unwrap(), [expected], "{calls}");
+        }
+    }
+
+    if let Some((_, guard, task)) = device {
+        drop(guard);
+        task.await??;
+    }
     drop(settings);
     drop(proxy_guard);
     drop(stub_guard);
@@ -347,12 +498,14 @@ async fn two_passes(
         .clone()
         .context("the browser turn's thread")?;
     let job = browser_job(project_id, true);
-    let pass = |stopped_for_the_person: bool, refused_a_step: bool| UnreadPagesPass {
+    let pass = |stopped_for_the_person: bool, refused_a_step: bool| BrowserTurnAnswer {
         options: &options,
         thread: Some(thread.clone()),
         used_the_browser: true,
         stopped_for_the_person,
         refused_a_step,
+        pages: Vec::new(),
+        final_json: &turn.final_json,
         progress: None,
         runtime_id: Uuid::nil(),
         paused_already: false,
@@ -369,7 +522,7 @@ async fn two_passes(
     ] {
         let mut summary = first_answer();
         let task_usage = TaskUsage::default();
-        let read = read_the_unread_pages(
+        let read = end_browser_turn_answer(
             &client,
             job,
             pass(stopped, refused),
@@ -390,12 +543,12 @@ async fn two_passes(
         let mut summary = first_answer();
         let task_usage = TaskUsage::default();
         let read =
-            read_the_unread_pages(&client, &job, pass(false, false), &mut summary, &task_usage)
+            end_browser_turn_answer(&client, &job, pass(false, false), &mut summary, &task_usage)
                 .await;
         assert!(read.artifacts.is_empty(), "{:?}", read.artifacts);
         // Not even started: a pass the Stop would only cut short is no end of the message.
         assert!(task_usage.artifact().is_none(), "no pass was started");
-        assert!(!read.stopped_for_the_person);
+        assert!(read.messages.is_empty());
         assert_eq!(summary, first_lines);
         assert!(second_passes(state).is_empty(), "no pass after a Stop");
         assert_eq!(state.requests.lock().unwrap().len(), 1, "the turn only");
@@ -406,7 +559,7 @@ async fn two_passes(
     let task_usage = TaskUsage::default();
     let read = tokio::time::timeout(
         Duration::from_secs(60),
-        read_the_unread_pages(&client, &job, pass(false, false), &mut summary, &task_usage),
+        end_browser_turn_answer(&client, &job, pass(false, false), &mut summary, &task_usage),
     )
     .await
     .context("the second pass timed out")?;
@@ -420,7 +573,7 @@ async fn two_passes(
         "{asked}"
     );
     for read_already in [
-        "https://maker.example/laptop-13",
+        "https://maker.example/laptops/13",
         "https://maker.example/\"",
     ] {
         assert!(!asked.contains(read_already), "{read_already}: {asked}");
@@ -448,31 +601,23 @@ async fn two_passes(
         !phases.is_empty() && phases.iter().all(|phase| *phase == "recovery"),
         "{receipt}"
     );
-    assert!(!read.stopped_for_the_person);
-    // The turn ends with every page both passes read, after the words of the last, and with no
-    // unread line: the second pass's starts no third.
+    // The turn ends with every page both passes read, after the words of both, and with no
+    // unread line: the second pass's starts no third, and with its lines the end of the turn
+    // asks for nothing more.
     let lines = [READ_HOME, READ_13, READ_12, READ_16, READ_12_REVIEW].join("\n");
-    assert_eq!(summary, format!("{SECOND_WORDS}\n\n{lines}"));
+    assert_eq!(
+        summary,
+        format!("{FIRST_WORDS}\n\n{SECOND_WORDS}\n\n{lines}")
+    );
     assert!(!summary.contains(STILL_UNREAD), "{summary}");
-
-    // The end of the turn asks for nothing more: it has its lines.
-    let artifacts = end_browser_turn_answer(
-        &client,
-        &job,
-        BrowserTurnAnswer {
-            options: &options,
-            thread: Some(thread.clone()),
-            used_the_browser: true,
-            stopped_for_the_person: false,
-            pages: Vec::new(),
-            final_json: &turn.final_json,
-        },
-        &mut summary,
-        &TaskUsage::default(),
-    )
-    .await;
-    assert!(artifacts.is_empty(), "{artifacts:?}");
     assert_eq!(state.requests.lock().unwrap().len(), 2, "no third pass");
+    assert!(
+        read.artifacts
+            .iter()
+            .all(|artifact| artifact["metadata"]["purpose"] != "finding-lines-wrap-up"),
+        "{:?}",
+        read.artifacts
+    );
 
     // Then the build: the turn's note names every page read, which the hand-back goes on.
     let mut ended = runtime_agent::jobs::JobExecution {
@@ -494,4 +639,180 @@ async fn two_passes(
         json!({ "pages": 5, "pagesRead": 5 })
     );
     Ok(())
+}
+
+/// The browser turn's run, on a thread of its own that a pass resumes, and its answer as the end
+/// of the turn reads it.
+async fn the_turn(
+    client: &CodexClient,
+    options: &CodexRunOptions,
+) -> Result<runtime_agent::codex::CodexRunOutput> {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        client.execute_with_options(REQUEST, None, options.clone()),
+    )
+    .await
+    .context("the browser turn timed out")?
+}
+
+/// The answer of a browser turn whose findings go back to the building turn, as its job ends it.
+fn its_answer<'a>(
+    options: &'a CodexRunOptions,
+    turn: &'a runtime_agent::codex::CodexRunOutput,
+) -> Result<BrowserTurnAnswer<'a>> {
+    Ok(BrowserTurnAnswer {
+        options,
+        thread: Some(
+            turn.provider_conversation_state
+                .clone()
+                .context("the browser turn's thread")?,
+        ),
+        used_the_browser: true,
+        stopped_for_the_person: false,
+        refused_a_step: false,
+        pages: vec!["https://maker.example/".to_string()],
+        final_json: &turn.final_json,
+        progress: None,
+        runtime_id: Uuid::nil(),
+        paused_already: false,
+    })
+}
+
+async fn no_lines_no_second_pass(
+    workspace: &Path,
+    project_id: Uuid,
+    state: &Provider,
+) -> Result<()> {
+    let client = CodexClient::new(CodexConfig {
+        workspace_dir: workspace.to_path_buf(),
+    });
+    let options = CodexRunOptions {
+        persist_conversation_thread: true,
+        ..Default::default()
+    };
+    let turn = the_turn(&client, &options).await?;
+    let mut summary = turn.final_json["summary"]
+        .as_str()
+        .context("the turn's answer")?
+        .to_string();
+    assert_eq!(summary, format!("{FIRST_WORDS}\n{}", unread_line(&UNREAD)));
+    let job = browser_job(project_id, true);
+    let ended = tokio::time::timeout(
+        Duration::from_secs(60),
+        end_browser_turn_answer(
+            &client,
+            &job,
+            its_answer(&options, &turn)?,
+            &mut summary,
+            &TaskUsage::default(),
+        ),
+    )
+    .await
+    .context("the end of the turn timed out")?;
+    assert!(second_passes(state).is_empty(), "no second pass");
+    let requests = state.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "the turn, then the wrap-up pass");
+    assert!(last_user_text(&requests[1]).contains(PASS_OPENING));
+    assert!(
+        ended
+            .artifacts
+            .iter()
+            .any(|artifact| artifact["metadata"]["purpose"] == "finding-lines-wrap-up"),
+        "{:?}",
+        ended.artifacts
+    );
+    // The pages the turn read reach its note, and its unread line is gone.
+    assert_eq!(summary, format!("{FIRST_WORDS}\n\n{READ_HOME}\n{READ_13}"));
+    Ok(())
+}
+
+/// A second pass that takes a step in the browser on the person's device: it pauses for the
+/// person to sign in, or opens a page and answers with no finding line. Returns the calls that
+/// browser saw, for the message of a failed check.
+async fn second_pass_on_the_device(
+    workspace: &Path,
+    project_id: Uuid,
+    state: &Provider,
+    case: Case,
+) -> Result<String> {
+    let client = CodexClient::new(CodexConfig {
+        workspace_dir: workspace.to_path_buf(),
+    });
+    let options = CodexRunOptions {
+        persist_conversation_thread: true,
+        personal_browser: true,
+        project_id: Some(project_id),
+        ..Default::default()
+    };
+    let turn = the_turn(&client, &options).await?;
+    let mut summary = first_answer();
+    let job = browser_job(project_id, true);
+    let ended = tokio::time::timeout(
+        Duration::from_secs(60),
+        end_browser_turn_answer(
+            &client,
+            &job,
+            its_answer(&options, &turn)?,
+            &mut summary,
+            &TaskUsage::default(),
+        ),
+    )
+    .await
+    .context("the second pass timed out")?;
+    let passes = second_passes(state);
+    assert_eq!(
+        passes.len(),
+        2,
+        "one second pass: its step, then its answer"
+    );
+    // No wrap-up pass: each pass's lines are its own.
+    assert!(
+        state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| !last_user_text(request).contains(PASS_OPENING)),
+        "no wrap-up pass"
+    );
+    let first_lines = format!("{READ_HOME}\n{READ_13}");
+    let mut done = runtime_agent::jobs::JobExecution {
+        summary: summary.clone(),
+        suggested_replies: Vec::new(),
+        provider: "codex-embedded".to_string(),
+        artifacts: Vec::new(),
+        credit_snapshot: None,
+        provider_conversation_state: None,
+        messages: ended.messages.clone(),
+        messages_streamed: false,
+        final_messages: Vec::new(),
+    };
+    move_findings_into_details(&job, &mut done);
+    let note = done
+        .final_messages
+        .first()
+        .map(|message| message.content.clone())
+        .unwrap_or_default();
+    match case {
+        Case::SecondPassPauses => {
+            // The person reads what they do next, and the note keeps what the first pass read.
+            assert_eq!(summary, format!("{PAUSE_WORDS}\n\n{first_lines}"));
+            assert_eq!(done.summary, PAUSE_WORDS);
+            assert_eq!(note, first_lines);
+        }
+        _ => {
+            // The page its step opened joins the turn's lines, by address.
+            let opened = format!("{{\"url\":\"{DEVICE_PAGE}\"}}");
+            assert_eq!(
+                summary,
+                format!("{FIRST_WORDS}\n\n{SECOND_PROSE}\n\n{first_lines}\n{opened}")
+            );
+            assert_eq!(done.summary, "", "a hand-back follows: no reply bubble");
+            assert_eq!(
+                note,
+                format!("{FIRST_WORDS}\n\n{SECOND_PROSE}\n\n{first_lines}\n{opened}")
+            );
+        }
+    }
+    Ok(format!("{:?}", ended.messages.len()))
 }
