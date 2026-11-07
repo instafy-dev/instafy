@@ -5120,6 +5120,13 @@ pub(crate) async fn lease_next_agent_job(
                  payload = aj.payload - 'requeuedAt' - 'requeuedReason'
              from candidate
              where aj.id = candidate.id
+               -- The candidate came from this statement's snapshot, and its
+               -- lock clause takes no row lock (it reads a WITH query). A
+               -- Stop or another lease that changed the job since then has
+               -- committed by the time this update gets the row, and the
+               -- update reads the row again: only a job still queued is
+               -- leased, never one a Stop cancelled meanwhile.
+               and aj.status = 'queued'
              returning aj.*"),
             &[
                 project_id,
