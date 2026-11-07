@@ -7085,8 +7085,8 @@ mod tests {
         // a page: a turn that ends on the blank tab of a browser that has
         // just started fails. The page is the official site of what the task
         // names, and a task that names nothing ends at once: a routed browser
-        // part whose task named no laptop opened nvidia.com, "the official
-        // site of what the task is about" (a local test, Nov 6).
+        // part whose task named no laptop opened a site it never named, "the
+        // official site of what the task is about" (a local test, Nov 6).
         for instructions in [
             SHARED_BROWSER_DEVELOPER_INSTRUCTIONS,
             SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS,

@@ -4941,7 +4941,8 @@ fn blank_page_is_observed_as_blank_without_any_approval_or_page_content() {
     assert_eq!(payload["interactiveElements"], json!([]));
     // It says where to go: the address the task names, or the official site of what it names.
     // A task that names nothing ends at once: given "the official site of what the task is
-    // about", a routed task that named no laptop opened nvidia.com (a local test, Nov 6).
+    // about", a routed task that named no laptop opened a site it never named (a local test,
+    // Nov 6).
     let message = payload["message"].as_str().unwrap();
     assert!(message.contains("navigate"), "{message}");
     assert!(
