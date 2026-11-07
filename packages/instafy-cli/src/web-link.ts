@@ -23,7 +23,7 @@ export const WEB_LINK_TELL: Record<linkOnly.LinkOnlyKind, string> = {
     "their own tab (type the `typeIn` values there, if any), pick the pages to compare, and press \"Send page to Octo\" " +
     "on each. Work only from the pages they send.",
   "no-reuse":
-    "This site may be read; its terms bar reusing its content. Summarize it in your own words, cite \"seen <date> on " +
+    "This site may be read; the configured site policy restricts reusing its content. Summarize it in your own words, cite \"seen <date> on " +
     "<host>\" and link back; never copy its reviews, photos or price lists, and keep its content out of anything " +
     "published or shared by public link.",
 };

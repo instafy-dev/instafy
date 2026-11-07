@@ -14,13 +14,12 @@ import { WEB_LINK_EXIT_OK, WEB_LINK_EXIT_USAGE, parseLinkValues, registerWebLink
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const cliBin = path.resolve(here, "..", "bin", "instafy.js");
-const SKILL_LIST_PATH = path.resolve(here, "../../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json");
+const SKILL_LIST_PATH = path.resolve(here, "../../browser-action-policy/test/link-only-policy.json");
 type ListedSite = {
   name: string;
   match: string[];
   kind: string;
   why: string;
-  terms: { url: string; checked: string; quote: string; note?: string };
   home: string;
   deepLinks?: boolean;
   search?: string;
@@ -30,8 +29,6 @@ const SKILL_LIST = JSON.parse(fs.readFileSync(SKILL_LIST_PATH, "utf8")) as {
   sites: ListedSite[];
 };
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-web-link-"));
-/** Words of a clause that bars copying or republishing a site's content. */
-const REUSE_CLAUSE = /\b(?:cop(?:y|ying|ies)|reproduc\w*|republish\w*|redistribut\w*|re-?use|re-?sell\w*|resale)\b/i;
 afterAll(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
 const bundled = () => {
@@ -45,38 +42,7 @@ const site = (name: string) => SKILL_LIST.sites.find((entry) => entry.name === n
 const compiled = (sites: unknown[]) =>
   linkOnly.compileLinkOnlyList({ schema: LINK_ONLY_SCHEMA, placeholders: SKILL_LIST.placeholders, sites }, { source: "test" });
 
-describe("the skill's list: kinds, evidence and guided-mode data", () => {
-  it("gives every site a kind and the terms it rests on: the page, the day it was read and the deciding clause", () => {
-    expect(SKILL_LIST.sites.length).toBeGreaterThan(0);
-    for (const entry of SKILL_LIST.sites) {
-      expect(linkOnly.KINDS, entry.name).toContain(entry.kind);
-      expect(entry.terms.url, entry.name).toMatch(/^https:\/\/[^\s]+$/);
-      expect(entry.terms.checked, entry.name).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-      expect(Number.isNaN(Date.parse(entry.terms.checked)), entry.name).toBe(false);
-      expect(entry.terms.quote.trim().length, entry.name).toBeGreaterThan(10);
-      expect(entry.terms.quote.length, entry.name).toBeLessThanOrEqual(200);
-      // A site is read but not reused only on a clause of its terms that bars copying or republishing (the clause
-      // that makes it "no-reuse"), with a note on why reading is not barred. Anything less is unclear: "no-agents".
-      if (entry.kind === "no-reuse") {
-        expect(entry.terms.note?.trim(), entry.name).toBeTruthy();
-        expect(entry.terms.quote, `${entry.name}: the quote is the clause that bars reuse`).toMatch(REUSE_CLAUSE);
-      }
-    }
-    // Most sites bar agents outright; the strict kind is the default.
-    expect(SKILL_LIST.sites.filter((entry) => entry.kind === "no-agents").length).toBeGreaterThan(SKILL_LIST.sites.length / 2);
-    for (const name of ["Booking.com", "Agoda", "Airbnb", "Amazon", "Tripadvisor", "Expedia group", "RunRepeat"]) expect(site(name).kind, name).toBe("no-agents");
-  });
-
-  it("knows a clause that bars reuse from one that does not", () => {
-    for (const quote of ["You may not copy, reproduce or republish any content", "no reuse of our reviews without a licence", "must not redistribute the data"]) {
-      expect(quote).toMatch(REUSE_CLAUSE);
-    }
-    // A price for a data licence, or a page with no terms, bars nothing: such a site stays "no-agents".
-    for (const quote of ["Our most basic license agreement start at €1,000 per year", "Terms of use", "Contact us for API access"]) {
-      expect(quote).not.toMatch(REUSE_CLAUSE);
-    }
-  });
-
+describe("explicit policy guided-mode data", () => {
   it("compiles every home page and search template without a warning, each on the site's own hosts", () => {
     const list = bundled();
     for (const entry of SKILL_LIST.sites) {
@@ -290,7 +256,7 @@ describe("the command", () => {
     const out: string[] = [];
     return { out, io: { out: (line: string) => out.push(line), err: (line: string) => out.push(line) } };
   };
-  const deps = { skillRoots: [] as string[] };
+  const deps = { skillRoots: [] as string[], bundledLinkOnly: SKILL_LIST };
 
   it("prints the link, the kind and what Octo does with it, as JSON or text", async () => {
     const json = io();
@@ -322,7 +288,7 @@ describe("the command", () => {
       JSON.stringify({ schema: LINK_ONLY_SCHEMA, sites: [{ name: "Example Reviews", match: ["reviews.example"], kind: "no-reuse", why: "terms bar copying", home: "https://reviews.example/" }] }),
     );
     const reuse = io();
-    expect(await runWebLinkCli("reviews.example", [], { json: true }, reuse.io, { skillRoots: [skills] })).toBe(WEB_LINK_EXIT_OK);
+    expect(await runWebLinkCli("reviews.example", [], { json: true }, reuse.io, { skillRoots: [skills], bundledLinkOnly: SKILL_LIST })).toBe(WEB_LINK_EXIT_OK);
     expect(JSON.parse(reuse.out[0]!)).toMatchObject({ kind: "no-reuse", link: "https://reviews.example/" });
     expect(JSON.parse(reuse.out[0]!).tell).toMatch(/never copy its reviews, photos or price lists/);
   });
@@ -361,7 +327,7 @@ describe("the command", () => {
         sites: [{ name: "Example Shop", match: ["shop.example"], why: "terms bar AI agents", home: "https://shop.example/", search: "https://shop.example/?q={query}" }],
       }),
     );
-    expect(webLink("Example Shop", { query: "kettle" }, { skillRoots: [skills] })).toMatchObject({ ok: true, kind: "no-agents", link: "https://shop.example/?q=kettle" });
+    expect(webLink("Example Shop", { query: "kettle" }, { skillRoots: [skills], bundledLinkOnly: SKILL_LIST })).toMatchObject({ ok: true, kind: "no-agents", link: "https://shop.example/?q=kettle" });
   });
 
   it("is registered as `instafy web link`, and the built CLI carries it", () => {
@@ -370,6 +336,9 @@ describe("the command", () => {
     const web = program.commands.find((command) => command.name() === "web")!;
     expect(web.commands.map((command) => command.name())).toEqual(["read", "budget", "link"]);
     const home = fs.mkdtempSync(path.join(tmp, "home-"));
+    const policy = path.join(home, ".agents", "skills", "configured", "references", LINK_ONLY_FILE);
+    fs.mkdirSync(path.dirname(policy), { recursive: true });
+    fs.writeFileSync(policy, JSON.stringify(SKILL_LIST));
     const run = spawnSync(process.execPath, [cliBin, "web", "link", "booking.com", "query=Lisbon", "adults=2", "--json"], {
       cwd: home,
       env: { ...process.env, HOME: home, USERPROFILE: home, INSTAFY_SKILL_PACKS_DIR: "" },

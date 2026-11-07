@@ -1,7 +1,7 @@
 /** Where a wrapper's address writes the site it serves. */
 export type LinkOnlyEmbed = "subdomain" | "subdomain-dashes" | "path" | "query";
 
-/** What a site's terms bar: AI agents and automated access, or only copying and republishing. */
+/** What the configured policy restricts: agent access, or only copying and republishing. */
 export type LinkOnlyKind = "no-agents" | "no-reuse";
 
 /** The formats a placeholder's values take. */

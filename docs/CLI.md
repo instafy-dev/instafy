@@ -689,7 +689,7 @@ framed (`X-Frame-Options` or CSP `frame-ancestors`).
 
 What the page may load is Instafy's rule, not the page's: the site's own origin directly, every other public
 address through the runtime image's egress proxy (public addresses on ports 80 and 443 only), and nothing else.
-Another local port, `localhost` names, private and reserved addresses and every site on the link-only list (a
+Another local port, `localhost` names, private and reserved addresses and every site restricted by an explicit configured policy (a
 `no-reuse` one too, since the check's picture can become the card's) are blocked, and listed under `blocked` with
 the reason rather than as errors. Redirect hops follow the same rules: every connection off the site passes
 Instafy's own gate in front of the egress proxy, which refuses by the whole address of a plain-HTTP request and by the
@@ -751,8 +751,8 @@ Each page comes back with:
 | `provenance` | `{requestedUrl, finalUrl, title, readAt, viewer: "server fetch"}`, to cite the page |
 | `text` | The page text, at most `--max-chars` (default 4,000, at most 12,000), wrapped in `<untrusted_page_content url=… read_at=… viewer=…>`. With `--find`, a page of up to 12,000 characters comes back whole, so a line that names no term (a place's hours under its name) is never cut away from the lines around it; only a longer page is cut to the passages that mention the terms (at most `--max-chars`) |
 | `find` | With `--find`: the `terms`, how many `passages` mention them and how many lines (`matchedLines`). A passage is each matching line with the two lines above it and the one below. On a page of up to 12,000 characters, `find.text` holds the passages, wrapped like `text` and ahead of it, its links and its data, so a reader that keeps only the start and the end of the output still sees them; `whole: true` when `text` is all of the page, and not when the page's HTML was too large to read whole (`truncated: true`) |
-| `links` | Plain `<a href>` links (`--links`, default 30, at most 200), each marked `linkOnly` when it leads to a `no-agents` link-only site or a wrapper's copy of one, and `noReuse` when it leads to a `no-reuse` site |
-| `noReuse` | `{site, reason, via?}` when the page is on a `no-reuse` site (its terms bar reusing its content, not reading it) or a copy of one; `tell` then says how its content may be used |
+| `links` | Plain `<a href>` links (`--links`, default 30, at most 200), each marked `linkOnly` or `noReuse` when an explicit configured site rule applies, including configured wrapper copies |
+| `noReuse` | `{site, reason, via?}` when an explicit `no-reuse` rule applies to the page or a configured wrapper copy; `tell` then says how its content may be used |
 | `structured` | The page's own JSON-LD, microdata and descriptive meta tags, raw and bounded (8,000 characters in all; items that do not fit are left out and counted in `structuredDropped`); skills map the fields they need |
 | `redirects`, `httpStatus`, `contentHash`, `fromCache` | How the page was reached, and whether it came from this workspace's cache |
 
@@ -768,39 +768,35 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   anthropic-ai, PerplexityBot, Perplexity-User, CCBot, Google-Extended, Applebot-Extended, meta-externalagent,
   meta-externalfetcher, Bytespider, Amazonbot, cohere-ai, MistralAI-User, DuckAssistBot) is not read. A robots.txt
   that answers 5xx counts as "disallow everything".
-- **Link-only sites.** The list is the `instafy-web-research` skill's own data (`references/link-only-sites.json`), and
-  each site has a `kind`. A `no-agents` site (its terms ban AI agents, bots or automated access; also a site with no
-  kind or an unknown one) is never fetched, nor a translator's, cache's or archive's copy of one, and no request goes
-  to one at any redirect hop (robots.txt redirects included). A `no-reuse` site (its terms ban copying or republishing,
-  not reading) is read like any page, robots.txt included, and comes back with `noReuse` and a `tell`: summarize it in
-  your own words, cite "seen <date> on <host>", link back, never copy its reviews, photos or price lists, and keep its
-  content out of anything published or shared by public link. Each site also records the `terms` it rests on (`url`,
-  the day it was `checked`, a short `quote`, an optional `note`). The CLI is built with that file, so
-  the list applies wherever the command runs; if it cannot be loaded, nothing is read (exit 70). A skill folder's own
-  copy (`<skill>/references/link-only-sites.json` or `<skill>/link-only-sites.json` under `.agents/skills/` in the
-  space and its parents, `~/.agents/skills/`, and the skill packs under `INSTAFY_SKILL_PACKS_DIR`), such as the
-  space's copy of the list, only adds sites and wrappers, or makes a site stricter: where several entries match an
-  address, the strictest kind wins, so a copy cannot turn a `no-agents` site into a `no-reuse` one:
+- **Optional site rules.** Instafy ships no curated website denylist. The bundled
+  `instafy-web-research/references/link-only-sites.json` has an empty `sites` array. Provider-native search uses
+  the provider's own source policies. Direct readers still enforce private-address checks, robots.txt, access
+  refusals and their budgets.
+
+  Explicit skill or workspace policy files can restrict direct readers: `<skill>/references/link-only-sites.json`
+  or `<skill>/link-only-sites.json` under `.agents/skills/` in the space and its parents, `~/.agents/skills/`,
+  or skill packs under `INSTAFY_SKILL_PACKS_DIR`. A `no-agents` entry refuses a site and configured wrapper
+  copies; a `no-reuse` entry permits reading but marks content with its configured reuse restriction. Unknown
+  kinds remain restrictive. Overlapping configured rules use the strictest kind. Generic wrapper recognition
+  and link-template fields remain available to these explicit policies.
 
   ```json
   { "schema": "instafy.link-only-sites@1",
-    "sites": [{ "name": "Example Travel", "match": ["example-travel.com", "exampletravel.*"], "kind": "no-agents", "why": "terms ban AI agents" }],
+    "sites": [{ "name": "Example Travel", "match": ["example-travel.com"], "kind": "no-agents", "why": "Workspace owner requires manual access" }],
     "wrappers": [{ "name": "Example Proxy", "match": ["proxy.example"], "embeds": ["subdomain"], "why": "serves sites at <host>.proxy.example" }] }
   ```
 
-  A pattern covers its subdomains; `name.*` covers `name` followed by one or two 2-3 letter labels (`name.de`,
-  `name.co.uk`). Hosts match however the address spells them (case, trailing dots, port, user info, international
-  names). A wrapper is a service that serves other sites' pages at its own address; `embeds` says where its address
-  writes the site (`subdomain`, `subdomain-dashes` as in `www-example-com.translate.goog`, `path` as in
-  `web.archive.org/web/2024/https://example.com/`, or `query`). Wrappers nest (a translator's copy of an archive's copy is
-  the archived site), every host written in a wrapper's path or query counts, and an address of any length is checked; a
-  copy the check cannot see through (nested more than 32 wrappers deep, or naming more than 4,096 hosts) is refused. A
-  page that says it is a copy of another address (the Memento `Link: <…>; rel="original"` header archives send) is
-  checked as that address too, also when it is served from the cache. A copy that does not
-  parse, has another schema or is not a list is ignored with a warning, and the bundled list still applies.
-  `guards.linkOnly` reports the sites (and how many are `noReuse`), wrappers and sources (`bundled` and each copy) in
-  force. The matching is `@instafy/browser-action-policy`'s `linkOnly.js`, which the Shared and Personal Browser run
-  too: they refuse `no-agents` sites the same way and let `no-reuse` sites through.
+  A pattern covers its subdomains; `name.*` covers `name` followed by one or two 2–3 letter labels
+  (`name.de`, `name.co.uk`). Matching normalizes host spelling, including international names. Configured
+  wrappers and Memento `rel="original"` headers are checked as copies of the original site. With effective
+  restrictions, wrapper parsing limits fail closed; an empty policy produces no site-policy refusals.
+  The shared matcher is `@instafy/browser-action-policy`'s `linkOnly.js`.
+
+  Missing or malformed bundled configuration still fails closed (exit 70); a valid empty list is supported.
+  Malformed additional files are ignored with a warning. The CLI ignores exact retired Instafy-generated
+  defaults wherever it discovers them; edited policies remain effective. `guards.linkOnly` reports the effective
+  sites, wrappers and sources. Shared Browser supports workspace additions; Personal Browser currently uses
+  only the empty bundled policy, not workspace additions.
 - **Private networks.** Every hop's host is resolved and every address checked. Loopback, private, link-local,
   CGNAT, multicast, documentation, metadata (`169.254.169.254`) and other reserved addresses, their IPv6, IPv4-mapped,
   IPv4-translated, NAT64 (including local-use `64:ff9b:1::/48`) and 6to4 forms, and local names (`localhost`,
@@ -817,7 +813,7 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   (another tool, user agent or browser, or a copy at another address), and give the person the plain link. The
   `tell` says what is still open: the site's other pages (such as each product's own page, when a listing page
   stopped), each checked on its own, and other sources; only other sources after a refused address or a stop of the
-  whole site (a link-only site, a 429 or bot check, or a robots.txt that refuses every page: one that cannot be read,
+  whole site (an explicitly restricted site, a 429 or bot check, or a robots.txt that refuses every page: one that cannot be read,
   or whose rules keep any of the agents above out of every path, as `Disallow: /` does).
 - **Redaction.** The browsers' `redaction.js` (`packages/browser-action-policy`) masks keys and tokens in the text,
   title, links, addresses and structured data before anything is printed or cached. A page that shows a credential is
@@ -890,26 +886,27 @@ no page and no address under `hosts` does not resolve. Every other build, the pu
 | 64 | Bad options or URLs |
 | 70 | The command itself failed, so nothing was read |
 
-### Guiding the person to a link-only site: `instafy web link`
+### Links for configured manual-access sites: `instafy web link`
 
 `instafy web link <site> [name=value…] --json` gives the link the person opens in their own tab when a task needs a
-`no-agents` site (guided mode). It reads and fetches nothing. `<site>` is the site's name in the list, one of its hosts
-or an address on it; the values fill the placeholders of the site's `search` template.
+site covered by an explicit policy (guided mode). It reads and fetches nothing. There are no bundled sites or
+guided templates. `<site>` is a configured site name, one of its hosts or an address on it; values fill its optional
+`search` template.
 
 ```bash
-instafy web link booking.com query=Lisbon checkin=2026-11-12 checkout=2026-11-14 adults=2 --json
-instafy web link Agoda query=Lisbon checkin=2026-11-12 --json
+# Requires an explicit site policy with this name and template.
+instafy web link example-travel.com query=Lisbon --json
 ```
 
 The answer is `{ok, site, kind, deepLinks, link, home, typeIn, tell, warnings}`. With a search template, `link` is the
 template filled in: each value checked against its placeholder's format (`text`, `date` as YYYY-MM-DD, or `count`
-from 0 to 99) and URL-encoded (a path value is one segment), with values not given left out of the query. A site whose
-terms bar deep links (`deepLinks: false`), or that has no template, gets its `home` page as `link`, and `typeIn` lists
+from 0 to 99) and URL-encoded (a path value is one segment), with values not given left out of the query. A configured site whose
+policy bars deep links (`deepLinks: false`), or that has no template, gets its `home` page as `link`, and `typeIn` lists
 what to type there. A placeholder the list does not define, or that the site's template does not take, is refused, as
 is a site that is not on the list (exit 64); without a list that loads, exit 70. The list's `placeholders` define the
 names; a template is https on the site's own hosts, with each placeholder a whole path segment or a whole query value,
 or it is left out with a warning. The same list files apply as for `instafy web read`, so a space's copy may add a
-site's template or bar its deep links, but never allow deep links the bundled list bars.
+site's template or bar its deep links. Overlapping configured policies retain the stricter rule.
 
 ### Searching for links: `instafy web search`
 
@@ -934,8 +931,8 @@ count, results, tell, notice, offer?, budget, warnings}`:
 | `no_provider` | No provider in the chain has its key in this space. The first time in a space, `offer` is the `request_secret` action for the first provider's key (`BRAVE_SEARCH_API_KEY`), whose card says: "Everyone in this space can search with this key, up to 100 searches a day. Brave bills the key's owner." |
 
 Each result is `{rank, url, site, text?, linkOnly?, noReuse?, source?, provider?, attribution?}`. `text` holds the title and snippet, redacted and
-wrapped in `<untrusted_page_content url=… read_at=… viewer="search result">` like page text. A result on a `no-agents`
-link-only site, or a translator's, cache's or archive's copy of one, keeps only its link and `linkOnly: {site, reason,
+wrapped in `<untrusted_page_content url=… read_at=… viewer="search result">` like page text. A result restricted by an explicit `no-agents`
+rule, including a configured wrapper copy, keeps only its link and `linkOnly: {site, reason,
 via?}`: its title and snippet, which often carry prices and ratings, are dropped. Links that are not http(s), carry a
 user name or password, use a port other than 80 or 443, or point at a private address or a local name are dropped, and
 the same page twice (by address, without its fragment) is one result.
@@ -987,7 +984,7 @@ or a key goes.
 - **Queries.** At most 200 characters, from the person's request. A query that looks like a key or a password (a known
   key format, a long random token, `password: …`, or a provider's own key) is refused (exit 64) and not sent. E-mail
   addresses, account numbers and numbers of 9 or more digits are removed before sending, and `queryRedacted` says what
-  was removed. `--site` takes a public host; a `no-agents` link-only site is refused there (use `instafy web link`).
+  was removed. `--site` takes a public host; an explicitly configured `no-agents` site is refused there (use `instafy web link`).
 - **Limits.** Per turn, at most 4 searches (separate from the configurable page-load budget); 8 results by default and 20
   at most. One search at a time per provider. An HTTP 429, or a refused key (401 or 403), stops that provider for the
   rest of the turn, and the chain's next provider with a key is tried. Every search ends 5 s before the turn's
@@ -1004,7 +1001,7 @@ the last line of the text. Offline fixtures apply as for `instafy web read` (`vi
 | 70 | The command itself failed (provider or link-only list, fixtures), so nothing was searched |
 
 **Eval.** `packages/instafy-cli/test/web-search-eval.mjs` holds 15 asks on hand-written fixtures (5 trips, 5 maps, 5
-shopping), each with a search answer that lists a link-only hit, a poisoned snippet, a page behind a sign-in and a dead
+shopping), each with an explicit fixture site policy and a search answer that lists a restricted hit, a poisoned snippet, a page behind a sign-in and a dead
 link. Its grader checks a turn's transcript (searches, reads, findings, reply, saved items and cards) by the skill's
 rules: every fact cites a page Octo read; link-only places are links only and never read; no instruction from a snippet
 or page is followed and no query has words the request does not; at most 4 searches and 12 page loads; no snippet is

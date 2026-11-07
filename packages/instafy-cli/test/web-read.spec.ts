@@ -1,6 +1,7 @@
 // `instafy web read`: every rule against a local fixture server, never a live site. Host names resolve through a
 // table the test owns (public-looking addresses), and every dial goes to the fixture server on loopback, so the address
 // checks run on what DNS "said" while no packet leaves this machine.
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { once } from "node:events";
 import fs from "node:fs";
@@ -36,13 +37,15 @@ import {
   type PageResult,
   type WebReadDeps,
 } from "../src/web-read.js";
+import { defaultSkillRoots } from "../src/web-shared.js";
+import { webLink } from "../src/web-link.js";
 import { findPassages, findTerms, pageLines, pageLinks, pageStructured } from "../src/web-page.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const cliBin = path.resolve(here, "..", "bin", "instafy.js");
 const cliBundle = path.resolve(here, "..", "dist", "cli.js");
 // The web-research skill's own list (the single source the CLI bundles) and the matching cases every reader runs.
-const SKILL_LIST_PATH = path.resolve(here, "../../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json");
+const SKILL_LIST_PATH = path.resolve(here, "../../browser-action-policy/test/link-only-policy.json");
 const SKILL_LIST = JSON.parse(fs.readFileSync(SKILL_LIST_PATH, "utf8")) as {
   sites: Array<{ name: string; match: string[]; kind: string }>;
   wrappers: Array<{ name: string; match: string[] }>;
@@ -158,6 +161,7 @@ function deps(over: Partial<WebReadDeps> = {}): WebReadDeps {
     stateDir,
     cacheDir,
     skillRoots: [skillsDir],
+    bundledLinkOnly: SKILL_LIST,
     env: { INSTAFY_TURN_STARTED_AT: turn, INSTAFY_PROJECT_ID: "project-1" },
     cwd: tmp,
     ...over,
@@ -476,20 +480,20 @@ describe("robots.txt for this agent and the AI agents", () => {
   });
 });
 
-describe("link-only sites: the skill's list, bundled, plus what the space adds", () => {
+describe("configured link-only sites plus what the space adds", () => {
   const hitOf = (hit: ReturnType<typeof listedSite>) => (hit ? { site: hit.name, kind: hit.kind, via: hit.via } : null);
   const expected = (kase: LinkOnlyExpectation) => (kase.site ? { site: kase.site, kind: kase.kind ?? "no-agents", via: kase.via ?? [] } : null);
   // A reader refuses only a "no-agents" site; a "no-reuse" one is read.
   const refused = (kase: LinkOnlyExpectation) => Boolean(kase.site) && kase.kind !== "no-reuse";
 
-  it("bundles the web-research skill's own list, so a link-only site is never fetched with no skill installed anywhere", async () => {
-    expect(BUNDLED_LINK_ONLY_SITES).toEqual(SKILL_LIST);
+  it("enforces an explicit test policy before network access", async () => {
+    expect(BUNDLED_LINK_ONLY_SITES).toMatchObject({ sites: [] });
     dns["www.booking.com"] = [PUBLIC_A];
     dns["www.amazon.co.uk"] = [PUBLIC_A];
     routes["www.booking.com/hotel/x.html"] = { body: ARTICLE };
     const report = await read(["https://www.booking.com/hotel/x.html", "https://www.amazon.co.uk/dp/1"], {}, { skillRoots: [] });
     expect(report.pages.map((p) => p.code)).toEqual(["link_only", "link_only"]);
-    expect(report.pages[0]!.message).toMatch(/^Booking\.com is link-only \(terms bar AI agents\)/);
+    expect(report.pages[0]!.message).toMatch(/^Booking\.com is link-only \(restricted by this test policy\)/);
     expect(report.guards.linkOnly.sources).toEqual(["bundled"]);
     expect(report.guards.linkOnly.noReuse).toBe(SKILL_LIST.sites.filter((site) => site.kind === "no-reuse").length);
     expect(hits).toEqual([]);
@@ -510,15 +514,15 @@ describe("link-only sites: the skill's list, bundled, plus what the space adds",
     const withSpaceCopy = [...CASES.spaceCopy.cases, ...CASES.bundled.map((kase) => kase.withSpaceCopy ?? kase)];
     expect(CASES.bundled.some((kase) => refused(kase))).toBe(true);
     expect(withSpaceCopy.some((kase) => kase.site && kase.kind === "no-reuse")).toBe(true);
-    // The bundled list has no "no-reuse" site: each one bars agents, so every bundled case on a site is refused.
+    // The explicit fixture has no "no-reuse" site: every matching fixture case is refused.
     expect(CASES.bundled.filter((kase) => kase.site && !refused(kase))).toEqual([]);
-    const bundled = loadLinkOnlyGuard([]);
+    const bundled = loadLinkOnlyGuard([], SKILL_LIST);
     for (const kase of CASES.bundled) {
       expect(hitOf(listedSite(caseUrl(kase), bundled)), kase.url).toEqual(expected(kase));
       expect(Boolean(linkOnlySite(caseUrl(kase), bundled)), kase.url).toBe(refused(kase));
     }
     writeLinkOnly(skillsDir, "instafy-web-research", CASES.spaceCopy.list);
-    const withSpace = loadLinkOnlyGuard([skillsDir]);
+    const withSpace = loadLinkOnlyGuard([skillsDir], SKILL_LIST);
     // The one entry with a kind it does not know is the strict kind, with a warning.
     expect(withSpace.warnings).toEqual([expect.stringMatching(/Example Odd has a kind other than no-agents or no-reuse, so it is no-agents/)]);
     const cases: Array<[string, LinkOnlyExpectation]> = [
@@ -543,7 +547,7 @@ describe("link-only sites: the skill's list, bundled, plus what the space adds",
     const [direct, archived, redirected] = report.pages;
     for (const page of [direct, archived, redirected]) {
       expect(page).toMatchObject({ status: "read", noReuse: { site: "Example Reviews" } });
-      expect(page!.tell).toMatch(/terms bar reusing its content\. Summarize it in your own words, cite "seen <date> on <host>" and link back/);
+      expect(page!.tell).toMatch(/configured site policy restricts reusing this site's content\. Summarize it in your own words, cite "seen <date> on <host>" and link back/);
       expect(page!.tell).toMatch(/never copy its reviews, photos or price lists, and keep its content out of anything published or shared by public link/);
     }
     expect(archived!.noReuse!.via).toEqual(["the Wayback Machine"]);
@@ -560,7 +564,7 @@ describe("link-only sites: the skill's list, bundled, plus what the space adds",
     expect(hits).not.toContain("www.reviews.example/search?q=pegasus");
   });
 
-  it("refuses RunRepeat: its terms give no clause that lets an agent read it, so it is no-agents", async () => {
+  it("refuses RunRepeat when explicitly configured as no-agents", async () => {
     dns["runrepeat.com"] = [PUBLIC_A];
     routes["runrepeat.com/nike-pegasus-41"] = { body: ARTICLE };
     const result = await one("https://runrepeat.com/nike-pegasus-41");
@@ -631,7 +635,7 @@ describe("link-only sites: the skill's list, bundled, plus what the space adds",
     writeLinkOnly(skillsDir, "partly", spaceList([{ name: "Bad", match: ["not a domain!"] }, { name: "Good", match: ["good.example"] }]));
     // A pack that keeps the file in its skill folder itself is read too.
     writeLinkOnly(skillsDir, "map-pack", spaceList([{ name: "Example Maps", match: ["maps.example"], why: "no automated access" }]), LINK_ONLY_FILE);
-    const guard = loadLinkOnlyGuard([skillsDir, path.join(tmp, "missing")]);
+    const guard = loadLinkOnlyGuard([skillsDir, path.join(tmp, "missing")], SKILL_LIST);
     const warnings = guard.warnings.join("\n");
     expect(warnings).toMatch(/broken.*is not valid JSON.*ignored; the bundled list still applies/);
     expect(warnings).toMatch(/other-schema.*schema is not instafy\.link-only-sites@1/);
@@ -658,7 +662,7 @@ describe("link-only sites: the skill's list, bundled, plus what the space adds",
     const pipe = path.join(skillsDir, "pipe-pack", "references", LINK_ONLY_FILE);
     fs.mkdirSync(path.dirname(pipe), { recursive: true });
     expect(spawnSync("mkfifo", [pipe]).status).toBe(0);
-    const guard = loadLinkOnlyGuard([skillsDir]);
+    const guard = loadLinkOnlyGuard([skillsDir], SKILL_LIST);
     const warnings = guard.warnings.join("\n");
     expect(warnings).toMatch(/instafy-web-research.*is larger than 262144 bytes and was ignored; the bundled list still applies/);
     expect(warnings).toMatch(/pipe-pack.*is not a file and was ignored; the bundled list still applies/);
@@ -669,7 +673,7 @@ describe("link-only sites: the skill's list, bundled, plus what the space adds",
 
   it("fails closed: when the bundled list cannot be loaded, nothing is read", async () => {
     routes["news.example.org/a"] = { body: ARTICLE };
-    for (const bundled of [null, "not a list", { schema: "something@2", sites: SKILL_LIST.sites }, spaceList([]), spaceList([{ name: "x", match: ["*"] }])]) {
+    for (const bundled of [null, "not a list", { schema: "something@2", sites: SKILL_LIST.sites }, spaceList([{ name: "x", match: ["*"] }])]) {
       const out: string[] = [];
       const io = { out: (line: string) => out.push(line), err: (line: string) => out.push(line) };
       const code = await runWebReadCli(["http://news.example.org/a"], { json: true }, io, deps({ bundledLinkOnly: bundled }));
@@ -691,7 +695,7 @@ describe("link-only sites: the skill's list, bundled, plus what the space adds",
       "https://r.jina.ai/https://www.tripadvisor.com/x",
     ]);
     expect(report.pages.map((p) => p.code)).toEqual(["link_only", "link_only", "link_only", "link_only", "link_only"]);
-    expect(report.pages[0]!.message).toMatch(/^Booking\.com is link-only \(terms bar AI agents\); this address is its copy on Google Translate's page proxy/);
+    expect(report.pages[0]!.message).toMatch(/^Booking\.com is link-only \(restricted by this test policy\); this address is its copy on Google Translate's page proxy/);
     expect(report.pages[1]!.message).toMatch(/its copy on the Wayback Machine/);
     expect(hits).toEqual([]);
     expect(resolved).toEqual([]);
@@ -1443,14 +1447,15 @@ describe("the command", () => {
       encoding: "utf8",
     });
 
-  it("carries the web-research skill's own list in the built CLI, so it applies with no skill installed, and no network", () => {
-    const bundle = fs.readFileSync(cliBundle, "utf8");
-    for (const entry of [...SKILL_LIST.sites, ...SKILL_LIST.wrappers]) {
-      expect(bundle, entry.name).toContain(JSON.stringify(entry.name));
-      for (const pattern of entry.match) expect(bundle, pattern).toContain(JSON.stringify(pattern));
-    }
+  it("enforces an explicit site policy in the built CLI without network access", () => {
     const home = fs.mkdtempSync(path.join(tmp, "home-"));
     const space = fs.mkdtempSync(path.join(tmp, "space-"));
+    const unrestricted = runBuilt(space, home, ["http://127.0.0.1/"]);
+    expect(unrestricted.status, unrestricted.stderr).toBe(WEB_READ_EXIT_NONE_READ);
+    const defaultReport = JSON.parse(unrestricted.stdout);
+    expect(defaultReport.guards.linkOnly).toMatchObject({ sites: 0, wrappers: SKILL_LIST.wrappers.length });
+    expect(defaultReport.pages[0].code).toBe("blocked_address");
+    writeLinkOnly(path.join(space, ".agents", "skills"), "configured-policy", { ...SKILL_LIST, wrappers: [] });
     // The shared matcher is bundled too: a translator's copy of an archive's copy is found as the archived site.
     const run = runBuilt(space, home, [
       "https://www.booking.com/x",
@@ -1461,7 +1466,8 @@ describe("the command", () => {
     expect(run.status, run.stderr).toBe(WEB_READ_EXIT_NONE_READ);
     const report = JSON.parse(run.stdout);
     expect(report.pages.map((p: PageResult) => p.code)).toEqual(["link_only", "link_only", "link_only", "blocked_address"]);
-    expect(report.guards.linkOnly).toMatchObject({ sites: SKILL_LIST.sites.length, wrappers: SKILL_LIST.wrappers.length, sources: ["bundled"] });
+    expect(report.guards.linkOnly).toMatchObject({ sites: SKILL_LIST.sites.length, wrappers: SKILL_LIST.wrappers.length });
+    expect(report.guards.linkOnly.sources).toHaveLength(2);
     expect(fs.existsSync(path.join(home, ".local", "state", "instafy", "web-read"))).toBe(true);
   });
 
@@ -1471,10 +1477,10 @@ describe("the command", () => {
     writeLinkOnly(path.join(space, ".agents", "skills"), "instafy-web-research", spaceList([EXAMPLE_SHOP]));
     const nested = path.join(space, "site", "src");
     fs.mkdirSync(nested, { recursive: true });
-    const run = runBuilt(nested, home, ["https://www.shop.example/item", "https://www.booking.com/x"]);
+    const run = runBuilt(nested, home, ["https://www.shop.example/item", "http://127.0.0.1/"]);
     expect(run.status, run.stderr).toBe(WEB_READ_EXIT_NONE_READ);
     const report = JSON.parse(run.stdout);
-    expect(report.pages.map((p: PageResult) => p.code)).toEqual(["link_only", "link_only"]);
+    expect(report.pages.map((p: PageResult) => p.code)).toEqual(["link_only", "blocked_address"]);
     expect(report.pages[0].message).toMatch(/^Example Shop is link-only/);
     expect(report.guards.linkOnly.sources[0]).toBe("bundled");
     expect(report.guards.linkOnly.sources[1]).toMatch(/instafy-web-research[\\/]references[\\/]link-only-sites\.json$/);
@@ -1528,5 +1534,79 @@ describe("the cache in the space's folder (INSTAFY_CACHE_DIR)", () => {
       expect(fs.existsSync(path.join(home, ".cache", "instafy", "web-read")), name).toBe(true);
       expect(fs.existsSync(path.join(home, ".local", "state", "instafy", "web-read")), name).toBe(true);
     }
+  });
+});
+
+describe("no platform site restrictions", () => {
+  it("reads formerly listed sites with the default empty policy", async () => {
+    dns["www.booking.com"] = [PUBLIC_A];
+    routes["www.booking.com/x"] = { body: ARTICLE };
+    const result = await one("http://www.booking.com/x", {}, { bundledLinkOnly: BUNDLED_LINK_ONLY_SITES });
+    expect(result.status).toBe("read");
+    expect(hits).toContain("www.booking.com/x");
+  });
+
+  it("inherits wrapper recognition and guided placeholders for a sites-only custom policy", async () => {
+    writeLinkOnly(skillsDir, "configured-policy", spaceList([{
+      name: "Private catalog", match: ["shop.example"], kind: "no-agents",
+      home: "https://shop.example/", search: "https://shop.example/search?q={query}",
+    }]));
+    const report = await read([
+      "https://shop.example/item",
+      "https://web.archive.org/web/2024/https://shop.example/item",
+      "https://shop-example.translate.goog/item",
+    ], {}, { bundledLinkOnly: BUNDLED_LINK_ONLY_SITES });
+    expect(report.pages.map((page) => page.code)).toEqual(["link_only", "link_only", "link_only"]);
+    expect(report.pages[1]!.message).toContain("the Wayback Machine");
+    expect(report.pages[2]!.message).toContain("Google Translate's page proxy");
+    expect(resolved).toEqual([]);
+    expect(webLink("Private catalog", { query: "boots & shoes" }, { skillRoots: [skillsDir] })).toMatchObject({
+      ok: true, link: "https://shop.example/search?q=boots+%26+shoes", warnings: [],
+    });
+  });
+
+  it("retires only exact shipped copies across parent, home and skill-pack roots", () => {
+    const home = path.join(tmp, `retired-home-${caseNo}`);
+    const parent = path.join(tmp, `retired-parent-${caseNo}`);
+    const packs = path.join(tmp, `retired-packs-${caseNo}`);
+    const cwd = path.join(parent, "nested");
+    fs.mkdirSync(cwd, { recursive: true });
+    const old = fs.readFileSync(path.resolve(here, "../../runtime-agent/src/jobs/legacy/web-research-link-only-v3.json"), "utf8");
+    const hash = createHash("sha256").update(old.trim()).digest("hex");
+    expect(BUNDLED_LINK_ONLY_SITES).toMatchObject({ retiredDefaultSha256: expect.arrayContaining([hash]) });
+    for (const root of [path.join(parent, ".agents", "skills"), path.join(home, ".agents", "skills"), path.join(packs, "installed", "skills")]) {
+      writeLinkOnly(root, "instafy-web-research", ` \n${old}\n`);
+    }
+    const roots = defaultSkillRoots(cwd, { HOME: home, INSTAFY_SKILL_PACKS_DIR: packs });
+    expect(loadLinkOnlyGuard(roots)).toMatchObject({ list: { sites: [] }, warnings: [], sources: ["bundled"] });
+    // An edit to the shipped data remains explicit local policy.
+    const edited = JSON.parse(old);
+    edited.sites[0].why = "my policy";
+    writeLinkOnly(path.join(home, ".agents", "skills"), "instafy-web-research", edited);
+    expect(linkOnlySite("https://www.booking.com/", loadLinkOnlyGuard(roots))?.reason).toBe("my policy");
+  });
+
+  it("rechecks only policy-derived stops when policy changes, in this turn and the cache", async () => {
+    const policy = spaceList([{ name: "News", match: ["news.example.org"] }]);
+    routes["news.example.org/x"] = { body: ARTICLE };
+    expect(await one("http://news.example.org/x", {}, { bundledLinkOnly: policy })).toMatchObject({ code: "link_only" });
+    expect(await one("http://news.example.org/x", {}, { bundledLinkOnly: policy })).toMatchObject({ code: "link_only", previouslyStopped: true });
+    expect(await one("http://news.example.org/x", {}, { bundledLinkOnly: BUNDLED_LINK_ONLY_SITES })).toMatchObject({ status: "read" });
+    routes["news.example.org/legacy"] = { body: ARTICLE };
+    expect(await one("http://news.example.org/legacy", {}, { bundledLinkOnly: policy })).toMatchObject({ code: "link_only" });
+    // Older cached policy refusals have no policy fingerprint. They must be rechecked too.
+    for (const dir of [stateDir, cacheDir]) {
+      for (const entry of fs.readdirSync(dir, { recursive: true, withFileTypes: true }).filter((e) => e.isFile())) {
+        const file = path.join(entry.parentPath, entry.name);
+        const raw = fs.readFileSync(file, "utf8");
+        fs.writeFileSync(file, raw.replace(/,"policyHash":"[a-f0-9]+"/g, ""));
+      }
+    }
+    const nextTurn = { INSTAFY_TURN_STARTED_AT: "2026-10-26T11:00:00Z", INSTAFY_PROJECT_ID: "project-1" };
+    expect(await one("http://news.example.org/legacy", {}, { bundledLinkOnly: BUNDLED_LINK_ONLY_SITES, env: nextTurn })).toMatchObject({ status: "read" });
+    expect(await one("http://news.example.org/x", { fresh: true }, { bundledLinkOnly: BUNDLED_LINK_ONLY_SITES, env: nextTurn })).toMatchObject({ status: "read" });
+    routes["news.example.org/blocked"] = { status: 403 };
+    expect(await one("http://news.example.org/blocked", {}, { bundledLinkOnly: BUNDLED_LINK_ONLY_SITES })).toMatchObject({ code: "forbidden" });
+    expect(await one("http://news.example.org/blocked", { fresh: true }, { bundledLinkOnly: spaceList([{ name: "Other", match: ["other.example"] }]) })).toMatchObject({ code: "forbidden", previouslyStopped: true });
   });
 });

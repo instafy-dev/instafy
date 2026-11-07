@@ -2845,6 +2845,22 @@ fn classify_auth_json(
     ))
 }
 
+/// The stored kind is classified from the onboarded secret, never client metadata.
+/// The proxy additionally checks the resolved material before forwarding hosted search.
+pub(crate) async fn credential_allows_native_web_search(
+    client: &Transaction<'_>,
+    credential_id: Option<&Uuid>,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let Some(id) = credential_id.filter(|id| !is_managed_ai_credential_id(id)) else {
+        return Ok(false);
+    };
+    let row = client.query_one(
+        "select exists(select 1 from user_credentials where id = $1 and kind = $2 and revoked_at is null)",
+        &[id, &CREDENTIAL_KIND_CODEX_AUTH_JSON],
+    ).await.map_err(|error| internal_error(format!("failed to resolve credential capabilities: {error}")))?;
+    Ok(row.get(0))
+}
+
 fn materialize_internal_credential(
     effective_credential_id: Uuid,
     kind: &str,
