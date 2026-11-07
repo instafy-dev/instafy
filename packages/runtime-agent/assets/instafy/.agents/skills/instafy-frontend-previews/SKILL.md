@@ -51,7 +51,7 @@ Every process your turn starts is killed with its terminal's process group when 
 ## Building a site to show
 
 - Don't assume a framework. Inspect the workspace (`package.json`, `vite.config.*`, `next.config.*`, etc) and use its own dev or preview command with `{port}` for its port and a reachable host (Vite: `npx vite --host 127.0.0.1 --port {port} --strictPort`).
-- With no toolchain, prefer one `index.html` (React through ESM CDN imports such as `https://esm.sh/react@18` if needed) served by a static file server, for example `--serve-cmd "python3 -m http.server {port} --bind 127.0.0.1"`.
+- A page made for the person (a map, a comparison, a page to share) is built per `instafy-interactive-artifacts`. Any other site with no toolchain: one `index.html` (React through ESM CDN imports such as `https://esm.sh/react@18` if needed) served by a static file server, for example `--serve-cmd "python3 -m http.server {port} --bind 127.0.0.1"`.
 - Install dependencies only when needed, and say you did.
 - Reuse the running site: rerun the same command instead of starting a duplicate.
 - Never store secrets in the workspace. Request them with `request_secret` actions; if a provider's screens are involved, open Instafy's browser on the provider's public site to show the way.
