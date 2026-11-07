@@ -1350,13 +1350,13 @@ async fn run_every_chain(harness: &mut Harness) {
     let r5 = harness.run("R5", r5).await;
     harness.run("R6", Spec::new(cr, Lane::PlainFinal, r5)).await;
 
-    // T: the API-key transport, a fresh thread, a lane change, which starts a thread of its own,
-    // and back.
+    // T: the API-key transport, a fresh thread, a resumed lane change (an MCP task runs on its
+    // thread's own base instructions) and back.
     let ct = Uuid::new_v4();
     let mut t1 = Spec::new(ct, Lane::Default, None);
     t1.api_key = true;
     let t1 = harness.run("T1", t1).await;
-    let mut t2 = Spec::new(ct, Lane::PlainFinal, t1);
+    let mut t2 = Spec::new(ct, Lane::Mcp, t1);
     t2.api_key = true;
     let t2 = harness.run("T2", t2).await;
     let mut t3 = Spec::new(ct, Lane::Default, t2);
@@ -1691,8 +1691,8 @@ fn follow_up_continuation(card: Uuid, continues: Option<Uuid>) -> Value {
 /// going" go through the routing step, which sends each straight to the browser: its card's turn
 /// goes on in the chat's tab from the browser turn before it. "Put the hours and the metro route
 /// on a small page I can share." is a building turn of its own, which reads the browser turns
-/// since its thread's last turn as page data. It runs in N0's mode, so it resumes N0's thread: a
-/// turn of another mode starts a thread of its own, whose replay quotes them (`thread_mode`).
+/// since its thread's last turn as page data. A change, it leaves N0's thread, a question's, for
+/// a thread of its own mode, and reads them as that thread's turn would have.
 async fn run_follow_ups_from_the_chat(harness: &mut Harness) {
     let cn = Uuid::new_v4();
     let n0 = harness
@@ -1739,7 +1739,7 @@ async fn run_follow_ups_from_the_chat(harness: &mut Harness) {
         browser = harness.turn(label).run_id;
     }
     harness
-        .run("N7", Spec::new(cn, Lane::Default, state).asking(N_PAGE))
+        .run("N7", Spec::new(cn, Lane::PlainWrite, state).asking(N_PAGE))
         .await;
 }
 
@@ -2525,7 +2525,7 @@ fn check(harness: &Harness) -> Result<()> {
     // Turns that must complete do. R5 fails before the model answers.
     for label in [
         "A1", "A4", "U1", "U2", "C2", "D1", "E1", "E3", "E5", "P1", "P3", "K1", "K2", "K3", "K5",
-        "R1", "R6", "T1", "T2", "T3", "O1", "O2", "O3", "Q1", "Q2", "Q3",
+        "R1", "R6", "T1", "T3", "O1", "O2", "O3", "Q1", "Q2", "Q3",
     ] {
         let turn = harness.turn(label);
         ensure!(turn.outcome.is_ok(), "{label} failed: {:?}", turn.outcome);
@@ -2640,8 +2640,8 @@ fn check(harness: &Harness) -> Result<()> {
         ("R5", 1),
         ("R6", 1),
         ("T1", 1),
-        ("T2", 1),
-        ("T3", 1),
+        ("T2", 2),
+        ("T3", 3),
         ("O1", 1),
         ("O2", 1),
         ("O3", 1),

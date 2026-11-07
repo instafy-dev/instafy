@@ -6,8 +6,13 @@
 //! and its first request, 52.5k tokens, was sent again uncached. The note starts a new thread
 //! now, from the chat's replay, which holds the map's request and reply, and the next change
 //! resumes the note's thread with no instructions replaced.
+//!
+//! A note that fails after it left the map's thread saves no thread. Its job reports the state it
+//! ran on, so a question after it, of the map's mode, starts a new thread from the replay, which
+//! holds the failed note, rather than resume the map's thread, which never saw it.
 
 use super::*;
+use runtime_agent::jobs::{JobExecution, failed_job_proxy_metadata};
 use std::sync::Mutex as StdMutex;
 
 const CHILD: &str = "INSTAFY_THREAD_MODE_TEST_CHILD";
@@ -18,6 +23,10 @@ const NOTE: &str = "Add a note under day 1: book the palace ahead.";
 const NOTED: &str = "Added the note under day 1.";
 const TITLE: &str = "Make the title bigger.";
 const TITLED: &str = "Made the title bigger.";
+const QUESTION: &str = "Which day has the palace?";
+const ANSWERED: &str = "Day 1 has the palace.";
+/// What the provider answers the note with when it fails.
+const REFUSED: &str = "The note's request was refused upstream.";
 const SITE: &str = "sites/seville/app.js";
 /// What a request carries when a run replaces its thread's base instructions.
 const REPLACED: &str = "replace the previous base instructions";
@@ -31,6 +40,22 @@ fn a_building_thread_keeps_one_mode_via_proxy() -> Result<()> {
             "thread-mode",
         );
     }
+    on_a_large_stack(false)
+}
+
+#[test]
+fn a_failed_turn_leaves_the_thread_it_left_via_proxy() -> Result<()> {
+    if std::env::var(CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(
+            CHILD,
+            "thread_mode::a_failed_turn_leaves_the_thread_it_left_via_proxy",
+            "thread-mode-failed",
+        );
+    }
+    on_a_large_stack(true)
+}
+
+fn on_a_large_stack(note_fails: bool) -> Result<()> {
     const STACK: usize = 32 * 1024 * 1024;
     std::thread::Builder::new()
         .name("thread-mode-proxy".to_string())
@@ -41,7 +66,7 @@ fn a_building_thread_keeps_one_mode_via_proxy() -> Result<()> {
                 .worker_threads(2)
                 .thread_stack_size(STACK)
                 .build()?
-                .block_on(run_case())
+                .block_on(run_case(note_fails))
         })?
         .join()
         .map_err(|_| anyhow::anyhow!("thread-mode fixture panicked"))?
@@ -49,6 +74,8 @@ fn a_building_thread_keeps_one_mode_via_proxy() -> Result<()> {
 
 struct Provider {
     requests: StdMutex<Vec<Value>>,
+    /// The provider refuses the note's requests.
+    note_fails: bool,
 }
 
 fn response(item: Value) -> axum::response::Response {
@@ -134,6 +161,15 @@ async fn provider_request(
     Json(body): Json<Value>,
 ) -> axum::response::Response {
     state.requests.lock().unwrap().push(body.clone());
+    if state.note_fails && asks(&body, NOTE) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {
+                "message": REFUSED, "type": "invalid_request_error", "param": null, "code": null,
+            }})),
+        )
+            .into_response();
+    }
     let (write, reply) = if asks(&body, MAP) {
         (
             format!("mkdir -p sites/seville && printf 'day 1\\n' > {SITE}"),
@@ -141,13 +177,15 @@ async fn provider_request(
         )
     } else if asks(&body, NOTE) {
         (format!("printf 'note: book ahead\\n' >> {SITE}"), NOTED)
+    } else if asks(&body, QUESTION) {
+        (format!("cat {SITE}"), ANSWERED)
     } else {
         (format!("printf 'title: large\\n' >> {SITE}"), TITLED)
     };
     match commands_run(&body) {
         0 => response(command("write", &write)),
-        // The map's turn answers in the turn's final JSON; a change, in words.
-        _ if asks(&body, MAP) => response(message(
+        // The map's turn and the question answer in the turn's final JSON; a change, in words.
+        _ if asks(&body, MAP) || asks(&body, QUESTION) => response(message(
             &json!({"summary": reply, "code": "", "suggestions": [], "files": [], "actions": []})
                 .to_string(),
         )),
@@ -207,7 +245,7 @@ fn job(
     }
 }
 
-async fn run_case() -> Result<()> {
+async fn run_case(note_fails: bool) -> Result<()> {
     let _env = env_guard().await;
     let workspace_root = TempDir::new()?;
     let runtime_home = TempDir::new()?;
@@ -248,6 +286,7 @@ async fn run_case() -> Result<()> {
 
     let state = Arc::new(Provider {
         requests: StdMutex::new(Vec::new()),
+        note_fails,
     });
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let upstream = listener.local_addr()?;
@@ -347,12 +386,133 @@ async fn run_case() -> Result<()> {
         .provider_conversation_state
         .context("the map's building thread")?;
 
-    // The note, a change, on the map's saved state.
     chat.push(reply(MAPPED, "run-1"));
     chat.push(person(NOTE, "run-2"));
+    if note_fails {
+        a_question_after_a_failed_note(
+            &run,
+            &state,
+            job_for(project_id, conversation_id),
+            chat,
+            map_thread,
+        )
+        .await?;
+    } else {
+        a_note_then_a_change(
+            &run,
+            &state,
+            job_for(project_id, conversation_id),
+            chat,
+            map_thread,
+        )
+        .await?;
+    }
+
+    drop(settings);
+    drop(proxy_guard);
+    drop(stub_guard);
+    proxy_task.await??;
+    stub_task.await??;
+    Ok(())
+}
+
+/// A job of this chat: its prompt, routing, history and saved state.
+fn job_for(
+    project_id: Uuid,
+    conversation_id: Uuid,
+) -> impl Fn(&str, Value, Vec<Value>, Option<Value>) -> LeaseJob {
+    move |prompt, metadata, history, thread| {
+        job(
+            project_id,
+            conversation_id,
+            prompt,
+            metadata,
+            history,
+            thread,
+        )
+    }
+}
+
+/// The note fails after it left the map's thread; the question after it is of the map's mode.
+async fn a_question_after_a_failed_note<R, F>(
+    run: &R,
+    state: &Provider,
+    job: impl Fn(&str, Value, Vec<Value>, Option<Value>) -> LeaseJob,
+    mut chat: Vec<Value>,
+    map_thread: Value,
+) -> Result<()>
+where
+    R: Fn(LeaseJob) -> F,
+    F: std::future::Future<Output = Result<JobExecution>>,
+{
+    let failed = run(job(
+        NOTE,
+        direct("conditional"),
+        chat.clone(),
+        Some(map_thread.clone()),
+    ))
+    .await
+    .expect_err("the note's turn fails");
+    // The controller hands the next turn the newest state a job reported: the failed note's
+    // when it reported one, the map's otherwise.
+    let reported = failed_job_proxy_metadata(&failed);
+    let next_state = reported
+        .as_ref()
+        .map(|metadata| metadata["conversation"].clone())
+        .unwrap_or_else(|| map_thread.clone());
+    chat.push(json!({
+        "role": "assistant", "content": REFUSED, "runId": "run-2",
+        "metadata": {"jobId": "job-run-2", "source": "agent", "outcome": "failed", "messageType": "error"},
+    }));
+    chat.push(person(QUESTION, "run-3"));
+    let answered = run(job(
+        QUESTION,
+        direct("none"),
+        chat.clone(),
+        Some(next_state),
+    ))
+    .await
+    .context("the question's turn failed")?;
+    assert_eq!(answered.summary, ANSWERED);
+    let question_thread = answered
+        .provider_conversation_state
+        .context("the question's building thread")?;
+    // A new thread, from the replay, not the map's, which never saw the note.
+    assert_ne!(
+        question_thread["defaultThreadId"], map_thread["defaultThreadId"],
+        "the note reported {reported:?}"
+    );
+    assert_eq!(question_thread["defaultThreadRestoreSource"], "new");
+    assert_eq!(question_thread["defaultThreadMode"], "structured");
+    let requests = state.requests.lock().unwrap().clone();
+    let question = requests
+        .iter()
+        .find(|request| asks(request, QUESTION))
+        .context("the question's request")?;
+    let prompt = last_user_text(question);
+    assert!(
+        !prompt.contains("The provider thread was restored successfully"),
+        "{prompt}"
+    );
+    // The replay holds the note the person asked for, and its failure.
+    assert!(prompt.contains(NOTE), "{prompt}");
+    assert!(prompt.contains(REFUSED), "{prompt}");
+    Ok(())
+}
+
+/// The note, a change, on the map's saved state, then another change.
+async fn a_note_then_a_change<R, F>(
+    run: &R,
+    state: &Provider,
+    job: impl Fn(&str, Value, Vec<Value>, Option<Value>) -> LeaseJob,
+    mut chat: Vec<Value>,
+    map_thread: Value,
+) -> Result<()>
+where
+    R: Fn(LeaseJob) -> F,
+    F: std::future::Future<Output = Result<JobExecution>>,
+{
     let note = run(job(
-        project_id,
-        conversation_id,
         NOTE,
         direct("conditional"),
         chat.clone(),
@@ -375,8 +535,6 @@ async fn run_case() -> Result<()> {
     chat.push(reply(NOTED, "run-2"));
     chat.push(person(TITLE, "run-3"));
     let titled = run(job(
-        project_id,
-        conversation_id,
         TITLE,
         direct("conditional"),
         chat.clone(),
@@ -438,11 +596,5 @@ async fn run_case() -> Result<()> {
         last_user_text(title_requests[0]).contains("The provider thread was restored successfully"),
         "{title_text}"
     );
-
-    drop(settings);
-    drop(proxy_guard);
-    drop(stub_guard);
-    proxy_task.await??;
-    stub_task.await??;
     Ok(())
 }

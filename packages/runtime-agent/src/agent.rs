@@ -1644,6 +1644,8 @@ impl RuntimeAgent {
                                     "failed to report telemetry for job error"
                                 );
                             }
+                            // A turn that left its building thread says so, failed or not.
+                            let proxy_metadata = crate::jobs::failed_job_proxy_metadata(&error);
                             let failure_result = match failure_with_artifacts {
                                 Some(failure) => {
                                     client
@@ -1652,11 +1654,15 @@ impl RuntimeAgent {
                                             job.id,
                                             &message,
                                             &failure.artifacts,
-                                            None,
+                                            proxy_metadata,
                                         )
                                         .await
                                 }
-                                None => client.fail_job(registration, job.id, &message, None).await,
+                                None => {
+                                    client
+                                        .fail_job(registration, job.id, &message, proxy_metadata)
+                                        .await
+                                }
                             };
                             if let Err(report_error) = failure_result {
                                 warn!(
