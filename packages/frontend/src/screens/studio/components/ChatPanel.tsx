@@ -392,6 +392,8 @@ import { LocalBrowserSharing, LocalBrowserTabPublisher } from "./LocalBrowserSha
 import { ConversationSurfaceLayout, ConversationSurfaceTabs, type ConversationSurface } from "../../../workspace/ConversationSurfaceLayout";
 import { ConversationWorkspaceViews } from "../../../workspace/ConversationWorkspaceViews";
 import { ConversationFileContext } from "../../../workspace/ConversationFileContext";
+import { ConversationMessageContext, openConversationMessageReference, type ConversationMessageReference } from "../../../workspace/ConversationMessageContext";
+import { useConversationMessageMetadata } from "../../../conversations/ConversationMessageMetadata";
 import { ConversationPreviewContext, type ConversationPreviewOpener } from "../../../workspace/ConversationPreviewContext";
 import { browserViewTabDetails } from "../../../workspace/browserViewTab";
 import { conversationSurfaceScope, closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, openConversationFile, openConversationPreview, selectConversationView, visibleSitePreviewId } from "../../../workspace/conversationSurfaces";
@@ -714,6 +716,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return conversations.find((conversation) => conversation.localId === activeConversationId)?.controllerId ?? null;
   }, [activeConversationId, conversations]);
   const goToStudio = useStudioNavigation();
+  const { resolveConversationLocalId } = useConversationMessageMetadata();
+  const openReferencedMessage = useCallback((reference: ConversationMessageReference) =>
+    openConversationMessageReference(reference, {
+      activeProjectId, conversationsProjectKey, resolveConversationLocalId,
+    }, goToStudio),
+  [activeProjectId, conversationsProjectKey, goToStudio, resolveConversationLocalId]);
   const searchReturn = useStudioSearchReturn();
   const messageQueryClient = useQueryClient();
   const requestedMessageId = new URLSearchParams(location.search).get("messageId")?.trim() || null;
@@ -6782,6 +6790,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     <ChatRunStopNoticeProvider value={runStopNoticeContext}>
     <RunFailureRetryProvider value={runFailureRetryContextValue}>
     <ConversationFileContext.Provider value={openSurfaceFile}>
+    <ConversationMessageContext.Provider value={openReferencedMessage}>
     <ConversationPreviewContext.Provider value={previewOpener}>
     <ChatRuntimeActivityContext.Provider value={chatRuntimeActivityValue}>
     <BrowserRequestHostContext.Provider value={browserRequestHost}>
@@ -7135,6 +7144,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     </BrowserRequestHostContext.Provider>
     </ChatRuntimeActivityContext.Provider>
     </ConversationPreviewContext.Provider>
+    </ConversationMessageContext.Provider>
     </ConversationFileContext.Provider>
     </RunFailureRetryProvider>
     </ChatRunStopNoticeProvider>
