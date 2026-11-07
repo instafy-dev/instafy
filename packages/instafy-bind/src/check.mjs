@@ -374,7 +374,7 @@ export function memoryCitations(data) {
   const rest = keysIn({ ...data, items: [] });
   if (rest.size) out.push(problem("the page", rest));
   if (data.filter && typeof data.filter === "object") {
-    out.push(`the filter "${String(data.filter.label || data.filter.key || "")}": nothing on a page from what Octo knows was checked, so no value counts as within the limit and every row would be listed apart. Leave out "filter", and say in the lede how each compares with it.`);
+    out.push(`the filter "${String(data.filter.label || data.filter.key || "")}": nothing on a page from what Octo knows was checked, so no value on it counts as within the limit. Leave out "filter", and say in the lede how each compares with it.`);
   }
   return out;
 }

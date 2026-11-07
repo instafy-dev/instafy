@@ -617,10 +617,10 @@ test("a page from what Octo knows passes without pages, and fails with any page 
 });
 
 // A page from what Octo knows: its columns are its own, so a "Released" column keyed "date" is a value, not the day a
-// page was read. A value's source claims a page nobody read; a store makes the page offer a price check, which on such
-// a page has no store link to read, or puts a checked price under "nothing checked"; and under a filter no value counts
-// as known, so every row would be listed apart from the limit. Each fails. Only the compare starter draws such a page:
-// a ranked page marked so fails once, and is not asked for pages.
+// page was read. A value's source claims a page nobody read; a store made the page offer a price check, which on such a
+// page has no store link to read, or puts a checked price under "nothing checked"; and under a filter no value counted
+// as known, so every row was listed apart from the limit. Each fails. Only the compare starter draws such a page: a
+// ranked page marked so fails once, and is not asked for pages.
 test("a page from what Octo knows keeps its own columns, and fails a source, a store, a filter, or a starter that can't draw it", () => {
   const remembered = () => ({
     title: "Maker Laptop 13 vs 16",
@@ -648,7 +648,7 @@ test("a page from what Octo knows keeps its own columns, and fails a source, a s
     assert.equal(problems.length, 3, problems.join("\n"));
     assert.match(problems[0], /^Maker Laptop 13: this page is from what Octo knows .* leave out its "src"\./);
     assert.match(problems[1], /^Maker Laptop 16: this page is from what Octo knows .* leave out its "store"\./);
-    assert.match(problems[2], /^the filter "Under \$1,500": nothing on a page from what Octo knows was checked, so no value counts as within the limit and every row would be listed apart\. Leave out "filter"/);
+    assert.match(problems[2], /^the filter "Under \$1,500": nothing on a page from what Octo knows was checked, so no value on it counts as within the limit\. Leave out "filter"/);
     assert.deepEqual(notes, [], "no note asks the lede to call the remembered prices unknown");
     assert.equal(run("check", dir, "--expect", expect).status, 1);
   } finally {
