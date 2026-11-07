@@ -3687,7 +3687,7 @@ fn chat_browser_run_given(
     chat: Uuid,
     task: &str,
 ) -> (SharedBrowserAgentControlGuard, JobCancelSignal) {
-    let (mut guard, cancel_signal) = chat_browser_run(fixture, chat, unix_time_millis());
+    let (guard, cancel_signal) = chat_browser_run(fixture, chat, unix_time_millis());
     guard.start_given_addresses(&given_addresses_in_text(task));
     (guard, cancel_signal)
 }
@@ -3736,13 +3736,19 @@ async fn an_address_no_message_or_page_gave_is_not_opened() {
     // A made-up review on the same site: refused, and nothing loads, in the
     // chat's own tab and as a tab of Octo's own.
     let words = failure(&navigate("https://reviews.example/laptops/three"));
-    assert!(words.contains(&made_up("https://reviews.example")), "{words}");
+    assert!(
+        words.contains(&made_up("https://reviews.example")),
+        "{words}"
+    );
     let words = failure(&step(
         "safe",
         "/v1/tabs/open",
         json!({ "url": "https://reviews.example/laptops/three" }),
     ));
-    assert!(words.contains(&made_up("https://reviews.example")), "{words}");
+    assert!(
+        words.contains(&made_up("https://reviews.example")),
+        "{words}"
+    );
     assert!(!opened("laptops/three"));
     assert_eq!(
         std::fs::read_to_string(&fixture.opened_tabs).unwrap_or_default(),
@@ -3803,7 +3809,10 @@ fn a_tasks_addresses_are_kept_by_their_site_and_path() {
     );
     assert_eq!(
         given_addresses_in_text("Open visitporto.travel/en/lello, then www.livrarialello.pt/en/."),
-        vec![key("visitporto.travel/en/lello"), key("livrarialello.pt/en")]
+        vec![
+            key("visitporto.travel/en/lello"),
+            key("livrarialello.pt/en")
+        ]
     );
     assert!(
         given_addresses_in_text(
@@ -9888,7 +9897,10 @@ fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
         // person as usual: a turn that read a journey planner in its own tab
         // stopped at the planner's button and never ran it.
         assert!(error.contains(OWN_TAB_STEP_WORDS), "{mode} {path}: {error}");
-        assert!(!error.contains("Leave it to the person"), "{mode} {path}: {error}");
+        assert!(
+            !error.contains("Leave it to the person"),
+            "{mode} {path}: {error}"
+        );
         assert!(requests.is_empty(), "{mode} {path} asked: {requests:?}");
     }
     assert!(
@@ -9919,7 +9931,11 @@ fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
         "/v1/navigate",
         Some(r#"{"url":"https://example.test/logout"}"#),
     ));
-    assert!(risky.contains(OWN_TAB_STEP_WORDS), "{risky}");
+    // A risky address is left to the person, in the words it had.
+    assert!(
+        risky.contains("Octo's own tabs are for reading, so this step was not performed there. Leave it to the person, or take it on the page they chose when they asked for it."),
+        "{risky}"
+    );
 
     // Reading steps still run there: typing that does not submit, a plain click.
     let typed = payload_of(

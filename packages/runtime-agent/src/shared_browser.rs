@@ -1073,9 +1073,18 @@ fn given_address_key(url: &reqwest::Url) -> Option<String> {
     let host = host.strip_prefix("www.").unwrap_or(&host);
     let path = url.path().trim_end_matches('/');
     let path = if path.is_empty() { "/" } else { path };
-    let port = url.port().map(|port| format!(":{port}")).unwrap_or_default();
+    let port = url
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
     let digest = sha2::Sha256::digest(format!("{host}{port}{path}").as_bytes());
-    Some(digest.iter().take(16).map(|byte| format!("{byte:02x}")).collect())
+    Some(
+        digest
+            .iter()
+            .take(16)
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
 }
 
 /// The fingerprints of the addresses a browser turn's task names (the job's
@@ -1102,15 +1111,33 @@ fn given_addresses_in_text(text: &str) -> Vec<String> {
         character.is_whitespace()
             || matches!(
                 character,
-                '<' | '>' | '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '“' | '”' | '‘'
-                    | '’' | '«' | '»'
+                '<' | '>'
+                    | '"'
+                    | '\''
+                    | '`'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '“'
+                    | '”'
+                    | '‘'
+                    | '’'
+                    | '«'
+                    | '»'
             )
     };
     let mut keys = Vec::new();
     for word in text[..end].split(delimiter) {
         let word = word.trim_end_matches(['.', ',', ';', ':', '!', '?']);
         let lower = word.to_ascii_lowercase();
-        let address = match lower.find("http://").or_else(|| lower.find("https://")) {
+        let scheme_at = ["http://", "https://"]
+            .iter()
+            .filter_map(|scheme| lower.find(scheme))
+            .min();
+        let address = match scheme_at {
             Some(start) => reqwest::Url::parse(&word[start..]).ok(),
             None if !word.contains("://") && word.contains('/') => {
                 let host = word.split('/').next().unwrap_or_default();
@@ -1584,14 +1611,13 @@ impl SharedBrowserAgentControlGuard {
     /// given. Every run has one, empty or not: the controller script refuses a
     /// made-up address only in a run that has it, so one that cannot be
     /// written leaves the run without that check.
-    fn start_given_addresses(&mut self, task: &[String]) {
+    fn start_given_addresses(&self, task: &[String]) {
         let earlier = self
             .chat
             .map(|chat| given_addresses_of(&self.approval_dir, chat))
             .unwrap_or_default();
         let addresses = newest_given_addresses(earlier.into_iter().chain(task.iter().cloned()));
-        if let Err(error) = write_given_addresses(&self.approval_dir, &self.binding(), &addresses)
-        {
+        if let Err(error) = write_given_addresses(&self.approval_dir, &self.binding(), &addresses) {
             tracing::warn!(
                 ?error,
                 "Shared Browser could not start the record of the addresses this run was given"

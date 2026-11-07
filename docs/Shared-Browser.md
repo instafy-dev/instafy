@@ -1035,12 +1035,14 @@ Browser has tabs of its own (see Personal-Browser.md).
   a named risky step (purchase, message, download, sign-out and the others), an
   activation key, a risky address, a step that may show a secret and a manual
   field handoff are refused there in every mode, before any prompt. A refused
-  step says where to take it: "Open this page in the chat's own tab with
-  navigate … and take the step there; the browser asks the person as usual."
-  (a turn that read a journey planner in its own tab stopped at the planner's
-  button and replied that it couldn't run it). A sign-in and the person's own
-  fields are refused before this, in their own words, and a manual field
-  handoff still says to stop at a sign-in or form and tell the person.
+  button, form post or activation key says where to take it instead: "Open
+  this page in the chat's own tab with navigate … and take the step there; the
+  browser asks the person as usual." (a turn that read a journey planner in
+  its own tab stopped at the planner's button and replied that it couldn't run
+  it). Typing into a field the person fills, a choice and a risky address are
+  still left to the person, a sign-in is refused before this in its own words,
+  and a manual field handoff still says to stop at a sign-in or form and tell
+  the person.
 - **Never a link-only site, in any tab.** A `no-agents` site on the
   web-research skill's link-only list (its terms bar AI agents or automated
   access; a site with no kind, or an unknown one, counts; runtime-agent embeds

@@ -478,17 +478,20 @@ function labelAddress(rawUrl) {
 // takes without asking (reading, plain links, menus, ordinary clicks, typing
 // that does not submit). A submission, a purchase, a message, a download, a
 // commit button, an activation key or a risky address is refused there in
-// every mode, before any prompt. The refusal sends the step to the chat's own
-// tab, where the browser asks the person as it does for any such step: a turn
-// that read a journey planner in its own tab stopped at the planner's button
-// and replied that it couldn't run it. A sign-in and the person's own fields
-// are refused before this, in their own words.
+// every mode, before any prompt. A button or a form post is sent to the chat's
+// own tab, where the browser asks the person as it does for any such step: a
+// turn that read a journey planner in its own tab stopped at the planner's
+// button and replied that it couldn't run it. A field the person fills, a
+// choice and a risky address are left to the person. A sign-in is refused
+// before this, in its own words.
+const OWN_TAB_READING_MESSAGE =
+  "Octo's own tabs are for reading, so this step was not performed there. Leave it to the person, or take it on the page they chose when they asked for it.";
 const OWN_TAB_STEP_MESSAGE =
   "Octo's own tabs don't take this step, so nothing was done there. Open this page in the chat's own tab with navigate (its tabId is the one list_tabs shows opened by the person) and take the step there; the browser asks the person as usual.";
 
-function refuseUnlessReadingStep(readingStep) {
+function refuseUnlessReadingStep(readingStep, message = OWN_TAB_READING_MESSAGE) {
   if (inAgentTab() && !readingStep) {
-    throw new Error(OWN_TAB_STEP_MESSAGE);
+    throw new Error(message);
   }
 }
 
@@ -5718,7 +5721,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       assertMayOpen(rawDestination);
     }
     refuseNewWindowOrNestedSubmission(clickSubmission);
-    refuseUnlessReadingStep(readingStep);
+    refuseUnlessReadingStep(readingStep, OWN_TAB_STEP_MESSAGE);
     if (
       destination.destinationOrigin &&
       destination.destinationOrigin !== sourceOrigin
@@ -5828,7 +5831,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const freeSearch = submitting && documents !== null && (await freeSiteSearch(page, target, body.text));
     const readingStep = freeSearch ||
       (!submitting && routineCovers(step, target.description, { consequential: false }));
-    refuseUnlessReadingStep(readingStep);
+    refuseUnlessReadingStep(readingStep, submitting ? OWN_TAB_STEP_MESSAGE : OWN_TAB_READING_MESSAGE);
     const approvedTargetFingerprint = targetFingerprint(target.description);
     const destination = approvalProtocol.destinationBinding(rawDestination);
     if (submitting) {
@@ -6049,7 +6052,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // browsing; every other activation key asks.
     const freeSearch = pressKey === "Enter" && documents !== null && (await freeSiteSearch(page, target, null));
     const readingStep = freeSearch || (!activationKey && routineCovers(step, target.description));
-    refuseUnlessReadingStep(readingStep);
+    refuseUnlessReadingStep(readingStep, activationKey ? OWN_TAB_STEP_MESSAGE : OWN_TAB_READING_MESSAGE);
     const destination = approvalProtocol.destinationBinding(rawDestination);
     if (activationKey) {
       if (
