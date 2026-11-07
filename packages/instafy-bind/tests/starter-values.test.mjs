@@ -445,7 +445,7 @@ test("compare: a page from what Octo knows reads each value \"not checked\", cit
     const { document } = await draw("compare", data, { width, search: "?open=13" });
     assert.equal(document.getElementById("lede").textContent, "The 16 is the bigger one, with room for a graphics card. From what Octo knows; nothing checked.", `${width}px`);
     const thirteen = rowText(document, "option:13");
-    for (const value of ["13.5 in", "about 1.3 kg", "from about $1,000"]) assert.match(thirteen, new RegExp(`${value.replace(/[$.]/g, "\\$&")}, not checked`), `${width}px: ${thirteen}`);
+    for (const value of ["13.5 in", "about 1.3 kg", "from about $1,000"]) assert.ok(thirteen.includes(`${value}, not checked`), `${width}px: ${value}: ${thirteen}`);
     const sixteen = rowText(document, "option:16");
     assert.match(sixteen, /16 in, not checked.*about 2\.1 kg, not checked/, `${width}px: ${sixteen}`);
     assert.doesNotMatch(sixteen, /Not found yet/, `${width}px: nothing was looked for: ${sixteen}`);
