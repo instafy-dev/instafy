@@ -72,10 +72,10 @@ for (const theme of ["light", "dark"]) {
         await expect(lightbox).toBeVisible();
         if (!before) {
           await expect.poll(() => page.getByRole("dialog", { name: "Image preview" }).evaluate(element => element.contains(document.activeElement))).toBe(true);
-          await page.keyboard.press("Tab");
-          await expect(page.getByTestId("chat-image-lightbox-close")).toBeFocused();
-          await page.keyboard.press("Tab");
-          await expect(page.getByTestId("chat-image-lightbox-close")).toBeFocused();
+          for (let index = 0; index < 2; index++) {
+            await page.keyboard.press("Tab");
+            await expect.poll(() => page.getByRole("dialog", { name: "Image preview" }).evaluate(element => element.contains(document.activeElement))).toBe(true);
+          }
         }
         await capture(page, `${theme}-${width}-image`);
         await insideViewport(page, page.getByTestId("chat-image-lightbox-close"));
@@ -328,3 +328,177 @@ for (const enlarged of [false, true]) {
     });
   });
 }
+
+async function openImageReview(page: Page, theme: string, extra = "") {
+  await openOlderMessage(page, theme, `&review=image${extra}`);
+  await page.getByTestId("chat-input").fill("Keep this edited draft while inspecting the reference image.");
+  const opener = page.getByTestId("chat-image-attachment-thumbnail");
+  await opener.tap();
+  await expect(page.getByRole("dialog", { name: "Image preview" })).toBeVisible();
+  await expect(page.getByTestId("chat-image-lightbox-image")).toBeVisible();
+  return opener;
+}
+
+async function imageTouchGesture(page: Page, { dx = 0, dy = 0, cancel = false, multi = false, afterStart }: {
+  dx?: number; dy?: number; cancel?: boolean; multi?: boolean; afterStart?: () => Promise<void>;
+}) {
+  const rect = (await page.getByTestId("chat-image-lightbox-image").boundingBox())!;
+  const x = rect.x + rect.width / 2;
+  const y = rect.y + rect.height / 2;
+  const session = await page.context().newCDPSession(page);
+  const points = (progress: number) => [
+    { id: 1, x: x + dx * progress, y: y + dy * progress, radiusX: 2, radiusY: 2, force: 1 },
+    ...(multi ? [{ id: 2, x: x + 24 + dx * progress, y: y + dy * progress, radiusX: 2, radiusY: 2, force: 1 }] : []),
+  ];
+  try {
+    await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: points(0) });
+    await afterStart?.();
+    for (const progress of [.25, .5, .75, 1]) await session.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: points(progress) });
+    await session.send("Input.dispatchTouchEvent", { type: cancel ? "touchCancel" : "touchEnd", touchPoints: [] });
+  } finally { await session.detach(); }
+}
+
+async function emptyImageStagePoint(page: Page) {
+  const stage = (await page.getByTestId("chat-image-lightbox-stage").boundingBox())!;
+  const image = (await page.getByTestId("chat-image-lightbox-image").boundingBox())!;
+  const close = (await page.getByTestId("chat-image-lightbox-close").boundingBox())!;
+  const outside = (x: number, y: number, rect: typeof image) => x < rect.x || x > rect.x + rect.width || y < rect.y || y > rect.y + rect.height;
+  const candidates = [[stage.x + 12, stage.y + 100], [stage.x + stage.width / 2, stage.y + stage.height - 12], [stage.x + 12, stage.y + stage.height / 2]];
+  const point = candidates.find(([x, y]) => outside(x, y, image) && outside(x, y, close));
+  expect(point).toBeDefined();
+  return { x: point![0], y: point![1] };
+}
+
+const imageReviewCases = [
+  { name: "phone-320", width: 320, height: 760, touch: true, immersive: true },
+  { name: "phone-390", width: 390, height: 760, touch: true, immersive: true },
+  { name: "boundary-767", width: 767, height: 900, touch: true, immersive: true },
+  { name: "tablet-768", width: 768, height: 900, touch: true, immersive: false },
+  { name: "landscape-touch", width: 844, height: 390, touch: true, immersive: true },
+  { name: "landscape-mouse", width: 844, height: 390, touch: false, immersive: false },
+  { name: "desktop", width: 1280, height: 900, touch: false, immersive: false },
+  { name: "tall-image", width: 390, height: 844, touch: true, immersive: true, shape: "tall" },
+];
+
+for (const theme of ["light", "dark"]) {
+  for (const view of imageReviewCases) {
+    test.describe(`mobile image preview ${theme} ${view.name}`, () => {
+      test.use({ viewport: { width: view.width, height: view.height }, hasTouch: view.touch });
+      test("fits the image and dismissal controls without changing the reading context", async ({ page }) => {
+        await page.addInitScript(() => addEventListener("DOMContentLoaded", () => {
+          for (const [side, value] of Object.entries({ top: 28, right: 24, bottom: 16, left: 20 })) {
+            document.documentElement.style.setProperty(`--instafy-safe-area-inset-${side}`, `${value}px`);
+          }
+        }));
+        await openOlderMessage(page, theme, `&review=image${view.shape ? `&imageShape=${view.shape}` : ""}`);
+        const opener = page.getByTestId("chat-image-attachment-thumbnail");
+        if (view.touch) await opener.tap(); else await opener.click();
+        const dialog = page.getByRole("dialog", { name: "Image preview" });
+        const preview = page.getByTestId("chat-image-lightbox-image");
+        const close = page.getByTestId("chat-image-lightbox-close");
+        await expect(preview).toBeVisible();
+        await insideViewport(page, dialog);
+        await insideViewport(page, close);
+        // The existing framed desktop body scrolls at short viewport heights.
+        if (!before || view.height >= 500) await insideViewport(page, preview);
+        expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+        if (!before) {
+          await expect(page.getByTestId("chat-image-lightbox-stage")).toHaveAttribute("data-immersive", String(view.immersive));
+          const rect = (await dialog.boundingBox())!;
+          const closeRect = (await close.boundingBox())!;
+          if (view.immersive) {
+            expect(rect).toEqual({ x: 0, y: 0, width: view.width, height: view.height });
+            expect(closeRect.y).toBeGreaterThanOrEqual(28);
+            expect(closeRect.x + closeRect.width).toBeLessThanOrEqual(view.width - 24);
+            expect(closeRect.y).toBeLessThanOrEqual(30);
+            expect(closeRect.width).toBeGreaterThanOrEqual(44);
+            expect(closeRect.height).toBeGreaterThanOrEqual(44);
+            const heading = dialog.getByRole("heading");
+            if (await heading.count()) {
+              expect(await heading.evaluate(element => {
+                for (let ancestor: Element | null = element; ancestor; ancestor = ancestor.parentElement) {
+                  const style = getComputedStyle(ancestor);
+                  if (style.clip === "rect(0px, 0px, 0px, 0px)" || style.clipPath === "inset(50%)") return true;
+                }
+                return false;
+              })).toBe(true);
+            }
+          } else {
+            expect(rect.x).toBeGreaterThan(0);
+            expect(rect.width).toBeLessThan(view.width);
+            await expect(dialog.getByRole("heading")).toBeVisible();
+          }
+        }
+        if (view.shape) expect(await preview.evaluate(element => (element as HTMLImageElement).naturalHeight / (element as HTMLImageElement).naturalWidth)).toBeGreaterThan(5);
+        await capture(page, `mobile-image-${theme}-${view.name}`);
+        const imageRect = (await preview.boundingBox())!;
+        const imagePoint = { x: imageRect.x + imageRect.width / 2, y: imageRect.y + imageRect.height / 2 };
+        if (view.touch) await page.touchscreen.tap(imagePoint.x, imagePoint.y); else await page.mouse.click(imagePoint.x, imagePoint.y);
+        await expect(dialog).toBeVisible();
+        await close.click();
+        await expect(dialog).toHaveCount(0);
+        await expect(opener).toBeFocused();
+        await expect(page.getByTestId("chat-input")).not.toBeFocused();
+        await expect(page.getByTestId("review-chat-pane")).toHaveAttribute("data-message-target", target);
+      });
+    });
+  }
+
+  test.describe(`mobile image gestures ${theme}`, () => {
+    test.use({ viewport: { width: 390, height: 760 }, hasTouch: true });
+    test.skip(before, "Immersive image gestures are new");
+    test("dismisses downward and by empty-space tap while retaining draft and opener focus", async ({ page }) => {
+      const opener = await openImageReview(page, theme);
+      await imageTouchGesture(page, { dy: 160 });
+      await expect(page.getByRole("dialog", { name: "Image preview" })).toHaveCount(0);
+      await expect(opener).toBeFocused();
+      await expect(page.getByTestId("chat-input")).toHaveText("Keep this edited draft while inspecting the reference image.");
+      await opener.tap();
+      const imageRect = (await page.getByTestId("chat-image-lightbox-image").boundingBox())!;
+      await page.touchscreen.tap(imageRect.x + imageRect.width / 2, imageRect.y + imageRect.height / 2);
+      await expect(page.getByRole("dialog", { name: "Image preview" })).toBeVisible();
+      const point = await emptyImageStagePoint(page);
+      await page.touchscreen.tap(point.x, point.y);
+      await expect(page.getByRole("dialog", { name: "Image preview" })).toHaveCount(0);
+      await expect(opener).toBeFocused();
+      await opener.tap();
+      await page.keyboard.press("Escape");
+      await expect(opener).toBeFocused();
+      await expect(page.getByTestId("chat-input")).not.toBeFocused();
+    });
+
+    test("does not dismiss short, horizontal, upward, cancelled or multi-finger gestures", async ({ page }) => {
+      await openImageReview(page, theme);
+      for (const gesture of [{ dy: 16 }, { dx: 140, dy: 24 }, { dy: -120 }, { dy: 140, cancel: true }, { dy: 140, multi: true }]) {
+        const resting = (await page.getByTestId("chat-image-lightbox-image").boundingBox())!;
+        await imageTouchGesture(page, gesture);
+        await expect(page.getByRole("dialog", { name: "Image preview" })).toBeVisible();
+        await expect.poll(async () => Math.abs((await page.getByTestId("chat-image-lightbox-image").boundingBox())!.y - resting.y)).toBeLessThan(1);
+        await expect.poll(async () => (await page.getByTestId("chat-image-lightbox-image").boundingBox())!.width).toBeCloseTo(resting.width, 0);
+      }
+      await imageTouchGesture(page, { dy: 160 });
+      await expect(page.getByRole("dialog", { name: "Image preview" })).toHaveCount(0);
+    });
+  });
+}
+
+test.describe("mobile image viewport changes", () => {
+  test.use({ viewport: { width: 390, height: 760 }, hasTouch: true });
+  test("cancels a swipe when the viewport changes or the page is zoomed", async ({ page }) => {
+    test.skip(before, "Immersive image gestures are new");
+    await openImageReview(page, "dark");
+    await imageTouchGesture(page, { dy: 160, afterStart: () => page.setViewportSize({ width: 390, height: 700 }) });
+    await expect(page.getByRole("dialog", { name: "Image preview" })).toBeVisible();
+    const session = await page.context().newCDPSession(page);
+    try {
+      await session.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1.25 });
+      await expect.poll(() => page.evaluate(() => visualViewport?.scale)).toBeGreaterThan(1.01);
+      await imageTouchGesture(page, { dy: 140 });
+      await expect(page.getByRole("dialog", { name: "Image preview" })).toBeVisible();
+      await session.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
+      await expect.poll(() => page.evaluate(() => visualViewport?.scale)).toBe(1);
+      await imageTouchGesture(page, { dy: 160 });
+      await expect(page.getByRole("dialog", { name: "Image preview" })).toHaveCount(0);
+    } finally { await session.detach(); }
+  });
+});

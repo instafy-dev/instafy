@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, type CSSProperties, type ReactNode, typ
 import { useNativeBackButtonAction } from "../../native/useNativeBackButtonAction";
 import { StudioDialogGutterContext, type StudioDialogGutter } from "./StudioDialogSpacing";
 import { StudioModalNativeOcclusion } from "./studioModalOcclusion";
+import { useStudioMediaImmersive } from "./studioMediaLayout";
 import {
   Dialog,
   Modal,
@@ -15,6 +16,16 @@ const OVERLAY_BASE =
 
 const MODAL_BASE =
   "w-full rounded-2xl border shadow-xl outline-none";
+
+const IMMERSIVE_OVERLAY_BASE = "fixed inset-0 z-[80] flex items-center justify-center";
+const IMMERSIVE_MODAL_BASE = "dark h-dvh w-full max-w-none overflow-hidden text-slate-100 outline-none";
+const IMMERSIVE_DIALOG_BASE = "relative flex h-full min-h-0 w-full flex-col outline-none";
+const MEDIA_SAFE_AREA_STYLE = {
+  "--studio-media-safe-top": "max(var(--instafy-safe-area-inset-top, 0px), 1rem)",
+  "--studio-media-safe-right": "max(var(--instafy-safe-area-inset-right, 0px), 1rem)",
+  "--studio-media-safe-bottom": "max(var(--instafy-safe-area-inset-bottom, 0px), 1rem)",
+  "--studio-media-safe-left": "max(var(--instafy-safe-area-inset-left, 0px), 1rem)",
+} as CSSProperties;
 
 export type StudioDialogSize = "sm" | "md" | "lg" | "media";
 
@@ -33,7 +44,7 @@ const OVERLAY_APPEARANCE_CLASSES: Record<StudioDialogAppearance, string> = {
 };
 
 export type StudioDialogBackdrop = "standard" | "opaque";
-export type StudioDialogLayout = "default" | "editor";
+export type StudioDialogLayout = "default" | "editor" | "media";
 
 const EDITOR_MODAL_CLASS =
   "max-h-[calc(100dvh-max(var(--instafy-safe-area-inset-top,0px),1rem)-max(var(--instafy-safe-area-inset-bottom,0px),1rem))] overflow-hidden";
@@ -55,7 +66,7 @@ interface StudioDialogModalProps extends ModalOverlayProps {
   size?: StudioDialogSize;
   /** Shared section gutters. Responsive is 16px narrow / 20px at sm and above. */
   gutter?: StudioDialogGutter;
-  /** Bounded header/body/footer layout. Pair with a scrollable StudioDialogBody. */
+  /** Editor bounds sections; media uses that desktop frame and an immersive mobile shell. */
   layout?: StudioDialogLayout;
   /** False only when the modal contains the native surface itself, such as fullscreen. */
   occludesNativeSurface?: boolean;
@@ -119,7 +130,7 @@ export function StudioDialogModal({
   onNativeBack,
   appearance = "default",
   backdrop = "standard",
-  size = "md",
+  size,
   gutter = "default",
   layout = "default",
   occludesNativeSurface = true,
@@ -132,6 +143,7 @@ export function StudioDialogModal({
   dialogAriaLabelledBy,
   ...props
 }: StudioDialogModalProps) {
+  const immersive = useStudioMediaImmersive(layout === "media");
   // Native Back closes the top modal before drawers/routes, including on wider
   // phones. A busy modal consumes Back without dismissing its underlying page.
   useNativeBackButtonAction(Boolean(props.isOpen), () => {
@@ -155,25 +167,39 @@ export function StudioDialogModal({
   const normalizedDialogLabel = normalizedDialogLabelledBy
     ? undefined
     : dialogAriaLabel?.trim() || "Dialog";
+  const overlayClasses = [
+    immersive ? IMMERSIVE_OVERLAY_BASE : OVERLAY_BASE,
+    backdrop === "opaque" || immersive ? "bg-zinc-950" : OVERLAY_APPEARANCE_CLASSES[appearance],
+  ].join(" ");
+  const modalClasses = immersive ? IMMERSIVE_MODAL_BASE : [
+    MODAL_BASE,
+    MODAL_SIZE_CLASSES[size ?? (layout === "media" ? "media" : "md")],
+    MODAL_APPEARANCE_CLASSES[appearance],
+    layout !== "default" ? EDITOR_MODAL_CLASS : "",
+    layout === "media" ? "h-full" : "",
+  ].filter(Boolean).join(" ");
+  const dialogClasses = immersive ? IMMERSIVE_DIALOG_BASE : [
+    "outline-none", layout !== "default" ? EDITOR_DIALOG_CLASS : "", layout === "media" ? "h-full" : "",
+  ].filter(Boolean).join(" ");
 
   return (
     <ModalOverlay
       {...props}
       className={composeRenderProps(className, (value) =>
-        `${OVERLAY_BASE} ${
-          backdrop === "opaque" ? "bg-zinc-950" : OVERLAY_APPEARANCE_CLASSES[appearance]
-        }${value ? ` ${value}` : ""}`
+        `${overlayClasses}${value ? ` ${value}` : ""}`
       )}
     >
       <Modal
         style={modalStyle}
         className={composeRenderProps(modalClassName, (value) =>
-          [MODAL_BASE, MODAL_SIZE_CLASSES[size], MODAL_APPEARANCE_CLASSES[appearance], layout === "editor" ? EDITOR_MODAL_CLASS : "", value].filter(Boolean).join(" ")
+          [modalClasses, value].filter(Boolean).join(" ")
         )}
       >
         <Dialog
           ref={setDialogNode}
-          className={["outline-none", layout === "editor" ? EDITOR_DIALOG_CLASS : "", dialogClassName].filter(Boolean).join(" ")}
+          className={[dialogClasses, dialogClassName].filter(Boolean).join(" ")}
+          data-media-immersive={layout === "media" ? String(immersive) : undefined}
+          style={layout === "media" ? MEDIA_SAFE_AREA_STYLE : undefined}
           aria-label={normalizedDialogLabel}
           aria-labelledby={normalizedDialogLabelledBy}
         >

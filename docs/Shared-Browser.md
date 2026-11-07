@@ -481,14 +481,18 @@ Two steps never ask, in Ask too:
   "Declined cookies on <site>" after the step; a banner whose button took no
   press (its script not ready yet) stays up and is not said to be declined.
   Octo reads the page as it is after the press. A banner with no refusal of
-  its own stays up, and Octo reads on under it.
+  its own stays up: answering it is the person's step (see the notice pause
+  below).
 - **A covered click is refused at once.** A click whose control has something
   outside it over its middle (a notice, a dialog, a loading screen) would go
   to that instead. The control is brought to the middle of the view, past a
   pinned header, and a cover still there after about 600 ms refuses the step
-  at once, in words: a cookie or consent notice says "A cookie notice covers
-  this page, and the browser could not decline it: read on under it, or open
-  the place's own site." (it may have no reject button, sit on a page the
+  at once, in words: a cookie or consent notice says
+  "A cookie notice covers this page, and the browser could not decline it. If
+  the task needs this page, pause on the notice's buttons with
+  request_human_input in the chat's own tab: the person answers it there and
+  chooses Let Octo continue. Otherwise open a link under it by its address, or
+  the official site of the place or service the task is about." (it may have no reject button, sit on a page the
   browser presses nothing on, or have come after the page was read, which the
   next look declines when it can), any other cover that something covers the
   control and to take a fresh snapshot. Before, such a click waited out Playwright's 15-second
@@ -502,8 +506,9 @@ Two steps never ask, in Ask too:
   continuar", "Toestemming geven", …, in the refusal's languages), or that
   only allows ("Allow", "Allow all cookies", "Autoriser", "Alle Cookies
   zulassen"), is refused in every mode before any prompt
-  (`step_refused_consent`): accepting is the person's step, and Octo reads on
-  under the banner. A link is refused too, which plain-link navigation would
+  (`step_refused_consent`): accepting is the person's step, and the refusal
+  says so in the covered click's words, which the Personal Browser's policy
+  gives too. A link is refused too, which plain-link navigation would
   otherwise take. Only these words count: a banner's "Disagree" toggles, its
   cookie policy link, its settings ("Manage consent", a "Consent" tab) stay
   ordinary steps, and an accept word with "not", "no" or "without" up to two
@@ -513,6 +518,32 @@ Two steps never ask, in Ask too:
   selection", "Save and accept") is how a refusal made in the banner's
   settings is saved, so it is not refused: it asks once in every mode, a link
   too, because pre-ticked purposes could ride along.
+- **A notice the browser could not decline is the person's step, like a
+  sign-in.** `request_human_input` takes a cookie notice's buttons as well as
+  editable fields, in the chat's own tab only (Octo's own tabs refuse it, and
+  say to open that page in the chat's own tab and pause there). Each one must
+  be a button or link the describer found in a consent banner, as both
+  refusals judge a notice (so a notice that speaks only of privacy counts
+  too), in one small part of the page with a button of that banner that
+  accepts, and turned on. And it must be the notice's own answer (its accept,
+  an accept limited to the necessary cookies or a selection, or a refusal)
+  that on its own asks only as an accept or allow word does, or a step the
+  browser takes by itself while it reads (a settings link, "Learn more"). So
+  a page cannot dress a field, a payment, a sign-in, a deletion or a commit
+  ("Book now") up as a notice's button to get a pause. A notice in a frame is
+  never listed, so never handed over. The pause
+  highlights those buttons and presses none of them; its guidance says
+  `kind: "cookies"` with fixed labels ("Highlighted button 1") and nothing of
+  the page, and ends the run under its own code (`cookie_notice_required`).
+  The Browser view's hint says "Answer the highlighted cookie notice, then let
+  Octo continue." and the turn's reply "Answer the highlighted cookie notice
+  in Instafy's browser, then choose Let Octo continue." (after a pause right
+  before it, "Instafy's browser is still waiting for you. Answer the
+  highlighted cookie notice, then choose Let Octo continue."). The Browser
+  view's row under the toolbar holds **Let Octo continue** without the
+  sign-in note, since nobody signs in. The person answers the
+  notice on the page (in its settings, if they like), and the next turn reads
+  the page under it.
 
 The browser view's prompt asks in the chat row's words: "Octo wants to use
 example.com." with **Deny** and **Allow site** (or "Octo wants to click “Search”
@@ -1277,22 +1308,27 @@ a space whose copy of the skill lacks it keeps today's routes. Research whose
 answer ends in a page (a comparison, prices, a route) is `browser_then_build`
 from the first message too, while research answered in a reply (facts, a
 price, opening hours, reviews) stays with Octo, whose turn reads public pages
-itself. A request to make something with no site to use first ("on a map",
-"put this on a page") stays with Octo: a browser turn cannot make it, and a
-map's skill finds and cites its places itself. So does one made from what the
-chat already found. Folded into one sentence with that second case, the rule
-for "on a map" likely lost to research that ends in a page: a three-day city
-plan "on a map" went through the browser to a map with no hotels, no day plan
-and no sight's own page cited (a local test, Nov 4). A message that carries on the
-chat's browser work goes on there, whether or not that work found its answer,
-and a bare "keep going" carries on what the chat left open (what its replies
-or a page here mark not checked or not confirmed, such as a route), never a
-change the person stopped or undid. The turn that carries it on reads the same
-in `AGENTS.md`'s "Replies", and says which. A message that names the browser
-still stays with Octo when the browser turn could not do it alone: it sees
-only the person's words and the chat's earlier browser turns, so a message
-that needs what this space or another chat holds, a site that runs in this
-space, or a message that says not to use the browser is not sent there. The
+itself. Only a map ("on a map") stays with Octo, since a map's skill finds
+and cites its places itself, and so does a page made only from what the chat
+already found. A comparison that named no site to use first once stayed with
+Octo too, under a rule written for maps, and its building turn, which must
+change files and so cannot ask for the browser, met a maker's robots.txt and
+no search key (a local test, Nov 6). A message that carries on the chat's
+browser work goes on there, whether or not that work found its answer, and a
+bare "keep going" is `browser_then_build` when a page here marks something not
+checked or not confirmed, such as a route, or an earlier message asked for a
+page not made yet; it never carries on a change the person stopped or undid.
+The turn that carries it on reads the same in `AGENTS.md`'s "Replies", and says
+which. A message that names the browser still stays with Octo when the browser
+turn could not do it alone: it sees only the person's words (with the routing
+step's summary of what they carry on while the chat has no browser turn) and
+the chat's earlier browser turns, so a message whose browser part needs what
+this space or another chat holds (what a page, map or file here says, or, once
+the chat has a browser turn, what a reply that was not the browser's named), a
+site that runs in this space, or a message that says not to use the browser is
+not sent there. Its building turn reads what the browser part needs and names
+it in a card, which hands back to a build when the message changes something
+here: such a turn changes no file itself, so it can ask for the browser. The
 routes are offered only for the
 person's own words (never a prompt Instafy wrote for a command such as
 `/learn`) on an interactive turn that could ask for the browser itself (not a
@@ -1300,13 +1336,18 @@ hand-back, a worker, a plan, an unattended run or a browser turn) and that
 Octo answers for sure (not a group chat's message that Octo first decides
 whether to answer at all), with no attachments. That message's job then runs
 no model turn of its own: it posts one card marked `routed`, whose task is the
-person's own words, and no reply. Studio opens it as it opens any card, and
+person's own words, and no reply. In a chat with earlier turns but no browser
+turn yet, the words are followed by one quoted line, "What this carries on:
+…", with the routing step's summary, since the browser turn reads nothing of
+those turns; like any card's task, the line names no address the person could
+not have seen in the chat, and is left out when it would. Studio opens it as it opens any card, and
 the chat reads it as one turn: the turn's line says "Opening Instafy's
 browser…" until the browser turn shows something, and neither the card nor
 the continuation is shown. The chat keeps the continuation as any card's, as
 one line ("Octo opened Instafy's browser for …"); what it sends, and what is
-stored as its message, is still the person's words, as the browser turn's
-task. Routing and a building turn on a new thread read those words once,
+stored as its message, is still the card's task, as the browser turn's task,
+and so is what **Try again** sends. Routing and a building turn on a new
+thread read the person's words once,
 from the person's own message: they leave that copy out and quote the
 browser turn with its reply alone (only a continuation the controller
 checked as the routed card's own, `browserCardTurn.routed`, whose message is
@@ -1844,7 +1885,7 @@ readable. The Shared and Personal Browser policies, the browser skill and the
 turn that writes a card's task state the same rule. A run on a resumed provider
 thread is given its own policy as well (once, when it differs from the one the
 thread last read), and the hint says the rule again where it applies. The
-turn's reply after a pause says "Sign in or fill in the highlighted
+turn's reply after a pause on fields says "Sign in or fill in the highlighted
 fields on the page in Instafy's browser, then choose Let Octo continue. I don't
 ask for those details in chat." When Octo's last reply in the chat was such a
 pause already, it says "Instafy's browser is still waiting for you. Sign in or
@@ -1893,7 +1934,7 @@ the bounded server and a fresh snapshot, except for a browser turn that carries
 on the person's own message and asked Octo to make it: that message goes to the
 building turn instead (see "Hand-back"). If the retry still has no instrumented
 action evidence, the job fails closed instead of presenting an unverified prose
-success. The person reads one plain sentence for it ("Octo couldn't open a page
+success. The person reads one plain sentence for it ("Octo didn't open a page
 in the browser, so this turn stopped."); the artifact beside it keeps the
 machine-readable reason.
 

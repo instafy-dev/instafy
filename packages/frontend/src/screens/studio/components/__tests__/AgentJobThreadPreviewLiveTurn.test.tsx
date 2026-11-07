@@ -300,7 +300,7 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
       id: "failure",
       role: "assistant",
       authorId: null,
-      content: "Octo couldn't open a page in the browser, so this turn stopped.",
+      content: "Octo didn't open a page in the browser, so this turn stopped.",
       timestamp: base + 4_000,
       files: null,
       messageType: "error",
@@ -320,7 +320,7 @@ describe("AgentJobThreadPreviewLayout live turn", () => {
     });
     expect(activityLine()).toBeNull();
     expect(container.querySelector('[data-testid="run-failure-body"]')?.textContent).toContain(
-      "Octo couldn't open a page in the browser, so this turn stopped.",
+      "Octo didn't open a page in the browser, so this turn stopped.",
     );
   });
 

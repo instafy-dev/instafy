@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "request_human_input",
-      "description": "End this turn and ask the user to fill one to eight highlighted fields from a fresh snapshot. Never include field values. The user explicitly continues in a fresh turn.",
+      "description": "End this turn and ask the user to fill one to eight highlighted fields, or to answer a cookie notice by its highlighted buttons, from a fresh snapshot. Never include field values. The user explicitly continues in a fresh turn.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

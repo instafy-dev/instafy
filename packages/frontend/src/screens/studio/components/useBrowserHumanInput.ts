@@ -12,6 +12,8 @@ export type BrowserHumanInputRequest = {
   origin: string;
   createdAtMs: number;
   expiresAtMs: number;
+  /** A pause on a cookie notice the browser could not decline, not on fields. */
+  kind?: "cookies";
   fields: Array<{ label: string }>;
 };
 

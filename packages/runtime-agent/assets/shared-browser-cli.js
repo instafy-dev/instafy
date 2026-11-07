@@ -2562,13 +2562,14 @@ function fieldFingerprint(url, description) {
 }
 
 // Records the editable fields a snapshot of the page the person chose shows,
-// for request_human_input (approvalProtocol.recordObservedFields). Octo's own
-// tabs are for reading and never ask the person to fill a field. Without the
+// and the controls of a consent banner on it, for request_human_input
+// (approvalProtocol.recordObservedFields). Octo's own tabs are for reading
+// and never ask the person to fill a field or answer a notice. Without the
 // record, a pause checks the whole page, as before.
 function recordObservedFields(snapshotId, url, interactive) {
   if (inAgentTab()) return;
   const fields = interactive
-    .filter(({ description }) => EDITABLE_FIELD_TAGS.has(description.tag))
+    .filter(({ description }) => EDITABLE_FIELD_TAGS.has(description.tag) || description.policy?.consentContext === true)
     .slice(0, approvalProtocol.maxObservedFields)
     .map(({ description }) => ({ index: description.index, field: fieldFingerprint(url, description) }));
   if (!fields.length) return;
@@ -2894,6 +2895,9 @@ const DECLINE_CLICK_TIMEOUT_MS = 2_000;
 // around it, up to its dialog. A dialog that speaks only of privacy or
 // consent (a policy to accept, a consent form) is no cookie banner, though
 // its buttons are judged as a banner's (the describer's consent context).
+// With `request.anyConsent` such a dialog counts too: a pause hands the
+// person a notice the browser never presses, and both refusals send the turn
+// to pause on any notice the describer found consent around.
 function cookieBannerInPage(element, request) {
   const doc = element.ownerDocument;
   const roots = [doc.body, doc.documentElement];
@@ -2913,6 +2917,7 @@ function cookieBannerInPage(element, request) {
     }
   }
   if (!banner || typeof banner.textContent !== "string" || banner.textContent.length > 4_000) return false;
+  if (request && request.anyConsent === true) return true;
   const cookieName = /cookie/i;
   const cookieText = /\bcookies?\b/i;
   const labelledText = (node) => String(node.getAttribute("aria-labelledby") || "")
@@ -3097,6 +3102,47 @@ async function declineCookieBanner(page, interactive) {
     }
   }
   return false;
+}
+
+// Whether a pause may hand these controls to the person as a cookie notice
+// the browser could not decline (request_human_input). Each one is a button
+// or link the describer found in a consent banner, as both refusals judge a
+// notice (its consent context), turned on, in one small part of the page
+// with a button of that banner that accepts (cookieBannerInPage). And it is
+// the notice's own answer (its accept, a limited accept or a refusal) that
+// on its own asks only as an accept or allow word does, or a step the
+// browser takes by itself while it reads (its settings link, "Learn more").
+// So a page can't dress a field, a payment, a sign-in, a deletion or a
+// commit ("Book now") up as a notice's button to get a pause. A notice in a
+// frame is never listed, so never handed over.
+async function cookieNoticeButtons(page, interactive, selected) {
+  const pageUrl = page.url();
+  const accepts = interactive
+    .filter(({ description }) => {
+      if (description.policy?.consentContext !== true) return false;
+      const step = classifyStep("click", description, { pageUrl });
+      return step.verdict === "refuse" && step.category === "consent";
+    })
+    .map(({ locator }) => locator);
+  if (!accepts.length) return false;
+  for (const entry of selected) {
+    if (!entry || EDITABLE_FIELD_TAGS.has(entry.description.tag) ||
+        entry.description.policy?.consentContext !== true || entry.description.disabled === true) return false;
+    const { description } = entry;
+    const inNotice = classifyStep("click", description, { pageUrl });
+    const alone = classifyStep("click", { ...description, policy: { ...description.policy, consentContext: false } }, { pageUrl });
+    const answer = (inNotice.verdict === "refuse" && inNotice.category === "consent") ||
+      inNotice.consentLimited === true || inNotice.consentRejection === true;
+    if (alone.verdict === "refuse") return false;
+    if (answer
+      ? alone.category !== "permission" && ROUTINE_CONFIRMED_CATEGORIES.has(alone.category)
+      : !routineCovers(alone, description) || isFormSubmissionControl(description)) return false;
+    const beside = await entry.locator
+      .evaluate(cookieBannerInPage, { kind: "cookie-banner", others: accepts, anyConsent: true })
+      .catch(() => false);
+    if (beside !== true) return false;
+  }
+  return true;
 }
 
 // The model-facing view of the page: what a person can see of it. Text,
@@ -3559,9 +3605,10 @@ const COVER_LOOK_MS = 100;
 // (declineCookieBanner). A notice still over a control is one it could not
 // decline: one with no reject button, one on a page it presses nothing on,
 // or one that came after the page was read, which the next look declines
-// when it can.
-const CONSENT_COVER_MESSAGE =
-  "A cookie notice covers this page, and the browser could not decline it: read on under it, or open the place's own site.";
+// when it can. Answering it is the person's step, as accepting one is
+// (`step_refused_consent`), so both refusals say the same: pause on it
+// (request_human_input takes a cookie notice's buttons), or go elsewhere.
+const CONSENT_COVER_MESSAGE = actionPolicy.refusalFor("consent").message;
 
 async function clickLanding(target) {
   const landing = await target.locator
@@ -5432,7 +5479,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
   if (method === "POST" && requestPath === "/v1/request-human-input") {
     if (inAgentTab()) {
       throw new Error(
-        "Octo's own tabs are for reading, so the person is not asked to fill fields there. Stop at the sign-in or form and tell the person; nothing was highlighted.",
+        "Octo's own tabs are for reading, so nothing was highlighted. Stop at a sign-in or form and tell the person. When the task needs a page a cookie notice covers, open it in the chat's own tab, the page the person chose (select_tab, then navigate to this address), take a snapshot there and pause on the notice with request_human_input.",
       );
     }
     const sourceOrigin = await ensureSiteApproved(page.url(), "Allow the assistant to identify fields for your input");
@@ -5446,8 +5493,12 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       throw new Error("The page changed; take a fresh snapshot before requesting human input");
     }
     const selected = body.indices.map((index) => interactive[index]);
-    if (selected.some((entry) => !entry || !EDITABLE_FIELD_TAGS.has(entry.description.tag))) {
-      throw new Error("Human input targets must be observed editable fields");
+    // Editable fields (a sign-in, a form), or the buttons of a cookie notice
+    // the browser could not decline. The browser itself presses neither: the
+    // person answers the notice on the page.
+    const fields = selected.every((entry) => entry && EDITABLE_FIELD_TAGS.has(entry.description.tag));
+    if (!fields && !(await cookieNoticeButtons(page, interactive, selected))) {
+      throw new Error("Human input targets must be observed editable fields, or the buttons of a cookie notice");
     }
     for (const entry of selected) assertControlOn(entry.description);
     await clearHumanInputHighlights(page);
@@ -5483,13 +5534,18 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
         version: 1, handoffId: crypto.randomUUID(), runId: authority.runId,
         initiatorUserId: authority.initiatorUserId, browserPageId: EXPECTED_BROWSER_PAGE_ID,
         origin: sourceOrigin, createdAtMs, expiresAtMs: createdAtMs + 600_000,
-        fields: selected.map((_, index) => ({ label: `Highlighted field ${index + 1}` })),
+        // A pause on a cookie notice says so (`kind`), so Studio asks the
+        // person to answer it. Fixed labels: nothing of the page goes along.
+        ...(fields ? {} : { kind: "cookies" }),
+        fields: selected.map((_, index) => ({ label: `Highlighted ${fields ? "field" : "button"} ${index + 1}` })),
       },
     });
     // The MCP latch blocks all further observation/mutation for this turn.
     // The existing guard, not this helper, restores human authority only after
     // confirmed shutdown. Never remove the agent marker to lend control.
-    throw new Error("User input is needed. End this turn; the user will explicitly continue after filling the highlighted fields. [human_input_required_non_retryable]");
+    throw new Error(fields
+      ? "User input is needed. End this turn; the user will explicitly continue after filling the highlighted fields. [human_input_required_non_retryable]"
+      : "The person answers the cookie notice on the page. End this turn; they will explicitly continue after answering it. [cookie_notice_required_non_retryable]");
   }
 
   if (method === "POST" && requestPath === "/v1/navigate") {

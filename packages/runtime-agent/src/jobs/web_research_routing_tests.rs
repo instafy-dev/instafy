@@ -533,7 +533,7 @@ fn the_skills_name_instafy_web_read_as_a_reader() {
         "It enforces robots.txt, task/per-site budgets and 2 s site pacing.",
         "`needs_browser` means JavaScript is needed",
         "for a `needs_browser` page, an aggregator, or a page the person wants to see or show",
-        "for a `needs_browser` page, or when none of these is there: one `request_browser` card",
+        "in a reply-only turn, for a `needs_browser` page or with none of these: one `request_browser` card",
         "`login` (401 or a sign-in form), `forbidden` (403), `rate_limited` (429), `captcha`, `paywall`, `robots`, `link_only`",
         "After a 429 or bot check, read nothing more from that site this turn.",
         "`needs_browser` means JavaScript is needed, and is not a stop: read that page in a browser tab or use another source.",
@@ -552,7 +552,7 @@ fn the_skills_name_instafy_web_read_as_a_reader() {
     // Whether a page needs a card at all is the building turn's choice, in the section a
     // building turn reads before it hands the person a card.
     assert!(carried.contains(
-        "A public page with no JavaScript or sign-in needs no card: `instafy web read <url…> --json` reads it; its `needs_browser` pages go in a card."
+        "A public page with no JavaScript or sign-in needs no card: `instafy web read <url…> --json` reads it; in a reply-only turn, its `needs_browser` pages go in a card."
     ));
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
 
@@ -930,13 +930,13 @@ fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_b
     for words in [
         "`browser`",
         "`browser_then_build`",
-        "sees only those words and this chat's earlier browser turns",
+        "sees only those words, with your `summary` while this chat has no browser turn, and this chat's earlier browser turns",
         "Stay `direct`, even when the message names Instafy's browser",
         "what only this space or another chat holds",
         "the site runs in this space",
         "says not to use the browser",
         "attachments",
-        "or it carries on browser work this chat started, whether or not that found the answer:",
+        "or it carries on browser work this chat started, whether or not that found the answer.",
         "Research whose answer is a reply (facts, a price, opening hours, reviews) stays `direct` when the message does not name the browser, unless it carries on this chat's browser work:",
     ] {
         assert!(section.contains(words), "{words}");
@@ -973,7 +973,7 @@ fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() 
     };
     assert!(
         line("browser").contains(
-            "or it carries on browser work this chat started, whether or not that found the answer:"
+            "or it carries on browser work this chat started, whether or not that found the answer."
         ),
         "{section}"
     );
@@ -981,9 +981,8 @@ fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() 
         line("browser_then_build"),
         "- `browser_then_build`: the same, and Octo then makes or changes something in this space \
          (a page, a map, a table). So is research whose answer ends in a page (a comparison, \
-         prices, a route), from the first message. A request to make one with no site to use \
-         first (\"on a map\", \"put this on a page\") is `direct`: a map's skill finds and \
-         cites its places itself. So is one made from what this chat already found."
+         prices, a route), from the first message. So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on, never a change the person stopped or undid. \
+         A map (\"on a map\") is `direct`: its skill finds and cites its places itself. So is a page made only from what this chat already found."
     );
     let reply = section
         .lines()
@@ -1036,12 +1035,12 @@ fn a_follow_up_on_the_chats_browser_work_browses_even_when_it_needs_a_page_here(
         .expect("the line that keeps a message direct");
     assert!(
         stay.ends_with(
-            "the building turn reads it and names it in a card, unless all it needs is what this chat's browser work found: filling in, checking again or going on with that work is `browser_then_build`."
+            "the building turn reads it and names it in a card, and a change here is built after it, unless all it needs is what this chat's browser work found: filling in, checking again or going on with that work is `browser_then_build`."
         ),
         "{stay}"
     );
-    // Making a page from what the browser found, with no site to use first, is still a build.
-    assert!(section.contains("(\"on a map\", \"put this on a page\") is `direct`"));
+    // A map is still a build, and so is a page made only from what this chat already found.
+    assert!(section.contains("A map (\"on a map\") is `direct`"));
 
     // The routing prompt for such a follow-up carries the line, whole.
     let tmp = scaffolded_space();
@@ -1086,7 +1085,7 @@ fn a_follow_up_goes_to_the_browser_only_with_what_its_browser_work_found() {
         + 1;
     let section = &BROWSER_SKILL[start..];
     assert!(section.contains(
-        "That browser turn sees only those words and this chat's earlier browser turns."
+        "That browser turn sees only those words, with your `summary` while this chat has no browser turn, and this chat's earlier browser turns."
     ));
     let stay = section
         .lines()
@@ -1094,14 +1093,12 @@ fn a_follow_up_goes_to_the_browser_only_with_what_its_browser_work_found() {
         .expect("the line that keeps a message direct");
     assert!(
         stay.starts_with(
-            "- Stay `direct`, even when the message names Instafy's browser, when the site runs in this space (a preview card), the person says not to use the browser, or it has attachments. Also when the browser part needs what only this space or another chat holds"
+            "- Stay `direct`, even when the message names Instafy's browser, when the site runs in this space (a preview card), the person says not to use the browser, or it has attachments. Also when the browser part needs what only this space or another chat holds (what a page, map or file here says, or, once this chat has a browser turn, \"those\" from a reply that was not the browser's)"
         ),
         "{stay}"
     );
     assert!(
-        stay.contains(
-            "names it in a card, unless all it needs is what this chat's browser work found: filling in"
-        ),
+        stay.contains("names it in a card, and a change here is built after it, unless all it needs is what this chat's browser work found: filling in"),
         "{stay}"
     );
     assert!(
@@ -1348,22 +1345,28 @@ fn a_bare_keep_going_carries_on_what_the_chat_left_open() {
         .expect("routing section")
         + 1;
     let section = BROWSER_SKILL[start..].trim_end();
-    let line = section
+    let browser = section
         .lines()
         .find(|line| line.starts_with("- `browser`:"))
         .expect("the browser line");
     assert!(
-        line.ends_with(
-            "or it carries on browser work this chat started, whether or not that found the answer: a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked or not confirmed, such as a route), never a change the person stopped or undid; when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`."
+        browser.ends_with(
+            "or it carries on browser work this chat started, whether or not that found the answer."
         ),
-        "{line}"
+        "{browser}"
     );
-    // No rule of its own ahead of the routes: the first rule is the `browser` route's.
+    // No rule of its own ahead of the routes: the first rule is the `browser` route's, and a bare
+    // "keep going" is `browser_then_build`'s.
     let first_rule = section
         .lines()
         .find(|line| line.starts_with("- "))
         .expect("the first rule");
-    assert_eq!(first_rule, line);
+    assert_eq!(first_rule, browser);
+    let line = section
+        .lines()
+        .find(|line| line.starts_with("- `browser_then_build`:"))
+        .expect("the build line");
+    assert!(line.contains("So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on, never a change the person stopped or undid."), "{line}");
     assert_eq!(section.matches("stopped or undid").count(), 1, "{section}");
     assert!(section.chars().count() <= BROWSER_SKILL_ROUTING_MAX_CHARS);
 
@@ -2257,26 +2260,18 @@ fn research_that_ends_in_a_page_reaches_its_build_and_keep_going_never_undoes_an
         .collect();
     assert!(rules[0].starts_with("- `browser`:"), "{}", rules[0]);
     assert!(
-        rules[0].ends_with(
-            "never a change the person stopped or undid; when a page here shows it, or an earlier message here asked for one that isn't made yet, that is `browser_then_build`."
-        ),
-        "{}",
-        rules[0]
-    );
-    assert!(
-        rules[1].ends_with(
-            "A request to make one with no site to use first (\"on a map\", \"put this on a page\") is `direct`: a map's skill finds and cites its places itself. So is one made from what this chat already found."
-        ),
+        rules[1].contains("never a change the person stopped or undid. A map"),
         "{}",
         rules[1]
     );
     assert!(
-        rules[2].ends_with(
-            "unless all it needs is what this chat's browser work found: filling in, checking again or going on with that work is `browser_then_build`."
+        rules[1].ends_with(
+            "A map (\"on a map\") is `direct`: its skill finds and cites its places itself. So is a page made only from what this chat already found."
         ),
         "{}",
-        rules[2]
+        rules[1]
     );
+    assert!(rules[2].ends_with("the building turn reads it and names it in a card, and a change here is built after it, unless all it needs is what this chat's browser work found: filling in, checking again or going on with that work is `browser_then_build`."), "{}", rules[2]);
     assert_eq!(section.matches("stopped or undid").count(), 1, "{section}");
     assert!(section.chars().count() <= BROWSER_SKILL_ROUTING_MAX_CHARS);
 
@@ -2334,17 +2329,17 @@ fn a_map_request_is_a_build_and_keep_going_carries_on_what_is_not_confirmed() {
     let build = rule("browser_then_build");
     assert!(
         build.ends_with(
-            "So is research whose answer ends in a page (a comparison, prices, a route), from the first message. A request to make one with no site to use first (\"on a map\", \"put this on a page\") is `direct`: a map's skill finds and cites its places itself. So is one made from what this chat already found."
+            "So is research whose answer ends in a page (a comparison, prices, a route), from the first message. So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on, never a change the person stopped or undid. A map (\"on a map\") is `direct`: its skill finds and cites its places itself. So is a page made only from what this chat already found."
         ),
         "{build}"
     );
     let browser = rule("browser");
-    for words in [
-        "the work happens on a website (use a site, sign in, send a form, press its buttons), or it carries on browser work this chat started",
-        "a bare \"keep going\" carries on what the chat left open (what its replies or page mark not checked or not confirmed, such as a route), never a change the person stopped or undid; when a page here shows it",
-    ] {
-        assert!(browser.contains(words), "{words}\n{browser}");
-    }
+    assert!(
+        browser.contains(
+            "the work happens on a website (use a site, sign in, send a form, press its buttons), or it carries on browser work this chat started"
+        ),
+        "{browser}"
+    );
     for earlier in [
         "A request to make one from what this chat already found, or with no site to use first",
         "(what its replies or page mark not checked);",
@@ -2352,7 +2347,7 @@ fn a_map_request_is_a_build_and_keep_going_carries_on_what_is_not_confirmed() {
     ] {
         assert!(!section.contains(earlier), "{earlier}");
     }
-    // Never a change the person stopped or undid: part of the `browser` route, the first one.
+    // The `browser` route is the first one.
     assert_eq!(
         section.lines().find(|line| line.starts_with("- ")),
         Some(browser)
@@ -2531,4 +2526,126 @@ fn a_value_nobody_found_says_where_it_was_looked_for() {
         learn::ensure_project_memory_scaffold(tmp.path());
         assert_eq!(fs::read_to_string(&path).unwrap(), current, "{relative}");
     }
+}
+
+/// Research that ends in a page starts in the browser; only a map, or a page made only from what
+/// the chat already found, is a building turn of its own. A local test (Nov 6): "Compare the three
+/// latest Framework laptops: CPU, battery, weight, price, with two independent reviews each, as a
+/// comparison page." went `direct`, its routing reason quoting "no site to use first", a sentence
+/// written for maps. Its building turn, which must change files and so has no card to ask for the
+/// browser, met the maker's robots.txt and no search key, and asked the person for the pages. A
+/// building turn names what the browser part needs in a card only for a message that changes
+/// nothing here; one that needs the web and a change here is `browser_then_build`, and while the
+/// chat has no browser turn, its browser part gets the routing step's summary. After a Stop and an
+/// Undo, with a page that marks its route not confirmed, a bare "keep going" went to the browser
+/// alone: its rule ended the `browser` line. It is `browser_then_build`'s now. The section is
+/// shorter, the routing step reads it whole, and an unedited earlier copy is upgraded.
+#[test]
+fn research_ending_in_a_page_browses_first_and_keep_going_with_a_page_builds() {
+    let start = BROWSER_SKILL
+        .find("\n## Routing preflight\n")
+        .expect("routing section")
+        + 1;
+    let section = BROWSER_SKILL[start..].trim_end();
+    let rule = |route: &str| {
+        section
+            .lines()
+            .find(|line| line.starts_with(&format!("- `{route}`:")))
+            .unwrap_or_else(|| panic!("no {route} line"))
+    };
+    let build = rule("browser_then_build");
+    assert!(
+        build.ends_with(
+            "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on, never a change the person stopped or undid. A map (\"on a map\") is `direct`: its skill finds and cites its places itself. So is a page made only from what this chat already found."
+        ),
+        "{build}"
+    );
+    let browser = rule("browser");
+    assert!(
+        browser.ends_with("whether or not that found the answer."),
+        "{browser}"
+    );
+    let stay = section
+        .lines()
+        .find(|line| line.starts_with("- Stay `direct`"))
+        .expect("the line that keeps a message direct");
+    assert!(
+        stay.contains(
+            "Also when the browser part needs what only this space or another chat holds (what a page, map or file here says, or, once this chat has a browser turn, \"those\" from a reply that was not the browser's): the building turn reads it and names it in a card, and a change here is built after it, unless"
+        ),
+        "{stay}"
+    );
+    assert!(!stay.contains("changes nothing here"), "{stay}");
+    assert!(section.contains(
+        "That browser turn sees only those words, with your `summary` while this chat has no browser turn, and this chat's earlier browser turns."
+    ));
+    for gone in [
+        "with no site to use first",
+        "put this on a page",
+        "when a page here shows it",
+    ] {
+        assert!(!section.contains(gone), "{gone}");
+    }
+    assert_eq!(section.matches("keep going").count(), 1, "{section}");
+    let previous = include_str!("legacy/browser-automation-v33.md");
+    let before = &previous[previous
+        .find("\n## Routing preflight\n")
+        .expect("routing section")
+        + 1..];
+    assert!(section.chars().count() < before.trim_end().chars().count());
+    assert!(section.chars().count() <= BROWSER_SKILL_ROUTING_MAX_CHARS);
+
+    let tmp = scaffolded_space();
+    for request in [
+        "Compare the three latest Framework laptops: CPU, battery, weight, price, with two independent reviews each, as a comparison page.",
+        "Fill in what's still missing.",
+        "keep going",
+    ] {
+        let job = test_lease_job(
+            Some("feature"),
+            json!({ "prompt_text": request, "metadata": {} }),
+        );
+        let routes = browser_routing_snapshot_for_job(&job, tmp.path(), request)
+            .expect("the message is offered the browser routes");
+        assert!(!routes.contains("(truncated)"), "{request}: {routes}");
+        assert!(routes.contains(section), "{request}: {routes}");
+    }
+
+    assert!(previous.contains("A request to make one with no site to use first"));
+    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+}
+
+/// A `request_browser` card is a reader only in a turn whose answer is a reply: a turn that must
+/// change files has none in its answer, in the research skill and in the browser skill's handoff. A local test (Nov 6): a comparison page's building turn
+/// read "one `request_browser` card" for the maker's pages, which its answer could not carry,
+/// and asked the person to send the pages. The research skill stays within what a turn loads of
+/// it, and an unedited earlier copy is upgraded.
+#[test]
+fn a_card_is_a_reader_only_in_a_reply_only_turn() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let research = flat(RESEARCH_SKILL);
+    assert!(research.contains(
+        "- in a reply-only turn, for a `needs_browser` page or with none of these: one `request_browser` card listing the related reads, at most 6"
+    ));
+    assert!(!research.contains("or when none of these is there"));
+    assert!(RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+    // The browser skill's handoff, which such a turn reads too, says the same.
+    let browser = flat(BROWSER_SKILL);
+    for words in [
+        "When a page would help in a reply-only turn and neither Personal nor Shared Browser tools are exposed, emit one `request_browser` action",
+        "reads it; in a reply-only turn, its `needs_browser` pages go in a card.",
+    ] {
+        assert!(browser.contains(words), "{words}");
+    }
+    assert!(!browser.contains("When a page would help and neither"));
+    let previous = include_str!("legacy/web-research-v16.md");
+    assert!(flat(previous).contains("or when none of these is there: one `request_browser` card"));
+    let tmp = scaffolded_space();
+    let skill = tmp.path().join(learn::WEB_RESEARCH_RELATIVE_PATH);
+    fs::write(&skill, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), RESEARCH_SKILL);
 }

@@ -214,6 +214,10 @@ struct BrowserHumanInputRequest {
     origin: String,
     created_at_ms: u64,
     expires_at_ms: u64,
+    /// `cookies` on a pause on a cookie notice the browser could not decline,
+    /// whose buttons the person answers; none on a pause on fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
     fields: Vec<BrowserHumanInputField>,
 }
 
@@ -461,6 +465,7 @@ fn valid_browser_human_input_request(request: &BrowserHumanInputRequest) -> bool
         && request.expires_at_ms <= 9_007_199_254_740_991
         && request.expires_at_ms > request.created_at_ms
         && request.expires_at_ms - request.created_at_ms <= 600_000
+        && request.kind.as_deref().is_none_or(|kind| kind == "cookies")
         && !request.fields.is_empty()
         && request.fields.len() <= 8
         && request.fields.iter().all(|field| {
@@ -2239,6 +2244,14 @@ mod tests {
         let action = parse_browser_action_line(&value.to_string()).expect("valid handoff");
         let response = serde_json::to_value(action).expect("serialize handoff");
         assert_eq!(response["humanInputRequest"], value["humanInputRequest"]);
+        assert!(response["humanInputRequest"].get("kind").is_none());
+        // A pause on a cookie notice the browser could not decline says so, for
+        // Studio to ask the person to answer it.
+        let mut notice = human_input_action_fixture();
+        notice["humanInputRequest"]["kind"] = serde_json::json!("cookies");
+        let action = parse_browser_action_line(&notice.to_string()).expect("valid notice handoff");
+        let response = serde_json::to_value(action).expect("serialize notice handoff");
+        assert_eq!(response["humanInputRequest"], notice["humanInputRequest"]);
 
         value["pageId"] = serde_json::json!("other-page");
         assert!(parse_browser_action_line(&value.to_string()).is_none());
@@ -2284,6 +2297,9 @@ mod tests {
                 serde_json::json!([{"label": "Field", "value": "must not be forwarded"}]),
             ),
             ("instructions", serde_json::json!("must not be forwarded")),
+            ("kind", serde_json::json!("fields")),
+            ("kind", serde_json::json!("")),
+            ("kind", serde_json::json!(true)),
         ] {
             let mut value = human_input_action_fixture();
             value["humanInputRequest"][key] = invalid;
