@@ -11,10 +11,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::active_turn_input::ActiveTurnInputReceiver;
 use crate::codex::{
-    BUILDING_THREAD_KEYS, CodexClient, CodexFallbackSummaryKind, CodexFinalOutputSchema,
-    CodexRunOptions, CodexRunOutput, CodexThreadRestoreNeedsHistory, RETIRED_BROWSER_THREAD_KEYS,
-    ScopedWorkerExecution, ThreadLane, classify_internal_codex_fallback_summary,
-    lane_history_replay_required, provider_thread_restorable_on_this_runtime,
+    BUILDING_THREAD_KEYS, BUILDING_THREAD_MODE_KEY, CodexClient, CodexFallbackSummaryKind,
+    CodexFinalOutputSchema, CodexRunOptions, CodexRunOutput, CodexThreadRestoreNeedsHistory,
+    RETIRED_BROWSER_THREAD_KEYS, ScopedWorkerExecution, ThreadLane,
+    classify_internal_codex_fallback_summary, lane_history_replay_required,
+    provider_thread_restorable_on_this_runtime,
 };
 use crate::config::Config;
 use crate::controller::{LeaseJob, Registration};
@@ -638,13 +639,21 @@ fn leave_thread_holding_a_stopped_request(
     let Some(JsonValue::Object(mut map)) = state else {
         return (state, false);
     };
+    let left = leave_lane_thread(&mut map, lane);
+    map.insert(marker.to_string(), JsonValue::String(stop));
+    (Some(JsonValue::Object(map)), left)
+}
+
+/// Takes the lane's thread out of a state, so a run of the lane starts a new one: every key of
+/// the thread goes, at the top and in a nested `codex` state. Says whether the state named one.
+fn leave_lane_thread(map: &mut JsonMap<String, JsonValue>, lane: ThreadLane) -> bool {
     let names_a_thread = |map: &JsonMap<String, JsonValue>| {
         lane.thread_id_keys()
             .iter()
             .chain(lane.rollout_path_keys())
             .any(|key| map.contains_key(*key))
     };
-    let mut left = names_a_thread(&map);
+    let mut left = names_a_thread(map);
     for key in lane.thread_state_keys() {
         map.remove(*key);
     }
@@ -654,8 +663,166 @@ fn leave_thread_holding_a_stopped_request(
             nested.remove(*key);
         }
     }
-    map.insert(marker.to_string(), JsonValue::String(stop));
-    (Some(JsonValue::Object(map)), left)
+    left
+}
+
+/// A building thread runs in one mode. Each of its requests begins with the base instructions
+/// and reply format of the mode its turns run in ([`RuntimeFinalOutputMode::thread_mode`]), and
+/// a provider serves the thread's earlier turns from its cache. A turn of another mode would
+/// replace those mid-thread, and its first request would send the whole thread again uncached;
+/// it starts a new thread from the chat's replay instead, as a turn after a Stop does
+/// ([`leave_thread_holding_a_stopped_request`]). The state names the mode of its building
+/// thread, and the run saves its thread as a merge of this state, so the next turn of that mode
+/// resumes it.
+///
+/// A hand-back of a building turn's card keeps that turn's thread, in its own mode from then on:
+/// its own words are the controller's one line, and the person's request and the skills the
+/// card's turn read are in that thread, not in a replay. So does a turn on a thread saved before
+/// states named a mode. A turn on its thread's own base instructions ([`ThreadStart::ThreadsOwn`])
+/// keeps a thread it can resume as it is, and a thread it starts begins on the model's own
+/// instructions, which no mode picks ([`MODEL_OWN_THREAD_MODE`]): a turn of a mode leaves it. A
+/// turn that keeps no thread (`start` None) and a team plan's, whose prompt leaves the chat out,
+/// keep the thread as it is.
+///
+/// The thread left never sees this turn, so the state says this turn left it
+/// ([`BUILDING_THREAD_LEFT_FOR_MODE_KEY`]): its prompt reads the browser turns that thread had
+/// not read, and, should the turn fail, its job reports this state ([`LeftThread`]). The second
+/// value says whether a thread was left.
+fn leave_thread_begun_in_another_mode(
+    state: Option<JsonValue>,
+    job: &LeaseJob,
+    lane: ThreadLane,
+    start: Option<ThreadStart>,
+) -> (Option<JsonValue>, bool) {
+    let Some(start) = start.filter(|_| lane == ThreadLane::Building) else {
+        return (state, false);
+    };
+    if is_explicit_team_planning_job(job) || is_multi_agent_worker_job(job) {
+        return (state, false);
+    }
+    let mut state = match state {
+        Some(state @ JsonValue::Object(_)) => state,
+        // A chat's first turn: a job names no state, or a null one.
+        None | Some(JsonValue::Null) => JsonValue::Object(JsonMap::new()),
+        other => return (other, false),
+    };
+    let mode = match start {
+        ThreadStart::Mode(mode) => mode.thread_mode(),
+        ThreadStart::ThreadsOwn
+            if provider_thread_restorable_on_this_runtime(Some(&state), lane) =>
+        {
+            return (Some(state), false);
+        }
+        ThreadStart::ThreadsOwn => MODEL_OWN_THREAD_MODE,
+    };
+    let Some(map) = state.as_object_mut() else {
+        return (Some(state), false);
+    };
+    let began_in_another = map
+        .get(BUILDING_THREAD_MODE_KEY)
+        .and_then(JsonValue::as_str)
+        .is_some_and(|began_in| began_in != mode);
+    let carries_on_its_card = browser_hand_back::is_hand_back_job(job)
+        && browser_hand_back::person_request(job.payload.get("metadata")).is_none();
+    let left = began_in_another && !carries_on_its_card && leave_lane_thread(map, lane);
+    map.insert(
+        BUILDING_THREAD_MODE_KEY.to_string(),
+        JsonValue::String(mode.to_string()),
+    );
+    if left {
+        map.insert(
+            BUILDING_THREAD_LEFT_FOR_MODE_KEY.to_string(),
+            JsonValue::Bool(true),
+        );
+    }
+    (Some(state), left)
+}
+
+/// How the requests of a turn that keeps a building thread begin
+/// ([`leave_thread_begun_in_another_mode`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ThreadStart {
+    /// With the base instructions and reply format of the turn's mode
+    /// ([`RuntimeFinalOutputMode::thread_mode`]).
+    Mode(RuntimeFinalOutputMode),
+    /// With its thread's own base instructions, or the model's own on a new thread
+    /// (`codex::runtime_base_instructions`): an MCP task's, a granted turn's, a browser
+    /// runtime's.
+    ThreadsOwn,
+}
+
+/// The mode of a building thread begun on the model's own base instructions
+/// ([`ThreadStart::ThreadsOwn`]).
+const MODEL_OWN_THREAD_MODE: &str = "model_own";
+
+/// Says, for one run only, that its turn left the building thread for another mode
+/// ([`leave_thread_begun_in_another_mode`]). The state a run saves leaves it out
+/// ([`provider_conversation_state_to_save`]).
+const BUILDING_THREAD_LEFT_FOR_MODE_KEY: &str = "defaultThreadLeftForMode";
+
+/// Whether a run's state says its turn left the building thread for another mode.
+fn left_building_thread_for_mode(state: Option<&JsonValue>) -> bool {
+    state
+        .and_then(|state| state.get(BUILDING_THREAD_LEFT_FOR_MODE_KEY))
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false)
+}
+
+/// The state a job reports when its turn fails after it left the building thread for another
+/// mode. A failed turn saves no thread, so the controller would hand the next turn the state that
+/// names the thread left, which never saw the failed turn: a turn of that thread's mode would
+/// resume it, and read neither the failed request nor an Undo or a Stop before it. The job reports
+/// the state the turn ran on instead, which names no building thread, so the next turn starts
+/// one from the chat's replay. A turn that lost its lease (a Stop) reports no failure.
+#[derive(Default)]
+struct LeftThread(parking_lot::Mutex<Option<JsonValue>>);
+
+impl LeftThread {
+    fn record(&self, state: Option<&JsonValue>) {
+        let mut state = state.cloned().unwrap_or_else(|| json!({}));
+        if let Some(map) = state.as_object_mut() {
+            map.remove(BUILDING_THREAD_LEFT_FOR_MODE_KEY);
+        }
+        *self.0.lock() = Some(state);
+    }
+
+    /// `result`, with the state on the error when the turn failed after it left its thread.
+    fn attach_to_failure(&self, result: Result<JobExecution>) -> Result<JobExecution> {
+        let error = match result {
+            Err(error) if !crate::agent_executor::is_lease_lost(&error) => error,
+            other => return other,
+        };
+        let Some(state) = self.0.lock().take() else {
+            return Err(error);
+        };
+        let message =
+            extract_job_failure_message(&error).map_or_else(|| error.to_string(), str::to_owned);
+        Err(error.context(FailedTurnState { message, state }))
+    }
+}
+
+/// A failed turn's state for its job's report ([`LeftThread`]). Its message is the failure's own.
+#[derive(Debug)]
+struct FailedTurnState {
+    message: String,
+    state: JsonValue,
+}
+
+impl std::fmt::Display for FailedTurnState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for FailedTurnState {}
+
+/// What a failed job reports for the next turn of its chat, as a finished job does
+/// (`JobExecution::proxy_metadata`): the state its turn ran on, when it left its building thread
+/// ([`LeftThread`]); otherwise nothing, and the next turn gets the state saved before.
+pub fn failed_job_proxy_metadata(error: &anyhow::Error) -> Option<JsonValue> {
+    error
+        .downcast_ref::<FailedTurnState>()
+        .map(|failed| json!({ "conversation": failed.state }))
 }
 
 /// The controller attaches the previous run's provider state when it enqueues a job, whichever
@@ -747,7 +914,8 @@ fn provider_conversation_state_after_history_replay(
 /// first attempt, so they still say the history was replayed after a missing-final recovery
 /// rebuilt its prompt from the latest request alone. The prompt text decides instead: every
 /// retry that keeps the history resends the whole first prompt ahead of its own
-/// instructions, and the first attempt sent that prompt itself.
+/// instructions, and the first attempt sent that prompt itself. A mark for this run alone
+/// ([`BUILDING_THREAD_LEFT_FOR_MODE_KEY`]) is not saved.
 fn provider_conversation_state_to_save(
     output: &CodexRunOutput,
     run_prompt: &str,
@@ -755,8 +923,12 @@ fn provider_conversation_state_to_save(
     prompt_context: &JsonValue,
     lane: ThreadLane,
 ) -> Option<JsonValue> {
+    let mut state = output.provider_conversation_state.clone();
+    if let Some(map) = state.as_mut().and_then(JsonValue::as_object_mut) {
+        map.remove(BUILDING_THREAD_LEFT_FOR_MODE_KEY);
+    }
     provider_conversation_state_after_history_replay(
-        output.provider_conversation_state.clone(),
+        state,
         run_prompt.starts_with(prompt) && prompt_context_replayed_history(prompt_context),
         lane,
     )
@@ -7001,6 +7173,7 @@ impl JobProcessor {
         let task_usage = TaskUsage::default();
         let turn_files = turn_continuation::TurnFiles::for_job(job);
         let turn_start = stopped_turn::TurnStart::default();
+        let left_thread = LeftThread::default();
         // Keep the large execution state off the caller's async frame. Admission rejection
         // above must be cheap even on the standard two-megabyte thread stack.
         let result = Box::pin(self.run_apply_job_observed(
@@ -7013,6 +7186,7 @@ impl JobProcessor {
             &task_usage,
             &turn_files,
             &turn_start,
+            &left_thread,
         ))
         .await;
         let result = turn_continuation::attach_turn_records(result, &turn_files);
@@ -7030,6 +7204,7 @@ impl JobProcessor {
         {
             turn_baseline::forget(&self.config.project_workspace_dir(&project_id), job.id);
         }
+        let result = left_thread.attach_to_failure(result);
         attach_task_usage(result, &task_usage)
     }
 
@@ -7044,6 +7219,7 @@ impl JobProcessor {
         task_usage: &TaskUsage,
         turn_files: &turn_continuation::TurnFiles,
         turn_start: &stopped_turn::TurnStart,
+        left_thread: &LeftThread,
     ) -> Result<JobExecution> {
         let proxy_envelope = job.proxy.as_ref().or(registration.proxy.as_ref());
 
@@ -7615,6 +7791,35 @@ impl JobProcessor {
                 "the lane's thread holds a turn of a request the person stopped; this turn starts a new thread from the chat's replay"
             );
         }
+        let final_output_mode = final_output_mode_for_runtime_job(
+            job,
+            read_only_scoped_worker_preobserved,
+            runtime_expectations,
+        );
+        // The run's base instructions follow its mode unless it runs on its thread's own
+        // (`codex::runtime_base_instructions`).
+        let thread_start =
+            if !browser_mode && !expects_generic_mcp_tool_execution && !granted_execution {
+                ThreadStart::Mode(final_output_mode)
+            } else {
+                ThreadStart::ThreadsOwn
+            };
+        let (stored_provider_conversation_state, left_thread_of_another_mode) =
+            leave_thread_begun_in_another_mode(
+                stored_provider_conversation_state,
+                job,
+                thread_lane,
+                persist_codex_conversation_thread.then_some(thread_start),
+            );
+        if left_thread_of_another_mode {
+            left_thread.record(stored_provider_conversation_state.as_ref());
+            tracing::info!(
+                job_id = %job.id,
+                lane = thread_lane.name(),
+                final_output_mode = final_output_mode.label(),
+                "the lane's thread runs in another mode; this turn starts a new thread from the chat's replay"
+            );
+        }
         let (provider_conversation_state_for_run, provider_thread_not_restorable) =
             provider_conversation_state_for_this_runtime(
                 stored_provider_conversation_state,
@@ -7648,11 +7853,6 @@ impl JobProcessor {
             )
             .await
         };
-        let final_output_mode = final_output_mode_for_runtime_job(
-            job,
-            read_only_scoped_worker_preobserved,
-            runtime_expectations,
-        );
         let tracks_workspace_file_changes = tracks_workspace_file_changes(
             commit_to_workspace,
             read_only_workspace,
@@ -11377,13 +11577,16 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
         }
 
         // What the chat's browser turns found since this building thread's last turn: the one
-        // way a page's text reaches building work besides the hand-back below.
+        // way a page's text reaches building work besides the hand-back below. A turn that left
+        // its thread for another mode reads those the thread left had not read, in full, as that
+        // thread's turn would have: its replay may cut the older ones short.
         if !lead_continuation_checkpoint
             && !multi_agent_planning_turn
             && !multi_agent_worker
             && let Some(section) = browser_hand_back::format_browser_turns_since_section(
                 &job.payload,
-                stateful_thread_restored,
+                stateful_thread_restored
+                    || left_building_thread_for_mode(provider_conversation_state),
             )
         {
             append_prompt_section(
@@ -15802,6 +16005,18 @@ impl RuntimeFinalOutputMode {
             Self::PlainTextWrite => {
                 "workspace-change turn: natural final message; files derived from the git diff, not model JSON"
             }
+        }
+    }
+
+    /// How a building thread's requests begin in this mode: with the base instructions it picks
+    /// (`codex::runtime_base_instructions`), and with or without the reply's JSON schema. Modes
+    /// that begin alike share a thread ([`leave_thread_begun_in_another_mode`]).
+    fn thread_mode(self) -> &'static str {
+        match self {
+            Self::StrictStructured | Self::StructuredWrite => "structured",
+            Self::SchemaFreeStructured => "schema_free_structured",
+            Self::PlainTextReport => "plain_text_report",
+            Self::PlainTextWrite => "plain_text_write",
         }
     }
 
@@ -25322,6 +25537,347 @@ mod tests {
         );
     }
 
+    /// Two modes share a building thread exactly when their requests begin alike: with the same
+    /// base instructions and the same reply format.
+    #[test]
+    fn modes_share_a_building_thread_when_their_requests_begin_alike() {
+        use crate::codex::{RuntimeBaseInstructionsLane, runtime_base_instructions};
+        let modes = [
+            RuntimeFinalOutputMode::StrictStructured,
+            RuntimeFinalOutputMode::StructuredWrite,
+            RuntimeFinalOutputMode::SchemaFreeStructured,
+            RuntimeFinalOutputMode::PlainTextReport,
+            RuntimeFinalOutputMode::PlainTextWrite,
+        ];
+        // As the run hands a mode to Codex (`CodexRunOptions`).
+        let begins = |mode: RuntimeFinalOutputMode| {
+            let lane = RuntimeBaseInstructionsLane {
+                plain_text_final: mode.disable_final_output_json_schema()
+                    && mode.allow_plain_text_final_fallback(),
+                plain_text_write: mode == RuntimeFinalOutputMode::PlainTextWrite,
+                ..Default::default()
+            };
+            (
+                runtime_base_instructions(lane, None),
+                mode.disable_final_output_json_schema(),
+            )
+        };
+        for a in modes {
+            for b in modes {
+                assert_eq!(
+                    a.thread_mode() == b.thread_mode(),
+                    begins(a) == begins(b),
+                    "{a:?} and {b:?}"
+                );
+            }
+        }
+    }
+
+    /// Nov 6: a map's turn ran `strict_structured`, and the note after it, a change, resumed its
+    /// thread in `plain_text_write`: the base instructions were replaced mid-thread and the
+    /// note's first request, 52.5k tokens, went uncached. The proxy test runs it through Codex
+    /// (`thread_mode`); these are the turns that keep their thread.
+    #[test]
+    fn a_turn_of_another_mode_leaves_the_building_thread() {
+        let building = Uuid::new_v4().to_string();
+        let browser = Uuid::new_v4().to_string();
+        let map_state = json!({
+            "provider": "codex-embedded",
+            "defaultThreadId": building,
+            "threadId": building,
+            "defaultRolloutPath": "/tmp/building.jsonl",
+            "rolloutPath": "/tmp/building.jsonl",
+            "defaultThreadMode": "structured",
+            "sharedBrowserThreadId": browser,
+        });
+        let note = test_lease_job(Some("feature"), json!({}));
+        let write = Some(ThreadStart::Mode(RuntimeFinalOutputMode::PlainTextWrite));
+        let (state, left) = leave_thread_begun_in_another_mode(
+            Some(map_state.clone()),
+            &note,
+            ThreadLane::Building,
+            write,
+        );
+        assert!(left);
+        let state = state.expect("state");
+        for key in BUILDING_THREAD_KEYS
+            .iter()
+            .filter(|key| **key != BUILDING_THREAD_MODE_KEY)
+        {
+            assert!(state.get(*key).is_none(), "{key}: {state}");
+        }
+        assert_eq!(state["sharedBrowserThreadId"], browser);
+        assert_eq!(state[BUILDING_THREAD_MODE_KEY], "plain_text_write");
+        // For this run alone, it says it left the thread.
+        assert!(left_building_thread_for_mode(Some(&state)));
+        assert!(!left_building_thread_for_mode(Some(&map_state)));
+        assert!(!provider_state_claims_restored_thread(
+            Some(&state),
+            ThreadLane::Building
+        ));
+
+        // A turn of the thread's mode keeps it, and so does one of a mode that begins alike.
+        for mode in [
+            RuntimeFinalOutputMode::StrictStructured,
+            RuntimeFinalOutputMode::StructuredWrite,
+        ] {
+            assert_eq!(
+                leave_thread_begun_in_another_mode(
+                    Some(map_state.clone()),
+                    &note,
+                    ThreadLane::Building,
+                    Some(ThreadStart::Mode(mode)),
+                ),
+                (Some(map_state.clone()), false)
+            );
+        }
+        // A chat's first turn, whose job names no state or a null one, names the mode its new
+        // thread starts in.
+        for first in [None, Some(JsonValue::Null)] {
+            assert_eq!(
+                leave_thread_begun_in_another_mode(first, &note, ThreadLane::Building, write),
+                (
+                    Some(json!({"defaultThreadMode": "plain_text_write"})),
+                    false
+                )
+            );
+        }
+        // A thread saved before states named a mode is kept, and runs in this turn's from now.
+        let mut saved_before = map_state.clone();
+        saved_before
+            .as_object_mut()
+            .expect("state")
+            .remove(BUILDING_THREAD_MODE_KEY);
+        let (kept, left) = leave_thread_begun_in_another_mode(
+            Some(saved_before),
+            &note,
+            ThreadLane::Building,
+            write,
+        );
+        assert!(!left);
+        let kept = kept.expect("state");
+        assert_eq!(kept["defaultThreadId"], building);
+        assert_eq!(kept[BUILDING_THREAD_MODE_KEY], "plain_text_write");
+        // The hand-back of a card the thread's turn posted keeps that thread, which holds the
+        // person's request and the skills that turn read, and runs in its mode from then on. A
+        // hand-back of a message the routing step sent straight to the browser carries the
+        // person's words itself, and starts a new thread.
+        let card_hand_back = test_lease_job(
+            Some("feature"),
+            json!({"metadata": {"browserHandBack": {"verified": true, "reply": ""}}}),
+        );
+        let (kept, left) = leave_thread_begun_in_another_mode(
+            Some(map_state.clone()),
+            &card_hand_back,
+            ThreadLane::Building,
+            write,
+        );
+        assert!(!left);
+        let kept = kept.expect("state");
+        assert_eq!(kept["defaultThreadId"], building);
+        assert_eq!(kept[BUILDING_THREAD_MODE_KEY], "plain_text_write");
+        let routed_hand_back = test_lease_job(
+            Some("feature"),
+            json!({"metadata": {"browserHandBack": {
+                "verified": true, "reply": "", "personRequest": "Put the hours on a small page.",
+            }}}),
+        );
+        assert!(
+            leave_thread_begun_in_another_mode(
+                Some(map_state.clone()),
+                &routed_hand_back,
+                ThreadLane::Building,
+                write,
+            )
+            .1
+        );
+        // The browser lane's thread keeps the base instructions it began with
+        // (`codex::resumed_shared_browser_base_instructions`); a turn that keeps no thread and a
+        // team plan's, which leaves the chat out of its prompt, keep the thread as it is.
+        assert_eq!(
+            leave_thread_begun_in_another_mode(
+                Some(map_state.clone()),
+                &note,
+                ThreadLane::SharedBrowser,
+                write,
+            ),
+            (Some(map_state.clone()), false)
+        );
+        assert_eq!(
+            leave_thread_begun_in_another_mode(
+                Some(map_state.clone()),
+                &note,
+                ThreadLane::Building,
+                None,
+            ),
+            (Some(map_state.clone()), false)
+        );
+        let plan = test_lease_job(
+            Some("feature"),
+            json!({"metadata": {"agentCollaboration": {"requested": true}}}),
+        );
+        assert!(is_explicit_team_planning_job(&plan));
+        assert_eq!(
+            leave_thread_begun_in_another_mode(
+                Some(map_state.clone()),
+                &plan,
+                ThreadLane::Building,
+                write,
+            ),
+            (Some(map_state), false)
+        );
+    }
+
+    /// An MCP task's turn runs on its thread's own base instructions, and a thread it starts
+    /// begins on the model's own, which no mode picks. A turn of a mode after it leaves that
+    /// thread rather than replace its base instructions mid-thread; a thread it resumes, of a mode
+    /// or its own, stays as it was.
+    #[test]
+    fn a_thread_begun_on_the_models_own_instructions_is_left_by_a_turn_of_a_mode() {
+        let tmp = tempdir().expect("temp dir");
+        let job = test_lease_job(Some("feature"), json!({}));
+        let own = Some(ThreadStart::ThreadsOwn);
+        // The chat's first turn, an MCP task, starts the building thread.
+        assert_eq!(
+            leave_thread_begun_in_another_mode(None, &job, ThreadLane::Building, own),
+            (
+                Some(json!({"defaultThreadMode": MODEL_OWN_THREAD_MODE})),
+                false
+            )
+        );
+        let rollout = tmp.path().join("building.jsonl");
+        fs::write(&rollout, "").expect("write rollout");
+        let thread = Uuid::new_v4().to_string();
+        let saved = |mode: &str| {
+            json!({
+                "defaultThreadId": thread,
+                "defaultRolloutPath": rollout.display().to_string(),
+                "defaultThreadMode": mode,
+                "sharedBrowserThreadId": "browser",
+            })
+        };
+        // The next turn, a question, leaves it.
+        let (state, left) = leave_thread_begun_in_another_mode(
+            Some(saved(MODEL_OWN_THREAD_MODE)),
+            &job,
+            ThreadLane::Building,
+            Some(ThreadStart::Mode(RuntimeFinalOutputMode::StrictStructured)),
+        );
+        assert!(left);
+        let state = state.expect("state");
+        assert!(state.get("defaultThreadId").is_none(), "{state}");
+        assert_eq!(state[BUILDING_THREAD_MODE_KEY], "structured");
+        assert_eq!(state["sharedBrowserThreadId"], "browser");
+        // Another MCP task resumes a thread as it began.
+        for mode in [MODEL_OWN_THREAD_MODE, "structured", "plain_text_write"] {
+            assert_eq!(
+                leave_thread_begun_in_another_mode(
+                    Some(saved(mode)),
+                    &job,
+                    ThreadLane::Building,
+                    own
+                ),
+                (Some(saved(mode)), false),
+                "{mode}"
+            );
+        }
+        // A thread it can't resume here is replaced by one it starts.
+        let mut lost = saved("structured");
+        lost["defaultRolloutPath"] = json!(tmp.path().join("gone.jsonl").display().to_string());
+        let (state, _) =
+            leave_thread_begun_in_another_mode(Some(lost), &job, ThreadLane::Building, own);
+        let state = state.expect("state");
+        assert!(state.get("defaultThreadId").is_none(), "{state}");
+        assert_eq!(state[BUILDING_THREAD_MODE_KEY], MODEL_OWN_THREAD_MODE);
+    }
+
+    /// A turn that left its building thread for another mode and then failed saves no thread. Its
+    /// job reports the state it ran on, which names none, so the next turn of the left thread's
+    /// mode doesn't resume a thread that never saw the failed request: it starts from the replay.
+    #[test]
+    fn a_failed_turn_that_left_its_thread_reports_the_state_it_ran_on() {
+        let map_state = json!({
+            "defaultThreadId": Uuid::new_v4().to_string(),
+            "defaultRolloutPath": "/tmp/building.jsonl",
+            "defaultThreadMode": "structured",
+            "sharedBrowserThreadId": "browser",
+        });
+        let note = test_lease_job(Some("feature"), json!({}));
+        let (ran_on, left) = leave_thread_begun_in_another_mode(
+            Some(map_state),
+            &note,
+            ThreadLane::Building,
+            Some(ThreadStart::Mode(RuntimeFinalOutputMode::PlainTextWrite)),
+        );
+        assert!(left);
+        let left_thread = LeftThread::default();
+        left_thread.record(ran_on.as_ref());
+        let reported = json!({"conversation": {
+            "defaultThreadMode": "plain_text_write",
+            "sharedBrowserThreadId": "browser",
+        }});
+        let error = left_thread
+            .attach_to_failure(Err(anyhow!("unexpected status 500")))
+            .expect_err("failed");
+        assert_eq!(failed_job_proxy_metadata(&error), Some(reported.clone()));
+        // The person reads the failure's own words, also under the turn's usage receipt.
+        assert_eq!(error.to_string(), "unexpected status 500");
+        let task = TaskUsage::default();
+        task.call(UsagePhase::Main)
+            .start_attempt(1)
+            .finish(crate::task_usage::UsageOutcome::Error);
+        let error = attach_task_usage(Err(error), &task).expect_err("failed");
+        assert_eq!(
+            extract_job_failure_message(&error),
+            Some("unexpected status 500")
+        );
+        assert_eq!(failed_job_proxy_metadata(&error), Some(reported));
+        // A turn that kept its thread reports no state, nor does one that lost its lease to a
+        // Stop, which reports no failure, nor a finished one.
+        let kept = LeftThread::default();
+        let error = kept
+            .attach_to_failure(Err(anyhow!("unexpected status 500")))
+            .expect_err("failed");
+        assert_eq!(failed_job_proxy_metadata(&error), None);
+        let stopped = LeftThread::default();
+        stopped.record(ran_on.as_ref());
+        let error = stopped
+            .attach_to_failure(Err(anyhow!("job lease lost")))
+            .expect_err("failed");
+        assert_eq!(failed_job_proxy_metadata(&error), None);
+        assert!(crate::agent_executor::is_lease_lost(&error));
+        let done = LeftThread::default();
+        done.record(ran_on.as_ref());
+        let finished = JobExecution {
+            summary: "Added the note.".to_string(),
+            suggested_replies: Vec::new(),
+            provider: "codex-embedded".to_string(),
+            artifacts: Vec::new(),
+            credit_snapshot: None,
+            provider_conversation_state: None,
+            messages: Vec::new(),
+            messages_streamed: false,
+            final_messages: Vec::new(),
+        };
+        assert!(done.attach_to_failure(Ok(finished)).is_ok());
+        // A run on that state saves its new thread without the mark of this run alone.
+        let mut codex_state = ran_on.clone().expect("state");
+        codex_state["defaultThreadId"] = json!(Uuid::new_v4().to_string());
+        let saved = provider_conversation_state_to_save(
+            &codex_run_output(codex_state),
+            "prompt",
+            "prompt",
+            &json!({}),
+            ThreadLane::Building,
+        )
+        .expect("saved state");
+        assert!(
+            saved.get(BUILDING_THREAD_LEFT_FOR_MODE_KEY).is_none(),
+            "{saved}"
+        );
+        assert_eq!(saved[BUILDING_THREAD_MODE_KEY], "plain_text_write");
+    }
+
     /// A Shared Browser turn runs on its chat's browser thread; every other turn that keeps a
     /// thread runs on the building thread, also an ordinary turn on a runtime whose browser
     /// starts with it (`INSTAFY_ENABLE_BROWSER_SESSION`), which has shell tools, and a Personal
@@ -25346,7 +25902,8 @@ mod tests {
 
     /// A building turn on a restored thread reads what the chat's browser turns found since its
     /// last turn, by their findings and never their replies' words; on a new or lost thread its
-    /// replay quotes them instead, and a browser turn never reads them.
+    /// replay quotes them instead, and a browser turn never reads them. A turn that left a thread
+    /// of another mode reads both.
     #[test]
     fn a_restored_building_prompt_carries_the_browser_turns_since() {
         let tmp = tempdir().expect("temp dir");
@@ -25411,6 +25968,20 @@ mod tests {
             Some(&restored),
         );
         assert!(browser.get("browserTurnsSince").is_none(), "{browser}");
+        // A turn that leaves a thread of another mode reads, in full, the browser turns that
+        // thread had not read, as its turn would have: its replay may cut the older ones short.
+        let mut question_thread = restored.clone();
+        question_thread["defaultThreadMode"] = json!("structured");
+        let (left_for_mode, left) = leave_thread_begun_in_another_mode(
+            Some(question_thread),
+            &test_lease_job(Some("feature"), json!({})),
+            ThreadLane::Building,
+            Some(ThreadStart::Mode(RuntimeFinalOutputMode::PlainTextWrite)),
+        );
+        assert!(left);
+        let (prompt, replaced) = sections(json!({}), left_for_mode.as_ref());
+        assert!(replaced.get("browserTurnsSince").is_some(), "{replaced}");
+        assert!(prompt.contains("Open daily, 09:00 to 19:30."));
     }
 
     /// A retry reuses the first prompt's metrics, but the missing-final recoveries rebuild

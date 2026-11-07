@@ -13699,6 +13699,199 @@ async fn lease_next_agent_job_leases_queued_work() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A queued job that a Stop cancels while a lease waits for its row is not leased. The lease
+/// picks its job from its statement's snapshot, where the job is still queued, and waits for the
+/// Stop's lock on its row; once the Stop commits, the job is cancelled. The lease used to take it
+/// anyway, and its machine ran the turn the person had stopped.
+#[tokio::test]
+async fn a_job_a_stop_cancels_while_a_lease_waits_is_not_leased() -> anyhow::Result<()> {
+    let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+        eprintln!("skipping lease race test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    // Tables of their own, which the Stop's session and the lease's both see.
+    let schema = format!("lease_race_{}", Uuid::new_v4().simple());
+    async fn connect(
+        url: &str,
+        schema: &str,
+    ) -> anyhow::Result<(
+        tokio_postgres::Client,
+        JoinHandle<Result<(), tokio_postgres::Error>>,
+    )> {
+        let (client, connection) = tokio_postgres::connect(url, NoTls).await?;
+        let driver = tokio::spawn(connection);
+        client
+            .batch_execute(&format!("SET search_path TO {schema}"))
+            .await?;
+        Ok((client, driver))
+    }
+    let (setup, setup_driver) = connect(&url, &schema).await?;
+    setup
+        .batch_execute(&format!(
+            "CREATE SCHEMA {schema};
+            SET search_path TO {schema};
+            CREATE TABLE agent_jobs (
+                id uuid PRIMARY KEY,
+                project_id uuid NOT NULL,
+                run_id uuid,
+                prompt_id uuid,
+                session_id uuid,
+                conversation_id uuid,
+                intent text,
+                credential_id uuid,
+                status text NOT NULL,
+                outcome text,
+                payload jsonb NOT NULL,
+                priority integer NOT NULL DEFAULT 100,
+                lease_attempts integer NOT NULL DEFAULT 0,
+                leased_at timestamptz,
+                lease_expires_at timestamptz,
+                leased_by_runtime_id uuid,
+                heartbeat_at timestamptz,
+                target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                completed_at timestamptz,
+                trigger_received_at timestamptz,
+                grant_ids uuid[],
+                agent_role text
+            );
+            CREATE TABLE upstream_pacing (
+                upstream_key text PRIMARY KEY,
+                cooldown_until timestamptz,
+                ceiling double precision NOT NULL,
+                last_rate_limited_at timestamptz NOT NULL,
+                decreased_at timestamptz NOT NULL,
+                updated_at timestamptz NOT NULL DEFAULT now()
+            );
+            CREATE TABLE project_multi_agent_settings (
+                project_id uuid PRIMARY KEY,
+                max_agents_per_plan integer NOT NULL DEFAULT 64,
+                max_concurrent_agents integer NOT NULL DEFAULT 8,
+                max_native_subagents integer NOT NULL DEFAULT 3
+            );
+            CREATE TABLE runtimes (
+                id uuid PRIMARY KEY,
+                project_id uuid NOT NULL,
+                provider text NOT NULL DEFAULT 'instafy-cloud',
+                status text NOT NULL,
+                capabilities jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+                active_lease_id uuid,
+                last_seen_at timestamptz DEFAULT now()
+            );
+            CREATE TABLE runtime_leases (
+                id uuid PRIMARY KEY,
+                metadata jsonb,
+                released_at timestamptz
+            );"
+        ))
+        .await?;
+
+    let outcome = async {
+        let project_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+        setup
+            .execute(
+                "INSERT INTO agent_jobs (id, project_id, status, payload)
+                 VALUES ($1, $2, 'queued', $3)",
+                &[
+                    &job_id,
+                    &project_id,
+                    &PgJson(json!({ "prompt_text": "test" })),
+                ],
+            )
+            .await?;
+
+        // The Stop has cancelled the job and not committed yet.
+        let (mut stopper, stopper_driver) = connect(&url, &schema).await?;
+        let stop = stopper.transaction().await?;
+        let stopper_pid: i32 = stop.query_one("select pg_backend_pid()", &[]).await?.get(0);
+        stop.execute(
+            "UPDATE agent_jobs SET status = 'canceled', outcome = 'canceled', completed_at = now()
+             WHERE id = $1 AND status IN ('queued', 'leased')",
+            &[&job_id],
+        )
+        .await?;
+
+        // A machine's lease starts meanwhile, and waits for the Stop.
+        let (mut leaser, leaser_driver) = connect(&url, &schema).await?;
+        let lease = tokio::spawn(async move {
+            let transaction = leaser.transaction().await?;
+            let leased = agent::lease_next_agent_job(
+                &transaction,
+                &project_id,
+                Some(&runtime_id),
+                120,
+                true,
+                false,
+                false,
+                false,
+                None,
+                None,
+                false,
+            )
+            .await
+            .map_err(|error| controller_error("lease job", error))?;
+            transaction.commit().await?;
+            drop(leaser);
+            leaser_driver.abort();
+            anyhow::Ok(leased.map(|job| job.id))
+        });
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let waiting: i64 = stop
+                .query_one(
+                    "select count(*) from pg_stat_activity where $1 = any(pg_blocking_pids(pid))",
+                    &[&stopper_pid],
+                )
+                .await?
+                .get(0);
+            if waiting > 0 || lease.is_finished() {
+                break;
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "the lease never reached the job"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        stop.commit().await?;
+        drop(stopper);
+        stopper_driver.abort();
+
+        // Checked without a panic, so the schema goes either way.
+        let leased = lease.await??;
+        anyhow::ensure!(
+            leased.is_none(),
+            "the lease took the stopped job: {leased:?}"
+        );
+        let row = setup
+            .query_one(
+                "SELECT status, leased_by_runtime_id FROM agent_jobs WHERE id = $1",
+                &[&job_id],
+            )
+            .await?;
+        let status: String = row.get("status");
+        let leased_by: Option<Uuid> = row.get("leased_by_runtime_id");
+        anyhow::ensure!(
+            status == "canceled" && leased_by.is_none(),
+            "the stopped job is {status}, leased by {leased_by:?}"
+        );
+        anyhow::Ok(())
+    }
+    .await;
+    let cleanup = setup
+        .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await;
+    drop(setup);
+    setup_driver.abort();
+    outcome.and(cleanup.map_err(anyhow::Error::from))
+}
+
 #[tokio::test]
 async fn lease_next_agent_job_can_filter_for_read_only_batches() -> anyhow::Result<()> {
     let Some((mut client, connection_handle)) = connect_test_db().await? else {
