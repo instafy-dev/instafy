@@ -3818,17 +3818,82 @@ async fn an_address_no_message_or_page_gave_is_not_opened() {
     );
     let words = failure(&navigate("https://example.test/reports/q3"));
     assert!(words.contains(&made_up("https://example.test")), "{words}");
-    // A page gives the addresses its text spells out, with a scheme or
-    // without, a parenthesis that is part of one included.
-    payload_of(&fixture.call("spelled-addresses", "GET", "/v1/snapshot", None));
-    payload_of(&navigate("https://www.reviews.example/laptops/four"));
-    payload_of(&navigate("https://en.wikipedia.org/wiki/Mercury_(planet)"));
     end_chat_browser_run(run);
+}
 
-    // A chat's history gives what the person said in it and what its browser
-    // turns were asked and read, as a runtime that started again finds it
-    // (another chat here: nothing in this process carries over to it). A
-    // building turn's own reply gives nothing.
+/// The words an address no message and no page gave is refused with.
+fn made_up_address_words(site: &str) -> String {
+    format!(
+        "No message and no page Octo read gave this address, so it was not opened: Octo opens only addresses it was given. Open {site}/ and follow its links to the page, or use the site's own search."
+    )
+}
+
+/// A page gives the addresses its text spells out, read as a task's are: with
+/// a scheme or without, and with a parenthesis of its own
+/// ("/wiki/Mercury_(planet)") inside one of the sentence's.
+#[tokio::test]
+async fn a_page_gives_the_addresses_its_text_spells_out() {
+    let fixture = EmbeddedControllerFixture::new();
+    let navigate = |url: &str| {
+        fixture
+            .command_for(
+                "safe",
+                "page-target",
+                "POST",
+                "/v1/navigate",
+                Some(&json!({ "url": url }).to_string()),
+            )
+            .output()
+            .expect("run the controller")
+    };
+    let spelled = [
+        (
+            "https://www.reviews.example/laptops/four",
+            "https://reviews.example",
+        ),
+        (
+            "https://en.wikipedia.org/wiki/Mercury_(planet)",
+            "https://en.wikipedia.org",
+        ),
+    ];
+    let run = chat_browser_run_given(
+        &fixture,
+        Uuid::new_v4(),
+        json!({ "prompt_text": "Read the page." }),
+    );
+    for (url, site) in spelled {
+        let words = failure_of(&navigate(url));
+        assert!(
+            words.contains(&made_up_address_words(site)),
+            "{url}: {words}"
+        );
+    }
+    payload_of(&fixture.call("spelled-addresses", "GET", "/v1/snapshot", None));
+    for (url, _) in spelled {
+        payload_of(&navigate(url));
+    }
+    end_chat_browser_run(run);
+}
+
+/// A chat's history gives the addresses the person named in it and those its
+/// browser turns were asked about and read (their finding lines), as a runtime
+/// that started again finds them, with nothing of the chat's earlier runs in
+/// its memory. A building turn's own reply gives none.
+#[tokio::test]
+async fn a_chats_history_gives_what_the_person_and_its_browser_turns_named() {
+    let fixture = EmbeddedControllerFixture::new();
+    let navigate = |url: &str| {
+        fixture
+            .command_for(
+                "safe",
+                "page-target",
+                "POST",
+                "/v1/navigate",
+                Some(&json!({ "url": url }).to_string()),
+            )
+            .output()
+            .expect("run the controller")
+    };
     let run = chat_browser_run_given(
         &fixture,
         Uuid::new_v4(),
@@ -3837,7 +3902,7 @@ async fn an_address_no_message_or_page_gave_is_not_opened() {
             "conversation_history": [
                 { "role": "user", "content": "Here's the review: https://reviews.example/laptops/five" },
                 { "role": "assistant", "content": "Its maker's page is https://maker.example/laptops/five, I think." },
-                { "role": "user", "lane": "browser", "content": "Read the maker's specs." },
+                { "role": "user", "lane": "browser", "content": "Read maker.example/laptops/five/press." },
                 {
                     "role": "assistant",
                     "lane": "browser",
@@ -3846,10 +3911,18 @@ async fn an_address_no_message_or_page_gave_is_not_opened() {
             ],
         }),
     );
-    payload_of(&navigate("https://reviews.example/laptops/five"));
-    payload_of(&navigate("https://maker.example/laptops/five/specs"));
-    let words = failure(&navigate("https://maker.example/laptops/five"));
-    assert!(words.contains(&made_up("https://maker.example")), "{words}");
+    for url in [
+        "https://reviews.example/laptops/five",
+        "https://maker.example/laptops/five/press",
+        "https://maker.example/laptops/five/specs",
+    ] {
+        payload_of(&navigate(url));
+    }
+    let words = failure_of(&navigate("https://maker.example/laptops/five"));
+    assert!(
+        words.contains(&made_up_address_words("https://maker.example")),
+        "{words}"
+    );
     end_chat_browser_run(run);
 }
 

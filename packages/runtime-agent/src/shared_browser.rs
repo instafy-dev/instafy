@@ -1098,7 +1098,9 @@ fn given_address_key(url: &reqwest::Url) -> Option<String> {
 /// longer holds. A building turn's own replies give none. A site's root needs
 /// none: it always opens.
 pub fn given_addresses_from_payload(payload: &JsonValue) -> Vec<String> {
-    let text = |entry: &JsonValue, key: &str| entry.get(key).and_then(JsonValue::as_str);
+    fn text<'a>(entry: &'a JsonValue, key: &str) -> Option<&'a str> {
+        entry.get(key).and_then(JsonValue::as_str)
+    }
     let earlier = payload
         .get("conversation_history")
         .and_then(JsonValue::as_array)
