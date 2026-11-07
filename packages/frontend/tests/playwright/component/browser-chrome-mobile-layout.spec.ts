@@ -526,6 +526,42 @@ test("keeps the unified browser address usable at tablet portrait width", async 
   expect(geometry.addressWidth).toBeGreaterThanOrEqual(96);
 });
 
+test("keyboard history actions preserve the draft and return to the toolbar focus order", async ({ page }) => {
+  await page.setViewportSize({ width: 768, height: 1024 });
+  await page.addInitScript(() => {
+    localStorage.setItem("instafy:browser-address-history:v1:component-browser-user", JSON.stringify([
+      { url: "https://history.example.test/", title: "History review", lastVisitedAt: Date.now() },
+    ]));
+  });
+  await mountCompactBrowserChrome(page, true);
+  const address = page.getByTestId("shared-browser-address");
+  const clear = page.getByRole("button", { name: "Clear recent sites", exact: true });
+  await address.fill("history");
+  await address.press("ArrowDown");
+  await address.press("Tab");
+  await expect(clear).toBeFocused();
+  await expect(address).toHaveValue("history");
+  await page.keyboard.press("Shift+Tab");
+  await expect(address).toBeFocused();
+  await address.press("Tab");
+  await page.keyboard.press("Escape");
+  await expect(address).toBeFocused();
+  await expect(clear).toBeHidden();
+  await address.press("ArrowDown");
+  await address.press("Tab");
+  await page.keyboard.press("Tab");
+  await expect(page.getByTestId("shared-browser-collaboration-toggle")).toBeFocused();
+  await expect(clear).toBeHidden();
+  await address.fill("history");
+  await address.press("Tab");
+  await expect(clear).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(address).toBeFocused();
+  await expect(clear).toBeHidden();
+  expect(await page.evaluate(() => localStorage.getItem("instafy:browser-address-history:v1:component-browser-user"))).toBeNull();
+  expect(await page.evaluate(() => (window as Window & { __browserNavigations?: unknown[] }).__browserNavigations)).toEqual([]);
+});
+
 test("uses one real Chromium action per mobile keyboard control key", async ({ browser, baseURL }) => {
   // A touch utility: a coarse pointer shows its icon, and then its bar.
   const context = await browser.newContext({ baseURL, hasTouch: true, viewport: { width: 390, height: 844 } });

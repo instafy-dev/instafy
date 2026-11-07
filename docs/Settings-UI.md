@@ -142,6 +142,13 @@ determines the winner. Arbitrary layout classes remain supported.
 - Provider, credential and model pickers use `FormPickerTrigger` and `FormPickerPopover`.
   Their feature-specific choices and actions remain in each picker. Connect visible field
   labels using a trigger `id`/`htmlFor` or a label ID/`aria-labelledby`.
+  `ControlTrigger` supplies the shared input surface, 12px corners and focus states
+  to both form pickers and the phone browser address field, without an action-button
+  shadow or press nudge. The owning feature supplies menu or dialog semantics.
+  Recent-site labels/descriptions use shared body/caption typography and retain
+  their combobox slots; clearing history is a quiet inline action. On desktop,
+  Tab reaches that action without navigating; clearing or Escape returns focus
+  to the address field, and Tab again continues through the toolbar.
 - Scrolling editors use `StudioDialogModal layout="editor"`, a `StudioDialogHeader`,
   `StudioDialogBody scrollable` and `StudioDialogFooter`. The shared shell owns viewport
   bounds and scrolling; callers may choose width and supply their form contents. Mobile

@@ -181,7 +181,11 @@ The existing address bar in both **This device** and **Workspace** suggests
 recent sites. Focus an empty field or clear it to see recent visits; type to
 filter by page title or address. Select a suggestion to open it, or enter a new
 address as usual. Arrow keys select suggestions, Enter opens the selection,
-Tab completes it without navigating, and Escape dismisses the list.
+and Escape dismisses the list. On desktop, Tab moves from the field to
+**Clear recent sites** without completing or navigating to the highlighted
+suggestion. Shift+Tab returns to the field; Tab again continues through the
+toolbar. Clearing history or pressing Escape from that action returns focus
+to the field.
 Suggestions show site icons with a globe fallback. Icons load directly from the
 site's `/favicon.ico` without a referrer; no third-party favicon service is used.
 
