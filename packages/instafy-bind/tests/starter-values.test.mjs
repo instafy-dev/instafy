@@ -458,6 +458,37 @@ test("compare: a page from what Octo knows reads each value \"not checked\", cit
   }
 });
 
+// A page from what Octo knows that still gave its rows a store offered "Check all prices" under "nothing checked": a
+// press failed with no store link to read, or drew "checked just now" under that lede. Under a filter, every row was
+// listed apart as "Price unknown" while showing its price. Such a page offers no check, draws no check a binder kept,
+// and lists every row with its value, with no filter.
+test("compare: a page from what Octo knows offers no price check, draws none, and lists every row under no filter", async () => {
+  const data = {
+    title: "Maker Laptop 13 vs 16",
+    lede: "The 16 is the bigger one.",
+    from: "memory",
+    columns: [{ key: "display", label: "Display", type: "text" }, { key: "price", label: "Price", type: "price" }],
+    filter: { key: "price", max: 1500, label: "Under $1,500", rest: "over $1,500" },
+    items: [
+      item("13", "Maker Laptop 13", { display: { v: "13.5 in" }, price: { v: "$1,099" } }, { store: { name: "Maker", readable: true } }),
+      item("16", "Maker Laptop 16", { display: { v: "16 in" }, price: { v: "$1,399" } }, { store: { name: "Maker", readable: true } }),
+    ],
+  };
+  const offer = { type: "offer", ref: "option:13", price: { amount: 1409, currency: "EUR" }, seller: { name: "Maker" }, handoff: { url: "https://maker.example/13" },
+    prov: { source: "maker.example", lane: "local", observed_at: new Date().toISOString(), ttl_s: 3600 } };
+  const client = () => ({ on() {}, ready: Promise.resolve({ connected: true, names: ["read_offer"] }), names: ["read_offer"], isPending: () => false,
+    records: (ref) => (ref === "option:13" ? [offer] : []), expired: () => false });
+  for (const width of [1280, 375]) {
+    const { document } = await draw("compare", data, { width, bind: client });
+    assert.equal(document.getElementById("bar").textContent, "", `${width}px: no check and no filter to press`);
+    assert.deepEqual(rows(document), { within: ["option:13", "option:16"], apart: [], heading: null }, `${width}px`);
+    assert.match(rowText(document, "option:13"), /\$1,099, not checked/, `${width}px`);
+    assert.match(rowText(document, "option:16"), /\$1,399, not checked/, `${width}px`);
+    const page = document.body.textContent.replace(/\s+/g, " ");
+    assert.doesNotMatch(page, /checked just now|€1,409|Price unknown|None is known|stores? don't allow/, `${width}px: ${page}`);
+  }
+});
+
 // A value looked for on a page and not found there said "Not found · checked … ↗" on its row, above a "Not found yet"
 // line that left it out: one card used the words for two things. It is named in that line with the page it was looked
 // for on; the desktop table keeps its cell.

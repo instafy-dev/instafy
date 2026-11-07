@@ -211,7 +211,8 @@ the compare starter then marks the row "Not checked"). A row with neither, a gue
 fails the check, also when `--expect` or `"expect"` names it: that list only says what the page must show. A page the
 person asked for from what Octo knows, with nothing looked up (`"from": "memory"`), cites no page: its rows and values
 pass without one, the compare starter shows each value as "<value>, not checked" and says so in the lede, and any
-`url`, `date` or `asof` on it fails the check. In a space's workspace, until the CLI has recorded a preview of that
+`src`, `url`, `date`, `asof`, store or filter on it fails the check, as does the mark on a page of another starter.
+In a space's workspace, until the CLI has recorded a preview of that
 space opened from the site's folder, `init`'s next step names the command that serves the page and posts its card in
 Studio (`instafy preview open … --serve-cmd 'instafy bind serve . --port {port} --preview' --start`, run in the site's
 folder) before the check, and every check ends with it: a failing check never holds the card back.

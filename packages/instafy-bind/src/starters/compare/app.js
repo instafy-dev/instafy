@@ -28,9 +28,10 @@
  *                          checked". `instafy bind check` fails a row with neither: a guess or a placeholder.
  *   unchecked: ["what was not checked", …]     listed once in the footer, on an empty page too
  *   from: "memory"         only when the person asked for the page from what Octo knows, with nothing looked up: each
- *                          fact is just {"v"} (or a {"note"}), with no "src", "url" or "date" (`instafy bind check`
- *                          fails them), and reads "<value>, not checked", as a ranked row's value without a source does;
- *                          the lede adds "From what Octo knows; nothing checked." Nothing on the page cites a page.
+ *                          fact is just {"v"} (or a {"note"}), with no "src", "url" or "date", and no store or filter
+ *                          (`instafy bind check` fails them), and reads "<value>, not checked", as a ranked row's value
+ *                          without a source does; the lede adds "From what Octo knows; nothing checked." Nothing on the
+ *                          page cites a page or offers a check.
  *   fact: {"v": "$145", "src": "Example Store", "url": "https://…", "date": "2026-10-17", "asof"?: "2026-08-05", "est": false}
  *   Each value cites its page and day ("checked 17 Oct on maker.com ↗"), and no cell is blank: a source you read
  *   without finding the value on it is the fact without "v" ({"src", "url", "date"}): "Not found · checked 17 Oct on
@@ -74,10 +75,11 @@
   function isPrice(col) { return col && col.type === "price"; }
   function colOf(data, key) { return columns(data).filter(function (c) { return c.key === key; })[0] || null; }
   function seedOf(item, col) { return (item.facts || {})[col.key] || null; }
-  /** The value shown for a cell: a live check for the price column, else the seed fact. */
+  /** The value shown for a cell: a live check for the price column, else the seed fact (always on a page from what Octo
+   * knows, which says nothing was checked). */
   function valueOf(item, col) {
     var seed = seedOf(item, col);
-    if (!isPrice(col)) return seed;
+    if (!isPrice(col) || memory) return seed;
     var live = site.live(item.ref, col.key);
     if (live && site.blocked(item.ref)) return seed; // a blocked check keeps the seed value
     return live || seed;
@@ -147,13 +149,13 @@
   function hasMore(item) { return !!(item.note || found(item) || (item.more && item.more.length) || (item.sources && item.sources.length)); }
   /** The site of the search result that alone names this row ("found"), or "". */
   function found(item) { return typeof item.found === "string" ? item.found.trim().slice(0, 100) : ""; }
-  /** On a page from what Octo knows, a fact's value ("" for none, and for a live check's record, which keeps its own
-   * caption). */
-  function remembered(f) { return memory && f && !f.prov ? site.valueText(f) : ""; }
+  /** On a page from what Octo knows, a fact's value ("" for none). */
+  function remembered(f) { return memory ? site.valueText(f) : ""; }
   /** "1.3 kg, not checked": no source line, date or link. */
   function notChecked(value) { return h("span", { "class": "trust" }, h("span", { "class": "v", text: value + ", not checked" })); }
   /** The page as drawn when it is from what Octo knows: each fact only its value and note, no row cites a page or a
-   * search result, and the lede says nothing was checked. */
+   * search result or offers a store's price check, no filter counts a value as known, and the lede says nothing was
+   * checked. */
   function asRemembered(data) {
     var plain = function (f) { return f && typeof f === "object" ? { v: f.v, note: f.note } : f; };
     var lede = String(data.lede || "").trim();
@@ -161,10 +163,11 @@
     return Object.assign({}, data, {
       lede: lede,
       map: null,
+      filter: null,
       items: (data.items || []).map(function (i) {
         var facts = {};
         Object.keys(i.facts || {}).forEach(function (k) { facts[k] = plain(i.facts[k]); });
-        return Object.assign({}, i, { facts: facts, sources: [], found: "",
+        return Object.assign({}, i, { facts: facts, sources: [], found: "", store: null,
           more: (i.more || []).map(function (m) { return Object.assign({}, m, { fact: plain(m && m.fact) }); }) });
       })
     });

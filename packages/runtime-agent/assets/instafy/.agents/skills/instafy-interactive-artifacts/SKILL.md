@@ -51,9 +51,9 @@ own kind of page.
   checked (its own page wasn't opened)" in the reply, and each of its unknown values has `"note": "its own page wasn't
   opened"`. The lede names the same missing items as the reply.
 - Options asked for from what you already know, with nothing looked up: the compare starter with `"from": "memory"`,
-  each value only its `"v"`, from your own knowledge, never from the space's other pages. No `src`, `url` or `date`
-  (`instafy bind check` fails them): the starter reads each value "<value>, not checked" and adds "From what Octo
-  knows; nothing checked." to the lede.
+  each value only its `"v"`, from your own knowledge, never from the space's other pages. No `src`, `url`, `date`,
+  store or filter (`instafy bind check` fails them): the starter reads each value "<value>, not checked" and adds
+  "From what Octo knows; nothing checked." to the lede.
 - Keep sort, filters and the open tab in the URL query and give rows ids, so links and Studio's Follow keep them.
 - Every item the request names (stops, products, entries) is on the page, or the reply says plainly which is
   missing and why. Post the card first (step 3), then check with the builder skill's own check, else

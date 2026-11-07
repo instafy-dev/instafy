@@ -605,7 +605,7 @@ test("a page from what Octo knows passes without pages, and fails with any page 
     fs.writeFileSync(file, JSON.stringify(data));
     const { problems } = checkValues(dir);
     assert.equal(problems.length, 3, problems.join("\n"));
-    assert.match(problems[0], /^Maker Laptop 13: this page is from what Octo knows \("from": "memory"\), so nothing on it was read: leave out its "url" and "date"\. Each value is only its "v" \(or a "note"\), and reads "<value>, not checked"\./);
+    assert.match(problems[0], /^Maker Laptop 13: this page is from what Octo knows \("from": "memory"\), so nothing on it was read: leave out its "src", "url" and "date"\. Each value is only its "v" \(or a "note"\), and reads "<value>, not checked"\./);
     assert.match(problems[1], /^Maker Laptop 16: .* leave out its "url"\./);
     assert.match(problems[2], /^the page: .* leave out its "asof"\./);
     const failed = run("check", dir, "--expect", expect);
@@ -613,6 +613,58 @@ test("a page from what Octo knows passes without pages, and fails with any page 
     assert.match(failed.stdout, /^VALUES: 3 value\(s\) to fix in data\.json:$/m);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A page from what Octo knows: its columns are its own, so a "Released" column keyed "date" is a value, not the day a
+// page was read. A value's source claims a page nobody read; a store makes the page offer a price check, which on such
+// a page has no store link to read, or puts a checked price under "nothing checked"; and under a filter no value counts
+// as known, so every row would be listed apart from the limit. Each fails. Only the compare starter draws such a page:
+// a ranked page marked so fails once, and is not asked for pages.
+test("a page from what Octo knows keeps its own columns, and fails a source, a store, a filter, or a starter that can't draw it", () => {
+  const remembered = () => ({
+    title: "Maker Laptop 13 vs 16",
+    lede: "The 16 is the bigger one.",
+    from: "memory",
+    columns: [{ key: "date", label: "Released", type: "text" }, { key: "url", label: "Website", type: "text" }, { key: "store", label: "Sold at", type: "text" }, { key: "price", label: "Price", type: "price" }],
+    items: [
+      { ref: "laptop:13", name: "Maker Laptop 13", facts: { date: { v: "2021" }, url: { v: "maker.example" }, store: { v: "The maker's own shop" }, price: { v: "from about $1,000" } } },
+      { ref: "laptop:16", name: "Maker Laptop 16", facts: { date: { v: "2024" }, url: { v: "maker.example" }, store: { v: "The maker's own shop" }, price: { v: "from about $1,400" } } },
+    ],
+  });
+  const expect = "Maker Laptop 13, Maker Laptop 16";
+  const dir = optionsSite("compare", remembered);
+  const file = path.join(dir, "data.json");
+  try {
+    assert.deepEqual(checkValues(dir).problems, []);
+    const out = run("check", dir, "--expect", expect);
+    assert.equal(out.status, 0, out.stdout);
+    const data = remembered();
+    data.items[0].facts.price = { v: "from about $1,000", src: "Maker" };
+    data.items[1].store = { name: "Maker", readable: true };
+    data.filter = { key: "price", max: 1500, label: "Under $1,500" };
+    fs.writeFileSync(file, JSON.stringify(data));
+    const { problems, notes } = checkValues(dir);
+    assert.equal(problems.length, 3, problems.join("\n"));
+    assert.match(problems[0], /^Maker Laptop 13: this page is from what Octo knows .* leave out its "src"\./);
+    assert.match(problems[1], /^Maker Laptop 16: this page is from what Octo knows .* leave out its "store"\./);
+    assert.match(problems[2], /^the filter "Under \$1,500": nothing on a page from what Octo knows was checked, so no value counts as within the limit and every row would be listed apart\. Leave out "filter"/);
+    assert.deepEqual(notes, [], "no note asks the lede to call the remembered prices unknown");
+    assert.equal(run("check", dir, "--expect", expect).status, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  const ranked = optionsSite("ranked", (data) => ({
+    ...data,
+    from: "memory",
+    items: data.items.map(({ ref, rank, name, why }) => ({ ref, rank, name, why, price: { v: "about $100" }, specs: [{ v: "about 9 oz" }] })),
+  }));
+  try {
+    const { problems } = checkValues(ranked);
+    assert.equal(problems.length, 1, problems.join("\n"));
+    assert.match(problems[0], /^the page: only the compare starter \("columns" and "items"\) draws a page from what Octo knows \("from": "memory"\)\./);
+  } finally {
+    fs.rmSync(ranked, { recursive: true, force: true });
   }
 });
 

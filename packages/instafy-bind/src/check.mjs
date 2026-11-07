@@ -342,24 +342,29 @@ function liveValue(records, key) {
 /** A page made from what Octo knows, at the person's ask, with nothing looked up ("from": "memory"). */
 export const fromMemory = (data) => !!data && typeof data === "object" && data.from === "memory";
 
-/** The keys that say a page was read, and when. */
-const READ_KEYS = new Set(["url", "date", "asof"]);
+/** The keys that say a value was read, on which page and when, and a row's store, which the page offers to check. */
+const READ_KEYS = new Set(["src", "url", "date", "asof", "store"]);
 
-/** On a page from what Octo knows, every address or day it gives, as problems: nothing was read, so each would claim a
- *  check that never happened ("checked 1 Mar on maker.com"). One problem per row, and one for the rest of the page. */
+/** On a page from what Octo knows, as problems: every source, address, day or store it gives, since nothing was read,
+ *  so each would claim or offer a check ("checked 1 Mar on maker.com"); a filter, under which no value counts as known;
+ *  and the mark on a page only the compare starter draws. One problem per row, and one for the rest of the page. */
 export function memoryCitations(data) {
   if (!fromMemory(data)) return [];
+  if (!Array.isArray(data.columns)) return [`the page: only the compare starter ("columns" and "items") draws a page from what Octo knows ("from": "memory"). Build it with that starter, each value only its "v" (or a "note").`];
   const keysIn = (value, keys = new Set()) => {
     if (Array.isArray(value)) for (const v of value) keysIn(v, keys);
     else if (value && typeof value === "object") {
       for (const [k, v] of Object.entries(value)) {
-        if (READ_KEYS.has(k) && v != null && String(v).trim() !== "") keys.add(k);
+        // a row's "facts" are keyed by its columns ("date" for a "Released" column): only the values say anything
+        if (k === "facts" && v && typeof v === "object") keysIn(Object.values(v), keys);
+        else if (READ_KEYS.has(k) && v != null && String(v).trim() !== "") keys.add(k);
         else keysIn(v, keys);
       }
     }
     return keys;
   };
-  const problem = (label, keys) => `${label}: this page is from what Octo knows ("from": "memory"), so nothing on it was read: leave out its ${[...keys].map((k) => `"${k}"`).join(" and ")}. Each value is only its "v" (or a "note"), and reads "<value>, not checked". A page you read is cited on a page without "from": "memory".`;
+  const listed = (keys) => [...keys].map((k) => `"${k}"`).join(", ").replace(/, ([^,]*)$/, " and $1");
+  const problem = (label, keys) => `${label}: this page is from what Octo knows ("from": "memory"), so nothing on it was read: leave out its ${listed(keys)}. Each value is only its "v" (or a "note"), and reads "<value>, not checked". A page you read is cited on a page without "from": "memory".`;
   const out = [];
   const items = Array.isArray(data.items) ? data.items : [];
   for (const item of items) {
@@ -368,6 +373,9 @@ export function memoryCitations(data) {
   }
   const rest = keysIn({ ...data, items: [] });
   if (rest.size) out.push(problem("the page", rest));
+  if (data.filter && typeof data.filter === "object") {
+    out.push(`the filter "${String(data.filter.label || data.filter.key || "")}": nothing on a page from what Octo knows was checked, so no value counts as within the limit and every row would be listed apart. Leave out "filter", and say in the lede how each compares with it.`);
+  }
   return out;
 }
 
@@ -434,7 +442,8 @@ export function checkValues(dir) {
   problems.push(...memoryCitations(data));
 
   const filter = data.filter;
-  if (filter && typeof filter === "object") {
+  // a page from what Octo knows has no filter (memoryCitations)
+  if (filter && typeof filter === "object" && !memory) {
     const label = String(filter.label || "the filter");
     const columns = Array.isArray(data.columns) ? data.columns : null;
     const isNumber = (v) => v != null && v !== "" && Number.isFinite(Number(v));

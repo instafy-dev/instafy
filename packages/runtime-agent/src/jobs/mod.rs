@@ -3954,6 +3954,14 @@ const WORKSPACE_IS_CURRENT_RULE: &str = "\
 - You are running in this space's workspace, so it is up. An earlier turn's failure or notice may be out of date: check what you see now before repeating it or its advice. Tell the person to reconnect or restart the workspace only if they ask how, or something you ran this turn shows it failing.\n\
 - In a skill setup, the workspace records its progress. If a file an earlier step saved is missing, say in one plain sentence that it is gone, without guessing why, then redo that step (ask its question again) and continue.\n";
 
+/// Whose page a turn changes. In a new chat, "Make a simple comparison page of … from what you
+/// already know" found another chat's researched comparison, read it and wrote its own over it,
+/// so that chat's page and card showed the new one. A page made for the person stays the page of
+/// the chat that made it, as the interactive artifacts skill also says; the person's own app or
+/// site is changed as asked, from any chat. Every turn that may write files reads this, whatever
+/// skill it reads and whichever form its answer takes.
+const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A follow-up changes the page this chat made; a page made for the person in another chat (a map, a comparison, a page to share) changes only when the person names it, else start a new folder.\n";
+
 /// True when a person in this conversation opened a skill setup with
 /// `/skills import ... --start` or `/skills start <name>` and the setup began.
 ///
@@ -10730,12 +10738,15 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 &mut prompt,
                 &mut prompt_section_metrics,
                 "studioRuntimeInvariants",
-                "\nDirect workspace-change invariants:\n\
-                - Use workspace-relative paths only. Never write outside the active workspace.\n\
-                - A follow-up changes the site this chat made; a site another chat made changes only when the person names it, else start a new folder.\n\
-                - Do not create submodules or gitlinks unless the user explicitly asked for one.\n\
+                &[
+                    "\nDirect workspace-change invariants:\n\
+                - Use workspace-relative paths only. Never write outside the active workspace.\n",
+                    PAGE_OF_ITS_OWN_CHAT_RULE,
+                    "- Do not create submodules or gitlinks unless the user explicitly asked for one.\n\
                 - Imported or nested repositories are ordinary directories unless the user explicitly asks to preserve nested Git metadata.\n\
                 - Keep the final summary short: what changed and important caveats.\n",
+                ]
+                .concat(),
             );
             // The replies guide the reply line names. A turn that loads no memory snapshot (a
             // required change, a lookup of another chat, a turn on a restored thread) also runs
@@ -10806,15 +10817,24 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                     &mut prompt,
                     &mut prompt_section_metrics,
                     "studioRuntimeInvariants",
-                    "\nCurrent Studio runtime invariants:\n\
-                - Treat read-only as no workspace mutation. Safe inspection commands and CLI lookups are allowed when needed to answer.\n\
-                - Compact agent context cards are soft hints/cache for prior context, current work focus, and coordination direction. Use the relevant cards included in this prompt when present; otherwise query them with `instafy agents context list --json --query \"<topic>\"` when the latest request asks for prior project, coordination, audit, host, or hardware context.\n\
+                    &[
+                        "\nCurrent Studio runtime invariants:\n\
+                - Treat read-only as no workspace mutation. Safe inspection commands and CLI lookups are allowed when needed to answer.\n",
+                        // as the full constraints say to a turn that may write
+                        if metadata_requests_read_only_workspace(job.payload.get("metadata")) {
+                            ""
+                        } else {
+                            PAGE_OF_ITS_OWN_CHAT_RULE
+                        },
+                        "- Compact agent context cards are soft hints/cache for prior context, current work focus, and coordination direction. Use the relevant cards included in this prompt when present; otherwise query them with `instafy agents context list --json --query \"<topic>\"` when the latest request asks for prior project, coordination, audit, host, or hardware context.\n\
                 - Agent-to-agent conversations are first-class conversations. For unknown-focus follow-ups, lookup first, answer directly when evidence is sufficient, ask one clear prior thread when durable context matters, and do not poll all agents to discover soft focus.\n\
                 - For follow-ups about lanes, workers, files, or evidence, prefer the most recent matching user-visible evidence in this active conversation, but what you see in the workspace now beats earlier failure notices. Use older same-topic context cards or prior conversation search results only if current conversation evidence is absent or clearly not the target.\n\
                 - For current-conversation evidence-only follow-ups, do not search workspace files, source trees, `.instafy`, `.codex-runtime*`, `.codex-runtime-fallback`, or runtime logs. If restored provider context is insufficient, inspect only the active conversation with `instafy conversation show --include-threads --transcript --json`, which reads this conversation's id from the environment. Only if an older CLI reports a missing conversation argument, add the Conversation ID from Runtime context.\n\
                 - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n\
                 - Hardware/IO context card facts are not proof. Verify on the active runtime before claiming serial, BLE, USB, or flashing access.\n\
                 - If the active runtime cannot access host-native IO, say that a Desktop/CLI runtime on the attached machine is needed.\n",
+                    ]
+                    .concat(),
                 );
             }
         } else if cross_chat_context_lookup {
@@ -11023,6 +11043,14 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - If multiple secret inputs are required, include all names in `suggestedSecretNames` (ordered by setup priority).\n\
               Never include secret values or tokens in chat or JSON.\n\
             - When referencing UI onboarding/actions in `summary`, do not use positional wording (for example \"above\", \"below\", \"left\", \"right\"). Use position-agnostic wording like \"the integration action card in this message\".\n",
+            // A turn here may write files too (a goal's change, a page the routing step
+            // expected no change for), so it reads whose page it may change, as a
+            // direct workspace-change turn does.
+            if metadata_requests_read_only_workspace(job.payload.get("metadata")) {
+                ""
+            } else {
+                PAGE_OF_ITS_OWN_CHAT_RULE
+            },
             "- If the user asks you to create/edit/delete files, you MUST actually perform the filesystem changes in the workspace (prefer the `apply_patch` tool). Do not claim a file was changed unless it truly exists in the workspace.\n\
             - If you cannot apply file changes via tools, you MUST include the full post-change contents inline in the JSON `files` array using either `content` (UTF-8 text) or `contentBase64` (base64-encoded bytes). The runtime will write the files for you; this does not require `exec_command` or `shell`. Do not treat missing command tools as a blocker for file-only create/edit/delete requests when you can return inline `files[]` content.\n\
             - If you use `apply_patch`, follow the patch format exactly. Example (create a file):\n\
