@@ -21,11 +21,26 @@ struct StandIn {
     /// The job is not leased any more: its secrets request is refused, as the controller
     /// refuses a cancelled job's.
     not_leased: Arc<AtomicBool>,
+    /// A completion takes this long to answer once it is taken; the job's lease ends as it is
+    /// taken, as the controller ends it.
+    completion_delay: Arc<Mutex<Option<Duration>>>,
+    /// Heartbeats that came after a completion was taken.
+    heartbeats_after_completion: Arc<AtomicUsize>,
 }
 
 async fn heartbeat(State(stand_in): State<StandIn>) -> axum::response::Response {
     use axum::response::IntoResponse as _;
     stand_in.heartbeats.fetch_add(1, Ordering::SeqCst);
+    if stand_in.completions.load(Ordering::SeqCst) > 0 {
+        stand_in
+            .heartbeats_after_completion
+            .fetch_add(1, Ordering::SeqCst);
+        return (
+            AxumStatusCode::CONFLICT,
+            Json(json!({"message": "agent job lease is no longer active"})),
+        )
+            .into_response();
+    }
     if stand_in.lease_lost.load(Ordering::SeqCst) {
         (AxumStatusCode::CONFLICT, "job lease no longer held").into_response()
     } else {
@@ -64,6 +79,10 @@ async fn complete(
         );
     }
     stand_in.completions.fetch_add(1, Ordering::SeqCst);
+    let delay = *stand_in.completion_delay.lock();
+    if let Some(delay) = delay {
+        tokio::time::sleep(delay).await;
+    }
     (AxumStatusCode::OK, Json(json!({ "ok": true })))
 }
 
@@ -342,6 +361,51 @@ async fn the_job_loop_records_whether_a_turn_was_interrupted() {
         1,
         "the lost job is not completed"
     );
+}
+
+/// A job that finished sends no heartbeat while it reports its end. In a recorded local test
+/// (Nov 6) a heartbeat went out while a completion was being taken, found the lease the
+/// completion had just ended, and the runtime logged that the job lost its lease.
+#[test]
+fn a_finished_job_sends_no_heartbeat_while_it_reports() {
+    on_a_worker_stack(async {
+        let harness = Harness::start().await;
+        *harness.stand_in.completion_delay.lock() = Some(Duration::from_millis(2500));
+        let executor = Arc::new(AgentExecutor::new(harness.config.clone()));
+        let mut job = harness.job();
+        job.payload = json!({
+            "prompt_text": "/mcp list",
+            "metadata": {"execution_mode": "apply"}
+        });
+        let client = harness.client.clone();
+        let registration = harness.registration.clone();
+        let task_executor = executor.clone();
+        tokio::spawn(async move {
+            RuntimeAgent::handle_job(
+                client,
+                task_executor,
+                &registration,
+                job,
+                60,
+                Arc::new(Mutex::new(HashSet::new())),
+            )
+            .await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(harness.stand_in.completions.load(Ordering::SeqCst), 1);
+        // Its heartbeats ran while it worked: the first at once.
+        assert!(harness.stand_in.heartbeats.load(Ordering::SeqCst) >= 1);
+        assert_eq!(
+            harness
+                .stand_in
+                .heartbeats_after_completion
+                .load(Ordering::SeqCst),
+            0
+        );
+        assert!(!executor.turn_interrupted(), "a finished turn");
+    });
 }
 
 /// Runs `work` on a thread with the production worker's stack, as a leased job runs.
