@@ -27,9 +27,9 @@
 //! routine browsing: both need Linux-only trust checks) put their text into the same run text
 //! as every other part, so chain S varies a Shared Browser turn's text through its environment
 //! override instead. Shared Browser, MCP and write turns end without the tool evidence their
-//! lanes require (no browser, no project MCP server, no file change) and fail after their
-//! recovery run; for the chat's next turn the test saves the state a successful turn would have
-//! saved.
+//! lanes require (no browser, no project MCP server, no file change) and fail, a Shared Browser
+//! turn at once and the others after their recovery run; for the chat's next turn the test saves
+//! the state a successful turn would have saved.
 //!
 //! What a turn costs: chains B, H, G, F, N and M replay six browser flows as a person meets them (a
 //! comparison page whose browser turns hand back twice, research that keeps going in the
@@ -564,7 +564,8 @@ struct Spec {
     /// CODEX_BROWSER_MODE_DEVELOPER_INSTRUCTIONS for this job, and the marker it carries.
     browser_lane_override: Option<(&'static str, &'static str)>,
     /// The harness has no browser or project MCP server, so these lanes' jobs end without the
-    /// tool evidence they require and fail after their recovery run. For the chat's next turn
+    /// tool evidence they require and fail (a Shared Browser job at once, any other after its
+    /// recovery run). For the chat's next turn
     /// the test then saves the state a successful turn would have saved: the thread of the
     /// job's first run (from its rollout), or the stored state when that run resumed it.
     emulate_success: bool,
@@ -1739,9 +1740,9 @@ async fn run_follow_ups_from_the_chat(harness: &mut Harness) {
 /// (ix) Chain N: a message typed in the chat right after a browser turn. The routing step reads
 /// the browser skill's lines that keep a message that carries on this chat's browser work in the
 /// browser, also when public pages could answer it and whether or not that work found its answer,
-/// that a bare "keep going" carries on what a page here left open and never a change the person
-/// stopped or undid, that send research ending in a page to the browser from the first message,
-/// and that keep a map, or a page made only from what the chat already found, out of it. Each browser turn is told that it reads pages in Instafy's browser
+/// that a bare "keep going" carries on what a page here left open, that send research ending in
+/// a page to the browser from the first message, and that keep a map, or a page made only from
+/// what the chat already found and confirmed, out of it. Each browser turn is told that it reads pages in Instafy's browser
 /// and Octo builds in the chat, never only that it is read-only, with no write-scope guardrail,
 /// mode or rationale above that line. The page is one building turn,
 /// which reads every browser turn as page data and none outside it.
@@ -1760,16 +1761,16 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "browser work goes on whether or not it found its answer",
             ),
             (
-                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on, never a change the person stopped or undid.",
-                "a bare \"keep going\" carries on what a page here left open, never a change the person stopped or undid",
+                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on. A map",
+                "a bare \"keep going\" carries on what a page here left open",
             ),
             (
                 "So is research whose answer ends in a page (a comparison, prices, a route), from the first message.",
                 "research ending in a page goes to the browser from the first message",
             ),
             (
-                "A map (\"on a map\") is `direct`: its skill finds and cites its places itself. So is a page made only from what this chat already found.",
-                "a map, or a page made only from what the chat found, stays direct",
+                "A map (\"on a map\") is `direct`: its skill finds and cites its places itself. So is a page made only from what this chat already found and confirmed.",
+                "a map, or a page made only from what the chat found and confirmed, stays direct",
             ),
         ] {
             ensure!(
@@ -1825,9 +1826,11 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
 const M_MAP: &str = "Plan three days in the old town for a first visit: where to stay, what to see each day, on a map.";
 const M_MAP_REPLY: &str = "I can't build the map in this turn because the required workspace command tool isn't available.";
 const M_HOURS: &str = "Find the old bookshop's opening hours on the city's tourism site.";
+/// The requirement a browser turn that opened no page was once tried again with.
 const SHARED_BROWSER_RETRY: &str = "IMPORTANT SHARED BROWSER RETRY REQUIREMENT";
-/// What the browser retry of a turn that carries on the person's own message reads first.
-const BUILD_REQUEST_FIRST: &str = "answer with the action `{type: 'request_build'}` alone, with no browser step. Every other request:";
+/// An answer that is the model's service failing, not the turn: a passing upstream error.
+const M_UPSTREAM_ERROR: &str = "unexpected status 502 Bad Gateway: upstream request failed";
+const M_NOTHING_OPENED: &str = "I couldn't find the bookshop's hours.";
 
 /// The metadata of the Shared Browser turn that carries on the routed card the turn `card` posted:
 /// Studio's continuation, and the controller's check that it asks the card's task, the person's own
@@ -1871,8 +1874,8 @@ const L_SUMMARY: &str = "Continue the laptop comparison research in the browser,
 
 /// L: the comparison's reply, then the fill-in, which the routing step sends to the browser with
 /// a build after it. L1's routed card carries the fill-in's words and the routing step's summary;
-/// L2 is its browser turn, which opens no page, is tried again in the browser and fails; L3 is
-/// Try again, which sends the card's task once more, on a chat whose browser lane now holds L2.
+/// L2 is its browser turn, which opens no page and fails, with no retry; L3 is Try again, which
+/// sends the card's task once more, on a chat whose browser lane now holds L2.
 async fn run_a_fill_in_after_a_reply(harness: &mut Harness) {
     let cl = Uuid::new_v4();
     let mut history = vec![
@@ -1931,13 +1934,22 @@ async fn run_a_fill_in_after_a_reply(harness: &mut Harness) {
         .await;
 }
 
-/// (xiv) Chain L: the fill-in's card carries the routing step's summary after the person's words,
-/// as one quoted line, and every model request of its browser turn, of that turn's retry in the
-/// browser and of Try again reads it with the words. The browser turn that opened no page says
-/// that it didn't, not that it couldn't: Instafy's browser had opened.
+/// (xiv) Chain L: the routing step is told to name in its summary the items, place or site the
+/// chat names and what to find, and the fill-in's card carries that summary after the person's
+/// words, as one quoted line, which every model request of its browser turn and of Try again
+/// reads with the words. A browser turn that opened no page ends at once: it is not run again in
+/// the browser, whose retry sent a task that named nothing to a site it guessed (a local test,
+/// Nov 6), and it says that it didn't open a page, not that it couldn't: Instafy's browser had
+/// opened.
 fn check_a_fill_in_after_a_reply(harness: &Harness) -> Result<()> {
     let r1 = harness.turn("L1");
     ensure!(r1.routed, "L1 was not sent straight to the browser");
+    ensure!(
+        input_text(first_sampling_request(r1)).contains(
+            "with your `summary` while this chat has no browser turn: name in it the items, place or site this chat names (by name, not an address), and what to find."
+        ),
+        "L1's routing call was never told what its summary names"
+    );
     let line = format!("What this carries on: \"{L_SUMMARY}\"");
     let card = r1.final_messages.first().context("L1 posted no card")?;
     let request = &card["metadata"]["details"]["browserRequest"];
@@ -1956,8 +1968,15 @@ fn check_a_fill_in_after_a_reply(harness: &Harness) -> Result<()> {
                 text.contains(&format!("[[L1]] {L_FILL_IN}\n\n{line}")),
                 "{label}#{index} never read what the fill-in carries on"
             );
+            ensure!(
+                !text.contains(SHARED_BROWSER_RETRY),
+                "{label}#{index} was tried again in the browser"
+            );
         }
-        ensure!(requests > 0, "{label} made no model request");
+        ensure!(
+            requests == 1,
+            "{label} made {requests} model requests: it was tried again in the browser"
+        );
         ensure!(
             turn.outcome.as_ref().is_err_and(|error| {
                 error.contains("Octo didn't open a page in the browser, so this turn stopped.")
@@ -1974,9 +1993,11 @@ fn check_a_fill_in_after_a_reply(harness: &Harness) -> Result<()> {
 /// again in the browser, posts no reply, and ends with the note the controller hands the message
 /// back on. M3 is that hand-back, as the controller sends and stamps it: one building turn, which
 /// reads the message's words and nothing of M2. M5 carries on M4's, opens no page and answers in
-/// words alone: it is tried again in the browser, as before, and fails when that try opens no page
-/// either. M7 carries on M6's map and says in words alone that it cannot make it: its retry reads
-/// the build request first, answers with it, and hands the message back instead of failing.
+/// words alone: it fails at once, with no retry in the browser. M7 carries on M6's map and says in
+/// words alone that it cannot make it: it ends as M5 does, its prompt having offered the build
+/// request before any browser step. M8 is Try again on M5's card, whose first answer is a passing
+/// upstream error: the model's service, not the turn, left it without a page, so it runs once
+/// more with its own request and nothing added, and ends as M5 does when that opens no page.
 async fn run_messages_the_browser_could_not_make(harness: &mut Harness) {
     let cm = Uuid::new_v4();
     let m1 = harness
@@ -2024,7 +2045,8 @@ async fn run_messages_the_browser_could_not_make(harness: &mut Harness) {
                 .routed(false),
         )
         .await;
-    let card = harness.turn("M4").job_id;
+    let hours_card = harness.turn("M4").job_id;
+    let card = hours_card;
     let m5 = harness
         .run(
             "M5",
@@ -2044,18 +2066,27 @@ async fn run_messages_the_browser_could_not_make(harness: &mut Harness) {
     let mut m7 = Spec::new(cm, Lane::Shared("page-m"), m6)
         .asking(M_MAP)
         .with_metadata(routed_card_turn(card));
-    m7.script = vec![
-        Step::Answer(answer_with(M_MAP_REPLY, &[])),
-        Step::Answer(answer_with("", &[("request_build", None, None)])),
-    ];
+    m7.script = vec![Step::Answer(answer_with(M_MAP_REPLY, &[]))];
     // It ends by itself: no thread to make up for it.
     m7.emulate_success = false;
-    harness.run("M7", m7).await;
+    let m7 = harness.run("M7", m7).await;
+
+    let mut m8 = Spec::new(cm, Lane::Shared("page-m"), m7)
+        .asking(M_HOURS)
+        .with_metadata(routed_card_turn(hours_card));
+    m8.script = vec![
+        Step::Answer(answer_with(M_UPSTREAM_ERROR, &[])),
+        Step::Answer(answer_with(M_NOTHING_OPENED, &[])),
+    ];
+    m8.emulate_success = false;
+    harness.run("M8", m8).await;
 }
 
 /// (xi) Chain M: a browser turn that carries on the person's own message, opened no page and asks
 /// Octo to make it hands the message to one building turn, with no retry in the browser and
-/// nothing of its answer; one that opened no page for another reason is retried as before.
+/// nothing of its answer; one that opened no page for another reason fails at once, with no retry
+/// in the browser either, unless a passing upstream error ended it (M8): that runs it once more,
+/// with its own request alone.
 fn check_messages_the_browser_could_not_make(harness: &Harness) -> Result<()> {
     let m2 = harness.turn("M2");
     let requests: Vec<&Value> = sampling_requests(m2).map(|(_, request)| request).collect();
@@ -2125,59 +2156,76 @@ fn check_messages_the_browser_could_not_make(harness: &Harness) -> Result<()> {
         "M3 read the browser retry"
     );
 
-    let m5 = harness.turn("M5");
-    let requests: Vec<&Value> = sampling_requests(m5).map(|(_, request)| request).collect();
-    ensure!(
-        requests.len() == 2 && input_text(requests[1]).contains(SHARED_BROWSER_RETRY),
-        "M5 opened no page and was not tried again in the browser ({} requests)",
-        requests.len()
-    );
-    ensure!(
-        input_text(requests[1]).contains(BUILD_REQUEST_FIRST),
-        "M5's retry did not read the build request first"
-    );
-    ensure!(
-        m5.outcome
-            .as_ref()
-            .is_err_and(|error| error.contains("Octo didn't open a page in the browser")),
-        "M5: {:?}",
-        m5.outcome
-    );
-    ensure!(
-        m5.final_messages.is_empty(),
-        "M5 ended with messages: {:?}",
-        m5.final_messages
-    );
+    for label in ["M5", "M7"] {
+        let turn = harness.turn(label);
+        let requests: Vec<&Value> = sampling_requests(turn)
+            .map(|(_, request)| request)
+            .collect();
+        ensure!(
+            requests.len() == 1,
+            "{label} opened no page and made {} model requests: it was tried again in the browser",
+            requests.len()
+        );
+        let prompt = input_text(requests[0]);
+        ensure!(
+            !prompt.contains(SHARED_BROWSER_RETRY),
+            "{label} read the browser retry"
+        );
+        ensure!(
+            prompt.contains("answer with the action `{type: 'request_build'}` alone"),
+            "{label} was never told how to hand a build back"
+        );
+        ensure!(
+            turn.outcome
+                .as_ref()
+                .is_err_and(|error| error.contains("Octo didn't open a page in the browser")),
+            "{label}: {:?}",
+            turn.outcome
+        );
+        ensure!(
+            turn.final_messages.is_empty(),
+            "{label} ended with messages: {:?}",
+            turn.final_messages
+        );
+    }
 
-    let m7 = harness.turn("M7");
-    let requests: Vec<&Value> = sampling_requests(m7).map(|(_, request)| request).collect();
+    // M8: a passing upstream error ran the turn once more, with its own request and nothing
+    // added: no requirement that sends it to a page the task does not name.
+    let m8 = harness.turn("M8");
+    let requests: Vec<&Value> = sampling_requests(m8).map(|(_, request)| request).collect();
     ensure!(
         requests.len() == 2,
-        "M7 made {} model requests: it was not tried again once",
+        "M8 made {} model requests: a passing upstream error was not tried again",
         requests.len()
     );
-    let retry = input_text(requests[1]);
-    let decide = retry.find(BUILD_REQUEST_FIRST);
-    let navigate = retry.find("Use `instafy_shared_browser.snapshot` now.");
+    let request = format!("[[M8]] {M_HOURS}");
+    for (index, sent) in requests.iter().enumerate() {
+        let text = input_text(sent);
+        ensure!(text.contains(&request), "M8#{index} never read its request");
+        for added in [SHARED_BROWSER_RETRY, "Retry the latest user request now."] {
+            ensure!(!text.contains(added), "M8#{index} read {added:?}");
+        }
+    }
+    let own_request = |sent: &Value| {
+        sent["input"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(item_text)
+            .filter(|text| text.contains(&request))
+            .last()
+    };
     ensure!(
-        matches!((decide, navigate), (Some(decide), Some(navigate)) if decide < navigate),
-        "M7's retry did not read the build request ahead of its own requirement"
+        own_request(requests[1]) == own_request(requests[0]),
+        "M8's retry did not send its own request again: {:?}",
+        own_request(requests[1])
     );
-    ensure!(m7.outcome.is_ok(), "M7 failed: {:?}", m7.outcome);
     ensure!(
-        m7.final_messages.len() == 1
-            && m7.final_messages[0]["summary"] == ""
-            && m7.final_messages[0]["metadata"]["browserBuildRequest"].is_object(),
-        "M7 did not hand the message back: {:?}",
-        m7.final_messages
-    );
-    // What the person could read: the note's words, what Studio reads off it, and the reply. The
-    // turn's run log keeps both answers, as any turn's does.
-    let note = &m7.final_messages[0];
-    ensure!(
-        !note["content"].to_string().contains(M_MAP_REPLY)
-            && !note["metadata"].to_string().contains(M_MAP_REPLY),
-        "M7's note carries its first answer: {note}"
+        m8.outcome
+            .as_ref()
+            .is_err_and(|error| error.contains("Octo didn't open a page in the browser")),
+        "M8: {:?}",
+        m8.outcome
     );
     Ok(())
 }
