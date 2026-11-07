@@ -235,7 +235,7 @@ export interface BrowserScript {
   /** The label of the control Octo clicks (Click "…"). */
   clickLabel: string;
   steps: TurnStep[];
-  /** The run's done line ("Opened …, read a page"), which opens Details. */
+  /** The run's done line ("Opened …"), which opens Details. */
   activity: string;
   summary: string;
 }
@@ -388,7 +388,7 @@ const SITE_BROWSER: BrowserScript = {
     { live: "Browsing k7m2qa.instafy.site…" },
     { live: "Browsing k7m2qa.instafy.site…" },
   ],
-  activity: "Opened k7m2qa.instafy.site, read a page · you allowed opening k7m2qa.instafy.site",
+  activity: "Opened k7m2qa.instafy.site · you allowed opening k7m2qa.instafy.site",
   summary: "Clicked through the preview: both plans load, and Choose Team selects the Team plan.",
 };
 
