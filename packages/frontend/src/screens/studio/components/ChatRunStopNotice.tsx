@@ -37,9 +37,11 @@ export function stoppedByWords(message: ChatMessage, viewerUserId: string | null
  * frame.work ›"): who stopped it, when it was someone else, and Continue,
  * which carries the stopped request on (useChatRunStopContinuation) from the
  * chat's newest stopped turn only. Without the provider (thread previews,
- * tests) only the name shows.
+ * tests) only the name shows. The words are a status, so a screen reader hears
+ * the Stop as it lands; in a turn's row (`announce`), whose line is no live
+ * region, an own Stop is heard as "Stopped".
  */
-export function ChatRunStopActions({ notice }: { notice: ChatMessage }) {
+export function ChatRunStopActions({ notice, announce = false }: { notice: ChatMessage; announce?: boolean }) {
   const context = useContext(Context);
   const [pending, setPending] = useState(false);
   const [continued, setContinued] = useState(false);
@@ -48,7 +50,9 @@ export function ChatRunStopActions({ notice }: { notice: ChatMessage }) {
   const canContinue = !continued && context?.canContinue(notice);
   return (
     <>
-      {stoppedBy ? <Text as="span" variant="caption" tone="muted" data-testid="chat-run-stopped-by">{stoppedBy}</Text> : null}
+      {stoppedBy ? (
+        <Text as="span" variant="caption" tone="muted" role="status" data-testid="chat-run-stopped-by">{stoppedBy}</Text>
+      ) : announce ? <span className="sr-only" role="status">Stopped</span> : null}
       {canContinue ? <Button variant="text" tone="muted" size="xs" isPending={pending}
         data-testid="chat-run-stop-continue" onPress={() => {
           if (pending || !context?.canContinue(notice)) return;

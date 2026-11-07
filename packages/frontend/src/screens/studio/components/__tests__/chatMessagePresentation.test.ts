@@ -263,6 +263,28 @@ describe("chatMessagePresentation", () => {
     expect(agentJobThreadAcknowledgementIds(createMessage({ id: "plain", content: "hi" }))).toEqual([]);
   });
 
+  // The notice of a Stop is the chat's newest message once the turn stopped,
+  // and Home lists the chat as one with news until that message is read. Its
+  // row is gone into the turn's: the turn's row reads it.
+  it("lists the notice of the Stop a stopped turn's row shows, for read acknowledgement", () => {
+    const collapsedAll: ChatMessage[] = [
+      createMessage({
+        id: "command", content: "ls", timestamp: 1, messageType: "command_execution",
+        metadata: { jobId: "job-1", runId: "run-1", messageType: "command_execution", kind: "update", outcome: "in_progress" },
+      }),
+      createMessage({
+        id: "stop-notice", content: "Stopped this run.", timestamp: 2,
+        metadata: {
+          source: "controller", kind: "run_cancellation", runId: "run-1",
+          details: { stopRequested: true, actorUserId: "person-2", agentHandles: ["octo"], jobIds: ["job-1"], runIds: ["run-1"] },
+        },
+      }),
+    ];
+    const rows = synthesizeAgentJobThreadMessages(collapsedAll, collapsedAll.filter((message) => shouldDisplayChatMessage(message)));
+    expect(rows.map((row) => row.id)).toEqual(["agent-job-thread:job-1"]);
+    expect(agentJobThreadAcknowledgementIds(rows[0]!)).toEqual(["stop-notice"]);
+  });
+
   it("removes a stale runtime alert once the same run later produces agent output", () => {
     const messages: ChatMessage[] = [
       createMessage({

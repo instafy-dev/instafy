@@ -189,7 +189,8 @@ function sameRow(a: TurnStep, b: TurnStep): boolean {
 /**
  * A read of the page `step` acted on: a look at a form between its fields
  * ("Read a page on httpbin.org" between "Filled in a form on httpbin.org"
- * steps) leaves them one row.
+ * steps) leaves them one row. Only the same page: a read whose page, or a
+ * step whose page, is not known splits them, as another page's does.
  */
 function readsPageOf(read: TurnStep, step: TurnStep): boolean {
   const looked = read.activity;
@@ -200,7 +201,8 @@ function readsPageOf(read: TurnStep, step: TurnStep): boolean {
     acted !== null &&
     looked.host !== undefined &&
     looked.host === acted.host &&
-    (looked.pageKey === undefined || acted.pageKey === undefined || looked.pageKey === acted.pageKey)
+    looked.pageKey !== undefined &&
+    looked.pageKey === acted.pageKey
   );
 }
 

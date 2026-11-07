@@ -274,8 +274,13 @@ describe("TurnActivityDetails", () => {
       "You said no to a click on httpbin.org",
     ]);
 
-    // A read of another page, or of another site, still splits them.
-    for (const between of [read(3, "bbbbbbbbbbbbbbbb"), read(3, PAGE, "example.com")]) {
+    // A read of another page, of another site, or of a page not known still splits them.
+    const unknownPage = toolItem(3, "instafy_shared_browser", "snapshot", {
+      key: "browser/read", role: "content", live: "Reading {host}",
+      done: { one: "read a page on {host}", other: "read {n} pages on {host}", some: "read pages on {host}" },
+      host: "httpbin.org", step: "snapshot", when: "success",
+    });
+    for (const between of [read(3, "bbbbbbbbbbbbbbbb"), read(3, PAGE, "example.com"), unknownPage]) {
       await act(async () => {
         root.render(<TurnActivityDetails id="details" items={[filled(2), between, filled(4)]} renderUpdate={() => null} />);
       });

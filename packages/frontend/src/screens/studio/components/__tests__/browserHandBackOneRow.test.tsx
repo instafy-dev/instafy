@@ -496,6 +496,9 @@ describe("a message Octo answers in its browser and then builds from what it fou
     const continueButton = turn.querySelector<HTMLElement>('[data-testid="chat-run-stop-continue"]');
     expect(continueButton).not.toBeNull();
     expect(turn.querySelector('[data-testid="chat-run-stopped-by"]')).toBeNull();
+    // The line is no live region: a screen reader hears the Stop from the row.
+    const heard = (row: HTMLElement) => Array.from(row.querySelectorAll('[role="status"]')).map((element) => element.textContent);
+    expect(heard(turn)).toContain("Stopped");
     // Continue sends what it sent from the notice's own row.
     await act(async () => {
       continueButton!.click();
@@ -516,6 +519,8 @@ describe("a message Octo answers in its browser and then builds from what it fou
     });
     expect(view2.turns).toHaveLength(1);
     expect(view2.turns[0]!.querySelector('[data-testid="chat-run-stopped-by"]')?.textContent).toBe("Sam stopped this");
+    expect(heard(view2.turns[0]!)).toEqual(expect.arrayContaining(["Sam stopped this"]));
+    expect(heard(view2.turns[0]!)).not.toContain("Stopped");
     expect(container.textContent).not.toContain("asked Octo to stop");
   });
 

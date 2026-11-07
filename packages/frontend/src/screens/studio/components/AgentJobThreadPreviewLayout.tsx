@@ -906,7 +906,7 @@ export function AgentJobThreadPreviewLayout({
             {lineStopNotice ? (
               <div className="flex min-w-0 flex-wrap items-center gap-x-2">
                 {activityLine}
-                <ChatRunStopActions notice={lineStopNotice} />
+                <ChatRunStopActions notice={lineStopNotice} announce />
               </div>
             ) : activityLine}
           </div>
