@@ -5,8 +5,8 @@ fn read_descriptor(path: &str) -> CodexFileDescriptor {
     parse_file_descriptor(&json!({"path": path, "change": "read"})).unwrap()
 }
 
-#[test]
-fn read_references_preserve_original_bytes_and_display_metadata() {
+#[tokio::test]
+async fn read_references_preserve_original_bytes_and_display_metadata() {
     let tmp = tempdir().unwrap();
     let workspace = tmp.path().join("project");
     fs::create_dir_all(workspace.join("instructions")).unwrap();
@@ -25,7 +25,9 @@ fn read_references_preserve_original_bytes_and_display_metadata() {
         "references cannot satisfy write evidence"
     );
     assert!(workspace_file_changes_still_required(true, &outcome));
-    outcome.files = normalize_codex_files_for_commit(&workspace, outcome.files, true).unwrap();
+    outcome.files = normalize_codex_files_for_commit(&workspace, outcome.files, true, None)
+        .await
+        .unwrap();
     outcome.read_files = normalize_codex_read_files(&workspace, outcome.read_files);
     assert_eq!(
         fs::read(workspace.join("instructions/status.txt")).unwrap(),
@@ -154,8 +156,8 @@ fn read_references_do_not_exempt_paths_from_read_only_restoration() {
     assert_eq!(paths, HashSet::from(["handoff.md".to_string()]));
 }
 
-#[test]
-fn read_references_are_partitioned_from_supported_mutations() {
+#[tokio::test]
+async fn read_references_are_partitioned_from_supported_mutations() {
     let tmp = tempdir().unwrap();
     let workspace = tmp.path().join("project");
     fs::create_dir(&workspace).unwrap();
@@ -172,7 +174,9 @@ fn read_references_are_partitioned_from_supported_mutations() {
     .unwrap();
     assert_eq!(outcome.files.len(), 4);
     assert_eq!(outcome.read_files.len(), 1);
-    outcome.files = normalize_codex_files_for_commit(&workspace, outcome.files, true).unwrap();
+    outcome.files = normalize_codex_files_for_commit(&workspace, outcome.files, true, None)
+        .await
+        .unwrap();
     outcome.read_files = normalize_codex_read_files(&workspace, outcome.read_files);
     assert_eq!(outcome.files.len(), 4);
     assert_eq!(
