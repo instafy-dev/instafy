@@ -439,6 +439,32 @@ describe("summarizeTurnActivity", () => {
       const running = summarize([command(stepOf(before(CITE, 2), entryOf(ADD_POINT)), { status: "in_progress" })], "running");
       expect(running.live).toBe("Reading a source…");
     });
+
+    // A local test, Nov 7: a page's build ran `instafy web read a;` and then
+    // `instafy web read b …; instafy web read c …`, and its line read "Edited
+    // 2 files, read pages". A web read counts the addresses it was given and
+    // exits 0 once it read any of them, so `a; b` that worked says what
+    // `a b` says: "read 2 pages".
+    it("counts every page of web reads chained with `;` when the step worked", () => {
+      const read = (count: number) => ({ ...WEB_READ, count });
+      const chained = stepOf(before(read(1)), entryOf(read(1)));
+      const edit = step(
+        "file_change",
+        { v: 1, key: "builtin/edit", role: "content", live: "Editing files", done: { one: "edited a file", other: "edited {n} files", some: "edited files" }, count: 1, also: [] },
+        { paths: ["sites/visit/app.js", "sites/visit/index.html"] },
+      );
+      const page = summarize([command(read(1)), command(chained), edit]);
+      expect(rows(page).slice(0, 2)).toEqual([["done", "Read a page"], ["done", "Read 2 pages"]]);
+      expect(page.summary).toBe("Edited 2 files, read 3 pages");
+      // Inside a loop the count is still unknown.
+      const loop = stepOf({ ...entryOf(WEB_READ), count: null, result: "unknown" }, entryOf(read(1)));
+      expect(rows(summarize([command(loop)]))).toEqual([["done", "Read pages"]]);
+      expect(summarize([command(loop)]).summary).toBe("Read pages");
+      // A step whose last read failed counts none of them.
+      expect(summarize([command(chained, { exitCode: 2 })]).summary).toBe("Tried reading pages");
+      // Any other command chained with `;` still counts without a number.
+      expect(summarize([command(stepOf(before(CITE), entryOf(CITE)))]).summary).toBe("Read sources");
+    });
   });
 
   // A local test: a map turn read "Opened a preview, planned the days,

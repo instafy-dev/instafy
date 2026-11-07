@@ -474,6 +474,19 @@ function countsWithoutItsOwnResult(entry: ActivityEntry, activity: StepActivity,
   );
 }
 
+// `instafy web read`: its count is the addresses it was given, and it exits 0
+// once it read any of them, so `instafy web read a b` reads "read 2 pages"
+// whichever of the two loaded. `instafy web read a; instafy web read b` that
+// worked says no less (b was read), so its first read counts with its number
+// too: "read 2 pages", as the step's Details row and the done line both say.
+// Inside a loop its count is still unknown ("read pages").
+const WEB_READ_KEY = "instafy/web-read";
+
+/** The count an entry that counts without its own result adds: its own for a web read, else none. */
+function countWithoutItsOwnResult(entry: ActivityEntry): number | null {
+  return entry.key === WEB_READ_KEY ? entry.count : null;
+}
+
 // Steps no runtime labelled (an unlisted command, an older runtime) read as
 // what is sure of their kind, the words the line's own neutral count uses. An
 // unlabelled command may read a file, but as often stops a site by its
@@ -653,11 +666,13 @@ function summarizeGroups(steps: TurnStep[]): { phrases: string[]; firstHost: str
       // A command the step's result is not about did what its words say, or
       // did not: it neither counts nor is what the step tried, unless the
       // step worked and it ran in a loop or beside a run of the same command
-      // that worked; then it counts without a number ("looked up places").
+      // that worked; then it counts without a number ("looked up places"),
+      // or, a web read, with its pages.
       if (ranEntry.result === "unknown" && !countsWithoutItsOwnResult(ranEntry, activity, step.state)) {
         continue;
       }
-      const entry: ActivityEntry = ranEntry.result === "unknown" ? { ...ranEntry, count: null } : ranEntry;
+      const entry: ActivityEntry =
+        ranEntry.result === "unknown" ? { ...ranEntry, count: countWithoutItsOwnResult(ranEntry) } : ranEntry;
       if (step.state === "failed") {
         if (!tried && !declined && entry.role !== "quiet" && entry.live) {
           tried = entry;
@@ -1038,11 +1053,16 @@ function stepLabel(kind: StepKind, message: ChatMessage, activity: StepActivity 
   if (entry?.done) {
     // The same command also ran where its own result is not known (earlier
     // in the step, or in a loop): the step did it more than once, so it reads
-    // "Looked up places", never "Looked up a place".
-    const more = activity !== null && state === "done" &&
-      [activity, ...activity.also].some((other) => other !== entry && other.key === entry.key &&
-        countsWithoutItsOwnResult(other, activity, state));
-    return capitalize(doneWords(entry.done, more ? null : entry.count, entry.host));
+    // "Looked up places", never "Looked up a place"; a web read adds its pages.
+    const more = activity !== null && state === "done"
+      ? [activity, ...activity.also].filter((other) => other !== entry && other.key === entry.key &&
+        countsWithoutItsOwnResult(other, activity, state))
+      : [];
+    const count = more.reduce<number | null>((sum, other) => {
+      const added = countWithoutItsOwnResult(other);
+      return sum === null || added === null ? null : sum + added;
+    }, entry.count);
+    return capitalize(doneWords(entry.done, count, entry.host));
   }
   if (unlabelledBrowserStep) {
     return capitalize(BROWSER_NEUTRAL_LABEL.done);

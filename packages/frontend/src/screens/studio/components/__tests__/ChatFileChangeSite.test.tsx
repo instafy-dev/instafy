@@ -103,6 +103,27 @@ describe("the files a site turn created", () => {
     expect(toggle()?.textContent).toContain("Created 5 files");
   });
 
+  // A local test, Nov 7: a chat with no card of its own changed a page's data
+  // and read "data.json +23 −61" under its reply, which names a file, not the page.
+  it("names the page its files make up where the chat has no site, never a file in it", async () => {
+    await show([changed("sites/framework-laptops/data.json")], false);
+    expect(toggle()?.textContent).toBe("Changed framework-laptops");
+    expect(container.textContent).not.toMatch(/data\.json|[+−-]\d/u);
+    expect(chips()).toHaveLength(0);
+    // Its files stay one press away.
+    await act(async () => toggle()?.click());
+    expect(chips()).toHaveLength(1);
+    expect(chips()[0]?.textContent).toContain("data.json");
+    await show([changed("sites/lello-visit/app.js"), created("sites/lello-visit/notes/hours.md")], false);
+    expect(toggle()?.textContent).toBe("Changed lello-visit");
+    // Files of two pages, or outside any page, keep their names and count.
+    await show([changed("sites/a/data.json"), changed("sites/b/data.json")], false);
+    expect(toggle()?.textContent).toContain("Edited 2 files");
+    await show([changed("notes.md")], false);
+    expect(toggle()).toBeNull();
+    expect(chips()[0]?.textContent).toContain("notes.md");
+  });
+
   // A local test: the map's hand-back read "sights.geojson +5 −2 ·
   // map.config.json +22 −4" under its reply.
   it("reads Changed the site for a site's files that were there, with no names or line counts", async () => {

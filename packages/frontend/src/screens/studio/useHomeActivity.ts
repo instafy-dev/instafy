@@ -8,7 +8,16 @@ import {
 
 const ACTIVITY_POLL_MS = 20_000;
 const CATCH_UP_MAX_PAGES = 4;
+// The controller's largest page (`MAX_LIMIT` in activity.rs).
 const CATCH_UP_PAGE_SIZE = 200;
+// Home lists one row per chat, from the chat's newest ledger row, and a
+// message writes about five rows (each part's reply and run end). A first page
+// of two rows per listed chat reached back about ten messages: in a local test
+// (Nov 6), 49 rows came after a chat's Stop before Home was opened, so the
+// Stop's row was the 50th, past the first page, and Home listed that chat from
+// its reply notification alone, with no "Stopped". The first page is the
+// controller's largest, which reaches about 40 messages back.
+const FIRST_PAGE_SIZE = CATCH_UP_PAGE_SIZE;
 
 function numericCursor(value: string | null): bigint | null {
   try {
@@ -124,7 +133,7 @@ export function useHomeActivity(viewerUserId: string | null, pageSize = 24, mark
       firstLoading = true;
       update({ activityLoading: true, activityError: null });
       try {
-        const result = await controllerClient.activity.list({ limit: pageSize * 2 });
+        const result = await controllerClient.activity.list({ limit: FIRST_PAGE_SIZE });
         if (cancelled) return false;
         if (!result.success) {
           recordError(result.error ?? "Unable to load activity.", "first");
@@ -190,7 +199,7 @@ export function useHomeActivity(viewerUserId: string | null, pageSize = 24, mark
           const result = await controllerClient.activity.list(
             before ? { before, limit: CATCH_UP_PAGE_SIZE }
               : boundary !== null ? { since: boundary.toString(), limit: CATCH_UP_PAGE_SIZE }
-                : { limit: pageSize * 2 },
+                : { limit: FIRST_PAGE_SIZE },
           );
           if (cancelled) return false;
           if (!result.success) {

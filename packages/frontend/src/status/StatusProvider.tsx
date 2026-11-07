@@ -15,7 +15,7 @@ export interface StatusToast {
   presentation: StatusPresentation;
   actionLabel?: string;
   onAction?: (() => void) | null;
-  /** Pressing the toast's words runs its action too (`StatusToastOptions.actionOnPress`). */
+  /** Pressing the toast's message runs its action too (`StatusToastOptions.actionOnPress`). */
   actionOnPress?: boolean;
   /** App-owned reading timer; absent for persistent and absolute-deadline notices. */
   readingDuration?: number;
@@ -30,10 +30,10 @@ export interface StatusToastOptions {
   actionLabel?: string;
   onAction?: () => void;
   /**
-   * Pressing the toast's words runs its action too, as a press on a
-   * notification does. Only for an action that opens something (View), never
-   * one that changes anything (Undo). The action's button stays the control a
-   * keyboard and a screen reader reach.
+   * Pressing the toast's message, anywhere in its box, runs its action too,
+   * as a press on a notification does. Only for an action that opens
+   * something (View), never one that changes anything (Undo). The action's
+   * button stays the control a keyboard and a screen reader reach.
    */
   actionOnPress?: boolean;
   onClose?: () => void;

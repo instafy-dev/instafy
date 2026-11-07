@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useId, useRef, useState } from "react";
 import { stopConversationJobs, type ControllerConversationStopResult } from "../../../services/runtimeController/conversationStop";
 import { chatRunStopEscapeBlocked } from "./chatRunStopEscape";
 import { chatRunStopNeedsConfirmation, groupChatRunStopTargets, type ChatRunStopTarget } from "./chatRunStopTargets";
@@ -69,10 +69,18 @@ export function useChatRunStop(options: ChatRunStopOptions) {
     const capturedConversation = current.conversationId;
     const requestId = ++operation.current;
     busy.current = true;
-    setState((previous) => ({
-      ...(previous.conversationId === capturedConversation ? previous : emptyState(capturedConversation)),
-      phase: "stopping", attemptedTargets: captured, confirmationTargets: null, error: null,
-    }));
+    // The Stop's request goes out first. The chat draws "Stopping…" as a
+    // transition, which yields while it draws, so the request's sign-in lookup
+    // and its send run in between. Drawn first, a long chat held the request
+    // back by the whole drawing: it reached the controller 37 to 93 ms after
+    // the press in a local test (Nov 7), before the Stop could even begin.
+    // `busy` already refuses a second press meanwhile.
+    startTransition(() => {
+      setState((previous) => ({
+        ...(previous.conversationId === capturedConversation ? previous : emptyState(capturedConversation)),
+        phase: "stopping", attemptedTargets: captured, confirmationTargets: null, error: null,
+      }));
+    });
     let timer: ReturnType<typeof setTimeout> | undefined;
     const isCurrent = () => mounted.current && operation.current === requestId
       && latest.current.options.conversationId === capturedConversation;
