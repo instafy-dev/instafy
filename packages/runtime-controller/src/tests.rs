@@ -23122,8 +23122,8 @@ async fn dispatch_prompt_dedupes_nested_client_message_id() -> anyhow::Result<()
 
     let project_id = Uuid::new_v4();
     let conversation_id = Uuid::new_v4();
-    let client_message_id = format!("goal-continuation:{}:{}", Uuid::new_v4(), Uuid::new_v4());
-    let prompt = "Continue goal: count to 3";
+    let client_message_id = format!("dispatch-retry:{}:{}", Uuid::new_v4(), Uuid::new_v4());
+    let prompt = "Continue the review";
 
     {
         let connection = pool.get().await?;
@@ -23156,11 +23156,7 @@ async fn dispatch_prompt_dedupes_nested_client_message_id() -> anyhow::Result<()
         intent: Some("feature".to_string()),
         plan_seed: None,
         metadata: Some(json!({
-            "clientMessageId": client_message_id,
-            "goalContinuation": {
-                "triggerRunId": Uuid::new_v4().to_string(),
-                "turn": 1
-            }
+            "clientMessageId": client_message_id
         })),
         conversation_metadata: None,
         parent_conversation_id: None,

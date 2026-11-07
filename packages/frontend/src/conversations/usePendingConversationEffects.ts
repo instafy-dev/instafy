@@ -8,11 +8,7 @@ import type {
 } from "../services/runtimeController/conversations";
 import { isTimelineMessage, isUuid, mapControllerMessageToChat } from "./conversationMessageUtils";
 import {
-  applyGoalActionMessage,
-  createConversationGoalMetadataPatch,
   extractConversationGoalFromMetadata,
-  resolveNonRecoverableGoalErrorRunId,
-  settleGoalAfterNonRecoverableRunError,
   shouldApplyConversationGoalSnapshot,
 } from "./conversationGoals";
 import {
@@ -59,10 +55,6 @@ interface PendingConversationEffectsArgs {
   lastBackgroundAtRef: MutableRefObject<number>;
   notifiedMessageIdsRef: MutableRefObject<Set<string>>;
   dispatch: Dispatch<ConversationsAction>;
-  updateControllerConversationMetadata?: (params: {
-    conversationId: string;
-    metadata: Record<string, unknown>;
-  }) => Promise<unknown>;
 }
 
 const NO_INTERNAL_CONVERSATIONS: Readonly<Record<string, true>> = {};
@@ -94,7 +86,6 @@ export function usePendingConversationEffects({
   lastBackgroundAtRef,
   notifiedMessageIdsRef,
   dispatch,
-  updateControllerConversationMetadata,
 }: PendingConversationEffectsArgs) {
   // Creation and its first message may be flushed together before React has
   // applied CREATE. Share that identity between the ordered effects below.
@@ -649,44 +640,6 @@ export function usePendingConversationEffects({
       const localConversation =
         state.conversations.find((conversation) => conversation.localId === conversationId) ??
         null;
-      let goalFromAction = applyGoalActionMessage(
-        localConversation?.activeGoal ?? null,
-        chatMessage,
-        currentUserId,
-      );
-      if (!goalFromAction.changed && localConversation) {
-        goalFromAction = settleGoalAfterNonRecoverableRunError(
-          localConversation.activeGoal,
-          localConversation.messages,
-          chatMessage,
-          currentUserId,
-        );
-      }
-      if (goalFromAction.changed) {
-        const failedRunId = localConversation
-          ? resolveNonRecoverableGoalErrorRunId(
-              localConversation.activeGoal,
-              localConversation.messages,
-              chatMessage,
-            )
-          : null;
-        dispatch({
-          type: "SET_GOAL",
-          id: conversationId,
-          goal: goalFromAction.goal,
-        });
-        if (failedRunId) {
-          dispatch({ type: "UNLINK_RUN", runId: failedRunId });
-        }
-        if (controllerId) {
-          void updateControllerConversationMetadata?.({
-            conversationId: controllerId,
-            metadata: createConversationGoalMetadataPatch(goalFromAction.goal),
-          }).catch((error) => {
-            console.warn("Failed to persist conversation goal update", error);
-          });
-        }
-      }
       dispatch({
         type: "APPLY_REMOTE_MESSAGE",
         conversationId,
@@ -738,6 +691,5 @@ export function usePendingConversationEffects({
     state.conversations,
     state.projectKey,
     state.sequence,
-    updateControllerConversationMetadata,
   ]);
 }

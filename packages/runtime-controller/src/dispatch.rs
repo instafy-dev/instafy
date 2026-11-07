@@ -226,6 +226,10 @@ pub(crate) struct DispatchPromptNormalized {
     /// Controller-private queue reservation ignored by that entry's own lane
     /// admission check. Browser payloads can never set this field.
     pub(crate) dispatch_queue_entry_id: Option<Uuid>,
+    /// Controller-owned wakeup and claim; never accepted from a request body.
+    pub(crate) goal_wakeup: Option<(Uuid, Uuid)>,
+    /// Trusted final team checkpoint inherits its planning job's goal revision.
+    pub(crate) goal_parent_job_id: Option<Uuid>,
     /// Authenticated job that delegated this send. Kept across routes that use
     /// its human subject for access checks; never accepted from a request body.
     pub(crate) delegating_job_id: Option<Uuid>,
@@ -1031,6 +1035,14 @@ pub(crate) async fn process_dispatch_prompt_timed(
     timings: &mut DispatchPhaseTimings,
 ) -> Result<DispatchPromptResponse, (StatusCode, Json<ApiError>)> {
     let started = Instant::now();
+    crate::conversation_goals::strip_job_claims(&mut request.metadata);
+    if request.goal_wakeup.is_none()
+        && crate::conversation_goals::is_legacy_automatic_continuation(&request.metadata)
+    {
+        return Err(crate::conversation_goals::conflict(
+            "Goal continuation is now managed by the controller. Refresh this client.",
+        ));
+    }
     crate::task_usage::strip_authoring_claims(&mut request.metadata);
     crate::user_input_requests::routing::strip_claims(&mut request.metadata);
     // Only a runtime's step carries an activity label (crate::chat_activity).
@@ -1272,6 +1284,12 @@ pub(crate) async fn process_dispatch_prompt_timed(
                     &request.prompt_text,
                 )?;
                 if let Some(existing_run_id) = existing.run_id {
+                    crate::conversation_goals::record_dispatch(
+                        &transaction,
+                        request.goal_wakeup,
+                        existing_run_id,
+                    )
+                    .await?;
                     transaction.commit().await.map_err(|error| {
                         internal_error(format!(
                             "failed to finalize duplicate dispatch lookup: {error}"
@@ -1486,6 +1504,11 @@ pub(crate) async fn process_dispatch_prompt_timed(
             record,
         );
     }
+
+    // Goal authority depends on authenticated ingress and verified system-turn
+    // provenance, not just the person whose access an internal send uses.
+    crate::conversation_goals::bind_dispatch(&transaction, context, &conversation, &mut request)
+        .await?;
 
     // An ambient multi-human turn dispatches to the default agent stamped with
     // the agent_evaluation marker; the agent's participation skill decides
@@ -2651,6 +2674,8 @@ pub(crate) async fn process_dispatch_prompt_timed(
         }
     }
 
+    crate::conversation_goals::record_dispatch(&transaction, request.goal_wakeup, primary_run_id)
+        .await?;
     transaction
         .commit()
         .await
@@ -2782,7 +2807,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 "projectId": project.id,
                 "sessionId": conversation.session_id,
                 "createdBy": conversation.created_by,
-                "metadata": conversation_metadata,
+                "metadata": conversations::public_conversation_metadata(Some(conversation_metadata)),
                 "visibility": conversation.visibility,
                 "parentConversationId": conversation.parent_conversation_id,
                 "rootConversationId": conversation.root_conversation_id,
@@ -3345,6 +3370,8 @@ pub(crate) fn normalize_dispatch_request(
         prefer_runtime,
         expected_lane_idle: false,
         dispatch_queue_entry_id: None,
+        goal_wakeup: None,
+        goal_parent_job_id: None,
         delegating_job_id: None,
         allow_silent_automation_decline: false,
         allow_internal_review: false,

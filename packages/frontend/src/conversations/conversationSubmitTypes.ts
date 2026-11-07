@@ -73,7 +73,7 @@ export interface UseConversationSubmitFlowArgs {
   ) => void;
   setConversationControllerId: (conversationId: string, controllerId: string | null) => void;
   setConversationTitle: (conversationId: string, title: string) => void;
-  setConversationGoal: (conversationId: string, goal: ConversationGoal | null) => void;
+  setConversationGoal: (conversationId: string, goal: ConversationGoal | null, expectedGoal?: ConversationGoal | null) => void;
   appendMessages: (conversationId: string, messages: ChatMessage[]) => void;
   updateMessage: (
     conversationId: string,
