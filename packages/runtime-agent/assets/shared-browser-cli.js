@@ -3717,7 +3717,7 @@ async function refuseCovered(page, target, landing) {
   const control = quotedControlLabel(target.description);
   const cover = await coverWords(page, landing.cover);
   throw new Error(
-    (await coveredBefore(target, { mark: true }))
+    (await coveredBefore(page, target, { mark: true }))
       ? `Something else on the page still covers ${control}${cover}, so nothing was clicked. Leave this step to the person and tell them what covers it.`
       : `Something else on the page covers ${control}${cover}, so nothing was clicked. Take a fresh snapshot and try once more.`,
   );
@@ -3727,7 +3727,7 @@ async function refuseCovered(page, target, landing) {
 // is asked: one a cover still takes is left to the person at once, so the
 // person is never asked again for a click that cannot land.
 async function refuseStillCovered(page, target) {
-  if (!(await coveredBefore(target))) return;
+  if (!(await coveredBefore(page, target))) return;
   const landing = await settledLanding(page, target);
   if (!landing.other) await refuseCovered(page, target, landing);
 }
@@ -3736,24 +3736,25 @@ async function refuseStillCovered(page, target) {
 // marking it now with `request.mark`. The mark is the document's, like the
 // withheld mark (withholdDocumentInPage): the page cannot take it away, and a
 // new page loads without it. A document the page froze reads as marked.
-function coveredBeforeInPage(element, request) {
-  const doc = element.ownerDocument;
+function coveredBeforeInPage(request) {
   const key = Symbol.for(request.key);
-  const before = Object.getOwnPropertyDescriptor(doc, key) !== undefined || !Object.isExtensible(doc);
-  if (!before && request.mark === true) Object.defineProperty(doc, key, { value: true });
+  const before = Object.getOwnPropertyDescriptor(document, key) !== undefined || !Object.isExtensible(document);
+  if (!before && request.mark === true) Object.defineProperty(document, key, { value: true });
   return before;
 }
 
 const COVERED_CONTROL_KEY = "instafy.sharedBrowser.coveredControl";
-// A page that cannot be asked counts as marked.
-async function coveredBefore(target, { mark = false } = {}) {
-  const before = await target.locator
+// A page that cannot be asked counts as marked once a cover took the control,
+// so its words end the tries, and as not marked before anyone is asked, so
+// the step goes on to its prompt as it would without the mark.
+async function coveredBefore(page, target, { mark = false } = {}) {
+  const before = await page
     .evaluate(coveredBeforeInPage, {
       kind: "covered-mark",
       key: `${COVERED_CONTROL_KEY}.${targetFingerprint(target.description)}`,
       mark,
     })
-    .catch(() => true);
+    .catch(() => mark);
   return before === true;
 }
 
