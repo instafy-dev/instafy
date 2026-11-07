@@ -19,6 +19,7 @@ import {
 } from "react-aria-components";
 import { Check } from "iconoir-react";
 import { ControlChevron } from "./ControlChevron";
+import { iconButtonStyles } from "./Button";
 import { FieldLabelContext } from "./Field";
 import { StudioListBox, StudioListBoxItem } from "./aria/StudioListBox";
 import { StudioPopover } from "./aria/StudioPopover";
@@ -32,17 +33,9 @@ import {
   type ControlRadius,
 } from "./controlStyles";
 
-// The one value picker. It keeps the shape every call site already uses, a
-// native-looking element with <option> children and an onChange that hands
-// back event.target.value, and draws its own menu instead of the operating
-// system's. A census across the product found sixteen native-backed pickers
-// against zero uses of the app-drawn ToolbarMenuSelect, and every one of the
-// sixteen leaned on props that component lacked: disabled, sizes, test ids,
-// per-option disabled, a placeholder option, an id for a Field label. So the
-// unification happened here, inside the primitive, and the call sites did not
-// move. Pass native for the one place the OS control is the right one, the
-// phone-width twin in ProjectPickerPanel, where a touch device's own wheel
-// picker beats anything we draw.
+// Shared value picker with native <option> children. The app-rendered default
+// uses our listbox styles; `native` preserves OS picker and keyboard behavior.
+// Compact native toolbar pickers can show a count or icon through nativeTrigger.
 
 type ControlTone = "default" | "muted";
 
@@ -62,8 +55,10 @@ export type SelectProps = Omit<React.SelectHTMLAttributes<HTMLSelectElement>, "s
   tone?: ControlTone;
   fullWidth?: boolean;
   selectClassName?: React.SelectHTMLAttributes<HTMLSelectElement>["className"];
-  /** Render the operating system's own control. For touch surfaces only. */
+  /** Render the operating system's own control, including its keyboard behavior. */
   native?: boolean;
+  /** A compact native picker uses the shared quiet icon-button target around this glyph. */
+  nativeTrigger?: ReactNode;
 };
 
 type OptionSpec = { value: string; label: string; disabled: boolean };
@@ -125,6 +120,7 @@ function NativeSelect(
     className,
     selectClassName,
     native,
+    nativeTrigger,
     ...props
   }: SelectProps,
   ref: React.ForwardedRef<HTMLSelectElement>,
@@ -132,6 +128,22 @@ function NativeSelect(
   // Consumed by Select's branch above; pulled out here only so it never lands
   // on the element as an unknown attribute.
   void native;
+  if (nativeTrigger !== undefined) {
+    return (
+      <label
+        className={[
+          iconButtonStyles({ variant: "ghost" }),
+          "relative shrink-0 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-primary-500/40 has-[:focus-visible]:ring-offset-2 has-[:focus-visible]:ring-offset-white dark:has-[:focus-visible]:ring-offset-[var(--color-studio-dark-canvas)]",
+          className,
+        ].filter(Boolean).join(" ")}
+        data-disabled={props.disabled || undefined}
+      >
+        <span aria-hidden="true" className="pointer-events-none">{nativeTrigger}</span>
+        <select ref={ref} {...props}
+          className="absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-default" />
+      </label>
+    );
+  }
   return (
     <div className={["relative min-w-0", fullWidth ? "w-full" : "w-fit", className].filter(Boolean).join(" ")}>
       <select
@@ -170,6 +182,7 @@ function StyledSelect({
   className,
   selectClassName,
   native,
+  nativeTrigger,
   children,
   value,
   defaultValue,
@@ -184,6 +197,7 @@ function StyledSelect({
   ...rest
 }: SelectProps) {
   void native;
+  void nativeTrigger;
   // children is a fresh array on every render, so memoising on its identity
   // memoises nothing: react-aria would receive a new items array each time,
   // rebuild its collection, and in a live browser that can chase its own tail

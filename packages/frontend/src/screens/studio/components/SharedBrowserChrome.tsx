@@ -9,6 +9,7 @@ import {
 } from "react";
 import { NavArrowLeft, NavArrowRight, Refresh } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
+import { Select } from "../../../components/Select";
 import { browserSessionPageIsPlaceholder, type BrowserSessionPage } from "./browserSessionPages";
 import { normalizeBrowserAddress } from "./browserAddress";
 import { BrowserAddressField } from "./BrowserAddressField";
@@ -240,12 +241,19 @@ export function SharedBrowserChrome({
   );
   const pageSelectionDisabled = !resolved || busy || !controls.focusPage || !humanHasControl;
   const pageSelect = (
-    <select
+    <Select
+      native
+      size="sm"
+      radius="lg"
+      nativeTrigger={compact ? (
+        <span
+          className={`inline-flex h-5 min-w-5 items-center justify-center rounded-[5px] border-[1.5px] border-current px-0.5 text-[10px] font-semibold ${agentTabIds.size ? "text-violet-700 dark:text-violet-300" : ""}`}
+          data-agent-tabs={agentTabIds.size || undefined}
+        >{pages.length}</span>
+      ) : undefined}
+      selectClassName="truncate"
       aria-label="Shared browser tab"
       aria-description={`${pages.length} tabs${agentName && agentTabIds.size ? `, ${agentTabIds.size} used by ${agentName}` : ""}. Current tab: ${activePage ? tabLabel(activePage) : "none"}`}
-      className={compact
-        ? "absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-default"
-        : "h-8 w-36 shrink-0 truncate rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700 outline-none focus:border-primary-400 focus:ring-2 focus:ring-primary-500/20 max-[540px]:h-10 pointer-coarse:h-11 dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-slate-950 dark:text-slate-200"}
       data-testid="shared-browser-page-select"
       disabled={pageSelectionDisabled}
       onChange={(event) => onFocusPage(event.target.value)}
@@ -257,27 +265,15 @@ export function SharedBrowserChrome({
           {tabLabel(page)}
         </option>
       ))}
-    </select>
+    </Select>
   );
   // A native picker keeps page selection one tap away on mobile. The compact
   // count avoids squeezing a long page title beside the address field.
   const pageSelector = pages.length > 1 ? (
-    compact ? (
-      <label
-        title={`Switch browser tab (${pages.length} tabs)`}
-        data-testid="shared-browser-tabs-picker"
-        className={`relative inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-slate-600 focus-within:ring-2 focus-within:ring-inset focus-within:ring-primary-500/50 dark:text-slate-300 ${pageSelectionDisabled ? "opacity-50" : "hover:bg-slate-200/60 dark:hover:bg-slate-800"}`}
-      >
-        <span
-          aria-hidden="true"
-          className={`inline-flex h-5 min-w-5 items-center justify-center rounded-[5px] border-[1.5px] border-current px-0.5 text-[10px] font-semibold ${agentTabIds.size ? "text-violet-700 dark:text-violet-300" : ""}`}
-          data-agent-tabs={agentTabIds.size || undefined}
-        >
-          {pages.length}
-        </span>
-        {pageSelect}
-      </label>
-    ) : pageSelect
+    <div className={compact ? "shrink-0" : "w-40 shrink-0"}
+      data-testid="shared-browser-tabs-picker">
+      {pageSelect}
+    </div>
   ) : null;
   const compactNavigation = compact ? (
     <div className="flex min-w-0 items-center gap-2 px-1 py-1" aria-label="Browser navigation">
@@ -304,7 +300,7 @@ export function SharedBrowserChrome({
           </div>
         ) : null}
         address={
-          <div className="flex min-w-0 items-center gap-1">
+          <div className="flex min-w-0 items-center gap-2">
             {pageSelector}
             <div className="min-w-0 flex-1">
               <BrowserAddressField

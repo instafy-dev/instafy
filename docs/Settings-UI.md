@@ -639,6 +639,12 @@ existing thin outline, 12px default radius
 and visible keyboard focus treatment. Profile's Save action follows the same 44px mobile
 target and uses a compact 36px height on wider fine-pointer screens.
 
+Browser tab selection also uses `Select`. Keep its native behavior when one-tap OS
+selection is appropriate; `nativeTrigger` draws a compact count or icon within the
+shared quiet 8px toolbar target (32px mouse, 44px touch), with a visible keyboard
+focus ring. Give the select an accessible name and keep the full active page title
+in its description. Wider browser panes show the small native text selector.
+
 Use a small, consistent radius scale: 6px for compact search scope chips, 8px for utility icon controls, menu rows
 and segmented options, 12px for navigation rows, form controls and profile actions, and 16px for cards, dialogs and
 popovers. Human avatars remain circular; every AI's face and team identities use rounded
