@@ -18,6 +18,7 @@ import {
   type ConversationVisibility,
 } from "./conversationMetadata";
 import {
+  conversationGoalsEqual,
   shouldApplyConversationGoalSnapshot,
   type ConversationGoal,
 } from "./conversationGoals";
@@ -128,7 +129,7 @@ export type ConversationsAction =
   | { type: "SET_REMOTE_HISTORY"; id: string; hasMessages: boolean }
   | { type: "SET_REMOTE_SUMMARY_PENDING"; id: string; pending: boolean }
   | { type: "SET_TITLE"; id: string; title: string }
-  | { type: "SET_GOAL"; id: string; goal: ConversationGoal | null }
+  | { type: "SET_GOAL"; id: string; goal: ConversationGoal | null; expectedGoal?: ConversationGoal | null }
   | { type: "SET_VISIBILITY"; id: string; visibility: ConversationVisibility }
   | { type: "SET_TOOL_SOURCE"; id: string; toolSource: string | null }
   | { type: "SET_STARTED_BY_OTHER"; id: string; startedByOther: boolean }
@@ -731,7 +732,9 @@ export function conversationsReducer(
         ...state,
         conversations: state.conversations.map((conversation) =>
           conversation.localId === action.id
-            ? shouldApplyConversationGoalSnapshot(conversation.activeGoal, action.goal)
+            ? (action.expectedGoal !== undefined
+                ? conversationGoalsEqual(conversation.activeGoal, action.expectedGoal)
+                : shouldApplyConversationGoalSnapshot(conversation.activeGoal, action.goal))
               ? { ...conversation, activeGoal: action.goal ? { ...action.goal } : null }
               : conversation
             : conversation,

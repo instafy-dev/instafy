@@ -63,7 +63,7 @@ impl Chain {
         let mut metadata = metadata;
         metadata["clientMessageId"] = json!(Uuid::new_v4().to_string());
         metadata["agentSelection"] = json!({ "active": ["octo"], "mentions": ["octo"] });
-        let request = dispatch::normalize_dispatch_request(DispatchPromptRequest {
+        let mut request = dispatch::normalize_dispatch_request(DispatchPromptRequest {
             project_id: Some(self.project_id.to_string()),
             session_id: None,
             prompt_text: Some(prompt.to_string()),
@@ -84,6 +84,11 @@ impl Chain {
             runtime_display_name: None,
             prefer_runtime: None,
         })?;
+        request.trigger = crate::job_trigger::JobTrigger::of_send(
+            &self.config,
+            &self.context(user),
+            &request.metadata,
+        );
         dispatch::process_dispatch_prompt(&self.state, &self.context(user), request).await
     }
 
@@ -1978,6 +1983,84 @@ async fn a_message_the_browser_turn_could_not_make_goes_to_the_building_turn() -
         })
     })
     .await
+}
+
+/// A hand-back carries on work, whether the controller or a signed-in client
+/// sends it. Neither may turn a paused goal back on as if the person asked.
+#[tokio::test]
+async fn a_hand_back_cannot_grant_itself_fresh_user_goal_authority() -> anyhow::Result<()> {
+    for controller_sends in [false, true] {
+        with_chain("hand-back-goal-authority", |chain| {
+            Box::pin(async move {
+                let browser = if controller_sends {
+                    let words = "Plan a day in the old town on a map.";
+                    let routed = chain.routed_message(words, false).await?;
+                    let browser = chain.routed_browser_turn(&routed, words).await?;
+                    chain.post_build_request(&browser).await?;
+                    browser
+                } else {
+                    let (_, browser) = chain.card_and_running_browser_turn().await?;
+                    chain.read_page(&browser, "https://livrarialello.pt/en/", 0).await?;
+                    browser
+                };
+                let paused = json!({
+                    "instafyGoal": {"id":"paused-goal", "objective":"Finish the plan", "status":"paused"},
+                    "_goalController": {"revision":Uuid::new_v4(), "ownerUserId":chain.owner}
+                });
+                chain.pool.get().await?.execute(
+                    "update conversations set metadata=$2 where id=$1",
+                    &[&chain.conversation_id, &PgJson(&paused)],
+                ).await?;
+                let findings = fixtures();
+                let reply = if controller_sends { "" } else { findings["browserReply"].as_str().unwrap() };
+                chain.finish(&browser, Some(reply), "succeeded").await?;
+                let hand_back = if controller_sends {
+                    let jobs = chain.hand_backs_of(&browser).await?;
+                    assert_eq!(jobs.len(), 1);
+                    jobs[0]
+                } else {
+                    let response = chain.hand_back(&chain.owner, &browser, json!({})).await
+                        .map_err(|error| controller_error("hand-back", error))?;
+                    chain.job_of(&response).await?
+                };
+                assert!(chain.payload_metadata(&hand_back).await?.get("_controllerGoal").is_none());
+                chain.post(&hand_back, "Continuing", "goal_update", json!({
+                    "messageType":"goal_update", "details":{"status":"active", "objective":"Finish the plan"}
+                })).await?;
+                chain.finish(&hand_back, Some("Added the plan."), "succeeded").await?;
+                let current: serde_json::Value = chain.pool.get().await?.query_one(
+                    "select metadata from conversations where id=$1", &[&chain.conversation_id],
+                ).await?.get(0);
+                assert_eq!(current["instafyGoal"], paused["instafyGoal"]);
+                assert_eq!(current["_goalController"], paused["_goalController"]);
+                let wakeups: i64 = chain.pool.get().await?.query_one(
+                    "select count(*) from conversation_goal_continuations where conversation_id=$1",
+                    &[&chain.conversation_id],
+                ).await?.get(0);
+                assert_eq!(wakeups, 0);
+
+                // A genuine new send can still resume the goal. Raw forged
+                // system-turn claims are stripped rather than denying it.
+                let response = chain.send(&chain.owner, "Resume the goal", json!({
+                    "automaticRetry":{"verified":true}, "browserHandBack":{"verified":true}
+                })).await.map_err(|error| controller_error("resume", error))?;
+                let resume = chain.job_of(&response).await?;
+                let binding = chain.payload_metadata(&resume).await?["_controllerGoal"].clone();
+                assert_eq!(binding["userTurn"], json!(true));
+                assert_ne!(binding["revision"], paused["_goalController"]["revision"]);
+                chain.post(&resume, "Resumed", "goal_update", json!({
+                    "messageType":"goal_update", "details":{"status":"active"}
+                })).await?;
+                let status: String = chain.pool.get().await?.query_one(
+                    "select metadata#>>'{instafyGoal,status}' from conversations where id=$1",
+                    &[&chain.conversation_id],
+                ).await?.get(0);
+                assert_eq!(status, "active");
+                Ok(())
+            })
+        }).await?;
+    }
+    Ok(())
 }
 
 /// Without the runtime's note, the same browser turn hands nothing back: its

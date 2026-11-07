@@ -32,6 +32,7 @@ mod chat_activity;
 mod chat_attachments;
 mod config;
 mod connection_limit;
+mod conversation_goals;
 mod conversation_stop;
 mod conversations;
 mod cors;
@@ -404,6 +405,7 @@ async fn main() -> anyhow::Result<()> {
     workspace::spawn_local_workspace_housekeeping(&state);
     origins::spawn_origin_presence_housekeeping(&state);
     automations::spawn_automation_scheduler(state.clone());
+    conversation_goals::spawn_scheduler(state.clone());
     notification_platform::spawn_worker(state.clone());
     send_queue::spawn_send_queue_recovery_sweep(state.clone());
     // Retries hosted launches the organization runtime limit refused while
