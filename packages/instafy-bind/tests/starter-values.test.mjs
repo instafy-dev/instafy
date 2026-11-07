@@ -917,7 +917,7 @@ test("compare: a note longer than 100 characters ends at a whole word, with \"�
   // a note of 100 characters or fewer is shown whole
   data.items[0].facts.reviews = { note: note.slice(0, 98) };
   const { document: short } = await draw("compare", data, { width: 1280 });
-  assert.match(rowText(short, "option:pro"), new RegExp(`Unknown · ${note.slice(0, 98).replace(/[.;]/g, "\\$&")}`));
+  assert.ok(rowText(short, "option:pro").includes(`Unknown · ${note.slice(0, 98)}`), rowText(short, "option:pro"));
   assert.doesNotMatch(rowText(short, "option:pro"), /…/);
 });
 
