@@ -253,10 +253,11 @@
   );
   const SEARCH_LABEL = words(["search", "suche", "suchen", "filter", "find", "finden", "durchsuchen"]);
   // A consent banner's button that refuses consent, in the languages the
-  // other word lists cover and the main ones a banner uses. Never an
-  // "allow" or "accept" phrase, even "Allow necessary only": those words
-  // add risk wherever they appear.
-  const CONSENT_REJECT_EXACT = /^(?:reject(?:\s+all)?(?:\s+cookies)?|decline(?:\s+all)?(?:\s+cookies)?|refuse(?:\s+all)?|deny(?:\s+all)?|only\s+(?:necessary|essential|required)(?:\s+cookies)?|(?:necessary|essential|required)(?:\s+cookies)?\s+only|use\s+(?:only\s+)?(?:necessary|essential)(?:\s+cookies)?(?:\s+only)?|continue\s+without\s+accepting|alle\s+ablehnen|ablehnen|nur\s+(?:notwendige|erforderliche|essenzielle|technisch\s+notwendige)(?:\s+cookies)?|tout\s+refuser|refuser(?:\s+tout)?|continuer\s+sans\s+accepter|rechazar(?:\s+todo|\s+todas)?|rifiuta(?:\s+tutto|\s+tutti)?|rejeitar(?:\s+tudo|\s+todos|\s+todas)?|recusar(?:\s+tudo|\s+todos|\s+todas)?|apenas\s+(?:necess[aá]rios|essenciais)|alles\s+weigeren|weigeren)$/iu;
+  // other word lists cover and the main ones a banner uses, including a
+  // refusal of the optional cookies ("Reject optional cookies", "Optionale
+  // Cookies ablehnen"). Never an "allow" or "accept" phrase, even "Allow
+  // necessary only": those words add risk wherever they appear.
+  const CONSENT_REJECT_EXACT = /^(?:reject(?:\s+all)?(?:\s+cookies)?|decline(?:\s+all)?(?:\s+cookies)?|refuse(?:\s+all)?|deny(?:\s+all)?|(?:reject|decline|refuse|deny)(?:\s+all)?\s+optional\s+cookies|only\s+(?:necessary|essential|required)(?:\s+cookies)?|(?:necessary|essential|required)(?:\s+cookies)?\s+only|use\s+(?:only\s+)?(?:necessary|essential)(?:\s+cookies)?(?:\s+only)?|continue\s+without\s+accepting|alle\s+ablehnen|ablehnen|(?:alle\s+)?optionalen?\s+cookies\s+ablehnen|nur\s+(?:notwendige|erforderliche|essenzielle|technisch\s+notwendige)(?:\s+cookies)?|tout\s+refuser|refuser(?:\s+tout)?|refuser\s+(?:tous\s+)?(?:les\s+)?cookies\s+(?:optionnels|facultatifs)|continuer\s+sans\s+accepter|rechazar(?:\s+todo|\s+todas)?|rechazar\s+(?:todas\s+)?(?:las\s+)?cookies\s+opcionales|rifiuta(?:\s+tutto|\s+tutti)?|rifiuta(?:re)?\s+(?:tutti\s+)?(?:i\s+)?cookie\s+(?:opzionali|facoltativi)|rejeitar(?:\s+tudo|\s+todos|\s+todas)?|recusar(?:\s+tudo|\s+todos|\s+todas)?|(?:rejeitar|recusar)\s+(?:todos\s+)?(?:os\s+)?cookies\s+opcionais|apenas\s+(?:necess[aá]rios|essenciais)|alles\s+weigeren|weigeren|(?:alle\s+)?optionele\s+cookies\s+weigeren|weiger\s+(?:alle\s+)?optionele\s+cookies)$/iu;
   // Words that accept, agree or consent in a consent banner, in the same
   // languages: "Accept all", "I agree", "Alle akzeptieren", "Einwilligen",
   // "Tout accepter", "Consentir", "Accetta", "Acconsento", "aceitar e
@@ -1359,5 +1360,6 @@
     isSignInField,
     isSignInOpener,
     isFreeSiteSearch,
+    isPublicHost,
   });
 });

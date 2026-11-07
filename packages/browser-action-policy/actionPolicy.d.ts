@@ -152,3 +152,10 @@ export declare function isFreeSiteSearch(
   pageUrl: string,
   submittedEntries: readonly (readonly [name: string, value: string])[],
 ): boolean;
+/**
+ * Whether a host name is a public site's: never a loopback, private,
+ * link-local, CGNAT, multicast, reserved or documentation address, an IPv6
+ * literal or a local name (localhost, *.local, a single label). Judged on the
+ * name alone.
+ */
+export declare function isPublicHost(hostname: string): boolean;
