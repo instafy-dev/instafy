@@ -826,8 +826,8 @@ fn a_routed_browser_turn_that_hands_back_is_offered_no_build_request() {
 /// create the comparison page in this read-only turn" and that its research was not complete,
 /// and ended: the page was built with four of its fifteen facts (a local test, Nov 4). A map's
 /// turn reads the same, and so does a follow-up on the same browser thread ("Fill in what's
-/// still missing."). A turn that hands nothing back reads neither, and nothing else differs
-/// between the two prompts.
+/// still missing."). A turn that hands nothing back reads neither: it ends its reply with the same
+/// finding lines, under a heading of its own, and nothing else differs between the two prompts.
 #[test]
 fn a_browser_turn_that_hands_back_reads_its_part_right_before_the_request() {
     let tmp = space();
@@ -917,6 +917,14 @@ fn a_browser_turn_that_hands_back_reads_its_part_right_before_the_request() {
         let (other, _) = prompt_for_request(tmp.path(), request, routed(false), state);
         assert!(!other.contains("Your part of this request"), "{other}");
         assert!(other.contains(other_scope), "{other}");
+        let other_findings = other
+            .find("\n\nFindings for Octo's later turns:\n")
+            .expect("the other turn's findings");
+        let other_latest = other
+            .find("\n\nLatest user request:\n")
+            .expect("the other turn's request");
+        assert!(other_findings < other_latest, "{other}");
+        let other = format!("{}{}", &other[..other_findings], &other[other_latest..]);
         // Nothing else differs: without its findings and its part, and with the other turn's
         // own line, the turn that hands back reads all the other reads but its build request.
         let findings = hand_back

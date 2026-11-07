@@ -29,7 +29,7 @@ const REQUEST: &str = "Compare the three latest laptops from maker.example: proc
 /// The browser turn's answer, which promises a build and names no page.
 const PROMISED_BUILD: &str = "Read the maker's pages and two reviews. I'm passing the findings to the comparison-page build.";
 /// The opening of the wrap-up pass's request (runtime-agent `FINDING_LINES_PASS_PROMPT`).
-const PASS_OPENING: &str = "Your answer has no finding lines, and the building turn makes what the person asked for only from them.";
+const PASS_OPENING: &str = "Your answer has no finding lines, and Octo's later turns use what the pages showed only from them.";
 const READ_13: &str = r#"{"url": "https://maker.example/laptop-13", "title": "Laptop 13", "facts": ["Battery: 74 Wh"]}"#;
 const READ_REVIEW: &str = r#"{"url": "https://reviews.example/laptop-13", "title": "Laptop 13 review", "facts": ["Battery lasted 20 hours"]}"#;
 /// The pages the browser turn's own steps opened, as the run reports them.
@@ -646,8 +646,9 @@ async fn end_of_a_turn_with_its_thread(
     );
     let passes_so_far = passes(state).len();
 
-    // A routed turn that hands nothing back gets no pass, and its build request, which nothing
-    // acts on after it opened pages, is said in its reply.
+    // A routed turn that hands nothing back gets the same pass, since a later building turn
+    // reads only its finding lines, and its build request, which nothing acts on after it opened
+    // pages, is said in its reply.
     let routed = browser_job(project_id, "shared", false);
     let mut summary = PROMISED_BUILD.to_string();
     let artifacts = end_browser_turn_answer(
@@ -665,13 +666,26 @@ async fn end_of_a_turn_with_its_thread(
         &TaskUsage::default(),
     )
     .await;
-    assert!(artifacts.is_empty(), "{artifacts:?}");
-    assert_eq!(summary, format!("{PROMISED_BUILD}\n\n{NOT_MADE}"));
-    assert_eq!(
-        passes(state).len(),
-        passes_so_far,
-        "no pass for a turn that hands nothing back"
+    assert!(
+        artifacts
+            .iter()
+            .any(|artifact| artifact["metadata"]["purpose"] == "finding-lines-wrap-up"),
+        "{artifacts:?}"
     );
+    assert_eq!(
+        summary,
+        format!("{PROMISED_BUILD}\n\n{lines}\n\n{NOT_MADE}")
+    );
+    assert!(
+        passes(state).len() > passes_so_far,
+        "a pass for a turn that hands nothing back too"
+    );
+    // The person reads its words and the line, and its note keeps the lines.
+    let mut ended = execution(summary);
+    move_findings_into_details(&routed, &mut ended);
+    assert_eq!(ended.summary, format!("{PROMISED_BUILD}\n\n{NOT_MADE}"));
+    assert_eq!(ended.final_messages[0].content, lines);
+    let passes_so_far = passes(state).len();
 
     // A turn that stopped on a step of the person's is left as it wrote it: no pass, no page
     // lines and no word about a build, whatever its answer asked.
@@ -991,14 +1005,27 @@ async fn a_whole_device_turn(
                 "{request}"
             );
         }
-        assert!(
-            passes(state).is_empty(),
-            "no pass for a turn that hands nothing back"
+        assert!(passes(state).is_empty(), "no pass on the person's device");
+        // Its note keeps the page it opened, which a later building turn reads.
+        let line = format!("{{\"url\":\"{DEVICE_PAGE}\"}}");
+        assert_eq!(
+            answered.summary,
+            format!("{PROMISED_BUILD}\n\n{line}\n\n{NOT_MADE}")
         );
-        let said = format!("{PROMISED_BUILD}\n\n{NOT_MADE}");
-        assert_eq!(answered.summary, said);
         move_findings_into_details(&routed, &mut answered);
-        assert_eq!(answered.summary, said, "the person reads it");
+        assert_eq!(
+            answered.summary,
+            format!("{PROMISED_BUILD}\n\n{NOT_MADE}"),
+            "the person reads it"
+        );
+        assert!(
+            answered
+                .final_messages
+                .iter()
+                .any(|message| message.content == line),
+            "{:?}",
+            answered.final_messages
+        );
     }
 
     drop(browser_guard);

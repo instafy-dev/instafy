@@ -778,6 +778,11 @@ async fn as_the_chats_first_building_turn(space: &Space<'_>) -> Result<()> {
 #[path = "browser_finding_lines.rs"]
 mod finding_lines;
 
+/// A browser turn that names pages it didn't read, and its second pass over them: in a file of
+/// its own, run with these.
+#[path = "browser_unread_pages.rs"]
+mod unread_pages;
+
 /// A hand-back after a turn the person stopped: in a file of its own, run with these.
 #[path = "taken_back.rs"]
 mod taken_back;

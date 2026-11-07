@@ -508,7 +508,7 @@ fn the_browser_skill_carries_several_reads_and_returns_labelled_findings() {
     .expect("the findings contract");
     for needle in [
         "End your reply with one finding per page",
-        "\"stopped\": \"login|captcha|paywall|blocked|robots|download|secret|link-only\"",
+        "\"stopped\": \"login|captcha|paywall|blocked|robots|download|secret|link-only|no-page|timed-out\"",
         "never a secret",
         "Instafy adds when and in which browser each page was read",
     ] {

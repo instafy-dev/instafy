@@ -147,7 +147,10 @@ impl ReplyDraftStream {
     }
 
     fn publish(&mut self, summary: &str) {
-        let visible = summary.trim_start();
+        // A browser turn ends its reply with finding lines, which the runtime moves into a
+        // Details note (`browser_hand_back::move_findings_into_details`): the draft ends before
+        // the first of them, so none shows while it grows.
+        let visible = before_a_json_line(summary.trim_start());
         // The runtime removes a final NO_FILE_CHANGES line from the durable
         // answer. Hold its prefixes too, so streaming cannot expose the marker.
         let last_line = visible.rsplit_once('\n');
@@ -175,6 +178,23 @@ impl ReplyDraftStream {
         self.sender.send_modify(|draft| draft.text.push_str(added));
         self.published = end;
     }
+}
+
+/// The text before its first line that opens a JSON object, after a list marker or backticks:
+/// a browser turn's finding line, or the start of one, which no person reads.
+fn before_a_json_line(text: &str) -> &str {
+    let mut start = 0;
+    for line in text.split_inclusive('\n') {
+        let opening = line
+            .trim_start()
+            .trim_start_matches(['-', '*', '\u{2022}', '`'])
+            .trim_start();
+        if opening.starts_with('{') {
+            return text[..start].trim_end();
+        }
+        start += line.len();
+    }
+    text
 }
 
 /// Whether a partial summary is, or could still grow into, the decline
@@ -606,6 +626,29 @@ mod tests {
         let _retry = ReplyDraftStream::start(sender, false);
         assert_eq!(receiver.borrow().segment, first_segment + 2);
         assert_eq!(receiver.borrow().text, "");
+    }
+
+    /// A browser turn ends its reply with finding lines, which the runtime moves into a Details
+    /// note: the draft stops before the first of them, so none shows while the turn writes it.
+    #[test]
+    fn a_browser_turns_finding_lines_never_reach_the_draft() {
+        let (sender, receiver) = watch::channel(ReplyDraft::default());
+        let mut stream = ReplyDraftStream::start(sender, false);
+        let words = "Livraria Lello is open daily from 9:00 to 19:30.";
+        let mut text = format!("{{\"summary\":\"{words}");
+        stream.observe(&update("a", &text));
+        assert_eq!(receiver.borrow().text, words);
+        for piece in [
+            r#"\n"#,
+            r#"{\"url\": \"https://lello.example/\""#,
+            r#", \"facts\": [\"Open daily\"]}"#,
+            r#"\n- `{\"url\": \"https://visit.example/\", \"stopped\": \"timed-out\"}`"#,
+            r#"\"}"#,
+        ] {
+            text.push_str(piece);
+            stream.observe(&update("a", &text));
+            assert_eq!(receiver.borrow().text.trim_end(), words, "{text}");
+        }
     }
 
     #[test]
