@@ -54,12 +54,13 @@ pub(crate) const RECOMMENDATION_REMINDERS: LoopSchedule =
 pub(crate) const AUTOMATION_SCHEDULER: LoopSchedule = schedule("automation_scheduler", 30, 8);
 pub(crate) const HOSTED_RUNTIME_CREDIT_SWEEP: LoopSchedule =
     schedule("hosted_runtime_credit_sweep", 60, 9);
+pub(crate) const GOAL_CONTINUATION: LoopSchedule = schedule("goal_continuation", 30, 17);
 pub(crate) const RETENTION_PRUNE: LoopSchedule = schedule("retention_prune", 300, 19);
 
 /// Every periodic loop that uses the database pool. Each schedule constant
 /// above must appear here exactly once.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) const DATABASE_LOOPS: [LoopSchedule; 9] = [
+pub(crate) const DATABASE_LOOPS: [LoopSchedule; 10] = [
     SEND_QUEUE_RECOVERY,
     NOTIFICATION_WORKER,
     IDLE_ACTIVITY_SWEEP,
@@ -69,6 +70,7 @@ pub(crate) const DATABASE_LOOPS: [LoopSchedule; 9] = [
     AUTOMATION_SCHEDULER,
     HOSTED_RUNTIME_CREDIT_SWEEP,
     RETENTION_PRUNE,
+    GOAL_CONTINUATION,
 ];
 
 /// An interval that first ticks `schedule.offset` from now and then every

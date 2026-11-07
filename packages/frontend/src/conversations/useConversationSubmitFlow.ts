@@ -65,7 +65,6 @@ import {
   createConversationGoalMetadataPatch,
   parseGoalCommand,
   resolveGoalCommandDispatch,
-  updateConversationGoal,
 } from "./conversationGoals";
 import type {
   SubmitConversationOptions,
@@ -441,7 +440,7 @@ export function useConversationSubmitFlow({
           currentUserId,
         );
         if (result.changed) {
-          setConversationGoal(sourceConversation.localId, result.goal);
+          setConversationGoal(sourceConversation.localId, result.goal, sourceConversation.activeGoal);
         }
         const goalCommandDispatch = resolveGoalCommandDispatch({
           command: goalCommand,
@@ -474,30 +473,40 @@ export function useConversationSubmitFlow({
           messageType: "goal_update",
         };
         rememberPromptSentFromThisPage(userMessage);
-        appendMessages(sourceConversation.localId, [userMessage, assistantMessage]);
+        appendMessages(sourceConversation.localId, [userMessage]);
         void (async () => {
+          let goalSaved = false;
           try {
-            const conversationWithGoal = {
-              ...sourceConversation,
-              activeGoal: result.goal,
-            };
             const controllerConversationId = await ensureControllerConversationId(
               projectId,
-              conversationWithGoal,
+              sourceConversation,
             );
-            if (controllerConversationId && result.changed) {
+            const saved = controllerConversationId && (!result.changed ||
               await updateControllerConversationMetadata({
                 conversationId: controllerConversationId,
                 metadata: createConversationGoalMetadataPatch(result.goal),
-              });
+              }));
+            if (!saved) {
+              if (result.changed) {
+                setConversationGoal(sourceConversation.localId, sourceConversation.activeGoal, result.goal);
+              }
+              showStatus("Couldn't save the goal. Try again.", "error", 4500);
+              return;
             }
+            goalSaved = true;
+            appendMessages(sourceConversation.localId, [assistantMessage]);
+            const conversationWithGoal = {
+              ...sourceConversation,
+              controllerId: controllerConversationId,
+              activeGoal: result.goal,
+            };
             if (goalCommandDispatchInput) {
-              const dispatchResult = await dispatch(
+              await dispatch(
                 sourceConversation.localId,
                 goalCommandDispatchInput,
                 {
                   ...goalUserMetadata,
-                  goal: activeGoalPromptMetadata(result.goal),
+                  goal: result.goal,
                   ...(goalCommandDispatch?.continuationTurn
                     ? {
                         goalContinuation: {
@@ -514,25 +523,6 @@ export function useConversationSubmitFlow({
                 undefined,
                 options?.expectedLaneIdle ?? false,
               );
-              if (dispatchResult?.ok === false && result.goal?.status === "active") {
-                const blockedGoal = updateConversationGoal(
-                  result.goal,
-                  {
-                    status: "blocked",
-                    progressSummary:
-                      dispatchResult.errorMessage ??
-                      "Controller unavailable before the goal could start.",
-                  },
-                  currentUserId,
-                );
-                setConversationGoal(sourceConversation.localId, blockedGoal);
-                if (controllerConversationId) {
-                  await updateControllerConversationMetadata({
-                    conversationId: controllerConversationId,
-                    metadata: createConversationGoalMetadataPatch(blockedGoal),
-                  }).catch(() => null);
-                }
-              }
             } else {
               await recordMessageToController(
                 sourceConversation.localId,
@@ -550,7 +540,11 @@ export function useConversationSubmitFlow({
               );
             }
           } catch (error) {
+            if (!goalSaved && result.changed) {
+              setConversationGoal(sourceConversation.localId, sourceConversation.activeGoal, result.goal);
+            }
             console.warn("Failed to persist conversation goal", error);
+            showStatus("Couldn't finish the goal command. Try again.", "error", 4500);
           }
         })();
         return;

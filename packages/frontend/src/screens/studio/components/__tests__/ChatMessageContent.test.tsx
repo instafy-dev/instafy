@@ -1066,7 +1066,7 @@ describe("ChatMessageContent", () => {
       await Promise.resolve();
     });
 
-    const preview = container.querySelector('[data-testid="chat-message-file-reference-preview"]');
+    const preview = document.querySelector('[data-testid="chat-message-file-reference-preview"]');
     expect(preview?.textContent).toContain("docs/handoff/current-state.md:4");
     expect(preview?.textContent).toContain("Imported repo: instafy-dev-demo");
     expect(preview?.textContent).not.toContain("text/markdown");
@@ -1116,7 +1116,7 @@ describe("ChatMessageContent", () => {
       await new Promise((resolve) => window.setTimeout(resolve, 260));
     });
 
-    const preview = container.querySelector('[data-testid="chat-message-file-reference-preview"]');
+    const preview = document.querySelector('[data-testid="chat-message-file-reference-preview"]');
     const header = preview?.querySelector('[data-testid="chat-message-file-reference-preview-header"]');
     expect(header?.textContent).toBe("sources/…/packages/borsh/src/bigint.ts:15");
     expect(header?.getAttribute("title")).toBe(`${sourcePath}:15`);
@@ -1291,7 +1291,7 @@ describe("ChatMessageContent", () => {
       await new Promise((resolve) => window.setTimeout(resolve, 260));
     });
 
-    const preview = container.querySelector('[data-testid="chat-message-file-reference-preview"]');
+    const preview = document.querySelector('[data-testid="chat-message-file-reference-preview"]');
     expect(preview?.textContent).toContain("# Demo TODO");
     expect(readWorkspaceFile).toHaveBeenCalledWith({
       projectId: "project-1",
@@ -1346,7 +1346,7 @@ describe("ChatMessageContent", () => {
       await Promise.resolve();
     });
 
-    const preview = container.querySelector('[data-testid="chat-message-file-reference-preview"]');
+    const preview = document.querySelector('[data-testid="chat-message-file-reference-preview"]');
     expect(preview?.textContent).toContain("Menu preview");
     expect(readWorkspaceFile).toHaveBeenCalledWith({
       projectId: "project-1",
@@ -1369,7 +1369,7 @@ describe("ChatMessageContent", () => {
     });
 
     menu = document.querySelector('[data-testid="chat-message-file-reference-menu"]');
-    expect(container.querySelector('[data-testid="chat-message-file-reference-preview"]')).toBeNull();
+    expect(document.querySelector('[data-testid="chat-message-file-reference-preview"]')).toBeNull();
     const openButton = Array.from(menu?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []).find(
       (button) => button.textContent?.trim() === "Open",
     );
@@ -1387,6 +1387,30 @@ describe("ChatMessageContent", () => {
       projectId: "project-1",
       returnTarget: "assistant",
     });
+  });
+
+  it("retries an explicit file preview without exposing transport details or navigating", async () => {
+    readWorkspaceFile.mockRejectedValueOnce(new Error("GET /private/runtime/path: internal failure"))
+      .mockResolvedValueOnce({ path: "TODO.md", size: 20, mimeType: "text/markdown", contentText: "Recovered preview", isText: true });
+    await act(async () => {
+      root.render(<MessageContent content="Inspect TODO.md before editing." projectId="project-1" />);
+    });
+    const trigger = container.querySelector<HTMLButtonElement>('[data-testid="chat-message-file-reference-inline"]')!;
+    await act(async () => trigger.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })));
+    await act(async () => {
+      Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]')).find((item) => item.textContent === "Preview")?.click();
+    });
+    const preview = document.querySelector<HTMLElement>('[data-testid="chat-message-file-reference-preview"]')!;
+    expect(preview.getAttribute("role")).toBe("dialog");
+    expect(preview.textContent).toContain("Couldn't load this preview. Try again or open the file.");
+    expect(preview.textContent).not.toContain("/private/runtime/path");
+    await act(async () => {
+      Array.from(preview.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === "Try again")?.click();
+    });
+    expect(readWorkspaceFile).toHaveBeenCalledTimes(2);
+    expect(preview.textContent).toContain("Recovered preview");
+    expect(openPanelTab).not.toHaveBeenCalled();
+    expect(requestUrlPush).not.toHaveBeenCalled();
   });
 
   it("previews workspace file references around the cited line and highlights it", async () => {
@@ -1429,7 +1453,7 @@ describe("ChatMessageContent", () => {
         await new Promise((resolve) => window.setTimeout(resolve, 260));
       });
 
-      const preview = container.querySelector('[data-testid="chat-message-file-reference-preview"]');
+      const preview = document.querySelector('[data-testid="chat-message-file-reference-preview"]');
       expect(preview?.textContent).toContain("Line 7");
       expect(preview?.querySelector('[data-line-number="1"]')).toBeNull();
       expect(preview?.querySelector('[data-line-number="2"]')?.textContent).toContain("Line 2");
@@ -1504,7 +1528,7 @@ describe("ChatMessageContent", () => {
         await new Promise((resolve) => window.setTimeout(resolve, 260));
       });
 
-      const preview = container.querySelector('[data-testid="chat-message-file-reference-preview"]') as HTMLElement | null;
+      const preview = document.querySelector('[data-testid="chat-message-file-reference-preview"]') as HTMLElement | null;
       expect(preview).not.toBeNull();
       expect(preview?.style.top).toBe("");
       expect(preview?.style.bottom).toBe("62px");
@@ -1572,7 +1596,7 @@ describe("ChatMessageContent", () => {
         await new Promise((resolve) => window.setTimeout(resolve, 260));
       });
 
-      const preview = container.querySelector('[data-testid="chat-message-file-reference-preview"]') as HTMLElement | null;
+      const preview = document.querySelector('[data-testid="chat-message-file-reference-preview"]') as HTMLElement | null;
       expect(preview).not.toBeNull();
       expect(preview?.style.top).toBe("");
       expect(preview?.style.bottom).toBe("400px");
@@ -1598,7 +1622,7 @@ describe("ChatMessageContent", () => {
       vi.advanceTimersByTime(260);
     });
 
-    let preview = container.querySelector('[data-testid="chat-message-file-reference-preview"]');
+    let preview = document.querySelector('[data-testid="chat-message-file-reference-preview"]');
     expect(preview?.textContent).toContain("Loading preview");
 
     await act(async () => {
@@ -1606,8 +1630,8 @@ describe("ChatMessageContent", () => {
       await Promise.resolve();
     });
 
-    preview = container.querySelector('[data-testid="chat-message-file-reference-preview"]');
-    expect(preview?.textContent).toContain("Preview is taking too long. Click the file to open it.");
+    preview = document.querySelector('[data-testid="chat-message-file-reference-preview"]');
+    expect(preview?.textContent).toContain("Preview is taking too long. Try again or open the file.");
     expect(readWorkspaceFile).toHaveBeenCalledWith({
       projectId: "project-1",
       path: "current-state.md",
@@ -1647,7 +1671,7 @@ describe("ChatMessageContent", () => {
       vi.advanceTimersByTime(260);
     });
 
-    expect(container.querySelector('[data-testid="chat-message-file-reference-preview"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="chat-message-file-reference-preview"]')?.textContent).toContain(
       "Loading preview",
     );
 
@@ -1656,7 +1680,7 @@ describe("ChatMessageContent", () => {
       await Promise.resolve();
     });
 
-    expect(container.querySelector('[data-testid="chat-message-file-reference-preview"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="chat-message-file-reference-preview"]')?.textContent).toContain(
       "Preview is taking too long",
     );
 
@@ -1664,7 +1688,7 @@ describe("ChatMessageContent", () => {
       fileRefs[1]?.parentElement?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
     });
 
-    expect(container.querySelector('[data-testid="chat-message-file-reference-preview"]')).toBeNull();
+    expect(document.querySelector('[data-testid="chat-message-file-reference-preview"]')).toBeNull();
 
     await act(async () => {
       vi.advanceTimersByTime(260);
@@ -1672,7 +1696,7 @@ describe("ChatMessageContent", () => {
       await Promise.resolve();
     });
 
-    const preview = container.querySelector('[data-testid="chat-message-file-reference-preview"]');
+    const preview = document.querySelector('[data-testid="chat-message-file-reference-preview"]');
     expect(preview?.textContent).toContain("TODO.md:27");
     expect(preview?.textContent).toContain("Todo line 27");
     expect(preview?.querySelector('[data-line-number="27"]')?.className).toContain("bg-primary-50");
@@ -1722,7 +1746,7 @@ describe("ChatMessageContent", () => {
       await Promise.resolve();
     });
 
-    expect(container.querySelector('[data-testid="chat-message-file-reference-preview"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="chat-message-file-reference-preview"]')?.textContent).toContain(
       "calibrated parity",
     );
 
@@ -1732,7 +1756,7 @@ describe("ChatMessageContent", () => {
       await Promise.resolve();
     });
 
-    const preview = container.querySelector('[data-testid="chat-message-file-reference-preview"]');
+    const preview = document.querySelector('[data-testid="chat-message-file-reference-preview"]');
     expect(preview?.textContent).toContain("current real-board BLE probes");
     expect(preview?.querySelector('[data-line-number="17"]')?.className).toContain("bg-primary-50");
     expect(readWorkspaceFile).toHaveBeenCalledTimes(1);
@@ -1766,7 +1790,7 @@ describe("ChatMessageContent", () => {
       vi.advanceTimersByTime(260);
     });
 
-    expect(container.querySelector('[data-testid="chat-message-file-reference-preview"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="chat-message-file-reference-preview"]')?.textContent).toContain(
       "Loading preview",
     );
 
@@ -1781,7 +1805,7 @@ describe("ChatMessageContent", () => {
       );
     });
 
-    expect(container.querySelector('[data-testid="chat-message-file-reference-preview"]')).toBeNull();
+    expect(document.querySelector('[data-testid="chat-message-file-reference-preview"]')).toBeNull();
     const menu = document.querySelector('[data-testid="chat-message-file-reference-menu"]');
     const previewButton = Array.from(menu?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []).find(
       (button) => button.textContent?.trim() === "Preview",
@@ -1794,7 +1818,7 @@ describe("ChatMessageContent", () => {
       await Promise.resolve();
     });
 
-    const preview = container.querySelector('[data-testid="chat-message-file-reference-preview"]');
+    const preview = document.querySelector('[data-testid="chat-message-file-reference-preview"]');
     expect(preview?.textContent).toContain("Restarted preview");
     expect(readWorkspaceFile).toHaveBeenCalledTimes(2);
     expect(requestUrlPush).not.toHaveBeenCalled();
@@ -1845,7 +1869,7 @@ describe("ChatMessageContent", () => {
       chip.dispatchEvent(touch("pointerup", 35));
       chip.click();
     });
-    expect(container.querySelector('[data-testid="chat-message-file-reference-preview"]')).toBeNull();
+    expect(document.querySelector('[data-testid="chat-message-file-reference-preview"]')).toBeNull();
     expect(readWorkspaceFile).not.toHaveBeenCalled();
     expect(openPanelTab).not.toHaveBeenCalled();
     await act(async () => {
@@ -1886,7 +1910,7 @@ describe("ChatMessageContent", () => {
       fileRef?.click();
     });
 
-    const preview = container.querySelector('[data-testid="chat-message-file-reference-preview"]');
+    const preview = document.querySelector('[data-testid="chat-message-file-reference-preview"]');
     expect(preview?.textContent).toContain("Touch preview");
     expect(readWorkspaceFile).toHaveBeenCalledWith({
       projectId: "project-1",

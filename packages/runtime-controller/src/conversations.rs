@@ -344,7 +344,16 @@ fn strip_client_internal_metadata(metadata: &mut JsonValue) {
     if let Some(map) = metadata.as_object_mut() {
         map.remove("internalPurpose");
         map.remove("spaceReview");
+        map.remove("_goalController");
     }
+}
+
+pub(crate) fn public_conversation_metadata(metadata: Option<JsonValue>) -> JsonValue {
+    let mut metadata = metadata.unwrap_or_else(|| json!({}));
+    if let Some(map) = metadata.as_object_mut() {
+        map.remove("_goalController");
+    }
+    metadata
 }
 
 pub(crate) async fn is_internal_conversation(
@@ -751,7 +760,7 @@ pub(crate) async fn list_project_conversations(
             project_id: conversation.project_id,
             session_id: conversation.session_id,
             created_by: conversation.created_by,
-            metadata: conversation.metadata.unwrap_or_else(|| json!({})),
+            metadata: public_conversation_metadata(conversation.metadata),
             visibility: conversation.visibility,
             parent_conversation_id: conversation.parent_conversation_id,
             root_conversation_id: conversation.root_conversation_id,
@@ -838,6 +847,7 @@ pub(crate) async fn create_blank_project_conversation(
         _ => json!({}),
     };
     strip_client_internal_metadata(&mut metadata_value);
+    crate::conversation_goals::state::prepare_client_metadata(&mut metadata_value);
     let thread_parent_id = match body.parent_conversation_id.as_ref() {
         Some(raw) if !raw.trim().is_empty() => Some(
             Uuid::from_str(raw.trim())
@@ -1016,7 +1026,7 @@ pub(crate) async fn create_blank_project_conversation(
         "projectId": conversation.project_id,
         "sessionId": conversation.session_id,
         "createdBy": conversation.created_by,
-        "metadata": conversation.metadata.clone().unwrap_or_else(|| json!({})),
+        "metadata": public_conversation_metadata(conversation.metadata.clone()),
         "visibility": conversation.visibility,
         "parentConversationId": conversation.parent_conversation_id,
         "rootConversationId": conversation.root_conversation_id,
@@ -1062,7 +1072,7 @@ pub(crate) async fn update_conversation_metadata(
     };
 
     strip_client_internal_metadata(&mut metadata_value);
-    let metadata_param = PgJson(&metadata_value);
+    crate::conversation_goals::state::prepare_client_metadata(&mut metadata_value);
 
     let mut connection = state
         .pool
@@ -1107,6 +1117,10 @@ pub(crate) async fn update_conversation_metadata(
     ensure_project_write_access(&transaction, &project, &context, existing.session_id).await?;
     ensure_conversation_access(&transaction, &existing, &context).await?;
     ensure_not_internal_conversation(&transaction, &conversation_id).await?;
+    crate::conversation_goals::state::preserve_unchanged_goal_revision(
+        &mut metadata_value,
+        existing.metadata.as_ref(),
+    );
 
     if let Some(map) = metadata_value.as_object() {
         if let Some(raw) = map.get("visibility").and_then(|value| value.as_str()) {
@@ -1118,10 +1132,13 @@ pub(crate) async fn update_conversation_metadata(
         }
     }
 
+    let metadata_param = PgJson(&metadata_value);
     let updated = transaction
         .query_one(
             "update conversations
-             set metadata = coalesce(metadata, '{}'::jsonb) || $2::jsonb,
+             set metadata = (case when $2::jsonb ? 'instafyGoal'
+                                 then coalesce(metadata, '{}'::jsonb) - 'instafy_goal'
+                                 else coalesce(metadata, '{}'::jsonb) end) || $2::jsonb,
                  updated_at = now()
              where id = $1
              returning id,
@@ -1153,7 +1170,7 @@ pub(crate) async fn update_conversation_metadata(
         "projectId": updated.project_id,
         "sessionId": updated.session_id,
         "createdBy": updated.created_by,
-        "metadata": updated.metadata.clone().unwrap_or_else(|| json!({})),
+        "metadata": public_conversation_metadata(updated.metadata.clone()),
         "visibility": updated.visibility,
         "parentConversationId": updated.parent_conversation_id,
         "rootConversationId": updated.root_conversation_id,
@@ -1181,7 +1198,7 @@ pub(crate) async fn update_conversation_metadata(
         project_id: updated.project_id,
         session_id: updated.session_id,
         created_by: updated.created_by,
-        metadata: updated.metadata.unwrap_or_else(|| json!({})),
+        metadata: public_conversation_metadata(updated.metadata),
         visibility: updated.visibility,
         parent_conversation_id: updated.parent_conversation_id,
         root_conversation_id: updated.root_conversation_id,
@@ -3245,7 +3262,28 @@ pub(crate) async fn ensure_conversation_record(
         .map_err(|error| internal_error(format!("failed to load conversation: {error}")))?;
 
     if let Some(metadata) = request.conversation_metadata.as_mut() {
+        // Explicit goal commands save their goal before dispatch. Their inline
+        // snapshot cannot overwrite a newer edit while loading the conversation.
+        // Admission compares the expected goal after idempotent retries resolve.
+        if request
+            .metadata
+            .pointer("/command/type")
+            .and_then(JsonValue::as_str)
+            == Some("goal")
+        {
+            if let Some(map) = metadata.as_object_mut() {
+                map.remove("instafyGoal");
+                map.remove("instafy_goal");
+            }
+        }
         strip_client_internal_metadata(metadata);
+        crate::conversation_goals::state::prepare_client_metadata(metadata);
+        if let Some(row) = existing.as_ref() {
+            crate::conversation_goals::state::preserve_unchanged_goal_revision(
+                metadata,
+                row.get::<_, Option<JsonValue>>("metadata").as_ref(),
+            );
+        }
     }
     let metadata_param = request.conversation_metadata.as_ref().map(PgJson);
 
@@ -3299,7 +3337,9 @@ pub(crate) async fn ensure_conversation_record(
             transaction
                 .execute(
                     "update conversations
-                     set metadata = coalesce(metadata, '{}'::jsonb) || $2::jsonb,
+                     set metadata = (case when $2::jsonb ? 'instafyGoal'
+                                         then coalesce(metadata, '{}'::jsonb) - 'instafy_goal'
+                                         else coalesce(metadata, '{}'::jsonb) end) || $2::jsonb,
                          updated_at = now()
                      where id = $1",
                     &[&conversation_id, metadata],

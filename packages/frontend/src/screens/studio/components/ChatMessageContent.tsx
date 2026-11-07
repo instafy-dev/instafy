@@ -1,4 +1,5 @@
 import { useConversationFileOpener } from "../../../workspace/ConversationFileContext";
+import { useConversationMessageOpener } from "../../../workspace/ConversationMessageContext";
 import {
   memo,
   useCallback,
@@ -13,7 +14,9 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { ChatBubble, GitBranch, QuoteMessage } from "iconoir-react";
+import { ChatBubble, GitBranch, QuoteMessage, Xmark } from "iconoir-react";
+import { createPortal } from "react-dom";
+import { Dialog } from "react-aria-components";
 import { requestAgentProfile } from "./agentProfileOpen";
 import { useConversationMessageMetadata } from "../../../conversations/ConversationMessageMetadata";
 import {
@@ -21,13 +24,16 @@ import {
   listBuiltInAssistantHandles,
 } from "../../../assistants/localBuiltInAssistantCatalog";
 import { Text } from "../../../components/Text";
-import { Button } from "../../../components/Button";
+import { Button, IconButton } from "../../../components/Button";
+import { Surface } from "../../../components/Surface";
+import { ContentHeader } from "../../../components/ContentHeader";
+import { LoadingStatus } from "../../../components/LoadingStatus";
 import { InlineNotice } from "../../../components/InlineNotice";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { controllerClient } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
-import { addFloatingSurfaceViewportChangeListener } from "../../../utils/floatingSurfacePosition";
+import { addFloatingSurfaceViewportChangeListener, readStudioSafeAreaInsets } from "../../../utils/floatingSurfacePosition";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import { getAssistantMentionClass, resolveAssistantMentionToken } from "./assistantMentionUI";
 import {
@@ -73,7 +79,7 @@ type WorkspaceFilePreviewState =
       truncated: boolean;
       linePreview: WorkspaceFilePreviewLine[] | null;
     }
-  | { status: "error"; message: string };
+  | { status: "error"; message: string; retryable?: boolean };
 
 type WorkspaceFilePreviewLine = {
   lineNumber: number;
@@ -115,6 +121,7 @@ type WorkspaceFilePreviewPosition = {
   top?: number;
   bottom?: number;
   width: number;
+  maxHeight: number;
 };
 
 const WORKSPACE_FILE_PREVIEW_WIDTH_PX = 420;
@@ -160,11 +167,6 @@ const GITHUB_REFERENCE_TOKEN_CLASS = [
 const WORKSPACE_FILE_REFERENCE_TOKEN_CLASS = [
   "inline-flex min-w-0 max-w-[14rem] items-center overflow-hidden rounded-[0.34rem] bg-primary-50/70 px-1.5 py-[0.08em] font-mono text-[0.92em] leading-[1.18] text-primary-700 ring-1 ring-inset ring-primary-200/80 shadow-[inset_0_-1px_0_rgba(0,122,204,0.08)] align-baseline sm:max-w-[24rem]",
   "dark:bg-primary-300/10 dark:text-primary-200 dark:ring-primary-300/20 dark:shadow-[inset_0_-1px_0_rgba(255,255,255,0.035)]",
-].join(" ");
-
-const QUOTE_SOURCE_BADGE_CLASS = [
-  "absolute -top-2.5 right-3 inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-200/70 bg-white text-slate-400 shadow-[0_1px_2px_rgba(15,23,42,0.06)]",
-  "dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:text-slate-500 dark:shadow-none",
 ].join(" ");
 
 type WorkspaceFilePreviewIntentEvent = CustomEvent<{ previewKey: string }>;
@@ -402,13 +404,15 @@ function formatWorkspaceFilePreviewHeaderParts(label: string): WorkspaceFilePrev
   const suffix = suffixMatch?.[0] ?? "";
   const pathWithoutSuffix = suffix ? trimmedLabel.slice(0, -suffix.length) : trimmedLabel;
   const segments = pathWithoutSuffix.split("/").filter(Boolean);
-  if (segments.length <= 5) {
+  if (segments.length <= 1) {
     return { lead: null, tail: trimmedLabel };
   }
 
   return {
-    lead: `${segments[0]}/…/`,
-    tail: `${segments.slice(-4).join("/")}${suffix}`,
+    lead: segments.length <= 5
+      ? `${segments.slice(0, -1).join("/")}/`
+      : `${segments[0]}/…/${segments.slice(-4, -1).join("/")}/`,
+    tail: `${segments[segments.length - 1]}${suffix}`,
   };
 }
 
@@ -627,31 +631,29 @@ function getWorkspaceFilePreviewSyntaxClass(kind: WorkspaceFilePreviewSyntaxKind
 
 function resolveWorkspaceFilePreviewPosition(anchor: HTMLElement): WorkspaceFilePreviewPosition {
   const rect = anchor.getBoundingClientRect();
-  const viewportWidth = typeof window === "undefined" ? WORKSPACE_FILE_PREVIEW_WIDTH_PX : window.innerWidth;
-  const viewportHeight = typeof window === "undefined" ? 720 : window.innerHeight;
-  const composerOverlay =
-    typeof document === "undefined"
-      ? null
-      : document.querySelector<HTMLElement>('[data-testid="chat-composer-overlay"]');
-  const composerTop = composerOverlay?.getBoundingClientRect().top;
-  const lowerBoundary =
-    typeof composerTop === "number" && Number.isFinite(composerTop) && composerTop > 0 && composerTop < viewportHeight - 8
-      ? Math.max(120, composerTop - 12)
-      : viewportHeight;
-  const width = Math.min(WORKSPACE_FILE_PREVIEW_WIDTH_PX, Math.max(220, viewportWidth - 24));
-  const left = Math.min(Math.max(12, rect.left), Math.max(12, viewportWidth - width - 12));
-  const bottomTop = rect.bottom + 10;
-  const availableBelow = lowerBoundary - bottomTop;
-  const availableAbove = rect.top - 10;
+  const viewport = window.visualViewport;
+  const insets = readStudioSafeAreaInsets();
+  const leftEdge = (viewport?.offsetLeft ?? 0) + insets.left + 12;
+  const topEdge = (viewport?.offsetTop ?? 0) + insets.top + 12;
+  const rightEdge = (viewport?.offsetLeft ?? 0) + (viewport?.width ?? window.innerWidth) - insets.right - 12;
+  const bottomEdge = (viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight) - insets.bottom - 12;
+  const composerTop = document.querySelector<HTMLElement>('[data-testid="chat-composer-overlay"]')?.getBoundingClientRect().top;
+  const lowerBoundary = typeof composerTop === "number" && composerTop > topEdge && composerTop < bottomEdge
+    ? composerTop - 12 : bottomEdge;
+  const width = Math.min(WORKSPACE_FILE_PREVIEW_WIDTH_PX, Math.max(0, rightEdge - leftEdge));
+  const left = Math.min(Math.max(leftEdge, rect.left), Math.max(leftEdge, rightEdge - width));
+  const belowTop = Math.max(topEdge, rect.bottom + 10);
+  const aboveBottom = Math.min(lowerBoundary, rect.top - 10);
+  const availableBelow = Math.max(0, lowerBoundary - belowTop);
+  const availableAbove = Math.max(0, aboveBottom - topEdge);
 
   if (availableBelow >= WORKSPACE_FILE_PREVIEW_MAX_HEIGHT_PX || availableBelow >= availableAbove) {
-    return { left, top: bottomTop, width };
+    return { left, top: belowTop, width, maxHeight: Math.min(WORKSPACE_FILE_PREVIEW_MAX_HEIGHT_PX, availableBelow) };
   }
-
   return {
-    bottom: Math.max(12, viewportHeight - rect.top + 10),
-    left,
-    width,
+    bottom: window.innerHeight - aboveBottom,
+    left, width,
+    maxHeight: Math.min(WORKSPACE_FILE_PREVIEW_MAX_HEIGHT_PX, availableAbove),
   };
 }
 
@@ -757,8 +759,8 @@ function WorkspaceFileReferenceChip({
   previewCacheRef: WorkspaceFilePreviewCacheRef;
 }) {
   const anchorRef = useRef<HTMLButtonElement | null>(null);
-  const previewRef = useRef<HTMLSpanElement | null>(null);
-  const previewBodyRef = useRef<HTMLSpanElement | null>(null);
+  const previewRef = useRef<HTMLDivElement | null>(null);
+  const previewBodyRef = useRef<HTMLDivElement | null>(null);
   const previewId = useId();
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
   const hoverTimerRef = useRef<number | null>(null);
@@ -766,6 +768,7 @@ function WorkspaceFileReferenceChip({
   const touchTimerRef = useRef<number | null>(null);
   const suppressNextClickRef = useRef(false);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewPinned, setPreviewPinned] = useState(false);
   const [previewPosition, setPreviewPosition] = useState<WorkspaceFilePreviewPosition | null>(null);
   const [previewState, setPreviewState] = useState<WorkspaceFilePreviewState>({ status: "idle" });
   const previewLoadKeyRef = useRef<string | null>(null);
@@ -776,6 +779,7 @@ function WorkspaceFileReferenceChip({
   const canNavigate = Boolean(reference.path.trim().length > 0);
   const presentation = formatWorkspaceFileReferencePresentation(reference);
   const previewHeaderParts = formatWorkspaceFilePreviewHeaderParts(presentation.previewHeaderLabel);
+  const previewLineSuffix = previewHeaderParts.tail.match(/(?:#L\d+|:\d+)$/)?.[0] ?? "";
   const previewLanguage = inferWorkspaceFilePreviewLanguage(
     reference.path,
     previewState.status === "ready" ? previewState.mimeType : null,
@@ -812,11 +816,15 @@ function WorkspaceFileReferenceChip({
     previewStateRef.current = previewState;
   }, [previewState]);
 
-  const openPreview = useCallback(() => {
+  const openPreview = useCallback((pinned = false) => {
     const anchor = anchorRef.current;
     if (!anchor || !canNavigate) {
       return;
     }
+    clearTimer(hoverTimerRef);
+    clearTimer(hideTimerRef);
+    setPreviewPinned(pinned);
+    if (pinned) anchor.focus({ preventScroll: true });
     setPreviewPosition(resolveWorkspaceFilePreviewPosition(anchor));
     if (previewStateRef.current.status !== "ready") {
       previewLoadKeyRef.current = null;
@@ -824,14 +832,15 @@ function WorkspaceFileReferenceChip({
       setPreviewLoadNonce((current) => current + 1);
     }
     setPreviewOpen(true);
-  }, [canNavigate]);
+  }, [canNavigate, clearTimer]);
 
   const scheduleHidePreview = useCallback(() => {
+    if (previewPinned) return;
     clearTimer(hideTimerRef);
     hideTimerRef.current = window.setTimeout(() => {
       setPreviewOpen(false);
     }, 120);
-  }, [clearTimer]);
+  }, [clearTimer, previewPinned]);
 
   const cancelHidePreview = useCallback(() => {
     clearTimer(hideTimerRef);
@@ -878,10 +887,10 @@ function WorkspaceFileReferenceChip({
       }
       setPreviewPosition(resolveWorkspaceFilePreviewPosition(anchor));
     };
-    window.addEventListener("resize", updatePosition);
+    const removeViewportListener = addFloatingSurfaceViewportChangeListener(updatePosition);
     window.addEventListener("scroll", updatePosition, true);
     return () => {
-      window.removeEventListener("resize", updatePosition);
+      removeViewportListener();
       window.removeEventListener("scroll", updatePosition, true);
     };
   }, [previewOpen]);
@@ -890,6 +899,7 @@ function WorkspaceFileReferenceChip({
     if (!previewOpen) {
       return;
     }
+    if (previewPinned) return; // The shared popover owns explicit-preview dismissal and focus.
     const handlePointerDownOutside = (event: globalThis.PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Node)) {
@@ -914,7 +924,7 @@ function WorkspaceFileReferenceChip({
       document.removeEventListener("pointerdown", handlePointerDownOutside, true);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [previewOpen]);
+  }, [previewOpen, previewPinned]);
 
   useEffect(() => {
     const cancelTouchPreview = () => {
@@ -987,7 +997,7 @@ function WorkspaceFileReferenceChip({
           return;
         }
         if (!result) {
-          setPreviewState({ status: "error", message: "Unable to load preview." });
+          setPreviewState({ status: "error", message: "Unable to load preview.", retryable: true });
           return;
         }
         cache.set(cacheKey, {
@@ -1016,8 +1026,11 @@ function WorkspaceFileReferenceChip({
         if (cancelled) {
           return;
         }
-        const message = error instanceof Error ? error.message : "Unable to load preview.";
-        setPreviewState({ status: "error", message });
+        // Controller errors can include internal paths or transport details.
+        const timedOut = error instanceof Error && error.message === "Preview is taking too long. Click the file to open it.";
+        setPreviewState({ status: "error", message: timedOut
+          ? "Preview is taking too long. Try again or open the file."
+          : "Couldn't load this preview. Try again or open the file.", retryable: true });
       }
     })();
 
@@ -1035,16 +1048,16 @@ function WorkspaceFileReferenceChip({
     if (!previewBody || !highlightedLine) {
       return;
     }
-    previewBody.scrollTop = Math.max(0, highlightedLine.offsetTop - previewBody.clientHeight / 2);
-  }, [previewOpen, previewState]);
+    previewBody.scrollTop = Math.max(0, highlightedLine.offsetTop - Math.max(0, (previewBody.clientHeight - highlightedLine.offsetHeight) / 2));
+  }, [previewOpen, previewPinned, previewState]);
 
   const handleMouseEnter = useCallback(() => {
-    if (actionMenuOpen) return;
+    if (actionMenuOpen || previewPinned && previewOpen) return;
     announceWorkspaceFilePreviewIntent(previewKey);
     clearTimer(hideTimerRef);
     clearTimer(hoverTimerRef);
-    hoverTimerRef.current = window.setTimeout(openPreview, WORKSPACE_FILE_PREVIEW_HOVER_DELAY_MS);
-  }, [actionMenuOpen, clearTimer, openPreview, previewKey]);
+    hoverTimerRef.current = window.setTimeout(() => openPreview(), WORKSPACE_FILE_PREVIEW_HOVER_DELAY_MS);
+  }, [actionMenuOpen, clearTimer, openPreview, previewKey, previewOpen, previewPinned]);
 
   const handleMouseLeave = useCallback(() => {
     clearTimer(hoverTimerRef);
@@ -1083,7 +1096,8 @@ function WorkspaceFileReferenceChip({
       suppressNextClickRef.current = false;
       touchTimerRef.current = window.setTimeout(() => {
         suppressNextClickRef.current = true;
-        openPreview();
+        touchStartRef.current = null;
+        openPreview(true);
       }, WORKSPACE_FILE_PREVIEW_TOUCH_DELAY_MS);
     },
     [clearTimer, openPreview, previewKey],
@@ -1114,6 +1128,7 @@ function WorkspaceFileReferenceChip({
       suppressNextClickRef.current = false;
       return;
     }
+    setPreviewOpen(false);
     onOpen(reference);
   }, [onOpen, reference]);
 
@@ -1139,17 +1154,85 @@ function WorkspaceFileReferenceChip({
 
   const handlePreviewFromMenu = useCallback(() => {
     setActionMenuOpen(false);
-    openPreview();
+    openPreview(true);
   }, [openPreview]);
 
   const handleOpenFromMenu = useCallback(() => {
     setActionMenuOpen(false);
+    setPreviewOpen(false);
     onOpen(reference);
   }, [onOpen, reference]);
 
+  const previewContents = (
+    <>
+      <ContentHeader density="compact" titleAs="p"
+        title={<span className="flex min-w-0 items-baseline" title={presentation.title}
+          data-testid="chat-message-file-reference-preview-header">
+          {previewHeaderParts.lead ? <Text as="span" variant="bodyStrong" tone="muted" className="min-w-0 truncate">{previewHeaderParts.lead}</Text> : null}
+          <span className="inline-flex min-w-0 max-w-full flex-none">
+            <span className="truncate">{previewLineSuffix ? previewHeaderParts.tail.slice(0, -previewLineSuffix.length) : previewHeaderParts.tail}</span>
+            {previewLineSuffix ? <span className="shrink-0">{previewLineSuffix}</span> : null}
+          </span>
+        </span>} titleText={presentation.title}
+        subtitle={presentation.previewHeaderContext}
+        truncateSubtitle
+        titleAccessory={previewPinned ? <IconButton variant="ghost" tone="muted" aria-label="Close file preview"
+          title="Close file preview" onPress={() => setPreviewOpen(false)}><Xmark className="size-4" aria-hidden="true" /></IconButton> : undefined}
+      />
+      <div className="relative min-h-0 overflow-auto overscroll-contain px-4 py-3 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-primary-500" data-testid="chat-message-file-reference-preview-body"
+        ref={previewBodyRef} tabIndex={previewPinned && previewState.status === "ready" ? 0 : undefined}
+        role={previewPinned ? "region" : undefined}
+        aria-label={previewPinned ? "File preview content" : undefined}>
+        {previewState.status === "loading" || previewState.status === "idle" ? <LoadingStatus>Loading preview…</LoadingStatus>
+          : previewState.status === "error" ? <InlineNotice appearance="inline" tone={previewState.retryable ? "danger" : "info"}
+            role={previewPinned ? "status" : undefined} density="comfortable"
+            actions={previewPinned && previewState.retryable ? <Button preset="inline" variant="ghost" onPress={(event) => {
+              // Keep keyboard focus on the preview while Retry is replaced by progress.
+              event.target.closest<HTMLElement>('[role="dialog"]')?.focus({ preventScroll: true });
+              previewLoadKeyRef.current = null;
+              previewStateRef.current = { status: "idle" };
+              setPreviewState({ status: "idle" });
+              setPreviewLoadNonce((value) => value + 1);
+            }}>Try again</Button> : undefined}>{previewState.message}</InlineNotice>
+          : previewState.linePreview ? (
+              <Text as="span" variant="mono" className="block leading-5">
+                {previewState.linePreview.map((line) => (
+                  <span
+                    key={line.lineNumber}
+                    data-line-number={line.lineNumber}
+                    data-preview-line-highlighted={line.highlighted ? "true" : undefined}
+                    style={{ gridTemplateColumns: `${previewLineNumberColumnWidth} minmax(0, 1fr)` }}
+                    className={[
+                      "grid gap-2 rounded-md px-1",
+                      line.highlighted
+                        ? "bg-primary-50 text-primary-950 ring-1 ring-inset ring-primary-200 dark:bg-primary-400/15 dark:text-primary-50 dark:ring-primary-300/25"
+                        : "",
+                    ].join(" ")}
+                  >
+                    <span className="select-none text-right text-slate-400 dark:text-slate-500">
+                      {line.lineNumber}
+                    </span>
+                    <span className="min-w-0 whitespace-pre-wrap break-words">
+                      {line.text.length > 0 ? renderPreviewSyntaxContent(line.text, `line-${line.lineNumber}`) : " "}
+                    </span>
+                  </span>
+                ))}
+              </Text>
+            ) : (
+              <Text as="span" variant="mono" className="block whitespace-pre-wrap break-words leading-5">
+                {renderPreviewSyntaxContent(previewState.content, "content")}
+              </Text>
+            )}
+      </div>
+      {previewPinned ? <div className="shrink-0 px-4 pb-3">
+        <Button preset="inline" variant="ghost" onPress={handleOpenFromMenu}>Open file</Button>
+      </div> : null}
+    </>
+  );
+
   return (
     <span
-      className="relative inline-flex align-baseline"
+      className="relative inline-flex min-w-0 max-w-full align-baseline"
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
       onPointerEnter={handlePointerEnter}
@@ -1172,7 +1255,7 @@ function WorkspaceFileReferenceChip({
           }
         }}
         aria-keyshortcuts="Shift+F10"
-        aria-describedby={previewOpen ? previewId : undefined}
+        aria-describedby={previewOpen && !previewPinned ? previewId : undefined}
         disabled={!canNavigate}
         data-testid="chat-message-file-reference-inline"
         data-workspace-path={reference.path}
@@ -1216,88 +1299,23 @@ function WorkspaceFileReferenceChip({
           <StudioMenuItem id="open">Open</StudioMenuItem>
         </StudioMenu>
       </StudioPopover>
-      {previewOpen && previewPosition ? (
-        <span
-          ref={previewRef}
-          id={previewId}
-          role="tooltip"
-          data-testid="chat-message-file-reference-preview"
-          className="fixed z-50 block overflow-hidden rounded-2xl border border-slate-200 bg-white text-left shadow-xl shadow-slate-950/15 ring-1 ring-slate-950/5 dark:border-[color:var(--color-studio-dark-floating-border)] dark:bg-[var(--color-studio-dark-floating)] dark:shadow-black/25 dark:ring-white/[0.08]"
-          style={{
-            bottom: previewPosition.bottom,
-            left: previewPosition.left,
-            top: previewPosition.top,
-            width: previewPosition.width,
-            maxHeight: WORKSPACE_FILE_PREVIEW_MAX_HEIGHT_PX,
-          }}
-          onMouseEnter={cancelHidePreview}
-          onMouseLeave={scheduleHidePreview}
-        >
-          <span className="block border-b border-slate-200/70 px-3 py-2 dark:border-[color:var(--color-studio-dark-divider)]">
-            <span
-              className="block min-w-0 font-mono text-xs font-semibold text-slate-800 dark:text-slate-100"
-              title={presentation.title}
-              data-testid="chat-message-file-reference-preview-header"
-            >
-              {previewHeaderParts.lead ? (
-                <span className="flex min-w-0 items-baseline">
-                  <span className="min-w-0 truncate text-slate-500 dark:text-slate-400">
-                    {previewHeaderParts.lead}
-                  </span>
-                  <span className="min-w-0 max-w-[86%] flex-none truncate">
-                    {previewHeaderParts.tail}
-                  </span>
-                </span>
-              ) : (
-                <span className="block truncate">{previewHeaderParts.tail}</span>
-              )}
-            </span>
-            {presentation.previewHeaderContext ? (
-              <span className="mt-0.5 block truncate text-[0.68rem] text-slate-500 dark:text-slate-400">
-                {presentation.previewHeaderContext}
-              </span>
-            ) : null}
-          </span>
-          <span
-            ref={previewBodyRef}
-            data-testid="chat-message-file-reference-preview-body"
-            className="block max-h-[13rem] overflow-auto px-3 py-2"
-          >
-            {previewState.status === "loading" || previewState.status === "idle" ? (
-              <span className="text-xs text-slate-500 dark:text-slate-400">Loading preview…</span>
-            ) : previewState.status === "error" ? (
-              <span className="text-xs text-rose-600 dark:text-rose-300">{previewState.message}</span>
-            ) : previewState.linePreview ? (
-              <span className="block font-mono text-[0.72rem] leading-5 text-slate-700 dark:text-slate-200">
-                {previewState.linePreview.map((line) => (
-                  <span
-                    key={line.lineNumber}
-                    data-line-number={line.lineNumber}
-                    data-preview-line-highlighted={line.highlighted ? "true" : undefined}
-                    style={{ gridTemplateColumns: `${previewLineNumberColumnWidth} minmax(0, 1fr)` }}
-                    className={[
-                      "grid gap-2 rounded-md px-1",
-                      line.highlighted
-                        ? "bg-primary-50 text-primary-950 ring-1 ring-inset ring-primary-200 dark:bg-primary-400/15 dark:text-primary-50 dark:ring-primary-300/25"
-                        : "",
-                    ].join(" ")}
-                  >
-                    <span className="select-none text-right text-slate-400 dark:text-slate-500">
-                      {line.lineNumber}
-                    </span>
-                    <span className="min-w-0 whitespace-pre-wrap break-words">
-                      {line.text.length > 0 ? renderPreviewSyntaxContent(line.text, `line-${line.lineNumber}`) : " "}
-                    </span>
-                  </span>
-                ))}
-              </span>
-            ) : (
-              <span className="block whitespace-pre-wrap break-words font-mono text-[0.72rem] leading-5 text-slate-700 dark:text-slate-200">
-                {renderPreviewSyntaxContent(previewState.content, "content")}
-              </span>
-            )}
-          </span>
-        </span>
+      <StudioPopover isOpen={previewOpen && previewPinned} onOpenChange={setPreviewOpen} triggerRef={anchorRef}
+        placement="top start" offset={8} containerPadding={12} className="w-[420px] max-w-[calc(100vw-24px)]">
+        <Dialog aria-label={`Preview ${presentation.previewHeaderLabel}`} data-testid="chat-message-file-reference-preview"
+          className="flex min-h-0 flex-col outline-none"
+          style={{ maxHeight: previewPosition?.maxHeight ?? WORKSPACE_FILE_PREVIEW_MAX_HEIGHT_PX }}>
+          {previewContents}
+        </Dialog>
+      </StudioPopover>
+      {previewOpen && !previewPinned && previewPosition ? createPortal(
+        <div ref={previewRef} id={previewId} role="tooltip" data-testid="chat-message-file-reference-preview"
+          className="fixed z-50 flex min-h-0 text-left"
+          style={previewPosition}
+          onMouseEnter={cancelHidePreview} onMouseLeave={scheduleHidePreview}>
+          <Surface tone="floating" shadow="md" className="flex min-h-0 w-full flex-col overflow-hidden">
+            {previewContents}
+          </Surface>
+        </div>, document.body,
       ) : null}
     </span>
   );
@@ -1403,6 +1421,7 @@ const MessageContentBody = memo(function MessageContentBody({
   }, [openPanelTab, requestUrlPush, upstreamGuidance?.actionKind]);
 
   const openConversationFile = useConversationFileOpener();
+  const openConversationMessage = useConversationMessageOpener();
   const handleWorkspaceFileClick = useCallback(
     (reference: WorkspaceFileReferenceDescriptor) => {
       if (typeof window === "undefined") {
@@ -1447,7 +1466,12 @@ const MessageContentBody = memo(function MessageContentBody({
         return;
       }
       const localConversationId = resolveConversationLocalId(conversationId)?.trim() ?? "";
-      if (!localConversationId) {
+      const exactMessageId = reference.kind === "message" ? reference.messageId?.trim() : null;
+      if (exactMessageId && openConversationMessage?.({ projectId, conversationControllerId: conversationId, messageId: exactMessageId })) {
+        return;
+      }
+      // A rejected source must not silently jump to the latest message in another scope.
+      if (!localConversationId || exactMessageId && openConversationMessage) {
         const referenceKindLabel =
           reference.kind === "conversation" ? "conversation" : reference.kind === "thread" ? "thread" : "message";
         const label =
@@ -1468,7 +1492,7 @@ const MessageContentBody = memo(function MessageContentBody({
       requestUrlPush();
       openConversationTab(localConversationId);
     },
-    [openConversationTab, requestUrlPush, resolveConversationLocalId, showStatus],
+    [openConversationMessage, openConversationTab, projectId, requestUrlPush, resolveConversationLocalId, showStatus],
   );
 
   const renderConversationReferenceButton = (
@@ -1529,9 +1553,9 @@ const MessageContentBody = memo(function MessageContentBody({
   const renderQuoteSourceBadge = (reference: ConversationReferenceDescriptor | null) => {
     if (!reference) {
       return (
-        <span aria-hidden="true" className={QUOTE_SOURCE_BADGE_CLASS}>
-          <QuoteMessage className="h-3.5 w-3.5" />
-        </span>
+        <Text as="span" tone="muted" aria-hidden="true" className="shrink-0 py-1">
+          <QuoteMessage className="size-4" />
+        </Text>
       );
     }
 
@@ -1540,22 +1564,14 @@ const MessageContentBody = memo(function MessageContentBody({
       ? "Open quoted source"
       : "Quoted source is unavailable here";
     return (
-      <button
-        type="button"
-        onClick={() => handleConversationReferenceClick(reference)}
+      <IconButton variant="ghost" tone="muted" className="shrink-0"
+        onPress={() => handleConversationReferenceClick(reference)}
         data-testid="chat-message-quote-source-reference"
         data-conversation-id={reference.conversationId}
         data-message-id={reference.messageId ?? undefined}
-        aria-label={actionLabel}
-        title={`${actionLabel}\nStable message id: ${reference.conversationId}/${reference.messageId ?? ""}`}
-        className={[
-          QUOTE_SOURCE_BADGE_CLASS,
-          "transition hover:border-primary-200 hover:text-primary-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 dark:hover:border-primary-300/35 dark:hover:text-primary-200 dark:focus-visible:ring-primary-300",
-          canNavigate ? "cursor-pointer" : "cursor-pointer opacity-80",
-        ].join(" ")}
-      >
-        <QuoteMessage className="h-3.5 w-3.5" aria-hidden="true" />
-      </button>
+        aria-label={actionLabel} title={actionLabel}>
+        <QuoteMessage className="size-4" aria-hidden="true" />
+      </IconButton>
     );
   };
 
@@ -1820,7 +1836,7 @@ const MessageContentBody = memo(function MessageContentBody({
   };
 
   return (
-    <div className={className ?? "text-sm leading-relaxed break-words [overflow-wrap:anywhere]"}>
+    <div className={`min-w-0 max-w-full ${className ?? "text-sm leading-relaxed break-words [overflow-wrap:anywhere]"}`}>
       {contentBlocks.map((block, blockIndex) => {
         const blockSpacingClassName = blockIndex > 0 ? "mt-2" : block.kind === "list" ? "mt-1" : "";
         const teamFlow = block.kind === "paragraph" ? parseTeamFlowLine(block.line) : null;
@@ -1871,7 +1887,8 @@ const MessageContentBody = memo(function MessageContentBody({
                 .filter(Boolean)
                 .join(" ")}
             >
-              {renderQuoteSourceBadge(sourceReferenceForQuote)}
+              <div className="flex items-start gap-2">
+              <div className="min-w-0 flex-1">
               {block.lines.map((line, lineIndex) => (
                 <p
                   key={`quote-${blockIndex}-line-${lineIndex}`}
@@ -1880,6 +1897,9 @@ const MessageContentBody = memo(function MessageContentBody({
                   {line ? renderInlineTokens(line, `quote-${blockIndex}-line-${lineIndex}`) : "\u00a0"}
                 </p>
               ))}
+              </div>
+              {renderQuoteSourceBadge(sourceReferenceForQuote)}
+              </div>
             </blockquote>
           );
         }

@@ -8292,7 +8292,9 @@ impl JobProcessor {
                 &workspace_dir,
                 coordination_files,
                 commit_to_workspace,
-            )?;
+                git_status_before.as_ref(),
+            )
+            .await?;
             let normalized_files_len = normalized_files.len();
             (normalized_files, normalized_files_len)
         } else {
@@ -8300,7 +8302,9 @@ impl JobProcessor {
                 &workspace_dir,
                 outcome.files,
                 commit_to_workspace,
-            )?;
+                git_status_before.as_ref(),
+            )
+            .await?;
             let normalized_files_len = normalized_files.len();
             (normalized_files, normalized_files_len)
         };
@@ -8831,6 +8835,7 @@ impl JobProcessor {
             routing_recovery::wait(job_id, &cancel_signal.clone().unwrap_or_default()).await?;
 
             let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
+            let retry_git_status_before = collect_git_status_porcelain(&workspace_dir).await;
             let shared_browser_action_log_before_retry =
                 explicit_shared_browser_execution.then(crate::shared_browser::action_log_len);
             let _client_timezone_guard =
@@ -8961,7 +8966,9 @@ impl JobProcessor {
                     &workspace_dir,
                     coordination_files,
                     commit_to_workspace,
-                )?;
+                    retry_git_status_before.as_ref(),
+                )
+                .await?;
                 let retry_normalized_files_len = retry_normalized_files.len();
                 (retry_normalized_files, retry_normalized_files_len)
             } else {
@@ -8969,7 +8976,9 @@ impl JobProcessor {
                     &workspace_dir,
                     retry_reported_files,
                     commit_to_workspace,
-                )?;
+                    retry_git_status_before.as_ref(),
+                )
+                .await?;
                 let retry_normalized_files_len = retry_normalized_files.len();
                 (retry_normalized_files, retry_normalized_files_len)
             };
@@ -11582,7 +11591,11 @@ fn tracks_workspace_file_changes(
 ) -> bool {
     commit_to_workspace
         && !read_only_workspace
-        && (required || mode == RuntimeFinalOutputMode::PlainTextWrite)
+        && (required
+            || matches!(
+                mode,
+                RuntimeFinalOutputMode::PlainTextWrite | RuntimeFinalOutputMode::StructuredWrite
+            ))
 }
 
 /// Whether a turn lists the files it changed on disk among its receipts. Every
@@ -14116,15 +14129,57 @@ fn normalize_codex_files(
     Ok(normalized)
 }
 
-fn normalize_codex_files_for_commit(
+async fn normalize_codex_files_for_commit(
     workspace_dir: &Path,
-    files: Vec<CodexFileDescriptor>,
+    mut files: Vec<CodexFileDescriptor>,
     commit_to_workspace: bool,
+    before: Option<&HashMap<String, GitStatusEntry>>,
 ) -> Result<Vec<CodexFileDescriptor>> {
     if !commit_to_workspace {
         return Ok(Vec::new());
     }
 
+    // Inline files are a fallback for generation without a tool write, not a
+    // second edit after tools have written and verified the workspace. Compare
+    // this attempt's fingerprints, including already-dirty files and paths that
+    // disappeared from status, before applying any final-response content.
+    if !files.is_empty()
+        && let Some(before) = before
+        && let Some(after) = collect_git_status_porcelain(workspace_dir).await
+    {
+        let changed_paths = before
+            .keys()
+            .chain(after.keys())
+            .filter(|path| before.get(*path) != after.get(*path))
+            .map(PathBuf::from)
+            .collect::<HashSet<_>>();
+        for file in &mut files {
+            let Some(relative) = sanitize_codex_workspace_path(workspace_dir, &file.workspace_path)
+            else {
+                continue;
+            };
+            if file.is_read_reference()
+                || !changed_paths
+                    .iter()
+                    .any(|path| relative.starts_with(path) || path.starts_with(&relative))
+            {
+                continue;
+            }
+            file.content = None;
+            file.content_base64 = None;
+            let kind = if !workspace_dir.join(&relative).exists() {
+                "deleted"
+            } else if after
+                .get(relative.to_string_lossy().as_ref())
+                .is_some_and(|status| status.code == "??" || status.code.contains('A'))
+            {
+                "created"
+            } else {
+                "changed"
+            };
+            file.change = FileChangeDescriptor::parse(json!({ "type": kind }));
+        }
+    }
     normalize_codex_files(workspace_dir, files)
 }
 
@@ -15617,6 +15672,9 @@ fn reasoning_effort_for_runtime_job(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeFinalOutputMode {
     StrictStructured,
+    // Workspace edits still need the goal_update action to finish or block a
+    // durable goal. Keep write tracking while using the structured channel.
+    StructuredWrite,
     SchemaFreeStructured,
     PlainTextReport,
     // Workspace-change turns: the model works with tools (apply_patch) and ends with a
@@ -15630,6 +15688,7 @@ impl RuntimeFinalOutputMode {
     fn label(self) -> &'static str {
         match self {
             Self::StrictStructured => "strict_structured",
+            Self::StructuredWrite => "structured_write",
             Self::SchemaFreeStructured => "schema_free_structured",
             Self::PlainTextReport => "plain_text_report",
             Self::PlainTextWrite => "plain_text_write",
@@ -15640,6 +15699,9 @@ impl RuntimeFinalOutputMode {
         match self {
             Self::StrictStructured => {
                 "runtime needs machine-readable summary/files/actions contract"
+            }
+            Self::StructuredWrite => {
+                "workspace-change turn with an active goal needs structured status actions"
             }
             Self::SchemaFreeStructured => {
                 "turn still needs parseable files/actions but API schema is brittle"
@@ -15654,7 +15716,7 @@ impl RuntimeFinalOutputMode {
     }
 
     fn disable_final_output_json_schema(self) -> bool {
-        !matches!(self, Self::StrictStructured)
+        !matches!(self, Self::StrictStructured | Self::StructuredWrite)
     }
 
     fn allow_plain_text_final_fallback(self) -> bool {
@@ -15669,6 +15731,22 @@ impl RuntimeFinalOutputMode {
     }
 }
 
+fn ordinary_job_requires_goal_actions(job: &LeaseJob) -> bool {
+    !is_browser_turn(job)
+        && !is_multi_agent_worker_job(job)
+        && !is_explicit_team_planning_job(job)
+        && !is_multi_agent_lead_continuation_job(job)
+        && active_goal_metadata(job.payload.get("metadata")).is_some_and(|goal| {
+            goal_metadata_string(goal, &["objective"]).is_some()
+                && (goal_metadata_string(goal, &["status"]).unwrap_or("active") == "active"
+                    || job
+                        .payload
+                        .pointer("/metadata/_controllerGoal/userTurn")
+                        .and_then(JsonValue::as_bool)
+                        == Some(true))
+        })
+}
+
 fn final_output_mode_for_runtime_job(
     job: &LeaseJob,
     read_only_scoped_worker_preobserved: bool,
@@ -15678,7 +15756,9 @@ fn final_output_mode_for_runtime_job(
     // its metadata asks, such as web chat's Summarize or Explain more on a selection.
     if !job.grants.is_empty() {
         RuntimeFinalOutputMode::StrictStructured
-    } else if metadata_requests_plain_text_report(job.payload.get("metadata")) {
+    } else if metadata_requests_plain_text_report(job.payload.get("metadata"))
+        && !ordinary_job_requires_goal_actions(job)
+    {
         RuntimeFinalOutputMode::PlainTextReport
     } else if read_only_scoped_worker_preobserved && is_multi_agent_worker_job(job) {
         RuntimeFinalOutputMode::PlainTextReport
@@ -15709,9 +15789,14 @@ fn final_output_mode_for_runtime_job(
         || browser_hand_back::is_hand_back_job(job))
         && !metadata_requests_read_only_workspace(job.payload.get("metadata"))
     {
-        // Workspace-write jobs run the natural agentic loop: edit via tools, finish with a
-        // plain summary. Files come from the git-status delta, so no JSON contract is imposed.
-        RuntimeFinalOutputMode::PlainTextWrite
+        // A goal needs the existing structured action channel to report its
+        // state. Ordinary writes keep natural finals; both modes retain actual
+        // workspace-change tracking and the same tool/scope permissions.
+        if ordinary_job_requires_goal_actions(job) {
+            RuntimeFinalOutputMode::StructuredWrite
+        } else {
+            RuntimeFinalOutputMode::PlainTextWrite
+        }
     } else {
         RuntimeFinalOutputMode::StrictStructured
     }
@@ -28379,14 +28464,16 @@ mod tests {
         assert!(!reported_workspace_file_changes_missing(true, 0, 0));
     }
 
-    #[test]
-    fn conditional_write_still_rejects_reported_files_that_do_not_exist() {
+    #[tokio::test]
+    async fn conditional_write_still_rejects_reported_files_that_do_not_exist() {
         let tmp = tempdir().unwrap();
         let workspace = tmp.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
         let claimed =
             parse_file_descriptor(&json!({"path":"missing.rs","type":"changed"})).unwrap();
-        let files = normalize_codex_files_for_commit(&workspace, vec![claimed], true).unwrap();
+        let files = normalize_codex_files_for_commit(&workspace, vec![claimed], true, None)
+            .await
+            .unwrap();
         let tracking = tracks_workspace_file_changes(
             true,
             false,
@@ -32889,6 +32976,214 @@ mod tests {
     }
 
     #[test]
+    fn active_goal_writes_keep_change_tracking_and_can_emit_a_completion_action() {
+        let tmp = tempdir().unwrap();
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        for requirement in [
+            WorkspaceFileChangeRequirement::Required,
+            WorkspaceFileChangeRequirement::Conditional,
+        ] {
+            for restored in [false, true] {
+                let scope = json!({"mode":"owned","ownedPaths":["src/widget.rs"],"readOnlyPaths":["tests"]});
+                let mut job = test_lease_job(
+                    Some("feature"),
+                    json!({"metadata":{
+                        "goal":{"id":"goal-1","objective":"Verify the widget fix","status":"active"},
+                        "writeIntent":true,"writeScope":scope,
+                    }}),
+                );
+                job.project_id = Some(project_id);
+                let mut preflight =
+                    test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, false, true);
+                preflight.workspace_file_change_requirement = requirement;
+                let job = job_with_agent_routing_preflight(&job, &preflight);
+                let expectations = runtime_job_expectations(&job.payload);
+                let mode = final_output_mode_for_runtime_job(&job, false, expectations);
+                assert_eq!(mode, RuntimeFinalOutputMode::StructuredWrite);
+                assert!(!mode.disable_final_output_json_schema());
+                assert!(!mode.allow_plain_text_final_fallback());
+                assert!(tracks_workspace_file_changes(
+                    true,
+                    false,
+                    expectations.workspace_file_changes,
+                    mode,
+                ));
+                assert!(!tracks_workspace_file_changes(true, true, true, mode));
+                assert!(routing_evidence_requirements(&job, expectations).command_observation);
+                assert_eq!(job.payload["metadata"]["writeScope"], scope);
+                let provider_state =
+                    json!({"defaultThreadId":"existing-thread","historyReplayRequired":false});
+                let (prompt, _, metrics) = processor
+                    .build_prompt_with_text(
+                        &project_id,
+                        &job,
+                        tmp.path(),
+                        "Verify and finish the widget fix.",
+                        true,
+                        restored.then_some(&provider_state),
+                        &[],
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                assert!(prompt.contains("Owned paths: src/widget.rs"));
+                assert!(prompt.contains("include one `goal_update` action in the final JSON"));
+                assert!(!prompt.contains("Do not emit `multi_agent_plan`, goals"));
+                assert!(!prompt.contains(WRITE_LANE_REPLY_LINE));
+                assert!(metrics["promptSections"].get("activeGoal").is_some());
+            }
+        }
+        let outcome = extract_codex_outcome(&json!({
+            "summary":"The widget fix is verified.","files":[],
+            "actions":[{"type":"goal_update","status":"completed","progressSummary":"Regression passed"}],
+        })).unwrap();
+        let messages = build_final_messages_from_outcome(&outcome, Some(tmp.path()));
+        assert!(messages.iter().any(|message| {
+            message.message_type.as_deref() == Some("goal_update")
+                && message
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata["details"]["status"] == "completed")
+        }));
+    }
+
+    #[test]
+    fn active_goal_selection_reports_keep_the_structured_completion_channel() {
+        let tmp = tempdir().unwrap();
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        for action in ["summarize", "explain_more"] {
+            let mut job = test_lease_job(
+                Some("feature"),
+                json!({"metadata":{
+                    "goal":{"id":"goal-1","objective":"Explain the reviewed design","status":"active"},
+                    "writeScope":{"mode":"read_only","ownedPaths":[],"readOnlyPaths":["src"]},
+                    "replyContext":{"kind":"message_selection","action":action,
+                        "messageId":"message-1","selectedText":"Option 2"},
+                }}),
+            );
+            job.project_id = Some(project_id);
+            let mode =
+                final_output_mode_for_runtime_job(&job, false, RuntimeJobExpectations::default());
+            assert_eq!(mode, RuntimeFinalOutputMode::StrictStructured);
+            assert!(!mode.disable_final_output_json_schema());
+            assert!(!mode.allow_plain_text_final_fallback());
+            assert_eq!(
+                final_output_schema_for_job(&job, false),
+                CodexFinalOutputSchema::Default
+            );
+            let (prompt, _, _) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "Explain the selected design.",
+                    true,
+                    None,
+                    &[],
+                    None,
+                    None,
+                )
+                .unwrap();
+            assert!(prompt.contains("include one `goal_update` action in the final JSON"));
+            assert!(prompt.contains("Respond with a single JSON object shaped as"));
+            assert!(prompt.contains(
+                "This job is read-only. Do not create, edit, move, delete, or return workspace file changes."
+            ));
+
+            // A worker reports to its lead; browser control retains its own
+            // response contract. Neither owns the ordinary goal status channel.
+            for metadata in [
+                json!({"multiAgentPlan":{"role":"worker","groupId":"group-1"}}),
+                json!({"browserTransport":"shared"}),
+            ] {
+                let mut special_job = job.clone();
+                special_job.payload["metadata"]
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(metadata.as_object().unwrap().clone());
+                assert_eq!(
+                    final_output_mode_for_runtime_job(
+                        &special_job,
+                        false,
+                        RuntimeJobExpectations::default(),
+                    ),
+                    RuntimeFinalOutputMode::PlainTextReport
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fresh_human_turn_can_resume_a_paused_goal_through_the_structured_channel() {
+        let job = test_lease_job(
+            Some("feature"),
+            json!({"metadata":{
+                "goal":{"id":"goal-1","objective":"Verify the widget fix","status":"paused"},
+                "_controllerGoal":{"userTurn":true},
+            }}),
+        );
+        let mode = final_output_mode_for_runtime_job(
+            &job,
+            false,
+            RuntimeJobExpectations {
+                workspace_file_changes: true,
+                ..RuntimeJobExpectations::default()
+            },
+        );
+        assert_eq!(mode, RuntimeFinalOutputMode::StructuredWrite);
+        assert!(!mode.disable_final_output_json_schema());
+        let outcome = extract_codex_outcome(&json!({
+            "summary":"Resuming the widget verification.","files":[],
+            "actions":[{"type":"goal_update","status":"active"}],
+        }))
+        .unwrap();
+        let messages = build_final_messages_from_outcome(&outcome, None);
+        assert!(messages.iter().any(|message| {
+            message.message_type.as_deref() == Some("goal_update")
+                && message
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata["details"]["status"] == "active")
+        }));
+    }
+
+    #[test]
+    fn inactive_goals_and_browser_turns_keep_their_existing_output_contract() {
+        let expectations = RuntimeJobExpectations {
+            workspace_file_changes: true,
+            ..RuntimeJobExpectations::default()
+        };
+        for status in ["paused", "completed", "blocked", "canceled"] {
+            let job = test_lease_job(
+                Some("feature"),
+                json!({"metadata":{
+                    "goal":{"id":"goal-1","objective":"Review","status":status},
+                }}),
+            );
+            assert_eq!(
+                final_output_mode_for_runtime_job(&job, false, expectations),
+                RuntimeFinalOutputMode::PlainTextWrite
+            );
+        }
+        for transport in ["shared", "desktop-personal"] {
+            let mut job = test_lease_job(
+                Some("feature"),
+                json!({"metadata":{"browserTransport":transport}}),
+            );
+            let original =
+                final_output_mode_for_runtime_job(&job, false, RuntimeJobExpectations::default());
+            job.payload["metadata"]["goal"] =
+                json!({"id":"goal-1","objective":"Review","status":"active"});
+            assert_eq!(
+                final_output_mode_for_runtime_job(&job, false, RuntimeJobExpectations::default()),
+                original
+            );
+        }
+    }
+
+    #[test]
     fn conditional_write_prompt_matches_plain_output_without_suppressing_review_context() {
         let tmp = tempdir().unwrap();
         let memory = "Keep the event report deterministic; inspect caller-data ownership.";
@@ -35657,26 +35952,60 @@ mod tests {
     }
 
     #[test]
-    fn parse_codex_actions_supports_goal_update() {
-        let payload = json!({
-            "actions": [
-                {
-                    "type": "goal_update",
-                    "status": "completed",
-                    "progressSummary": "Validated and pushed."
-                }
-            ]
-        });
+    fn strict_goal_actions_reach_the_controller_with_their_lifecycle_fields() {
+        let schema = crate::codex::default_final_output_json_schema();
+        let action_schema = &schema["properties"]["actions"]["items"];
+        let properties = action_schema["properties"].as_object().unwrap();
+        let required = action_schema["required"].as_array().unwrap();
+        assert_eq!(action_schema["additionalProperties"], false);
+        assert_eq!(properties.len(), required.len());
 
-        let actions = parse_codex_actions(&payload);
-        assert_eq!(actions.len(), 1);
-        match &actions[0] {
-            CodexAction::GoalUpdate { details, content } => {
-                assert_eq!(details["status"], json!("completed"));
-                assert_eq!(details["progressSummary"], json!("Validated and pushed."));
-                assert_eq!(content, "Goal completed: Validated and pushed.");
+        // Model output must fit the actual decoder grammar: every required
+        // field is present and unrelated action fields are null. A sparse
+        // hand-written action hid the bug where status could not be emitted.
+        for fields in [
+            json!({"status":"completed","progressSummary":"Regression passed."}),
+            json!({"status":"active","objective":"Finish the review",
+                "doneWhen":"Changes are verified","stopWhen":"Access is unavailable"}),
+            json!({"status":"blocked","progressSummary":"Required access is unavailable."}),
+            json!({"status":"paused"}),
+            json!({"status":"canceled"}),
+            json!({"operation":"clear"}),
+        ] {
+            let mut action = required
+                .iter()
+                .map(|key| {
+                    let key = key.as_str().unwrap();
+                    assert!(properties.contains_key(key));
+                    (key.to_owned(), JsonValue::Null)
+                })
+                .collect::<JsonMap<String, JsonValue>>();
+            action.insert("type".into(), json!("goal_update"));
+            for (key, value) in fields.as_object().unwrap() {
+                let field_schema = properties.get(key).expect("goal field must be encodable");
+                assert_eq!(field_schema["type"], json!(["string", "null"]));
+                if let Some(choices) = field_schema.get("enum") {
+                    assert!(choices.as_array().unwrap().contains(value));
+                }
+                action.insert(key.clone(), value.clone());
             }
-            _ => panic!("expected goal update action"),
+            let outcome = extract_codex_outcome(&json!({
+                "summary":"Current goal result.","code":null,"files":[],"actions":[action],
+            }))
+            .unwrap();
+            let messages = build_final_messages_from_outcome(&outcome, None);
+            let message = messages
+                .iter()
+                .find(|message| message.message_type.as_deref() == Some("goal_update"))
+                .expect("controller goal message");
+            let metadata = message.metadata.as_ref().unwrap();
+            for (key, value) in fields.as_object().unwrap() {
+                assert_eq!(&metadata["details"][key], value, "{key}");
+            }
+            if fields["status"] == "completed" {
+                assert_eq!(message.content, "Goal completed: Regression passed.");
+                assert_eq!(metadata["presentation"]["hidden"], false);
+            }
         }
     }
 
@@ -36790,8 +37119,86 @@ mod tests {
         assert_eq!(fs::read_to_string(&above).unwrap(), "hello world");
     }
 
-    #[test]
-    fn non_commit_runs_ignore_reported_files_without_writing_inline_content() {
+    #[tokio::test]
+    async fn native_workspace_changes_take_precedence_over_final_file_snapshots() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path();
+        let initialized = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(workspace)
+            .output()
+            .unwrap();
+        assert!(initialized.status.success());
+        fs::write(workspace.join("dirty.json"), r#"{"ok":false}"#).unwrap();
+        fs::write(workspace.join("removed.json"), "old file").unwrap();
+        fs::write(workspace.join("inline.txt"), "old content").unwrap();
+        let before = collect_git_status_porcelain(workspace).await.unwrap();
+
+        // These are actual tool edits, including a rewrite of an already-dirty
+        // file whose porcelain code remains unchanged and an untracked deletion.
+        let verified = r#"{"ok":true}"#;
+        fs::write(workspace.join("new.json"), verified).unwrap();
+        fs::write(workspace.join("dirty.json"), verified).unwrap();
+        fs::remove_file(workspace.join("removed.json")).unwrap();
+        fs::create_dir(workspace.join("kept")).unwrap();
+        fs::write(workspace.join("kept/child.json"), verified).unwrap();
+        let files = [
+            json!({ "path": workspace.join("new.json"), "change": "created", "content": "{\"ok:true}" }),
+            json!({ "path": "dirty.json", "change": "deleted", "contentBase64": "invalid base64" }),
+            json!({ "path": "removed.json", "change": "created", "content": "resurrected" }),
+            json!({ "path": "kept", "change": "deleted" }),
+            json!({ "path": "inline.txt", "change": "changed", "content": "inline edit" }),
+            json!({ "path": "inline-new.txt", "change": "created", "content": "inline creation" }),
+        ]
+        .iter()
+        .map(|value| parse_file_descriptor(value).unwrap())
+        .collect();
+        let normalized = normalize_codex_files_for_commit(workspace, files, true, Some(&before))
+            .await
+            .unwrap();
+
+        for path in ["new.json", "dirty.json", "kept/child.json"] {
+            assert_eq!(fs::read_to_string(workspace.join(path)).unwrap(), verified);
+        }
+        assert!(!workspace.join("removed.json").exists());
+        assert_eq!(
+            fs::read_to_string(workspace.join("inline.txt")).unwrap(),
+            "inline edit"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("inline-new.txt")).unwrap(),
+            "inline creation"
+        );
+        for file in &normalized[..4] {
+            assert!(file.content.is_none() && file.content_base64.is_none());
+        }
+        assert!(matches!(
+            normalized[0].change.as_ref().unwrap().kind,
+            FileChangeKind::Created
+        ));
+        assert!(matches!(
+            normalized[2].change.as_ref().unwrap().kind,
+            FileChangeKind::Deleted
+        ));
+
+        // A recovery attempt gets a fresh baseline. It can still intentionally
+        // edit a prior attempt's file using the inline-only fallback.
+        let retry_before = collect_git_status_porcelain(workspace).await.unwrap();
+        let retry_file = parse_file_descriptor(&json!({
+            "path": "new.json", "change": "changed", "content": "{\"ok\":\"retry\"}"
+        }))
+        .unwrap();
+        normalize_codex_files_for_commit(workspace, vec![retry_file], true, Some(&retry_before))
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.join("new.json")).unwrap(),
+            r#"{"ok":"retry"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn non_commit_runs_ignore_reported_files_without_writing_inline_content() {
         let tmp = tempdir().unwrap();
         let project_dir = tmp.path().join("proj");
         fs::create_dir_all(&project_dir).unwrap();
@@ -36807,14 +37214,16 @@ mod tests {
             change: None,
         }];
 
-        let normalized = normalize_codex_files_for_commit(&project_dir, files, false).unwrap();
+        let normalized = normalize_codex_files_for_commit(&project_dir, files, false, None)
+            .await
+            .unwrap();
 
         assert!(normalized.is_empty());
         assert!(!project_dir.join("notes.txt").exists());
     }
 
-    #[test]
-    fn commit_runs_apply_reported_inline_files_without_explicit_file_expectation() {
+    #[tokio::test]
+    async fn commit_runs_apply_reported_inline_files_without_explicit_file_expectation() {
         let tmp = tempdir().unwrap();
         let project_dir = tmp.path().join("proj");
         fs::create_dir_all(&project_dir).unwrap();
@@ -36834,7 +37243,9 @@ mod tests {
             }),
         }];
 
-        let normalized = normalize_codex_files_for_commit(&project_dir, files, true).unwrap();
+        let normalized = normalize_codex_files_for_commit(&project_dir, files, true, None)
+            .await
+            .unwrap();
 
         assert_eq!(normalized.len(), 1);
         assert_eq!(
@@ -36843,8 +37254,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn commit_runs_overwrite_existing_files_from_reported_inline_content() {
+    #[tokio::test]
+    async fn commit_runs_overwrite_existing_files_from_reported_inline_content() {
         let tmp = tempdir().unwrap();
         let project_dir = tmp.path().join("proj");
         fs::create_dir_all(&project_dir).unwrap();
@@ -36865,7 +37276,9 @@ mod tests {
             }),
         }];
 
-        let normalized = normalize_codex_files_for_commit(&project_dir, files, true).unwrap();
+        let normalized = normalize_codex_files_for_commit(&project_dir, files, true, None)
+            .await
+            .unwrap();
 
         assert_eq!(normalized.len(), 1);
         assert_eq!(
