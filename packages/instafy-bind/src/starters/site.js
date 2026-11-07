@@ -30,6 +30,7 @@
  *   would check is fresh, or is left only with failed rows (each has its own "Try again").
  * - Links: a source in a caption is a quiet citation (muted, a faint underline); an action ("Open Amazon ↗",
  *   "where to check ↗", "Try again") is in the link colour.
+ * - Notes: site.clip(text) keeps a note to 100 characters, ending a longer one at a whole word with "…".
  * - Safety: every text goes through textContent; site.link() only links https: URLs; site.h() never sets an "on…"
  *   attribute from text, nor an address (href, src…) that could run script or load a page of its own: javascript:,
  *   and data: or blob: anywhere but a picture's or a video's source and a link that downloads (blob:).
@@ -138,7 +139,14 @@
   function safeUrl(url) {
     try { var u = new URL(String(url)); return u.protocol === "https:" ? u.href : null; } catch (e) { return null; }
   }
+  /** A web address (http or https), as either argument of link() may be. */
+  function isAddress(x) {
+    try { return /^https?:$/.test(new URL(String(x)).protocol); } catch (e) { return false; }
+  }
+  /** link(url, text): the address may be either argument, so link("Maker", "https://maker.com") is the link a page
+   * meant, and an address that can't be linked never shows as the words of one. */
   function link(url, text, cls) {
+    if (!isAddress(url) && isAddress(text)) { var named = url; url = text; text = named; }
     var href = safeUrl(url);
     if (!href) return h("span", { "class": cls || null, text: text });
     // the ↗ never wraps away from its words (the space before it sits in a no-wrap span)
@@ -148,6 +156,16 @@
   function host(url) {
     var href = safeUrl(url);
     return href ? new URL(href).hostname.replace(/^www\./, "") : "";
+  }
+  /** A note on one line, at most `max` characters (default 100): a longer one ends at a whole word, with "…", never
+   * mid-word or mid-sentence without saying so. */
+  function clip(text, max) {
+    var s = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+    max = max || 100;
+    if (s.length <= max) return s;
+    var cut = s.slice(0, max - 1);
+    if (s.charAt(max - 1) !== " " && cut.lastIndexOf(" ") > 0) cut = cut.slice(0, cut.lastIndexOf(" "));
+    return cut.replace(/[\s,;:.!?(\-\u2013\u2014]+$/, "") + "\u2026";
   }
   function slug(text) {
     var s = String(text == null ? "" : text);
@@ -342,7 +360,7 @@
   /** A note that only repeats the state ("not checked yet") says nothing. */
   function usefulNote(note) {
     var n = String(note || "").trim();
-    return n && !/^not (checked|verified)( yet)?\.?$/i.test(n) ? n.slice(0, 100) : "";
+    return n && !/^not (checked|verified)( yet)?\.?$/i.test(n) ? clip(n) : "";
   }
   /** The newest live price for a row is a "could not read it" answer (a blocked or unreadable store). */
   function blockedRecord(ref) {
@@ -635,7 +653,7 @@
     if (code === "rate" || code === "busy") return "too many checks, try again in a minute";
     if (code === "offline" || /No binder|No host/.test(reason || "")) return "not connected";
     if (code === "timeout") return "it took too long";
-    return String(reason || "it did not work").replace(/\s+/g, " ").slice(0, 100);
+    return clip(reason || "it did not work");
   }
   function send(intent, params, ref) {
     var b = bind();
@@ -733,7 +751,7 @@
     shared.forEach(function (k) { checks.noticed[k] = true; });
     var seedBlocked = priced.every(function (r) { return !(r.store && r.store.readable); });
     var tail = " Open a store to see today's price.";
-    if (shared.length === 1) return notice("info", capital(usefulNote(shared[0])) + "." + tail);
+    if (shared.length === 1) return notice("info", capital(usefulNote(shared[0])).replace(/([^.\u2026])$/, "$1.") + tail);
     if (shared.length > 1) return notice("info", "Some stores can't be checked automatically." + tail);
     if (seedBlocked) return notice("info", "These stores don't allow price checks from this page." + tail);
     return null;
@@ -1108,8 +1126,8 @@
   }
 
   window.site = {
-    version: "1.8.0",
-    h: h, append: append, icon: icon, link: link, slug: slug, rowAttrs: rowAttrs, safeUrl: safeUrl,
+    version: "1.9.0",
+    h: h, append: append, icon: icon, link: link, clip: clip, slug: slug, rowAttrs: rowAttrs, safeUrl: safeUrl,
     date: date, dayDate: dayDate, ago: ago, money: money, num: num, valueText: valueText, host: host, seen: seenText,
     cite: cite, shown: shown, known: known, within: within, byFilter: byFilter, old: isOld, expired: expired,
     live: live, trust: trust, rowAction: rowAction, checkButton: checkButton, checkAll: checkAll, canCheck: canCheck,

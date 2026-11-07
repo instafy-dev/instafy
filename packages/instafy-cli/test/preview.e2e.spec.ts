@@ -312,7 +312,7 @@ function writeState(home: string, previews: unknown[]) {
 function readState(home: string): {
   previews: Array<{
     previewId: string; pid: number; localPort: number; workdir: string; hostSuffix?: string; studioOrigin?: string;
-    siteDir?: string; pictureAt?: number; noThumbnail?: boolean;
+    siteDir?: string; pictureAt?: number; noThumbnail?: boolean; conversationId?: string;
   }>;
 } {
   return JSON.parse(fs.readFileSync(path.join(home, ".instafy", "cli-preview-state.json"), "utf8"));
@@ -1172,6 +1172,59 @@ describe("instafy preview: the card's summary and picture", () => {
     expect(entry).toMatchObject({ siteDir: "instafy-cli" });
     expect(entry.pictureAt).toBeGreaterThanOrEqual(before);
     expect(entry.pictureAt).toBeLessThanOrEqual(Date.now());
+  }, 60000);
+
+  // A turn that may write files is told the space's pages, each made in its own chat or in another: a new chat once
+  // took another chat's comparison for its own and wrote over it. The chat that made a page is the one its card went to
+  // (the job's own with a job token, which the server reads from the token; else --conversation). An open of the same
+  // folder from another chat keeps it, an entry from before chats were recorded is never claimed, and a new folder on
+  // the same port is the opening chat's.
+  it("records the chat that made the site, and keeps it when another chat opens the same folder", async () => {
+    const projectId = randomUUID();
+    const rathole = makeStubRathole();
+    const controller = await startMockController({ projectId });
+    const sitePort = await startSite();
+    const home = makeHome();
+    const packages = new URL("../../", import.meta.url).pathname;
+    const job = (conversation: string, workspace = packages) => ({
+      RUNTIME_ID: randomUUID(),
+      RUNTIME_LEASE_ID: "lease-1",
+      INSTAFY_CONVERSATION_ID: conversation,
+      CONTROLLER_ACCESS_TOKEN: "active-job-token",
+      CONTROLLER_BASE_URL: controller.url,
+      WORKSPACE_PROJECT_DIR: workspace,
+    });
+    const args = [...openArgs({ projectId, port: sitePort, rathole: rathole.file }), "--serve-cmd", "python3 -m http.server 8000"];
+    const [made, other, named] = [randomUUID(), randomUUID(), randomUUID()];
+
+    // a job's card goes to the job's own chat, whatever --conversation says
+    const first = await execCli([...args, "--conversation", named], home, job(made));
+    expect(first.code, first.stderr).toBe(0);
+    expect(readState(home).previews).toHaveLength(1);
+    expect(readState(home).previews[0]).toMatchObject({ siteDir: "instafy-cli", conversationId: made });
+
+    // the same folder, opened again from another chat, is still the page of the chat that made it
+    const again = await execCli(args, home, job(other));
+    expect(again.code, again.stderr).toBe(0);
+    expect(readState(home).previews).toHaveLength(1);
+    expect(readState(home).previews[0]).toMatchObject({ siteDir: "instafy-cli", conversationId: made });
+
+    // an entry from before chats were recorded is never claimed by the chat that opens it again
+    writeState(home, readState(home).previews.map(({ conversationId: _made, ...entry }) => entry));
+    const legacy = await execCli(args, home, job(other));
+    expect(legacy.code, legacy.stderr).toBe(0);
+    expect(readState(home).previews[0]?.siteDir).toBe("instafy-cli");
+    expect(readState(home).previews[0]).not.toHaveProperty("conversationId");
+
+    // another folder on the port, opened with a member's token: the chat --conversation names
+    const member = await execCli(
+      [...openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file }), "--serve-cmd", "python3 -m http.server 8000", "--conversation", named],
+      home,
+      { WORKSPACE_PROJECT_DIR: new URL("../../../", import.meta.url).pathname },
+    );
+    expect(member.code, member.stderr).toBe(0);
+    expect(readState(home).previews).toHaveLength(1);
+    expect(readState(home).previews[0]).toMatchObject({ siteDir: "packages/instafy-cli", conversationId: named });
   }, 60000);
 
   it("a picture that cannot be uploaded leaves the exit code alone", async () => {

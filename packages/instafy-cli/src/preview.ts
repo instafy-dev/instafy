@@ -7,6 +7,7 @@ import path from "node:path";
 import kleur from "kleur";
 import { resolveRatholeBinaryForCli } from "./runtime.js";
 import { loadCredentialFreeEnv } from "./bind.js";
+import { conversationIdFromEnvironment } from "./conversations.js";
 import { fetchWithControllerAuth } from "./controller-fetch.js";
 import { extractControllerErrorMessage, formatAuthRejectedError } from "./errors.js";
 import {
@@ -26,6 +27,7 @@ import {
   type Thumbnail,
   type ThumbnailAttempt,
 } from "./preview-thumbnail.js";
+import { resolveRuntimeControllerCredential } from "./runtime-controller-binding.js";
 import {
   buildRatholeConfig,
   cleanUrl,
@@ -176,6 +178,11 @@ type PreviewStateEntry = {
   pictureAt?: number;
   // Opened with `--no-thumbnail`: no picture of the site goes on its card, from a check or at a turn's end either.
   noThumbnail?: boolean;
+  // The chat that made the site: the one whose card the first open of its folder posted (the job's own chat, or
+  // `--conversation`). An open of the same folder from another chat keeps it, and an entry from before it was recorded
+  // stays without one. A turn that may write files is told the space's pages by title, each made in its own chat or in
+  // another, so it never takes another chat's page for its own.
+  conversationId?: string;
 };
 
 type PreviewStateFile = {
@@ -1215,6 +1222,35 @@ function siteRecordFor(
   return site ? { start: site.start } : {};
 }
 
+/**
+ * The chat the server posts this preview's card to: a job's own chat when the job's credential opens it (the server reads
+ * it from the token, never from the request), else `--conversation`.
+ */
+function cardConversation(auth: ResolvedTunnelToken, conversationId: string | undefined): string | undefined {
+  try {
+    const credential = resolveRuntimeControllerCredential();
+    if (credential?.kind === "job" && credential.token === auth.token) return conversationIdFromEnvironment() ?? undefined;
+  } catch {
+    return undefined;
+  }
+  return conversationId;
+}
+
+/**
+ * The chat that made the site in `siteDir`: the one an entry of this space records for that folder (none for an entry
+ * from before chats were recorded), else the chat this open posts its card to. A turn of another chat that opens the page
+ * again never makes it its own.
+ */
+function madeInChat(
+  previews: PreviewStateEntry[],
+  projectId: string,
+  siteDir: string | undefined,
+  opening: string | undefined,
+): string | undefined {
+  const earlier = siteDir === undefined ? null : previews.find((entry) => entry.projectId === projectId && entry.siteDir === siteDir);
+  return earlier ? earlier.conversationId : opening;
+}
+
 /** This space's open previews on this machine, by port, with their titles. Empty when the server does not say. */
 async function openPreviewPorts(params: {
   controllerUrl: string;
@@ -1312,8 +1348,10 @@ async function createAndStartClient(params: {
   const studioOrigin = parseStudioOrigin(grant["studioOrigin"]);
   const state = readStateFile();
   const current = state.previews.find((preview) => preview.previewId === previewId) ?? null;
-  // Read before an older entry on this port is forgotten below: the site's record moves to this preview.
+  // Read before an older entry on this port is forgotten below: the site's record moves to this preview, and so does
+  // the chat that made it.
   const siteRecord = siteRecordFor(site, state.previews, port, projectId);
+  const madeIn = madeInChat(state.previews, projectId, serve?.cwd, cardConversation(auth, conversationId));
 
   // From here on the server holds a preview. Any failure before the client runs closes it again,
   // so no grant or card is left without a tunnel behind it.
@@ -1392,6 +1430,7 @@ async function createAndStartClient(params: {
     // The same preview opened again keeps its picture until a new one is uploaded.
     ...(current?.pictureAt ? { pictureAt: current.pictureAt } : {}),
     ...(opts.thumbnail === false ? { noThumbnail: true } : {}),
+    ...(madeIn ? { conversationId: madeIn } : {}),
   };
   upsertPreviewState(entry);
   return { grant, previewId, entry, current };

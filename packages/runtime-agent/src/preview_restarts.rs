@@ -901,7 +901,8 @@ fn start_tunnel_client(
         // come from (a site served in preview mode answers only those), the
         // site's folder and when it was last pictured for the card (a turn
         // that changes the site after that checks it again, for a new
-        // picture), and whether its card takes a picture at all.
+        // picture), whether its card takes a picture at all, and the chat
+        // that made it (a turn that may write files is told whose page it is).
         let earlier = |key: &str| current.and_then(|entry| entry.get(key)).cloned();
         for key in [
             "start",
@@ -910,6 +911,7 @@ fn start_tunnel_client(
             "siteDir",
             "pictureAt",
             "noThumbnail",
+            "conversationId",
         ] {
             if let Some(value) = earlier(key) {
                 record.insert(key.to_string(), value);
@@ -1230,6 +1232,7 @@ mod tests {
             "siteDir": "sites/lisbon",
             "pictureAt": 1_761_800_000_000_i64,
             "noThumbnail": true,
+            "conversationId": "4f1c2b8e-0000-4000-8000-0000000000c1",
         });
         let mut recorded = earlier.clone();
         recorded["previewId"] = json!("already");
@@ -1248,7 +1251,8 @@ mod tests {
         assert!(!marker.exists(), "the start command must not run");
         // The record of the site that answered is kept, and so is what the
         // preview's viewers come from, the site's folder, when it was last
-        // pictured for the card, and whether the card takes a picture.
+        // pictured for the card, whether the card takes a picture, and the
+        // chat that made the page.
         let entry = &state["previews"][0];
         for key in [
             "start",
@@ -1259,6 +1263,7 @@ mod tests {
             "siteDir",
             "pictureAt",
             "noThumbnail",
+            "conversationId",
         ] {
             assert_eq!(entry[key], earlier[key], "{key}");
         }

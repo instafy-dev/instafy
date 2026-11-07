@@ -528,9 +528,8 @@ fn direct_write_prompt(workspace: &Path, request: &str) -> String {
 /// found another chat's researched comparison in `sites/`, read it, deleted its data and wrote its
 /// own there, and that chat's page and card showed the new one. The turn, which loads no workspace
 /// memory, was hinted only the browser skill: "comparison" was no keyword of the hub (it folds apart
-/// from "compare"), so it never read that a follow-up changes its own chat's site. The hub is hinted
-/// now, and the hub and every direct workspace-change turn say whose page a request changes: the one
-/// this chat made, another chat's only when the person names it, else a new folder. An unedited hub
+/// from "compare"). The hub is hinted now. Whose page a request changes is said once, in every
+/// direct workspace-change turn's instructions, and the hub no longer repeats it. An unedited hub
 /// from before is upgraded.
 #[test]
 fn a_comparison_asked_in_a_new_chat_is_the_hubs_and_leaves_another_chats_site_as_it_is() {
@@ -544,13 +543,13 @@ fn a_comparison_asked_in_a_new_chat_is_the_hubs_and_leaves_another_chats_site_as
             .unwrap_or_default()
     };
     assert!(hinted().iter().any(|id| id == HUB), "{:?}", hinted());
-    let rule = "A follow-up changes the site this chat made; a site another chat made changes only when the person names it, else start a new folder.";
     let hub =
         include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
     assert!(
-        flat(hub).contains(&format!("One site per request. {rule}")),
+        flat(hub).contains("The page holds the detail; chat holds a short reply. One site per request. Never stop to ask"),
         "{hub}"
     );
+    assert!(!hub.contains("another chat"), "{hub}");
     let prompt = direct_write_prompt(tmp.path(), request);
     assert!(
         prompt.contains(".agents/skills/instafy-interactive-artifacts/SKILL.md"),
@@ -578,68 +577,152 @@ fn a_comparison_asked_in_a_new_chat_is_the_hubs_and_leaves_another_chats_site_as
     assert!(!hinted().iter().any(|id| id == HUB), "{:?}", hinted());
     learn::ensure_project_memory_scaffold(tmp.path());
     assert_eq!(fs::read_to_string(&path).unwrap(), hub);
+    // and the one that said whose page a request changes itself
+    let previous = include_str!("legacy/interactive-artifacts-v13.md");
+    assert!(previous.contains("a site another chat made changes only when the person names it"));
+    fs::write(&path, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&path).unwrap(), hub);
 }
 
-/// Whose page a turn changes reached only the turns that answer in plain text. A chat with a
-/// goal answers a change in JSON, and so does a turn the routing step expected no change for
-/// (the map that was built anyway), on a new thread or a restored one: none read it unless a
-/// keyword hinted the hub. Every turn that may write files reads it now. It speaks of a page made
-/// for the person (a map, a comparison, a page to share), so a change to the person's own app
-/// from a new chat ("Make the buttons rounder.") still changes that app, and never a site in
-/// general. A turn that may not write, and a browser turn, are not told it.
+/// The prompt a turn of `conversation` with this job metadata gets for `request` in the space
+/// `project`, whose pages the CLI recorded in `state` (its state file's contents).
+fn prompt_in_chat(
+    workspace: &Path,
+    state: &JsonValue,
+    project: Uuid,
+    conversation: Uuid,
+    metadata: JsonValue,
+    provider_state: Option<&JsonValue>,
+    request: &str,
+) -> String {
+    let home = tempdir().expect("home");
+    let state_file = home.path().join("cli-preview-state.json");
+    fs::write(&state_file, state.to_string()).unwrap();
+    let processor = test_job_processor(workspace).with_preview_state_file(state_file);
+    let mut job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
+    job.project_id = Some(project);
+    job.conversation_id = Some(conversation);
+    let (prompt, ..) = processor
+        .build_prompt_with_text(
+            &project,
+            &job,
+            workspace,
+            request,
+            true,
+            provider_state,
+            &[],
+            None,
+            None,
+        )
+        .expect("prompt should build");
+    prompt
+}
+
+/// A page the CLI recorded for `project`, in `folder`, made in `chat` (none: from before the CLI
+/// recorded it).
+fn recorded_page(project: Uuid, folder: &str, title: &str, chat: Option<Uuid>) -> JsonValue {
+    let mut page = json!({
+        "previewId": format!("preview-{}", folder.replace('/', "-")),
+        "projectId": project.to_string(),
+        "title": title,
+        "localPort": 20_100,
+        "path": "/",
+        "pid": -1,
+        "siteDir": folder,
+    });
+    if let Some(chat) = chat {
+        page["conversationId"] = json!(chat.to_string());
+    }
+    page
+}
+
+/// Whose page a turn changes is a fact now, not a judgement. In a new chat, "Make a simple
+/// comparison page of the Framework Laptop 13 and 16 from what you already know, without
+/// browsing." had the rule in its instructions and still wrote over another chat's comparison:
+/// nothing told it which chat made `sites/framework-laptops`. Every turn that may write files reads
+/// the rule (a new page is a new folder; another chat's page changes only when the person points at
+/// it), then the space's pages, each made in this chat or in another, by the chat recorded with the
+/// page's card, not by the chat's history: a long chat whose page has left the history it sends
+/// still reads that page as its own. A page from before the chat was recorded reads as another
+/// chat's, in its own chat too: a follow-up there may start a new folder, never replace a page.
 #[test]
-fn every_turn_that_may_write_reads_whose_page_it_changes_and_never_whose_app() {
+fn a_writing_turn_is_told_which_chat_made_each_of_the_spaces_pages() {
     let tmp = tempdir().expect("tmp");
     learn::ensure_project_memory_scaffold(tmp.path());
-    let rounder = direct_write_prompt(tmp.path(), "Make the buttons rounder.");
-    assert!(rounder.contains(PAGE_OF_ITS_OWN_CHAT_RULE), "{rounder}");
-    assert!(
-        !rounder.contains("a site another chat made changes only when the person names it"),
-        "{rounder}"
-    );
-    assert!(
-        PAGE_OF_ITS_OWN_CHAT_RULE.contains(
-            "a page made for the person in another chat (a map, a comparison, a page to share) changes only when the person names it, else start a new folder."
+    let project = Uuid::new_v4();
+    let (theirs, ours) = (Uuid::new_v4(), Uuid::new_v4());
+    for folder in [
+        "sites/framework-13-16",
+        "sites/framework-laptops",
+        "seville-3-days",
+    ] {
+        fs::create_dir_all(tmp.path().join(folder)).unwrap();
+    }
+    let state = json!({ "version": 1, "previews": [
+        recorded_page(project, "sites/framework-13-16", "Framework Laptop 13 vs 16", Some(ours)),
+        recorded_page(project, "sites/framework-laptops", "Framework Laptop 12, 13 and 16", Some(theirs)),
+        recorded_page(project, "seville-3-days", "Seville in 3 days", None),
+    ]});
+    let pages = |chat: Uuid, metadata: JsonValue, provider_state: Option<&JsonValue>| {
+        prompt_in_chat(
+            tmp.path(),
+            &state,
+            project,
+            chat,
+            metadata,
+            provider_state,
+            "Make a simple comparison page of the Framework Laptop 13 and 16 from what you already know, without browsing.",
         )
+    };
+    let direct = json!({ "runtimeExpectations": { "workspaceFileChanges": true } });
+    let prompt = pages(ours, direct.clone(), None);
+    let rule_and_pages = [
+        PAGE_OF_ITS_OWN_CHAT_RULE,
+        "- The space's pages:\n",
+        "  - \"Framework Laptop 13 vs 16\", in `sites/framework-13-16/`: made in this chat.\n",
+        "  - \"Framework Laptop 12, 13 and 16\", in `sites/framework-laptops/`: made in another chat.\n",
+        "  - \"Seville in 3 days\", in `seville-3-days/`: made in another chat.\n",
+    ]
+    .concat();
+    let invariants = prompt
+        .split_once("Direct workspace-change invariants:\n")
+        .map(|(_, rest)| rest)
+        .expect("the invariants");
+    assert!(invariants.contains(&rule_and_pages), "{prompt}");
+    assert!(
+        PAGE_OF_ITS_OWN_CHAT_RULE.contains("A request for a new page starts a new folder, even on the same subject. A page another chat made changes only when the person points at that page (\"the laptop comparison\", \"that page\")."),
+        "{PAGE_OF_ITS_OWN_CHAT_RULE}"
     );
+    // The other chat, with no history at all: its page is its own.
+    let theirs_prompt = pages(theirs, direct, None);
+    assert!(
+        theirs_prompt.contains("  - \"Framework Laptop 12, 13 and 16\", in `sites/framework-laptops/`: made in this chat.\n")
+            && theirs_prompt.contains("  - \"Framework Laptop 13 vs 16\", in `sites/framework-13-16/`: made in another chat.\n"),
+        "{theirs_prompt}"
+    );
+    // Every lane that may write files: a chat with a goal, a turn the routing step expected no
+    // change for, the same on a restored thread.
     let goal = json!({ "objective": "Keep the comparison page current", "status": "active" });
     let none = json!({ "agentRoutingPreflight": { "workspaceFileChangeRequirement": "none" } });
     let restored = json!({ "threadId": "thread-1", "historyReplayRequired": false });
-    for (lane, metadata, provider_state, section) in [
+    for (lane, metadata, provider_state) in [
         (
             "a change in a chat with a goal",
             json!({ "runtimeExpectations": { "workspaceFileChanges": true }, "goal": goal }),
             None,
-            "\nPlease follow these constraints:\n",
         ),
         (
             "a turn the routing step expected no change for",
             none.clone(),
             None,
-            "\nPlease follow these constraints:\n",
         ),
-        (
-            "the same on a restored thread",
-            none,
-            Some(&restored),
-            "\nCurrent Studio runtime invariants:\n",
-        ),
+        ("the same on a restored thread", none, Some(&restored)),
     ] {
-        let prompt = prompt_for(
-            tmp.path(),
-            metadata,
-            provider_state,
-            "Make a simple comparison of the two laptops.",
-        );
-        let section = prompt
-            .split_once(section)
-            .map(|(_, rest)| rest)
-            .unwrap_or_else(|| panic!("{lane}: {prompt}"));
-        assert!(
-            section.contains(PAGE_OF_ITS_OWN_CHAT_RULE),
-            "{lane}: {prompt}"
-        );
+        let prompt = pages(ours, metadata, provider_state);
+        assert!(prompt.contains(&rule_and_pages), "{lane}: {prompt}");
     }
+    // A turn that may not write, and a browser turn, read neither.
     for (lane, metadata, provider_state) in [
         (
             "a read-only turn",
@@ -657,17 +740,67 @@ fn every_turn_that_may_write_reads_whose_page_it_changes_and_never_whose_app() {
             None,
         ),
     ] {
-        let prompt = prompt_for(
-            tmp.path(),
-            metadata,
-            provider_state,
-            "Compare the two laptops.",
-        );
+        let prompt = pages(ours, metadata, provider_state);
+        assert!(!prompt.contains("The space's pages"), "{lane}: {prompt}");
         assert!(
             !prompt.contains(PAGE_OF_ITS_OWN_CHAT_RULE),
             "{lane}: {prompt}"
         );
     }
+}
+
+/// "Assumed: the official hours are useful without a specific visit date." closed a page's reply that
+/// assumed nothing: the hub asked every reply for one `Assumed:` line. It is only for a default the
+/// person didn't give (dates, a currency, which models) now. And "the review search had no provider"
+/// reached a comparison's cell: a note on a page says where Octo looked, never its tools. An
+/// unedited hub from before is upgraded (`a_comparison_asked_in_a_new_chat_is_the_hubs_…`).
+#[test]
+fn a_reply_assumes_only_what_the_person_left_open_and_a_page_names_no_tool() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hub = flat(include_str!(
+        "../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
+    ));
+    let previous = flat(include_str!("legacy/interactive-artifacts-v13.md"));
+    for needle in [
+        "An `Assumed:` line only for a default you chose that the person didn't give (dates, a currency, which models), and none when there is none.",
+        "A note on the page says where you looked, never the tools, searches or services you used.",
+    ] {
+        assert!(hub.contains(needle), "{needle}");
+        assert!(!previous.contains(needle), "new in this version: {needle}");
+    }
+    assert!(!hub.contains("ONE `Assumed:` line"), "{hub}");
+    assert!(previous.contains("ONE `Assumed:` line for the defaults you chose"));
+}
+
+/// Whose page a turn changes reached only the turns that answer in plain text, then every turn
+/// that may write files. It speaks of pages, and the space's own app or site, served from the
+/// workspace itself, is no page in the list: a change to the person's own app from a new chat
+/// ("Make the buttons rounder.") still changes that app. A space with no page has no list.
+#[test]
+fn every_turn_that_may_write_reads_whose_page_it_changes_and_never_whose_app() {
+    let tmp = tempdir().expect("tmp");
+    learn::ensure_project_memory_scaffold(tmp.path());
+    let project = Uuid::new_v4();
+    let app = json!({ "version": 1, "previews": [
+        recorded_page(project, ".", "My app", Some(Uuid::new_v4())),
+    ]});
+    let direct = json!({ "runtimeExpectations": { "workspaceFileChanges": true } });
+    let rounder = prompt_in_chat(
+        tmp.path(),
+        &app,
+        project,
+        Uuid::new_v4(),
+        direct,
+        None,
+        "Make the buttons rounder.",
+    );
+    assert!(rounder.contains(PAGE_OF_ITS_OWN_CHAT_RULE), "{rounder}");
+    assert!(!rounder.contains("The space's pages"), "{rounder}");
+    assert!(!rounder.contains("My app"), "{rounder}");
+    // no page recorded at all
+    let plain = direct_write_prompt(tmp.path(), "Make the buttons rounder.");
+    assert!(plain.contains(PAGE_OF_ITS_OWN_CHAT_RULE), "{plain}");
+    assert!(!plain.contains("The space's pages"), "{plain}");
 }
 
 /// The page to share in a chat that had found the hours ("Put the hours and the metro route on a
