@@ -480,3 +480,170 @@ fn a_hand_back_picks_its_skills_from_the_request_it_carries_on() {
     assert!(!selected_tree(&first).contains(HUB), "{first}");
     assert!(!first.contains(&hub_heading), "{first}");
 }
+
+/// The prompt a direct workspace-change turn gets for `request`, which loads no workspace memory.
+fn direct_write_prompt(workspace: &Path, request: &str) -> String {
+    let processor = test_job_processor(workspace);
+    let project_id = Uuid::new_v4();
+    let mut job = test_lease_job(
+        Some("feature"),
+        json!({ "metadata": { "runtimeExpectations": { "workspaceFileChanges": true } } }),
+    );
+    job.project_id = Some(project_id);
+    let (prompt, ..) = processor
+        .build_prompt_with_text(
+            &project_id,
+            &job,
+            workspace,
+            request,
+            true,
+            None,
+            &[],
+            None,
+            None,
+        )
+        .expect("prompt should build");
+    assert!(
+        prompt.contains("Direct workspace-change response contract"),
+        "{prompt}"
+    );
+    prompt
+}
+
+/// In a new chat, "Make a simple comparison page of … from what you already know, without browsing."
+/// found another chat's researched comparison in `sites/`, read it, deleted its data and wrote its
+/// own there, and that chat's page and card showed the new one. The turn, which loads no workspace
+/// memory, was hinted only the browser skill: "comparison" was no keyword of the hub (it folds apart
+/// from "compare"), so it never read that a follow-up changes its own chat's site. The hub is hinted
+/// now, and the hub and every direct workspace-change turn say whose site a request changes: the one
+/// this chat made, another chat's only when the person names it, else a new folder. An unedited hub
+/// from before is upgraded.
+#[test]
+fn a_comparison_asked_in_a_new_chat_is_the_hubs_and_leaves_another_chats_site_as_it_is() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let tmp = tempdir().expect("tmp");
+    learn::ensure_project_memory_scaffold(tmp.path());
+    let request = "Make a simple comparison page of the Framework Laptop 13 and 16 from what you already know, without browsing.";
+    let hinted = || {
+        format_skill_hints(tmp.path(), request, DIRECT_WRITE_SKILL_HINTS_LEAD)
+            .map(|hints| hints.skills)
+            .unwrap_or_default()
+    };
+    assert!(hinted().iter().any(|id| id == HUB), "{:?}", hinted());
+    let rule = "A follow-up changes the site this chat made; a site another chat made changes only when the person names it, else start a new folder.";
+    let hub =
+        include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
+    assert!(
+        flat(hub).contains(&format!("One site per request. {rule}")),
+        "{hub}"
+    );
+    let prompt = direct_write_prompt(tmp.path(), request);
+    assert!(
+        prompt.contains(".agents/skills/instafy-interactive-artifacts/SKILL.md"),
+        "{prompt}"
+    );
+    let invariants = prompt
+        .split_once("Direct workspace-change invariants:\n")
+        .map(|(_, rest)| rest)
+        .expect("the invariants");
+    assert!(invariants.contains(&format!("- {rule}\n")), "{prompt}");
+    // also for a request no skill matches
+    assert!(
+        direct_write_prompt(
+            tmp.path(),
+            "Create notes/hello.txt with exactly: hello world"
+        )
+        .contains(rule)
+    );
+
+    // The hub from before: no keyword of this request, and "follow-ups change the same site".
+    let path = tmp.path().join(learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
+    let previous = include_str!("legacy/interactive-artifacts-v12.md");
+    assert!(previous.contains("follow-ups change the same site"));
+    fs::write(&path, previous).unwrap();
+    assert!(!hinted().iter().any(|id| id == HUB), "{:?}", hinted());
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&path).unwrap(), hub);
+}
+
+/// The page to share in a chat that had found the hours ("Put the hours and the metro route on a
+/// small page I can share.") was written by hand and served by a static file server, with no links,
+/// no reload and no starter: after the hub, its turn read the previews skill, whose "With no
+/// toolchain, prefer one `index.html` … served by a static file server" won. Its prompt names the hub;
+/// the previews skill now sends a page made for the person to the hub, and keeps the static file
+/// server for other sites. An unedited previews skill from before is upgraded.
+#[test]
+fn a_page_to_share_is_built_the_hubs_way_not_served_by_hand() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let tmp = tempdir().expect("tmp");
+    learn::ensure_project_memory_scaffold(tmp.path());
+    let prompt = direct_write_prompt(
+        tmp.path(),
+        "Put the hours and the metro route on a small page I can share.",
+    );
+    assert!(
+        prompt.contains(".agents/skills/instafy-interactive-artifacts/SKILL.md"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("http.server"), "{prompt}");
+    let previews = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/instafy/.agents/skills/instafy-frontend-previews/SKILL.md"
+    ));
+    let building = flat(
+        previews
+            .split_once("## Building a site to show\n")
+            .and_then(|(_, rest)| rest.split("\n## ").next())
+            .expect("Building a site to show"),
+    );
+    let page = "- A page made for the person (a map, a comparison, a page to share) is built per `instafy-interactive-artifacts`. Any other site with no toolchain: one `index.html`";
+    assert!(building.contains(page), "{building}");
+    assert!(
+        !building.contains("With no toolchain, prefer one `index.html`"),
+        "{building}"
+    );
+    assert_eq!(
+        building.matches("static file server").count(),
+        1,
+        "{building}"
+    );
+    assert!(
+        previews.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+        "{} bytes",
+        previews.len()
+    );
+
+    let path = tmp.path().join(learn::FRONTEND_PREVIEWS_RELATIVE_PATH);
+    let previous = include_str!("legacy/frontend-previews-v16.md");
+    assert!(previous.contains("With no toolchain, prefer one `index.html`"));
+    fs::write(&path, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&path).unwrap(), previews);
+}
+
+/// A comparison asked for "from what you already know, without browsing" claimed "checked 1 Mar 2025
+/// on frame.work" on every row: the hub said "never from memory" and had no form for a person who
+/// asks for exactly that. Such a page says so (`"from": "memory"`), and its values cite no page. On
+/// pages of options, the lede also named the wrong laptop for a missing review, an item whose own
+/// page nobody opened read "Not found yet", and a tip from no page sat in the style of the hours'
+/// source line: the lede names the reply's missing items, such an item says it wasn't checked, and
+/// a tip is plain text. An unedited hub from before is upgraded.
+#[test]
+fn a_page_from_what_octo_knows_says_so_and_its_rows_say_what_was_not_checked() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hub = flat(include_str!(
+        "../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
+    ));
+    let previous = flat(include_str!("legacy/interactive-artifacts-v12.md"));
+    for needle in [
+        "Asked for from what you already know, with nothing looked up: the compare starter with `\"from\": \"memory\"`, each value only its `\"v\"`, from your own knowledge, never from the space's other pages.",
+        "the starter reads each value \"<value>, not checked\" and adds \"From what Octo knows; nothing checked.\" to the lede.",
+        "never from memory unless asked (above)",
+        "An item whose own page wasn't opened is \"not checked (its own page wasn't opened)\" in the reply, and each of its unknown values has `\"note\": \"its own page wasn't opened\"`.",
+        "The lede names the same missing items as the reply.",
+        "A tip no page gave is plain text, never styled like a source line.",
+    ] {
+        assert!(hub.contains(needle), "{needle}");
+        assert!(!previous.contains(needle), "new in this version: {needle}");
+    }
+}

@@ -148,6 +148,9 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     // From before a reply that didn't find something said where it looked or which page it didn't
     // reach, in place of a rule that only forbade saying a site or page lacks it.
     include_str!("legacy/agents-doc-v13.md"),
+    // From before a reply named none of its turn's tabs, checks ("validation passed") or limits ("I
+    // can't use a browser here"), and said what is missing and what the person can ask for instead.
+    include_str!("legacy/agents-doc-v14.md"),
 ];
 /// Whether `text` is a copy of `AGENTS.md` Instafy ships, the current one or an earlier one. A
 /// copy a space edited, or a team's own, is not: its rules are the space's.
@@ -230,6 +233,9 @@ const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
     include_str!("legacy/frontend-previews-v13.md"),
     include_str!("legacy/frontend-previews-v14.md"),
     include_str!("legacy/frontend-previews-v15.md"),
+    // From before a page made for the person (a map, a comparison, a page to share) was built per the
+    // interactive artifacts skill, and a static file server served only other sites.
+    include_str!("legacy/frontend-previews-v16.md"),
 ];
 /// What a previewed site asks Studio for (the person's location, Present and
 /// Follow), read only when a site needs it.
@@ -397,6 +403,10 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // From before a value nobody found said where it was looked for ("price not found on
     // maker.com's page"), not that the page lacks it.
     include_str!("legacy/interactive-artifacts-v11.md"),
+    // From before "comparison" routed here, a follow-up changed only the site its own chat made, a
+    // page asked for from what Octo knows said so ("from": "memory"), and an item whose own page
+    // wasn't opened, the lede's missing items and a tip from no page each said what they are.
+    include_str!("legacy/interactive-artifacts-v12.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),
@@ -2253,7 +2263,7 @@ mod tests {
             .expect("Replies section");
         assert!(
             replies.contains(
-                "- Never describe the turn itself: its run, pass, snapshot, tools or checks."
+                "- Never describe the turn itself: its run, pass, snapshot, tabs, tools,"
             ),
             "{replies}"
         );
@@ -2285,6 +2295,34 @@ mod tests {
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
         }
+    }
+
+    /// A reply named its turn's check ("JSON validation passed."), its browser's own tab ("I couldn't
+    /// run the planner from my reading tab") and what its turn can't do ("I can't access a browser for
+    /// another lookup here", from a build after the browser part, which by design opens no browser):
+    /// none says anything the person can use. The rule on the turn itself names its tabs, checks and
+    /// limits, and a reply says what is missing and what the person can ask for instead. The copy
+    /// from before is upgraded.
+    #[test]
+    fn a_reply_names_no_tab_check_or_limit_of_its_turn_and_says_what_to_ask_for() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let doc = flat(AGENTS_DOC_TEMPLATE);
+        let replies = doc
+            .split("## Replies")
+            .nth(1)
+            .and_then(|rest| rest.split("## ").next())
+            .expect("Replies section");
+        let rule = "- Never describe the turn itself: its run, pass, snapshot, tabs, tools, checks (\"validation passed\") or limits (\"I can't use a browser here\"). Say what is missing and what they can ask for.";
+        assert!(replies.contains(rule), "{replies}");
+        assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+
+        let previous = include_str!("legacy/agents-doc-v14.md");
+        assert!(!flat(previous).contains(rule));
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join(AGENTS_DOC_FILENAME);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
     }
 
     /// A reply states only what a page read in its turn says, else "not checked"; it never says a site or

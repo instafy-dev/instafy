@@ -230,8 +230,9 @@ export function checkSite(dir, expect = []) {
 // nobody found says so with why; a dash or "n/a" is not a value. A filter from a stated limit ("under €600") counts
 // only values the page shows: the starters' site.byFilter lists a row whose value is unknown apart ("Price
 // unknown"), never as within the limit. A row of a comparison is a candidate a page read names (a value's or a
-// "sources" page), or only a search result ("found": its site, drawn "Not checked"). These rules read the data the
-// same way site.js and the compare starter draw it.
+// "sources" page), or only a search result ("found": its site, drawn "Not checked"). A page the person asked for from
+// what Octo knows, with nothing looked up ("from": "memory"), cites no page at all: each value reads "<value>, not
+// checked". These rules read the data the same way site.js and the compare starter draw it.
 
 /** A value that only says nothing is known: blank, dashes, "?", "n/a", "unknown", "TBD" (site.js: no value). */
 export const NO_VALUE = /^(?:[\s\-\u2010-\u2015?.\u00b7\u2026/]*|n\s*\/\s*a|unknown|tb[ad])$/i;
@@ -338,6 +339,38 @@ function liveValue(records, key) {
   return NO_VALUE.test(String(newest.value).trim()) ? null : numberIn(String(newest.value));
 }
 
+/** A page made from what Octo knows, at the person's ask, with nothing looked up ("from": "memory"). */
+export const fromMemory = (data) => !!data && typeof data === "object" && data.from === "memory";
+
+/** The keys that say a page was read, and when. */
+const READ_KEYS = new Set(["url", "date", "asof"]);
+
+/** On a page from what Octo knows, every address or day it gives, as problems: nothing was read, so each would claim a
+ *  check that never happened ("checked 1 Mar on maker.com"). One problem per row, and one for the rest of the page. */
+export function memoryCitations(data) {
+  if (!fromMemory(data)) return [];
+  const keysIn = (value, keys = new Set()) => {
+    if (Array.isArray(value)) for (const v of value) keysIn(v, keys);
+    else if (value && typeof value === "object") {
+      for (const [k, v] of Object.entries(value)) {
+        if (READ_KEYS.has(k) && v != null && String(v).trim() !== "") keys.add(k);
+        else keysIn(v, keys);
+      }
+    }
+    return keys;
+  };
+  const problem = (label, keys) => `${label}: this page is from what Octo knows ("from": "memory"), so nothing on it was read: leave out its ${[...keys].map((k) => `"${k}"`).join(" and ")}. Each value is only its "v" (or a "note"), and reads "<value>, not checked". A page you read is cited on a page without "from": "memory".`;
+  const out = [];
+  const items = Array.isArray(data.items) ? data.items : [];
+  for (const item of items) {
+    const keys = keysIn(item);
+    if (keys.size) out.push(problem(String(item?.name ?? item?.ref ?? "a row"), keys));
+  }
+  const rest = keysIn({ ...data, items: [] });
+  if (rest.size) out.push(problem("the page", rest));
+  return out;
+}
+
 /** A page a row cites: a value with its source and https page, or a "sources" entry with an https page. */
 const citesPage = (fact) => !!(fact && typeof fact === "object" && !fact.est && fact.src && httpsUrl(fact.url));
 
@@ -350,7 +383,8 @@ const SITE_NAME = /^(?=.{1,253}$)(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?\
  *  shape, never by the row's words. A list of names the same turn writes (`--expect`, data.json's "expect") only says
  *  what the page must show; it never vouches for a row. */
 export function uncitedRows(data) {
-  if (!isOptionsData(data) || !Array.isArray(data.columns)) return [];
+  // a page from what Octo knows cites no page by design: its values say "not checked" (memoryCitations)
+  if (!isOptionsData(data) || !Array.isArray(data.columns) || fromMemory(data)) return [];
   const out = [];
   for (const item of data.items) {
     if (!item || typeof item !== "object") continue;
@@ -381,6 +415,7 @@ export function checkValues(dir) {
     return { checked: false, problems, notes };
   }
   if (!isOptionsData(data)) return { checked: false, problems, notes };
+  const memory = fromMemory(data);
   for (const cell of optionCells(data)) {
     const { fact } = cell;
     const where = `${cell.item} · ${cell.label}`;
@@ -389,12 +424,14 @@ export function checkValues(dir) {
       problems.push(`${where}: "${valueOf(fact).trim() || " "}" says nothing. Leave out "v" and say why in "note" ("price not found on maker.com's page"), or give the page you read without finding it there ({"src", "url", "date"}); the page then says "Unknown".`);
       continue;
     }
-    if (!hasValue(fact) || fact.est) continue;
+    // a value from what Octo knows names no page and no day (memoryCitations, below)
+    if (memory || !hasValue(fact) || fact.est) continue;
     const lacks = [!fact.src && '"src"', !httpsUrl(fact.url) && '"url" (the page)', !fact.date && !fact.asof && '"date" (the day)'].filter(Boolean);
     const list = lacks.length > 1 ? `${lacks.slice(0, -1).join(", ")} or ${lacks[lacks.length - 1]}` : lacks[0];
     if (lacks.length) problems.push(`${where}: "${valueOf(fact)}" has no ${list}: add the page that gives this value and the day you read it ("checked 27 Oct on maker.com"). When no page gives it (such as a count of what you found, with none found), leave out "v" and say why in "note".${fact.src ? "" : " Without a source the page shows it as not checked."}`);
   }
   for (const row of uncitedRows(data)) problems.push(row.problem);
+  problems.push(...memoryCitations(data));
 
   const filter = data.filter;
   if (filter && typeof filter === "object") {

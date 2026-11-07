@@ -10723,6 +10723,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "studioRuntimeInvariants",
                 "\nDirect workspace-change invariants:\n\
                 - Use workspace-relative paths only. Never write outside the active workspace.\n\
+                - A follow-up changes the site this chat made; a site another chat made changes only when the person names it, else start a new folder.\n\
                 - Do not create submodules or gitlinks unless the user explicitly asked for one.\n\
                 - Imported or nested repositories are ordinary directories unless the user explicitly asks to preserve nested Git metadata.\n\
                 - Keep the final summary short: what changed and important caveats.\n",

@@ -27,6 +27,10 @@
  *                          search result names it, "found" is that result's site instead, and the row says "Not
  *                          checked". `instafy bind check` fails a row with neither: a guess or a placeholder.
  *   unchecked: ["what was not checked", …]     listed once in the footer, on an empty page too
+ *   from: "memory"         only when the person asked for the page from what Octo knows, with nothing looked up: each
+ *                          fact is just {"v"} (or a {"note"}), with no "src", "url" or "date" (`instafy bind check`
+ *                          fails them), and reads "<value>, not checked", as a ranked row's value without a source does;
+ *                          the lede adds "From what Octo knows; nothing checked." Nothing on the page cites a page.
  *   fact: {"v": "$145", "src": "Example Store", "url": "https://…", "date": "2026-10-17", "asof"?: "2026-08-05", "est": false}
  *   Each value cites its page and day ("checked 17 Oct on maker.com ↗"), and no cell is blank: a source you read
  *   without finding the value on it is the fact without "v" ({"src", "url", "date"}): "Not found · checked 17 Oct on
@@ -43,6 +47,8 @@
   var h = site.h;
   var TABLE_MIN = 760; // the list's own width (not the screen's): Studio's pane and a phone get the same rule
   var lastOrder = [];  // row order while a live check runs, so rows never move under the pointer
+  var MEMORY_LINE = "From what Octo knows; nothing checked.";
+  var memory = false;  // the page is from what Octo knows ("from": "memory"): nothing on it was checked
 
   site.start({
     data: "data.json",
@@ -131,6 +137,8 @@
   }
   /** A missing value reads "Unknown" (with label: "Price unknown", where no column header or fact label says what). */
   function cell(item, col, src, label) {
+    var said = remembered(valueOf(item, col));
+    if (said) return notChecked(said);
     if (isPrice(col)) {
       return site.trust(valueOf(item, col), { price: true, ref: item.ref, intent: "read_offer", store: item.store, seed: seedOf(item, col), label: label, unknown: "Unknown" });
     }
@@ -139,6 +147,28 @@
   function hasMore(item) { return !!(item.note || found(item) || (item.more && item.more.length) || (item.sources && item.sources.length)); }
   /** The site of the search result that alone names this row ("found"), or "". */
   function found(item) { return typeof item.found === "string" ? item.found.trim().slice(0, 100) : ""; }
+  /** On a page from what Octo knows, a fact's value ("" for none, and for a live check's record, which keeps its own
+   * caption). */
+  function remembered(f) { return memory && f && !f.prov ? site.valueText(f) : ""; }
+  /** "1.3 kg, not checked": no source line, date or link. */
+  function notChecked(value) { return h("span", { "class": "trust" }, h("span", { "class": "v", text: value + ", not checked" })); }
+  /** The page as drawn when it is from what Octo knows: each fact only its value and note, no row cites a page or a
+   * search result, and the lede says nothing was checked. */
+  function asRemembered(data) {
+    var plain = function (f) { return f && typeof f === "object" ? { v: f.v, note: f.note } : f; };
+    var lede = String(data.lede || "").trim();
+    if (lede.indexOf(MEMORY_LINE.slice(0, -1)) < 0) lede = (lede ? lede.replace(/([^.!?\u2026])$/, "$1.") + " " : "") + MEMORY_LINE;
+    return Object.assign({}, data, {
+      lede: lede,
+      map: null,
+      items: (data.items || []).map(function (i) {
+        var facts = {};
+        Object.keys(i.facts || {}).forEach(function (k) { facts[k] = plain(i.facts[k]); });
+        return Object.assign({}, i, { facts: facts, sources: [], found: "",
+          more: (i.more || []).map(function (m) { return Object.assign({}, m, { fact: plain(m && m.fact) }); }) });
+      })
+    });
+  }
 
   /** The sort entries data.json gives (none unless it is a list). */
   function sortList(data) { return Array.isArray(data.sort) ? data.sort : []; }
@@ -195,6 +225,8 @@
   function and(list) { return list.length > 1 ? list.slice(0, -1).join(", ") + " and " + list[list.length - 1] : list[0]; }
 
   function render(data, st) {
+    memory = !!data && data.from === "memory";
+    if (memory) data = asRemembered(data);
     site.head(data);
     var all = data.items || [];
     // unless data.json asks for a sort (5+ options), the rows keep their authored order: nothing moves when a check
@@ -337,7 +369,8 @@
       item.note ? h("p", { text: item.note }) : null,
       found(item) ? h("p", { "class": "cap", text: "Named in a search result on " + found(item) + "." }) : null,
       facts.length ? h("dl", { "class": "facts" }, facts.map(function (f) {
-        return h("div", null, h("dt", { text: f.label }), h("dd", null, site.trust(f.fact)));
+        var said = remembered(f.fact);
+        return h("div", null, h("dt", { text: f.label }), h("dd", null, said ? notChecked(said) : site.trust(f.fact)));
       })) : null,
       sources.length ? h("p", { "class": "cap" }, "Sources: ", sources.map(function (s, i) {
         return [i ? ", " : "", site.link(s.url, s.name)];
@@ -412,7 +445,7 @@
    * could not read the store says there why. */
   function isGap(item, col, drawn) {
     var f = valueOf(item, col);
-    if (site.shown(f) || (f && (f.src || f.status === "not_found"))) return false;
+    if (remembered(f) || site.shown(f) || (f && (f.src || f.status === "not_found"))) return false;
     if (isPrice(col) && (site.anyPending([item]) || (item.store && (item.store.readable || site.safeUrl(item.store.url))))) return false;
     return !drawn.querySelector("a, button, svg, .err");
   }
@@ -427,7 +460,7 @@
   }
   /** "Not found yet: Weight, Price, Reviews"; values missing for one reason share it, and values looked for on one page
    * share that page: "Not found yet: Price and Battery (maker.example did not answer), Weight (checked 17 Oct on
-   * maker.com ↗), Suction". */
+   * maker.com ↗), Suction". On a page from what Octo knows nothing was looked for: "Not known: Price". */
   function notFound(gaps) {
     var parts = [];
     gaps.forEach(function (g) {
@@ -435,7 +468,7 @@
       var same = key ? parts.filter(function (p) { return p.key === key; })[0] : null;
       if (same) same.labels.push(g.label); else parts.push({ key: key, note: g.note, page: g.page, labels: [g.label] });
     });
-    var out = ["Not found yet: "];
+    var out = [memory ? "Not known: " : "Not found yet: "];
     parts.forEach(function (p, i) {
       out.push((i ? ", " : "") + and(p.labels));
       if (p.page) out.push(" (" + (p.note ? p.note + " · " : ""), site.cite(p.page), ")");

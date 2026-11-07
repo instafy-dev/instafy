@@ -208,11 +208,13 @@ lists apart because their value is unknown (`site.within` never counts an unknow
 comparison must say where it comes from, by its data, never its words: a value or a `sources` entry cites an https
 page that was read, or, when only a search result names it, `found` names that result's site (`"reviews.example.net"`;
 the compare starter then marks the row "Not checked"). A row with neither, a guess or a placeholder such as "Model 1",
-fails the check, also when `--expect` or `"expect"` names it: that list only says what the page must show. In a
-space's workspace, until the CLI has recorded a preview of that space opened from the site's folder, `init`'s next
-step names the command that serves the page and posts its card in Studio (`instafy preview open … --serve-cmd
-'instafy bind serve . --port {port} --preview' --start`, run in the site's folder) before the check, and every check
-ends with it: a failing check never holds the card back.
+fails the check, also when `--expect` or `"expect"` names it: that list only says what the page must show. A page the
+person asked for from what Octo knows, with nothing looked up (`"from": "memory"`), cites no page: its rows and values
+pass without one, the compare starter shows each value as "<value>, not checked" and says so in the lede, and any
+`url`, `date` or `asof` on it fails the check. In a space's workspace, until the CLI has recorded a preview of that
+space opened from the site's folder, `init`'s next step names the command that serves the page and posts its card in
+Studio (`instafy preview open … --serve-cmd 'instafy bind serve . --port {port} --preview' --start`, run in the site's
+folder) before the check, and every check ends with it: a failing check never holds the card back.
 
 On timeout the binder sends SIGTERM, then SIGKILL after 3 s, and reports `error timeout`.
 
