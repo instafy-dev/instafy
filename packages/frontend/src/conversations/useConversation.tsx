@@ -18,18 +18,13 @@ import {
   getStructuredConversationTitle,
   isDefaultConversationTitle,
 } from "./conversationAutoTitle";
-import { useConversationGoalContinuationEffects } from "./useConversationGoalContinuationEffects";
 import {
   hasVisibleAssistantMessageForRun,
   shouldSuppressAgentEvaluationRunPresence,
   type ConversationGroupParticipationPreflightInput,
   type ConversationGroupParticipationPreflightResult,
 } from "./groupParticipation";
-import {
-  hasNonRecoverableErrorForRun,
-  resolveNonRecoverableGoalErrorRunId,
-  settleGoalAfterNonRecoverableRunError,
-} from "./conversationGoals";
+import { hasNonRecoverableErrorForRun } from "./conversationGoals";
 export type { SubmitConversationOptions, SubmitConversationRuntimeOverride } from "./useConversationSubmitFlow";
 
 const { updateMetadata: updateControllerConversationMetadata } = controllerClient.conversations;
@@ -94,7 +89,6 @@ export function useConversation(): UseConversationResult {
     setConversationTitle,
     setConversationGoal,
     linkRunToConversation,
-    unlinkRunFromConversation,
   } = useConversations();
   const { showStatus } = useStatus();
   const { activeProjectId } = useProject();
@@ -134,7 +128,6 @@ export function useConversation(): UseConversationResult {
     maybeAutoTitleConversation,
     resolveGroupParticipationBeforeSubmit,
     handleSubmit,
-    sendPromptToController,
     stickyMentionedAgentByConversationRef,
     pendingAgentEvaluationRunIdsRef,
   } = useConversationSubmitFlow({
@@ -157,16 +150,6 @@ export function useConversation(): UseConversationResult {
     appendMessages,
     updateMessage,
     linkRunToConversation,
-  });
-
-  useConversationGoalContinuationEffects({
-    conversations,
-    runs,
-    currentUserId,
-    setConversationGoal,
-    appendMessages,
-    sendPromptToController,
-    updateControllerConversationMetadata,
   });
 
   useEffect(() => {
@@ -221,39 +204,6 @@ export function useConversation(): UseConversationResult {
     maybeAutoTitleConversation,
     messages,
     setConversationTitle,
-  ]);
-
-  useEffect(() => {
-    if (!activeConversation?.activeGoal || messages.length === 0) {
-      return;
-    }
-    for (const message of messages) {
-      const result = settleGoalAfterNonRecoverableRunError(
-        activeConversation.activeGoal,
-        messages,
-        message,
-        currentUserId,
-      );
-      if (result.changed) {
-        const failedRunId = resolveNonRecoverableGoalErrorRunId(
-          activeConversation.activeGoal,
-          messages,
-          message,
-        );
-        setConversationGoal(activeConversation.localId, result.goal);
-        if (failedRunId) {
-          unlinkRunFromConversation(failedRunId);
-        }
-        break;
-      }
-    }
-  }, [
-    activeConversation?.activeGoal,
-    activeConversation?.localId,
-    currentUserId,
-    messages,
-    setConversationGoal,
-    unlinkRunFromConversation,
   ]);
 
   const handleSelectConversation = useCallback(

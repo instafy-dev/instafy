@@ -3,7 +3,8 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
-import { createInitialConversation, type ConversationState } from "../conversationState";
+import { conversationsReducer, createInitialConversation, type ConversationsState, type ConversationState } from "../conversationState";
+import { createConversationGoal, type ConversationGoal } from "../conversationGoals";
 import {
   didSendFailForPromptSentFromThisPage,
   forgetPromptsSentFromThisPageForTests,
@@ -14,6 +15,9 @@ const resolveParticipationMock = vi.hoisted(() => vi.fn());
 const ensureControllerConversationIdMock = vi.hoisted(() => vi.fn());
 const recordMessageToControllerMock = vi.hoisted(() => vi.fn());
 const sendPromptToControllerMock = vi.hoisted(() => vi.fn());
+const updateMetadataMock = vi.hoisted(() => vi.fn());
+const setConversationGoalMock = vi.hoisted(() => vi.fn());
+const showStatusMock = vi.hoisted(() => vi.fn());
 const queueAutoTitleConversationMock = vi.hoisted(() => vi.fn());
 const resolveLocalCapabilityHandleMock = vi.hoisted(() => vi.fn());
 const runLocalCapabilityConversationFlowMock = vi.hoisted(() => vi.fn());
@@ -38,6 +42,7 @@ vi.mock("../../sdk/instafy", async () => {
       conversations: {
         ...actual.controllerClient.conversations,
         resolveParticipation: resolveParticipationMock,
+        updateMetadata: updateMetadataMock,
       },
     },
   };
@@ -102,14 +107,14 @@ function HookHarness({
     runtimeStatuses: [],
     effectiveRuntimeId: null,
     effectiveRuntimeSource: "auto",
-    showStatus: vi.fn(),
+    showStatus: showStatusMock,
     createConversation: vi.fn(),
     selectConversation: vi.fn(),
     markConversationRead: vi.fn(),
     setConversationDraft: vi.fn(),
     setConversationControllerId: vi.fn(),
     setConversationTitle: vi.fn(),
-    setConversationGoal: vi.fn(),
+    setConversationGoal: setConversationGoalMock,
     appendMessages,
     updateMessage,
     linkRunToConversation: vi.fn(),
@@ -118,7 +123,7 @@ function HookHarness({
   return null;
 }
 
-describe("useConversationSubmitFlow group participation", () => {
+describe("useConversationSubmitFlow", () => {
   let container: HTMLDivElement;
   let root: Root;
   let flow: SubmitFlow | null;
@@ -143,6 +148,9 @@ describe("useConversationSubmitFlow group participation", () => {
     ensureControllerConversationIdMock.mockReset();
     recordMessageToControllerMock.mockReset();
     sendPromptToControllerMock.mockReset();
+    updateMetadataMock.mockReset().mockResolvedValue(true);
+    setConversationGoalMock.mockReset();
+    showStatusMock.mockReset();
     queueAutoTitleConversationMock.mockReset();
     resolveLocalCapabilityHandleMock.mockReset();
     runLocalCapabilityConversationFlowMock.mockReset();
@@ -186,6 +194,165 @@ describe("useConversationSubmitFlow group participation", () => {
     });
     container.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it.each([
+    ["/goal Review the changes", null, "active", true],
+    ["/goal edit Review the UI", "active", "active", true],
+    ["/goal pause", "active", "paused", false],
+    ["/goal resume", "paused", "active", true],
+    ["/goal clear", "paused", null, false],
+  ] as const)("persists explicit %s and dispatches only when requested", async (command, priorStatus, nextStatus, shouldDispatch) => {
+    conversation.activeGoal = priorStatus ? {
+      ...createConversationGoal("Review the changes", USER_ID), status: priorStatus,
+    } : null;
+    await act(async () => { await flow!.handleSubmit("conversation-local", command); });
+    const expectedGoal = nextStatus ? expect.objectContaining({ status: nextStatus }) : null;
+    expect(setConversationGoalMock).toHaveBeenCalledWith("conversation-local", expectedGoal, conversation.activeGoal);
+    expect(updateMetadataMock).toHaveBeenCalledTimes(1);
+    expect(updateMetadataMock).toHaveBeenCalledWith({
+      conversationId: CONTROLLER_ID, metadata: { instafyGoal: expectedGoal },
+    });
+    expect(sendPromptToControllerMock).toHaveBeenCalledTimes(shouldDispatch ? 1 : 0);
+    if (shouldDispatch) {
+      expect(sendPromptToControllerMock.mock.calls[0][2]).toMatchObject({
+        command: { type: "goal" },
+        goal: updateMetadataMock.mock.calls[0][0].metadata.instafyGoal,
+        displayContent: command,
+      });
+      expect(sendPromptToControllerMock.mock.calls[0][4]).toMatchObject({ controllerId: CONTROLLER_ID });
+    }
+  });
+
+  it("waits for the goal metadata write before starting its run", async () => {
+    let finishWrite!: () => void;
+    updateMetadataMock.mockReturnValue(new Promise<boolean>((resolve) => { finishWrite = () => resolve(true); }));
+    await act(async () => { await flow!.handleSubmit("conversation-local", "/goal Verify the change"); });
+    expect(updateMetadataMock).toHaveBeenCalledTimes(1);
+    expect(setConversationGoalMock).toHaveBeenCalledTimes(1);
+    expect(appendMessages.mock.calls.flatMap(([, messages]) => messages).every((message) => message.role === "user")).toBe(true);
+    expect(sendPromptToControllerMock).not.toHaveBeenCalled();
+    await act(async () => { finishWrite(); });
+    expect(sendPromptToControllerMock).toHaveBeenCalledTimes(1);
+    expect(updateMetadataMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["conversation", "metadata"] as const)("does not dispatch and restores the goal when %s persistence fails", async (failure) => {
+    conversation.activeGoal = createConversationGoal("Previous objective", USER_ID);
+    if (failure === "conversation") ensureControllerConversationIdMock.mockResolvedValue(null);
+    else updateMetadataMock.mockResolvedValue(null);
+    await act(async () => { await flow!.handleSubmit("conversation-local", "/goal edit New objective"); });
+    expect(sendPromptToControllerMock).not.toHaveBeenCalled();
+    expect(setConversationGoalMock).toHaveBeenLastCalledWith(
+      "conversation-local", conversation.activeGoal, expect.objectContaining({ objective: "New objective" }),
+    );
+    expect(showStatusMock).toHaveBeenCalledWith("Couldn't save the goal. Try again.", "error", 4500);
+  });
+
+  function trackGoalState() {
+    let state: ConversationsState = {
+      projectKey: PROJECT_ID, conversations: [conversation], activeId: conversation.localId,
+      sequence: 1, runMap: {},
+    };
+    setConversationGoalMock.mockImplementation((id, goal, expectedGoal) => {
+      state = conversationsReducer(state, { type: "SET_GOAL", id, goal, expectedGoal });
+    });
+    return {
+      current: () => state.conversations[0].activeGoal,
+      conversation: () => state.conversations[0],
+      receive: (goal: ConversationGoal | null) => {
+        state = conversationsReducer(state, { type: "SET_GOAL", id: conversation.localId, goal });
+      },
+    };
+  }
+
+  it.each(["complete", "block", "cancel"] as const)("a failed /goal %s restores the real goal state to active", async (command) => {
+    conversation.activeGoal = {
+      ...createConversationGoal("Previous objective", USER_ID), updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const state = trackGoalState();
+    let failSave!: () => void;
+    updateMetadataMock.mockReturnValue(new Promise<null>((resolve) => { failSave = () => resolve(null); }));
+    await act(async () => { await flow!.handleSubmit("conversation-local", `/goal ${command}`); });
+    expect(state.current()?.status).not.toBe("active");
+    await act(async () => { failSave(); });
+    expect(state.current()).toEqual(conversation.activeGoal);
+    expect(sendPromptToControllerMock).not.toHaveBeenCalled();
+    expect(appendMessages.mock.calls.flatMap(([, messages]) => messages).every((message) => message.role === "user")).toBe(true);
+    expect(showStatusMock).toHaveBeenCalledWith("Couldn't save the goal. Try again.", "error", 4500);
+  });
+
+  it("reports a rejected save without changing goal state or confirming success", async () => {
+    conversation.activeGoal = createConversationGoal("Previous objective", USER_ID);
+    const state = trackGoalState();
+    updateMetadataMock.mockRejectedValue(new Error("Session unavailable"));
+    await act(async () => { await flow!.handleSubmit("conversation-local", "/goal cancel"); });
+    expect(state.current()).toEqual(conversation.activeGoal);
+    expect(sendPromptToControllerMock).not.toHaveBeenCalled();
+    expect(appendMessages.mock.calls.flatMap(([, messages]) => messages).every((message) => message.role === "user")).toBe(true);
+    expect(showStatusMock).toHaveBeenCalledWith("Couldn't finish the goal command. Try again.", "error", 4500);
+  });
+
+  it("a delayed save confirmation cannot replace a newer controller goal", async () => {
+    conversation.activeGoal = createConversationGoal("Previous objective", USER_ID);
+    const state = trackGoalState();
+    let finishSave!: () => void;
+    updateMetadataMock.mockReturnValue(new Promise<boolean>((resolve) => { finishSave = () => resolve(true); }));
+    await act(async () => { await flow!.handleSubmit("conversation-local", "/goal complete"); });
+    const newerGoal = createConversationGoal("A new objective", USER_ID);
+    state.receive(newerGoal);
+    await act(async () => { finishSave(); });
+    expect(state.current()).toEqual(newerGoal);
+    expect(sendPromptToControllerMock).not.toHaveBeenCalled();
+  });
+
+  it("pauses a pending start and keeps the pause when that start's acknowledgement arrives late", async () => {
+    const state = trackGoalState();
+    let finishStartSave!: () => void;
+    updateMetadataMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => {
+      finishStartSave = () => resolve(true);
+    }));
+    sendPromptToControllerMock.mockResolvedValue({ ok: false, errorMessage: "The goal changed before dispatch" });
+    await act(async () => { await flow!.handleSubmit("conversation-local", "/goal Review the changes"); });
+    const startedGoal = state.current();
+    expect(startedGoal?.status).toBe("active");
+    await act(async () => root.render(<HookHarness conversation={state.conversation()}
+      appendMessages={appendMessages} updateMessage={updateMessage} onReady={(value) => { flow = value; }} />));
+    await act(async () => { await flow!.handleSubmit("conversation-local", "/goal pause"); });
+    expect(state.current()).toMatchObject({ id: startedGoal!.id, status: "paused" });
+    expect(updateMetadataMock.mock.calls[1][0].metadata.instafyGoal).toMatchObject({ id: startedGoal!.id, status: "paused" });
+    await act(async () => { finishStartSave(); });
+    expect(sendPromptToControllerMock.mock.calls[0][2].goal).toEqual(startedGoal);
+    expect(state.current()?.status).toBe("paused");
+    expect(updateMetadataMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("a failed save does not roll back a newer controller update", async () => {
+    conversation.activeGoal = createConversationGoal("Previous objective", USER_ID);
+    const state = trackGoalState();
+    let failSave!: () => void;
+    updateMetadataMock.mockReturnValue(new Promise<null>((resolve) => { failSave = () => resolve(null); }));
+    await act(async () => { await flow!.handleSubmit("conversation-local", "/goal cancel"); });
+    const replacement = createConversationGoal("New objective", USER_ID);
+    state.receive(replacement);
+    await act(async () => { failSave(); });
+    expect(state.current()).toEqual(replacement);
+    expect(sendPromptToControllerMock).not.toHaveBeenCalled();
+  });
+
+  it("a late dispatch refusal cannot overwrite a newer goal or issue another metadata write", async () => {
+    const state = trackGoalState();
+    let refuseDispatch!: () => void;
+    sendPromptToControllerMock.mockReturnValue(new Promise<{ ok: false; errorMessage: string }>((resolve) => {
+      refuseDispatch = () => resolve({ ok: false, errorMessage: "The goal changed before dispatch" });
+    }));
+    await act(async () => { await flow!.handleSubmit("conversation-local", "/goal Review the changes"); });
+    expect(state.current()?.status).toBe("active");
+    const newerGoal = createConversationGoal("A new objective", USER_ID);
+    state.receive(newerGoal);
+    await act(async () => { refuseDispatch(); });
+    expect(state.current()).toEqual(newerGoal);
+    expect(updateMetadataMock).toHaveBeenCalledTimes(1);
   });
 
   it("records a silent human turn without dispatching or starting a runtime", async () => {

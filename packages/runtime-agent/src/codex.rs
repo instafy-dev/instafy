@@ -363,7 +363,9 @@ fn normalize_runtime_codex_model_id(model: &str) -> String {
 /// obeying a harder constraint than the prompt. They are listed here now, and
 /// because `required` names every key, an action of another type emits them as
 /// explicit nulls, which every parse site already reads as absence.
-fn default_final_output_json_schema() -> JsonValue {
+/// Goal lifecycle fields must also be encodable: a goal_update without status
+/// cannot mark a completed goal complete, even when its description says so.
+pub(crate) fn default_final_output_json_schema() -> JsonValue {
     serde_json::from_str(
         r#"{
           "type": "object",
@@ -462,10 +464,28 @@ fn default_final_output_json_schema() -> JsonValue {
                   "suggestedSecrets",
                   "agentHandles",
                   "questions",
-                  "continuationNote"
+                  "continuationNote",
+                  "status",
+                  "objective",
+                  "progressSummary",
+                  "doneWhen",
+                  "stopWhen",
+                  "operation"
                 ],
                 "properties": {
                   "type": { "type": "string" },
+                  "status": {
+                    "type": ["string", "null"],
+                    "enum": ["active", "paused", "completed", "blocked", "canceled", null]
+                  },
+                  "objective": { "type": ["string", "null"] },
+                  "progressSummary": { "type": ["string", "null"] },
+                  "doneWhen": { "type": ["string", "null"] },
+                  "stopWhen": { "type": ["string", "null"] },
+                  "operation": {
+                    "type": ["string", "null"],
+                    "enum": ["clear", null]
+                  },
                   "continuationNote": { "type": ["string", "null"] },
                   "questions": {
                     "type": ["array", "null"],
