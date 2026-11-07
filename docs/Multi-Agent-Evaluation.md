@@ -433,15 +433,15 @@ Before a normal root turn enters detailed planning, the runtime asks for one sma
 Write permission and completion requirements are separate. Controller `writeIntent` and
 `writeScope` authorize and constrain mutations; routing cannot grant permission. A conditional
 review must still perform its required observations and tests, but may explain why no edit is
-warranted. It can also make justified edits within its existing scope. A required write that
-ends without a change gets one recovery pass, which asks again for the change or the concrete
-blocker, and asks a reply that changes nothing to end with the line `NO_FILE_CHANGES`. The
-preflight reads the request before anything runs, so when the recovery pass still changes
-nothing and its reply ends with that line, the reply (an answer, a question for the person, or
-what blocks the work) is the turn's result, without the line, recorded as a
-`codex/required-changes-not-made` artifact. A reply that changes nothing without that line reads
-as a promise of a change that was not made, and fails the turn, as does a reply that lists a file
-missing from disk.
+warranted. It can also make justified edits within its existing scope. A required write's
+prompt asks a reply that changes nothing to say why and end with the line `NO_FILE_CHANGES`. The
+preflight reads the request before anything runs, so when the turn changes nothing and its reply
+ends with that line, the reply (an answer, a question for the person, or what blocks the work) is
+the turn's result, without the line, recorded as a `codex/required-changes-not-made` artifact. A
+reply that changes nothing without that line gets one recovery pass, which asks again for the
+change or the concrete blocker; if that pass still changes nothing without saying so, its reply
+reads as a promise of a change that was not made, and fails the turn, as does a reply that lists a
+file missing from disk.
 
 Every turn that saves to the workspace lists the files it changed on disk in its receipts,
 whatever the requirement: a tool such as a skill pack's command can write files on a turn read

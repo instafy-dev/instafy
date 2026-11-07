@@ -231,7 +231,8 @@ const REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND: &str = "codex/required-changes-no
 /// it did not make, and the turn fails.
 const NO_FILE_CHANGES_MARKER: &str = "NO_FILE_CHANGES";
 
-/// Added to the recovery prompt of a required change that is still missing.
+/// Added to a required change's prompt, and once more, last, to its recovery
+/// prompt when the change is still missing.
 const NO_FILE_CHANGES_REPORT_REQUIREMENT: &str = "\n\nIMPORTANT NO-CHANGE REPORT REQUIREMENT:\n\
 - If you end this attempt without changing any file, say in plain words what you found, what you need from the person, or what blocks the change, and end that reply with a separate last line that is exactly `NO_FILE_CHANGES` (as the last line of the `summary` text when you answer in JSON). The runtime removes that line before the person reads your reply.\n\
 - Never add that line when you changed files, and never say a change was made when it was not.\n";
@@ -3953,6 +3954,14 @@ const SKILL_SETUP_CONTINUATION: &str = "\nSkill setup rule:\n- This conversation
 const WORKSPACE_IS_CURRENT_RULE: &str = "\
 - You are running in this space's workspace, so it is up. An earlier turn's failure or notice may be out of date: check what you see now before repeating it or its advice. Tell the person to reconnect or restart the workspace only if they ask how, or something you ran this turn shows it failing.\n\
 - In a skill setup, the workspace records its progress. If a file an earlier step saved is missing, say in one plain sentence that it is gone, without guessing why, then redo that step (ask its question again) and continue.\n";
+
+/// Whose page a turn changes. In a new chat, "Make a simple comparison page of … from what you
+/// already know" found another chat's researched comparison, read it and wrote its own over it,
+/// so that chat's page and card showed the new one. A page made for the person stays the page of
+/// the chat that made it, as the interactive artifacts skill also says; the person's own app or
+/// site is changed as asked, from any chat. Every turn that may write files reads this, whatever
+/// skill it reads and whichever form its answer takes.
+const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A follow-up changes the page this chat made; a page made for the person in another chat (a map, a comparison, a page to share) changes only when the person names it, else start a new folder.\n";
 
 /// True when a person in this conversation opened a skill setup with
 /// `/skills import ... --start` or `/skills start <name>` and the setup began.
@@ -7799,6 +7808,13 @@ impl JobProcessor {
             pending.append_deferred_context(reply, &mut prompt);
             enrich_prompt_context_metrics(&mut prompt_context, &prompt);
         }
+        // A required change: a reply that changes nothing on purpose says why and ends with the
+        // runtime's line, and then stands as the turn's result, with no recovery pass to ask the
+        // same again (`reported_no_file_changes` below).
+        if expects_workspace_file_changes {
+            prompt.push_str(NO_FILE_CHANGES_REPORT_REQUIREMENT);
+            enrich_prompt_context_metrics(&mut prompt_context, &prompt);
+        }
         ensure_ambient_participation_prompt_context(job, &mut prompt, &mut prompt_context);
         if provider_thread_not_restorable && let Some(metrics) = prompt_context.as_object_mut() {
             metrics.insert(
@@ -8220,6 +8236,16 @@ impl JobProcessor {
         let mut outcome = extract_codex_outcome(&output.final_json)?;
         user_input_request::validate_outcome_scope(job, &outcome)?;
         outcome.read_files = normalize_codex_read_files(&workspace_dir, outcome.read_files);
+        // The runtime's no-change line: a required change's prompt asks for it, and a turn's
+        // provider thread can keep it from an earlier prompt. It leaves the reply before anything
+        // reads or shows it (a plan card carries the reply's words), so the person never reads it.
+        let reported_no_file_changes = match take_no_file_changes_marker(&outcome.summary) {
+            Some(summary) => {
+                outcome.summary = summary;
+                true
+            }
+            None => false,
+        };
         let clean_ambient_decline = clean_ambient_participation_decline(
             job,
             &output.final_json,
@@ -8349,12 +8375,6 @@ impl JobProcessor {
         )
         .await?
             == 0;
-        // A turn's provider thread keeps an earlier recovery prompt, so a
-        // first answer can end with the runtime's no-change line too; the
-        // person never reads it.
-        if let Some(summary) = take_no_file_changes_marker(&outcome.summary) {
-            outcome.summary = summary;
-        }
 
         // Learning prompts require that we mention `INSTAFY.md` in the final summary (even when no
         // updates were needed). Relying on the model to follow this requirement is brittle, and
@@ -8441,6 +8461,16 @@ impl JobProcessor {
                 shared_browser_action_log_before,
                 crate::shared_browser::action_log_len(),
             );
+        // A Shared Browser turn that opened no page is not run again: told to open "the official
+        // site of what the task is about", the retry of a routed task that named nothing opened
+        // a site it guessed (a local test, Nov 6). It ends below, unless the browser or the
+        // model's service failed it (a step that never reached the browser, or a passing
+        // upstream error), which runs it again with its own request.
+        let shared_browser_turn_ends_without_a_page = shared_browser_no_page_ends_the_turn(
+            shared_browser_execution_missing,
+            transient_upstream_summary_failure,
+            &interim_messages,
+        );
         let evidence_recovery_plan = routing_recovery::plan(
             evidence_requirements,
             observed_evidence,
@@ -8479,11 +8509,30 @@ impl JobProcessor {
         let workspace_file_changes_missing = expects_workspace_file_changes_after_actions
             && outcome.files.is_empty()
             && !workspace_file_changes_satisfied_by_patch_apply;
+        // A required change that changed nothing and says why (an answer, a question for the
+        // person, or what blocks the work) is the turn's result, as after a recovery pass: that
+        // pass, on a thread of its own, asked the same again (a local test, Nov 6: "keep going"
+        // answered that it left out the tip the person undid, and the retry's draft showed for
+        // 2 s before the same answer).
+        let required_changes_not_made = workspace_file_changes_missing && reported_no_file_changes;
+        let workspace_file_changes_missing =
+            workspace_file_changes_missing && !reported_no_file_changes;
+        if required_changes_not_made {
+            tracing::info!(
+                job_id = %job_id,
+                "no file change, and the reply says so; keeping it"
+            );
+            artifacts.push(json!({
+                "kind": REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND,
+                "metadata": { "reason": "no_change_reported" },
+            }));
+        }
 
         // A browser turn that hands the person's message to the building turn
         // has its answer: no reason to run it again.
         let recovery_retry_required = !clean_ambient_decline
             && !hands_the_message_to_the_building_turn
+            && !shared_browser_turn_ends_without_a_page
             && (reported_file_changes_missing
                 || workspace_file_changes_missing
                 || codex_fallback_summary_kind.is_some()
@@ -8516,6 +8565,19 @@ impl JobProcessor {
                 message: "The turn ended without an answer. It was not run again, because it may \
                           already have acted."
                     .into(),
+                artifacts,
+            }
+            .into());
+        }
+        if !run_once && shared_browser_turn_ends_without_a_page {
+            artifacts.push(json!({
+                "kind": "browser/execution-missing",
+                "metadata": {
+                    "reason": "missing_instrumented_shared_browser_actions",
+                }
+            }));
+            return Err(JobFailureWithArtifacts {
+                message: SHARED_BROWSER_NO_PAGE_FAILURE.to_string(),
                 artifacts,
             }
             .into());
@@ -8613,10 +8675,9 @@ impl JobProcessor {
                     browser_hand_back::build_request_retry_line(job)
                 )
             } else if shared_browser_execution_missing {
-                shared_browser_execution_retry_prompt(
-                    &prompt,
-                    browser_hand_back::build_request_retry_line(job),
-                )
+                // The browser or the model's service failed the turn: its own request again,
+                // with nothing that sends it to a page the task does not name.
+                prompt.to_string()
             } else if command_execution_missing {
                 evidence_recovery_plan.map_or_else(
                     || prompt.to_string(),
@@ -8727,7 +8788,9 @@ impl JobProcessor {
                 }
             }
             // A required change is still missing: the recovery pass may end
-            // without one only by saying so.
+            // without one only by saying so. The line comes last, after the
+            // retry's own requirement to make the change, which overrides
+            // what comes before it, the turn's own copy of the line included.
             if workspace_file_changes_missing {
                 retry_prompt.push_str(NO_FILE_CHANGES_REPORT_REQUIREMENT);
             }
@@ -9104,8 +9167,8 @@ impl JobProcessor {
             // message, opened no page and asks Octo to make what the message
             // asks: the message goes to the building turn, as after a first
             // attempt that did, and the turn does not fail for the page it
-            // never opened. A first attempt that said so in words alone gets
-            // here, its retry asked to decide first
+            // never opened. A Personal Browser turn's first attempt that said
+            // so in words alone gets here, its retry asked to decide first
             // (`browser_hand_back::build_request_retry_line`).
             let retry_hands_the_message_to_the_building_turn =
                 (retry_shared_browser_execution_missing
@@ -10731,11 +10794,15 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 &mut prompt,
                 &mut prompt_section_metrics,
                 "studioRuntimeInvariants",
-                "\nDirect workspace-change invariants:\n\
-                - Use workspace-relative paths only. Never write outside the active workspace.\n\
-                - Do not create submodules or gitlinks unless the user explicitly asked for one.\n\
+                &[
+                    "\nDirect workspace-change invariants:\n\
+                - Use workspace-relative paths only. Never write outside the active workspace.\n",
+                    PAGE_OF_ITS_OWN_CHAT_RULE,
+                    "- Do not create submodules or gitlinks unless the user explicitly asked for one.\n\
                 - Imported or nested repositories are ordinary directories unless the user explicitly asks to preserve nested Git metadata.\n\
                 - Keep the final summary short: what changed and important caveats.\n",
+                ]
+                .concat(),
             );
             // The replies guide the reply line names. A turn that loads no memory snapshot (a
             // required change, a lookup of another chat, a turn on a restored thread) also runs
@@ -10806,15 +10873,24 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                     &mut prompt,
                     &mut prompt_section_metrics,
                     "studioRuntimeInvariants",
-                    "\nCurrent Studio runtime invariants:\n\
-                - Treat read-only as no workspace mutation. Safe inspection commands and CLI lookups are allowed when needed to answer.\n\
-                - Compact agent context cards are soft hints/cache for prior context, current work focus, and coordination direction. Use the relevant cards included in this prompt when present; otherwise query them with `instafy agents context list --json --query \"<topic>\"` when the latest request asks for prior project, coordination, audit, host, or hardware context.\n\
+                    &[
+                        "\nCurrent Studio runtime invariants:\n\
+                - Treat read-only as no workspace mutation. Safe inspection commands and CLI lookups are allowed when needed to answer.\n",
+                        // as the full constraints say to a turn that may write
+                        if metadata_requests_read_only_workspace(job.payload.get("metadata")) {
+                            ""
+                        } else {
+                            PAGE_OF_ITS_OWN_CHAT_RULE
+                        },
+                        "- Compact agent context cards are soft hints/cache for prior context, current work focus, and coordination direction. Use the relevant cards included in this prompt when present; otherwise query them with `instafy agents context list --json --query \"<topic>\"` when the latest request asks for prior project, coordination, audit, host, or hardware context.\n\
                 - Agent-to-agent conversations are first-class conversations. For unknown-focus follow-ups, lookup first, answer directly when evidence is sufficient, ask one clear prior thread when durable context matters, and do not poll all agents to discover soft focus.\n\
                 - For follow-ups about lanes, workers, files, or evidence, prefer the most recent matching user-visible evidence in this active conversation, but what you see in the workspace now beats earlier failure notices. Use older same-topic context cards or prior conversation search results only if current conversation evidence is absent or clearly not the target.\n\
                 - For current-conversation evidence-only follow-ups, do not search workspace files, source trees, `.instafy`, `.codex-runtime*`, `.codex-runtime-fallback`, or runtime logs. If restored provider context is insufficient, inspect only the active conversation with `instafy conversation show --include-threads --transcript --json`, which reads this conversation's id from the environment. Only if an older CLI reports a missing conversation argument, add the Conversation ID from Runtime context.\n\
                 - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n\
                 - Hardware/IO context card facts are not proof. Verify on the active runtime before claiming serial, BLE, USB, or flashing access.\n\
                 - If the active runtime cannot access host-native IO, say that a Desktop/CLI runtime on the attached machine is needed.\n",
+                    ]
+                    .concat(),
                 );
             }
         } else if cross_chat_context_lookup {
@@ -11023,6 +11099,14 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - If multiple secret inputs are required, include all names in `suggestedSecretNames` (ordered by setup priority).\n\
               Never include secret values or tokens in chat or JSON.\n\
             - When referencing UI onboarding/actions in `summary`, do not use positional wording (for example \"above\", \"below\", \"left\", \"right\"). Use position-agnostic wording like \"the integration action card in this message\".\n",
+            // A turn here may write files too (a goal's change, a page the routing step
+            // expected no change for), so it reads whose page it may change, as a
+            // direct workspace-change turn does.
+            if metadata_requests_read_only_workspace(job.payload.get("metadata")) {
+                ""
+            } else {
+                PAGE_OF_ITS_OWN_CHAT_RULE
+            },
             "- If the user asks you to create/edit/delete files, you MUST actually perform the filesystem changes in the workspace (prefer the `apply_patch` tool). Do not claim a file was changed unless it truly exists in the workspace.\n\
             - If you cannot apply file changes via tools, you MUST include the full post-change contents inline in the JSON `files` array using either `content` (UTF-8 text) or `contentBase64` (base64-encoded bytes). The runtime will write the files for you; this does not require `exec_command` or `shell`. Do not treat missing command tools as a blocker for file-only create/edit/delete requests when you can return inline `files[]` content.\n\
             - If you use `apply_patch`, follow the patch format exactly. Example (create a file):\n\
@@ -13103,10 +13187,19 @@ fn augment_summary_for_onboarding_actions(summary: &mut String, actions: &[Codex
         return;
     }
 
-    if !summary.trim().is_empty() {
-        summary.push_str("\n\n");
+    // The runtime's no-change line stays last, for the caller that reads it: a
+    // required change that only asks for a connection says why and ends with it.
+    let marked = take_no_file_changes_marker(summary);
+    let mut reply = marked.clone().unwrap_or_else(|| std::mem::take(summary));
+    if !reply.trim().is_empty() {
+        reply.push_str("\n\n");
     }
-    summary.push_str(&guidance_lines.join("\n"));
+    reply.push_str(&guidance_lines.join("\n"));
+    if marked.is_some() {
+        reply.push('\n');
+        reply.push_str(NO_FILE_CHANGES_MARKER);
+    }
+    *summary = reply;
 }
 
 fn push_unique_ci(values: &mut Vec<String>, candidate: &str) {
@@ -14404,37 +14497,56 @@ fn turn_that_cannot_save(
     })
 }
 
-/// What the person reads when a browser turn ended, after its retry, without
-/// having used the browser: plain words, shown inline on the failed turn
-/// (Studio keeps a reason that names the AI vendor or a tool behind Details).
-/// The artifact beside it keeps the machine-readable reason.
+/// What the person reads when a browser turn ended without having used the
+/// browser: plain words, shown inline on the failed turn (Studio keeps a
+/// reason that names the AI vendor or a tool behind Details). The artifact
+/// beside it keeps the machine-readable reason.
 const SHARED_BROWSER_NO_PAGE_FAILURE: &str =
     "Octo didn't open a page in the browser, so this turn stopped.";
 const PERSONAL_BROWSER_NOT_USED_FAILURE: &str =
     "Octo couldn't use the browser on this device, so this turn stopped.";
-/// The status a retry for the same reason leaves in Details.
+/// The status a retry leaves in Details: a Shared Browser turn whose step
+/// never reached the browser, or that a passing upstream error ended, runs
+/// again with its own request.
 const SHARED_BROWSER_NO_PAGE_RETRY_STATUS: &str =
     "Trying again: Octo hadn't opened a page in the browser yet.";
 const PERSONAL_BROWSER_NOT_USED_RETRY_STATUS: &str =
     "Trying again: Octo hadn't used the browser on this device yet.";
 
-/// `build_request` is what a retry of a browser turn that carries on the
-/// person's own message reads first ([`browser_hand_back::build_request_retry_line`]).
-fn shared_browser_execution_retry_prompt(prompt: &str, build_request: &str) -> String {
-    // A browser that has just started is on a blank page: the snapshot says so
-    // and the agent has to navigate before there is anything to act on. A
-    // task that names no address (research, a comparison) gets no address
-    // from its card either, so the agent picks the page to start from.
-    format!(
-        "{prompt}\n\nIMPORTANT SHARED BROWSER RETRY REQUIREMENT:\n\
-        - Your previous response did not produce any instrumented Shared Browser action evidence.\n\
-        {build_request}\
-        - Use `instafy_shared_browser.snapshot` now. If it reports a blank page, call `instafy_shared_browser.navigate` before anything else: with the http(s) address the task names, or, when it names none, with the official site of what the task is about. A blank page is never a reason to stop.\n\
-        - Complete the requested interaction with the same dedicated MCP server and fresh snapshot indices.\n\
-        - Do not use shell, Playwright, direct CDP, or merely narrate the action.\n\
-        - Finish only after the controller response provides the final observed page title and URL.\n\n\
-        Retry the latest user request now."
-    )
+/// Whether a Shared Browser turn that opened no page (`execution_missing`) ends
+/// there, with no retry: always, unless the browser or the model's service left
+/// it without a page (a passing upstream error, or a step that never reached the
+/// browser), which runs it once more with its own request.
+fn shared_browser_no_page_ends_the_turn(
+    execution_missing: bool,
+    transient_upstream_failure: bool,
+    messages: &[JobMessage],
+) -> bool {
+    execution_missing
+        && !transient_upstream_failure
+        && !shared_browser_step_never_reached_the_browser(messages)
+}
+
+/// Whether a step of the turn could not reach Instafy's browser at all
+/// (`browserUnavailable`: one slow connect, a browser starting again): the
+/// browser, not the turn, left it without a page.
+fn shared_browser_step_never_reached_the_browser(messages: &[JobMessage]) -> bool {
+    messages.iter().any(|message| {
+        message
+            .message_type
+            .as_deref()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("mcp_tool_call"))
+            && message.metadata.as_ref().is_some_and(|metadata| {
+                metadata
+                    .get("server")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|server| server.eq_ignore_ascii_case("instafy_shared_browser"))
+                    && metadata
+                        .get("browserUnavailable")
+                        .and_then(JsonValue::as_bool)
+                        == Some(true)
+            })
+    })
 }
 
 fn codex_plain_write_task_retry_prompt(prompt: &str) -> String {
@@ -28984,32 +29096,70 @@ mod tests {
         ));
     }
 
+    /// A Shared Browser turn that opened no page runs again only when a step of it never reached
+    /// the browser (`browserUnavailable`): the browser, not the turn, left it without a page. A
+    /// look at a blank page, a listing of the turn's tools or an answer in words alone end the
+    /// turn: told to open "the official site of what the task is about", the retry of a routed
+    /// task that named nothing opened a site it guessed (a local test, Nov 6).
     #[test]
-    fn shared_browser_retry_prompt_navigates_away_from_a_blank_page() {
-        let retry = shared_browser_execution_retry_prompt("Open https://app.example.test", "");
-        assert!(retry.starts_with("Open https://app.example.test\n\n"));
-        assert!(retry.contains("Use `instafy_shared_browser.snapshot` now."));
-        assert!(retry.contains(
-            "If it reports a blank page, call `instafy_shared_browser.navigate` before anything else: with the http(s) address the task names"
-        ));
-        assert!(retry.ends_with("Retry the latest user request now."));
-    }
+    fn only_a_step_that_never_reached_the_browser_runs_a_turn_with_no_page_again() {
+        let step = |server: &str, tool: &str, status: &str, unreachable: bool| {
+            let mut item = json!({
+                "id": format!("call-{server}-{tool}"),
+                "type": "mcp_tool_call",
+                "server": server,
+                "tool": tool,
+                "status": status,
+            });
+            if unreachable {
+                item["browserUnavailable"] = json!(true);
+            }
+            extract_codex_messages(&[json!({"type": "item.completed", "item": item})])
+        };
+        for tool in ["navigate", "open_tab", "snapshot", "status"] {
+            assert!(
+                shared_browser_step_never_reached_the_browser(&step(
+                    "instafy_shared_browser",
+                    tool,
+                    "failed",
+                    true
+                )),
+                "{tool}"
+            );
+        }
+        for (server, tool, status, unreachable) in [
+            ("instafy_shared_browser", "status", "completed", false),
+            ("instafy_shared_browser", "snapshot", "completed", false),
+            ("instafy_shared_browser", "navigate", "failed", false),
+            ("codex", "list_mcp_resources", "completed", false),
+            ("another_server", "navigate", "failed", true),
+        ] {
+            assert!(
+                !shared_browser_step_never_reached_the_browser(&step(
+                    server,
+                    tool,
+                    status,
+                    unreachable
+                )),
+                "{server}/{tool} {status}"
+            );
+        }
+        assert!(!shared_browser_step_never_reached_the_browser(&[]));
 
-    #[test]
-    fn shared_browser_retry_prompt_opens_a_page_for_a_task_that_names_no_address() {
-        // Drive, Oct 28: a research card named no address, the browser had
-        // just started on a blank tab, and both attempts stopped there ("the
-        // task provides no page address to open"), so the turn failed.
-        let retry = shared_browser_execution_retry_prompt(
-            "Research the three latest robot vacuums under 600 euros and build a comparison page.",
-            "",
-        );
-        assert!(
-            retry.contains(
-                "or, when it names none, with the official site of what the task is about"
-            )
-        );
-        assert!(retry.contains("A blank page is never a reason to stop."));
+        // The turn ends at once, whatever it looked at or answered, unless the browser or the
+        // model's service left it without a page: a step that never reached the browser, or a
+        // passing upstream error.
+        let looked = step("instafy_shared_browser", "status", "completed", false);
+        let unreachable = step("instafy_shared_browser", "navigate", "failed", true);
+        assert!(shared_browser_no_page_ends_the_turn(true, false, &looked));
+        assert!(shared_browser_no_page_ends_the_turn(true, false, &[]));
+        assert!(!shared_browser_no_page_ends_the_turn(
+            true,
+            false,
+            &unreachable
+        ));
+        assert!(!shared_browser_no_page_ends_the_turn(true, true, &looked));
+        assert!(!shared_browser_no_page_ends_the_turn(false, false, &looked));
     }
 
     #[test]
@@ -34696,7 +34846,7 @@ mod tests {
             )
         );
         // It decides before any browser step: the run text sends a turn that
-        // finds a blank page to the official site of what the task is about,
+        // finds a blank page to the official site of what the task names,
         // and a turn that opened a page hands nothing back.
         assert!(
             browser_hand_back::BUILD_REQUEST_LINE
@@ -34704,14 +34854,13 @@ mod tests {
         );
     }
 
-    /// A browser turn that carries on the person's own message and opened no page is tried
-    /// again once in the browser, as any is, unless its answer asked Octo to make the message.
-    /// That retry reads the build request first, ahead of its own requirement to open a page: a
-    /// first answer that said in words alone it could not make the map (as one did in a local
-    /// test, Oct 31) gets one more chance to hand the message back, where the retry's
-    /// requirement alone would send it to a website. A retry of any other turn reads nothing of
-    /// it: its build request would hand nothing back, or, for a turn whose findings go back to
-    /// the building turn, a build comes after it already.
+    /// A Personal Browser turn that carries on the person's own message and did not use the
+    /// browser is tried again once, unless its answer asked Octo to make the message, and that
+    /// retry reads the build request first: a first answer that said in words alone it could not
+    /// make the map (as one did in a local test, Oct 31) gets one more chance to hand the message
+    /// back. A retry of any other turn reads nothing of it: its build request would hand nothing
+    /// back, or, for a turn whose findings go back to the building turn, a build comes after it
+    /// already. A Shared Browser turn that opened no page is not tried again at all.
     #[test]
     fn the_browser_retry_of_a_routed_turn_reads_the_build_request_first() {
         let job = |routed: JsonValue| {
@@ -34719,7 +34868,7 @@ mod tests {
                 Some("feature"),
                 json!({
                     "metadata": {
-                        "browserTransport": "shared",
+                        "browserTransport": "desktop-personal",
                         "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
                         "browserCardTurn": {"version": 1, "routed": routed},
                     }
@@ -34730,7 +34879,7 @@ mod tests {
             Some("feature"),
             json!({
                 "metadata": {
-                    "browserTransport": "shared",
+                    "browserTransport": "desktop-personal",
                     "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
                     "browserHandsBack": true,
                     "browserCardTurn": {"version": 1, "routed": true},
@@ -34743,25 +34892,17 @@ mod tests {
         );
         let line = browser_hand_back::build_request_retry_line(&job(json!(true)));
         assert_eq!(line, browser_hand_back::BUILD_REQUEST_RETRY_LINE);
-        let retry = shared_browser_execution_retry_prompt("Plan three days, on a map.", line);
-        let decide = retry
-            .find("answer with the action `{type: 'request_build'}` alone, with no browser step.")
-            .expect("the build request");
-        let navigate = retry
-            .find("Use `instafy_shared_browser.snapshot` now.")
-            .expect("the retry requirement");
-        assert!(decide < navigate, "{retry}");
         assert!(
-            retry.contains("Every other request:\n- Use `instafy_shared_browser.snapshot` now.")
+            line.contains(
+                "answer with the action `{type: 'request_build'}` alone, with no browser step."
+            ),
+            "{line}"
         );
         // It points to the turn's prompt: a browser turn reads no write-scope guardrail.
-        assert!(!retry.contains("write-scope"), "{retry}");
+        assert!(!line.contains("write-scope"), "{line}");
         for stamp in [json!(false), json!("true"), JsonValue::Null] {
             assert_eq!(browser_hand_back::build_request_retry_line(&job(stamp)), "");
         }
-        let plain = shared_browser_execution_retry_prompt("Open https://app.example.test", "");
-        assert!(!plain.contains("request_build"), "{plain}");
-        assert!(plain.contains("action evidence.\n- Use `instafy_shared_browser.snapshot` now."));
     }
 
     #[test]
@@ -36634,6 +36775,40 @@ mod tests {
             summary.contains("I connected Example. Retry now."),
             "expected explicit retry phrase in summary: {summary}"
         );
+    }
+
+    /// A required change that only asks for a connection says why and ends with the runtime's
+    /// no-change line, as its prompt asks. The guidance goes above that line, which stays last:
+    /// after it, the line went unread, so the reply was taken for one that promised a change, ran
+    /// again on a thread of its own, and failed with the card and its steps lost.
+    #[test]
+    fn onboarding_guidance_keeps_the_no_change_line_last() {
+        let reply = "Your payments are in Example, which isn't connected to this space yet.";
+        let mut summary = format!("{reply}\n\n{NO_FILE_CHANGES_MARKER}");
+        let actions = vec![CodexAction::RequestIntegration {
+            provider: "example".to_string(),
+            description: None,
+            required_scopes: Vec::new(),
+            capabilities: Vec::new(),
+            auth_methods: Vec::new(),
+            suggested_secret_names: Vec::new(),
+            suggested_secrets: Vec::new(),
+            agent_handles: Vec::new(),
+        }];
+
+        augment_summary_for_onboarding_actions(&mut summary, &actions);
+
+        assert!(
+            summary.ends_with(&format!("\n{NO_FILE_CHANGES_MARKER}")),
+            "{summary}"
+        );
+        let read = take_no_file_changes_marker(&summary).expect("the line is read");
+        assert!(read.starts_with(reply), "{read}");
+        assert!(
+            read.ends_with("Then reply `I connected Example. Retry now.` and I will verify the connection and continue your request."),
+            "{read}"
+        );
+        assert!(!read.contains(NO_FILE_CHANGES_MARKER), "{read}");
     }
 
     #[test]

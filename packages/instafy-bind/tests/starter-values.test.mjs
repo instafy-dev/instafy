@@ -419,6 +419,76 @@ test("compare on a phone: a row shows the values found with their sources and na
   assert.equal(document.querySelectorAll("p.not-found").length, 0, "no line of what was not found under the table");
 });
 
+// A new chat asked for a comparison "from what you already know, without browsing", and every row said "checked 1 Mar
+// 2025 on maker.example ↗": the turn gave each value an address and a day nobody read, since the starter had no honest
+// form for what Octo knows. On a page that says it is from memory ("from": "memory"), each value reads "<value>, not
+// checked", as a ranked row's value without a source does, nothing cites a page or a day (also when the data still
+// gives one), and the lede says so, at every width.
+test("compare: a page from what Octo knows reads each value \"not checked\", cites nothing, and says so in its lede", async () => {
+  const data = {
+    title: "Maker Laptop 13 vs 16",
+    lede: "The 16 is the bigger one, with room for a graphics card",
+    from: "memory",
+    sort: [{ key: "price", label: "Price, low to high", dir: "asc" }],
+    columns: [{ key: "display", label: "Display", type: "text" }, { key: "weight", label: "Weight", type: "text" }, { key: "price", label: "Price", type: "price" }],
+    items: [
+      item("13", "Maker Laptop 13", {
+        display: { v: "13.5 in" },
+        weight: { v: "about 1.3 kg", src: "Maker", url: "https://maker.example/products/laptop13-gen1", date: "2025-03-01" },
+        price: { v: "from about $1,000" },
+      }, { sources: [{ name: "Maker", url: "https://maker.example/products/laptop13" }], more: [{ label: "Ports", fact: { v: "4 expansion cards", src: "Maker", url: "https://maker.example/x", date: "2025-03-01" } }] }),
+      item("16", "Maker Laptop 16", { display: { v: "16 in" }, weight: { v: "about 2.1 kg" }, price: { note: "today's price not known" } }, { found: "maker.example" }),
+    ],
+    unchecked: ["Today's prices and configurations"],
+  };
+  for (const width of [1280, 375]) {
+    const { document } = await draw("compare", data, { width, search: "?open=13" });
+    assert.equal(document.getElementById("lede").textContent, "The 16 is the bigger one, with room for a graphics card. From what Octo knows; nothing checked.", `${width}px`);
+    const thirteen = rowText(document, "option:13");
+    for (const value of ["13.5 in", "about 1.3 kg", "from about $1,000"]) assert.ok(thirteen.includes(`${value}, not checked`), `${width}px: ${value}: ${thirteen}`);
+    const sixteen = rowText(document, "option:16");
+    assert.match(sixteen, /16 in, not checked.*about 2\.1 kg, not checked/, `${width}px: ${sixteen}`);
+    assert.doesNotMatch(sixteen, /Not found yet/, `${width}px: nothing was looked for: ${sixteen}`);
+    if (width < 760) assert.match(sixteen, /Not known: Price \(today's price not known\)/, `${width}px: ${sixteen}`);
+    else assert.match(sixteen, /Unknown · today's price not known/, `${width}px: ${sixteen}`);
+    const page = document.body.textContent.replace(/\s+/g, " ");
+    assert.doesNotMatch(page, /checked \d|seen \d|maker\.example|Sources|search result|Mar 2025/, `${width}px: nothing cites a page or a day: ${page}`);
+    assert.match(page, /4 expansion cards, not checked/, `${width}px: Details too`);
+    assert.match(document.getElementById("notes").textContent, /Still to confirm\s*Today's prices and configurations/);
+  }
+});
+
+// A page from what Octo knows that still gave its rows a store offered "Check all prices" under "nothing checked": a
+// press failed with no store link to read, or drew "checked just now" under that lede. Under a filter, every row was
+// listed apart as "Price unknown" while showing its price. Such a page offers no check, draws no check a binder kept,
+// and lists every row with its value, with no filter.
+test("compare: a page from what Octo knows offers no price check, draws none, and lists every row under no filter", async () => {
+  const data = {
+    title: "Maker Laptop 13 vs 16",
+    lede: "The 16 is the bigger one.",
+    from: "memory",
+    columns: [{ key: "display", label: "Display", type: "text" }, { key: "price", label: "Price", type: "price" }],
+    filter: { key: "price", max: 1500, label: "Under $1,500", rest: "over $1,500" },
+    items: [
+      item("13", "Maker Laptop 13", { display: { v: "13.5 in" }, price: { v: "$1,099" } }, { store: { name: "Maker", readable: true } }),
+      item("16", "Maker Laptop 16", { display: { v: "16 in" }, price: { v: "$1,399" } }, { store: { name: "Maker", readable: true } }),
+    ],
+  };
+  const offer = { type: "offer", ref: "option:13", price: { amount: 1409, currency: "EUR" }, seller: { name: "Maker" }, handoff: { url: "https://maker.example/13" },
+    prov: { source: "maker.example", lane: "local", observed_at: new Date().toISOString(), ttl_s: 3600 } };
+  const client = () => ({ on() {}, ready: Promise.resolve({ connected: true, names: ["read_offer"] }), names: ["read_offer"], isPending: () => false,
+    records: (ref) => (ref === "option:13" ? [offer] : []), expired: () => false });
+  for (const width of [1280, 375]) {
+    const { document } = await draw("compare", data, { width, bind: client });
+    assert.equal(document.getElementById("bar").textContent, "", `${width}px: no check and no filter to press`);
+    assert.deepEqual(rows(document), { within: ["option:13", "option:16"], apart: [], heading: null }, `${width}px`);
+    assert.match(rowText(document, "option:13"), /\$1,099, not checked/, `${width}px`);
+    assert.match(rowText(document, "option:16"), /\$1,399, not checked/, `${width}px`);
+    const page = document.body.textContent.replace(/\s+/g, " ");
+    assert.doesNotMatch(page, /checked just now|€1,409|Price unknown|None is known|stores? don't allow/, `${width}px: ${page}`);
+  }
+});
+
 // A value looked for on a page and not found there said "Not found · checked … ↗" on its row, above a "Not found yet"
 // line that left it out: one card used the words for two things. It is named in that line with the page it was looked
 // for on; the desktop table keeps its cell.
