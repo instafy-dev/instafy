@@ -34,6 +34,12 @@ Unconfirmed cleanup prevents runtime reuse. See [Multi-Agent Evaluation](../../d
 for delegation boundaries, usage coverage, deterministic proxy integration tests and the
 remaining upstream child-admission cleanup gap.
 
+On structured turns, workspace changes detected during an attempt take precedence over
+final inline file snapshots. This uses the same Git-status fingerprints as change receipts;
+inline-only generation remains available for unchanged paths. A recovery attempt starts
+from a fresh baseline. Ignored files and changes committed entirely inside a tool call
+remain outside that change detector.
+
 ## Runtime images (base vs webdev)
 
 The canonical `docker/runtime/Dockerfile` defines multiple runtime image targets so we can keep the default image small and opt into heavier toolchains only when needed:

@@ -4,19 +4,18 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const session = vi.hoisted(() => ({ userId: "user-a", projectId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" }));
+const updateMetadata = vi.hoisted(() => vi.fn());
 vi.mock("../../providers/AuthProvider", () => ({ useAuth: () => ({ user: { id: session.userId } }) }));
 vi.mock("../../projects/useProject", () => ({ useProject: () => ({ activeProjectId: session.projectId }) }));
 vi.mock("../../runtime/useRuntime", () => ({ useRuntime: () => ({ runtime: {}, runs: [] }) }));
-vi.mock("../../status/useStatus", () => ({ useStatus: () => ({ showStatus: vi.fn() }) }));
-vi.mock("../../sdk/instafy", () => ({ controllerClient: { conversations: {} } }));
-vi.mock("../useConversationProviderEffects", () => ({
+vi.mock("../../sdk/instafy", () => ({ controllerClient: { core: { enabled: true }, conversations: { updateMetadata } } }));
+vi.mock("../useConversationProviderEffects", async () => ({
   useConversationControllerSync: () => ({ remoteConversationHistoryResolved: true }),
   useConversationRunEffects: vi.fn(), usePendingConversationEffects: vi.fn(),
-  useConversationMetadataPersistence: () => ({}),
+  useConversationMetadataPersistence: (await import("../useConversationMetadataPersistence")).useConversationMetadataPersistence,
 }));
-vi.mock("../useConversationControllerDispatch", () => ({ useConversationControllerDispatch: () => ({}) }));
-vi.mock("../useConversationGoalContinuationEffects", () => ({ useConversationGoalContinuationEffects: vi.fn() }));
 import { ConversationsProvider, useConversations } from "../ConversationsProvider";
+import { createConversationGoal } from "../conversationGoals";
 
 let current: ReturnType<typeof useConversations>;
 let root: Root;
@@ -29,6 +28,7 @@ async function draft(value: string) {
   await act(async () => current.setConversationDraft(current.activeConversationId!, value));
 }
 beforeEach(() => {
+  updateMetadata.mockReset().mockResolvedValue(true);
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   sessionStorage.clear();
   session.userId = "user-a"; session.projectId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -62,4 +62,28 @@ it("isolates drafts through space changes and an A to B to A account switch", as
   session.projectId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"; await render();
   expect(current.conversations.map(c => c.draft)).toContain("Space A, account A");
   expect(current.conversations.map(c => c.draft)).not.toContain("Space B, account B");
+});
+
+it("projects a local goal edit without racing the command's awaited controller write", async () => {
+  await render();
+  const id = current.activeConversationId!;
+  await act(async () => current.setConversationControllerId(id, "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee"));
+  const goal = createConversationGoal("Verify the change", session.userId);
+  await act(async () => current.setConversationGoal(id, goal));
+  expect(current.activeConversation?.activeGoal).toEqual(goal);
+  expect(updateMetadata).not.toHaveBeenCalled();
+});
+
+
+it("does not let a saved command overwrite a newer goal snapshot", async () => {
+  await render();
+  const id = current.activeConversationId!;
+  const original = createConversationGoal("Original objective", session.userId);
+  await act(async () => current.setConversationGoal(id, original, null));
+  expect(current.activeConversation?.activeGoal).toEqual(original);
+  const replacement = createConversationGoal("New objective", session.userId);
+  await act(async () => current.setConversationGoal(id, replacement));
+  await act(async () => current.setConversationGoal(id, { ...original, status: "completed" }, original));
+  expect(current.activeConversation?.activeGoal).toEqual(replacement);
+  expect(updateMetadata).not.toHaveBeenCalled();
 });

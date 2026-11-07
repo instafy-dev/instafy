@@ -2469,6 +2469,22 @@ pub(crate) async fn agent_message(
     let multi_agent_plan_metadata = message_row.metadata.clone();
     let multi_agent_plan_content = message_row.content.clone();
     let multi_agent_plan_job_payload = job_payload.clone();
+    let goal_update = if message_type
+        .as_deref()
+        .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("goal_update"))
+    {
+        crate::conversation_goals::state::apply_runtime_update(
+            &transaction,
+            job_uuid,
+            &job_payload,
+            conversation_uuid,
+            &message_row.metadata,
+            &message_row.content,
+        )
+        .await?
+    } else {
+        None
+    };
 
     transaction
         .commit()
@@ -2476,6 +2492,9 @@ pub(crate) async fn agent_message(
         .map_err(|error| internal_error(format!("failed to commit agent message: {error}")))?;
 
     publish_conversation_message_event(&state.events, &message_row);
+    if let Some(conversation) = goal_update.as_ref() {
+        crate::conversation_goals::state::publish_update(&state, conversation);
+    }
     crate::notifications::enqueue_message_push_notifications(state.clone(), message_row);
     // After the message broadcast: the org project lookup must not delay it.
     if let Some(org_id) = deferred_credit_org_id {
@@ -3859,6 +3878,18 @@ pub(crate) async fn agent_complete(
         }
     }
 
+    let goal_update = if let Some(conversation_id) = run_conversation_id {
+        crate::conversation_goals::state::settle_job(
+            &transaction,
+            job_uuid,
+            &job_payload,
+            conversation_id,
+            &outcome_lower,
+        )
+        .await?
+    } else {
+        None
+    };
     transaction
         .commit()
         .await
@@ -3866,6 +3897,9 @@ pub(crate) async fn agent_complete(
 
     // The turn is closed and its reply stored: publish both now. Billing and
     // bookkeeping follow in CompletionSettlement and change nothing shown.
+    if let Some(conversation) = goal_update.as_ref() {
+        crate::conversation_goals::state::publish_update(&state, conversation);
+    }
     crate::send_intents::publish_job_input_state_updates(&state, &job_input_state_updates);
     crate::provider_requests::publish_canceled_provider_requests(
         &state,
@@ -3957,6 +3991,7 @@ pub(crate) async fn agent_complete(
         crate::send_queue::spawn_send_queue_drain(state.clone(), conversation_id);
     }
 
+    let has_goal_binding = job_payload.pointer("/metadata/_controllerGoal").is_some();
     let settlement = CompletionSettlement {
         project_id,
         job_id: job_uuid,
@@ -3982,6 +4017,10 @@ pub(crate) async fn agent_complete(
     // the billing short; the response still waits for it.
     if let Err(error) = tokio::spawn(settlement.settle(state.clone())).await {
         warn!(job_id = %job_uuid, ?error, "agent completion settlement did not finish");
+    }
+
+    if has_goal_binding {
+        crate::conversation_goals::wake_after_completion(state.clone(), job_uuid);
     }
 
     Ok(Json(AgentCompleteResponseBody { ok: true }))

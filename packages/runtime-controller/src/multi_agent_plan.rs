@@ -1471,7 +1471,13 @@ async fn dispatch_lead_checkpoint(
         is_service_role: true,
         scoped_claims: None,
     };
-    let normalized = normalize_dispatch_request(dispatch)?;
+    let mut normalized = normalize_dispatch_request(dispatch)?;
+    if checkpoint_kind.is_none() {
+        normalized.goal_parent_job_id = completed_job_payload
+            .pointer("/metadata/multiAgentPlan/parentJobId")
+            .and_then(JsonValue::as_str)
+            .and_then(|id| Uuid::parse_str(id).ok());
+    }
     let response = match process_dispatch_prompt(state, &context, normalized).await {
         Ok(response) => response,
         // A lead without a credential of its own would be pinned to the

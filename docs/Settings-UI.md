@@ -241,6 +241,21 @@ The shared Select uses the form-popover preset; action menus in Chats, Automatio
 AI connections and run controls use the menu preset. Listbox options, like menu items,
 keep compact mouse rows and at least 44px touch targets. Keep feature-specific choice
 contents in the caller rather than rebuilding menu geometry there.
+
+Message quote-source actions use the quiet shared `IconButton` within the quote,
+with a 32px mouse target and a 44px touch target. A quote without source metadata
+keeps a decorative glyph rather than an inactive-looking control.
+Quoted sources and inline message references use the shared exact-message route;
+stale references from another space show unavailable feedback without opening its latest chat.
+Workspace file references retain click-to-open and a passive hover preview. Holding a
+reference on touch, or choosing Preview from its right-click / Shift+F10 menu, opens
+a persistent `StudioPopover` dialog with Close and Open file actions. Transient errors
+offer Try again without navigating away. Escape and Close return focus to the reference.
+Preview surfaces use `Surface`, `ContentHeader`, `Text`, `LoadingStatus`, and `InlineNotice`;
+syntax highlighting remains specific to the code excerpt. The folder gives way to the
+filename, content scrolls within the available height, and hover previews stay clear of
+the composer and visual viewport. The [chat reference fixture](../packages/frontend/tests/fixtures/chat-references/README.md)
+checks these controls with inert file reads on phone and desktop layouts in both themes.
 Select options use a checkmark for the current value and a separate keyboard-visible
 focus ring. Disabled options belong to the owning Select's selection state, so neither
 pointer nor keyboard interaction can select them. Avoid repeating the selected value

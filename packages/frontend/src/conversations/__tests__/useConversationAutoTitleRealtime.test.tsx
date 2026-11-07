@@ -88,7 +88,6 @@ function Harness({ placeholderActive, author, onState }: HarnessProps) {
     lastBackgroundAtRef,
     notifiedMessageIdsRef,
     dispatch,
-    updateControllerConversationMetadata: vi.fn(),
   });
   useConversationAutoTitle({
     conversations: state.conversations,

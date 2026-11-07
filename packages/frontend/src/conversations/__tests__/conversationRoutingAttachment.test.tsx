@@ -127,7 +127,6 @@ function PendingCreationHarness({
   updates = [],
   messages = [],
   internalConversationIds,
-  updateMetadata = vi.fn(),
 }: {
   state: ConversationsState;
   dispatch: (action: ConversationsAction) => void;
@@ -135,7 +134,6 @@ function PendingCreationHarness({
   updates?: ControllerConversationUpdated[];
   messages?: ControllerConversationMessage[];
   internalConversationIds?: Readonly<Record<string, true>>;
-  updateMetadata?: (args: { conversationId: string; metadata: Record<string, unknown> }) => Promise<unknown>;
 }) {
   const lastBackgroundAtRef = useRef(0);
   const notifiedMessageIdsRef = useRef(new Set<string>());
@@ -153,7 +151,6 @@ function PendingCreationHarness({
     lastBackgroundAtRef,
     notifiedMessageIdsRef,
     dispatch,
-    updateControllerConversationMetadata: updateMetadata,
   });
   return null;
 }
@@ -274,9 +271,8 @@ describe("conversation routing during controller attachment", () => {
     const dispatch = vi.fn<(action: ConversationsAction) => void>((action) => {
       nextState = conversationsReducer(nextState, action);
     });
-    const updateMetadata = vi.fn();
     await act(async () => root.render(<PendingCreationHarness state={initialState} dispatch={dispatch}
-      internalConversationIds={{ [CONTROLLER_ID]: true }} updateMetadata={updateMetadata}
+      internalConversationIds={{ [CONTROLLER_ID]: true }}
       creation={buildConversationCreated({ title: "Space review" })}
       messages={[{
         id: "late-internal-message", conversationId: CONTROLLER_ID, projectId: PROJECT_ID,
@@ -295,7 +291,6 @@ describe("conversation routing during controller attachment", () => {
     expect(nextState.runMap).toEqual({});
     expect(attention(nextState).map((entry) => entry.title)).toEqual(["Useful finding"]);
     expect(dispatch.mock.calls.map(([action]) => action.type)).toEqual(["RETIRE_INTERNAL"]);
-    expect(updateMetadata).not.toHaveBeenCalled();
   });
 
   it.each([
