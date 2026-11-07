@@ -811,13 +811,21 @@ mod tests {
                 "{}: the chat is not in the routing input",
                 case.id
             );
+            // What the person stopped or undid, and its notices, are left out (below).
+            for gone in ["Stopped this run.", "The person undid the change from"] {
+                assert!(!chat.contains(gone), "{}: {chat}", case.id);
+            }
+            let taken_back = case.history.iter().any(|entry| {
+                entry["content"] == "Stopped this run."
+                    || entry["metadata"]["kind"] == "change_undone"
+            });
             for entry in &case.history {
                 let content = entry["content"].as_str().unwrap().trim();
                 // A hand-back's stored prompt is Studio's words, not the person's: the chat
                 // leaves it out.
                 if content == super::super::conversation_context::HAND_BACK_PROMPT {
                     assert!(!chat.contains(content), "{}: {chat}", case.id);
-                } else if !content.is_empty() {
+                } else if !content.is_empty() && !taken_back {
                     assert!(chat.contains(content), "{}: {content}", case.id);
                 }
             }
@@ -840,22 +848,37 @@ mod tests {
         assert_eq!(input.history_metrics["includedTurns"], json!(3));
         assert_eq!(input.history_metrics["ignoredEntries"], json!(3));
 
-        // A Stop and an Undo reach the routing step as the chat shows them.
+        // A request the person stopped and one whose change they undid are not in the chat the
+        // routing step reads, nor their Stop and Undo lines: only what was left.
         let undone = case(&cases, "keep-going-after-stop-and-undo");
         let chat = read(&undone);
-        assert!(chat.contains("Stopped this run."), "{chat}");
-        assert!(chat.contains("The person undid the change from"), "{chat}");
+        for gone in [
+            "Add a short \"Before you go\" section to that page.",
+            "Add a one-line tip about the best time to visit.",
+            "Added a one-line visit tip",
+            "Stopped this run.",
+            "The person undid the change from",
+        ] {
+            assert!(!chat.contains(gone), "{gone}: {chat}");
+        }
+        assert!(
+            chat.contains("User: Put the hours on a small page I can share.\nAssistant: I made a small shareable page"),
+            "{chat}"
+        );
+        assert!(chat.ends_with("User: keep going"), "{chat}");
     }
 
     /// After the person stopped one change and stopped and undid another, a bare "keep going"
     /// whose page marks the route not confirmed reads the line that says what it carries on, and
     /// no rule against a change the person stopped or undid ahead of the routes: in a recorded
     /// local test (Nov 5) that rule sent it to the browser alone, whose
-    /// turn set nothing on the planner. It reads the chat as the person had it: their messages,
-    /// the Stops and the Undo, and none of the words a hand-back is stored with. So does the
-    /// message before it, a page asked for in a chat that confirmed nothing yet.
+    /// turn set nothing on the planner. It reads the chat up to the page, and none of the words a
+    /// hand-back is stored with: the section the person stopped and the tip they stopped and
+    /// undid, with their Stops and the Undo, are left out (a local test, Nov 7: read as "the
+    /// unfinished page work", they kept a real "keep going" with Octo). So does the message
+    /// before it, a page asked for in a chat that confirmed nothing yet.
     #[test]
-    fn keep_going_after_a_stop_and_an_undo_reads_the_route_line_and_the_chat_as_it_was() {
+    fn keep_going_after_a_stop_and_an_undo_reads_the_route_line_and_not_what_was_taken_back() {
         let cases = shipped();
         let workspace = tempdir().unwrap();
         prepare_workspace(workspace.path()).unwrap();
@@ -893,13 +916,26 @@ mod tests {
             2
         );
         let input = routing_input(&keep_going, workspace.path()).unwrap();
-        assert_eq!(input.prompt.matches("Stopped this run.").count(), 2);
-        assert!(input.prompt.contains(
-            "The person undid the change from \u{201c}Add a one-line tip about the best time to visit.\u{201d}"
-        ));
-        // Four requests sent on to the browser, two empty replies and two hand-backs' words.
-        assert_eq!(input.history_metrics["ignoredEntries"], json!(8));
-        assert_eq!(input.history_metrics["includedTurns"], json!(13));
+        for gone in [
+            "Stopped this run.",
+            "The person undid the change from",
+            "Add a short \\\"Before you go\\\" section",
+            "Add a one-line tip about the best time to visit.",
+            "Applied file changes:",
+        ] {
+            assert!(!input.prompt.contains(gone), "{gone}: {}", input.prompt);
+        }
+        assert!(
+            input
+                .prompt
+                .contains("I built a small page with Livraria Lello\u{2019}s daily hours"),
+            "{}",
+            input.prompt
+        );
+        // Four requests sent on to the browser, two empty replies, two hand-backs' words, and
+        // the section's request and Stop, and the tip's request, Stop, kept change and Undo.
+        assert_eq!(input.history_metrics["ignoredEntries"], json!(14));
+        assert_eq!(input.history_metrics["includedTurns"], json!(7));
     }
 
     /// Two chats of a recorded local test (Nov 6), each with the entries its routing step
@@ -907,10 +943,10 @@ mod tests {
     /// pages, "Fill in what's still missing." needs the web and a change here, in a chat with no
     /// browser turn yet; after a page that marks its metro route not confirmed, a stopped section
     /// and a tip stopped and undone, "keep going" carries the route on. Each input reads the
-    /// routing section's line for it, and the chat as the routing step read it there: the
-    /// comparison and its reply; twelve of the page's entries, its two Stops and the Undo among
-    /// them, and five left out (three requests sent on to the browser, an empty reply and a
-    /// hand-back's words).
+    /// routing section's line for it, and the chat as the routing step reads it: the comparison
+    /// and its reply; six of the page's entries, and eleven left out (three requests sent on to
+    /// the browser, an empty reply, a hand-back's words, and the section and the tip the person
+    /// stopped, one of them undone, with their two Stops, the kept change and the Undo).
     #[test]
     fn a_fill_in_after_a_reply_and_keep_going_after_a_page_read_their_lines() {
         let cases = shipped();
@@ -927,15 +963,15 @@ mod tests {
         for (case, line, included, ignored) in [
             (
                 &fill_in,
-                "Also when the browser part needs what only this space or another chat holds (what a page, map or file here says, or, once this chat has a browser turn, \"those\" from a reply that was not the browser's)",
+                "Also when the browser part needs what only this space or another chat holds (what a page, map or file here says)",
                 3,
                 0,
             ),
             (
                 &keep_going,
                 "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on.",
-                13,
-                5,
+                7,
+                11,
             ),
         ] {
             assert_eq!(case.expected(), "browser_then_build", "{}", case.id);
@@ -943,7 +979,7 @@ mod tests {
             assert!(input.browser_routes_offered, "{}", case.id);
             assert!(input.prompt.contains(line), "{}: {}", case.id, input.prompt);
             assert!(input.prompt.contains(
-                "That browser turn sees only those words and this chat's earlier browser turns, with your `summary` while this chat has no browser turn: name in it the items, place or site this chat names (by name, not an address), and what to find."
+                "That browser turn sees only those words and this chat's earlier browser turns, with your `summary`: name in it the items, place or site this chat names (by name, not an address), and what to find."
             ));
             assert_eq!(
                 input.history_metrics["includedTurns"],
@@ -959,15 +995,17 @@ mod tests {
             );
         }
         let input = routing_input(&keep_going, workspace.path()).unwrap();
-        assert_eq!(input.prompt.matches("Stopped this run.").count(), 2);
+        assert_eq!(input.prompt.matches("Stopped this run.").count(), 0);
     }
 
     /// Two messages of a fourth recorded local test (Nov 6), each with the entries its routing
     /// step received there, both `browser_then_build`: a page asked for while the chat had found
     /// the hours but not confirmed the metro route, and a bare "keep going" after that page, a
     /// stopped section and a tip stopped and undid. Each input reads the routing section's line
-    /// for it and the chat as the routing step read it there: four and twelve entries, and the
-    /// two requests sent on to the browser left out. And the map trip's turn must make files.
+    /// for it and the chat as the routing step reads it: four and six entries, the two requests
+    /// sent on to the browser left out, and from "keep going" also the section and the tip the
+    /// person took back, with their Stops, the kept change and the Undo. And the map trip's turn
+    /// must make files.
     #[test]
     fn a_page_and_keep_going_with_the_route_unconfirmed_read_their_lines() {
         let cases = shipped();
@@ -975,16 +1013,18 @@ mod tests {
         prepare_workspace(workspace.path()).unwrap();
         let page = case(&cases, "page-from-findings-with-the-route-unconfirmed");
         let keep_going = case(&cases, "keep-going-after-a-page-made-from-findings");
-        for (case, line, included) in [
+        for (case, line, included, ignored) in [
             (
                 &page,
                 "So is a page made only from what this chat already found and confirmed.",
                 5,
+                2,
             ),
             (
                 &keep_going,
                 "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on.",
-                13,
+                7,
+                8,
             ),
         ] {
             assert_eq!(case.expected(), "browser_then_build", "{}", case.id);
@@ -1000,21 +1040,81 @@ mod tests {
             );
             assert_eq!(
                 input.history_metrics["ignoredEntries"],
-                json!(2),
+                json!(ignored),
                 "{}",
                 case.id
             );
         }
         let input = routing_input(&keep_going, workspace.path()).unwrap();
-        assert_eq!(input.prompt.matches("Stopped this run.").count(), 2);
-        assert_eq!(input.prompt.matches("Applied file changes:").count(), 1);
-        assert!(input.prompt.contains(
-            "The person undid the change from \u{201c}Add a one-line tip about the best time to visit.\u{201d}"
-        ));
+        assert_eq!(input.prompt.matches("Stopped this run.").count(), 0);
+        assert_eq!(input.prompt.matches("Applied file changes:").count(), 0);
+        assert!(!input.prompt.contains("The person undid the change from"));
         assert_eq!(
             case(&cases, "map-trip").expected(),
             "direct (change: required)"
         );
+    }
+
+    /// Two messages of a fifth recorded local test (Nov 7), each with the entries its routing step
+    /// received there, both `browser_then_build`. "Add each laptop's warranty from its own page."
+    /// went `direct`, its reason that the building turn would read the pages; that turn, which
+    /// changes files and opens no browser, asked the person to send them. Its input now reads that
+    /// a change that needs what a web page says starts in the browser, and that the building
+    /// turn's own reads end in words. After a page whose metro route was not confirmed, a section
+    /// the person stopped and a tip they stopped and undid, "keep going" read them as "the
+    /// unfinished page work" and stayed `direct`: its input now reads the chat up to the page and
+    /// nothing the person took back.
+    #[test]
+    fn a_change_that_needs_a_page_and_keep_going_after_two_stops_read_their_lines() {
+        let cases = shipped();
+        let workspace = tempdir().unwrap();
+        prepare_workspace(workspace.path()).unwrap();
+        let warranty = case(&cases, "warranty-from-each-laptops-page");
+        assert_eq!(warranty.expected(), "browser_then_build");
+        let input = routing_input(&warranty, workspace.path()).unwrap();
+        assert!(input.browser_routes_offered);
+        for line in [
+            "the building turn reads first and answers, opening the browser itself if a page needs it. A change that needs what a web page says is `browser_then_build`.",
+            "the building turn reads it and answers with a card naming it, and a change here is built after it,",
+        ] {
+            assert!(input.prompt.contains(line), "{line}: {}", input.prompt);
+        }
+        // Both requests and their replies, the two requests sent on to the browser and the two
+        // hand-backs' words left out.
+        assert_eq!(input.history_metrics["includedTurns"], json!(7));
+        assert_eq!(input.history_metrics["ignoredEntries"], json!(4));
+
+        let keep_going = case(&cases, "keep-going-after-two-stops-and-an-undo");
+        assert_eq!(keep_going.expected(), "browser_then_build");
+        let input = routing_input(&keep_going, workspace.path()).unwrap();
+        assert!(input.prompt.contains(
+            "So is a bare \"keep going\" when a page here marks something not checked or not confirmed"
+        ));
+        let mut history = keep_going.history.clone();
+        history.push(json!({"role": "user", "content": keep_going.message}));
+        let chat = super::super::conversation_context::build_routing_conversation_context(Some(
+            &json!(history),
+        ))
+        .section_text;
+        let kept: Vec<String> = [0, 2, 3, 5, 6, 8, 9, 13, 20]
+            .into_iter()
+            .map(|index| {
+                let entry = &history[index];
+                let role = if entry["role"] == "user" {
+                    "User"
+                } else {
+                    "Assistant"
+                };
+                format!("{role}: {}", entry["content"].as_str().unwrap())
+            })
+            .collect();
+        assert_eq!(chat, kept.join("\n"));
+        assert!(
+            chat.contains("The metro route from São Bento remains unconfirmed"),
+            "{chat}"
+        );
+        assert_eq!(input.history_metrics["includedTurns"], json!(9));
+        assert_eq!(input.history_metrics["ignoredEntries"], json!(12));
     }
 
     /// A page stays `direct` when this chat found and confirmed all it needs: the hours from the

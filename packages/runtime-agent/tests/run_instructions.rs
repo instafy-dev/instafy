@@ -1775,7 +1775,7 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "research ending in a page goes to the browser from the first message",
             ),
             (
-                "A map (\"on a map\") is `direct`: its skill finds and cites its places itself. So is a page made only from what this chat already found and confirmed.",
+                "A map (\"on a map\") is `direct` and a change of files (`required`): its skill finds and cites its places itself. So is a page made only from what this chat already found and confirmed.",
                 "a map, or a page made only from what the chat found and confirmed, stays direct",
             ),
         ] {
@@ -1952,7 +1952,7 @@ fn check_a_fill_in_after_a_reply(harness: &Harness) -> Result<()> {
     ensure!(r1.routed, "L1 was not sent straight to the browser");
     ensure!(
         input_text(first_sampling_request(r1)).contains(
-            "with your `summary` while this chat has no browser turn: name in it the items, place or site this chat names (by name, not an address), and what to find."
+            "with your `summary`: name in it the items, place or site this chat names (by name, not an address), and what to find."
         ),
         "L1's routing call was never told what its summary names"
     );

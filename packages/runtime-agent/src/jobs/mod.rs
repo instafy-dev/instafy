@@ -2172,6 +2172,26 @@ const RESTORED_SKILL_HINTS_LEAD: &str = "\nSkills that match this request (this 
 /// How the hints open on a direct workspace-change turn, which skips the
 /// workspace memory snapshot.
 const DIRECT_WRITE_SKILL_HINTS_LEAD: &str = "\nSkills that match this request (no workspace memory is loaded for this run; read the file before acting unless already read in this conversation):\n";
+/// The research skill, whose `instafy web read` line a direct change is pointed to in place of
+/// the browser skill ([`web_read_line`]).
+const WEB_RESEARCH_SKILL_ID: &str = "instafy-web-research";
+
+/// The research skill's hint in a direct workspace change, also in place of the browser skill's:
+/// its `instafy web read` line, to the end of the line's first sentence. A direct change emits no
+/// browser action (its response contract), so the browser skill's "Open Instafy's browser
+/// whenever a web page would help" left it no way to read a page: asked to add each laptop's
+/// warranty "from its own page", one ran two unrelated commands and asked the person to send the
+/// pages, while the builds that read pages that day did it with `instafy web read` (a local
+/// test, Nov 7). None when the space's copy of the skill has no such line.
+fn web_read_line(research: &ContextNode) -> Option<String> {
+    let skill = fs::read_to_string(&research.path).ok()?;
+    let line = skill
+        .lines()
+        .find_map(|line| line.strip_prefix("- `instafy web read "))?;
+    let line = format!("`instafy web read {line}");
+    let end = line.find(". ").map_or(line.len(), |at| at + 1);
+    Some(line[..end].to_string())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SkillHints {
@@ -2184,8 +2204,10 @@ struct SkillHints {
 /// workspace memory snapshot, so the skills that match their request are never
 /// named to them. This lists, by the same selection as the snapshot, at most
 /// three workflow skills that match the request strongly, each with its
-/// description and the file to read, after `lead`, within a fixed byte cap.
-/// None when nothing matches that well.
+/// description and the file to read, after `lead`, within a fixed byte cap. In
+/// a direct workspace change the research skill's line is its `instafy web read`
+/// line, also in place of the browser skill's ([`web_read_line`]). None when
+/// nothing matches that well.
 fn format_skill_hints(workspace_dir: &Path, prompt_text: &str, lead: &str) -> Option<SkillHints> {
     let contexts = build_top_level_context_nodes(workspace_dir);
     if contexts.is_empty() {
@@ -2207,10 +2229,21 @@ fn format_skill_hints(workspace_dir: &Path, prompt_text: &str, lead: &str) -> Op
             .collect();
     matched.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
 
+    // A direct change reads a web page with the research skill's `instafy web read`, never in
+    // the browser ([`web_read_line`]).
+    let direct_change = lead == DIRECT_WRITE_SKILL_HINTS_LEAD;
     let mut text = String::from(lead);
-    let mut skills = Vec::new();
+    let mut skills: Vec<String> = Vec::new();
     for node in matched.into_iter().take(SKILL_HINT_MAX_SKILLS) {
-        let Some(context) = by_id.get(node.id.as_str()) else {
+        let id = if direct_change && node.id == BROWSER_TURN_SKILL.id {
+            WEB_RESEARCH_SKILL_ID
+        } else {
+            node.id.as_str()
+        };
+        if skills.iter().any(|skill| skill.as_str() == id) {
+            continue;
+        }
+        let Some(context) = by_id.get(id) else {
             continue;
         };
         let name = context
@@ -2218,10 +2251,12 @@ fn format_skill_hints(workspace_dir: &Path, prompt_text: &str, lead: &str) -> Op
             .name
             .as_deref()
             .unwrap_or(context.id.as_str());
-        let description: String = context
-            .metadata
-            .description
+        let web_read = (direct_change && id == WEB_RESEARCH_SKILL_ID)
+            .then(|| web_read_line(context))
+            .flatten();
+        let description: String = web_read
             .as_deref()
+            .or(context.metadata.description.as_deref())
             .unwrap_or("")
             .chars()
             .take(SKILL_HINT_MAX_DESCRIPTION_CHARS)
@@ -8733,6 +8768,14 @@ impl JobProcessor {
                 "metadata": { "reason": "no_change_reported" },
             }));
         }
+        // That answer ends the turn: no pass runs for an observation it skipped either. Such a
+        // pass asked the same again, and the answer's draft showed for 3.7 s, then gave way to
+        // the pass's (a local test, Nov 7: "Add each laptop's warranty from its own page." was
+        // to observe, ran two commands that did not count as observations, and kept its
+        // answer). A lookup of earlier chats it was to make is still asked for.
+        let command_execution_missing = command_execution_missing
+            && (!required_changes_not_made
+                || routing_recovery::blocking_missing(evidence_requirements, observed_evidence));
 
         // A browser turn that hands the person's message to the building turn
         // has its answer: no reason to run it again.
@@ -17313,11 +17356,15 @@ fn browser_routing_snapshot_for_job(
 }
 
 /// The task of the card for a message the routing step sent straight to Instafy's browser: the
-/// person's words and, in a chat with earlier turns but no browser turn yet, the routing step's
-/// `summary` of what the message carries on ([`browser_request::routed_task`]). A browser turn
-/// reads only the chat's browser turns, so the line is all it learns of the turns before. What
-/// the person could have read of the chat ([`conversation_context::read_by_the_person`]) is
-/// where an address on that line must come from, as Studio checks a card's task.
+/// person's words and, in a chat with earlier turns, the routing step's `summary` of what the
+/// message carries on ([`browser_request::routed_task`]). A browser turn reads only the chat's
+/// browser turns, so the line is all it learns of the other turns, and of what the routing step
+/// read of the browser turns: in a chat with a browser turn, a page to share got only "Put the
+/// hours and the metro route on a small page I can share." and opened nothing, and a fill-in
+/// re-read the maker's six pages instead of looking for the missing reviews, though both
+/// summaries named what to find (a local test, Nov 7). What the person could have read of the
+/// chat ([`conversation_context::read_by_the_person`]) is where an address on that line must
+/// come from, as Studio checks a card's task.
 fn routed_browser_task(job: &LeaseJob, prompt_text: &str, summary: Option<&str>) -> String {
     let entries = job
         .payload
@@ -17335,7 +17382,7 @@ fn routed_browser_task(job: &LeaseJob, prompt_text: &str, summary: Option<&str>)
         .skip(1)
         .skip_while(|content| **content == prompt_text.trim())
         .count();
-    if earlier == 0 || conversation_context::has_browser_turn(entries) {
+    if earlier == 0 {
         return prompt_text.trim().to_owned();
     }
     browser_request::routed_task(prompt_text, summary, &said)
@@ -17343,7 +17390,7 @@ fn routed_browser_task(job: &LeaseJob, prompt_text: &str, summary: Option<&str>)
 
 /// A message the routing step sent straight to Instafy's browser: its job runs no main model
 /// turn. Its only message is the card, marked `routed`, whose task is the person's own words
-/// (with what it carries on, in a chat with no browser turn yet: [`routed_browser_task`]);
+/// (with what it carries on, in a chat with earlier turns: [`routed_browser_task`]);
 /// Studio opens it by itself where it can, and where it cannot, it stays a button with its
 /// reason. The card's browser turn and its hand-back follow the card's own checks. No reply, no
 /// run log and no provider state: the building thread never sees this turn (its browser turn
@@ -27727,17 +27774,18 @@ mod tests {
         }
     }
 
-    /// In a chat with earlier turns but no browser turn yet, a routed card's task carries what the
-    /// routing step said the message carries on, as one quoted line after the person's words: the
-    /// browser turn reads none of those turns. A local test (Nov 6): after a comparison page's
-    /// building turn said it could not read the maker's pages, "Fill in what's still missing."
-    /// went to the browser with those words alone, and its turns, and Try again's, which sends the
-    /// card's task again, answered that they could not tell what was missing. Like any card's
-    /// task, the line names no address the person could not have seen in the chat: one only a
-    /// page, a tool's output or a guess gave, or one that can't be checked, leaves the line out.
-    /// A chat with a browser turn, which that turn reads, and a first message get the words alone.
+    /// In a chat with earlier turns, a routed card's task carries what the routing step said the
+    /// message carries on, as one quoted line after the person's words: the browser turn reads
+    /// none of the building turns. A local test (Nov 6): after a comparison page's building turn
+    /// said it could not read the maker's pages, "Fill in what's still missing." went to the
+    /// browser with those words alone, and its turns, and Try again's, which sends the card's task
+    /// again, answered that they could not tell what was missing. Like any card's task, the line
+    /// names no address the person could not have seen in the chat: one only a page, a tool's
+    /// output or a guess gave, or one that can't be checked, leaves the line out. A chat with a
+    /// browser turn gets the line too; a first message, which carries nothing on, gets the words
+    /// alone.
     #[test]
-    fn a_routed_card_in_a_chat_with_no_browser_turn_carries_what_it_carries_on() {
+    fn a_routed_card_in_a_chat_with_earlier_turns_carries_what_it_carries_on() {
         let words = "Fill in what's still missing.";
         let summary = "Continue the Framework comparison research in the browser, then build the comparison page from the findings.";
         let chat = |entries: JsonValue| {
@@ -27818,7 +27866,7 @@ mod tests {
         assert!(cut.ends_with("\u{2026}\""), "{cut}");
         assert_eq!(cut.lines().count(), 3, "{cut}");
 
-        // A chat whose browser turn its next browser turn reads, and a chat's first message.
+        // A chat with a browser turn gets the line too, and a chat's first message the words alone.
         let mut browsed = earlier.as_array().unwrap().clone();
         browsed.insert(
             2,
@@ -27826,7 +27874,7 @@ mod tests {
         );
         assert_eq!(
             routed_browser_task(&chat(json!(browsed)), words, Some(summary)),
-            words
+            format!("{words}\n\nWhat this carries on: \"{summary}\"")
         );
         for first in [
             json!([{"role": "user", "content": words}]),
@@ -27839,6 +27887,68 @@ mod tests {
                 "{first}"
             );
         }
+    }
+
+    /// In a chat with browser turns, a routed card's task carries the routing step's summary too.
+    /// In a local test (Nov 7) both chats had one: the page to share got only "Put the hours and
+    /// the metro route on a small page I can share.", listed its tools and opened nothing, and the
+    /// fill-in got only "Fill in what's still missing." and re-read the maker's six pages instead
+    /// of looking for the missing reviews, though both summaries named what to find. Each chat's
+    /// entries are those its routing step received there.
+    #[test]
+    fn the_share_page_and_the_fill_in_carry_their_summaries() {
+        let routed = |words: &str, run: &str, card: &str| {
+            json!({"role": "user", "content": words, "runId": run, "lane": "browser",
+                   "metadata": {"prompt_metadata": {"browserTransport": "shared",
+                       "browserRequestOf": format!("job:{card}"), "browserAutoStarted": true,
+                       "browserCardTurn": {"version": 1, "cardJobId": card, "routed": true}}}})
+        };
+        let task = |entries: Vec<JsonValue>, words: &str, summary: &str| {
+            let mut history = entries;
+            history.push(json!({"role": "user", "content": words, "runId": "run-latest"}));
+            let job = test_lease_job(
+                Some("feature"),
+                json!({ "prompt_text": words, "conversation_history": history, "metadata": {} }),
+            );
+            routed_browser_task(&job, words, Some(summary))
+        };
+        let hours =
+            "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.";
+        let metro = "Now find how to get there by metro from São Bento.";
+        let planner = "Confirm the metro route in the operator's journey planner.";
+        let page = "Put the hours and the metro route on a small page I can share.";
+        let page_summary = "Use Instafy's browser to continue the Porto hours and metro-route research, then create a small shareable page from the confirmed findings.";
+        let porto = vec![
+            json!({"role": "user", "content": hours, "runId": "run-1"}),
+            routed(hours, "run-2", "card-1"),
+            json!({"role": "assistant", "content": "I couldn't read Visit Porto because the page stayed busy and showed no content, so I couldn't verify Livraria Lello's opening hours.", "runId": "run-2", "lane": "browser"}),
+            json!({"role": "user", "content": metro, "runId": "run-3"}),
+            routed(metro, "run-4", "card-3"),
+            json!({"role": "assistant", "content": "The Metro do Porto journey planner shows São Bento as the starting station, but its cookie notice blocked using the planner, so I couldn't confirm a route to Livraria Lello. Please clear the cookie notice on the metro page, then I can check the route.", "runId": "run-4", "lane": "browser"}),
+            json!({"role": "user", "content": planner, "runId": "run-5"}),
+            routed(planner, "run-6", "card-5"),
+            json!({"role": "assistant", "content": "Finished in the browser.", "runId": "run-6", "lane": "browser"}),
+        ];
+        assert_eq!(
+            task(porto, page, page_summary),
+            format!("{page}\n\nWhat this carries on: \"{page_summary}\"")
+        );
+
+        let compare = "Compare the three latest Framework laptops: CPU, battery, weight, price, with two independent reviews each, as a comparison page.";
+        let fill_in = "Fill in what's still missing.";
+        let fill_in_summary = "Continue browser research for independent Laptop 12 and Laptop 16 reviews, then fill the remaining gaps in the comparison page.";
+        let comparison = vec![
+            json!({"role": "user", "content": compare, "runId": "run-1"}),
+            routed(compare, "run-2", "card-1"),
+            json!({"role": "assistant", "content": "I read 8 pages on Framework, Phoronix, PCWorld, and Gizmodo. The three newest laptop models shown on Framework\u{2019}s site are Laptop 13 Pro, Laptop 12 (Series 3), and Laptop 16 (AI 300). Two independent reviews each for Laptop 12 and Laptop 16 were not read, so those review comparisons remain incomplete.", "runId": "run-2", "lane": "browser"}),
+            json!({"role": "user", "content": conversation_context::HAND_BACK_PROMPT, "runId": "run-3",
+                   "metadata": {"browserHandBack": {"version": 1, "cardJobId": "card-1", "browserJobId": "job-run-2"}}}),
+            json!({"role": "assistant", "content": "Built the Framework laptop comparison page with CPU, battery, weight, Austrian DIY starting price, and linked review details. The available pages provided multiple independent reviews for the 13 Pro, but not two reviews each for the Laptop 12 and Laptop 16; those gaps are marked on the page.", "runId": "run-3"}),
+        ];
+        assert_eq!(
+            task(comparison, fill_in, fill_in_summary),
+            format!("{fill_in}\n\nWhat this carries on: \"{fill_in_summary}\"")
+        );
     }
 
     /// The summary line names only an address the person could have read in the chat, as Studio

@@ -400,8 +400,9 @@ async fn responses(
             );
         }
         // The routing preflight reads the request as a required change that
-        // needs a fresh observation. The agent first answers without a
-        // command, and after the recovery pass's `pwd` gives the same blocker.
+        // needs a fresh observation. The agent answers without a command and
+        // says why it changed nothing; a recovery pass would run `pwd` and give
+        // the same blocker.
         "chat_write_blocked" => {
             return match ordinal {
                 1 => answer(
@@ -1359,12 +1360,13 @@ scenario_test!(
 );
 // Oct 28: a turn read as a required change could verify nothing, built
 // nothing and said why. Its recovery pass, for the observation it skipped,
-// ran it and said the same. The reply stands; the turn is not failed and
-// resent.
+// ran it and said the same, and the first answer's draft showed, then gave way
+// to the pass's (a local test, Nov 7). The reply stands on its first attempt,
+// with no pass for the observation: the turn is neither retried nor failed.
 scenario_test!(
-    blocked_write_turn_reply_stands_after_one_recovery_pass,
+    blocked_write_turn_reply_stands_on_its_first_attempt,
     "chat_write_blocked",
-    4
+    2
 );
 // A required change answered with a team plan, which puts the change off: the
 // plan card carries the reply's words without the runtime's no-change line,
@@ -2002,7 +2004,6 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
         // attempt: no recovery pass.
         "retry_usage"
         | "failed_recovery_usage"
-        | "chat_write_blocked"
         | "chat_write_claimed_files"
         | "chat_write_unmade_change" => {
             vec![Some("routing"), Some("main"), Some("recovery")]
@@ -2105,19 +2106,17 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
                 .any(|artifact| artifact["kind"] == "codex/required-changes-not-made"),
             "{scenario}: the turn must record that its reply stood without the change"
         );
-        if scenario == "chat_write_guess" {
-            assert!(
-                !execution
-                    .messages
-                    .iter()
-                    .chain(execution.final_messages.iter())
-                    .any(|message| message
-                        .metadata
-                        .as_ref()
-                        .is_some_and(|metadata| metadata["kind"] == "codex_retry")),
-                "a reply that changed nothing and said why must not be retried"
-            );
-        }
+        assert!(
+            !execution
+                .messages
+                .iter()
+                .chain(execution.final_messages.iter())
+                .any(|message| message
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata["kind"] == "codex_retry")),
+            "{scenario}: a reply that changed nothing and said why must not be retried"
+        );
         return Ok(());
     }
     // The plan puts the change off, so the turn stands on its first attempt, and

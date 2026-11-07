@@ -323,6 +323,26 @@ fn kept_files_of(entry: &JsonValue) -> impl Iterator<Item = &str> {
         .filter(|path| !path.is_empty())
 }
 
+/// The runs a Stop's notice says it ended (`runIds`), or, when it lists none, its own run.
+fn notice_runs(entry: &JsonValue) -> Vec<&str> {
+    let listed: Vec<&str> = entry
+        .pointer("/metadata/details/runIds")
+        .and_then(JsonValue::as_array)
+        .map(|runs| {
+            runs.iter()
+                .filter_map(JsonValue::as_str)
+                .map(str::trim)
+                .filter(|run| !run.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if listed.is_empty() {
+        entry_text(entry, "runId").into_iter().collect()
+    } else {
+        listed
+    }
+}
+
 /// A request the person stopped with Stop and has not asked for again.
 struct StoppedRequest<'a> {
     /// Where the Stop's notice is in the history.
@@ -371,22 +391,7 @@ fn stopped_requests(entries: &[JsonValue]) -> Vec<StoppedRequest<'_>> {
             .filter(|later| entry_text(later, "role") == Some("user"))
             .flat_map(continued_runs_of)
             .collect();
-        let listed: Vec<&str> = entry
-            .pointer("/metadata/details/runIds")
-            .and_then(JsonValue::as_array)
-            .map(|runs| {
-                runs.iter()
-                    .filter_map(JsonValue::as_str)
-                    .map(str::trim)
-                    .filter(|run| !run.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let runs = if listed.is_empty() {
-            entry_text(entry, "runId").into_iter().collect()
-        } else {
-            listed
-        };
+        let runs = notice_runs(entry);
         let first_of_this_stop = stopped.len();
         let mut requests_at: Vec<Option<usize>> = Vec::new();
         for run in runs.into_iter().filter(|run| !continued.contains(run)) {
@@ -620,11 +625,6 @@ fn is_browser_entry(entry: &JsonValue) -> bool {
     entry.get("lane").and_then(JsonValue::as_str) == Some("browser")
 }
 
-/// Whether a chat's history holds a browser turn.
-pub(super) fn has_browser_turn(entries: &[JsonValue]) -> bool {
-    entries.iter().any(is_browser_entry)
-}
-
 /// Rows that are not the conversation itself, as Studio's `NON_CONVERSATIONAL_MESSAGE_TYPES`
 /// (`browserAutoStart.ts`) lists them.
 const NON_CONVERSATIONAL_TYPES: [&str; 13] = [
@@ -704,7 +704,7 @@ fn entry_text<'a>(entry: &'a JsonValue, key: &str) -> Option<&'a str> {
 /// The entries that repeat the person's message: each request of a browser turn that carries
 /// on the card the routing step posted for that message, when the message itself is in the
 /// history before it. Its words are the message's, sent once more as that turn's task (in a chat
-/// that had no browser turn, with the routing step's summary line after them:
+/// with earlier turns, with the routing step's summary line after them:
 /// [`super::browser_request::routed_task`]), which the controller checked on its send (`browserCardTurn.routed`,
 /// [`super::browser_hand_back::carries_on_a_routed_card`]). Routing and the building lane read
 /// the message once, from the person's own entry; the browser lane, which reads no other entry,
@@ -1112,29 +1112,121 @@ fn push_taken_back(section_text: &mut String, note: &str, lines: &[String]) {
     }
 }
 
+/// The runs of the requests the person took back: each one they stopped and have not asked for
+/// again ([`stopped_requests`]), and each whose change they undid: the run its Undo line names
+/// (`undoneRunId`) and every other run of that request ([`persons_request_at`]), such as a
+/// message's own run, the browser turn of its card and the hand-back of what that turn found.
+fn taken_back_runs(entries: &[JsonValue]) -> HashSet<&str> {
+    let mut runs: HashSet<&str> = stopped_requests(entries)
+        .into_iter()
+        .flat_map(|stopped| stopped.runs)
+        .collect();
+    let undone: Vec<&str> = entries.iter().filter_map(undone_run_of).collect();
+    if undone.is_empty() {
+        return runs;
+    }
+    let request_of: HashMap<&str, Option<usize>> = entries
+        .iter()
+        .filter_map(|entry| entry_text(entry, "runId"))
+        .map(|run| (run, persons_request_at(entries, run)))
+        .collect();
+    for run in undone {
+        runs.insert(run);
+        if let Some(Some(at)) = request_of.get(run) {
+            runs.extend(
+                request_of
+                    .iter()
+                    .filter(|(_, other)| **other == Some(*at))
+                    .map(|(run, _)| *run),
+            );
+        }
+    }
+    runs
+}
+
+/// The run whose change an Undo line says the person undid, when the controller names it.
+fn undone_run_of(entry: &JsonValue) -> Option<&str> {
+    if !is_undo_line(entry) {
+        return None;
+    }
+    entry
+        .pointer("/metadata/undoneRunId")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|run| !run.is_empty())
+}
+
+/// The line the routing step reads in place of a browser turn's findings note: how many pages
+/// that turn read, as the runtime counted them when it wrote the note (`browserFindings`), and no
+/// page text. A browser part that reads every page posts no words of its own, so with no line
+/// the routing step saw no browser work in such a chat at all.
+fn findings_note_line(entry: &JsonValue) -> String {
+    let read = [
+        "/metadata/browserFindings/pagesRead",
+        "/metadata/details/browserFindings/pagesRead",
+        "/metadata/details/details/browserFindings/pagesRead",
+    ]
+    .into_iter()
+    .find_map(|pointer| entry.pointer(pointer).and_then(JsonValue::as_u64))
+    .unwrap_or_else(|| {
+        entry_text(entry, "content").map_or(0, |note| {
+            super::browser_hand_back::finding_values(note)
+                .iter()
+                .filter(|finding| finding.get("stopped").is_none())
+                .count() as u64
+        })
+    });
+    match read {
+        0 => "Octo read no page in Instafy's browser.".to_string(),
+        1 => "Octo read 1 page in Instafy's browser.".to_string(),
+        pages => format!("Octo read {pages} pages in Instafy's browser."),
+    }
+}
+
 /// Routing runs on a new provider turn. Supply ordinary stateless history, not
 /// a restored-thread assertion or arbitrary controller/history metadata. The person's message
 /// reads once, never again as the request of the browser turn it went to
 /// ([`repeated_person_messages`]), and a hand-back's stored prompt not at all: it read "User:
 /// Continue building with what the browser turn found." in the person's name
-/// ([`is_hand_back_prompt`]). Nor does a browser turn's findings note, which every browser turn
-/// now posts ([`is_findings_note`]): it read as an assistant turn of page text with no fence.
+/// ([`is_hand_back_prompt`]). A browser turn's findings note reads as one line the runtime writes,
+/// how many pages it read ([`findings_note_line`]): its own lines quote page text with no fence.
+///
+/// A request the person stopped and has not asked for again, or whose change they undid, is left
+/// out, with every entry of its runs, its Stop's notice and its Undo line ([`taken_back_runs`]):
+/// the routing step only picks a route, and a stopped or undone request is never one to carry on.
+/// After a page whose metro route was not confirmed, a section the person stopped and a tip they
+/// stopped and undid, "keep going" read both as "the unfinished page work" and stayed with Octo,
+/// whose reply offered nothing (a local test, Nov 7). A building turn still reads each Stop and
+/// Undo line ([`build_prompt_conversation_context`]). An Undo line that names no run stays, as it
+/// is the only sign of the Undo, and so does the notice of a Stop whose request a Continue asked
+/// for again.
 pub(super) fn build_routing_conversation_context(
     history_value: Option<&JsonValue>,
 ) -> PromptConversationContext {
     let entries = history_value.and_then(JsonValue::as_array);
     let repeated = entries.map_or_else(HashSet::new, |entries| repeated_person_messages(entries));
-    // A browser turn's findings note is Details, not the chat's words, and its lines quote page
-    // text: the routing step reads the browser turn's reply, never its note.
+    let taken_back = entries.map_or_else(HashSet::new, |entries| taken_back_runs(entries));
     let turns: Vec<JsonValue> = entries
         .into_iter()
         .flatten()
         .enumerate()
         .filter(|(index, entry)| {
-            !repeated.contains(index) && !is_hand_back_prompt(entry) && !is_findings_note(entry)
+            let stopped_here = is_stop_notice(entry)
+                && notice_runs(entry)
+                    .iter()
+                    .any(|run| taken_back.contains(run));
+            !repeated.contains(index)
+                && !is_hand_back_prompt(entry)
+                && !stopped_here
+                && undone_run_of(entry).is_none()
+                && !entry_text(entry, "runId").is_some_and(|run| taken_back.contains(run))
         })
         .filter_map(|(_, entry)| {
             let role = entry.get("role")?.as_str()?;
+            if is_findings_note(entry) {
+                return (role == "assistant")
+                    .then(|| json!({"role": role, "content": findings_note_line(entry)}));
+            }
             let content = entry.get("content")?.as_str()?.trim();
             (matches!(role, "user" | "assistant") && !content.is_empty())
                 .then(|| json!({"role": role, "content": content}))
@@ -1876,24 +1968,55 @@ mod tests {
         assert!(!BROWSER_RUNS_NOTE.contains("reply that no page it read states"));
     }
 
-    /// The routing step reads the chat's words, never a browser turn's findings note: Details,
-    /// whose lines quote page text with no fence. Every browser turn posts one now, so with them
-    /// the routing step would read each question's pages as Octo's own turns.
+    /// The routing step reads a browser turn's findings note as one line the runtime writes, how
+    /// many pages the turn read, and never the note's lines: Details, which quote page text with
+    /// no fence. A browser part that read every page posts no words of its own, so with no line
+    /// the routing step read no browser work at all in such a chat, and a change that needed what
+    /// those pages said stayed with the building turn (a local test, Nov 7).
     #[test]
-    fn the_routing_step_never_reads_a_browser_turns_findings_note() {
+    fn the_routing_step_reads_a_browser_turns_findings_note_as_one_line_of_its_pages() {
         let with_notes = build_routing_conversation_context(Some(&porto_chat(true))).section_text;
         let without = build_routing_conversation_context(Some(&porto_chat(false))).section_text;
-        assert_eq!(with_notes, without);
         for page_text in [
             "\"stopped\"",
             "livrarialello.pt",
             "The journey planner lists São Bento and Aliados as stations.",
+            "facts",
         ] {
             assert!(!with_notes.contains(page_text), "{page_text}: {with_notes}");
         }
-        assert!(
-            with_notes.contains("Put the hours and the metro route on a small page I can share."),
-            "{with_notes}"
+        let line = "Assistant: Octo read 1 page in Instafy's browser.";
+        assert_eq!(with_notes.matches(line).count(), 2, "{with_notes}");
+        assert_eq!(with_notes.replace(&format!("\n{line}"), ""), without);
+        assert!(!without.contains("Octo read"), "{without}");
+
+        // A browser part that read every page and posted no words, one that read none, and a
+        // note with no count, whose lines say how many pages it read.
+        let note = |run: &str, content: &str, findings: JsonValue| {
+            json!({"role": "assistant", "content": content, "runId": run, "lane": "browser",
+                   "metadata": {"source": "agent", "kind": "update", "messageType": "status",
+                                "details": {"kind": "agent_message", "browserFindings": findings}}})
+        };
+        let page =
+            |url: &str| json!({"url": url, "title": "A laptop", "facts": ["74Wh"]}).to_string();
+        let history = json!([
+            {"role": "user", "content": "Compare the three latest laptops, as a comparison page.", "runId": "run-1"},
+            {"role": "assistant", "content": "", "runId": "run-2", "lane": "browser"},
+            note("run-2", &(1..=10).map(|n| page(&format!("https://maker.example/{n}"))).collect::<Vec<_>>().join("\n"), json!({"pages": 10, "pagesRead": 10})),
+            {"role": "user", "content": "Find the opening hours.", "runId": "run-3"},
+            {"role": "assistant", "content": "The site didn't answer.", "runId": "run-4", "lane": "browser"},
+            note("run-4", &json!({"url": "https://slow.example/", "stopped": "timed-out"}).to_string(), json!({"pages": 1, "pagesRead": 0})),
+            note("run-5", &[page("https://a.example/"), page("https://b.example/")].join("\n"), json!({})),
+        ]);
+        let text = build_routing_conversation_context(Some(&history)).section_text;
+        assert_eq!(
+            text,
+            "User: Compare the three latest laptops, as a comparison page.\n\
+             Assistant: Octo read 10 pages in Instafy's browser.\n\
+             User: Find the opening hours.\n\
+             Assistant: The site didn't answer.\n\
+             Assistant: Octo read no page in Instafy's browser.\n\
+             Assistant: Octo read 2 pages in Instafy's browser."
         );
     }
 
@@ -2061,11 +2184,11 @@ mod tests {
         }
     }
 
-    /// In a chat with no browser turn yet, a routed card's task ends with what the routing step
-    /// said the message carries on (`browser_request::routed_task`). Routing and a building
-    /// thread still read the person's message once, a new browser thread reads the whole task as
-    /// that turn's request, and a Stop of that turn names only the person's words: the line is
-    /// the routing step's, never theirs.
+    /// In a chat with earlier turns, a routed card's task ends with what the routing step said
+    /// the message carries on (`browser_request::routed_task`). A building thread still reads the
+    /// person's message once, a new browser thread reads the whole task as that turn's request,
+    /// and a Stop of that turn names only the person's words: the line is the routing step's,
+    /// never theirs. Routing, which leaves out what the person stopped, reads neither.
     #[test]
     fn a_routed_request_with_what_it_carries_on_reads_once_and_stops_in_the_persons_words() {
         let words = "Fill in what's still missing.";
@@ -2087,10 +2210,21 @@ mod tests {
         let building =
             build_prompt_conversation_context(Some(&json!(history)), None, ThreadLane::Building)
                 .section_text;
-        for text in [&routing, &building] {
-            assert_eq!(text.matches(words).count(), 1, "{text}");
+        for (text, times) in [(&routing, 0), (&building, 1)] {
+            assert_eq!(text.matches(words).count(), times, "{text}");
             assert!(!text.contains("What this carries on"), "{text}");
         }
+        let before_the_stop =
+            build_routing_conversation_context(Some(&json!(history[..3].to_vec()))).section_text;
+        assert_eq!(
+            before_the_stop.matches(words).count(),
+            1,
+            "{before_the_stop}"
+        );
+        assert!(
+            !before_the_stop.contains("What this carries on"),
+            "{before_the_stop}"
+        );
         // Before its Stop, which leaves a stopped turn's request out of the lane's replay.
         let browser = build_prompt_conversation_context(
             Some(&json!(history[..3].to_vec())),
@@ -2686,9 +2820,10 @@ mod tests {
             );
             assert!(text.contains("I built a small page with the bookstore's daily hours."));
         }
-        // Routing reads the chat's lines as they are; a new building thread reads each stopped
-        // request as its Stop's line ([`a_new_building_thread_reads_a_stopped_request_as_its_stop_line`]).
-        assert!(routing.section_text.contains("Stopped this run."));
+        // Routing leaves each stopped request out with its notice
+        // ([`the_routing_step_leaves_out_what_the_person_stopped_or_undid`]); a new building thread
+        // reads each as its Stop's line ([`a_new_building_thread_reads_a_stopped_request_as_its_stop_line`]).
+        assert!(!routing.section_text.contains("Stopped this run."));
         assert!(!building.section_text.contains("Stopped this run."));
         // Words a person typed that only look like it stay theirs.
         let typed = json!([{"role": "user", "content": "Continue building with what the browser turn found, please."}]);
@@ -2696,6 +2831,83 @@ mod tests {
             build_routing_conversation_context(Some(&typed))
                 .section_text
                 .contains("found, please.")
+        );
+    }
+
+    /// The routing step only picks a route, and a request the person stopped or undid is never one
+    /// to carry on: its input leaves out the request, every entry of its runs (a browser turn of
+    /// its card, the hand-back after it, a change a Stop kept), its Stop's notice and its Undo
+    /// line. After a page whose metro route was not confirmed, a section the person stopped and a
+    /// tip they stopped and undid, "keep going" read both as "the unfinished page work" and
+    /// stayed with Octo, which offered nothing (a local test, Nov 7). A building thread still
+    /// reads each Stop and Undo line. A Continue under a Stop asks for its request again, which
+    /// stays with its notice; an Undo line that names no run is the only sign of the Undo, and
+    /// stays.
+    #[test]
+    fn the_routing_step_leaves_out_what_the_person_stopped_or_undid() {
+        const BEFORE_YOU_GO: &str = "Add a short \"Before you go\" section to that page.";
+        const TIP: &str = "Add a one-line tip about the best time to visit.";
+        let mut chat = chat_with_stops_and_an_undo();
+        chat.push(json!({"role": "user", "content": "keep going", "runId": "run-12"}));
+        let routing = build_routing_conversation_context(Some(&json!(chat))).section_text;
+        for gone in [
+            BEFORE_YOU_GO,
+            TIP,
+            "Stopped this run.",
+            "The person undid the change from",
+            "Applied file changes:",
+        ] {
+            assert!(!routing.contains(gone), "{gone}: {routing}");
+        }
+        assert!(
+            routing.ends_with(
+                "User: Put the hours and the metro route on a small page I can share.\n\
+                 Assistant: I built a small page with the bookstore's daily hours.\n\
+                 User: keep going"
+            ),
+            "{routing}"
+        );
+        let building =
+            build_prompt_conversation_context(Some(&json!(chat)), None, ThreadLane::Building)
+                .section_text;
+        for line in [
+            stop_line(BEFORE_YOU_GO, &[]),
+            stop_line(TIP, &[]),
+            format!("The person undid the change from \u{201c}{TIP}\u{201d}"),
+        ] {
+            assert!(building.contains(&line), "{line}: {building}");
+        }
+
+        // A Continue under the Stop asks for the section again: it stays, with its notice.
+        let mut continued = chat[..10].to_vec();
+        continued.push(json!({
+            "role": "user", "content": "Continue the stopped turn from its current state.", "runId": "run-c",
+            "metadata": {"prompt_metadata": {"continuedRunIds": ["run-8"]}},
+        }));
+        let routing = build_routing_conversation_context(Some(&json!(continued))).section_text;
+        assert!(
+            routing.ends_with(&format!(
+                "User: {BEFORE_YOU_GO}\nAssistant: Stopped this run.\nUser: Continue the stopped turn from its current state."
+            )),
+            "{routing}"
+        );
+
+        // An Undo line that names no run stays, and the change's request with it.
+        let mut unnamed = chat[..8].to_vec();
+        unnamed.push(json!({"role": "user", "content": TIP, "runId": "run-9"}));
+        unnamed.push(json!({"role": "assistant", "content": "Added the tip.", "runId": "run-9"}));
+        let mut undo = chat[16].clone();
+        undo["metadata"]
+            .as_object_mut()
+            .expect("the Undo's metadata")
+            .remove("undoneRunId");
+        unnamed.push(undo);
+        let routing = build_routing_conversation_context(Some(&json!(unnamed))).section_text;
+        assert!(
+            routing.ends_with(&format!(
+                "User: {TIP}\nAssistant: Added the tip.\nAssistant: The person undid the change from \u{201c}{TIP}\u{201d}"
+            )),
+            "{routing}"
         );
     }
 
