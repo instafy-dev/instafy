@@ -153,6 +153,15 @@ fn let_octo_continue_of(entry: &JsonValue) -> Option<&str> {
     .filter(|run| !run.is_empty())
 }
 
+/// Whether an entry is a press of Let Octo continue: Studio's continuation prompt as a browser
+/// turn's request ([`LET_OCTO_CONTINUE_PROMPT`]), which every replay and the routing step read as
+/// [`LET_OCTO_CONTINUE_LINE`].
+fn is_let_octo_continue(entry: &JsonValue) -> bool {
+    is_browser_entry(entry)
+        && entry_text(entry, "role") == Some("user")
+        && entry_text(entry, "content") == Some(LET_OCTO_CONTINUE_PROMPT)
+}
+
 /// Whether an assistant entry is the card the routing step posts for a message it sends to the
 /// browser: that run's routing step ran no turn of the building thread.
 fn is_routed_browser_card(entry: &JsonValue) -> bool {
@@ -196,6 +205,32 @@ fn is_person_message(entry: &JsonValue) -> bool {
     entry_text(entry, "role") == Some("user")
         && !is_browser_entry(entry)
         && !is_hand_back_prompt(entry)
+}
+
+/// What the controller adds to a message of the person's for what they attached
+/// (runtime-controller `format_image_attachment_context_for_agent` and
+/// `chat_attachments::format_history_context`): each file's name and place in the space, and
+/// what a building turn does with it. It comes after their words, a blank line apart.
+const ATTACHMENT_LINES: [&str; 2] = [
+    "User attached image(s):\n",
+    "User attached file(s) stored with this conversation:\n",
+];
+
+/// A message of the person's in their own words: without the lines the controller adds for what
+/// they attached ([`ATTACHMENT_LINES`]), which only a building turn reads.
+fn persons_words(content: &str) -> &str {
+    let end = ATTACHMENT_LINES
+        .iter()
+        .filter_map(|lines| {
+            if content.starts_with(lines) {
+                Some(0)
+            } else {
+                content.find(&format!("\n\n{lines}"))
+            }
+        })
+        .min()
+        .unwrap_or(content.len());
+    content[..end].trim()
 }
 
 /// The person's own words of the request `run` carried out, which their Stop ended or whose
@@ -533,8 +568,9 @@ fn last_turn_start(entries: &[JsonValue], lane: ThreadLane) -> usize {
 /// each with when the person did it. A Stop's line names each request it ended in the person's
 /// words ([`persons_request_in`]), unless a later message carries that run on (a Continue under the
 /// Stop asks for it again). A browser thread reads only those of a request one of the chat's
-/// browser turns was asked: it reads nothing else of the chat, so the words of a message that
-/// stayed with Octo (an address to put on a page, say) never reach a turn a page can ask to type
+/// browser turns was asked: of the other messages it reads only the person's that still stand
+/// ([`parse_lane_history`]), so the words of a message that stayed with Octo and that the person
+/// stopped or undid (an address to put on a page, say) never reach a turn a page can ask to type
 /// them somewhere, and it could not carry that request on anyway. The newest [`TAKEN_BACK_MAX`],
 /// and how many of them are Undos.
 fn taken_back_lines(entries: &[JsonValue], since: usize, lane: ThreadLane) -> (Vec<String>, usize) {
@@ -712,19 +748,19 @@ fn entry_text<'a>(entry: &'a JsonValue, key: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
-/// The entries that repeat the person's message: each request of a browser turn that carries
-/// on the card the routing step posted for that message, when the message itself is in the
-/// history before it. Its words are the message's, sent once more as that turn's task (in a chat
-/// with earlier turns, with the routing step's summary line after them:
-/// [`super::browser_request::routed_task`]), which the controller checked on its send (`browserCardTurn.routed`,
+/// The entries that repeat the person's message, each with that message's entry: each request of
+/// a browser turn that carries on the card the routing step posted for that message, when the
+/// message itself is in the history before it. Its words are the message's, sent once more as
+/// that turn's task (in a chat with earlier turns, with the routing step's summary line after
+/// them: [`super::browser_request::routed_task`]), which the controller checked on its send (`browserCardTurn.routed`,
 /// [`super::browser_hand_back::carries_on_a_routed_card`]). Routing and the building lane read
-/// the message once, from the person's own entry; the browser lane, which reads no other entry,
-/// reads it as that turn's request. Read twice, the next message's routing read "User: Compare
-/// the three latest Framework laptops…" twice (a local test, Nov 3). Try again sends that task
-/// once more, for the card the routing step posted, which the controller stamps only on the first
-/// turn that carries it on: read as the person's, it put the routing step's summary line in their
-/// name in the next message's routing (a local test, Nov 6).
-fn repeated_person_messages(entries: &[JsonValue]) -> HashSet<usize> {
+/// the message once, from the person's own entry; the browser lane reads it once too, as that
+/// turn's request, with the summary line its turn was given. Read twice, the next message's
+/// routing read "User: Compare the three latest Framework laptops…" twice (a local test, Nov 3).
+/// Try again sends that task once more, for the card the routing step posted, which the
+/// controller stamps only on the first turn that carries it on: read as the person's, it put the
+/// routing step's summary line in their name in the next message's routing (a local test, Nov 6).
+fn repeated_person_messages(entries: &[JsonValue]) -> HashMap<usize, usize> {
     let routed_cards: HashSet<String> = entries
         .iter()
         .filter(|entry| {
@@ -733,8 +769,8 @@ fn repeated_person_messages(entries: &[JsonValue]) -> HashSet<usize> {
         .filter_map(|entry| entry.pointer("/metadata/jobId").and_then(JsonValue::as_str))
         .map(|job| job.trim().to_ascii_lowercase())
         .collect();
-    let mut said: HashSet<&str> = HashSet::new();
-    let mut repeated = HashSet::new();
+    let mut said: HashMap<&str, usize> = HashMap::new();
+    let mut repeated = HashMap::new();
     for (index, entry) in entries.iter().enumerate() {
         if entry_text(entry, "role") != Some("user") {
             continue;
@@ -743,15 +779,16 @@ fn repeated_person_messages(entries: &[JsonValue]) -> HashSet<usize> {
             continue;
         };
         if !is_browser_entry(entry) {
-            said.insert(content);
-        } else if said.contains(super::browser_request::routed_task_words(content).trim_end())
+            said.insert(content, index);
+        } else if let Some(&message) =
+            said.get(super::browser_request::routed_task_words(content).trim_end())
             && (entry
                 .pointer("/metadata/prompt_metadata")
                 .is_some_and(super::browser_hand_back::carries_on_a_routed_card)
                 || card_job_of(entry)
                     .is_some_and(|card| routed_cards.contains(&card.to_ascii_lowercase())))
         {
-            repeated.insert(index);
+            repeated.insert(index, message);
         }
     }
     repeated
@@ -862,9 +899,17 @@ impl BrowserRunEntries {
 
 /// The history as one lane of the chat reads it when its thread is new or lost.
 ///
-/// - The browser lane reads only the chat's browser turns (`lane: "browser"` entries): what each
-///   was asked and what it replied. Nothing of the building turns, whose files and command output
-///   a page could ask it to type somewhere. A Let Octo continue press reads as one line.
+/// - The browser lane reads the chat's browser turns (`lane: "browser"` entries), what each was
+///   asked and what it replied, and of the building turns only the person's own messages, in
+///   their words ([`persons_words`]): never Octo's replies there, its files or command output,
+///   which a page could ask it to type somewhere. A chat's first browser part read only the
+///   person's newest message, "Fill in what's still missing.", with a summary that named no
+///   laptop, though the person's first message here named both (a local test, Nov 8). A message
+///   sent on to a browser turn reads once, as that turn's request with the summary its turn was
+///   given ([`repeated_person_messages`]); Studio's words for a Continue under a Stop, and a
+///   message whose change the person undid, read as nothing: the request a Continue asks for
+///   again reads in its place, and an Undo line reaches the browser lane only for what a browser
+///   turn was asked ([`taken_back_lines`]). A Let Octo continue press reads as one line.
 /// - The building lane reads every turn, each browser turn as one quoted block of page data
 ///   ([`BrowserRun`]): its request and its findings, never its reply's words, and never as the
 ///   person's words or its own. A browser turn that carries on
@@ -880,9 +925,10 @@ fn parse_lane_history(value: Option<&JsonValue>, lane: ThreadLane) -> Vec<Conver
     let Some(JsonValue::Array(entries)) = value else {
         return Vec::new();
     };
-    let repeated = match lane {
-        ThreadLane::Building => repeated_person_messages(entries),
-        ThreadLane::SharedBrowser => HashSet::new(),
+    let repeats = repeated_person_messages(entries);
+    let (repeated, taken_back): (HashSet<usize>, HashSet<&str>) = match lane {
+        ThreadLane::Building => (repeats.into_keys().collect(), HashSet::new()),
+        ThreadLane::SharedBrowser => (repeats.into_values().collect(), taken_back_runs(entries)),
     };
     let stopped = stopped_requests(entries);
     let left_out: HashSet<&str> = stopped
@@ -966,10 +1012,32 @@ fn parse_lane_history(value: Option<&JsonValue>, lane: ThreadLane) -> Vec<Conver
         }
         if !is_browser_entry(entry) {
             flush(&mut run, &mut turns);
-            if lane == ThreadLane::Building && !is_hand_back_prompt(entry) {
-                turns.extend(parse_conversation_history(Some(&JsonValue::Array(vec![
-                    entry.clone(),
-                ]))));
+            match lane {
+                ThreadLane::Building if !is_hand_back_prompt(entry) => {
+                    turns.extend(parse_conversation_history(Some(&JsonValue::Array(vec![
+                        entry.clone(),
+                    ]))));
+                }
+                ThreadLane::SharedBrowser
+                    if is_person_message(entry)
+                        && !repeated.contains(&index)
+                        && continued_runs_of(entry).next().is_none()
+                        && !entry_text(entry, "runId")
+                            .is_some_and(|run| taken_back.contains(run)) =>
+                {
+                    if let Some(words) = entry_text(entry, "content")
+                        .map(persons_words)
+                        .filter(|words| !words.is_empty())
+                    {
+                        turns.push(ConversationTurn {
+                            role: "user".to_string(),
+                            content: words.to_string(),
+                            created_at: entry_text(entry, "createdAt").map(ToString::to_string),
+                            browser_run: None,
+                        });
+                    }
+                }
+                _ => {}
             }
             continue;
         }
@@ -1001,13 +1069,11 @@ fn parse_lane_history(value: Option<&JsonValue>, lane: ThreadLane) -> Vec<Conver
             if repeated.contains(&index) {
                 continue;
             }
-            current
-                .requests
-                .push(if content == LET_OCTO_CONTINUE_PROMPT {
-                    LET_OCTO_CONTINUE_LINE.to_string()
-                } else {
-                    content.to_string()
-                });
+            current.requests.push(if is_let_octo_continue(entry) {
+                LET_OCTO_CONTINUE_LINE.to_string()
+            } else {
+                content.to_string()
+            });
         } else if is_findings_note(entry) {
             current.findings_note = Some(content.to_string());
         } else {
@@ -1041,8 +1107,8 @@ pub fn format_conversation_history(turns: &[ConversationTurn]) -> String {
 /// chat so far, with what the person stopped or undid since its last turn, or, for a new or lost
 /// thread, the chat's history as that lane reads it (`parse_lane_history`), a browser thread's
 /// with what the person stopped or undid since the chat's first browser turn. A browser lane
-/// with no earlier browser turn to replay, nor a Stop or an Undo of one, gets no section: its
-/// `section_text` is empty.
+/// with nothing to replay, no browser turn and no message of the person's, nor a Stop or an Undo
+/// of a browser turn's request, gets no section: its `section_text` is empty.
 pub fn build_prompt_conversation_context(
     history_value: Option<&JsonValue>,
     provider_state: Option<&JsonValue>,
@@ -1125,8 +1191,9 @@ pub fn build_prompt_conversation_context(
         context.section_text.insert_str(0, &browser_runs_note);
         context
     };
-    // A new or lost browser thread replays only the chat's browser turns, and no Undo or Stop is
-    // one: it reads those since the first of them after its replay, so a request the person
+    // A new or lost browser thread replays the chat's browser turns and the person's messages
+    // that still stand, and no Undo or Stop is one: it reads those of the browser turns' requests
+    // since the first of those turns after its replay, so a request the person
     // stopped or undid is not one to carry on, even when the replay left out every browser turn
     // there was, as a stopped request's. The building lane's replay reads them in place, as
     // lines of the chat.
@@ -1255,6 +1322,10 @@ fn findings_note_line(entry: &JsonValue) -> String {
 /// Continue building with what the browser turn found." in the person's name
 /// ([`is_hand_back_prompt`]). A browser turn's findings note reads as one line the runtime writes,
 /// how many pages it read ([`findings_note_line`]): its own lines quote page text with no fence.
+/// A Let Octo continue press reads as the one line a replay reads ([`LET_OCTO_CONTINUE_LINE`]),
+/// never as Studio's continuation prompt in the person's name: "keep going" read both presses of
+/// its chat as "User: Continue the previous browser task on this same page. … Take a fresh
+/// snapshot before acting …", and its summary for the browser repeated them (a local test, Nov 8).
 ///
 /// A request the person stopped and has not asked for again, once they sent another message
 /// after it, or whose change they undid, is left out, with every entry of its runs, its Stop's
@@ -1271,7 +1342,7 @@ pub(super) fn build_routing_conversation_context(
     history_value: Option<&JsonValue>,
 ) -> PromptConversationContext {
     let entries = history_value.and_then(JsonValue::as_array);
-    let repeated = entries.map_or_else(HashSet::new, |entries| repeated_person_messages(entries));
+    let repeated = entries.map_or_else(HashMap::new, |entries| repeated_person_messages(entries));
     let taken_back = entries.map_or_else(HashSet::new, |entries| taken_back_runs(entries));
     let turns: Vec<JsonValue> = entries
         .into_iter()
@@ -1282,7 +1353,7 @@ pub(super) fn build_routing_conversation_context(
                 && notice_runs(entry)
                     .iter()
                     .any(|run| taken_back.contains(run));
-            !repeated.contains(index)
+            !repeated.contains_key(index)
                 && !is_hand_back_prompt(entry)
                 && !stopped_here
                 && undone_run_of(entry).is_none()
@@ -1294,7 +1365,11 @@ pub(super) fn build_routing_conversation_context(
                 return (role == "assistant")
                     .then(|| json!({"role": role, "content": findings_note_line(entry)}));
             }
-            let content = entry.get("content")?.as_str()?.trim();
+            let content = if is_let_octo_continue(entry) {
+                LET_OCTO_CONTINUE_LINE
+            } else {
+                entry.get("content")?.as_str()?.trim()
+            };
             (matches!(role, "user" | "assistant") && !content.is_empty())
                 .then(|| json!({"role": role, "content": content}))
         })
@@ -1879,17 +1954,20 @@ mod tests {
         ])
     }
 
-    /// A browser thread that is new or lost reads only the chat's browser turns: what each was
-    /// asked and what it replied, Let Octo continue as one line, and nothing of the building
-    /// turns. A chat without a browser turn gives it no section.
+    /// A browser thread that is new or lost reads the chat's browser turns, what each was asked
+    /// and what it replied, with Let Octo continue as one line, and of the building turns only
+    /// the person's own messages: never Octo's replies or cards there, nor a hand-back's words. A
+    /// chat with neither gives it no section.
     #[test]
-    fn a_fresh_browser_thread_replays_only_browser_turns() {
+    fn a_fresh_browser_thread_replays_browser_turns_and_the_persons_messages() {
         let history = chat_with_browser_turns();
         let context =
             build_prompt_conversation_context(Some(&history), None, ThreadLane::SharedBrowser);
         let text = &context.section_text;
         assert!(
-            text.contains("User: Read each laptop's own page."),
+            text.starts_with(
+                "User: Compare three laptops and build a page.\nUser: Read each laptop's own page."
+            ),
             "{text}"
         );
         assert!(text.contains("Read 1 page."), "{text}");
@@ -1900,7 +1978,6 @@ mod tests {
         );
         assert!(!text.contains(LET_OCTO_CONTINUE_PROMPT), "{text}");
         for building in [
-            "Compare three laptops",
             "Continue this task in Instafy's browser.",
             "Continue building with what the browser turn found.",
             "Built the comparison page.",
@@ -1908,7 +1985,7 @@ mod tests {
         ] {
             assert!(!text.contains(building), "{building}: {text}");
         }
-        assert_eq!(context.metrics["includedTurns"], 4);
+        assert_eq!(context.metrics["includedTurns"], 5);
 
         let no_browser_turns = json!([
             {"role": "user", "content": "Plan three days on a map."},
@@ -1919,6 +1996,11 @@ mod tests {
             None,
             ThreadLane::SharedBrowser,
         );
+        assert_eq!(context.section_text, "User: Plan three days on a map.");
+        assert_eq!(context.metrics["includedTurns"], 1);
+        let replies_only = json!([{"role": "assistant", "content": "Made the map."}]);
+        let context =
+            build_prompt_conversation_context(Some(&replies_only), None, ThreadLane::SharedBrowser);
         assert_eq!(context.section_text, "");
         assert_eq!(context.metrics["includedTurns"], 0);
     }
@@ -2938,11 +3020,12 @@ mod tests {
         assert_eq!(replay.matches("Before you go").count(), 1, "{replay}");
     }
 
-    /// A browser thread that is new, or lost when its restore failed, replays only the chat's
-    /// browser turns, and no Stop or Undo is one: the tip the person stopped and undid replayed as
-    /// a plain request, the path on which "keep going" asked to build it again (a local test,
-    /// Nov 5, on a restored thread). It reads the chat's Stops and Undos since its first browser
-    /// turn after the replay. Before any browser turn it has nothing to carry on, and reads none.
+    /// A browser thread that is new, or lost when its restore failed, replays the chat's browser
+    /// turns and the person's messages that still stand, and no Stop or Undo is one: the tip the
+    /// person stopped and undid replayed as a plain request, the path on which "keep going" asked
+    /// to build it again (a local test, Nov 5, on a restored thread). It reads the chat's Stops
+    /// and Undos since its first browser turn after the replay. Before any browser turn it reads
+    /// none, and nothing of a message the person stopped.
     #[test]
     fn a_new_or_lost_browser_thread_reads_what_the_person_stopped_and_undid() {
         let mut chat = chat_with_stops_and_an_undo();
@@ -2984,7 +3067,7 @@ mod tests {
             None,
             ThreadLane::SharedBrowser,
         );
-        assert_eq!(context.section_text, "");
+        assert_eq!(context.section_text, "User: keep going");
     }
 
     /// A browser thread reads nothing of the chat but its browser turns, and a page can ask it to
@@ -3526,6 +3609,176 @@ mod tests {
                 stop_line(RELEASES, &[])
             )),
             "{browser}"
+        );
+    }
+
+    const FIRST_PAGE: &str = "Make a simple comparison page of the Framework Laptop 13 and 16 from what you already know, without browsing.";
+    const FIRST_REPLY: &str = "I made a simple side-by-side comparison of the Framework Laptop 13 and 16 from what I already know, without browsing.";
+    const FILL_IN: &str = "Fill in what's still missing.";
+
+    /// A chat of a local test (Nov 8) with no browser turn yet, as the controller sends it: a
+    /// page made without browsing, with a command and the file it changed, then "Fill in what's
+    /// still missing.", which the routing step sent on to the browser with a summary that named
+    /// no laptop.
+    fn chat_with_no_browser_turn_yet() -> Vec<JsonValue> {
+        vec![
+            json!({"role": "user", "content": FIRST_PAGE, "runId": "run-1", "createdAt": "2026-11-08T08:15:38.070Z"}),
+            json!({"role": "assistant", "content": "/bin/bash -lc sed -n '1,120p' sites/framework-laptops/data.json", "runId": "run-1", "createdAt": "2026-11-08T08:15:52Z", "metadata": {"messageType": "command_execution", "jobId": "job-run-1"}}),
+            json!({"role": "assistant", "content": "Applied file changes: sites/framework-13-vs-16/index.html", "runId": "run-1", "createdAt": "2026-11-08T08:16:30Z", "metadata": {"messageType": "file_change", "jobId": "job-run-1"}}),
+            json!({"role": "assistant", "content": FIRST_REPLY, "runId": "run-1", "createdAt": "2026-11-08T08:16:32.647Z", "metadata": {"jobId": "job-run-1"}}),
+            json!({"role": "user", "content": FILL_IN, "runId": "run-2", "createdAt": "2026-11-08T08:17:40.566Z"}),
+            json!({"role": "assistant", "content": "Continue this task in Instafy's browser.", "runId": "run-2", "metadata": {"jobId": "card-2", "details": {"browserRequest": {"routed": true}}}}),
+            routed(
+                &format!(
+                    "{FILL_IN}\n\nWhat this carries on: \"Research the missing comparison details, then update the page.\""
+                ),
+                "run-3",
+                "card-2",
+                "2026-11-08T08:17:54.187Z",
+            ),
+        ]
+    }
+
+    /// A browser part always knows what its chat is about. In a local test (Nov 8), a chat's
+    /// first browser part read only "Fill in what's still missing.", with a summary that named no
+    /// laptop, though the person's first message here named both, and opened no page, twice. A
+    /// new or lost browser thread reads the person's own messages of the building turns, and still
+    /// nothing else of those turns: not Octo's reply, the file it changed or a command it ran. The
+    /// message sent on to the browser reads once, as that turn's request.
+    #[test]
+    fn a_browser_part_reads_the_persons_own_messages_of_the_chat() {
+        let chat = json!(chat_with_no_browser_turn_yet());
+        let context =
+            build_prompt_conversation_context(Some(&chat), None, ThreadLane::SharedBrowser);
+        let text = &context.section_text;
+        assert!(
+            text.starts_with(&format!(
+                "User [2026-11-08T08:15:38.070Z]: {FIRST_PAGE}\nUser [2026-11-08T08:17:54.187Z]: {FILL_IN}\n\nWhat this carries on:"
+            )),
+            "{text}"
+        );
+        assert_eq!(text.matches(FILL_IN).count(), 1, "{text}");
+        for building in [
+            FIRST_REPLY,
+            "Applied file changes",
+            "sed -n",
+            "sites/",
+            "Continue this task in Instafy's browser.",
+        ] {
+            assert!(!text.contains(building), "{building}: {text}");
+        }
+        assert_eq!(context.metrics["includedTurns"], 2);
+    }
+
+    /// What a browser thread reads of the building turns is the person's words that still stand:
+    /// not the lines the controller adds for what they attached, which name the space's files and
+    /// tell a building turn what to do with them, nor a message of only those; not Studio's words
+    /// for a Continue under a Stop; and not a message whose change they undid, whose Undo line
+    /// reaches the building lane alone. The building lane reads each of them as before.
+    #[test]
+    fn a_browser_thread_reads_the_persons_words_that_still_stand() {
+        const PHOTO: &str = "Use this photo for the header.";
+        const UNDONE: &str = "Make the title bigger.";
+        const CONTINUE: &str = "Continue the stopped turn from its current state. Check what has already finished before proceeding; do not repeat completed actions.";
+        let attached = "User attached image(s):\n- workspacePath: uploads/header.png (fileName: header.png, mimeType: image/png, sizeBytes: 2048)\nBefore answering, call the `view_image` tool with the `workspacePath` above.\n\n\nUser attached file(s) stored with this conversation:\n- header.png (mimeType: image/png, sizeBytes: 2048)\n";
+        let mut chat = chat_with_no_browser_turn_yet();
+        chat.splice(
+            4..4,
+            [
+                json!({"role": "user", "content": format!("{PHOTO}\n\n{attached}"), "runId": "run-a", "createdAt": "2026-11-08T08:16:40Z"}),
+                json!({"role": "user", "content": attached, "runId": "run-b", "createdAt": "2026-11-08T08:16:50Z"}),
+                json!({"role": "user", "content": UNDONE, "runId": "run-c", "createdAt": "2026-11-08T08:17:00Z"}),
+                json!({"role": "assistant", "content": "Applied file changes: sites/framework-13-vs-16/theme.css", "runId": "run-c", "createdAt": "2026-11-08T08:17:10Z"}),
+                json!({
+                    "role": "assistant", "content": format!("The person undid the change from “{UNDONE}”"),
+                    "createdAt": "2026-11-08T08:17:20Z",
+                    "metadata": {"source": "controller", "kind": "change_undone", "undoneRunId": "run-c", "actorUserId": "person-1"},
+                }),
+                json!({"role": "user", "content": CONTINUE, "runId": "run-d", "createdAt": "2026-11-08T08:17:30Z", "metadata": {"continuedRunIds": ["run-1"]}}),
+            ],
+        );
+        let history = json!(chat);
+        let text =
+            build_prompt_conversation_context(Some(&history), None, ThreadLane::SharedBrowser)
+                .section_text;
+        assert!(
+            text.contains(&format!(
+                "User [2026-11-08T08:15:38.070Z]: {FIRST_PAGE}\nUser [2026-11-08T08:16:40Z]: {PHOTO}\nUser [2026-11-08T08:17:54.187Z]: {FILL_IN}"
+            )),
+            "{text}"
+        );
+        for gone in [
+            "User attached",
+            "uploads/header.png",
+            "view_image",
+            UNDONE,
+            CONTINUE,
+        ] {
+            assert!(!text.contains(gone), "{gone}: {text}");
+        }
+        let building =
+            build_prompt_conversation_context(Some(&history), None, ThreadLane::Building)
+                .section_text;
+        for kept in ["view_image", UNDONE, CONTINUE] {
+            assert!(building.contains(kept), "{kept}: {building}");
+        }
+    }
+
+    /// The routing step reads a press of Let Octo continue as the one line every replay reads. In
+    /// a local test (Nov 8), "keep going" read both presses of its chat as the person's words,
+    /// "User: Continue the previous browser task on this same page. … Take a fresh snapshot
+    /// before acting …", and its summary for the browser said to use a fresh page snapshot before
+    /// acting.
+    #[test]
+    fn the_routing_step_reads_each_let_octo_continue_as_one_line() {
+        const HOURS: &str =
+            "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.";
+        const METRO: &str = "Now find how to get there by metro from São Bento.";
+        const PAUSE: &str = "Answer the highlighted cookie notice in Instafy's browser, then choose Let Octo continue.";
+        let card = |run: &str, job: &str| {
+            json!({
+                "role": "assistant", "content": "Continue this task in Instafy's browser.", "runId": run,
+                "metadata": {"jobId": job, "details": {"browserRequest": {"routed": true}}},
+            })
+        };
+        let press = |run: &str, paused: &str, at: &str| {
+            json!({
+                "role": "user", "content": LET_OCTO_CONTINUE_PROMPT, "runId": run, "lane": "browser", "createdAt": at,
+                "metadata": {"prompt_metadata": {"browserTransport": "shared", "browserContinuesRunId": paused}},
+            })
+        };
+        let history = json!([
+            {"role": "user", "content": HOURS, "runId": "run-1", "createdAt": "2026-11-08T08:19:16Z"},
+            card("run-1", "card-1"),
+            routed(HOURS, "run-2", "card-1", "2026-11-08T08:19:20Z"),
+            {"role": "assistant", "content": PAUSE, "runId": "run-2", "lane": "browser", "createdAt": "2026-11-08T08:20:01Z"},
+            press("run-3", "run-2", "2026-11-08T08:21:11Z"),
+            {"role": "assistant", "content": "The Visit Porto homepage is open, but I couldn't find Livraria Lello's opening hours.", "runId": "run-3", "lane": "browser", "createdAt": "2026-11-08T08:22:40Z"},
+            {"role": "user", "content": METRO, "runId": "run-4", "createdAt": "2026-11-08T08:22:50Z"},
+            card("run-4", "card-4"),
+            routed(METRO, "run-5", "card-4", "2026-11-08T08:22:54Z"),
+            {"role": "assistant", "content": PAUSE, "runId": "run-5", "lane": "browser", "createdAt": "2026-11-08T08:24:00Z"},
+            press("run-6", "run-5", "2026-11-08T08:24:42Z"),
+            {"role": "assistant", "content": "The Metro do Porto page is still showing its cookie notice.", "runId": "run-6", "lane": "browser", "createdAt": "2026-11-08T08:25:30Z"},
+            {"role": "user", "content": "keep going", "runId": "run-7", "createdAt": "2026-11-08T08:35:04Z"},
+        ]);
+        let text = build_routing_conversation_context(Some(&history)).section_text;
+        let line = format!("User: {LET_OCTO_CONTINUE_LINE}");
+        assert_eq!(text.matches(&line).count(), 2, "{text}");
+        assert!(!text.contains(LET_OCTO_CONTINUE_PROMPT), "{text}");
+        assert!(!text.contains("fresh snapshot"), "{text}");
+        assert!(
+            text.contains(&format!(
+                "Assistant: {PAUSE}\n{line}\nAssistant: The Metro do Porto page is still showing its cookie notice.\nUser: keep going"
+            )),
+            "{text}"
+        );
+        // Words the person types stay theirs: only a browser turn's request is a press.
+        let typed = json!([{"role": "user", "content": LET_OCTO_CONTINUE_PROMPT}]);
+        assert!(
+            build_routing_conversation_context(Some(&typed))
+                .section_text
+                .contains("fresh snapshot")
         );
     }
 

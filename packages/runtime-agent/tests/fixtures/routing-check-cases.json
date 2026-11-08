@@ -1,5 +1,5 @@
 {
-  "about": "Messages with the chat they were sent in, and the route the routing step should give each. The routing check builds each case's routing input with the runtime's own code and asks the routing model. history holds the chat's earlier entries as the runtime receives them; the message is added after them. Nine cases were sent in a recorded local test, each with the entries its routing step received there: map-trip, comparison-page, comparison-fill-in, page-from-findings, browser-named, browser-follow-up, keep-going-open-route, browser-sign-in and browser-form. keep-going-after-stop-and-undo was not: its chat is keep-going-open-route's up to the first Undo, with the route exchange taken out, the request and reply that named the route edited to match, and that reply's offer of more cut. page-from-unconfirmed-findings and keep-going-route-open-after-stop-and-undo were sent in a later recorded local test, each with the entries its routing step received there, a path's space id replaced as in keep-going-open-route. comparison-fill-in-after-a-reply and keep-going-unconfirmed-route-after-stops-and-undo were sent in a third recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-findings-with-the-route-unconfirmed and keep-going-after-a-page-made-from-findings were sent in a fourth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. warranty-from-each-laptops-page and keep-going-after-two-stops-and-an-undo were sent in a fifth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-confirmed-findings was not sent: its chat is browser-follow-up's, with a message that asks for a page of the hours alone. map-weekend was sent in none of them, and plain-answer and rewrite-names-a-map come from the Octo turn eval's cases. Every hand-back's stored prompt, Stop notice, report of what a stopped turn kept, and Undo line carries the metadata the controller writes on it that the runtime reads (the card a hand-back carries on, who stopped which runs, what was kept, which run's change was undone): where a recording kept only its words and kind, the rest is filled in as the controller writes it.",
+  "about": "Messages with the chat they were sent in, and the route the routing step should give each. The routing check builds each case's routing input with the runtime's own code and asks the routing model. history holds the chat's earlier entries as the runtime receives them; the message is added after them. Nine cases were sent in a recorded local test, each with the entries its routing step received there: map-trip, comparison-page, comparison-fill-in, page-from-findings, browser-named, browser-follow-up, keep-going-open-route, browser-sign-in and browser-form. keep-going-after-stop-and-undo was not: its chat is keep-going-open-route's up to the first Undo, with the route exchange taken out, the request and reply that named the route edited to match, and that reply's offer of more cut. page-from-unconfirmed-findings and keep-going-route-open-after-stop-and-undo were sent in a later recorded local test, each with the entries its routing step received there, a path's space id replaced as in keep-going-open-route. comparison-fill-in-after-a-reply and keep-going-unconfirmed-route-after-stops-and-undo were sent in a third recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-findings-with-the-route-unconfirmed and keep-going-after-a-page-made-from-findings were sent in a fourth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. warranty-from-each-laptops-page and keep-going-after-two-stops-and-an-undo were sent in a fifth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-confirmed-findings was not sent: its chat is browser-follow-up's, with a message that asks for a page of the hours alone. map-note was sent in a sixth recorded local test, with the entries its routing step received there. map-weekend was sent in none of them, and plain-answer and rewrite-names-a-map come from the Octo turn eval's cases. Every hand-back's stored prompt, Stop notice, report of what a stopped turn kept, and Undo line carries the metadata the controller writes on it that the runtime reads (the card a hand-back carries on, who stopped which runs, what was kept, which run's change was undone): where a recording kept only its words and kind, the rest is filled in as the controller writes it.",
   "cases": [
     {
       "id": "map-trip",
@@ -19,6 +19,31 @@
         "route": "direct"
       },
       "why": "The same kind of ask in fewer words."
+    },
+    {
+      "id": "map-note",
+      "history": [
+        {
+          "role": "user",
+          "content": "Plan 3 days in Seville for a first visit: where to stay, what to see each day, on a map.",
+          "runId": "run-1",
+          "createdAt": "2026-11-08T07:44:37.427Z"
+        },
+        {
+          "role": "assistant",
+          "content": "The Seville map has a three-night plan, a Santa Cruz hotel pick, and one sight pinned for each day. The map still needs more sourced sights for each day before the itinerary is complete. The hotel search was partial, and prices, availability, and your travel dates weren’t checked; the dates shown are assumed.\n\nAssumed: arrive Sun 8 Nov 2026, stay 3 nights, mid-range hotel, balanced pace. Sources include OpenStreetMap and the official Cathedral and Setas sites.",
+          "runId": "run-1",
+          "createdAt": "2026-11-08T07:46:24.419Z"
+        }
+      ],
+      "message": "Add a note to day 1: book the Alcázar tickets ahead.",
+      "expect": {
+        "route": "direct",
+        "workspaceFileChangeRequirement": [
+          "required"
+        ]
+      },
+      "why": "A change in the person's own words to the map this chat made needs no web page: the building turn adds the note as they wrote it, and the map is files that turn must change."
     },
     {
       "id": "comparison-page",

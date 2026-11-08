@@ -983,7 +983,7 @@ mod tests {
             assert!(input.browser_routes_offered, "{}", case.id);
             assert!(input.prompt.contains(line), "{}: {}", case.id, input.prompt);
             assert!(input.prompt.contains(
-                "That browser turn sees only those words and this chat's earlier browser turns, with your `summary`: name in it the items, place or site this chat names (by name, not an address), and what to find."
+                "That browser turn sees only the person's words and this chat's browser turns, with your `summary`: name in it the items, place or site this chat names (by name, not an address), and what to find."
             ));
             assert_eq!(
                 input.history_metrics["includedTurns"],
@@ -1020,7 +1020,7 @@ mod tests {
         for (case, line, included, ignored) in [
             (
                 &page,
-                "So is a page or change made only from what this chat already found and confirmed.",
+                "and for a page or change made only from what this chat found and confirmed.",
                 5,
                 2,
             ),
@@ -1078,7 +1078,7 @@ mod tests {
         let input = routing_input(&warranty, workspace.path()).unwrap();
         assert!(input.browser_routes_offered);
         for line in [
-            "it carries that on. So is a change that needs what a web page says. A map",
+            "it carries that on. So is a change that needs what a web page says.\n- Stay `direct` (`required`) for a map,",
             "the building turn reads it and answers with a card naming it, and a change here is built after it,",
             "the building turn reads first and answers, opening the browser itself if a page needs it.",
         ] {
@@ -1137,7 +1137,7 @@ mod tests {
         assert!(input.browser_routes_offered);
         assert!(
             input.prompt.contains(
-                "So is a page or change made only from what this chat already found and confirmed."
+                "and for a page or change made only from what this chat found and confirmed."
             ),
             "{}",
             input.prompt
@@ -1150,6 +1150,36 @@ mod tests {
             input
                 .prompt
                 .contains("Livraria Lello is listed as open daily from 09:00 to 19:30.")
+        );
+    }
+
+    /// A note in the person's own words on the map this chat made stays `direct`, a change of
+    /// files: a sixth recorded local test (Nov 8), with the entries its routing step received
+    /// there. It went `browser_then_build`, its reason quoting the confirmed-findings sentence
+    /// that closed that route's line; the line that keeps it `direct` now names it.
+    #[test]
+    fn a_note_in_the_persons_own_words_on_a_map_stays_direct() {
+        let cases = shipped();
+        let workspace = tempdir().unwrap();
+        prepare_workspace(workspace.path()).unwrap();
+        let note = case(&cases, "map-note");
+        assert_eq!(note.expected(), "direct (change: required)");
+        let input = routing_input(&note, workspace.path()).unwrap();
+        assert!(input.browser_routes_offered);
+        assert!(
+            input.prompt.contains(
+                "- Stay `direct` (`required`) for a map, for a change in the person's own words to a page or map here (a note, a name, a color),"
+            ),
+            "{}",
+            input.prompt
+        );
+        // The map's request, its reply and the note, as the routing step read them there.
+        assert_eq!(input.history_metrics["includedTurns"], json!(3));
+        assert_eq!(input.history_metrics["ignoredEntries"], json!(0));
+        assert!(
+            input.prompt.contains("one sight pinned for each day"),
+            "{}",
+            input.prompt
         );
     }
 
