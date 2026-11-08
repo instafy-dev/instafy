@@ -9516,7 +9516,10 @@ fn a_turns_first_open_tab_opens_its_page_in_the_chats_own_tab() {
     assert_eq!(first["activity"]["step"], "navigate", "{first}");
     assert_eq!(fixture.browser_tabs(), tabs_before, "a tab was opened");
     assert!(
-        fixture.approval_dir.join(CHAT_TAB_USED_FIXTURE_FILE).exists(),
+        fixture
+            .approval_dir
+            .join(CHAT_TAB_USED_FIXTURE_FILE)
+            .exists(),
         "the chat's tab was not marked used"
     );
 
