@@ -9954,6 +9954,12 @@ impl JobProcessor {
                             }
                             Ok(None) => {}
                             Err(error) => {
+                                if stopped_turn::a_stop_refused_the_save(cancel_signal.as_ref())
+                                    .await
+                                {
+                                    return Err(error
+                                        .context("job lease lost before its changes were saved"));
+                                }
                                 let mut failed_artifacts = retry_artifacts.clone();
                                 failed_artifacts.push(json!({
                                     "kind": "origin/apply-error",
@@ -10273,6 +10279,13 @@ impl JobProcessor {
                         }
                         Ok(None) => {}
                         Err(error) => {
+                            // A Stop that came before the save was let in: the
+                            // turn ends as a stopped one, with its change kept.
+                            if stopped_turn::a_stop_refused_the_save(cancel_signal.as_ref()).await {
+                                return Err(
+                                    error.context("job lease lost before its changes were saved")
+                                );
+                            }
                             let mut failed_artifacts = artifacts.clone();
                             failed_artifacts.push(json!({
                                 "kind": "origin/apply-error",

@@ -212,6 +212,10 @@ end report (`POST /agent/stopped`): the paths whose `git status` changed during 
 (`jobs/stopped_turn.rs`). A Stop can also reach a job after its model is done, while its changes
 are saved: the controller then refuses the job's completion, and the job loop sends the same
 report of the files the finished turn's reply lists, with that turn's own save (`origin/apply`).
+A Stop that reaches the controller once the model is done but before the save is let in refuses
+that save (the controller lets no save in for a job it stopped): the turn waits for its heartbeat
+to say so, about a second, and then ends as one that lost its lease, with the same report of the
+change it kept and never saved. Any other failed save fails the turn, as before.
 
 The controller takes the report only from the runtime that held the job, with that runtime's
 current token, once, and within two minutes of the Stop; a marker among the job's artifacts says
@@ -281,16 +285,20 @@ takes that reload halfway. No skill tells a turn to send a reload of its own: on
 covers every page, whichever skill made it.
 
 The command finds the server of the site's folder by the `.bind/server.json` in that folder or the
-nearest one above it, which names the server's address and the folder and address prefix of each
-site it serves, and posts `{"name":"reload","args":{}}` to `<address><prefix>/__bind/command` on
-the loopback address, with the admin token kept in `.bind/admin-token` beside that file. The server
-sends each open view of the site a `reload` command over its events stream, and answers how many
-views it sent it to (`{"viewers": n}`). `instafy bind serve` is such a server, and so is any other
-that answers the same way. A site whose server takes no reload (a dev server that reloads its own
-views, a plain file server) keeps its open views as they are until they load again; the machine
-logs that and shows it to nobody. The machine runs nothing that writes into a site's folder for a
-reload: after an Undo that would be a change no save takes, which a stop would keep as unsaved work
-and which the next Undo's folder follow would refuse to move past.
+nearest one above it. That file names the server's address (`url`) and each site it serves (`sites`:
+its `name`, address `prefix` and folder `dir`, a real path). The command takes the site whose `dir`
+is the folder; the folder that holds the file also names the server's only site. Any other folder
+below that server is a page it does not serve, and its reload reaches nobody. The command posts
+`{"name":"reload","args":{}}` to `<url><prefix>/__bind/command` on the loopback address, with the
+admin token kept in `.bind/admin-token` beside that file: one line of 16 to 128 letters, digits, `_`
+or `-` (with any other, it sends nothing). The server sends each open view of the site a `reload`
+command over its events stream, and answers how many views it sent it to (`{"viewers": n}`).
+`instafy bind serve` is such a server, and so is any other that answers the same way. A site whose
+server takes no reload (a dev server that reloads its own views, a plain file server) keeps its open
+views as they are until they load again; the machine logs that and shows it to nobody. The machine
+runs nothing that writes into a site's folder for a reload: after an Undo that would be a change no
+save takes, which a stop would keep as unsaved work and which the next Undo's folder follow would
+refuse to move past.
 
 An Undo that worked leaves one line in the chat's history, in the controller's words: "The person
 undid the change from “…”", quoting the person's request that made the change (`POST

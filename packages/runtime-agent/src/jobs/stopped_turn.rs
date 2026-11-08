@@ -17,7 +17,10 @@
 //! its model is done, while its changes are saved: the controller then refuses
 //! the job's completion, and the job loop sends the same report of the files
 //! the finished turn's reply would have listed, with its save
-//! ([`StoppedTurnChanges::of_finished_turn`]).
+//! ([`StoppedTurnChanges::of_finished_turn`]). A Stop that reaches the
+//! controller once the model is done but before the save is let in refuses
+//! that save: the turn then ends as one that lost its lease, with its change
+//! kept and never saved ([`a_stop_refused_the_save`]).
 //!
 //! The report is the turn's step that names the edit, as a finished turn's
 //! step does, and the files, as a finished turn's reply lists them. The step
@@ -45,6 +48,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Result;
 use parking_lot::Mutex;
@@ -54,9 +58,30 @@ use tracing::info;
 use super::preview_pictures::{changed_paths, reload_and_picture_changed_sites};
 use super::{CodexFileDescriptor, GitStatusEntry, JobExecution, JobMessage, JobProcessor};
 use crate::controller::{ControllerClient, LeaseJob, MAX_AGENT_METADATA_ARRAY_ITEMS, Registration};
+use crate::job_cancel::JobCancelSignal;
 
 /// The step's id in its turn: one per stopped turn.
 const STOPPED_TURN_STEP_ID: &str = "stopped-turn-files";
+
+/// How long a turn whose save failed waits to learn whether a Stop refused
+/// it: the job's heartbeat asks the controller every second.
+const STOP_NOTICE: Duration = Duration::from_secs(2);
+
+/// Whether a Stop refused the save of a turn whose model was done. The
+/// controller lets no save in for a job it stopped, so a Stop that reached it
+/// before the save's lease (or the origin's token) was granted fails the
+/// save, and the job's heartbeat sets `cancel` within about a second. Such a
+/// turn ends as one that lost its lease: its report records the change it
+/// kept, never saved, and sends that change's one reload. Any other failed
+/// save fails the turn, as before.
+pub(super) async fn a_stop_refused_the_save(cancel: Option<&JobCancelSignal>) -> bool {
+    let Some(cancel) = cancel else {
+        return false;
+    };
+    tokio::time::timeout(STOP_NOTICE, cancel.cancelled())
+        .await
+        .is_ok()
+}
 
 /// How a turn's folder began, for what the turn changed should it lose its
 /// lease. Set once the turn has taken the folder's `git status`.

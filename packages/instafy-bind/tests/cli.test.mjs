@@ -65,6 +65,64 @@ test("init, doctor, serve --json, command and a clean shutdown", async () => {
   }
 });
 
+// Instafy sends a page whose files changed `command ./<folder> reload '{}'`, for the folder of each open page. A folder
+// below a binder's own that is none of its sites is a page something else serves (a dev server, a map's host not yet
+// started): the command reaches nobody rather than the binder above it, whose own page did not change.
+test("command reaches the binder that serves the folder it names, never another page's binder above it", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bind-cli-folder-")));
+  const posts = [];
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      posts.push([req.url, JSON.parse(body)]);
+      res.writeHead(202, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, viewers: 2 }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  const state = (dir, sites) => {
+    fs.mkdirSync(path.join(dir, ".bind"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".bind/server.json"), JSON.stringify({ pid: process.pid, url, sites }));
+    fs.writeFileSync(path.join(dir, ".bind/admin-token"), `${"a".repeat(32)}\n`);
+  };
+  // Not a synchronous run: the stand-in binder answers on this test's own event loop.
+  const run = (dir) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [BIN, "command", dir, "reload", "{}"], { cwd: root, env: cleanEnv });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+  try {
+    // A binder of one site serves the space's own folder; a map sits in a folder of it.
+    state(root, [{ name: "share", prefix: "", dir: root }]);
+    fs.mkdirSync(path.join(root, "seville"));
+    const other = await run("./seville");
+    assert.equal(other.status, 1, other.stdout + other.stderr);
+    assert.match(other.stderr, /no running binder serves \.\/seville/);
+    assert.deepEqual(posts, [], "the binder above it gets nothing");
+    const own = await run(".");
+    assert.equal(own.status, 0, own.stdout + own.stderr);
+    assert.deepEqual(posts.splice(0), [["/__bind/command", { name: "reload", args: {} }]]);
+
+    // A folder of sites that holds only one still names that site, and a site's own folder names it.
+    const gallery = path.join(root, "pages");
+    fs.mkdirSync(path.join(gallery, "shoes"), { recursive: true });
+    state(gallery, [{ name: "shoes", prefix: "/shoes", dir: path.join(gallery, "shoes") }]);
+    for (const dir of ["./pages", "./pages/shoes"]) {
+      const result = await run(dir);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+    }
+    assert.deepEqual(posts.splice(0).map(([at]) => at), ["/shoes/__bind/command", "/shoes/__bind/command"]);
+  } finally {
+    server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("doctor warns about a site whose every intent is agent-only (its buttons only work where Instafy sends asks)", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-cli-agent-only-"));
   try {

@@ -7,6 +7,10 @@
 //! serve`, with its `.bind/server.json`) takes it. A page no server takes it for is logged at the
 //! info level, never as a warning, and nothing of it reaches the person: the reply, the turn's
 //! steps and what it recorded are the turn's own.
+//!
+//! A Stop the controller takes after the model is done but before the save gets its lease refuses
+//! that save. The turn then ends as a stopped turn whose change was never saved: the stop's report
+//! records it, and the open sites it changed get their one reload with that report.
 
 use super::*;
 use axum::extract::Path as AxumPath;
@@ -25,6 +29,9 @@ use std::sync::Mutex as StdMutex;
 const CHILD: &str = "INSTAFY_SAVED_CHANGE_RELOAD_TEST_CHILD";
 const TEST_NAME: &str =
     "saved_change_reload::a_saved_change_reloads_each_open_site_it_changed_once_after_the_save";
+const STOPPED_CHILD: &str = "INSTAFY_STOP_REFUSED_SAVE_RELOAD_TEST_CHILD";
+const STOPPED_TEST_NAME: &str =
+    "saved_change_reload::a_change_whose_save_a_stop_refused_is_reported_and_reloaded_once";
 const PROVIDER_KEY: &str = "inert-saved-change-provider-key";
 const KEY_ID: &str = "saved-change-reload";
 /// A bound page, open in Studio, whose binder takes a reload.
@@ -34,11 +41,33 @@ const MAP: &str = "seville/map.config.json";
 const REQUEST: &str = "Put the opening hours on the Porto page and a note on the map's first day.";
 const REPLY: &str = "I put the opening hours on the page and the note on the map's first day.";
 
+/// How the turn's save goes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Case {
+    /// The save takes the change.
+    Saved,
+    /// A Stop reached the controller once the model was done: it refuses the save's lease, and the
+    /// job's heartbeat sets its cancel a moment later.
+    StopRefusedTheSave,
+}
+
 #[test]
 fn a_saved_change_reloads_each_open_site_it_changed_once_after_the_save() -> Result<()> {
     if std::env::var(CHILD).as_deref() != Ok("1") {
         return run_isolated_fixture(CHILD, TEST_NAME, "saved-change-reload");
     }
+    run_fixture(Case::Saved)
+}
+
+#[test]
+fn a_change_whose_save_a_stop_refused_is_reported_and_reloaded_once() -> Result<()> {
+    if std::env::var(STOPPED_CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(STOPPED_CHILD, STOPPED_TEST_NAME, "stop-refused-save-reload");
+    }
+    run_fixture(Case::StopRefusedTheSave)
+}
+
+fn run_fixture(case: Case) -> Result<()> {
     // What the runtime logs, from every thread: this fixture runs in a process of its own.
     let logs = Logs::default();
     tracing::subscriber::set_global_default(
@@ -58,7 +87,7 @@ fn a_saved_change_reloads_each_open_site_it_changed_once_after_the_save() -> Res
                 .worker_threads(2)
                 .thread_stack_size(STACK)
                 .build()?
-                .block_on(run_case(logs))
+                .block_on(run_case(logs, case))
         })?
         .join()
         .map_err(|_| anyhow::anyhow!("saved-change reload fixture panicked"))?
@@ -142,11 +171,15 @@ async fn provider_request(Json(body): Json<Value>) -> axum::response::Response {
 }
 
 struct Controller {
+    case: Case,
     jwks: Value,
     origin: String,
     seen: PathBuf,
+    /// The job's cancel, as its heartbeat sets it once the controller says the job was stopped.
+    stop: JobCancelSignal,
     /// The steps and notes the turn sent to the chat.
     steps: StdMutex<Vec<Value>>,
+    stopped_reports: StdMutex<Vec<Value>>,
     pictures: StdMutex<Vec<(String, String)>>,
 }
 
@@ -154,8 +187,32 @@ async fn jwks(State(state): State<Arc<Controller>>) -> Json<Value> {
     Json(state.jwks.clone())
 }
 
-async fn lease_acquire() -> Json<Value> {
-    Json(json!({ "leaseId": Uuid::new_v4() }))
+async fn lease_acquire(State(state): State<Arc<Controller>>) -> axum::response::Response {
+    if state.case == Case::StopRefusedTheSave {
+        // The job was stopped: its token no longer gets the lease, and its heartbeat, which asks
+        // every second, learns of the Stop a moment after this answer.
+        note(&state.seen, "lease refused");
+        let stop = state.stop.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(300)).await;
+            stop.cancel();
+        });
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "job token is no longer active" })),
+        )
+            .into_response();
+    }
+    Json(json!({ "leaseId": Uuid::new_v4() })).into_response()
+}
+
+async fn stopped_report(
+    State(state): State<Arc<Controller>>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    note(&state.seen, "stop reported");
+    state.stopped_reports.lock().unwrap().push(body);
+    Json(json!({ "ok": true }))
 }
 
 /// The save's last step: the workspace lease goes back once the change is applied and saved.
@@ -210,7 +267,7 @@ async fn serve(app: Router) -> Result<(String, ChildGuard, tokio::task::JoinHand
     Ok((url, ChildGuard::new(shutdown), task))
 }
 
-async fn run_case(logs: Logs) -> Result<()> {
+async fn run_case(logs: Logs, case: Case) -> Result<()> {
     let _env = env_guard().await;
     let workspace_root = TempDir::new()?;
     let runtime_home = TempDir::new()?;
@@ -364,13 +421,16 @@ printf '{{"previewId":"preview-porto","description":"Livraria Lello","takenAt":%
     let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
         .map_err(|_| anyhow::anyhow!("read the signing key"))?;
     let controller = Arc::new(Controller {
+        case,
         jwks: json!({ "keys": [{
             "kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "use": "sig",
             "kid": KEY_ID, "x": URL_SAFE_NO_PAD.encode(pair.public_key().as_ref()),
         }] }),
         origin,
         seen: seen.clone(),
+        stop: JobCancelSignal::new(),
         steps: StdMutex::new(Vec::new()),
+        stopped_reports: StdMutex::new(Vec::new()),
         pictures: StdMutex::new(Vec::new()),
     });
     let (controller_url, controller_guard, controller_task) = serve(
@@ -380,6 +440,7 @@ printf '{{"previewId":"preview-porto","description":"Livraria Lello","takenAt":%
             .route("/lease/release", post(lease_release))
             .route("/access_token", post(access_token))
             .route("/agent/message", post(job_message))
+            .route("/agent/stopped", post(stopped_report))
             .route(
                 "/projects/:project/previews/:preview/thumbnail",
                 put(preview_picture),
@@ -504,21 +565,62 @@ printf '{{"previewId":"preview-porto","description":"Livraria Lello","takenAt":%
     };
 
     // The turn, as the job loop runs it.
-    let execution = tokio::time::timeout(
+    let result = tokio::time::timeout(
         Duration::from_secs(90),
-        executor.run_apply_with_progress(client.clone(), &registration, &job, None, None),
+        executor.run_apply_with_progress(
+            client.clone(),
+            &registration,
+            &job,
+            Some(controller.stop.clone()),
+            None,
+        ),
     )
     .await
-    .context("the turn did not end")??;
-    assert_eq!(execution.summary, REPLY);
-    assert!(
-        execution
-            .artifacts
-            .iter()
-            .any(|artifact| artifact["kind"] == "origin/apply"),
-        "the turn's change was saved: {:?}",
-        execution.artifacts
-    );
+    .context("the turn did not end")?;
+    let execution = match case {
+        Case::Saved => {
+            let execution = result?;
+            assert_eq!(execution.summary, REPLY);
+            assert!(
+                execution
+                    .artifacts
+                    .iter()
+                    .any(|artifact| artifact["kind"] == "origin/apply"),
+                "the turn's change was saved: {:?}",
+                execution.artifacts
+            );
+            Some(execution)
+        }
+        Case::StopRefusedTheSave => {
+            let error = match result {
+                Ok(execution) => anyhow::bail!("the turn finished: {}", execution.summary),
+                Err(error) => error,
+            };
+            // Not a failed save: a stopped turn, which the job loop reports nothing more for.
+            assert!(
+                runtime_agent::agent_executor::is_lease_lost(&error),
+                "it ends as a stopped turn: {error:#}"
+            );
+            // Its one end report records the change it kept, as never saved.
+            let reports = controller.stopped_reports.lock().unwrap().clone();
+            assert_eq!(reports.len(), 1, "one end report: {reports:?}");
+            assert_eq!(reports[0]["job_id"], json!(job.id.to_string()));
+            assert_eq!(
+                reports[0]["artifacts"][0]["metadata"]["stoppedBeforeSave"], true,
+                "{}",
+                reports[0]
+            );
+            let mut files: Vec<String> = reports[0]["artifacts"][0]["files"]
+                .as_array()
+                .context("the report lists the turn's files")?
+                .iter()
+                .filter_map(|file| file["workspacePath"].as_str().map(str::to_string))
+                .collect();
+            files.sort();
+            assert_eq!(files, [MAP, PAGE], "{}", reports[0]);
+            None
+        }
+    };
 
     // The page is pictured again once its reload was sent.
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -544,12 +646,18 @@ printf '{{"previewId":"preview-porto","description":"Livraria Lello","takenAt":%
     };
     let at = |line: &str| lines.iter().position(|seen| seen == line);
     // One save, then one reload for each open site it changed, from the workspace: the turn's
-    // own skills send none.
+    // own skills send none. A change whose save a Stop refused is saved by nothing: its reload
+    // goes with the stop's report.
+    let (saved_count, after) = match case {
+        Case::Saved => (1, "saved"),
+        Case::StopRefusedTheSave => (0, "stop reported"),
+    };
     assert_eq!(
         lines.iter().filter(|line| line.as_str() == "saved").count(),
-        1,
+        saved_count,
         "{lines:#?}"
     );
+    assert!(at(after).is_some(), "{lines:#?}");
     for site in ["./sites/porto", "./seville"] {
         assert_eq!(
             lines.iter().filter(|line| **line == reload(site)).count(),
@@ -557,8 +665,8 @@ printf '{{"previewId":"preview-porto","description":"Livraria Lello","takenAt":%
             "one reload of {site}: {lines:#?}"
         );
         assert!(
-            at("saved") < at(&reload(site)),
-            "the reload of {site} comes after the save: {lines:#?}"
+            at(after) < at(&reload(site)),
+            "the reload of {site} comes after {after}: {lines:#?}"
         );
     }
     assert_eq!(
@@ -611,7 +719,10 @@ printf '{{"previewId":"preview-porto","description":"Livraria Lello","takenAt":%
             "{step}"
         );
     }
-    for message in execution.messages.iter().chain(&execution.final_messages) {
+    for message in execution
+        .iter()
+        .flat_map(|execution| execution.messages.iter().chain(&execution.final_messages))
+    {
         let words = message.content.to_ascii_lowercase();
         assert!(
             !words.contains("reload") && !words.contains("binder"),
