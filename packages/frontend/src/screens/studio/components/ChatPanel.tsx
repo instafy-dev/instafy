@@ -207,18 +207,16 @@ import { resolveComposerGhostSuggestion } from "./composerGhostSuggestion";
 import { useChatBrowserSessionState } from "./useChatBrowserSessionState";
 import { sharedBrowserPagesFast, useChatComposerBrowserTargeting } from "./useChatComposerBrowserTargeting";
 import {
-  CHAT_BROWSER_VIEW_START,
   browserTurnUnderWay,
   chatBrowserCardReady,
   chatBrowserHandoffPage,
   chatBrowserTarget,
   chatPageOnScreen,
   newChatBrowserTabId,
-  nextChatBrowserViewStep,
   useChatBrowserTab,
   useChatViewTabs,
-  type ChatBrowserViewState,
 } from "./chatBrowserTab";
+import { useChatBrowserView } from "./useChatBrowserView";
 import { useShowBrowserOnHumanInput, useShowBrowserOnRequest } from "./useShowBrowserOnRequest";
 import { useChatCredentialGate } from "./useChatCredentialGate";
 import { useAmbientCredentialGatePresentation } from "./useAmbientCredentialGatePresentation";
@@ -1935,7 +1933,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const preferredBrowserPage = chatBrowserMessageTarget?.page ?? null;
   const sharedBrowserBindingPage = chatBrowserMessageTarget?.bindingPage ?? null;
   // The chat's Browser view shows the chat's own tab (nextChatBrowserViewStep).
-  const chatBrowserViewRef = useRef<ChatBrowserViewState>(CHAT_BROWSER_VIEW_START);
   const sharedBrowserPresenceKnown = sharedBrowserPresence?.status === "known";
   const sharedBrowserRemoteController = sharedBrowserPresence?.remoteController === true;
   // Only the person who holds the browser's control may bring a tab to the
@@ -1964,37 +1961,19 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const chatViewStepTabId = chatView.stepTab?.id ?? null;
   const chatViewStepTabActive = chatView.stepTab?.isActive === true;
   const anotherChatBrowserTurn = anyBrowserTurnUnderWay && !chatBrowserTurnUnderWay;
-  useEffect(() => {
-    const { state, step } = nextChatBrowserViewStep({
-      onScreen: browserVisible && browserTransport === "shared",
-      free: sharedBrowserPresenceKnown && !sharedBrowserRemoteController && sharedBrowserSelfControls,
-      chatId: chatBrowserScopeId,
-      tab: chatViewStepTabId ? { id: chatViewStepTabId, isActive: chatViewStepTabActive } : null,
-      canOpenTab: canWriteProject && sharedBrowserChromeResolved && sharedBrowserCanOpenPage !== null,
-      chatTurnUnderWay: chatBrowserTurnUnderWay,
-      anyTurnUnderWay: anyBrowserTurnUnderWay,
-      state: chatBrowserViewRef.current,
-    });
-    chatBrowserViewRef.current = state;
-    if (step === "open-blank-tab") void resolveChatBrowserTab().catch(() => null);
-    else if (step === "focus" && chatViewStepTabId) void focusSharedBrowserPageQuietly(chatViewStepTabId).catch(() => false);
-  }, [
-    anyBrowserTurnUnderWay,
-    browserTransport,
-    browserVisible,
-    canWriteProject,
-    chatBrowserScopeId,
-    chatBrowserTurnUnderWay,
-    chatViewStepTabActive,
-    chatViewStepTabId,
-    focusSharedBrowserPageQuietly,
-    resolveChatBrowserTab,
-    sharedBrowserCanOpenPage,
-    sharedBrowserChromeResolved,
-    sharedBrowserPresenceKnown,
-    sharedBrowserRemoteController,
-    sharedBrowserSelfControls,
-  ]);
+  const chatTabOpening = useChatBrowserView({
+    scopeKey: JSON.stringify([currentUserId, activeProjectId ?? null, chatBrowserScopeId, resolvedBrowserRuntimeId]),
+    onScreen: browserVisible && browserTransport === "shared",
+    free: sharedBrowserPresenceKnown && !sharedBrowserRemoteController && sharedBrowserSelfControls,
+    chatId: chatBrowserScopeId,
+    tabId: chatViewStepTabId,
+    tabActive: chatViewStepTabActive,
+    canOpenTab: canWriteProject && sharedBrowserChromeResolved && sharedBrowserCanOpenPage !== null,
+    chatTurnUnderWay: chatBrowserTurnUnderWay,
+    anyTurnUnderWay: anyBrowserTurnUnderWay,
+    resolveTab: resolveChatBrowserTab,
+    focusTab: focusSharedBrowserPageQuietly,
+  });
   const browserModeActive = browserSessionOpen && browserVisible;
   // A skill setup's composer answers the setup: its replies stay chat turns
   // while the browser is shown, and a walk there goes on only through the
@@ -6761,6 +6740,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     runApproval={browserRunApproval}
                     conversationId={activeConversationId ?? null}
                     chatPageIds={chatViewPageIds}
+                    chatTabOpening={chatTabOpening}
                     anotherChatTurn={anotherChatBrowserTurn}
                     agentArrival={browserArrival}
                     spaceHasTeammates={spaceHasTeammates}
