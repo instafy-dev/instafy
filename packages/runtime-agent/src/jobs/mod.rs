@@ -7177,6 +7177,7 @@ impl JobProcessor {
         task_usage: &TaskUsage,
         turn_files: &turn_continuation::TurnFiles,
         cancel_signal: Option<JobCancelSignal>,
+        shared_start: &str,
     ) -> CodexRunOptions {
         CodexRunOptions {
             usage_observer: Some(task_usage.call(UsagePhase::Routing)),
@@ -7184,7 +7185,7 @@ impl JobProcessor {
             run_timeout: turn_files.limit(),
             run_deadline: turn_files.deadline(),
             cancel_signal,
-            ..routing_preflight_run_options(self.isolated_workers.enabled)
+            ..routing_preflight_run_options(self.isolated_workers.enabled, shared_start)
         }
     }
 
@@ -7654,8 +7655,13 @@ impl JobProcessor {
             );
             browser_routes = request.browser_routes;
             tracing::info!(job_id = %job.id, context = %request.history_metrics, "routing preflight history projection");
-            let preflight_options =
-                self.routing_preflight_options(job, task_usage, turn_files, cancel_signal.clone());
+            let preflight_options = self.routing_preflight_options(
+                job,
+                task_usage,
+                turn_files,
+                cancel_signal.clone(),
+                &request.shared_start,
+            );
             let _codex_guard = CODEX_EXECUTION_LOCK.lock().await;
             ensure_lease_held(cancel_signal.as_ref(), "before its routing step")?;
             match codex
@@ -7945,6 +7951,8 @@ impl JobProcessor {
             input_images: Vec::new(),
             isolated_tool_worker: false,
             routing_scoped_worker_execution: None,
+            // Its requests carry its own thread's cache key: each starts as the thread's last did.
+            shared_start: None,
             // Shortly before the hard limit a team lane's turn is told to save and end (and,
             // when the controller can continue it, to leave a note for its next turn).
             turn_wrap_up: turn_files.wrap_up(),
@@ -17591,6 +17599,7 @@ fn build_agent_routing_preflight_prompt(
 
 /// The routing prompt; with `browser_routes` (the browser skill's routing section,
 /// `browser_routing_snapshot_for_job`), it also offers `browser` and `browser_then_build`.
+#[cfg(test)]
 fn build_agent_routing_preflight_prompt_with_browser_routes(
     workspace_dir: &Path,
     prompt_text: &str,
@@ -17598,6 +17607,29 @@ fn build_agent_routing_preflight_prompt_with_browser_routes(
     pending: Option<&worker_input_routing::PendingContext>,
     browser_routes: Option<&str>,
 ) -> String {
+    let (start, rest) = agent_routing_preflight_prompt(
+        workspace_dir,
+        prompt_text,
+        active_plan_group_id,
+        pending,
+        browser_routes,
+    );
+    start + &rest
+}
+
+/// The routing prompt, as its start and the rest. The start is the same for every chat offered
+/// the same routes: the routing instructions and the skills' routing sections. What varies with
+/// the chat, its plan group and then its message, is the rest, and its history goes in after the
+/// message (`agent_routing_primary_prompt`). So a provider serves the start from its cache to
+/// whichever chat routes next, under the routing step's one cache key
+/// (`routing_preflight_run_options`).
+fn agent_routing_preflight_prompt(
+    workspace_dir: &Path,
+    prompt_text: &str,
+    active_plan_group_id: Option<&str>,
+    pending: Option<&worker_input_routing::PendingContext>,
+    browser_routes: Option<&str>,
+) -> (String, String) {
     // A pending worker reply is answered here; it never goes to the browser.
     let browser_routes = browser_routes.filter(|_| pending.is_none());
     let browser_route_lines = if browser_routes.is_some() {
@@ -17625,7 +17657,7 @@ fn build_agent_routing_preflight_prompt_with_browser_routes(
             )
         })
         .unwrap_or_default();
-    let mut prompt = format!(
+    let start = format!(
         "\nInstafy routing preflight.\n\
         Decide only how the latest user request should enter the runtime. Do not answer the user request. Do not inspect files or run tools.\n\
         Routes:\n\
@@ -17640,15 +17672,17 @@ fn build_agent_routing_preflight_prompt_with_browser_routes(
         Set `workspaceFileChangeRequirement` from the success condition, independently of write permission: `required` when success necessarily requires creating, editing, moving, deleting, committing, or syncing workspace files (a map, page or site the person asks for is files); `conditional` when inspection or validation decides whether changes are warranted, and a justified unchanged result can satisfy the request; `none` when no workspace mutation is requested. Conditional work still permits warranted edits under the existing write scope. Do not turn permission to improve or repair into a requirement to produce a patch. Preserve the requested observations and tests even when no change is warranted.\n\
         {browser_change_line}\
         Always include `observationCommands`; use an empty array when no current-state observation is needed. When `requiresCommandExecution` is true, propose up to 3 concrete safe commands for that observation. These are proposals, not permission grants: the host executes only its existing allowlist, and the main agent must obtain any remaining observation under its normal tool permissions. Do not place conversation/context retrieval commands here. Do not set `requiresCommandExecution = true` merely because the main task includes workspace writes, patches, commits, pushes, or syncs. Do not put file-writing, patching, commit, push, or sync commands in `observationCommands`; classify `workspaceFileChangeRequirement` instead and let the main run make the requested changes under its existing permissions. Explicit non-file Instafy CLI actions such as `instafy automations create` or `instafy automations update` are allowed only when the user asked for that exact action. Propose independent read-only commands, not shell pipelines or command lists whose final status can hide a failed read. If no supported proposal fits, leave `observationCommands` empty and keep the observation requirement for the main agent.\n\
-        {plan_group_guidance}\
-        {skill_snapshot}{browser_snapshot}\n\
+        {skill_snapshot}{browser_snapshot}\n"
+    );
+    let mut rest = format!(
+        "{plan_group_guidance}\
         Latest user request:\n```text\n{prompt_text}\n```\n\
         Return exactly one JSON object with fields `summary`, `route`, `reason`, `selectedSkills`, `confidence` (0-100), `requiresContextLookup`, `requiresCommandExecution`, `workspaceFileChangeRequirement`, `observationCommands`, and nullable `workerQuestionReply`."
     );
     if let Some(pending) = pending {
-        pending.append_prompt(&mut prompt);
+        pending.append_prompt(&mut rest);
     }
-    prompt
+    (start, rest)
 }
 
 /// The routing preflight uses the normal stateless history budget.
@@ -17681,6 +17715,9 @@ fn agent_routing_primary_prompt(base: &str, payload: &JsonValue) -> (String, Jso
 /// (`routing_check`), so the check reads exactly what a turn's routing step reads.
 pub(crate) struct RoutingPreflightRequest {
     pub(crate) prompt: String,
+    /// How the prompt starts: the part that is the same for every chat offered the same routes
+    /// (`agent_routing_preflight_prompt`).
+    pub(crate) shared_start: String,
     /// The browser skill's routing section, when the browser routes are offered.
     pub(crate) browser_routes: Option<String>,
     /// The history projection's counts.
@@ -17698,24 +17735,30 @@ fn routing_preflight_request(
         .is_none()
         .then(|| browser_routing_snapshot_for_job(job, workspace_dir, prompt_text))
         .flatten();
-    let prompt = build_agent_routing_preflight_prompt_with_browser_routes(
+    let (shared_start, rest) = agent_routing_preflight_prompt(
         workspace_dir,
         prompt_text,
         active_plan_group_id.as_deref(),
         pending,
         browser_routes.as_deref(),
     );
-    let (prompt, history_metrics) = agent_routing_primary_prompt(&prompt, &job.payload);
+    let (prompt, history_metrics) =
+        agent_routing_primary_prompt(&format!("{shared_start}{rest}"), &job.payload);
     RoutingPreflightRequest {
         prompt,
+        shared_start,
         browser_routes,
         history_metrics,
     }
 }
 
-/// How a routing step runs: no tools of its own, the routing answer's schema, and none of the
-/// space's broad instructions.
-fn routing_preflight_run_options(isolated_tool_workers: bool) -> CodexRunOptions {
+/// How a routing step runs: no tools of its own, the routing answer's schema, none of the
+/// space's broad instructions, and the cache key of the prompt's `shared_start` and the model,
+/// the same for every chat, in place of its new thread's.
+fn routing_preflight_run_options(
+    isolated_tool_workers: bool,
+    shared_start: &str,
+) -> CodexRunOptions {
     CodexRunOptions {
         disable_shell_tool: true,
         final_output_schema: CodexFinalOutputSchema::RoutingPreflight,
@@ -17725,6 +17768,7 @@ fn routing_preflight_run_options(isolated_tool_workers: bool) -> CodexRunOptions
         } else {
             ScopedWorkerExecution::FileGeneration
         }),
+        shared_start: Some(shared_start.to_owned()),
         ..CodexRunOptions::default()
     }
 }
@@ -23985,8 +24029,10 @@ mod tests {
             (true, ScopedWorkerExecution::IsolatedTools),
         ] {
             processor.isolated_workers.enabled = enabled;
-            let options = processor.routing_preflight_options(&job, &usage, &turn_files, None);
+            let options =
+                processor.routing_preflight_options(&job, &usage, &turn_files, None, "start");
             assert_eq!(options.routing_scoped_worker_execution, Some(expected));
+            assert_eq!(options.shared_start.as_deref(), Some("start"));
             assert_eq!(options.job_id, Some(job.id));
             assert!(options.disable_shell_tool);
             assert_eq!(
@@ -24015,14 +24061,14 @@ mod tests {
         let deadline = turn_files.deadline().expect("explicit test budget");
 
         tokio::time::advance(Duration::from_secs(240)).await;
-        let options = processor.routing_preflight_options(&job, &usage, &turn_files, None);
+        let options = processor.routing_preflight_options(&job, &usage, &turn_files, None, "start");
         assert_eq!(options.run_timeout, Some(Duration::from_secs(360)));
         assert_eq!(options.run_deadline, Some(deadline));
 
         // Waiting for execution admission must not restart the captured remaining budget.
         tokio::time::advance(Duration::from_secs(361)).await;
         assert!(options.run_deadline.unwrap() < tokio::time::Instant::now());
-        let expired = processor.routing_preflight_options(&job, &usage, &turn_files, None);
+        let expired = processor.routing_preflight_options(&job, &usage, &turn_files, None, "start");
         assert_eq!(expired.run_timeout, Some(Duration::ZERO));
         assert_eq!(expired.run_deadline, Some(deadline));
     }

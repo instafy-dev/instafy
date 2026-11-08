@@ -13,7 +13,7 @@ use codex_core::config::{
 };
 use codex_core::test_support::EmptyUserInstructionsProvider;
 use codex_core::{
-    CodexAppsToolsCache, CodexThread, NewThread, StartThreadOptions, ThreadManager,
+    CodexAppsToolsCache, CodexThread, NewThread, PromptCacheKey, StartThreadOptions, ThreadManager,
     build_models_manager, init_state_db, local_agent_graph_store_from_state_db,
     resolve_installation_id, thread_store_from_config,
 };
@@ -958,6 +958,10 @@ pub struct CodexRunOptions {
     /// Runtime-owned admission mode, supplied only to routing preflight. This is not
     /// inferred from the user request or controller plan metadata.
     pub routing_scoped_worker_execution: Option<ScopedWorkerExecution>,
+    /// How the prompt starts when that start is the same in every chat: a routing step's
+    /// instructions, before anything of its chat. The run's requests then carry one cache key
+    /// for that start and the model, in place of their thread's ([`prompt_cache_key_for_run`]).
+    pub shared_start: Option<String>,
     /// Optional content-free diagnostic accounting, independent of event streaming.
     pub usage_observer: Option<UsageCall>,
     /// Authorized job scope for current shared defaults. Absent on routing preflight and non-project calls.
@@ -1351,10 +1355,39 @@ async fn resumed_shared_browser_base_instructions(
         .filter(|text| !text.trim().is_empty())
 }
 
+/// The cache key a run's requests carry. A provider sends requests that carry the same key and
+/// open the same way to where it may still hold that opening, and serves it from its cache.
+/// Codex keys a request by its thread, and a routing step is a new thread each time, so no
+/// routing step was served the start the one before it sent, though that start is the same for
+/// every chat (a local test, Nov 7: 16 routing steps of about 10k tokens each, 0 to 23% cached,
+/// about 95% of each that start). A run whose prompt opens with its `shared_start` carries one
+/// key for that start and the model instead; every other run, its thread's. Nothing of the
+/// space, the chat or the person goes into the key, and the proxy still keeps each space's keys
+/// apart, as it keeps every key it is sent.
+fn prompt_cache_key_for_run(
+    prompt: &str,
+    shared_start: Option<&str>,
+    model: &str,
+) -> PromptCacheKey {
+    use sha2::{Digest, Sha256};
+    match shared_start.filter(|start| !start.is_empty() && prompt.starts_with(start)) {
+        Some(start) => {
+            let digest = Sha256::digest(format!("{model}\n{start}").as_bytes());
+            let hex: String = digest[..16]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            PromptCacheKey::Custom(format!("instafy-shared-start-{hex}"))
+        }
+        None => PromptCacheKey::SessionDerived,
+    }
+}
+
 async fn start_codex_thread(
     registration: &CodexThreadRegistration,
     thread_manager: Arc<ThreadManager>,
     config: Config,
+    prompt_cache_key: PromptCacheKey,
 ) -> CodexResult<NewThread> {
     let startup = registration.startup();
     run_on_fresh_task(async move {
@@ -1365,6 +1398,7 @@ async fn start_codex_thread(
                 // rollout path, which only Legacy history supports. Paginated resume goes through
                 // the thread store by id and is a separate change.
                 history_mode: Some(ThreadHistoryMode::Legacy),
+                prompt_cache_key,
                 ..StartThreadOptions::new(config)
             })
             .await
@@ -2117,6 +2151,9 @@ impl CodexClient {
         if let Some(observation) = usage_attempt.as_ref() {
             observation.requested_model(&normalized_model);
         }
+        // A routing step's requests carry one key for its start and this model.
+        let prompt_cache_key =
+            prompt_cache_key_for_run(prompt, options.shared_start.as_deref(), &normalized_model);
         config.model = Some(normalized_model);
 
         if !config.mcp_servers.is_empty() && !config.features.enabled(Feature::Apps) {
@@ -2395,6 +2432,7 @@ impl CodexClient {
                                             &attempt_threads,
                                             Arc::clone(&thread_manager),
                                             config.clone(),
+                                            prompt_cache_key.clone(),
                                         )
                                             .await
                                             .context(
@@ -2420,6 +2458,7 @@ impl CodexClient {
                                     &attempt_threads,
                                     Arc::clone(&thread_manager),
                                     config.clone(),
+                                    prompt_cache_key.clone(),
                                 )
                                     .await
                                     .context(
@@ -2443,6 +2482,7 @@ impl CodexClient {
                                 &attempt_threads,
                                 Arc::clone(&thread_manager),
                                 config.clone(),
+                                prompt_cache_key.clone(),
                             )
                                 .await
                                 .context(
@@ -2461,6 +2501,7 @@ impl CodexClient {
                     &attempt_threads,
                     Arc::clone(&thread_manager),
                     config.clone(),
+                    prompt_cache_key.clone(),
                 )
                 .await
                 .context("failed to create Codex thread")?;
@@ -2475,6 +2516,7 @@ impl CodexClient {
                 &attempt_threads,
                 Arc::clone(&thread_manager),
                 config.clone(),
+                prompt_cache_key.clone(),
             )
             .await
             .context("failed to create Codex thread")?;

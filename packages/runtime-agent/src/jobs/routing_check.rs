@@ -210,6 +210,9 @@ fn case_job(case: &Case) -> LeaseJob {
 pub struct RoutingInput {
     /// The routing prompt, exactly as the job sends it.
     pub prompt: String,
+    /// How the prompt starts: the part that is the same for every chat offered the same routes,
+    /// from which the routing step's cache key is made.
+    pub shared_start: String,
     /// Whether the job offered the browser routes.
     pub browser_routes_offered: bool,
     /// The history projection's counts.
@@ -227,6 +230,7 @@ pub fn routing_input(case: &Case, workspace: &Path) -> Result<RoutingInput> {
     let request = super::routing_preflight_request(&job, workspace, &case.message, None);
     Ok(RoutingInput {
         prompt: request.prompt,
+        shared_start: request.shared_start,
         browser_routes_offered: request.browser_routes.is_some(),
         history_metrics: request.history_metrics,
     })
@@ -333,7 +337,7 @@ pub async fn route_once(
     let options = CodexRunOptions {
         usage_observer: Some(usage.call(UsagePhase::Routing)),
         run_timeout: Some(timeout),
-        ..super::routing_preflight_run_options(false)
+        ..super::routing_preflight_run_options(false, &input.shared_start)
     };
     let output = match CodexClient::from_env(workspace) {
         Some(codex) => {

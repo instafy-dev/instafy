@@ -598,3 +598,7 @@ where
     );
     Ok(())
 }
+
+/// A routing step's cache key, the same for every chat: in a file of its own, run with these.
+#[path = "routing_cache_key.rs"]
+mod routing_cache_key;
