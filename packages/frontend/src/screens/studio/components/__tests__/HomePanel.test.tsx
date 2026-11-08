@@ -299,6 +299,25 @@ describe("HomePanel activity states", () => {
     expect(container.textContent?.match(/Local unread work/g)).toHaveLength(1);
   });
 
+  // A local test, Nov 8: a chat stopped in the gap between its message's two
+  // parts read "Continue working: Compare the three latest Framework… /
+  // Personal · My space", with no "Stopped".
+  it("says a chat under Continue working was stopped, without listing it again", async () => {
+    mocks.conversationWorkspace = true;
+    mocks.conversations = [localConversation({ unreadCount: 0, controllerId: "conversation-recent" })];
+    mocks.activeConversationId = "local-unread";
+    mocks.activity.activityItems = [
+      activityItem({ id: "22", kind: "run.stopped", at: "2026-09-06T12:05:00Z", preview: null,
+        run: { id: "run-2", status: "canceled", promptId: null }, data: { outcome: "stopped" } }),
+      activityItem({ id: "21", kind: "run.finished", at: "2026-09-06T12:01:00Z", preview: null,
+        run: { id: "run-1", status: "success", promptId: null } }),
+    ];
+    await render({}, true);
+    expect(query("home-resume-conversation")?.textContent).toContain("Personal · My space · Stopped");
+    expect(container.textContent?.match(/Stopped/g)).toHaveLength(1);
+    expect(container.textContent?.match(/Local unread work/g)).toHaveLength(1);
+  });
+
   it("says a chat under Recent chats is running, without listing it again", async () => {
     mocks.recentChatKeys = [JSON.stringify(["project-personal", "conversation-recent"])];
     mocks.activity.activityItems = [

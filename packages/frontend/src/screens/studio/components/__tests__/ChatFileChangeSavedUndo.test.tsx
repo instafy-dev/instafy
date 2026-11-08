@@ -416,7 +416,7 @@ describe("Undo of a saved change", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <ChatSiteContext.Provider value={{ firstChangeAt: SAVED.timestamp }}>
+        <ChatSiteContext.Provider value={{ firstChangeAt: SAVED.timestamp, pageTitles: new Map() }}>
           <ChatLaterChangesContext.Provider value={conversationLaterChanges([SAVED, UNDO_LINE])}>
             <ChatFileChangeList
               files={SAVED.files ?? []}

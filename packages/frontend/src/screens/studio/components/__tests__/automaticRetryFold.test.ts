@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { mapControllerMessageToChat } from "../../../../conversations/conversationMessageUtils";
 import { buildRunFailureRetryMetadata } from "../../../../conversations/runFailurePresentation";
 import type { ChatMessage } from "../../types";
 import {
@@ -235,6 +236,95 @@ describe("a resend the person asked for with Try again reads as one turn", () =>
 
     expect(rows.map((row) => row.id)).toEqual(["prompt", `agent-job-thread:${FAILED_JOB}`]);
     expect(isAutomaticRetryPending(rows[1])).toBe(true);
+  });
+
+  // A local test, Nov 8: a note's browser part, which Studio opened by
+  // itself, failed; Try again worked, and the chat showed both turns, with
+  // the resend's "Opened Instafy's browser" between them. The two prompts
+  // sent the same task for the same card, as stored below; only their notices
+  // differ, as they name who opened the browser.
+  it("folds Try again on a browser part Studio opened by itself, though their notices differ", () => {
+    const CARD_JOB = "3a5b3d44-0000-4000-8000-000000000001";
+    const TASK = 'Add a note to day 1: book the Alcázar tickets ahead.\n\nWhat this carries on: "Add “book the Alcázar tickets ahead” to day 1 of the map."';
+    const browserTask = (id: string, runId: string, timestamp: number, promptMetadata: Record<string, unknown>) =>
+      mapControllerMessageToChat({
+        id,
+        conversationId: "conversation-1",
+        projectId: "project-1",
+        sessionId: null,
+        promptId: null,
+        runId,
+        role: "user",
+        createdBy: "person-1",
+        createdAt: new Date(timestamp * 1_000).toISOString(),
+        content: TASK,
+        metadata: {
+          prompt_metadata: {
+            dispatchContent: TASK,
+            browserRequestOf: `job:${CARD_JOB}`,
+            browserTransport: "shared",
+            browserHandsBack: true,
+            ...promptMetadata,
+          },
+        },
+      });
+    const note = message({ id: "note", role: "user", authorId: "person-1", content: "Add a note to day 1: book the Alcázar tickets ahead.", timestamp: 0.5 });
+    // The routing turn's card, which Studio opened the browser for by itself.
+    const card = mapControllerMessageToChat({
+      id: "card",
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      sessionId: null,
+      promptId: null,
+      runId: "3a5b3d44-0000-4000-8000-000000000002",
+      role: "assistant",
+      createdAt: new Date(700).toISOString(),
+      content: "Continue this task in Instafy's browser.",
+      metadata: {
+        kind: "update",
+        jobId: CARD_JOB,
+        source: "agent",
+        outcome: "in_progress",
+        messageType: "action_request",
+        details: {
+          kind: "runtime_selection",
+          runtimeId: "runtime-1",
+          displayName: "Hosted Runtime",
+          messageType: "action_request",
+          details: { browserRequest: { task: TASK, routed: true, location: "auto", continueBuilding: true } },
+        },
+      },
+    });
+    const opened = browserTask("opened", FAILED_RUN, 1, {
+      displayContent: "Octo opened Instafy's browser",
+      browserAutoStarted: true,
+      browserCardTurn: { routed: true, version: 1, cardJobId: CARD_JOB },
+    });
+    const noPage = message({
+      id: "failure",
+      content: "Octo didn't open a page in the browser.",
+      timestamp: 4,
+      metadata: { jobId: FAILED_JOB, runId: FAILED_RUN, source: "agent", outcome: "failed" },
+    });
+    const tryAgain = browserTask("try-again", RETRY_RUN, 5, {
+      displayContent: "Opened Instafy's browser",
+      ...buildRunFailureRetryMetadata(noPage),
+    });
+    expect([opened.content, tryAgain.content]).toEqual(["Octo opened Instafy's browser", "Opened Instafy's browser"]);
+
+    const rows = transcript([note, card, opened, step("failed-pwd", FAILED_JOB, FAILED_RUN, 3), noPage, tryAgain, step("retry-pwd", RETRY_JOB, RETRY_RUN, 6), retryReply]);
+
+    expect(rows.map((row) => row.id)).toEqual(["note", `agent-job-thread:${RETRY_JOB}`]);
+    expect(readEarlierAttempts(rows[1]).map((attempt) => attempt.map((entry) => entry.id))).toEqual([["failed-pwd", "failure"]]);
+
+    // Another card's task, or another task, is not the same prompt.
+    for (const other of [
+      browserTask("try-again", RETRY_RUN, 5, { browserRequestOf: "job:another-card", ...buildRunFailureRetryMetadata(noPage) }),
+      { ...tryAgain, metadata: { ...tryAgain.metadata, prompt_metadata: { ...(tryAgain.metadata as { prompt_metadata: object }).prompt_metadata, dispatchContent: "Open the ticket page." } } },
+    ]) {
+      const shown = transcript([note, card, opened, step("failed-pwd", FAILED_JOB, FAILED_RUN, 3), noPage, other, step("retry-pwd", RETRY_JOB, RETRY_RUN, 6), retryReply]);
+      expect(shown.map((row) => row.id)).toContain(`agent-job-thread:${FAILED_JOB}`);
+    }
   });
 
   it("shows a resend with other words, or from someone else, as sent", () => {

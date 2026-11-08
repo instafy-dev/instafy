@@ -158,24 +158,30 @@ for (const width of [320, 390, 768, 1280]) for (const theme of ["light", "dark"]
     await toggle.click();
     const sessions = page.getByTestId("shared-browser-session-control");
     await fitsViewport(page, sessions);
-    await expect(sessions.getByRole("button", { name: "Resume Shared session review-workspace-machine", exact: true })).toContainText("Current");
     // React Aria adds screen-reader-only dismiss sentinels outside the dialog.
     await touchTargets(sessions.getByRole("dialog").getByRole("button"), width);
-    const details = sessions.locator("summary");
-    await touchTargets(details, width);
-    await details.click();
+    // The resume link, the sessions and their details sit behind one Advanced row.
+    const advanced = sessions.locator("summary");
+    await expect(advanced).toHaveText("Advanced");
+    await expect(sessions.getByRole("button", { name: "Copy resume link", exact: true })).toHaveCount(0);
+    await touchTargets(advanced, width);
+    await advanced.click();
+    await expect(sessions.getByRole("button", { name: "Resume Shared session review-workspace-machine", exact: true })).toContainText("Current");
+    await touchTargets(sessions.getByRole("dialog").getByRole("button"), width);
     await expect(sessions.getByRole("textbox", { name: "Shared Browser resume link" })).toBeVisible();
     await fitsViewport(page, sessions);
     await page.keyboard.press("Escape");
     await expect(sessions).toHaveCount(0);
     await expect(toggle).toBeFocused();
     await toggle.click();
+    await advanced.click();
     const next = sessions.getByRole("button", { name: "Resume Shared session a1b2c3d4-review-session", exact: true });
     await next.focus();
     await next.press("Enter");
     await expect(sessions).toHaveCount(0);
     await expect(page.getByTestId("review-browser-session")).toHaveText("a1b2c3d4-review-session");
     await toggle.click();
+    await advanced.click();
     await expect(next).toContainText("Current");
     const clear = sessions.getByTestId("shared-browser-clear-data");
     page.once("dialog", dialog => dialog.dismiss());

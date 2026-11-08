@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { CursorPointer, Group } from "iconoir-react";
+import { CursorPointer, Group, User } from "iconoir-react";
 import { Dialog, DialogTrigger } from "react-aria-components";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { AiTag } from "../../../components/AiTag";
@@ -170,7 +170,13 @@ export function SharedBrowserCollaborationControls({
   const actionPending = action !== null && pending?.kind === action.kind && !answered;
 
   const visibleParticipants = participants.slice(0, compact ? 1 : 3);
-  const participantNames = participants.map((participant) => participant.displayName).join(", ");
+  // The person reads as "you", never by the name their account gives the
+  // browser, which may be the first part of their email address.
+  const isSelf = (participant: SharedBrowserCollaborationParticipant) => participant.id === client.participantId;
+  const participantNames = [
+    ...participants.filter((participant) => !isSelf(participant)).map((participant) => participant.displayName),
+    ...(participants.some(isSelf) ? ["you"] : []),
+  ].join(", ");
 
   const pendingRequestCount = selfOwnsControl ? state?.requests.length ?? 0 : 0;
   const requestLabel = pendingRequestCount
@@ -196,7 +202,9 @@ export function SharedBrowserCollaborationControls({
             key={participant.id}
             style={{ backgroundColor: participant.color }}
           >
-            {participantInitials(participant.displayName)}
+            {isSelf(participant)
+              ? <User className={compact ? "h-3 w-3" : "h-3.5 w-3.5"} />
+              : participantInitials(participant.displayName)}
           </span>
         );
       })}
@@ -344,8 +352,7 @@ export function SharedBrowserCollaborationControls({
                       <div className="min-w-0 flex-1">
                         <div className="flex min-w-0 items-baseline gap-2">
                           <Text as="span" variant="bodyCompact" tone="primary" className="min-w-0 flex-1 break-words" data-participant-name="">
-                            {participant.displayName}
-                            {participant.id === client.participantId ? <Text as="span" variant="caption" tone="muted"> (you)</Text> : null}
+                            {isSelf(participant) ? "You" : participant.displayName}
                           </Text>
                           {!agentDisplayName && humanOwner?.id === participant.id ? controlIndicator : null}
                         </div>

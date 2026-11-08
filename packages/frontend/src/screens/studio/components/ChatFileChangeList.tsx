@@ -43,7 +43,7 @@ import {
   unsavedWorkPlacementFor,
 } from "./versioningCopy";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
-import { useChatSite } from "./chatSiteContext";
+import { pageFolderOf, useChatSite, type ChatSite } from "./chatSiteContext";
 import { normalizeUndonePath, useChatLaterChanges } from "./chatLaterChanges";
 import { isFolderRevertablePath, runtimeFolderOriginId, undoFolderRuntimeId } from "./unsavedChangeRevert";
 
@@ -289,15 +289,14 @@ function formatFileCount(count: number): string {
 }
 
 /**
- * The page the files make up, as its folder names it, when every one of them
- * is in the same page's folder (`sites/<name>/`, where the space's pages are
- * made); null otherwise.
+ * The page the files make up, by its folder's name, when every one of them is
+ * in the same page's folder (`sites/<name>/`); null otherwise.
  */
 function pageOfFiles(entries: ResolvedChatFileChange[]): string | null {
   let page: string | null = null;
   for (const { workspacePath } of entries) {
-    const [top, name, ...inside] = workspacePath.split("/");
-    if (top !== "sites" || !name || inside.length === 0 || (page !== null && name !== page)) {
+    const name = pageFolderOf(workspacePath);
+    if (name === null || (page !== null && name !== page)) {
       return null;
     }
     page = name;
@@ -306,22 +305,31 @@ function pageOfFiles(entries: ResolvedChatFileChange[]): string | null {
 }
 
 /**
- * What the row says for a site's files: "Created the site" when the turn
- * that made the site created every one of them, "Changed the site" otherwise,
- * never a file count or the lines in them. In a chat with no site of its own,
- * files that are all one page's name that page ("Changed framework-laptops"),
- * never a file in it ("data.json"). Null when the files are no site's.
+ * What the row says for a page's or a site's files, never a file count or the
+ * lines in them. Files that are all one page's name that page, in every chat,
+ * by the title its card in this chat gives it, else by its folder ("Changed
+ * Three days in Seville", "Changed framework-laptops"), never a file in it
+ * ("data.json"). Other files of the chat's site read "Changed the site".
+ * Either reads "Created" for the turn that made the site, when it created
+ * every one of them. Null when the files are no site's.
  */
-function siteChangeLabel(site: boolean, madeTheSite: boolean, files: ChatMessageFileChange[]): string | null {
+function siteChangeLabel(
+  site: ChatSite | null,
+  madeSite: boolean,
+  madeTheSite: boolean,
+  files: ChatMessageFileChange[],
+): string | null {
   const entries = resolveUniqueChatFileChanges(files);
   if (entries.length === 0) {
     return null;
   }
-  if (!site) {
-    const page = pageOfFiles(entries);
-    return page === null ? null : `Changed ${page}`;
+  const page = pageOfFiles(entries);
+  const hasSite = madeSite || site !== null;
+  if (page === null && !hasSite) {
+    return null;
   }
-  return madeTheSite && entries.every((entry) => entry.file.changeType === "created") ? "Created the site" : "Changed the site";
+  const verb = hasSite && madeTheSite && entries.every((entry) => entry.file.changeType === "created") ? "Created" : "Changed";
+  return page === null ? `${verb} the site` : `${verb} ${site?.pageTitles.get(page) ?? page}`;
 }
 
 function resolveChangeSetVerb(entries: ResolvedChatFileChange[]): string {
@@ -402,13 +410,15 @@ export function ChatFileChangeList({
   messageId?: string | null;
   messageTimestamp?: number | null;
   // The turn opened a site in a preview. Its files, like those of any turn in
-  // a chat that has a site, read "Created the site" or "Changed the site":
-  // what the person asked for, not a file count and the lines in them. The
-  // files stay one press away.
+  // a chat that has a site, read as its page ("Created Three days in
+  // Seville") or the site ("Changed the site"): what the person asked for,
+  // not a file count and the lines in them. The files stay one press away.
   madeSite?: boolean;
 }) {
-  const chatSite = useChatSite();
-  const site = madeSite || chatSite !== null;
+  // Undefined while the chat's history is still coming in: the row waits for
+  // it (below), so it never names its page one way, then another.
+  const chatSiteOrPending = useChatSite();
+  const chatSite = chatSiteOrPending ?? null;
   // The turn that made the site: the one that opened its card, or the chat's
   // first change. A later turn whose files are all new (a page added, a list
   // written) changed the site.
@@ -444,7 +454,7 @@ export function ChatFileChangeList({
   const [diffRefreshNonce, setDiffRefreshNonce] = useState(0);
   const [undoStatusByPath, setUndoStatusByPath] = useState<Record<string, ChatFileUndoStatus>>({});
   const [railExpanded, setRailExpanded] = useState(
-    () => !siteChangeLabel(site, madeTheSite, files) && resolveUniqueChatFileChanges(files).length <= MAX_FILES_EXPANDED_BY_DEFAULT,
+    () => !siteChangeLabel(chatSite, madeSite, madeTheSite, files) && resolveUniqueChatFileChanges(files).length <= MAX_FILES_EXPANDED_BY_DEFAULT,
   );
   const [unsavedNoteOpen, setUnsavedNoteOpen] = useState(false);
   const [openNotSavedNotes, setOpenNotSavedNotes] = useState<Record<string, boolean>>({});
@@ -554,7 +564,7 @@ export function ChatFileChangeList({
   // Files the turn's save left out; reverted ones have nothing left to save.
   const notSavedCount = pendingEntries.filter((entry) => entry.file.notSaved).length;
 
-  const siteLabel = revertedCount === 0 ? siteChangeLabel(site, madeTheSite, files) : null;
+  const siteLabel = revertedCount === 0 ? siteChangeLabel(chatSite, madeSite, madeTheSite, files) : null;
   const siteSummary = siteLabel !== null;
   // The chat's site can show up after these files did (a later turn opened its
   // card): its files then fold behind the site's line, unless the person opened them.
@@ -1548,6 +1558,13 @@ export function ChatFileChangeList({
       <span>{undoRequestPending ? "Undo…" : "Undo"}</span>
     </button>
   ) : null;
+
+  // The chat's history is still coming in, and a card in it may name these
+  // files' page or site: the row waits for it rather than read one way, then
+  // another.
+  if (chatSiteOrPending === undefined) {
+    return null;
+  }
 
   return (
     <div ref={cardRef} className="mt-2 text-sm" data-testid="chat-file-change-summary">

@@ -272,6 +272,15 @@ export function readStepActivity(
   message: ChatMessage,
   jobId: string | readonly string[] | null,
 ): StepActivity | null {
+  const metadata = turnAgentMetadata(message, jobId);
+  return metadata ? checkActivity(metadata.activity) : null;
+}
+
+/** The metadata of a message the turn's own job wrote (any job when `jobId` is null), or null. */
+function turnAgentMetadata(
+  message: ChatMessage,
+  jobId: string | readonly string[] | null,
+): Record<string, unknown> | null {
   if (message.role !== "assistant" || !isRecord(message.metadata)) {
     return null;
   }
@@ -283,7 +292,18 @@ export function readStepActivity(
   if (jobIds.length > 0 && (typeof metadata.jobId !== "string" || !jobIds.includes(metadata.jobId.trim()))) {
     return null;
   }
-  return checkActivity(metadata.activity);
+  return metadata;
+}
+
+/**
+ * A status the turn's save writes on its way, after the one that names it
+ * ("Applying changes to workspace…"): the save still runs, so the line keeps
+ * saying so until the save's own outcome arrives. The runtime's words for it
+ * arrive under `details`, as the controller relays every runtime status.
+ */
+function isSaveUnderWay(message: ChatMessage, jobId: string | readonly string[] | null): boolean {
+  const save = extractMessageDetails(turnAgentMetadata(message, jobId));
+  return save?.kind === "workspace_commit" && save.status === "applying";
 }
 
 export type StepKind = "command" | "tool" | "search" | "edit";
@@ -502,16 +522,25 @@ function plural(count: number, one: string, many: string): string {
 }
 
 /**
+ * A step the person said no to, or left to run out: it did not happen, also
+ * when it ended without an error, and its answer names it ("you said no to
+ * opening google.com", "skipped opening httpbin.org: no answer in time").
+ */
+function isDeclined(step: TurnStep): boolean {
+  return step.activity?.approval === "denied" || step.activity?.approval === "expired";
+}
+
+/**
  * "ran 5 commands, used 2 tools": what an unlabelled turn did, by kind. A look
  * around the workspace is not counted: a turn that only did that and answered
  * (or posted a card) has no line, as a plain answer has none. A step that
  * failed (a command that exited with an error) did nothing it would have done,
- * so it is not counted either; when no other step is left, the line says what
- * was tried: "Tried running a command".
+ * so it is not counted either, nor is a step the person declined; when no
+ * other step is left, the line says what was tried: "Tried running a command".
  */
 function neutralCounts(allSteps: TurnStep[]): string[] {
   const counted = allSteps.filter((step) => !step.plumbing);
-  const steps = counted.filter((step) => step.state !== "failed");
+  const steps = counted.filter((step) => step.state !== "failed" && !isDeclined(step));
   const commands = steps.filter((step) => step.kind === "command").length;
   const tools = steps.filter((step) => step.kind === "tool" || step.kind === "search").length;
   const files = new Set<string>();
@@ -536,9 +565,7 @@ function neutralCounts(allSteps: TurnStep[]): string[] {
     return parts;
   }
   // A step the person said no to, or left, is named by its answer instead.
-  const tried = counted.find(
-    (step) => step.state === "failed" && step.activity?.approval !== "denied" && step.activity?.approval !== "expired",
-  );
+  const tried = counted.find((step) => step.state === "failed" && !isDeclined(step));
   return tried ? [triedWords(NEUTRAL_LABELS[tried.kind].live)] : [];
 }
 
@@ -647,7 +674,7 @@ function summarizeGroups(steps: TurnStep[]): { phrases: string[]; firstHost: str
     }
     const lookAtStartPage = firstMove === -1 || index < firstMove;
     // A step the person said no to, or left, is named by its answer instead.
-    const declined = step.activity.approval === "denied" || step.activity.approval === "expired";
+    const declined = isDeclined(step);
     const activity = step.activity;
     for (const ranEntry of [activity, ...activity.also]) {
       // A command the step's result is not about did what its words say, or
@@ -658,7 +685,10 @@ function summarizeGroups(steps: TurnStep[]): { phrases: string[]; firstHost: str
         continue;
       }
       const entry: ActivityEntry = ranEntry.result === "unknown" ? { ...ranEntry, count: null } : ranEntry;
-      if (step.state === "failed") {
+      // A step the person said no to, or left, did not happen, also when it
+      // ended without an error ("skipped opening httpbin.org: no answer in
+      // time" never also says "Opened httpbin.org").
+      if (step.state === "failed" || declined) {
         if (!tried && !declined && entry.role !== "quiet" && entry.live) {
           tried = entry;
         }
@@ -1383,7 +1413,7 @@ export function summarizeTurnActivity(
         if (activity.key === SAVE_KEY) {
           newestSaveIndex = index;
         }
-      } else {
+      } else if (!isSaveUnderWay(message, stepJobIds)) {
         newestOtherIndex = index;
       }
     } else {

@@ -7,6 +7,7 @@ import type { RuntimeSharedBrowserApprovalRequest } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
 import { statusBehavior } from "../../../status/statusBehavior";
 import type { RunRecord } from "../../../types";
+import { SOCIAL_CARD_IMAGE, applyPageMeta } from "../../../utils/seo";
 import { generateUUID } from "../../../utils/uuid";
 import {
   conversationSurfaceScope,
@@ -56,6 +57,30 @@ export function chatReadingOwnPrompts(
   visibleConversationControllerId: string | null,
 ): string | null {
   return activeTabKind === "jobThread" ? null : visibleConversationControllerId;
+}
+
+/**
+ * The browser tab's title while a prompt waits for the person, in the chat on
+ * screen or in another: someone in another tab sees no toast and no Approve,
+ * but sees this.
+ */
+export const PROMPT_WAITING_TAB_TITLE = `${BROWSER_AGENT_DEFAULT_NAME} needs your answer`;
+
+/** Studio's tab title: the open space's name, or, while a prompt waits, that it does. */
+export function studioTabTitle(spaceName: string, promptWaiting: boolean): string {
+  if (promptWaiting) return PROMPT_WAITING_TAB_TITLE;
+  return spaceName ? `${spaceName} · Instafy` : "Instafy";
+}
+
+/** Keeps the browser tab's title to {@link studioTabTitle}. */
+export function useStudioTabTitle(spaceName: string, promptWaiting: boolean): void {
+  useEffect(() => {
+    applyPageMeta({
+      title: studioTabTitle(spaceName, promptWaiting),
+      description: "Chat with Octo, edit files, and manage your space in Instafy.",
+      image: SOCIAL_CARD_IMAGE,
+    });
+  }, [promptWaiting, spaceName]);
 }
 
 /** The open chats' tabs, Approve on those a prompt waits in (`waiting`: lowercased controller ids). */
@@ -172,9 +197,10 @@ function WaitingBrowserPromptLane({ projectId, userId, target, browserSessionId,
  * Reads: only the turn that holds a machine's browser can ask, so this reads
  * one prompt a machine, of the person's newest running browser turn there,
  * and none for the chat on screen, which reads its own. Each read is the
- * prompt read the open chat makes (every 1.5 s while the turn runs, every
- * 400 ms while a prompt waits, none while the tab is hidden), with a
- * view-only grant minted once a machine and renewed before it runs out.
+ * prompt read the open chat makes (every 1.5 s while the turn runs, also
+ * while the tab is hidden, and every 400 ms while a prompt waits on a shown
+ * tab), with a view-only grant minted once a machine and renewed before it
+ * runs out.
  */
 export function WaitingBrowserPrompts({
   enabled, userId, projectId, runs, chats, chatOnScreen, onView, onWaitingChange,

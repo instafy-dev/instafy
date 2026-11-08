@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunRecord } from "../../../../types";
@@ -26,6 +26,8 @@ vi.mock("../../../../status/useStatus", () => ({
 import {
   chatReadingOwnPrompts,
   openChatAwaitingOk,
+  studioTabTitle,
+  useStudioTabTitle,
   WAITING_PROMPT_REREAD_GRACE_MS,
   WaitingBrowserPrompts,
   waitingPromptToastText,
@@ -85,6 +87,13 @@ function promptFor(run: string, overrides: Record<string, unknown> = {}) {
 }
 
 type Props = Parameters<typeof WaitingBrowserPrompts>[0];
+
+/** The prompts of other chats, and the browser tab's title as Studio keeps it. */
+function TitledPrompts(props: Props) {
+  const [waiting, setWaiting] = useState<ReadonlySet<string>>(() => new Set());
+  useStudioTabTitle("Porto trip", waiting.size > 0);
+  return <WaitingBrowserPrompts {...props} onWaitingChange={setWaiting} />;
+}
 
 describe("WaitingBrowserPrompts", () => {
   let container: HTMLDivElement;
@@ -268,6 +277,46 @@ describe("WaitingBrowserPrompts", () => {
   it("names the chat only by a name the person gave it", () => {
     expect(waitingPromptToastText("Octo", "  Plan 3 days\nin Seville ")).toBe("Octo is waiting for your OK in “Plan 3 days in Seville”.");
     expect(waitingPromptToastText("Octo", null)).toBe("Octo is waiting for your OK in another chat.");
+  });
+
+  // A local test, Nov 8: with Studio in a background tab, the prompt to submit
+  // a form was never read: the tab kept "<space> · Instafy", nothing on screen
+  // asked, and the prompt ran out after 120 s.
+  it("names a prompt raised while the page is hidden in the browser tab's title, until it is answered", async () => {
+    let visibility: DocumentVisibilityState = "visible";
+    const hidden = vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    try {
+      await act(async () => {
+        root.render(
+          <TitledPrompts enabled userId={me} projectId={project} chats={chats} chatOnScreen={chatB}
+            onView={onView} onWaitingChange={onWaitingChange} runs={{ [runA]: browserRun(runA, chatA) }} />,
+        );
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(mocks.fetchPendingApproval).toHaveBeenCalledTimes(1);
+      expect(document.title).toBe("Porto trip · Instafy");
+
+      visibility = "hidden";
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      mocks.fetchPendingApproval.mockResolvedValue(promptFor(runA));
+      await step(2_000);
+      expect(document.title).toBe("Octo needs your answer");
+
+      // Answered on another device, or by coming back: the next read finds none.
+      mocks.fetchPendingApproval.mockResolvedValue(null);
+      await step(2_000 + WAITING_PROMPT_REREAD_GRACE_MS);
+      expect(document.title).toBe("Porto trip · Instafy");
+    } finally {
+      visibility = "visible";
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      hidden.mockRestore();
+    }
+  });
+
+  it("titles the tab by the space, by Instafy with none, and by the prompt while one waits", () => {
+    expect(studioTabTitle("Porto trip", false)).toBe("Porto trip · Instafy");
+    expect(studioTabTitle("", false)).toBe("Instafy");
+    expect(studioTabTitle("Porto trip", true)).toBe("Octo needs your answer");
   });
 });
 

@@ -48,9 +48,14 @@ export interface HomeSections {
   /**
    * The In progress row of each chat listed above Recent activity, by chat:
    * that row steps aside, so the row listing the chat says it is running.
+   * A chat with none has its newest dated row here when that row is a Stop
+   * or a failure, so the row listing it says "Stopped" (or why it failed).
    */
   liveByChat: ReadonlyMap<string, HomeFeedEvent>;
 }
+
+/** Rows that say how a chat's last run ended, where nothing ran after it. */
+const ENDED_RUN_KINDS: ReadonlySet<HomeFeedEvent["kind"]> = new Set(["run_stopped", "run_failed"]);
 
 function updateCount(event: HomeFeedEvent): number {
   return event.group?.count ?? 1;
@@ -123,6 +128,9 @@ export function arrangeHomeSections({
 
   const activity: HomeFeedDay[] = [];
   const liveByChat = new Map<string, HomeFeedEvent>();
+  // Listed chats whose newest dated row has been seen. A chat under Unread
+  // has its newest there: its own row says its state.
+  const datedSeen = new Set(feed.needs.map(chatKey).filter((key): key is string => key !== null));
   for (const day of feed.activity) {
     const events: HomeFeedEvent[] = [];
     // The chats the last row stands for. A row standing for several says so
@@ -131,8 +139,15 @@ export function arrangeHomeSections({
     for (const event of day.events) {
       const key = chatKey(event);
       if (key !== null && listed.has(key)) {
-        // Running before queued: the first In progress row is the chat's state.
-        if (day.key === HOME_LIVE_DAY_KEY && !liveByChat.has(key)) liveByChat.set(key, event);
+        // Running before queued: the first In progress row is the chat's
+        // state. With none, its newest dated row is, when it is a Stop or a
+        // failure: nothing ran after it.
+        if (day.key === HOME_LIVE_DAY_KEY) {
+          if (!liveByChat.has(key)) liveByChat.set(key, event);
+        } else if (!datedSeen.has(key)) {
+          datedSeen.add(key);
+          if (!liveByChat.has(key) && ENDED_RUN_KINDS.has(event.kind)) liveByChat.set(key, event);
+        }
         continue;
       }
       const previous = events.at(-1);

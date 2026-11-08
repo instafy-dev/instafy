@@ -18,6 +18,7 @@ import {
   resolveRunFailureRetrySource,
 } from "../../../conversations/runFailurePresentation";
 import type { ChatMessage } from "../types";
+import { browserRequestFromContinuationPrompt, readBrowserRequestOf } from "./browserRequest";
 import { getMessageType } from "./chatMessageMetadata";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -161,9 +162,21 @@ function repeatsFailedPrompt(messages: readonly ChatMessage[], prompt: ChatMessa
   return (
     source !== null &&
     source.id !== prompt.id &&
-    source.content.trim() === prompt.content.trim() &&
+    sentWords(source) === sentWords(prompt) &&
     (source.authorId ?? null) === (prompt.authorId ?? null)
   );
+}
+
+/**
+ * What a prompt sent. A browser task's row shows a notice in its place, which
+ * names who opened the browser ("Octo opened Instafy's browser" when Studio
+ * opened it by itself, "Opened Instafy's browser" after a press, such as Try
+ * again), so its words are its card and the task it sent.
+ */
+function sentWords(prompt: ChatMessage): string {
+  const card = readBrowserRequestOf(prompt);
+  const task = card === null ? null : browserRequestFromContinuationPrompt(prompt)?.task ?? null;
+  return card !== null && task !== null ? `${card}\n${task}` : prompt.content.trim();
 }
 
 /** The earlier attempts a turn carries in its Details, oldest first. */

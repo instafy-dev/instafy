@@ -54,6 +54,12 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
     update();
     return addFloatingSurfaceViewportChangeListener(update);
   }, [open]);
+  // A session to choose, or sessions that could not be read: Advanced opens
+  // by itself, and stays as the person leaves it once that is over.
+  const advancedNeeded = selectionRequired || Boolean(error);
+  useLayoutEffect(() => {
+    if (open && advancedNeeded && detailsRef.current) detailsRef.current.open = true;
+  }, [advancedNeeded, open]);
   return <DialogTrigger isOpen={open} onOpenChange={onOpenChange}>
     <IconButton ref={triggerRef} size="sm" variant="ghost" aria-label="Browser options" title="Browser options"
       className="shrink-0" data-browser-session-safe-zone="true"
@@ -75,46 +81,47 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
           {location ? <>
             {actions ? <StudioMenuSeparator /> : null}
             {location}
-            {resumeUrl || canStart ? <StudioMenuSeparator /> : null}
+            {canStart ? <StudioMenuSeparator /> : null}
           </> : null}
-          {resumeUrl ? <StudioMenuAction onPress={() => {
-            void writeClipboardText(resumeUrl).then(
-              () => setCopyStatus({ url: resumeUrl, text: "Resume link copied." }),
-              () => {
-                setCopyStatus({ url: resumeUrl, text: "Could not copy. Select and copy the link in Session details." });
-                if (detailsRef.current) {
-                  detailsRef.current.open = true;
-                  detailsRef.current.querySelector("input")?.focus();
-                }
-              },
-            );
-          }}><MenuItemContent start={<Link aria-hidden="true" />}>Copy resume link</MenuItemContent></StudioMenuAction> : null}
-          {copyStatus?.url === resumeUrl ? <Text variant="caption" tone="muted" className="px-2.5 py-1" role="status">{copyStatus.text}</Text> : null}
           {canStart ? <StudioMenuAction isDisabled={busy} onPress={onStart}>
             <MenuItemContent start={<Plus aria-hidden="true" />}>Start new session</MenuItemContent>
           </StudioMenuAction> : null}
           <StudioMenuSeparator />
-          <div>
-            <div className="flex items-center justify-between px-2 py-1">
-              <Text as="h4" variant="caption" tone="muted">Sessions</Text>
-              <IconButton size="xs" variant="ghost" isDisabled={busy} aria-label="Refresh sessions" title="Refresh sessions" onPress={onRefresh}>
-                <Refresh className="h-3.5 w-3.5" aria-hidden="true" />
-              </IconButton>
-            </div>
-            {error ? <Text variant="caption" tone={selectionRequired ? "muted" : "danger"} className="px-2.5 py-1" role={selectionRequired ? "status" : "alert"}>{error}</Text> : null}
-            {candidates.map((candidate) => <StudioMenuAction key={candidate.runtimeId} isDisabled={busy}
-              onPress={() => onChoose(candidate.runtimeId)} aria-label={`Resume Shared session ${candidate.runtimeId}`}>
-              <MenuItemContent end={candidate.runtimeId === runtimeId ? <Check aria-hidden="true" /> : null}
-                description={candidate.runtimeId === runtimeId ? "Current" : undefined}>
-                {candidate.mode === "lazy" ? "This space's machine" : `Session ${candidate.runtimeId.slice(0, 8)}`}
-              </MenuItemContent>
-            </StudioMenuAction>)}
-          </div>
-          <StudioMenuSeparator />
+          {/* What few people need, in words they need not learn, behind one row:
+              the resume link, the machine's sessions and their details. */}
           <details ref={detailsRef} className="group">
             <summary className={`${STUDIO_MENU_NATIVE_ROW_CLASS} list-none [&::-webkit-details-marker]:hidden`}>
-              <MenuItemContent end={<NavArrowDown className="transition-transform group-open:rotate-180" aria-hidden="true" />}>Session details</MenuItemContent>
+              <MenuItemContent end={<NavArrowDown className="transition-transform group-open:rotate-180" aria-hidden="true" />}>Advanced</MenuItemContent>
             </summary>
+            {resumeUrl ? <StudioMenuAction onPress={() => {
+              void writeClipboardText(resumeUrl).then(
+                () => setCopyStatus({ url: resumeUrl, text: "Resume link copied." }),
+                () => {
+                  setCopyStatus({ url: resumeUrl, text: "Could not copy. Select and copy the link below." });
+                  if (detailsRef.current) {
+                    detailsRef.current.open = true;
+                    detailsRef.current.querySelector("input")?.focus();
+                  }
+                },
+              );
+            }}><MenuItemContent start={<Link aria-hidden="true" />}>Copy resume link</MenuItemContent></StudioMenuAction> : null}
+            {copyStatus?.url === resumeUrl ? <Text variant="caption" tone="muted" className="px-2.5 py-1" role="status">{copyStatus.text}</Text> : null}
+            <div>
+              <div className="flex items-center justify-between px-2 py-1">
+                <Text as="h4" variant="caption" tone="muted">Sessions</Text>
+                <IconButton size="xs" variant="ghost" isDisabled={busy} aria-label="Refresh sessions" title="Refresh sessions" onPress={onRefresh}>
+                  <Refresh className="h-3.5 w-3.5" aria-hidden="true" />
+                </IconButton>
+              </div>
+              {error ? <Text variant="caption" tone={selectionRequired ? "muted" : "danger"} className="px-2.5 py-1" role={selectionRequired ? "status" : "alert"}>{error}</Text> : null}
+              {candidates.map((candidate) => <StudioMenuAction key={candidate.runtimeId} isDisabled={busy}
+                onPress={() => onChoose(candidate.runtimeId)} aria-label={`Resume Shared session ${candidate.runtimeId}`}>
+                <MenuItemContent end={candidate.runtimeId === runtimeId ? <Check aria-hidden="true" /> : null}
+                  description={candidate.runtimeId === runtimeId ? "Current" : undefined}>
+                  {candidate.mode === "lazy" ? "This space's machine" : `Session ${candidate.runtimeId.slice(0, 8)}`}
+                </MenuItemContent>
+              </StudioMenuAction>)}
+            </div>
             <div className="space-y-2 px-2.5 py-2">
               <Text variant="caption" tone="muted">Members of this space can use the resume link to join and request control.</Text>
               {runtimeId ? <Text variant="caption" tone="muted" className="break-all" data-testid="shared-browser-current-runtime">Current session: {runtimeId}</Text> : null}

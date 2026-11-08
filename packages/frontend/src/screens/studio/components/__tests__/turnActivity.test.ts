@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { mapControllerMessageToChat } from "../../../../conversations/conversationMessageUtils";
+import type { ControllerConversationMessage } from "../../../../services/runtimeController/conversations";
 import type { ChatMessage } from "../../types";
 import {
   checkActivity,
@@ -13,6 +15,7 @@ import {
   summarizeTurnActivity,
   type TurnActivityPhase,
 } from "../turnActivity";
+import storedChats from "./fixtures/browserHandBackChats.json";
 
 // Studio's copy of the label rules. The fixture list is runtime-contracts' own
 // file, so a rule changed on one side and not the other fails here and in the
@@ -174,6 +177,27 @@ function note(content: string, type = "status", activity?: unknown): ChatMessage
     timestamp: sequence,
     messageType: type,
     metadata: { source: "agent", jobId: JOB, messageType: type, ...(activity ? { activity } : {}) },
+  };
+}
+
+const SAVE_LABEL = { v: 1, key: "runtime/save", role: "quiet", live: "Saving your changes", count: 1, also: [] };
+
+/**
+ * One of the statuses the turn's save writes, as Studio receives them: the
+ * controller relays the runtime's `workspace_commit` under `details`, with
+ * only the step's label lifted to the top.
+ */
+function saveStatus(stage: "started" | "applying" | "completed"): ChatMessage {
+  const content = { started: "Syncing workspace changes…", applying: "Applying changes to workspace…", completed: "Workspace sync complete." }[stage];
+  const message = note(content, "status", stage === "started" ? SAVE_LABEL : undefined);
+  return {
+    ...message,
+    metadata: {
+      ...(message.metadata as Record<string, unknown>),
+      kind: "update",
+      outcome: "in_progress",
+      details: { kind: "workspace_commit", status: stage },
+    },
   };
 }
 
@@ -775,13 +799,38 @@ describe("a step its turn ended before", () => {
   it("never names the line again once the turn's save came after it", () => {
     const stay = command(STAY, { status: "in_progress", exitCode: null });
     const saving = note("Syncing workspace changes…", "status", SAVING);
-    const applying = note("Applying changes to workspace…", "status");
+    const saved = saveStatus("completed");
     expect(summarize([command(ADD_POINT), stay], "running").live).toBe("Finding places to stay…");
     expect(summarize([command(ADD_POINT), stay, saving], "running").live).toBe("Saving your changes…");
-    expect(summarize([command(ADD_POINT), stay, saving, applying], "running").live).toBe("Thinking…");
+    expect(summarize([command(ADD_POINT), stay, saving, saved], "running").live).toBe("Thinking…");
     // A step started after the save names the line as usual.
     const later = command(WEB_READ, { status: "in_progress", exitCode: null });
-    expect(summarize([stay, saving, applying, later], "running").live).toBe("Reading pages…");
+    expect(summarize([stay, saving, saved, later], "running").live).toBe("Reading pages…");
+  });
+
+  // A local test, Nov 8: the tip's save ran 1.7 s under "Thinking…": the save
+  // writes "Applying changes to workspace…" 50 ms after the status that names
+  // it, and that status ended its line.
+  it("keeps saying Saving your changes while the save applies them, until its outcome", () => {
+    const stay = command(STAY, { status: "in_progress", exitCode: null });
+    const turn = [command(ADD_POINT), stay, saveStatus("started"), saveStatus("applying")];
+    expect(summarize(turn, "running").live).toBe("Saving your changes…");
+    expect(summarize([...turn, saveStatus("completed")], "running").live).toBe("Thinking…");
+    // A status of another kind, with no label, still ends it.
+    expect(summarize([...turn, note("Retrying: stream disconnected")], "running").live).toBe("Thinking…");
+  });
+
+  it("keeps saying Saving your changes through a stored save's own statuses", () => {
+    // A map's build turn as the chat stored it, mapped as Studio maps it.
+    const rows = (storedChats as unknown as Record<string, Array<Omit<ControllerConversationMessage, "conversationId" | "projectId" | "sessionId" | "promptId">>>).seville
+      .map((row) => mapControllerMessageToChat({ ...row, conversationId: "conversation-1", projectId: "project-1", sessionId: null, promptId: null }));
+    const saving = rows.findIndex((row) => row.content === "Syncing workspace changes…");
+    const applying = rows.findIndex((row) => row.content === "Applying changes to workspace…");
+    const saved = rows.findIndex((row) => row.content === "Workspace sync complete.");
+    expect([saving + 1, saving + 2]).toEqual([applying, saved]);
+    const jobId = (rows[saving]!.metadata as { jobId: string }).jobId;
+    const live = (end: number) => summarizeTurnActivity(rows.slice(0, end + 1), { jobId, phase: "running", viewerCanAnswer: false }).live;
+    expect([live(saving), live(applying), live(saved)]).toEqual(["Saving your changes…", "Saving your changes…", "Thinking…"]);
   });
 
   // A retry in the middle of a turn is not its end: a lookup still running
@@ -1639,6 +1688,21 @@ describe("answered browser prompts", () => {
     expect(summarize([opened, site]).summary).toBe("Opened 2 pages on carris.pt · you allowed the site");
     const google = browserStep({ key: "browser/use", role: "content", live: "Using the browser", done: "used the browser" }, { step: "navigate", approval: "denied" }, "failed");
     expect(summarize([google]).summary).toBe("You said no to opening a page");
+  });
+
+  // A local test, Nov 8: an open whose prompt ran out read "Opened httpbin.org
+  // · skipped opening httpbin.org: no answer in time": the browser said so as
+  // its answer, so the step ended without an error.
+  it("never count a step the person said no to, or left, also when it ended without an error", () => {
+    const unanswered = browserStep(BROWSER_OPEN, { host: "httpbin.org", step: "navigate", approval: "expired" });
+    expect(summarize([unanswered]).summary).toBe("Skipped opening httpbin.org: no answer in time");
+    const refused = browserStep(BROWSER_OPEN, { host: "httpbin.org", step: "navigate", approval: "denied" });
+    expect(summarize([refused]).summary).toBe("You said no to opening httpbin.org");
+    const opened = browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_A, step: "navigate" });
+    expect(summarize([opened, unanswered]).summary).toBe("Opened carris.pt · skipped opening httpbin.org: no answer in time");
+    // Allowed, it counts as any open does.
+    const allowed = browserStep(BROWSER_OPEN, { host: "httpbin.org", pageKey: PAGE_B, step: "navigate", approval: "once" });
+    expect(summarize([allowed]).summary).toBe("Opened httpbin.org · you allowed opening httpbin.org");
   });
 
   it("never say a step the person said no to, or left, was done", () => {

@@ -3,7 +3,8 @@
 // The browser view's three pollers (action log, approval lane, page list) at
 // the cadences measurement B (a live, idle, docked browser: 34 + 18 + 14 reads
 // in 33 s) asked for: fast only while a run is active, the agent controls or a
-// prompt is shown; a slow safety read otherwise; nothing while hidden.
+// prompt is shown; a slow safety read otherwise; nothing while hidden, except
+// the approval lane's 1.5 s read while a run may raise a prompt.
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -263,38 +264,49 @@ describe("browser view poll cadence", () => {
     expect(mocks.fetchPendingApproval.mock.calls.length).toBe(10);
   });
 
-  it("hidden: no reads at all; visible again: one read at once, then the cadence", async () => {
+  // A local test, Nov 8: with Studio in a background tab, a prompt to submit a
+  // form was never read and ran out after 120 s. The approval lane keeps its
+  // 1.5 s read while a run may raise a prompt; the other two read nothing.
+  it("hidden: the action log and the tabs read nothing, approvals keep 1.5 s while a run is active; visible again: one read at once", async () => {
     await act(async () => root.render(<><Actions agentActive /><Approval runActive /><Pages pollFast /></>));
     await advance(1_000);
     setVisibility("hidden");
     await advance(1_000);
     for (const m of Object.values(mocks)) m.mockClear();
     await advance(60_000, 500);
-    const hidden = [mocks.fetchActions, mocks.fetchPendingApproval, mocks.fetchPages].map((m) => m.mock.calls.length);
-    expect(hidden).toEqual([0, 0, 0]);
+    expect([mocks.fetchActions, mocks.fetchPages].map((m) => m.mock.calls.length)).toEqual([0, 0]);
+    // One read 1.5 s after each answer, which takes 400 ms here: about 31 in 60 s.
+    expect(mocks.fetchPendingApproval.mock.calls.length).toBeGreaterThanOrEqual(30);
+    expect(mocks.fetchPendingApproval.mock.calls.length).toBeLessThanOrEqual(33);
+    for (const m of Object.values(mocks)) m.mockClear();
     setVisibility("visible");
     await advance(100);
-    const woke = [mocks.fetchActions, mocks.fetchPendingApproval, mocks.fetchPages].map((m) => m.mock.calls.length);
-    expect(woke).toEqual([1, 1, 1]);
+    expect([mocks.fetchActions, mocks.fetchPages].map((m) => m.mock.calls.length)).toEqual([1, 1]);
   });
 
-  it("a run starting or ending in a hidden tab reads nothing until the tab is visible again", async () => {
+  it("a run starting in a hidden tab reads approvals at once and every 1.5 s, none once it ended, and the action log on the return", async () => {
     await act(async () => root.render(<><Actions agentActive={false} /><Approval runActive={false} /></>));
     await advance(1_000);
     setVisibility("hidden");
     await advance(1_000);
     mocks.fetchActions.mockClear();
     mocks.fetchPendingApproval.mockClear();
-    const reads = () => [mocks.fetchActions, mocks.fetchPendingApproval].map((m) => m.mock.calls.length);
     await act(async () => root.render(<><Actions agentActive /><Approval runActive /></>));
+    expect(mocks.fetchPendingApproval.mock.calls.length).toBe(1);
     await advance(5_000);
+    // 0, 1.9 and 3.8 s: each 1.5 s after a 400 ms answer.
+    expect(mocks.fetchPendingApproval.mock.calls.length).toBe(3);
     await act(async () => root.render(<><Actions agentActive={false} /><Approval runActive={false} /></>));
     await advance(5_000);
-    expect(reads()).toEqual([0, 0]);
-    // The return reads both at once, which also covers the run's trailing read.
+    // The read already due, then none.
+    expect(mocks.fetchPendingApproval.mock.calls.length).toBe(4);
+    await advance(60_000, 500);
+    expect(mocks.fetchPendingApproval.mock.calls.length).toBe(4);
+    expect(mocks.fetchActions.mock.calls.length).toBe(0);
+    // The return reads the action log at once, which also covers the run's trailing read.
     setVisibility("visible");
     await advance(100);
-    expect(reads()).toEqual([1, 1]);
+    expect(mocks.fetchActions.mock.calls.length).toBe(1);
   });
 
   it("pages while the browser surface is not on screen and nothing runs: every 15 s", async () => {
