@@ -58,9 +58,9 @@ serve      Serve the site (or every subfolder with a bound.json) with the binder
 init       Write a starter bound.json, index.html and handlers/hello.mjs. --starter <name>: a themed page instead,
            with theme.css and site.js (compare 2-8 options; ranked a top-N; timeline days or steps in time;
            checklist ticks; blank anything else). You design the content in data.json and app.js. Existing
-           files are kept; --force overwrites them. In a space, while no preview shows the folder, its next step
-           is the check, which posts the page's card; a folder with no starter content names the command that
-           serves the page and posts its card in Studio.
+           files are kept; --force overwrites them. In a space a starter's next step is the check, which posts
+           the page's card while no preview shows the folder; for a folder with no starter content, while no
+           preview shows it, the next step is the command that serves the page and posts its card in Studio.
 check      Does the site show every item the request named (each product, stop or entry)? Reads the text of its
            HTML pages, every value in its data files (data.json, data/**/*.json), and in its own scripts the text
            they pass to site.h and site.head (a blank page's app.js) and the strings of their lists and objects;

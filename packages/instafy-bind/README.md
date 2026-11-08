@@ -212,20 +212,20 @@ fails the check, also when `--expect` or `"expect"` names it: that list only say
 person asked for from what Octo knows, with nothing looked up (`"from": "memory"`), cites no page: its rows and values
 pass without one, the compare starter shows each value as "<value>, not checked" and says so in the lede, and any
 `src`, `url`, `date`, `asof`, store or filter on it fails the check, as does the mark on a page of another starter.
-In a space's workspace, until the CLI has recorded a preview of that
-space opened from the site's folder, a starter's next step is the check, and a folder with no starter content names
-the command that serves the page and posts its card in Studio (`instafy preview open … --serve-cmd 'instafy bind
-serve . --port {port} --preview' --start`, run in the site's folder). A check that passes on a new page, one the
-space's record of its pages (`.instafy/pages/pages.json`, which that command writes) does not hold yet, runs that
-command itself, titled from the page (`data.json`'s title, else the page's own), and says what it answered; any other
-check ends with it: a failing check never holds the card back. A source line drawn by hand (an element with the class
-`trust`) must link the page its fact was read on, unless it says "not checked" or "From what Octo knows":
-`site.trust(fact)` draws one that does. A page the record holds had its card, in this chat or another, and may have been
+On any page, a source line drawn by hand (an element with the class `trust`) fails the check, which names it, unless
+it links a page or says "not checked" or "From what Octo knows": `site.trust(fact)` draws one that links the page its
+fact was read on. In a space's workspace, `init`'s next step for a starter is the check; for a folder with no starter
+content, until the CLI has recorded a preview of that space opened from the folder, it is the command that serves the
+page and posts its card in Studio (`instafy preview open … --serve-cmd 'instafy bind serve . --port {port} --preview'
+--start`, run in the site's folder). A check that passes on a new page, one the space's record of its pages
+(`.instafy/pages/pages.json`, which that command writes) does not hold yet, runs that command itself, titled from the
+page (`data.json`'s title, else the page's own), and says what it answered; any other check ends with it: a failing
+check never holds the card back. A page the record holds had its card, in this chat or another, and may have been
 stopped on purpose, so its check only names the command. A page is served from its own folder, so a page that loads a
 file from outside it fails the check: `../another-page/site.js` in an element, a style or a script (also through a
 `<base href>`), a path from the root that names no file of its folder but another folder's
-(`/sites/another-page/site.js`), or a link in its folder to another folder's file. The check names the
-`instafy bind init <dir> --starter <name>` that gives it its own files; its card waits for the check that passes.
+(`/sites/another-page/site.js`), or a link in its folder to another folder's file. The check names the `instafy bind
+init <dir> --starter <name>` that gives it its own files; its card waits for the check that passes.
 
 On timeout the binder sends SIGTERM, then SIGKILL after 3 s, and reports `error timeout`.
 
