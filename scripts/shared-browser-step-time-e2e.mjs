@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { createServer } from "node:http";
 import net from "node:net";
@@ -14,8 +14,11 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // Real-browser proof that one Shared Browser step has one time limit: the
 // production controller script, composed as runtime-agent composes it, drives
 // a real Chromium over CDP against a loopback fixture site. A search whose
-// results page keeps the page busy for a minute answers once the step's time
-// is up, with the page as it is, instead of waiting for the page; a prompt the
+// results page keeps the page busy for a minute fails once the step's time is
+// up, as a site that did not answer, instead of waiting for the page, and so
+// does a page that never finishes loading: their words name the next source,
+// their address is refused for the rest of the turn, and the place's own site
+// still opens; a prompt the
 // person answers after more than the step's time is never cut short. A step
 // whose time runs out still ends as every step ends: a window it opened is
 // closed and said, and a hand-off it had not finished is never left behind. A
@@ -74,6 +77,9 @@ const WINDOW_BUSY_MS = 32_000;
 // How long a form keeps the page busy once a field is highlighted: longer than
 // a step's time, shorter than the step's time and its late read.
 const FORM_BUSY_MS = 24_000;
+// How long a "Load more" button's script keeps the page busy once its request
+// was answered: longer than a step's time and its late read.
+const LOAD_MORE_BUSY_MS = 32_000;
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -92,6 +98,14 @@ const page = (title, body, script = "") => `<!doctype html><html lang="en"><head
 const SEARCH = `<form action="/results" method="get" role="search"><input type="search" name="q" aria-label="Search places"><button>Search</button></form>`;
 const RESULTS = "<p>Results for your search.</p><p><a href=\"/places/tower\">The tower</a></p>";
 const BUSY = `setTimeout(() => { const end = Date.now() + ${BUSY_MS}; while (Date.now() < end) {} }, 100);`;
+// A button whose script sends a request of its own, loading no page, and then
+// keeps the page busy: what the click did happened inside the page.
+const LOAD_MORE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><link rel="icon" href="data:,">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'">
+<title>Events</title></head><body><h1>Events</h1><p>Concerts this week.</p><button id="more" type="button">Load more</button>
+<script>document.getElementById("more").addEventListener("click", () => {
+  fetch("/api/more", { method: "POST" }).then(() => { const end = Date.now() + ${LOAD_MORE_BUSY_MS}; while (Date.now() < end) {} });
+});</script></body></html>`;
 // A button that opens another window, then keeps the page busy; once free, the
 // page sends that window somewhere else.
 const WINDOW = `<button id="open" type="button">Open details</button>`;
@@ -114,6 +128,13 @@ const BUSY_MESSAGE = "The page is still busy, so it could not be read yet. Take 
 // waiting for it, from a blank tab and from a page that had loaded: nothing was
 // opened, and Octo goes to the next source in the same turn.
 const NEXT_SOURCE = "Don't open this address again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
+// What a step answers whose page was still busy when its time ran out: the
+// same as a site that sent nothing, so the turn goes to the next source.
+const BUSY_UNANSWERED_MESSAGE = `The site did not answer in time, so nothing on its page could be read. ${NEXT_SOURCE}`;
+// A tourism site's page that never finishes loading: its head and a hidden
+// body come at once, and the rest never does, so it shows nothing.
+const NEVER_LOADS_START = `<!doctype html><html lang="en"><head><meta charset="utf-8"><link rel="icon" href="data:,">
+<title>Visit the city</title><style>body { visibility: hidden; }</style></head><body><h1>Visit the city</h1><p>Opening hours of the bookshop.</p>${" ".repeat(2048)}`;
 const UNANSWERED_MESSAGE = `The site did not answer in time, so nothing was opened and the page is still blank. ${NEXT_SOURCE}`;
 const UNANSWERED_LOADED_MESSAGE = `The site did not answer in time, so nothing was opened and the tab still shows the page it showed before. ${NEXT_SOURCE}`;
 // What navigate and open_tab answer for that address while the chat's browser
@@ -257,6 +278,8 @@ export async function runSharedBrowserStepTimeFixture() {
   const unanswered = [];
   // Not-found pages whose rest has not been sent yet.
   const unfinished = [];
+  // Pages that never finish loading.
+  const neverEnding = [];
   try {
     const requests = [];
     server = createServer((request, response) => {
@@ -275,6 +298,16 @@ export async function runSharedBrowserStepTimeFixture() {
           response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
           response.end(page("Opening hours", "<p>Open daily from 09:00 to 19:30.</p>"));
         }, AFTER_REDIRECT_MS);
+        return;
+      }
+      if (url.pathname === "/api/more") {
+        response.writeHead(204, { "cache-control": "no-store" }).end();
+        return;
+      }
+      if (url.pathname === "/never-loads") {
+        response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        response.write(NEVER_LOADS_START);
+        neverEnding.push(response);
         return;
       }
       if (url.pathname === "/reviews/slow-not-found") {
@@ -302,6 +335,9 @@ export async function runSharedBrowserStepTimeFixture() {
         "/visit": [page("Visiting", "<p><a href=\"/slow\">Opening hours</a></p>")],
         "/reviews/soft-not-found": [page("Page not found", "<p>Sorry! Page not found.</p>")],
         "/ask": [page("Ask us", "<form action=\"/slow\" method=\"post\"><label>Your question <input name=\"question\"></label><button>Send question</button></form>")],
+        // The bookshop's own site, at a name of its own.
+        "/bookshop-hours": [page("Bookshop", "<p>Open daily from 10:00 to 19:00.</p>")],
+        "/events": [LOAD_MORE],
       }[url.pathname];
       if (!body) {
         response.writeHead(404).end();
@@ -316,6 +352,8 @@ export async function runSharedBrowserStepTimeFixture() {
     });
     // A public name, as a site's own search is free only on a public site.
     const origin = `http://places.test:${server.address().port}`;
+    // The bookshop's own site, another public name on the same fixture server.
+    const bookshop = `http://bookshop.test:${server.address().port}`;
 
     context = await chromium.launchPersistentContext(profileDirectory, {
       executablePath,
@@ -323,7 +361,7 @@ export async function runSharedBrowserStepTimeFixture() {
       viewport: { width: 1000, height: 800 },
       env: environment,
       // No host but the loopback fixture resolves, so nothing leaves the machine.
-      args: ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", "--host-resolver-rules=MAP places.test 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"],
+      args: ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", "--host-resolver-rules=MAP places.test 127.0.0.1, MAP bookshop.test 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"],
     });
     const runPage = context.pages()[0];
     await runPage.goto(`${origin}/`);
@@ -701,6 +739,43 @@ export async function runSharedBrowserStepTimeFixture() {
     assert.match(tower.payload.visibleText, /Open daily\./u);
     assert.equal(prompts.length, promptsBeforeForm + 1, "Nothing asked for the addresses");
 
+    // 1h. A tourism site whose page never finishes loading and shows nothing:
+    // its site answered, but when the step's time is up the page is still too
+    // busy to be read. It fails as a site that did not answer: its words name
+    // the next source, never "Take a snapshot in a moment", which sent a turn
+    // to open the same busy site again, 26 seconds each, and never to the
+    // place's own. Its address is then refused at once in the turn, as one
+    // whose site sent nothing is, and the place's own site still opens.
+    requests.length = 0;
+    const busyPage = await runTool("POST", "/v1/navigate", { url: `${origin}/never-loads` });
+    assert.deepEqual(requests, ["GET /never-loads"], "The site was asked once");
+    assert.equal(busyPage.code, 1, `The step fails: ${busyPage.stdout}`);
+    assert.equal(busyPage.stdout, "", "A failed navigation answers with no page");
+    assert.ok(busyPage.stderr.includes(BUSY_UNANSWERED_MESSAGE), busyPage.stderr);
+    assert.doesNotMatch(busyPage.stderr, /Take a snapshot in a moment|still busy|Check what the step did/u);
+    assert.ok(busyPage.wallMs >= STEP_TIME_MS - 1_000, `It answered when its time was up (${Math.round(busyPage.wallMs)} ms)`);
+    assert.ok(busyPage.wallMs < STEP_TIME_MS + LATE_READ_MS + 5_000, `It did not wait for the page (${Math.round(busyPage.wallMs)} ms)`);
+    // A read of that page while it is still busy says the same, never "Take a
+    // snapshot in a moment": a turn read the busy page again, then opened its
+    // address once more instead of the place's own site.
+    const busyRead = await ok("GET", "/v1/snapshot");
+    assert.equal(busyRead.payload.message, BUSY_UNANSWERED_MESSAGE);
+    assert.deepEqual(busyRead.payload.interactiveElements, []);
+    assert.equal(busyRead.payload.activity.step, "status", "A busy page was not read");
+    requests.length = 0;
+    const busyAgain = await runTool("POST", "/v1/navigate", { url: `${origin}/never-loads` });
+    assert.equal(busyAgain.code, 1, `The busy address is refused: ${busyAgain.stdout}`);
+    assert.ok(busyAgain.stderr.includes(REFUSED_AGAIN_MESSAGE), busyAgain.stderr);
+    assert.ok(busyAgain.wallMs < 5_000, `It was refused at once (${Math.round(busyAgain.wallMs)} ms)`);
+    assert.deepEqual(requests, [], "The busy site was not asked again");
+    const ownSite = await ok("POST", "/v1/navigate", { url: `${bookshop}/bookshop-hours` });
+    assert.equal(ownSite.payload.url, `${bookshop}/bookshop-hours`);
+    assert.match(ownSite.payload.visibleText, /Open daily from 10:00 to 19:00\./u);
+    assert.ok(ownSite.wallMs < 8_000, `The place's own site opened at once (${Math.round(ownSite.wallMs)} ms)`);
+    assert.deepEqual(requests, ["GET /bookshop-hours"]);
+    assert.equal(prompts.length, promptsBeforeForm + 1, "Nothing asked for the busy page or the place's own site");
+    for (const response of neverEnding.splice(0)) response.destroy();
+
     // 2. A click that opens another window and then keeps the page busy: the
     // step's time runs out, and it still ends as a step does. The window is
     // closed before it loads anything and the step says so, and once the page
@@ -718,6 +793,31 @@ export async function runSharedBrowserStepTimeFixture() {
     await delay(Math.max(0, clickedAt + WINDOW_BUSY_MS + 3_000 - performance.now()));
     assert.deepEqual(context.pages().map((open) => new URL(open.url()).pathname), ["/window"], "Only the run's page is left");
     assert.deepEqual(requests.filter((request) => request.includes("/popup")), [], "The window never loaded anything, then or later");
+
+    // 2b. A click whose script sends a request of its own and loads no page,
+    // then keeps the page busy: the step's time runs out on the page it acted
+    // on, so it answers with that page and says to check what it did, never
+    // that the site did not answer, which would read as nothing done.
+    await ok("POST", "/v1/navigate", { url: `${origin}/events` });
+    const events = await ok("GET", "/v1/snapshot");
+    const more = events.payload.interactiveElements.find((element) => element.label === "Load more");
+    assert.ok(more, "The button is observed");
+    requests.length = 0;
+    const loaded = await runTool("POST", "/v1/click", { index: more.index, snapshotId: events.payload.snapshotId });
+    const loadedAt = performance.now() - loaded.wallMs;
+    assert.equal(loaded.code, 0, `The step answers with the page it acted on: ${loaded.stderr}`);
+    assert.deepEqual(requests, ["POST /api/more"], "The click's own request reached the site");
+    assert.equal(loaded.payload.stepTimedOut, true);
+    assert.equal(
+      loaded.payload.message,
+      `${BUSY_MESSAGE} This step was still running after 20 seconds, so it stopped where it was. Check what the step did before you act again.`,
+    );
+    assert.ok(loaded.wallMs < STEP_TIME_MS + LATE_READ_MS + 10_000, `It did not wait for the busy page (${Math.round(loaded.wallMs)} ms)`);
+    const keptBefore = fs.existsSync(path.join(approvalDirectory, "unanswered.json"))
+      ? JSON.parse(fs.readFileSync(path.join(approvalDirectory, "unanswered.json"), "utf8")).addresses.map((entry) => entry.address)
+      : [];
+    assert.ok(!keptBefore.includes(createHash("sha256").update(`${origin}/events`).digest("hex")), "The page a click acted on was kept as one that did not answer");
+    await delay(Math.max(0, loadedAt + LOAD_MORE_BUSY_MS + 1_000 - performance.now()));
 
     // 3. A hand-off whose fields the page is too busy to highlight in time:
     // the step answers with the page as it is, and no hand-off is left behind
@@ -739,28 +839,25 @@ export async function runSharedBrowserStepTimeFixture() {
     assert.ok(field, "The search box is observed");
 
     // 5. The site's own search, whose results page then keeps the page busy:
-    // the step answers once its time is up, with the page as it is, and says
-    // so. It never waits out the busy page.
+    // the step fails once its time is up, as a site that did not answer, and
+    // names the next source. It never waits out the busy page, and the
+    // results' address is kept as one that did not answer (its page still
+    // holds the browser, so the record itself is read).
     requests.length = 0;
     const promptsBeforeSearch = prompts.length;
-    const searched = await ok("POST", "/v1/type", { index: field.index, snapshotId: start.payload.snapshotId, text: "tower", submit: true });
+    const searched = await runTool("POST", "/v1/type", { index: field.index, snapshotId: start.payload.snapshotId, text: "tower", submit: true });
     assert.deepEqual(requests, ["GET /results?q=tower"], "The search was sent once, as the form makes it");
     assert.ok(searched.wallMs >= STEP_TIME_MS - 1_000, `It answered when its time was up (${Math.round(searched.wallMs)} ms)`);
     assert.ok(searched.wallMs < STEP_TIME_MS + LATE_READ_MS + 10_000, `It did not wait for the busy page (${Math.round(searched.wallMs)} ms)`);
-    assert.equal(searched.payload.stepTimedOut, true);
-    assert.equal(searched.payload.url, `${origin}/results?q=tower`, "The page as it is: the results");
-    // Nothing could be read, so it is not "the page as it is now": the page is still busy.
-    assert.equal(
-      searched.payload.message,
-      `${BUSY_MESSAGE} This step was still running after 20 seconds, so it stopped where it was. Check what the step did before you act again.`,
-    );
-    // A page too busy to be read lists no controls, so no action can use it.
-    assert.deepEqual(searched.payload.interactiveElements, []);
-    assert.equal(searched.payload.visibleText, "");
-    // Nothing was read, so its line does not say a page was read: like status,
-    // it names the page it is on.
-    assert.deepEqual(searched.payload.activity, { step: "status", url: `${origin}/results?q=tower` });
+    assert.equal(searched.code, 1, `The step fails: ${searched.stdout}`);
+    assert.ok(searched.stderr.includes(BUSY_UNANSWERED_MESSAGE), searched.stderr);
+    assert.doesNotMatch(searched.stderr, /Take a snapshot in a moment|Check what the step did/u);
+    // Its line still names the step a search, as the browser judged it.
+    assert.deepEqual(JSON.parse(searched.stdout), { ok: false, activity: { step: "search" } });
     assert.equal(prompts.length, promptsBeforeSearch, "Nothing asked during the search");
+    const kept = JSON.parse(fs.readFileSync(path.join(approvalDirectory, "unanswered.json"), "utf8")).addresses.map((entry) => entry.address);
+    const fingerprint = (address) => createHash("sha256").update(new URL(address).toString()).digest("hex");
+    assert.ok(kept.includes(fingerprint(`${origin}/results?q=tower`)), "The busy results' address was not kept");
 
     const result = {
       status: "passed",
@@ -776,17 +873,19 @@ export async function runSharedBrowserStepTimeFixture() {
         "a link clicked on a page that had loaded, to a site that does not answer, is stopped once the click stops waiting for it and fails the same way, never as the page the tab still shows nor as the click's own timeout; the next step reaches the browser at once, and the site's late answer never lands",
         "a form sent to a site that does not answer is not stopped and never reads as nothing opened: the step answers once its time is up and says to check what it did, and the form's late answer lands",
         "a navigation the site answers 404 or 410 for fails as soon as that answer comes, saying the address has no page, even when the rest of its not-found page comes later than a step or there is no page at all; a page that only reads as not found, and a 200, are the step's page",
+        "a page that never finishes loading and shows nothing fails once the step's time is up as a site that did not answer, naming the next source, never 'take a snapshot in a moment', and a read of it while it is still busy says the same; its address is then refused at once in the turn, and the place's own site still opens",
         "a click that opens a window and keeps the page busy fails once the step's time is up, as it would in its time: the window is closed and never loads anything, then or later",
+        "a click whose script sends a request of its own and loads no page, then keeps the page busy, answers once the step's time is up with that page and says to check what the step did; its address is not kept as one that did not answer",
         "a hand-off whose fields the page is too busy to highlight in time answers with the page as it is and leaves no hand-off behind",
-        "a search whose results page keeps the page busy answers once the step's time is up, with the page's address and a note that it is still busy, never waiting out the page; its line says no page was read",
+        "a search whose results page keeps the page busy fails once the step's time is up as a site that did not answer, naming the next source, never waiting out the page; its line still names a search, and the results' address is kept as one that did not answer",
       ],
-      timings: { slowAnswerMs: Math.round(slow.wallMs), manyControlsReadMs: Math.round(planner.wallMs), manyControlsChoiceMs: Math.round(chose.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), unansweredLoadMs: Math.round(loading.wallMs), refusedAgainMs: refusedAgain.map((again) => Math.round(again.wallMs)), lateRedirectMs: Math.round(redirected.wallMs), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs), noPageMs },
+      timings: { slowAnswerMs: Math.round(slow.wallMs), manyControlsReadMs: Math.round(planner.wallMs), manyControlsChoiceMs: Math.round(chose.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyClickMs: Math.round(loaded.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), neverLoadsMs: Math.round(busyPage.wallMs), unansweredLoadMs: Math.round(loading.wallMs), refusedAgainMs: refusedAgain.map((again) => Math.round(again.wallMs)), lateRedirectMs: Math.round(redirected.wallMs), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs), noPageMs },
       limitations: ["No model, Studio UI, origin or runtime shutdown guard; those are unit-tested."],
     };
     fs.writeFileSync(resultFile, `${JSON.stringify(result, null, 2)}\n`);
     return result;
   } finally {
-    for (const response of [...unanswered, ...unfinished]) response.destroy();
+    for (const response of [...unanswered, ...unfinished, ...neverEnding]) response.destroy();
     for (const child of children) child.kill("SIGKILL");
     await context?.close().catch(() => {});
     if (server) await new Promise((resolve) => server.close(resolve));

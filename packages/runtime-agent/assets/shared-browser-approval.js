@@ -81,6 +81,11 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
   const MAX_GIVEN_ADDRESSES = 4_000;
   const HEX_32_PATTERN = /^[0-9a-f]{32}$/;
   const UNANSWERED_ADDRESS_MS = 10 * 60 * 1000;
+  // That a step of this run acted in the chat's own tab, the page the person
+  // chose: until one has, open_tab opens its page there instead of in a tab of
+  // Octo's own, as a turn's first page. Bound to the run; it says nothing more.
+  const CHAT_TAB_USED_FILE = "chat-tab-used.json";
+  const CHAT_TAB_USED_MAX_BYTES = 1024;
   const FIXED_FILES = new Set([
     "request.json",
     "decision.json",
@@ -112,6 +117,9 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     // to this run: runtime-agent seeds it, and this script adds what this
     // run's pages give.
     GIVEN_FILE,
+    // That a step of this run acted in the chat's own tab. This script writes
+    // it; runtime-agent clears it with the run.
+    CHAT_TAB_USED_FILE,
   ]);
   // Every writer of the approval directory publishes through a temporary
   // file with this prefix (runtime-agent's cleanup accepts the same prefix).
@@ -1262,6 +1270,44 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       }
     }
 
+    // Whether a step of this run acted in the chat's own tab (markChatTabUsed).
+    // A record that cannot be read counts as one, so open_tab opens a tab of
+    // Octo's own as it does once the turn has used its tab; a record of
+    // another run counts as none.
+    function chatTabUsed() {
+      let raw;
+      try {
+        raw = readJson(path.join(approvalDir, CHAT_TAB_USED_FILE), CHAT_TAB_USED_MAX_BYTES, false);
+      } catch (_) {
+        return true;
+      }
+      if (raw === null) {
+        return false;
+      }
+      if (typeof raw !== "object" || Array.isArray(raw) || raw.version !== 1) {
+        return true;
+      }
+      const authority = readAuthority(initialAuthority);
+      return Object.keys(authority).every((key) => raw[key] === authority[key]);
+    }
+
+    // Records that a step of this run acted in the chat's own tab. Best
+    // effort: the step itself already happened.
+    function markChatTabUsed() {
+      try {
+        if (chatTabUsed()) {
+          return;
+        }
+        atomicWriteJson(
+          path.join(approvalDir, CHAT_TAB_USED_FILE),
+          { version: 1, ...readAuthority(initialAuthority) },
+          CHAT_TAB_USED_MAX_BYTES,
+        );
+      } catch (_) {
+        // Nothing records it; a later open_tab may then open in the chat's tab.
+      }
+    }
+
     // The run's record of the addresses a message or a page gave, as
     // fingerprints, or null when the run has none (runtime-agent starts one
     // with every run; a run it did not start, as in a test, has none) or it
@@ -1373,6 +1419,8 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       rememberUnanswered,
       addressNotGiven,
       rememberGiven,
+      chatTabUsed,
+      markChatTabUsed,
       maxLabelBytes: MAX_LABEL_BYTES,
       redactedPageResult,
       readTabs,

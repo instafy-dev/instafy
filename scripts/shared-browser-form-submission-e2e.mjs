@@ -20,11 +20,12 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    button, a form that opens another window and a <base href> to another
 //    site: none of them sends a cross-site POST without the confirmation for
 //    that site.
-// 3. Under routine browsing, Enter in a site's own search box, or typing into
-//    it with submit, goes without a prompt when it is a GET of the page's own
-//    origin that sends nothing key-like, in the run's page and in Octo's own
-//    tabs, and lets no form post leave the tab; every other form step still
-//    asks or is refused, and Ask mode asks for each.
+// 3. Under routine browsing, Enter in a site's own search box, typing into it
+//    with submit, or a click on its own button goes without a prompt when it
+//    is a GET of the page's own origin that sends nothing key-like, in the
+//    run's page and in Octo's own tabs, and lets no form post leave the tab;
+//    every other form step still asks or is refused (a journey planner's GET
+//    button too), and Ask mode asks for each.
 // 4. A journey planner: under routine browsing, choosing a start and an end
 //    station asks nothing and sends nothing, the planner's own button asks
 //    once and the route is read. A list is named by its own label or the
@@ -137,6 +138,10 @@ const SEARCH_CHECKS = `<h1>Searches</h1>
 <form action="/search"><input type="search" name="q" aria-label="Search with a shadowed list"><input type="hidden" name="elements" value="1"><input type="hidden" name="k" value="{key}"><button>Search</button></form>
 <form action="/search"><input type="search" aria-label="Search, unnamed"><button>Search</button></form>
 <form action="/search" method="get"><input type="search" name="q" aria-label="Search, then posted" id="flip"><button>Search</button></form>
+<form action="/journey" method="get"><label>From <input name="from" value="Central"></label> <label>To <input name="to" value="Airport"></label><button>Plan a journey</button></form>
+<form action="/journey" method="get"><label>Destination <input name="to" value="Airport"></label><button>Plan a trip</button></form>
+<form action="/search" method="get" role="search"><input type="search" name="pin" aria-label="Search with your PIN"><button>Search</button></form>
+<form action="/lookup" method="get"><input type="search" name="code" aria-label="Look up an order" autocomplete="one-time-code"><button>Search</button></form>
 <script>
 document.getElementById("formless").addEventListener("keydown", (event) => {
   if (event.key === "Enter") location.assign("/search?q=" + encodeURIComponent(event.target.value));
@@ -667,6 +672,20 @@ export async function runSharedBrowserFormSubmissionFixture() {
     assert.deepEqual(promptsSince(start), []);
     assert.deepEqual(searches, [sentSearch("q=Jer%C3%B3nimos&lang=en")]);
     assert.deepEqual(searched.activity, { step: "search", url: `${sites().mall}/search?q=Jer%C3%B3nimos&lang=en`, approval: "free" });
+    // b'. A click on the search's own button, with text typed first, sends
+    // what Enter in the box sends, judged by the same test, with no prompt. A
+    // person waited to allow a click on a site's search button, where Enter
+    // in its box would have asked nothing.
+    await runPage.goto(searchPage);
+    snapshot = await ok("GET", "/v1/snapshot");
+    places = control(snapshot, "Search places");
+    snapshot = await ok("POST", "/v1/type", { index: places.index, snapshotId: snapshot.snapshotId, text: "Torre de Belém" });
+    start = prompts.length;
+    searches.length = 0;
+    searched = await ok("POST", "/v1/click", { index: control(snapshot, "Search").index, snapshotId: snapshot.snapshotId });
+    assert.deepEqual(promptsSince(start), [], "A click on a site's own search button asks nothing under routine browsing");
+    assert.deepEqual(searches, [sentSearch("q=Torre+de+Bel%C3%A9m&lang=en")], "It sent exactly the form's GET");
+    assert.deepEqual(searched.activity, { step: "search", url: `${sites().mall}/search?q=Torre+de+Bel%C3%A9m&lang=en`, approval: "free" });
     // c. In one of Octo's own tabs, which refuse every other submission.
     const octoTab = await ok("POST", "/v1/tabs/open", { url: searchPage });
     snapshot = await ok("GET", "/v1/snapshot", { tabId: octoTab.tabId });
@@ -718,6 +737,30 @@ export async function runSharedBrowserFormSubmissionFixture() {
       requests.length = 0;
       await refused(/approval_denied|denied/i, "POST", "/v1/type", { index: box.index, snapshotId: snapshot.snapshotId, text: "tower", submit: true }, ["deny"]);
       assert.deepEqual(promptsSince(start), [["action", "form-submit", destination]], `${label}: asks`);
+      await delay(200);
+      assert.deepEqual(requests, [], `${label}: nothing was sent`);
+    }
+    // A click on each of those boxes' own buttons asks the same way, and so do
+    // a journey planner's GET buttons: one whose form has two fields, and one
+    // whose one field is no search box. So does the button of a search box
+    // for a PIN or a one-time code, where Enter is refused as a secret's.
+    const buttonAsks = [
+      ...asks.filter(([label]) => label !== "Search without a form").map(([label, destination]) => [label, "Search", destination]),
+      ["From", "Plan a journey", sites().mall],
+      ["Destination", "Plan a trip", sites().mall],
+      ["Search with your PIN", "Search", sites().mall],
+      ["Look up an order", "Search", sites().mall],
+    ];
+    for (const [label, buttonLabel, destination] of buttonAsks) {
+      await runPage.goto(checksPage);
+      snapshot = await ok("GET", "/v1/snapshot");
+      const box = control(snapshot, label);
+      const button = snapshot.interactiveElements.find((element) => element.index > box.index && element.label === buttonLabel);
+      assert.ok(button, `${label}: its button is observed`);
+      start = prompts.length;
+      requests.length = 0;
+      await refused(/approval_denied|denied/i, "POST", "/v1/click", { index: button.index, snapshotId: snapshot.snapshotId }, ["deny"]);
+      assert.deepEqual(promptsSince(start), [["action", "click", destination]], `${label}: its button asks`);
       await delay(200);
       assert.deepEqual(requests, [], `${label}: nothing was sent`);
     }
@@ -1052,6 +1095,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
         "a field inside a submit button is refused before any prompt; a control nested deep inside one asks for the button's site",
         "in Ask mode a site's own GET search asks, typed or by Enter",
         "under routine browsing a GET search of the page's own origin goes without a prompt, sends exactly the form's GET and says approval free, in the run's page and in Octo's own tab",
+        "under routine browsing a click on a site's own search button, the one Enter in its box clicks, goes without a prompt by the same test and sends exactly the form's GET; the buttons of every box that asks still ask, and so do a journey planner's GET button, whose form has two fields or no search box, and the button of a search box for a PIN or a one-time code",
         "a key-like typed value, a default button that posts, another site, another subdomain, no form, a sign-out address, a hidden key-like value (also behind a control named elements), a hidden one-time code, a hidden file format and an unnamed field still ask; a new window, a field inside a submit button and a link-only destination are refused before any prompt",
         "a page script that turns a free search into a post to its own site is stopped by the step's guard",
         "under routine browsing a journey planner's start and end stations are chosen by label with no prompt and nothing sent, its own button asks once naming the fields it sends, and the route is read",

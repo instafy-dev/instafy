@@ -485,11 +485,17 @@ Two steps never ask, in Ask too:
   Octo reads the page as it is after the press. A banner with no refusal of
   its own stays up: answering it is the person's step (see the notice pause
   below).
-- **A covered click is refused at once.** A click whose control has something
-  outside it over its middle (a notice, a dialog, a loading screen) would go
-  to that instead. The control is brought to the middle of the view, past a
-  pinned header, and a cover still there after about 600 ms refuses the step
-  at once, in words: a cookie or consent notice says
+- **A covered click is refused at once, before anyone is asked.** A click
+  whose control has something outside it over its middle (a notice, a dialog,
+  a loading screen) would go to that instead. A click that asks the person is
+  looked at where it would land before they are asked (they are then asked
+  about the page as it is after that look), and every click again right
+  before it is made, as the page may change while the person answers: a
+  person waited about 45 seconds to allow a click on a search button a cookie
+  notice covered, which was then refused, and the turn's line still said they
+  had allowed a click. The control is brought to the middle of the view, past
+  a pinned header, and a cover still there after about 600 ms refuses the
+  step at once, in words: a cookie or consent notice says
   "A cookie notice covers this page, and the browser could not decline it. If
   the task needs this page, pause on the notice's buttons with
   request_human_input in the chat's own tab: the person answers it there and
@@ -510,11 +516,10 @@ Two steps never ask, in Ask too:
   name, and the turn gave up. It says so once for each control on a page: the
   page keeps a mark of the refusal (on its document, which the page cannot
   take away and a new page loads without), and a later try of that control on
-  that page is looked at before anyone is asked. One a cover still takes is
-  then refused with `Something else on the page still covers … Leave this
-  step to the person and tell them what covers it.`, with no prompt, so a
-  cover that stays never turns into a chain of prompts; once the cover goes,
-  the try asks as usual. Before, such a click waited out Playwright's 15-second
+  that page that a cover still takes is refused with `Something else on the
+  page still covers … Leave this step to the person and tell them what covers
+  it.`, so a cover that stays never turns into a chain of tries; once the
+  cover goes, the try asks as usual. Before, such a click waited out Playwright's 15-second
   timeout and returned its call log. A cover that goes within that moment (a
   toast that fades) is waited for. No failed step carries Playwright's call
   log: only its first line, and an action Playwright gave up waiting on says
@@ -550,8 +555,17 @@ Two steps never ask, in Ask too:
   browser takes by itself while it reads (a settings link, "Learn more"). So
   a page cannot dress a field, a payment, a sign-in, a deletion or a commit
   ("Book now") up as a notice's button to get a pause. A notice in a frame is
-  never listed, so never handed over. The pause
-  highlights those buttons and presses none of them; its guidance says
+  never listed, so never handed over. The pause highlights every such button
+  of the notice, the ones Octo named first, up to eight, and nothing outside
+  it: only buttons inside the container around one Octo named that is a
+  dialog or is named after cookies or consent (its id, class, label or test
+  id, or the title it is labelled by), when that is a small part of the page.
+  A notice that is neither outlines only the buttons Octo named: on a small
+  page held in one wrapper, that wrapper speaks of cookies and holds the menu
+  and footer too. A pause on a notice's accept alone would show the person
+  the accept outlined by itself, and a turn went for an accept twice. It
+  presses none of them; its
+  guidance says
   `kind: "cookies"` with fixed labels ("Highlighted button 1") and nothing of
   the page, and ends the run under its own code (`cookie_notice_required`).
   The Browser view's hint says "Answer the highlighted cookie notice, then let
@@ -603,8 +617,13 @@ addresses, form submissions, buttons whose label commits a change (such as
 Save, Speichern or Buchen, even when page script runs them without a form), and
 Enter/Space activation still require one-shot confirmation. The one form
 submission that does not is a **site search**: Enter in the page's own search
-box, or typing into it with submit, when all of these hold
-(`isFreeSiteSearch` in `@instafy/browser-action-policy`):
+box, typing into it with submit, or a click on its own button, when all of
+these hold for the box (`isFreeSiteSearch` in `@instafy/browser-action-policy`).
+Its own button is the one Enter in the box clicks (the form's default button),
+in a form whose one text field is that box, so the click sends exactly what
+Enter sends; a planner's button, whose form has two fields or none, asks. (A
+person had waited to allow a click on a site's search button that Enter in its
+box would have taken without asking.) The conditions:
 
 - the classifier allows the submit as a same-site GET search (a search field by
   structure, no risk word in the form's labels, not a sign-in form);
@@ -621,7 +640,8 @@ box, or typing into it with submit, when all of these hold
   `format=csv` makes the search an export that asks, as a navigation to the
   same address would;
 - nothing it sends looks like a key: the field is not a password, code or
-  payment field (refused anyway), and the redaction rules mask none of the
+  payment field (Enter or typing there is refused anyway, and a click on its
+  button asks), and the redaction rules mask none of the
   entries it sends, alone or as `name=value` (so a hidden `code=482910`
   asks): the field with the typed text and the form's other controls, hidden
   fields and the default button included. They are read from the controls
@@ -1010,7 +1030,22 @@ Octo works on the page the person chose for the run, the chat's own tab, so the
 page the person is left with is one it read (`navigate`; the browser policy and
 the `instafy-browser-automation` skill say so). Only to keep a second page open
 at the same time does it open a tab of its own, up to three, in the same
-browser. The
+browser. So a turn's first `open_tab`, while the run has no tab of its own and
+no step of it has acted in the chat's own tab (a `navigate`, click, typing,
+choice, key or scroll there; a reading does not count), opens its page in the
+chat's own tab as `navigate` does, and its result says so: a turn opened a
+journey planner in a tab of its own three times running, where neither a
+cookie notice's pause nor the planner's prompt can happen. A page an earlier
+turn left there is replaced, as `navigate` replaces it, unless it is one to
+keep: a page holding what someone typed or chose in its fields (a form the
+person was handed and filled in before Let Octo continue, notes they wrote),
+or a frame for a payment, a password or a code, which navigating away would
+lose; a page on a link-only site, which Octo leaves only when the person asks;
+and a page that cannot be looked at within 2 seconds. Then `open_tab` opens a
+tab of Octo's own as usual. The run's `chat-tab-used.json` records that a step
+acted there (runtime-agent clears it with the run's other records); one that
+cannot be read counts as one. An address `open_tab` refuses as doing more than
+show a page is still refused in its own words. The
 Shared Browser MCP server has `list_tabs`, `open_tab {url}`, `select_tab {tabId}`
 and `close_tab {tabId}`; `snapshot` and `navigate` also take a `tabId`, and every
 other tool acts on the tab `open_tab` or `select_tab` last chose. The Personal
@@ -1454,15 +1489,29 @@ a step far longer, with a script that keeps the page busy or a load that never
 settles, and the view and the turn's line would freeze while the step waited.
 When the time is up, the step takes no further action (no prompt, click, key,
 typing or navigation it had not started) and answers with the page as it is: a
-snapshot read within 8 more seconds, or, when the page is too busy to be read,
-its masked address alone, with no text and no controls. The answer carries
+snapshot read within 8 more seconds. The answer carries
 `stepTimedOut: true` and a note that tells Octo to check what the step did
 before it acts again (it calls the read "the page as it is now" only when the
 page was read), and the Shared Browser policy says to take a snapshot
 and go on from there: only an approval's own outcome is final. On the turn's
-line it reads as a page read when the page was read, and like `status`
-("Browsed <site>") when only its address was, so it adds no new wording and
-never says a page was read when none was. A step that can take the tab to
+line it reads as a page read (or like `status`, "Browsed <site>", on a site
+the run may not read yet), so it adds no new wording and never says a page was
+read when none was. A page still too busy to be read when the time is up (it
+has not drawn, or its script holds it), a tab still blank and a load the
+browser did not confirm stopped fail as a site that did not answer (below):
+"The site did not answer in time, so nothing on its page could be read.", with
+the same next source, and the address the step's load asked for (and the one a
+redirect led it to) kept by the same waits, so a browser turn calls it
+`timed-out` either way. A turn told only "Take a snapshot in a moment" for a
+tourism site that stayed busy opened it again, 26 seconds each time, and never
+tried the place's own site. A snapshot of such a page while it is still busy
+says the same, never "Take a snapshot in a moment". Only a step that sent a
+form (anything but a GET), or that loaded no page of its own (a click whose
+script acted inside the page it was on), still answers with a busy page's
+masked address alone, "The page is still busy, so it could not be read yet.
+Take a snapshot in a moment." and the note to check what it did, and its
+address is not kept: the form reached its site, and the script may have done
+what the click was for, so neither must be done again. A step that can take the tab to
 another page (a navigation, a link, a form) keeps its own kind in the turn's
 activity, so Studio knows the tab may be on another page now
 ([Chat Activity](Chat-Activity.md#browser-steps)). A step that started a load (a

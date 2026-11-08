@@ -23,8 +23,10 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // another product drawn beside it in place. A look-alike that appears beside
 // it is never taken for it. A take-over while the prompt waits still ends the
 // step, and a page that left its site after the yes ends the run with the yes
-// listed. No model, Studio, controller, account or external site is used, and
-// Chromium resolves no other host.
+// listed. A click something covers (the page's own picker, a slide, a banner,
+// a cookie notice) is refused before anyone is asked. No model, Studio,
+// controller, account or external site is used, and Chromium resolves no other
+// host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
 const playwrightRequire = createRequire(frontendRequire.resolve("@playwright/test"));
@@ -92,14 +94,20 @@ window.live = {
   // A page that moves its own address on its site, its controls all the same.
   address() { history.pushState(null, "", "/journey/updated"); },
   // Something the page draws over its form: its own time picker, a dialog of
-  // times, a carousel's next slide, a link laid over the page, or a banner
-  // with no name whose markup holds a style sheet and words nobody sees.
+  // times, a carousel's next slide, a link laid over the page, a banner
+  // with no name whose markup holds a style sheet and words nobody sees, or a
+  // cookie notice that came after the page was read, with an accept and its
+  // settings and no reject.
   // uncover() takes it away, as choosing a time or the carousel moving on does.
   cover(kind) {
     const over = document.createElement(kind === "slide" ? "a" : "div");
     over.id = "cover";
     over.style.cssText = "position:fixed;inset:0;display:block;background:#fff;font-size:32px";
-    if (kind === "picker") {
+    if (kind === "cookies") {
+      over.setAttribute("role", "dialog");
+      over.setAttribute("aria-label", "Cookie consent");
+      over.innerHTML = "<p>We use cookies.</p><button type='button'>Cookie settings</button> <button type='button'>Accept all cookies</button>";
+    } else if (kind === "picker") {
       over.setAttribute("role", "dialog");
       over.setAttribute("aria-label", "Choose a time");
       over.innerHTML = "<ul><li>11:00</li><li>11:30</li><li>12:00</li><li>12:30</li><li>13:00</li><li>13:30</li><li>14:00</li></ul>";
@@ -572,16 +580,21 @@ export async function runSharedBrowserAllowedStepFixture() {
     });
 
     // 6. Something the page draws covers the planner's button: its own time
-    // picker, a carousel's slide laid over the page, or a banner with no name.
-    // The click the person allowed is refused at once, naming the cover by
-    // its tag, role and label (never its text, which can hold what nobody
-    // sees), and nothing is sent. Once the cover goes, the next try asks again
-    // and runs. A planner's button the person allowed was refused under a
-    // cover nobody could name, with "read on without it", and the turn gave up.
-    for (const [name, kind, cover] of [
-      ["the page's own time picker", "picker", '(<div role="dialog"> named "Choose a time")'],
-      ["a carousel's slide", "slide", "(<a>)"],
-      ["a banner with no name", "banner", "(<div>)"],
+    // picker, a carousel's slide laid over the page, a banner with no name, or
+    // a cookie notice that came after the page was read. The browser looks
+    // where the click would land before anyone is asked, so the click is
+    // refused at once with no prompt, naming the cover by its tag, role and
+    // label (never its text, which can hold what nobody sees), or saying a
+    // cookie notice covers the page and to pause on it; nothing is sent, and
+    // no yes is listed. A person waited about 45 seconds to allow a click on a
+    // search button a cookie notice covered, which was then refused, and the
+    // turn's line said they had allowed it. Once the cover goes, the next try
+    // asks and runs.
+    for (const [name, kind, words] of [
+      ["the page's own time picker", "picker", 'Something else on the page covers "Plan your journey" (<div role="dialog"> named "Choose a time"), so nothing was clicked. Take a fresh snapshot and try once more.'],
+      ["a carousel's slide", "slide", 'Something else on the page covers "Plan your journey" (<a>), so nothing was clicked. Take a fresh snapshot and try once more.'],
+      ["a banner with no name", "banner", 'Something else on the page covers "Plan your journey" (<div>), so nothing was clicked. Take a fresh snapshot and try once more.'],
+      ["a cookie notice", "cookies", "A cookie notice covers this page, and the browser could not decline it. If the task needs this page, pause on the notice's buttons with request_human_input in the chat's own tab"],
     ]) {
       await check(`a button under ${name}`, async () => {
         freshRun();
@@ -589,56 +602,52 @@ export async function runSharedBrowserAllowedStepFixture() {
         await runPage.evaluate((over) => window.live.cover(over), kind);
         requests.length = 0;
         const asked = prompts.length;
-        const covered = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"]);
+        const covered = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), []);
         assert.equal(covered.code, 1, `the covered step ran: ${covered.stdout}`);
-        assert.ok(
-          covered.stderr.includes(`Something else on the page covers "Plan your journey" ${cover}, so nothing was clicked. Take a fresh snapshot and try once more.`),
-          covered.stderr,
-        );
+        assert.ok(covered.stderr.includes(words), covered.stderr);
         assert.doesNotMatch(covered.stderr, /read on without it|_non_retryable|Night service|Subscribe|Sponsored|assistant|evil|margin/u);
-        assert.equal(prompts.length, asked + 1, "the person was asked once");
-        // Details still list the person's yes.
-        assert.deepEqual(JSON.parse(covered.stdout), { ok: false, activity: { approval: "once" } });
+        assert.equal(prompts.length, asked, "the person was asked about a click that cannot land");
+        assert.equal(covered.stdout, "", "a yes is listed for a click nobody was asked about");
         assert.deepEqual(sent(), [], "something was sent under the cover");
         await runPage.evaluate(() => window.live.uncover());
         const looked = await ok("GET", "/v1/snapshot");
         const again = await runTool("POST", "/v1/click", control(looked.payload, "Plan your journey"), ["allow_once"]);
         assert.equal(again.code, 0, `the next try did not run: ${again.stderr}`);
-        assert.equal(prompts.length, asked + 2, "the next try asked again");
+        assert.equal(prompts.length, asked + 1, "the next try asked");
         assert.match(prompts.at(-1).display.label, /Plan your journey/u);
         assert.deepEqual(sent(), ["journeys.test GET /route?which=1&from=Central&to=Airport"]);
       });
     }
 
-    // 7. A cover that stays: the first refusal says to try once more, and the
-    // next try is looked at before anyone is asked. Still covered, it is left
-    // to the person, with no prompt, as is every try after it on that page.
-    // Once the cover goes, a try asks and runs.
+    // 7. A cover that stays: the first refusal, before anyone is asked, says
+    // to try once more. Still covered, the next try is left to the person, as
+    // is every try after it on that page, with no prompt. Once the cover goes,
+    // a try asks and runs.
     await check("a button under a cover that stays", async () => {
       freshRun();
       const planned = await openPlanner("", ["allow_origin"]);
       await runPage.evaluate(() => window.live.cover("picker"));
       requests.length = 0;
       const asked = prompts.length;
-      const first = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), ["allow_once"]);
+      const first = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), []);
       assert.equal(first.code, 1, `the covered step ran: ${first.stdout}`);
       assert.match(first.stderr, /Take a fresh snapshot and try once more\./u);
-      assert.equal(prompts.length, asked + 1, "the person was asked once");
+      assert.equal(prompts.length, asked, "the person was asked");
       const stays = 'Something else on the page still covers "Plan your journey" (<div role="dialog"> named "Choose a time"), so nothing was clicked. Leave this step to the person and tell them what covers it.';
       for (const attempt of ["again", "a third time"]) {
         const looked = await ok("GET", "/v1/snapshot");
-        const again = await runTool("POST", "/v1/click", control(looked.payload, "Plan your journey"), ["allow_once"]);
+        const again = await runTool("POST", "/v1/click", control(looked.payload, "Plan your journey"), []);
         assert.equal(again.code, 1, `the step tried ${attempt} ran: ${again.stdout}`);
         assert.ok(again.stderr.includes(stays), again.stderr);
         assert.doesNotMatch(again.stderr, /try once more/u);
-        assert.equal(prompts.length, asked + 1, `the person was asked ${attempt}`);
+        assert.equal(prompts.length, asked, `the person was asked ${attempt}`);
       }
       assert.deepEqual(sent(), [], "something was sent under the cover");
       await runPage.evaluate(() => window.live.uncover());
       const looked = await ok("GET", "/v1/snapshot");
       const last = await runTool("POST", "/v1/click", control(looked.payload, "Plan your journey"), ["allow_once"]);
       assert.equal(last.code, 0, `the try after the cover went did not run: ${last.stderr}`);
-      assert.equal(prompts.length, asked + 2, "the try after the cover went did not ask");
+      assert.equal(prompts.length, asked + 1, "the try after the cover went did not ask");
       assert.deepEqual(sent(), ["journeys.test GET /route?which=1&from=Central&to=Airport"]);
     });
 
@@ -653,8 +662,8 @@ export async function runSharedBrowserAllowedStepFixture() {
         "of two controls alike, the one asked about is used once the page changed or a look-alike appeared ahead of it, and on an unchanged page; never its twin once it went, after the yes or before anyone is asked",
         "a take-over while the prompt waits ends the step, and a yes then does nothing",
         "a page that left its site after the yes ends the run with the stale code, and the failed command lists the yes",
-        "a planner's button under the page's own time picker, a carousel's slide or a banner with no name is refused at once after the yes, naming the cover by its tag, role and label and never by its text, with nothing sent; once the cover goes, the next try asks again and runs",
-        "under a cover that stays, the first refusal says to try once more and every later try on that page is left to the person before anyone is asked; once the cover goes, a try asks and runs",
+        "a planner's button under the page's own time picker, a carousel's slide, a banner with no name or a cookie notice is refused before anyone is asked, naming the cover by its tag, role and label and never by its text, or saying a cookie notice covers the page, with nothing sent and no yes listed; once the cover goes, the next try asks and runs",
+        "under a cover that stays, the first refusal says to try once more and every later try on that page is left to the person, all before anyone is asked; once the cover goes, a try asks and runs",
       ],
       runs,
       limitations: ["No model, Studio UI, origin or runtime guard; those are unit-tested."],
