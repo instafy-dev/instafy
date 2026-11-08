@@ -278,7 +278,7 @@ test("research and browser policy checks match the current skills", () => {
     no_guessed_paths: ["Open an address the person or a skill gave, a link on a page you read (print a page's links with its text), or the home page of the official site of what the task names (for reviews, a reviewer's own site).", "never invent a page path"],
     missing_page_searched: ["A page that says it is missing (\"not found\", \"are you lost?\"): use that site's own search box or menu."],
     configured_sites_not_opened: ["Search engines are not categorically blocked", "an explicit workspace policy refusal ends that page"],
-    facts_from_own_page: ["comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: choose its stations and the day and time the person travels (a daytime hour when they gave none), press its button and read the route off the page it shows, saying which day and time it is for), not a listing or a kiosk page: those only lead to it."],
+    facts_from_own_page: ["comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: its destination is the stop the place's own page names, so read that page first; choose the stations and the day and time the person travels (a daytime hour when they gave none), press its button and read the route off the page it shows, saying which stop and which day and time it is for), not a listing or a kiosk page: those only lead to it."],
   };
   for (const [id, needles] of Object.entries(finding)) for (const needle of needles) assert.ok(browser.includes(needle), `${id}: ${needle}`);
   assert.ok(skill.includes('"Finding a page" not loaded? Print it:'));
