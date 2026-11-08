@@ -36,8 +36,8 @@ own kind of page.
   `:root[data-theme="dark"]` (Studio's theme, which `instafy bind serve` puts on `<html>`). Never
   `color-scheme: light` alone; one look only when asked.
 - One primary button per page; no search, filter or sort nobody asked for, and no sort by a value no row has. The
-  lede: the verdict plus the biggest unknown, saying only what a page you read says: how many a page lists, or that
-  these are all of them or the latest, only when it says so. Facts carry their trust: `checked 17 Oct on maker.com`,
+  lede: the verdict, saying only what a page you read says: how many a page lists, or that these are all of them or
+  the latest, only when it says so. Facts carry their trust: `checked 17 Oct on maker.com`,
   `€549 at Shop · seen 17 Oct`, `checked 4 min ago`, `Estimate`, `Unknown`. A tip no page gave is plain text, never
   styled like a source line.
 - Options side by side: each value names the page it was read on and the day; one nobody found reads `Unknown` and
@@ -49,17 +49,18 @@ own kind of page.
   candidate nothing could be read for is still a row, with `Unknown` in each cell: a page of options is never empty
   ("No options yet") while a page you read named what to compare. An item whose own page wasn't opened is "not
   checked (its own page wasn't opened)" in the reply, and each of its unknown values has `"note": "its own page wasn't
-  opened"`. The lede names the same missing items as the reply.
+  opened"`. The lede gives the verdict; the page names what's missing.
 - Options asked for from what you already know, with nothing looked up: the compare starter with `"from": "memory"`,
   each value only its `"v"`, from your own knowledge, never from the space's other pages. No `src`, `url`, `date`,
   store or filter (`instafy bind check` fails them): the starter reads each value "<value>, not checked" and adds
   "From what Octo knows; nothing checked." to the lede.
 - Keep sort, filters and the open tab in the URL query and give rows ids, so links and Studio's Follow keep them.
 - Every item the request names (stops, products, entries) is on the page, or the reply says plainly which is
-  missing and why. Post the card first (step 3), then check with the builder skill's own check, else
-  `instafy bind check <dir> --expect "<item>,<item>"` (it also lists blank values, values without their page or
-  date, and a filter applied without `site.byFilter`), and fix what it lists. A failing check never holds the card
-  back.
+  missing and why. Check with `instafy bind check <dir> --expect "<item>,<item>"` (it also lists blank values, values
+  without their page or date, a source line with no link, and a filter applied without `site.byFilter`) and fix what
+  it lists; a check that passes posts the card. A failing check never holds the card back: it names the card's
+  command. A site with no binder, such as a map a builder skill hosts: post the card first (step 3), then run that
+  skill's own check.
 - Facts come from pages you opened this turn, never from memory unless asked (above): the builder skill's source or
   fetch command when it has one, else `instafy-web-research` (its "Comparing items" for prices and reviews per item)
   or Instafy's browser (`instafy-browser-automation`). Keep each fact's link and date.
@@ -68,10 +69,11 @@ own kind of page.
 
 ## 3. Serve it and show it
 
-1. One command, run inside the site's folder, starts it so it outlives your turn and posts its card:
+1. A page `instafy bind check` checks gets its card from that check (above), whose answer gives its port. Any other
+   site: one command, run inside the site's folder, starts it so it outlives your turn and posts its card:
    `(cd sites/<slug> && instafy preview open --title '<short title>' --serve-cmd "<serve command>" --start --json)`,
-   with `{port}` where the serve command takes its port. The serve command is the builder skill's; a bound or plain
-   site's is `instafy bind serve . --port {port} --preview`. It picks the port: never choose one.
+   with `{port}` where the serve command takes its port. The serve command is the builder skill's. It picks the port:
+   never choose one.
 2. `instafy preview check --port <port>` (the JSON's) loads it as Studio does: fix every error it lists and look at
    the phone screenshot.
 3. Never post preview, tunnel or localhost URLs. A public link only when the user asks for one:

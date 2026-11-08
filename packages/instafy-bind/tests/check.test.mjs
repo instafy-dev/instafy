@@ -165,6 +165,164 @@ test("a blank page's words count: the text its app.js passes to site.h and site.
   }
 });
 
+// A page to share gave its two sources as lines written by hand, `site.h("p", { class: "trust" }, "Source: …")`, as
+// the blank starter's ".trust for any fact" invited: nothing on the page linked the bookshop's or the planner's page.
+// A source line links the page its fact was read on: site.trust(fact) draws one that does, and the check fails a line
+// drawn by hand that links none, naming it, unless it says nothing on it was checked.
+test("check fails a source line written by hand that links no page, and names it", () => {
+  const unlinked = `(function () {
+  site.start({ data: null, render: function () {
+    site.head({ title: "Livraria Lello", lede: "Opening hours and a metro route." });
+    document.getElementById("list").replaceChildren(
+      site.h("section", { class: "card" }, [
+        site.h("h2", {}, "Opening hours"),
+        site.h("p", {}, "Daily, 9:00 AM–7:30 PM"),
+        site.h("p", { class: "trust" }, "Source: Livraria Lello · checked November 8, 2026")
+      ]),
+      site.h("section", { class: "card" }, [
+        site.h("h2", {}, "Metro"),
+        site.h("p", { className: "trust is-old", text: "Source: Metro do Porto journey planner · " + when })
+      ])
+    );
+  } });
+})();
+`;
+  const dir = blankSite(unlinked);
+  try {
+    const out = run("check", dir, "--expect", "Livraria Lello, Opening hours");
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    assert.match(out.stdout, /^UNLINKED: 2 source line\(s\) link no page: "Source: Livraria Lello · checked November 8, 2026" \(app\.js\), "Source: Metro do Porto journey planner ·" \(app\.js\)\.$/m);
+    assert.match(out.stdout, /^Draw each fact with site\.trust\(\{"v", "src", "url", "date"\}\), which links the page it was read on/m);
+    assert.match(out.stdout, /2 of 2 expected item\(s\) shown/);
+    const json = JSON.parse(run("check", dir, "--expect", "Livraria Lello", "--json").stdout);
+    assert.equal(json.ok, false);
+    assert.deepEqual(json.unlinked.map((u) => u.line), ["Source: Livraria Lello · checked November 8, 2026", "Source: Metro do Porto journey planner ·"]);
+    // with nothing named to check, the lines are still named
+    assert.equal(run("check", dir).status, 1);
+
+    // drawn by site.trust, or linked by hand (an "a" with an href, site.link, site.cite), each line links its page
+    fs.writeFileSync(path.join(dir, "app.js"), `(function () {
+  var h = site.h;
+  site.start({ data: null, render: function () {
+    site.head({ title: "Livraria Lello" });
+    document.getElementById("list").replaceChildren(
+      h("p", {}, "Opening hours"),
+      site.trust({ v: "Daily, 9:00 AM–7:30 PM", src: "Livraria Lello", url: "https://bookshop.example/en/", date: "2026-11-08" }),
+      h("p", { class: "trust" }, ["Source: ", h("a", { href: "https://bookshop.example/en/" }, "Livraria Lello"), " · checked 8 Nov"]),
+      h("p", { class: "trust" }, "Planner: ", site.link("https://transit.example/planner", "Metro do Porto"), " · 8 Nov"),
+      h("p", { class: "trust" }, "Route ", site.cite({ src: "Metro", url: "https://transit.example/planner", date: "2026-11-08" })),
+      h("p", { class: "trust" }, "Walk from Aliados, not checked"),
+      h("span", { class: "trust" }, h("span", { class: "v", text: value + ", not checked" })),
+      h("p", { class: "trust" }, "From what Octo knows; nothing checked.")
+    );
+  } });
+})();
+`);
+    const linked = run("check", dir, "--expect", "Livraria Lello, Opening hours");
+    assert.equal(linked.status, 0, linked.stdout + linked.stderr);
+    assert.doesNotMatch(linked.stdout, /UNLINKED/);
+    assert.deepEqual(checkSite(dir).unlinked, []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // a page's own HTML is read the same way
+  const html = fs.mkdtempSync(path.join(os.tmpdir(), "bind-check-html-"));
+  try {
+    const page = (body) => fs.writeFileSync(path.join(html, "index.html"), `<!doctype html><title>Visit</title><main>${body}</main>`);
+    page('<h1>Visit</h1><p class="lede">Open daily.</p><p class="cap trust">Hours: <span>checked 8 Nov</span></p><!-- <p class="trust">old</p> -->');
+    assert.deepEqual(checkSite(html).unlinked, [{ file: "index.html", line: "Hours: checked 8 Nov" }]);
+    page('<h1>Visit</h1><p class="trust">Hours: <a class="x" href="https://bookshop.example/">bookshop.example</a></p><div class="trust">Tip, not checked</div>');
+    assert.deepEqual(checkSite(html).unlinked, []);
+    // a class that only contains the word, or a link with no address, is no source line or link
+    page('<p class="trusted">Partners</p><p class="trust">Hours: <a data-href="https://bookshop.example/">bookshop</a></p>');
+    assert.deepEqual(checkSite(html).unlinked.map((u) => u.line), ["Hours: bookshop"]);
+  } finally {
+    fs.rmSync(html, { recursive: true, force: true });
+  }
+
+  // every starter's own page passes (the compare starter's "…, not checked" line says so)
+  for (const starter of ["compare", "ranked", "timeline", "checklist", "blank"]) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-check-starter-"));
+    try {
+      execFileSync(process.execPath, [BIN, "init", dir, "--starter", starter], { env: cleanEnv });
+      assert.deepEqual(checkSite(dir).unlinked, [], starter);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+// The check fails a source line only when it can tell: a line linked through a name the script gives site.trust,
+// site.cite or a link of its own, or through anything the check cannot read, may well link its page, and a line that
+// only says a value is unknown ("Unknown", "To confirm", as site.js says it) names no source. A fact drawn by
+// site.trust with a source and no page draws a source line that links nothing, as a line written by hand would.
+test("check names a source line only when it can tell it links no page", () => {
+  const page = (body) => `(function () {
+  var h = site.h;
+  site.start({ data: null, render: function () {
+    site.head({ title: "Livraria Lello" });
+    document.getElementById("list").replaceChildren(${body});
+  } });
+})();
+`;
+  const unlinked = (app) => {
+    const dir = blankSite(app);
+    try {
+      return checkSite(dir).unlinked.map((u) => u.line);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const fact = '{ v: "Daily 9:00-19:30", src: "Livraria Lello", url: "https://bookshop.example/en/", date: "2026-11-08" }';
+  // site.trust and site.cite through a name of the script's own
+  assert.deepEqual(unlinked(`(function () {
+  const { h, trust } = site;
+  var cite = site.cite, t = window.site.trust;
+  site.start({ data: null, render: function () {
+    document.getElementById("list").replaceChildren(
+      h("p", { "class": "trust" }, "Opening hours: ", trust(${fact})),
+      h("p", { "class": "trust" }, "Hours: ", cite(${fact})),
+      h("p", { "class": "trust" }, "Also: ", t(${fact})));
+  } });
+})();
+`), []);
+  // a link the check cannot see: a function of the page's own, a name that holds one
+  assert.deepEqual(unlinked(`(function () {
+  var h = site.h;
+  function from(f) { return site.link(f.url, site.host(f.url)); }
+  var hours = ${fact};
+  var a = site.link("https://transit.example/planner", "transit.example");
+  site.start({ data: null, render: function () {
+    document.getElementById("list").replaceChildren(
+      h("p", { "class": "trust" }, "Checked 8 Nov on ", from(hours)),
+      h("p", { "class": "trust" }, "Planner: ", a),
+      h("p", { "class": "trust" }, ["Route: ", hours.v ? from(hours) : null]));
+  } });
+})();
+`), []);
+  // a value nobody found, in site.js's own words, names no source
+  assert.deepEqual(unlinked(page(`h("span", { "class": "trust", text: "To confirm" }), h("span", { "class": "trust" }, "Unknown"),
+      h("span", { "class": "trust" }, "Price unknown · the shop blocks price checks"), h("span", { "class": "trust" }, "Opening hours to confirm")`)), []);
+  // text is text, however it is put together: a sum or a template names no page
+  assert.deepEqual(unlinked(page(`h("p", { "class": "trust" }, "Source: " + hours.src + " · checked " + hours.date),
+      h("p", { "class": "trust" }, \`Source: \${hours.src}\`), h("p", { "class": "trust" }, "Hours unknown on Livraria Lello · checked 8 Nov")`)),
+    ["Source: · checked", "Source:", "Hours unknown on Livraria Lello · checked 8 Nov"]);
+  // a fact with its source and no page draws a source line that links nothing; one with its page, an estimate, a value
+  // from what Octo knows, and a file's or a script's "src" do not
+  assert.deepEqual(unlinked(`(function () {
+  var hours = { v: "Daily 9:00-19:30", src: "Livraria Lello", date: "2026-11-08" };
+  var media = { v: 2, src: "photo.jpg" }, player = { v: "1.0", src: "https://cdn.example/player.js" };
+  var facts = { walk: { "v": "about 10 min", "src": "Octo's estimate", "est": true }, memory: { v: "Open daily" }, linked: ${fact},
+    stop: { v: "Lapa", src: "Metro do Porto", url: "metroporto.pt/planner", date: "2026-11-08" } };
+  site.start({ data: null, render: function () {
+    document.getElementById("list").replaceChildren(site.h("p", null, site.trust(hours)), site.trust(facts.walk), site.trust(facts.memory),
+      site.trust(facts.linked), site.trust(facts.stop));
+  } });
+})();
+`), ["Daily 9:00-19:30 · Livraria Lello", "Lapa · Metro do Porto"]);
+});
+
 test("site.js helpers' text is read from the source, through any name the script gives them, never by running it", () => {
   const read = readScript(`
     const { h: el, head } = window.site;
@@ -505,6 +663,8 @@ test("check fails a comparison row that says nowhere where it comes from", () =>
   try {
     const { problems } = checkValues(dir);
     assert.equal(problems.length, 3, problems.join("\n"));
+    // a source with its name: a page made before the starter named each source by its site draws that name (with no
+    // name, "Sources: undefined ↗"); the starter now names it by its site whatever its name
     assert.match(problems[0], /^Latest eligible model 1: nothing says where this row comes from\. Cite the page you read that names it \(a value's "src" and "url", or "sources": \[\{"name", "url"\}\]\)\. When only a search result names it, put that result's site in "found"/);
     const out = run("check", dir, "--expect", "Brightvac");
     assert.equal(out.status, 1, out.stdout);
@@ -524,6 +684,8 @@ test("check fails a comparison row that says nowhere where it comes from", () =>
     row("B", { facts: { price: { ...page } } }),
     row("C", { sources: [{ name: "Review One", url: page.url }] }),
     row("D", { more: [{ label: "Mop", fact: { v: "none", ...page } }] }),
+    // a source is its page: the starter names it by its site, so it needs no name of its own
+    row("E", { sources: [{ url: page.url }] }),
   ])), []);
   // an estimate, a value without its page, a source without an https page and a store link are no page read
   assert.deepEqual(uncitedRows(data([

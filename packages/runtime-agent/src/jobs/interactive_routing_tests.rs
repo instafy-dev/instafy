@@ -267,20 +267,23 @@ fn a_page_written_by_hand_follows_light_and_dark() {
 /// "from the site's folder", a comparison's turn ran it from the space's folder with the site's
 /// path in the serve command (`instafy bind serve sites/<slug>`), so the card's site was the whole
 /// space and another chat's build took a new picture of it. The card step's command goes into the
-/// site's folder itself and serves `.`, as the map skill's does. An unedited earlier copy of the
-/// hub is upgraded; an edited one is kept.
+/// site's folder itself and serves `.`, as the map skill's does; a page `instafy bind check` checks
+/// gets that command from the check, which runs it when it passes (named in the hub as well, the
+/// card was asked for twice). An unedited earlier copy of the hub is upgraded; an edited one is
+/// kept.
 #[test]
 fn a_pages_card_starts_inside_the_sites_own_folder() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let hub =
         include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
     let previous = include_str!("legacy/interactive-artifacts-v7.md");
-    let step = r#"1. One command, run inside the site's folder, starts it so it outlives your turn and posts
-        its card: `(cd sites/<slug> && instafy preview open --title '<short title>' --serve-cmd
-        "<serve command>" --start --json)`, with `{port}` where the serve command takes its port. The
-        serve command is the builder skill's; a bound or plain site's is `instafy bind serve . --port
-        {port} --preview`."#;
+    let step = r#"1. A page `instafy bind check` checks gets its card from that check (above), whose answer
+        gives its port. Any other site: one command, run inside the site's folder, starts it so it
+        outlives your turn and posts its card: `(cd sites/<slug> && instafy preview open --title
+        '<short title>' --serve-cmd "<serve command>" --start --json)`, with `{port}` where the serve
+        command takes its port. The serve command is the builder skill's."#;
     assert!(flat(hub).contains(&flat(step)), "{hub}");
+    assert!(!hub.contains("a bound or plain site's is"), "{hub}");
     assert!(!hub.contains("from the site's folder"), "{hub}");
     assert!(flat(previous).contains("1. One command, from the site's folder, starts it"));
     assert!(
@@ -304,30 +307,45 @@ fn a_pages_card_starts_inside_the_sites_own_folder() {
 
 /// A blank page's turn chained `instafy bind check … && instafy preview open …`, as the hub said
 /// ("Check before the card"). The check could not read the page's words in its app.js and failed,
-/// so the card's command never ran and the page had no card. The card comes first, in the hub and
-/// in the research team's last step, and a failing check never holds it back. Unedited earlier
-/// copies of both are upgraded; edited ones are kept.
+/// so the card's command never ran and the page had no card. A failing check never holds the card
+/// back, in the hub and in the research team's last step: it names the card's command. A check
+/// that passes posts the card itself, so a bound page's turn no longer posts it first: two turns
+/// that did, then opened it again under another title, were refused and told the person the page
+/// "wasn't opened separately". Only a site with no binder (a map a builder skill hosts) posts its
+/// card first. Unedited earlier copies of both are upgraded; edited ones are kept.
 #[test]
-fn a_pages_card_comes_before_its_check() {
+fn a_pages_card_comes_from_its_check_and_never_waits_for_one_that_fails() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let hub =
         include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
     let team = include_str!("../../assets/instafy/.agents/skills/instafy-research-team/SKILL.md");
     assert!(
         flat(hub).contains(
-            "Post the card first (step 3), then check with the builder skill's own check, else `instafy bind check <dir> --expect \"<item>,<item>\"`"
+            "Check with `instafy bind check <dir> --expect \"<item>,<item>\"` (it also lists blank values, values without their page or date, a source line with no link, and a filter applied without `site.byFilter`) and fix what it lists; a check that passes posts the card."
         ),
         "{hub}"
     );
+    assert!(
+        flat(hub).contains(
+            "A site with no binder, such as a map a builder skill hosts: post the card first (step 3), then run that skill's own check."
+        ),
+        "{hub}"
+    );
+    assert!(!hub.contains("Post the card first"), "{hub}");
     assert!(
         flat(team).contains(
             "Serve, open the preview card and check it (hub step 3). Then reconcile with `Expect:`"
         ),
         "{team}"
     );
+    assert!(
+        flat(hub)
+            .contains("A failing check never holds the card back: it names the card's command."),
+        "{hub}"
+    );
     for skill in [hub, team] {
         assert!(
-            flat(skill).contains("A failing check never holds the card back."),
+            flat(skill).contains("A failing check never holds the card back"),
             "{skill}"
         );
         assert!(!skill.contains("before the card"), "{skill}");
@@ -348,12 +366,20 @@ fn a_pages_card_comes_before_its_check() {
             hub,
         ),
         (
+            learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
+            include_str!("legacy/interactive-artifacts-v15.md"),
+            hub,
+        ),
+        (
             learn::RESEARCH_TEAM_RELATIVE_PATH,
             include_str!("legacy/research-team-v3.md"),
             team,
         ),
     ] {
-        assert!(previous.contains("before the card"), "{relative}");
+        assert!(
+            previous.contains("before the card") || previous.contains("Post the card first"),
+            "{relative}"
+        );
         let path = root.join(relative);
         fs::write(&path, previous).unwrap();
         learn::ensure_project_memory_scaffold(root);
@@ -894,8 +920,9 @@ fn a_page_to_share_is_built_the_hubs_way_not_served_by_hand() {
 /// asks for exactly that. Such a page says so (`"from": "memory"`), and its values cite no page. On
 /// pages of options, the lede also named the wrong laptop for a missing review, an item whose own
 /// page nobody opened read "Not found yet", and a tip from no page sat in the style of the hours'
-/// source line: the lede names the reply's missing items, such an item says it wasn't checked, and
-/// a tip is plain text. An unedited hub from before is upgraded.
+/// source line: the page names what's missing (a lede written before the check changed a cell once
+/// claimed reviews the page showed as missing), such an item says it wasn't checked, and a tip is
+/// plain text. An unedited hub from before is upgraded.
 #[test]
 fn a_page_from_what_octo_knows_says_so_and_its_rows_say_what_was_not_checked() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -908,7 +935,7 @@ fn a_page_from_what_octo_knows_says_so_and_its_rows_say_what_was_not_checked() {
         "the starter reads each value \"<value>, not checked\" and adds \"From what Octo knows; nothing checked.\" to the lede.",
         "never from memory unless asked (above)",
         "An item whose own page wasn't opened is \"not checked (its own page wasn't opened)\" in the reply, and each of its unknown values has `\"note\": \"its own page wasn't opened\"`.",
-        "The lede names the same missing items as the reply.",
+        "The lede gives the verdict; the page names what's missing.",
         "A tip no page gave is plain text, never styled like a source line.",
     ] {
         assert!(hub.contains(needle), "{needle}");

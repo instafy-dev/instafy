@@ -9,9 +9,14 @@
 // they could not add, and that line must not pass the check. An item is missing only when no file of the site names
 // it: one whose words a script holds where the check cannot place them, or that a script fetches from another site, is
 // one it cannot tell about, never one it reports missing. On a page of options it also checks the values and where each
-// row comes from (below). A page is served from its own folder, so the check also fails a page that loads a file from
-// outside it ("../another-page/site.js"), and names the command that gives the page its own files. Pure helpers are
-// exported for the tests.
+// row comes from (below). A source line drawn by hand (an element with the class "trust") links the page its fact was
+// read on, unless it says it is not checked: written as plain text, a page to share once gave its sources as two lines
+// nobody could open, where site.trust(fact) would have linked each. So does a fact site.trust draws: one with its source
+// and no page draws a line that links nothing. The check names only a line it can tell links nothing: one with
+// something in it the check cannot read (a name, a function of the page's own) may link its page, and one that only
+// says a value is unknown names no source. A page is served from its own folder, so the check
+// also fails a page that loads a file from outside it ("../another-page/site.js"), and names the command that gives the
+// page its own files. Pure helpers are exported for the tests.
 // SPDX-License-Identifier: AGPL-3.0-only
 import fs from "node:fs";
 import path from "node:path";
@@ -92,6 +97,42 @@ export function htmlLines(html) {
     .map((line) => line.trim())
     .filter((line) => line && !UNAVAILABLE_RE.test(line));
 }
+
+/** The source lines an HTML page draws by hand, each element whose class names "trust": [{ line, linked }], its words
+ *  and whether a link (an <a> with an href) is in it. */
+export function htmlSourceLines(html) {
+  const text = String(html ?? "")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<(script|style|template)\b[\s\S]*?<\/\1\s*>/gi, " ");
+  const attr = (tag, name) => {
+    const found = [...tag[2].matchAll(TAG_ATTR)].find((a) => a[1].toLowerCase() === name);
+    return found ? found[2] ?? found[3] ?? found[4] ?? "" : null;
+  };
+  const out = [];
+  for (const tag of text.matchAll(LOAD_TAG)) {
+    if (!(attr(tag, "class") ?? "").split(/\s+/).includes("trust")) continue;
+    // its content runs to the end tag that closes it
+    const start = tag.index + tag[0].length;
+    const ends = new RegExp(`<(/?)${tag[1]}\\b(?:[^>"']|"[^"]*"|'[^']*')*>`, "gi");
+    ends.lastIndex = start;
+    let end = text.length;
+    for (let depth = 1, next; (next = ends.exec(text));) {
+      if (!next[1]) depth += 1;
+      else if (--depth === 0) {
+        end = next.index;
+        break;
+      }
+    }
+    const inner = text.slice(start, end);
+    const linked = [...inner.matchAll(LOAD_TAG)].some((t) => t[1].toLowerCase() === "a" && attr(t, "href") !== null);
+    out.push({ line: htmlText(inner).replace(/\s+/g, " ").trim(), linked });
+  }
+  return out;
+}
+
+/** A source line that needs no link: it says nothing on it was checked ("…, not checked", "From what Octo knows"), or
+ *  only that a value is unknown, in site.js's words ("Unknown", "Price unknown · why", "To confirm"). */
+export const SAYS_UNCHECKED = /\bnot checked\b|\bfrom what octo knows\b|^(?:[\p{L} ]+ )?(?:unknown|to confirm)(?: · .*)?$/iu;
 
 /** Every string value in a JSON value (keys are not shown, values are), except the "expect" list, lists of what is
  *  unavailable, and strings that only say an item is. */
@@ -391,13 +432,14 @@ const before = (version, [major, minor]) => !!version && (version[0] < major || 
 /** What the site can show: [{ file, kind, text }] for its HTML pages, data files and scripts ("html", "data",
  *  "script"), the "expect" list of data.json, its own scripts ([{ file, other, loads }]: a script file, or the
  *  scripts an HTML page carries; `other`, the words they hold where the check cannot place them, and `loads`, whether
- *  they fetch text from another site), what it loads from outside its folder (`outside`) and the starter whose files
- *  those are (`starter`). */
+ *  they fetch text from another site), the source lines its pages and scripts draw by hand ([{ file, line, linked }]),
+ *  what it loads from outside its folder (`outside`) and the starter whose files those are (`starter`). */
 export function readSite(dir) {
   const root = path.resolve(dir);
   if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) throw new Error(`no site folder at ${dir}`);
   const parts = [];
   const scripts = [];
+  const trust = [];
   let declared = [];
   const files = [];
   for (const file of siteFiles(root)) {
@@ -431,23 +473,27 @@ export function readSite(dir) {
       const script = read(raw);
       parts.push({ file: rel, kind: "script", text: shownText(script).join("\n") });
       scripts.push({ file: rel, other: otherText(script).join("\n"), loads: script.loads });
+      for (const line of script.trust) trust.push({ file: rel, ...line });
     } else {
       const inline = [...raw.matchAll(INLINE_SCRIPTS)]
         .filter(([, attrs, source]) => JS_TYPE.test(SCRIPT_TYPE.exec(attrs)?.[1] ?? "") && source.trim() && !DEFINES_SITE.test(source))
         .map(([, , source]) => read(source));
       parts.push({ file: rel, kind: "html", text: [...htmlLines(raw), ...inline.flatMap(shownText)].join("\n") });
       if (inline.length) scripts.push({ file: rel, other: inline.flatMap(otherText).join("\n"), loads: inline.some((s) => s.loads) });
+      for (const line of [...htmlSourceLines(raw), ...inline.flatMap((s) => s.trust)]) trust.push({ file: rel, ...line });
     }
   }
   const { outside, targets } = outsideLoads(files, root);
-  return { root, parts, declared, scripts, outside, starter: outside.length ? borrowedStarter(targets) : null };
+  return { root, parts, declared, scripts, trust, outside, starter: outside.length ? borrowedStarter(targets) : null };
 }
 
 /** Which expected items the site shows, and where; which it leaves out; and which it cannot tell about (`unknown`):
  *  their words are in a script where the check cannot place them, or a script fetches text from another site, so the
  *  page may show them all the same (`unread`: those scripts). An item no file of the site names is missing. `outside`:
  *  the files its pages, styles and scripts load from outside its folder, and its links to another folder's files, with
- *  the starter whose files those are (`starter`). */
+ *  the starter whose files those are (`starter`). `unlinked`: the source lines that link no page ([{ file, line }]):
+ *  each drawn by hand with nothing in it that links (or that the check cannot read), and each fact site.trust would
+ *  draw with its source and no page; never one that says it is not checked, or only that a value is unknown. */
 export function checkSite(dir, expect = []) {
   const site = readSite(dir);
   const items = parseExpect([...site.declared, ...parseExpect(expect)]);
@@ -470,7 +516,8 @@ export function checkSite(dir, expect = []) {
       for (const file of held) unread.add(file);
     }
   }
-  return { items, shown, missing, unknown, unread: [...unread], files: site.parts.map((p) => p.file), outside: site.outside, starter: site.starter };
+  const unlinked = site.trust.filter((t) => t.line && !t.linked && !t.unread && !SAYS_UNCHECKED.test(t.line)).map(({ file, line }) => ({ file, line }));
+  return { items, shown, missing, unknown, unread: [...unread], unlinked, files: site.parts.map((p) => p.file), outside: site.outside, starter: site.starter };
 }
 
 // ---------- the values of a page of options (the compare and ranked starters' data.json) ----------
@@ -647,7 +694,7 @@ export function uncitedRows(data) {
     const name = String(item.name ?? item.ref ?? "");
     const facts = [...Object.values(item.facts && typeof item.facts === "object" ? item.facts : {}), ...(Array.isArray(item.more) ? item.more.map((m) => m?.fact) : [])];
     const sources = Array.isArray(item.sources) ? item.sources : [];
-    if (facts.some(citesPage) || sources.some((s) => s && typeof s === "object" && s.name && httpsUrl(s.url))) continue;
+    if (facts.some(citesPage) || sources.some((s) => s && typeof s === "object" && httpsUrl(s.url))) continue;
     if (typeof item.found === "string" && SITE_NAME.test(item.found.trim())) continue;
     const label = name || "a row";
     out.push({
@@ -774,27 +821,27 @@ function outsideLines(dir, outside, starter) {
   };
 }
 
-/** The CLI's lines and exit code: 0 every item shown and every value fine, 1 an item missing, a value to fix or a file
- *  loaded from outside the site's folder, 2 nothing to check, or items the check cannot tell about because the page
- *  draws its text in a way it cannot read. `card`: the command that serves the site and posts its card, while no
- *  preview shows it. A check that passes takes that step itself with `post` (which runs the command and says what it
- *  answered); any other answer ends with the command, since a failing check never holds the card back, except for a
- *  page that loads files from outside its folder: served on its own it can't load them, so its card waits for the
- *  check that passes. */
+/** The CLI's lines and exit code: 0 every item shown and every value fine, 1 an item missing, a value to fix, a source
+ *  line that links no page or a file loaded from outside the site's folder, 2 nothing to check, or items the check
+ *  cannot tell about because the page draws its text in a way it cannot read. `card`: the command that serves the site
+ *  and posts its card, while no preview shows it. A check that passes takes that step itself with `post` (which runs
+ *  the command and says what it answered); any other answer ends with the command, since a failing check never holds
+ *  the card back, except for a page that loads files from outside its folder: served on its own it can't load them, so
+ *  its card waits for the check that passes. */
 export function checkReport(dir, expect, { json = false, card = null, post = null } = {}) {
   const { starter, ...result } = checkSite(dir, expect);
   const values = checkValues(dir);
-  const { missing, unknown, outside } = result;
+  const { missing, unknown, unlinked, outside } = result;
   const fix = outside.length ? outsideLines(dir, outside, starter) : null;
   const next = card && !fix ? `post its card: ${card}` : null;
   const nextLines = next ? [`next: ${next}`] : [];
-  if (!result.items.length && !values.problems.length) {
+  if (!result.items.length && !values.problems.length && !unlinked.length) {
     const message = 'nothing to check: pass --expect "<item>,<item>" (each item the request named) or put "expect": [...] in data.json';
     const exit = fix ? 1 : 2;
     if (json) return { exit, lines: [JSON.stringify({ ok: false, error: message, values, ...(fix ? { outside, init: fix.init } : {}), ...(next ? { next } : {}) })] };
     return { exit, lines: [...(fix ? fix.lines : []), message, ...values.notes.map((n) => `NOTE: ${n}`), ...nextLines] };
   }
-  const exit = missing.length || values.problems.length || fix ? 1 : unknown.length ? 2 : 0;
+  const exit = missing.length || values.problems.length || unlinked.length || fix ? 1 : unknown.length ? 2 : 0;
   // the check that passes posts the card itself, while no preview shows the site
   const posted = exit === 0 && card && post ? post() : null;
   if (json) {
@@ -813,6 +860,10 @@ export function checkReport(dir, expect, { json = false, card = null, post = nul
   if (values.problems.length) {
     lines.push(`VALUES: ${values.problems.length} value(s) to fix in data.json:`);
     for (const problem of values.problems) lines.push(`- ${problem}`);
+  }
+  if (unlinked.length) {
+    lines.push(`UNLINKED: ${unlinked.length} source line(s) link no page: ${unlinked.map((u) => `"${u.line}" (${u.file})`).join(", ")}.`);
+    lines.push('Draw each fact with site.trust({"v", "src", "url", "date"}), which links the page it was read on ("checked 8 Nov on maker.com ↗"), or link that page in the line. Something no page gave says "not checked".');
   }
   for (const note of values.notes) lines.push(`NOTE: ${note}`);
   if (result.items.length) {

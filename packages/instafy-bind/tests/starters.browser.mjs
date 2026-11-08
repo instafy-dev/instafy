@@ -608,7 +608,9 @@ try {
       ok(/Not counted as €600 or less/.test(await page.locator("#group-unknown").innerText()), `${label}: and that they are not counted as within the limit`);
       ok(/1 more over €600 · Show/.test(await text(page)), `${label}: the row over the limit leaves one line`);
       const none = (await page.locator("#row-none").innerText()).replace(/\s+/g, " ");
-      ok((label === "phone" ? /Still missing: Price/ : /Not found/).test(none) && !/Not listed/.test(none) && /checked 27 Oct( 2026)? on maker\.example ↗/.test(none), `${label}: a page read without the price says where it was looked for and cites it: ${none}`);
+      const said = (await page.locator("#missing").innerText()).replace(/\s+/g, " ");
+      ok(/Still missing for Silent Model: Price and Weight \(checked 27 Oct( 2026)? on maker\.example ↗\)/.test(said), `${label}: under the headline, a page read without the price says where it was looked for and cites it: ${said}`);
+      ok((label === "phone" ? !/Still missing|Not found/.test(none) : /Not found · checked 27 Oct( 2026)? on maker\.example ↗/.test(none)) && !/Not listed/.test(none), `${label}: ${label === "phone" ? "the row does not say it again" : "the table's cell says where it was looked for"}: ${none}`);
       ok(!/—/.test(none), `${label}: a dash is never drawn as a value: ${none}`);
       const blocked = (await page.locator("#row-blocked").innerText()).replace(/\s+/g, " ");
       ok(/(Price unknown|Unknown) · shop-two\.example blocks automated price checks/.test(blocked), `${label}: a blocked shop says why: ${blocked}`);
@@ -632,8 +634,9 @@ try {
     await rp.context().close();
   }
 
-  // ---------- 2i. phones (320, 375, 414): a row shows the values found and names the rest once, its facts take one
-  // column when two would cut a value or its source line, and nothing is wider than the screen; the table is as it was.
+  // ---------- 2i. phones (320, 375, 414): a row shows the values found, what is missing is named once under the
+  // headline, a row's facts take one column when two would cut a value or its source line, and nothing is wider than
+  // the screen; the table is as it was.
   // A comparison with 4 of 15 values found listed every column on every phone row with "Unknown" ("Unknown · Two
   // independent reviews not checked"), and two narrow columns cut values and their sources over lines. ----------
   {
@@ -657,11 +660,10 @@ try {
     const short = await staticServer(makeSite("compare-short", "compare", (d) => ({ ...d, sort: [], items: d.items.map((i) => ({ ...i, store: undefined, facts: {
       weight: { v: i.ref.slice(-1) === "a" ? "8.9 oz" : "9.1 oz", src: "Maker", url: "https://example.com/specs", date: "2026-10-17" },
       rating: { v: "4.5 of 5", src: "Reviews", url: "https://example.com/reviews", date: "2026-10-16" } } })) })));
-    const missing = {
-      "row-pro": "Still missing: Weight, Price, Two independent reviews",
-      "row-air": "Still missing: Battery, Weight, Price, Two independent reviews",
-      "row-max": "Still missing: Battery, Weight, Price, Two independent reviews",
-    };
+    const missing = [
+      "Still missing for Maker Laptop Pro: Weight, Price, Two independent reviews",
+      "Still missing for Maker Laptop Air and Maker Laptop Max: Battery, Weight, Price, Two independent reviews",
+    ];
     for (const width of [320, 375, 414]) {
       for (const scheme of ["light", "dark"]) {
         const where = `${width} px ${scheme}`;
@@ -674,12 +676,14 @@ try {
             found: [...li.querySelectorAll("dl.facts > div")].map((d) => `${d.querySelector("dt").innerText}: ${d.querySelector("dd").innerText.replace(/\s+/g, " ")}`),
             details: li.querySelectorAll(".more-btn").length,
           }));
-          return { overflow: document.documentElement.scrollWidth - innerWidth, wider, cards, list: document.getElementById("list").innerText, notes: document.getElementById("notes").innerText };
+          const header = [...document.querySelectorAll("#missing .not-found")].map((p) => p.innerText);
+          return { overflow: document.documentElement.scrollWidth - innerWidth, wider, cards, header, list: document.getElementById("list").innerText, notes: document.getElementById("notes").innerText };
         });
         eq(facts.overflow, 0, `${where}: no sideways scroll`);
         eq(facts.wider, [], `${where}: nothing is wider than the screen`);
         eq(facts.cards.map((c) => [c.id, c.ref]), [["row-pro", "laptop:pro"], ["row-air", "laptop:air"], ["row-max", "laptop:max"]], `${where}: ids and order`);
-        for (const c of facts.cards) eq(c.missing, [missing[c.id]], `${where}: ${c.id} names what was not found once`);
+        eq(facts.header, missing, `${where}: under the headline, what the rows are missing, once for rows missing the same`);
+        for (const c of facts.cards) eq(c.missing, [], `${where}: ${c.id} does not say it again`);
         ok(!/Unknown/.test(facts.list), `${where}: no stack of unknowns`);
         eq(facts.cards[0].found.map((t) => t.replace(/ 2026 on/, " on").replace(/(\S) (checked \d)/g, "$1 · $2")), [
           "CPU: Chip Ultra Series 3 · checked 27 Oct on maker.example ↗",
@@ -703,7 +707,8 @@ try {
       head: [...document.querySelectorAll("thead th")].map((th) => th.innerText.trim()),
       pro: [...document.querySelectorAll("#row-pro td")].slice(1).map((td) => td.innerText.replace(/\s+/g, " ").trim()),
       air: [...document.querySelectorAll("#row-air td")].slice(2).map((td) => td.innerText.replace(/\s+/g, " ").trim()),
-      lines: document.querySelectorAll(".not-found").length,
+      lines: document.querySelectorAll("#list .not-found").length,
+      header: [...document.querySelectorAll("#missing .not-found")].map((p) => p.innerText),
     }));
     eq(table.head, ["Option", "CPU", "Battery", "Weight", "Price", "Two independent reviews", "Details"], "1280 px: the table's columns");
     eq(table.pro.map((t) => t.replace(/ 2026 on/, " on").replace(/(\S) (checked \d)/g, "$1 · $2")), [
@@ -711,7 +716,8 @@ try {
       "Unknown", "Unknown", "Unknown · Two independent reviews not checked", "Details",
     ], "1280 px: a cell per column, as before");
     eq(table.air, ["Unknown", "Unknown", "Unknown", "Unknown · Two independent reviews not checked", ""], "1280 px: the gaps say Unknown in their cells");
-    eq(table.lines, 0, "1280 px: no line of what was not found");
+    eq(table.lines, 0, "1280 px: no line of what was not found under the table");
+    eq(table.header, missing, "1280 px: the same lines under the headline");
     if (SHOTS) await wide.screenshot({ path: path.join(SHOTS, "compare-gaps-1280.png"), fullPage: true });
     await wide.context().close();
     // no binder: each row's store link ("Open Example Store ↗") stays inside its narrow price cell, with no empty line
@@ -820,12 +826,12 @@ try {
     await lp.route("**/__bind/health", async (route) => { await new Promise((r) => setTimeout(r, 700)); await route.continue(); });
     await lp.goto(`${late.url}/`);
     await lp.waitForFunction(() => document.querySelector("#row-option-c"));
-    const shape = () => lp.evaluate(() => { const li = document.getElementById("row-option-c"); return { right: li.querySelector(".sortv")?.innerText.replace(/\s+/g, " ") ?? "", missing: li.querySelector(".not-found")?.innerText ?? "" }; });
+    const shape = () => lp.evaluate(() => { const li = document.getElementById("row-option-c"); return { right: li.querySelector(".sortv")?.innerText.replace(/\s+/g, " ") ?? "", missing: /Option C/.test(document.getElementById("missing")?.innerText ?? "") }; });
     const first = await shape();
     await lp.waitForFunction(() => /Open Other Store/.test(document.getElementById("row-option-c").innerText), null, { timeout: 5000 });
     const settled = await shape();
-    eq(first, { right: "Price unknown · the store blocks price checks", missing: "" }, "first view: the price is on the right of its row");
-    eq(settled, { right: "Price unknown · the store blocks price checks Open Other Store ↗", missing: "" }, "once the binder answers its store link joins it there");
+    eq(first, { right: "Price unknown · the store blocks price checks", missing: false }, "first view: the price is on the right of its row, not under the headline");
+    eq(settled, { right: "Price unknown · the store blocks price checks Open Other Store ↗", missing: false }, "once the binder answers its store link joins it there");
     await lc.close();
 
     // short source lines and a check's reason stay inside their cell: a fact's grid takes one column, the sorted value
@@ -859,6 +865,81 @@ try {
         eq(await drawnParts(page), { cut: [], past: [] }, `${width} px, ${url === outlet + "/" ? "a long store link" : "short source lines"}: every part stays inside its cell, on one line in a fact`);
         eq(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth), 0, `${width} px: no sideways scroll`);
         await page.context().close();
+      }
+    }
+  }
+
+  // ---------- 2k. the page says what is missing itself, on every screen, and names each source by its page's site.
+  // A comparison's lede, written before the check changed a cell, said two reviews were found for a laptop whose cell
+  // read "no independent review read", and a source named "Review One / Maker" linked only to the review's site. ----------
+  {
+    const day = "2026-11-08";
+    const fact = (v, src, url) => ({ v, src, url, date: day });
+    const laptops = (d) => ({
+      ...d, title: "Three laptops compared", lede: "The Laptop 12 starts lowest and is lightest; the 16 has the largest battery.", sort: [], filter: undefined,
+      columns: [{ key: "cpu", label: "CPU", type: "text" }, { key: "battery", label: "Battery", type: "text" }, { key: "reviews", label: "Independent reviews", type: "text" },
+        { key: "price", label: "List price", type: "price" }],
+      items: [
+        // a review's list price and an estimate name their pages by their sites too
+        { ref: "laptop:12", name: "Maker Laptop 12", why: "Lowest starting price",
+          sources: [{ url: "https://maker.example/laptop12?tab=specs" }, { name: "Maker Laptop 12 overview", url: "https://maker.example/laptop12?tab=overview" }],
+          facts: { cpu: fact("Chip 3", "Maker Laptop 12 specs", "https://maker.example/laptop12?tab=specs"),
+            battery: fact("50 Wh", "Maker Laptop 12 specs", "https://maker.example/laptop12?tab=specs"), reviews: { note: "no independent review read" },
+            price: { ...fact("$999", "Review One / Maker", "https://review-one.example/12"), list: true } } },
+        { ref: "laptop:13-pro", name: "Maker Laptop 13 Pro", why: "The lightest 13-inch",
+          sources: [{ name: "Review One review", url: "https://review-one.example/13-pro" }, { name: "Review Two review", url: "https://www.review-two.example/13-pro" }],
+          facts: { cpu: fact("Chip 5", "Maker", "https://maker.example/laptop13pro?tab=specs"), battery: fact("74 Wh", "Review One / Maker", "https://review-one.example/13-pro"),
+            reviews: fact("Review One · Review Two", "Review One / Review Two reviews", "https://review-one.example/13-pro"),
+            price: { ...fact("$1,299", "Review Two / Maker", "https://www.review-two.example/13-pro/price"), list: true } } },
+        { ref: "laptop:16", name: "Maker Laptop 16", why: "The largest battery", sources: [{ url: "https://maker.example/laptop16?tab=specs" }],
+          facts: { cpu: fact("Chip 7", "Maker Laptop 16 specs", "https://maker.example/laptop16?tab=specs"),
+            battery: { ...fact("about 85 Wh", "Review Two / Maker", "https://review-two.example/16"), est: true }, reviews: { note: "no independent review read" },
+            price: { ...fact("$1,499", "Review One / Maker", "https://review-one.example/16"), list: true } } },
+      ],
+      // only what no cell says: the line under the headline names each row's missing values
+      unchecked: ["Prices of configurations other than the base model"],
+    });
+    const site = await staticServer(makeSite("compare-says-missing", "compare", laptops));
+    for (const [width, height] of [[390, 844], [1280, 800]]) {
+      for (const scheme of ["light", "dark"]) {
+        const where = `${width} px ${scheme}`;
+        for (const open13 of [false, true]) {
+          const page = await open(`${site}/${open13 ? "?open=13-pro" : ""}`, { width, height, scheme });
+          const seen = await page.evaluate(() => {
+            const lede = document.getElementById("lede");
+            const box = document.getElementById("missing");
+            const shown = !!box && box.getClientRects().length > 0;
+            const style = box ? getComputedStyle(box) : null;
+            return {
+              lede: lede.innerText,
+              lines: shown ? [...box.querySelectorAll(".not-found")].map((p) => p.innerText) : [],
+              underLede: !!box && box.previousElementSibling === lede,
+              saidMissing: (document.body.innerText.match(/Still missing/g) || []).length,
+              // the gap itself, outside that line and the cells: the title, the lede, the footer and any row's own line
+              gapElsewhere: ["title", "lede", "notes"].map((id) => document.getElementById(id).innerText)
+                .concat([...document.querySelectorAll("#list .not-found")].map((p) => p.innerText))
+                .filter((text) => /independent review/i.test(text)),
+              links: [...document.querySelectorAll("a[href]")].map((a) => ({ text: a.innerText.replace(/\s*↗\s*$/, "").trim(), site: new URL(a.href).hostname.replace(/^www\./, "") })),
+              details: [...document.querySelectorAll(".more .cap")].map((p) => p.innerText).filter((t) => /^Sources:/.test(t)),
+              overflow: document.documentElement.scrollWidth - innerWidth,
+              ink: style && style.color !== getComputedStyle(document.body).backgroundColor,
+            };
+          });
+          eq(seen.lines, ["Still missing for Maker Laptop 12 and Maker Laptop 16: Independent reviews (no independent review read)"], `${where}: the page names the missing reviews itself`);
+          ok(seen.underLede, `${where}: right under the lede`);
+          eq(seen.saidMissing, 1, `${where}: said in that one line, by no row and in no other line`);
+          eq(seen.gapElsewhere, [], `${where}: the missing reviews are named in that line and their cells only`);
+          eq(seen.lede, "The Laptop 12 starts lowest and is lightest; the 16 has the largest battery.", `${where}: the lede is the verdict as written`);
+          ok(seen.links.length >= 6, `${where}: the page links its sources (${seen.links.length})`);
+          for (const link of seen.links) eq(link.text, link.site, `${where}: a source is named by its page's site`);
+          ok(!/Review One \/ Maker|Review Two review|Maker Laptop 12 overview/.test(JSON.stringify(seen.links)), `${where}: no source keeps a name of its own`);
+          if (open13) eq(seen.details, ["Sources: review-one.example ↗, review-two.example ↗"], `${where}: Details names each source by its site, once`);
+          eq(seen.overflow, 0, `${where}: no sideways scroll`);
+          ok(seen.ink, `${where}: the line is drawn in a colour of its own`);
+          eq(page.errors.filter((e) => !/404|Failed to load resource/.test(e)), [], `${where}: no script errors`);
+          if (SHOTS && !open13) await page.screenshot({ path: path.join(SHOTS, `compare-says-missing-${width}-${scheme}.png`), fullPage: true });
+          await page.context().close();
+        }
       }
     }
   }

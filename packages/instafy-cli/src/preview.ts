@@ -118,6 +118,9 @@ export type PreviewSummary = {
 
 export type PreviewOpenResult = PreviewSummary & {
   messageId: string | null;
+  // Set when the card was already in the chat (the server answered with the card it already holds for this turn): the
+  // one line to read, CARD_ALREADY_IN_CHAT. No new card was posted, and the card keeps its title.
+  note?: string;
   // The HTTP status the server's own check of the site got through the tunnel, or null when it got none
   // or did not say. That check sends `Host: localhost`, so a dev server's host check never shows up here.
   httpStatus: number | null;
@@ -179,6 +182,9 @@ type PreviewStateEntry = {
   pictureAt?: number;
   // Opened with `--no-thumbnail`: no picture of the site goes on its card, from a check or at a turn's end either.
   noThumbnail?: boolean;
+  // The card the server last answered with for this preview (it keeps one per turn): an open that gets the same card
+  // back posted none, and says its card is already in the chat.
+  messageId?: string;
 };
 
 type PreviewStateFile = {
@@ -204,9 +210,34 @@ export const PORT_PLACEHOLDER = "{port}";
 // What to do when another site holds the port.
 const PORT_TAKEN_HINT =
   "Run it with --start and without --port, so this site gets a free port of its own, or pass --replace to show this site on that port instead.";
-// The same, on a port `--start` picked itself: leaving out --port again would pick it again.
+// The same, on a port `--start` picked itself: leaving out --port again would pick it again. This same site under a
+// new title never comes here: its open keeps the card's title (cardOfThisSite).
 const PICKED_PORT_TAKEN_HINT =
-  "Pass --replace if this site replaces that one (this same site under a new title, for example); otherwise give this site a title of its own.";
+  "Pass --replace if this site replaces that one; otherwise give this site a title of its own.";
+// What an open says when the card it would post is already in the chat: the whole answer, so a turn neither opens it
+// again nor tells anyone it wasn't opened.
+export const CARD_ALREADY_IN_CHAT = "Its card is already in the chat.";
+
+/** Another site's open preview holds the port (`409 port_in_use`). `heldBy`: the title of the card it shows, when the
+ *  server says. */
+class PortHeldError extends PreviewCommandError {
+  constructor(
+    message: string,
+    readonly heldBy: string | null,
+  ) {
+    super(message, PREVIEW_EXIT_PORT_NOT_ALLOWED);
+  }
+}
+
+/** The title of the card a `409 port_in_use` names (its `details.title`), or null. */
+function heldTitle(body: string): string | null {
+  try {
+    const title = (JSON.parse(body) as { details?: { title?: unknown } } | null)?.details?.title;
+    return typeof title === "string" && title.trim() ? title : null;
+  } catch {
+    return null;
+  }
+}
 // Where `--start` looks for a free port when no --port is given: away from the ports dev servers take by themselves
 // (3000, 4173, 5173, 8000, 8080…) and below the ports a Linux machine hands out for outgoing connections (32768 and
 // up), so a site started again after the space slept still finds its port free.
@@ -507,9 +538,9 @@ async function controllerRequest(params: {
     }
     // Another site's open preview holds the port: the server names it.
     if (response.status === 409 && code === "port_in_use") {
-      throw new PreviewCommandError(
+      throw new PortHeldError(
         `${extractControllerErrorMessage(text) ?? "Another site's preview holds this port."} ${params.portTakenHint ?? PORT_TAKEN_HINT}`,
-        PREVIEW_EXIT_PORT_NOT_ALLOWED,
+        heldTitle(text),
       );
     }
     const message = extractControllerErrorMessage(text) ?? response.statusText;
@@ -1219,6 +1250,31 @@ function siteRecordFor(
 }
 
 /**
+ * The title of this same site's card, when the card the server says holds `port` (`heldBy`) is one this machine opened
+ * for it: the same space, port, page (`sitePath`) and title, and the same site (the same start command, with `--start`;
+ * else the same folder the process on the port runs from). Else null: another site's card, another page of the same
+ * server (opened under this card's title, it would move the card to that page), or one this machine can't place.
+ */
+function cardOfThisSite(params: {
+  heldBy: string | null;
+  port: number;
+  sitePath: string;
+  projectId: string;
+  site: SiteStart | null;
+  serve: PreviewServe | null;
+}): string | null {
+  const { heldBy, port, sitePath, projectId, site, serve } = params;
+  if (!heldBy) return null;
+  const entry = readStateFile().previews.find(
+    (preview) =>
+      preview.projectId === projectId && preview.localPort === port && preview.path === sitePath && preview.title === heldBy,
+  );
+  if (!entry) return null;
+  const same = site ? sameStart(entry.start, site.start) : !!serve && entry.siteDir === serve.cwd;
+  return same ? entry.title : null;
+}
+
+/**
  * The chat the server posts this preview's card to: a job's own chat when the job's credential opens it (the server reads
  * it from the token, never from the request), else `--conversation`.
  */
@@ -1406,8 +1462,9 @@ async function createAndStartClient(params: {
     ...(studioOrigin ? { studioOrigin } : {}),
     ...siteRecord,
     ...(serve ? { siteDir: serve.cwd } : {}),
-    // The same preview opened again keeps its picture until a new one is uploaded.
+    // The same preview opened again keeps its picture until a new one is uploaded, and the card it had.
     ...(current?.pictureAt ? { pictureAt: current.pictureAt } : {}),
+    ...(current?.messageId ? { messageId: current.messageId } : {}),
     ...(opts.thumbnail === false ? { noThumbnail: true } : {}),
   };
   upsertPreviewState(entry);
@@ -1462,7 +1519,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
 
   // From choosing the port to the state write, one `instafy preview` command at a time on this machine: two commands
   // never pick the same port, start the same site twice or start two clients for one preview.
-  const { grant, previewId, entry, port, site, serve, restartNote } = await withStateLock(async () => {
+  const { grant, previewId, entry, current, port, site, serve, restartNote } = await withStateLock(async () => {
     const site = start
       ? await startOrFindSite({
           explicitPort,
@@ -1502,21 +1559,36 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
         cwd: opts.cwd,
         procRoot: opts.procRoot,
       });
-      const created = await createAndStartClient({
-        opts: { ...opts, summary },
-        port,
-        title,
-        sitePath,
-        projectId,
-        retryCommand,
-        auth,
-        controllerUrl,
-        serverUrl,
-        log,
-        serve,
-        site,
-        portPicked: explicitPort === null,
-      });
+      const create = (cardTitle: string) =>
+        createAndStartClient({
+          opts: { ...opts, summary },
+          port,
+          title: cardTitle,
+          sitePath,
+          projectId,
+          retryCommand,
+          auth,
+          controllerUrl,
+          serverUrl,
+          log,
+          serve,
+          site,
+          portPicked: explicitPort === null,
+        });
+      let created: Awaited<ReturnType<typeof createAndStartClient>>;
+      try {
+        created = await create(title);
+      } catch (error) {
+        // This same site's card shows on its port under another title: open it under that title. A new title reads as
+        // another site's, and nobody asked to rename the card; refused, a turn reached for --replace or told the person
+        // the page wasn't opened.
+        const kept =
+          error instanceof PortHeldError && !opts.replace
+            ? cardOfThisSite({ heldBy: error.heldBy, port, sitePath, projectId, site, serve })
+            : null;
+        if (kept === null) throw error;
+        created = await create(kept);
+      }
       return { ...created, port, site, serve, restartNote: note };
     } catch (error) {
       // A site started for a preview that did not open is stopped again: no card shows it, and it would hold the port.
@@ -1547,6 +1619,11 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
     throw error;
   }
   const readyBody = (ready.body && !Array.isArray(ready.body) ? ready.body : {}) as Record<string, unknown>;
+  // The server keeps one card per preview and turn: the card this machine got for it before, answered again, means
+  // this open posted none.
+  const messageId = stringField(readyBody, "messageId");
+  const alreadyInChat = messageId !== null && current?.messageId === messageId;
+  if (messageId !== null && !alreadyInChat) await recordCard(previewId, messageId);
   // The server decides: an older controller ignores `serve` and answers without `restartable`.
   const restartable = serve !== null && grant["restartable"] === true;
   const status = previewStatusFromHealth(readyBody);
@@ -1574,12 +1651,14 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
 
   return {
     previewId,
-    title,
+    // the card's title: the one asked for, or the one this site's card already had
+    title: entry.title,
     port,
     path: sitePath,
     status,
     httpStatus: previewHttpStatusFromHealth(readyBody),
-    messageId: stringField(readyBody, "messageId"),
+    messageId,
+    ...(alreadyInChat ? { note: CARD_ALREADY_IN_CHAT } : {}),
     viewerHostSuffix: parseViewerHostSuffix(grant["viewerHostSuffix"]) ?? null,
     restartable,
     ...(restartable ? {} : { restartNote: restartNote ?? "the server did not record a start command" }),
@@ -1631,6 +1710,21 @@ export async function uploadPreviewThumbnail(params: {
 
 // How long recording a picture's time waits for another `instafy preview` command on this machine.
 const PICTURE_RECORD_LOCK_WAIT_MS = 5_000;
+
+/** Records the card the server answered with for a preview (see `messageId` on its entry). Never throws. */
+async function recordCard(previewId: string, messageId: string): Promise<void> {
+  try {
+    await withStateLock(async () => {
+      const state = readStateFile();
+      const entry = state.previews.find((preview) => preview.previewId === previewId);
+      if (!entry || entry.messageId === messageId) return;
+      entry.messageId = messageId;
+      writeStateFile(state);
+    }, PICTURE_RECORD_LOCK_WAIT_MS);
+  } catch {
+    // Another preview command holds the state: the next open of this preview may post its card as new.
+  }
+}
 
 /**
  * Records when a preview's site was last pictured for its card (a picture was taken for it, or `open` tried and could
@@ -1825,6 +1919,18 @@ export function printPreviewOpen(result: PreviewOpenResult, json: boolean) {
       : result.status === "not_responding"
         ? kleur.yellow("Not responding yet")
         : kleur.yellow("Preview opened (the server did not report whether the site answers)");
+  const httpWarning =
+    result.httpStatus !== null && result.httpStatus >= 400 ? `The site answered HTTP ${result.httpStatus} through the preview.` : null;
+  const restartWarning = `When the process that started it exits, or the space sleeps, Open cannot start the site by itself: ${result.restartNote}.`;
+  // The card the chat already has is the answer, with only what the site still needs: one that doesn't answer, answers
+  // with an error, or can't be started again.
+  if (result.note) {
+    console.log(result.note);
+    if (result.status !== "live") console.log(`${label}: ${result.title} (port ${result.port}).`);
+    if (httpWarning) console.log(kleur.yellow(httpWarning));
+    if (!result.restartable) console.log(kleur.yellow(restartWarning));
+    return;
+  }
   console.log(`${label}: ${result.title} (port ${result.port}). Its card is in the conversation.`);
   if (result.thumbnail === "uploaded") {
     console.log(kleur.gray("The card shows a picture of the site; `instafy preview check` takes a new one after a change."));
@@ -1839,16 +1945,10 @@ export function printPreviewOpen(result: PreviewOpenResult, json: boolean) {
   if (result.restartable) {
     console.log(kleur.gray("Open starts the site again when the process that started it exits, or the space sleeps."));
   } else {
-    console.log(
-      kleur.yellow(
-        `When the process that started it exits, or the space sleeps, Open cannot start the site by itself: ${result.restartNote}.`,
-      ),
-    );
+    console.log(kleur.yellow(restartWarning));
   }
   console.log(kleur.gray(`previewId=${result.previewId}`));
-  if (result.httpStatus !== null && result.httpStatus >= 400) {
-    console.log(kleur.yellow(`The site answered HTTP ${result.httpStatus} through the preview.`));
-  }
+  if (httpWarning) console.log(kleur.yellow(httpWarning));
   if (result.viewerHostSuffix) {
     console.log(kleur.gray(`viewerHostSuffix=${result.viewerHostSuffix}`));
   }

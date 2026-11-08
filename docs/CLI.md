@@ -541,8 +541,16 @@ preview, is never picked. With
 `--port`, a port where this same site already answers is used as it is, and one where any other server answers is
 refused with exit `3`, naming the preview that shows it ("Port 4173 already shows 'Lisbon in 3 days'."), never
 "already running". The server refuses too: an open whose title, or folder, differs from the open preview on that port
-gets `409 port_in_use` with the same words (exit `3`), unless `--replace` says this site replaces that one (this same
-site under a new title, for example). A site `--start` started for a preview the server refused is stopped again.
+gets `409 port_in_use` with the same words (exit `3`), unless `--replace` says this site replaces that one. This same
+site under a new title is never refused: when the card the server names is one this machine opened for this same site
+and page (the same command from the same folder, and the same `--path`), `open` keeps that card's title and opens it
+again. Another page of the same server is still refused. A site `--start` started for a preview the server refused is
+stopped again.
+
+The server posts one card per preview in a turn. An open that gets back the card this machine already had for the
+preview posted none: it prints "Its card is already in the chat." and only what the site still needs (it doesn't
+answer, answers with an error, or Open can't start it again; with `--json`, the result's `"note"` says so), and exits
+`0`.
 
 `open`:
 

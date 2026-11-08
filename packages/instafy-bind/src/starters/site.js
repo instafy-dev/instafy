@@ -18,7 +18,7 @@
  *   4 min ago", "Estimate", "Price not checked" (nobody checked it), "Not found · checked 16 Oct on maker.com ↗" (a
  *   fact with a source and no value: the source was read and the value not found on it); in a table of options a value nobody
  *   found reads opts.unknown, "Unknown · why" ("Price unknown"). A price fact with "list": true is that source's
- *   list price, never a store's price now: "$900 · list price on BabyGearLab ↗ · seen 5 Aug".
+ *   list price, never a store's price now: "$900 · list price on babygearlab.com ↗ · seen 5 Aug".
  * - Filters: site.within(value, filter) is "in", "out" or "unknown" for the page's one filter ({key, max, min}), and
  *   site.byFilter(rows, filter, valueOf) splits rows into {in, unknown, out}. Only a value the page shows counts: a
  *   row without one is never "under $140"; the starters list it apart ("Price unknown").
@@ -451,9 +451,10 @@
       }
       if (expired(x) && value) { el.classList.add("is-old"); add("may have changed"); }
     } else if (x && x.est && value) {
-      // an estimate names its basis: a source to check it against ("Estimate · Taiwan Railway ↗") or how ↗
+      // an estimate names its basis: a source to check it against, by its page's site ("Estimate · railway.gov.tw ↗"),
+      // or how ↗
       add("Estimate");
-      if (x.src) add(link(x.url, x.src)); else if (safeUrl(x.url)) add(link(x.url, "how"));
+      if (x.src) add(link(x.url, host(x.url) || x.src)); else if (safeUrl(x.url)) add(link(x.url, "how"));
     } else if (x && x.src && value) {
       var seedOld = isOld(x, opts.price);
       if (seedOld) el.classList.add("is-old");
@@ -463,7 +464,9 @@
       var list = opts.price && !atStore && x.list;
       if (!opts.shared) {
         if (atStore || list) {
-          add(atStore ? h("span", null, "at ", link(x.url, x.src)) : h("span", null, "list price on ", link(x.url, x.src)));
+          // a list price names its page by its site, as every source line does: a name of its own could say something
+          // its link doesn't
+          add(atStore ? h("span", null, "at ", link(x.url, x.src)) : h("span", null, "list price on ", link(x.url, host(x.url) || x.src)));
           var when = seenText(x);
           if (when) add(h("span", { "class": "age", text: when }));
         } else {

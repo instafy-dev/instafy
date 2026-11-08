@@ -427,6 +427,9 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // From before every saved change reloaded the open views of the sites it changed, so a turn
     // ran no `instafy bind command <dir> reload '{}'` of its own.
     include_str!("legacy/interactive-artifacts-v14.md"),
+    // From before a check that passes posted a bound page's card (it said "Post the card first"
+    // for every page), and before the page, not the lede, named what's missing.
+    include_str!("legacy/interactive-artifacts-v15.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),

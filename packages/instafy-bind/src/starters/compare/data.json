@@ -1,6 +1,6 @@
 {
   "title": "Compare three options",
-  "lede": "Option B costs least and Option A is the lightest. Option C's price is unknown.",
+  "lede": "Option B costs least and Option A is the lightest.",
   "sort": [
     {
       "key": "price",
@@ -89,7 +89,6 @@
       ],
       "sources": [
         {
-          "name": "Maker",
           "url": "https://example.com/option-a/specs"
         }
       ]

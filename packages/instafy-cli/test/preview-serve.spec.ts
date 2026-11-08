@@ -13,6 +13,7 @@ import {
   preferredSitePort,
   previewClose,
   previewOpen,
+  printPreviewOpen,
   resolvePreviewServe,
   parseExplicitServeCommand,
   secretInServeCommand,
@@ -607,14 +608,19 @@ describe("instafy preview open --start picks the site's port, and close stops th
 
   /**
    * A space with a `site` folder holding SITE, a controller that keeps a preview per port, and a HOME for the CLI
-   * (`home`: another space's, as on a machine that runs several spaces as one user).
+   * (`home`: another space's, as on a machine that runs several spaces as one user). With `titles`, the controller
+   * also does what the server does with a port's title and its cards: an open of another title on a port whose
+   * preview is open is refused (409 port_in_use, naming that card), unless it replaces it, and a preview posts one card
+   * in a turn (`cards`: the cards posted).
    */
-  async function space(shared: { home?: string } = {}) {
+  async function space(shared: { home?: string; titles?: boolean } = {}) {
     const ws = workspace();
     fs.writeFileSync(path.join(ws.root, "site", "site.mjs"), SITE);
     const bodies: Array<Record<string, unknown>> = [];
     const requests: string[] = [];
     let refuse: { status: number; body: unknown } | null = null;
+    const titles = new Map<number, string>();
+    const cards = new Map<string, string>();
     const controller = http.createServer((req, res) => {
       let body = "";
       req.on("data", (chunk) => (body += chunk));
@@ -629,6 +635,12 @@ describe("instafy preview open --start picks the site's port, and close stops th
           const parsed = JSON.parse(body) as Record<string, unknown>;
           bodies.push(parsed);
           if (refuse) return json(refuse.status, refuse.body);
+          const port = Number(parsed["port"]);
+          const holder = titles.get(port);
+          if (shared.titles && holder !== undefined && holder !== parsed["title"] && !parsed["replace"]) {
+            return json(409, { message: `Port ${port} already shows '${holder}'.`, code: "port_in_use", details: { port, title: holder } });
+          }
+          titles.set(port, String(parsed["title"]));
           // As the server does: one preview per machine and port.
           const previewId = `preview-${parsed["port"]}`;
           return json(201, {
@@ -642,6 +654,12 @@ describe("instafy preview open --start picks the site's port, and close stops th
         if (req.url?.endsWith("/close")) {
           res.writeHead(204);
           return res.end();
+        }
+        const ready = /\/previews\/([^/]+)\/ready$/.exec(req.url ?? "");
+        if (shared.titles && ready) {
+          // one card per preview in this turn: the same card again for each open after the first
+          if (!cards.has(ready[1]!)) cards.set(ready[1]!, `card-${cards.size + 1}`);
+          return json(200, { messageId: cards.get(ready[1]!), health: { listening: true, status: 200 } });
         }
         return json(200, { messageId: "message-1", health: { listening: true, status: 200 } });
       });
@@ -662,13 +680,14 @@ describe("instafy preview open --start picks the site's port, and close stops th
         }
       }
     };
-    const open = (params: { serveCmd: string; title?: string; port?: number; replace?: boolean }) =>
+    const open = (params: { serveCmd: string; title?: string; port?: number; replace?: boolean; path?: string }) =>
       withEnv(async () => {
         const result = await previewOpen({
           project: ws.projectId,
           controllerUrl,
           controllerToken: "test-token",
           ...(params.port ? { port: params.port } : {}),
+          ...(params.path ? { path: params.path } : {}),
           title: params.title ?? "Site preview",
           ratholeBin: rathole,
           serveCmd: params.serveCmd,
@@ -701,7 +720,18 @@ describe("instafy preview open --start picks the site's port, and close stops th
       JSON.parse(fs.readFileSync(path.join(home, ".instafy", "cli-preview-state.json"), "utf8")) as {
         previews: Array<Record<string, unknown>>;
       };
-    return { ws, home, bodies, requests, open, openOnly, close, state, refuseWith: (status: number, body: unknown) => (refuse = { status, body }) };
+    return {
+      ws,
+      home,
+      bodies,
+      requests,
+      open,
+      openOnly,
+      close,
+      state,
+      cards: () => [...cards.values()],
+      refuseWith: (status: number, body: unknown) => (refuse = { status, body }),
+    };
   }
 
   async function failure(promise: Promise<unknown>): Promise<{ message: string; exitCode?: number }> {
@@ -795,6 +825,89 @@ describe("instafy preview open --start picks the site's port, and close stops th
     await s.open({ serveCmd: `${node} site.mjs {port} b`, title: "B", replace: true });
     expect(s.bodies[1]!["replace"]).toBe(true);
   }, 60000);
+
+  // A page's check posted its card, then the turn opened the same page under another title: the server refused it as
+  // another site's card ("Pass --replace if this site replaces that one…"), and the reply told the person the page
+  // "wasn't opened separately". The open keeps the card's title and says its card is already in the chat; a site with
+  // no card still gets one.
+  it("opens a site whose card is in the chat under that card's title, posts no second card, and says so", async () => {
+    const s = await space({ titles: true });
+    const serveCmd = `${node} site.mjs {port} laptops`;
+    const first = await s.open({ serveCmd, title: "Framework Laptop 13 vs 16" });
+    expect(first.note).toBeUndefined();
+    expect(s.cards()).toEqual(["card-1"]);
+
+    const again = await s.open({ serveCmd, title: "Framework 13 vs 16" });
+    expect(again.note).toBe("Its card is already in the chat.");
+    expect(again.title).toBe("Framework Laptop 13 vs 16");
+    expect([again.port, again.previewId, again.messageId]).toEqual([first.port, first.previewId, first.messageId]);
+    expect(s.cards()).toEqual(["card-1"]);
+    // asked under the new title first, then under the card's own, which the server takes as this same site's
+    expect(s.bodies.map((body) => body["title"])).toEqual(["Framework Laptop 13 vs 16", "Framework 13 vs 16", "Framework Laptop 13 vs 16"]);
+    expect(s.bodies.some((body) => "replace" in body)).toBe(false);
+    expect(s.state().previews.find((entry) => entry["previewId"] === first.previewId)).toMatchObject({ title: "Framework Laptop 13 vs 16", messageId: "card-1" });
+    // the same title again gets the same answer
+    expect((await s.open({ serveCmd, title: "Framework Laptop 13 vs 16" })).note).toBe("Its card is already in the chat.");
+
+    // printed, that one line is the whole answer
+    const lines: string[] = [];
+    const log = console.log;
+    console.log = (line: unknown) => void lines.push(String(line));
+    try {
+      printPreviewOpen(again, false);
+    } finally {
+      console.log = log;
+    }
+    expect(lines).toEqual(["Its card is already in the chat."]);
+
+    // a site with no card gets its own, as before
+    const other = await s.open({ serveCmd: `${node} site.mjs {port} other`, title: "Another page" });
+    expect(other.note).toBeUndefined();
+    expect(other.port).not.toBe(first.port);
+    expect(s.cards()).toEqual(["card-1", "card-2"]);
+  }, 60000);
+
+  // Another page of the same server (`--path`, or one site of a folder of sites) is not this card: opened under the
+  // first page's title, it would move that card, in every chat that shows it, to the other page. It is refused, as it
+  // was before an open kept its card's title.
+  it("refuses another page of the same server under the first page's title, and moves no card", async () => {
+    const s = await space({ titles: true });
+    const serveCmd = `${node} site.mjs {port} trip`;
+    const first = await s.open({ serveCmd, title: "Trip overview" });
+    const refused = await failure(s.open({ serveCmd, title: "Packing list", path: "/packing.html" }));
+    expect(refused.exitCode).toBe(3);
+    expect(refused.message).toMatch(/^Port \d+ already shows 'Trip overview'\./);
+    expect(s.bodies.map((body) => [body["title"], body["path"]])).toEqual([
+      ["Trip overview", "/"],
+      ["Packing list", "/packing.html"],
+    ]);
+    expect(s.cards()).toEqual(["card-1"]);
+    expect(s.state().previews.find((entry) => entry["previewId"] === first.previewId)).toMatchObject({ title: "Trip overview", path: "/" });
+  }, 60000);
+
+  // The card already in the chat is the answer, but never in place of what the site still needs: a site that doesn't
+  // answer, answers with an error, or can't be started again by Open.
+  it("says a card is already in the chat and still says the site doesn't answer", () => {
+    const print = (result: Record<string, unknown>) => {
+      const lines: string[] = [];
+      const log = console.log;
+      console.log = (line: unknown) => void lines.push(String(line).replace(/\u001b\[[0-9;]*m/g, ""));
+      try {
+        printPreviewOpen({ previewId: "preview-1", title: "Laptops", port: 24129, path: "/", messageId: "card-1", viewerHostSuffix: null, ...result } as never, false);
+      } finally {
+        console.log = log;
+      }
+      return lines;
+    };
+    const quiet = { note: "Its card is already in the chat.", status: "live", httpStatus: 200, restartable: true };
+    expect(print(quiet)).toEqual(["Its card is already in the chat."]);
+    expect(print({ ...quiet, status: "not_responding", httpStatus: 500, restartable: false, restartNote: "the server did not record a start command" })).toEqual([
+      "Its card is already in the chat.",
+      "Not responding yet: Laptops (port 24129).",
+      "The site answered HTTP 500 through the preview.",
+      "When the process that started it exits, or the space sleeps, Open cannot start the site by itself: the server did not record a start command.",
+    ]);
+  });
 
   it("says what the server says when another site's preview holds the port, and stops the site it started for it", async () => {
     const s = await space();

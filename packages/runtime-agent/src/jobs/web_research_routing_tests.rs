@@ -1479,7 +1479,7 @@ fn the_research_skill_compares_items_and_the_page_lists_unknown_prices_apart() {
         "Options side by side: each value names the page it was read on and the day; one nobody found reads `Unknown` and why",
         "never a blank or a dash",
         "an item whose value is unknown is listed apart (\"Price unknown\"), never as within it, on the page, in the lede and in the reply",
-        "it also lists blank values, values without their page or date, and a filter applied without `site.byFilter`",
+        "it also lists blank values, values without their page or date, a source line with no link, and a filter applied without `site.byFilter`",
     ] {
         assert!(hub.contains(needle), "{needle}");
     }
@@ -1534,7 +1534,7 @@ fn a_page_of_options_cites_only_pages_that_give_a_value_and_its_lede_only_what_t
         (
             hub_skill,
             previous_hub,
-            "The lede: the verdict plus the biggest unknown, saying only what a page you read says: how many a page lists, or that these are all of them or the latest, only when it says so.",
+            "The lede: the verdict, saying only what a page you read says: how many a page lists, or that these are all of them or the latest, only when it says so.",
         ),
         (
             hub_skill,

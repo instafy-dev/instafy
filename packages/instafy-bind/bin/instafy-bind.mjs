@@ -58,22 +58,25 @@ serve      Serve the site (or every subfolder with a bound.json) with the binder
 init       Write a starter bound.json, index.html and handlers/hello.mjs. --starter <name>: a themed page instead,
            with theme.css and site.js (compare 2-8 options; ranked a top-N; timeline days or steps in time;
            checklist ticks; blank anything else). You design the content in data.json and app.js. Existing
-           files are kept; --force overwrites them. In a space, while no preview shows the folder, its next step
-           names the command that serves the page and posts its card in Studio, before the check.
+           files are kept; --force overwrites them. In a space a starter's next step is the check, which posts
+           the page's card while no preview shows the folder; for a folder with no starter content, while no
+           preview shows it, the next step is the command that serves the page and posts its card in Studio.
 check      Does the site show every item the request named (each product, stop or entry)? Reads the text of its
            HTML pages, every value in its data files (data.json, data/**/*.json), and in its own scripts the text
            they pass to site.h and site.head (a blank page's app.js) and the strings of their lists and objects;
            lists the items no file of the site names. On a page of options (the compare and ranked starters'
            data.json) it also lists values that only say nothing ("—", "n/a"), values without the page and day
            they were read, and a filter that would count a row whose value is unknown; and it notes the rows a
-           filter lists apart. Exit 1 when an item is missing or a value needs fixing; 2 when there is nothing to
-           check, or when a script holds an item's words where the check cannot place them (or fetches text from
-           another site), so it cannot tell. It also fails a page that loads a file from outside its folder (a
-           page is served from its own folder) and names the init command that gives it its own files. Items:
-           --expect, plus an "expect" array in data.json. Run it before telling anyone the page is done. In a
-           space, while no preview shows the site, a check that passes on a new page (one whose card was never
-           opened) serves it and posts its card itself, and any other check ends with the command that does: a
-           failing check never holds the card back, except for a page that loads files from outside its folder.
+           filter lists apart. On any page it lists a source line drawn by hand (class "trust") that links no
+           page, unless it says "not checked", and a fact with its source and no page. Exit 1 when an item is
+           missing, a value or a source line needs fixing; 2 when there is nothing to check, or when a script
+           holds an item's words where the check cannot place them (or fetches text from another site), so it
+           cannot tell. It also fails a page that loads a file from outside its folder (a page is served from its
+           own folder) and names the init command that gives it its own files. Items: --expect, plus an "expect"
+           array in data.json. Run it before telling anyone the page is done. In a space, while no preview shows
+           the site, a check that passes on a new page (one whose card was never opened) serves it and posts its
+           card itself, and any other check ends with the command that does: a failing check never holds the card
+           back, except for a page that loads files from outside its folder.
 command    Push a command (select, highlight, toast, reload) to every open viewer. Uses the
            admin token in .bind/admin-token.
 confirm    Approve (or --no: decline) jobs waiting for confirmation.
@@ -602,12 +605,14 @@ async function main() {
       for (const file of result.skipped) process.stdout.write(`kept  ${path.join(rest[0], file)} (exists; --force overwrites)\n`);
       // In a space the page ends with its card, posted by the command that also serves it, unless a preview already
       // shows the folder (a page made before: an edit needs no new card); anywhere else the binder runs on its own, and
-      // serving the site is the next step. The card comes before the check: a failing check never holds it back.
+      // serving the site is the next step. A page with content to check gets its card from the check: one that passes
+      // posts it, and one that fails names its command, so it never holds the card back. Named here as well, the card
+      // was asked for twice, the second time under another title.
       const content = flags.starter ? path.join(rest[0], flags.starter === "blank" ? "app.js" : "data.json") : null;
       if (inSpace(rest[0])) {
         const steps = [
           content && `put the real content in ${content}`,
-          !previewShows(rest[0]) && `post its card: ${cardCommand(rest[0])}`,
+          !content && !previewShows(rest[0]) && `post its card: ${cardCommand(rest[0])}`,
           content && `check it (\`instafy bind check ${shellWord(rest[0])} --expect "<item>,<item>"\`)`,
         ].filter(Boolean);
         if (steps.length) process.stdout.write(`next: ${[steps.slice(0, -1).join(", "), steps.at(-1)].filter(Boolean).join(", then ")}\n`);

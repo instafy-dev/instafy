@@ -1,8 +1,9 @@
-// A page someone asked for ends with its card. In a space, `init` names the command that serves the page and posts
-// its card as its next step, before the check, and until a preview shows the site a check that passes runs that
-// command itself, and any other check ends with it. A next step that named only `instafy-bind serve` (which posts no
-// card) and a check that named none left a finished page nobody could open; so did a failing check chained before the
-// card's command (`check && preview open`), and a check that passed and named the command to a turn that never ran it.
+// A page someone asked for ends with its card. In a space, until a preview shows the site, a check that passes runs
+// the command that serves the page and posts its card, and any other check ends with that command; `init`'s next step
+// is that check, or, for a folder with nothing to check, the card's command. A next step that named only
+// `instafy-bind serve` (which posts no card) and a check that named none left a finished page nobody could open; so
+// did a failing check chained before the card's command (`check && preview open`), and a check that passed and named
+// the command to a turn that never ran it. An init that named the card as well had it asked for twice.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -82,21 +83,26 @@ process.stdout.write(JSON.stringify({ status: "live", port: 24087 }, null, 2) + 
 
 const lastLine = (text) => text.trimEnd().split("\n").at(-1);
 
-test("in a space, init's next step names the command that posts the page's card, before the check", () => {
+// A turn ran init, whose next step said "post its card", and then `bind check … && preview open --title '<another
+// title>'`: the check had posted the card already, the second open was refused, and the reply said the page "wasn't
+// opened separately". A starter's next step is its check alone, which posts the card when it passes.
+test("in a space, a starter's next step is its check, which posts the card; init asks for the card only with nothing to check", () => {
   const s = space();
   try {
     const compare = s.run(["init", "sites/laptops", "--starter", "compare"]);
     assert.equal(compare.status, 0, compare.stderr);
     assert.equal(lastLine(compare.stdout),
-      `next: put the real content in sites/laptops/data.json, post its card: (cd sites/laptops && ${OPEN}), then check it (\`instafy bind check sites/laptops --expect "<item>,<item>"\`)`);
+      'next: put the real content in sites/laptops/data.json, then check it (`instafy bind check sites/laptops --expect "<item>,<item>"`)');
+    assert.doesNotMatch(compare.stdout, /post its card|preview open/);
     // a blank page's content is its app.js, whose words the check reads too
     assert.equal(lastLine(s.run(["init", "sites/visit", "--starter", "blank"]).stdout),
-      `next: put the real content in sites/visit/app.js, post its card: (cd sites/visit && ${OPEN}), then check it (\`instafy bind check sites/visit --expect "<item>,<item>"\`)`);
+      'next: put the real content in sites/visit/app.js, then check it (`instafy bind check sites/visit --expect "<item>,<item>"`)');
+    // a folder with no starter's content has nothing to check: its card's command is its next step
     assert.equal(lastLine(s.run(["init", "sites/hello"]).stdout), `next: post its card: (cd sites/hello && ${OPEN})`);
-    // run from inside its folder, the command needs no cd
+    // run from inside its folder, the check names it "."
     fs.mkdirSync(path.join(s.project, "sites", "plan"));
     assert.equal(lastLine(s.run(["init", ".", "--starter", "timeline"], { cwd: path.join(s.project, "sites", "plan") }).stdout),
-      `next: put the real content in data.json, post its card: ${OPEN}, then check it (\`instafy bind check . --expect "<item>,<item>"\`)`);
+      'next: put the real content in data.json, then check it (`instafy bind check . --expect "<item>,<item>"`)');
     // outside a space the binder runs on its own: there is no card to post, and serving the site is the next step
     const away = s.run(["init", "sites/away", "--starter", "compare"], { environment: { PATH: process.env.PATH, HOME: s.env.HOME } });
     assert.equal(lastLine(away.stdout), "next: put the real content in sites/away/data.json, then instafy-bind serve sites/away");
@@ -372,10 +378,19 @@ test("another space's preview is not this site's card, though their folders have
   }
 });
 
-test("init names the card only while no preview shows the folder: a page shown before needs no new card", () => {
+test("init names the card only for a folder with nothing to check, and only while no preview shows it", () => {
   const s = space();
   try {
-    assert.match(lastLine(s.run(["init", "sites/laptops", "--starter", "compare"]).stdout), /, post its card: .*, then check it /);
+    assert.equal(lastLine(s.run(["init", "sites/hello"]).stdout), `next: post its card: (cd sites/hello && ${OPEN})`);
+    s.open("sites/hello");
+    const plain = s.run(["init", "sites/hello"]);
+    assert.equal(plain.status, 0, plain.stderr);
+    assert.doesNotMatch(plain.stdout, /^next:|preview open|instafy-bind serve/m);
+    // a preview of another folder, or another space's of a folder with the same name, is not this page's card
+    s.record(s.preview("sites/hello"), s.preview("sites/plan", { projectId: OTHER_SPACE }));
+    assert.equal(lastLine(s.run(["init", "sites/plan"]).stdout), `next: post its card: (cd sites/plan && ${OPEN})`);
+    // a page shown before keeps its content and is checked again: no new card
+    s.run(["init", "sites/laptops", "--starter", "compare"]);
     s.open("sites/laptops");
     const again = s.run(["init", "sites/laptops", "--starter", "compare"]);
     assert.equal(again.status, 0, again.stderr);
@@ -383,16 +398,6 @@ test("init names the card only while no preview shows the folder: a page shown b
     assert.equal(lastLine(again.stdout),
       'next: put the real content in sites/laptops/data.json, then check it (`instafy bind check sites/laptops --expect "<item>,<item>"`)');
     assert.doesNotMatch(again.stdout, /preview open|instafy-bind serve/);
-    s.open("sites/visit");
-    const blank = s.run(["init", "sites/visit", "--starter", "blank"]);
-    assert.equal(lastLine(blank.stdout), 'next: put the real content in sites/visit/app.js, then check it (`instafy bind check sites/visit --expect "<item>,<item>"`)');
-    s.open("sites/hello");
-    const plain = s.run(["init", "sites/hello"]);
-    assert.equal(plain.status, 0, plain.stderr);
-    assert.doesNotMatch(plain.stdout, /^next:|preview open|instafy-bind serve/m);
-    // a preview of another folder, or another space's of a folder with the same name, is not this page's card
-    s.record(s.preview("sites/laptops"), s.preview("sites/plan", { projectId: OTHER_SPACE }));
-    assert.match(lastLine(s.run(["init", "sites/plan", "--starter", "timeline"]).stdout), /, post its card: \(cd sites\/plan && .*\), then check it /);
   } finally {
     s.done();
   }
