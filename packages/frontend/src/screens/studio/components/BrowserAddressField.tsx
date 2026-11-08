@@ -1,8 +1,11 @@
-import { forwardRef, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ComboBox, ComboBoxStateContext, InputContext, PopoverContext, Text, useContextProps } from "react-aria-components";
+import { forwardRef, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ComboBox, ComboBoxStateContext, InputContext, PopoverContext, Text as AriaText, useContextProps } from "react-aria-components";
 import { Globe, NavArrowRight, Xmark } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Input, type InputProps } from "../../../components/Input";
+import { ControlTrigger } from "../../../components/ControlTrigger";
+import { Text } from "../../../components/Text";
+import { textTones } from "../../../styles/typography";
 import { MobileFocusDialog } from "../../../components/aria/MobileFocusDialog";
 import { useBreakpoint } from "../../../hooks/useBreakpoint";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
@@ -37,7 +40,7 @@ function AddressSiteIcon({ url }: { url: string }) {
   const [loadedSrc, setLoadedSrc] = useState<string | null>(null);
   const loaded = loadedSrc === src;
   return <span aria-hidden="true" className="relative h-4 w-4 shrink-0">
-    {!loaded && <Globe className="h-4 w-4 text-slate-400" />}
+    {!loaded && <Globe className={`h-4 w-4 ${textTones.subtle}`} />}
     {menu?.isOpen && <img src={src} alt="" loading="lazy" referrerPolicy="no-referrer"
       className={`absolute inset-0 h-4 w-4 object-contain ${loaded ? "" : "opacity-0"}`}
       onLoad={() => setLoadedSrc(src)} onError={() => setLoadedSrc(null)} />}
@@ -109,14 +112,14 @@ export const BrowserAddressField = forwardRef<HTMLInputElement, BrowserAddressFi
   );
   if (desktop) return editor;
   return <>
-    <Button slot={null} variant="outline" size="xs" radius="xl"
-      className="h-8 max-[540px]:h-10 pointer-coarse:h-11 w-full min-w-0 !justify-start px-3 text-left !text-base font-normal"
+    <ControlTrigger slot={null} size="sm"
+      className="min-h-8 max-[540px]:min-h-10"
       aria-label="Address" aria-haspopup="dialog" aria-expanded={editing}
       data-testid={`${props.testIdPrefix}-address-trigger`} isDisabled={disabled}
       onPress={() => { originalValue.current = String(value ?? ""); setEditing(true); }}>
       {/* A disabled field never offers to take an address. */}
       <span className="truncate">{value || props.placeholder || (disabled ? "" : "Enter an address")}</span>
-    </Button>
+    </ControlTrigger>
     {editing && editor}
   </>;
 });
@@ -135,10 +138,11 @@ const AddressControls = forwardRef<HTMLInputElement, Pick<BrowserAddressFieldPro
 }, ref) {
   const id = useId();
   const formRef = useRef<HTMLFormElement>(null);
+  const clearHistoryRef = useRef<HTMLButtonElement>(null);
   // The click that focuses the field places a caret when it ends; like a
   // browser's address bar, that first click selects the whole address instead.
   const selectAllOnClickEnd = useRef(false);
-  const focusInput = () => formRef.current?.querySelector("input")?.focus();
+  const focusInput = useCallback(() => formRef.current?.querySelector("input")?.focus(), []);
   const state = useContext(ComboBoxStateContext);
   // The phone dialog replaces the popover. Register the same interaction
   // boundary so combobox blur and screen-reader isolation include its controls.
@@ -148,6 +152,23 @@ const AddressControls = forwardRef<HTMLInputElement, Pick<BrowserAddressFieldPro
   const open = Boolean(state?.isOpen && entries.length && !inputProps.disabled);
   const overlayOpen = Boolean(state && (mobile || open));
   useLayoutEffect(() => overlayOpen ? registerOverlay?.() : undefined, [overlayOpen, registerOverlay]);
+  useEffect(() => {
+    if (mobile || !open) return;
+    const ownerWindow = formRef.current?.ownerDocument.defaultView;
+    const onFooterKeyDown = (event: KeyboardEvent) => {
+      if (event.target !== clearHistoryRef.current || event.isComposing || event.altKey || event.ctrlKey || event.metaKey ||
+          (event.key !== "Tab" && event.key !== "Escape")) return;
+      // React Aria restores portal focus on document capture. Handle this
+      // footer first so reverse Tab returns to the field, rather than skipping
+      // past it. Forward Tab uses the field's ordinary native focus order.
+      if (event.key === "Escape" || event.shiftKey) event.preventDefault();
+      event.stopPropagation();
+      focusInput();
+      if (event.key === "Escape" || !event.shiftKey) state?.close();
+    };
+    ownerWindow?.addEventListener("keydown", onFooterKeyDown, true);
+    return () => ownerWindow?.removeEventListener("keydown", onFooterKeyDown, true);
+  }, [focusInput, mobile, open, state]);
 
   const suggestions = <>
     <StudioListBox<BrowserAddressHistoryEntry> aria-label="Recent sites"
@@ -157,14 +178,14 @@ const AddressControls = forwardRef<HTMLInputElement, Pick<BrowserAddressFieldPro
         className="min-h-11 @[28rem]/address-suggestions:pointer-fine:min-h-8 !justify-start gap-2 overflow-hidden">
         <AddressSiteIcon url={entry.url} />
         <div className="flex min-w-0 flex-1 flex-col @[28rem]/address-suggestions:flex-row @[28rem]/address-suggestions:items-baseline @[28rem]/address-suggestions:gap-2">
-          <Text slot="label" className="min-w-0 truncate leading-4 @[28rem]/address-suggestions:max-w-[60%] @[28rem]/address-suggestions:shrink-0">{entry.title || new URL(entry.url).hostname}</Text>
-          <Text slot="description" title={entry.url} className="min-w-0 truncate text-xs leading-4 text-slate-500 dark:text-slate-400">{entry.url.replace(/^https?:\/\//, "")}</Text>
+          <Text as={AriaText} slot="label" variant="bodyCompact" tone="inherit" className="min-w-0 truncate @[28rem]/address-suggestions:max-w-[60%] @[28rem]/address-suggestions:shrink-0">{entry.title || new URL(entry.url).hostname}</Text>
+          <Text as={AriaText} slot="description" variant="caption" tone="muted" title={entry.url} className="min-w-0 truncate">{entry.url.replace(/^https?:\/\//, "")}</Text>
         </div>
       </StudioListBoxItem>}
     </StudioListBox>
     <div className="flex justify-end">
-      <Button slot={null} size="xs" variant="ghost" className="px-2.5 text-slate-500 dark:text-slate-400"
-        onPress={() => { navigateSelection.current = false; clear(); state?.close(); if (mobile) focusInput(); }}>
+      <Button ref={clearHistoryRef} slot={null} preset="inline" variant="ghost"
+        onPress={() => { navigateSelection.current = false; focusInput(); clear(); state?.close(); }}>
         Clear recent sites
       </Button>
     </div>
@@ -216,10 +237,19 @@ const AddressControls = forwardRef<HTMLInputElement, Pick<BrowserAddressFieldPro
           }
         }}
         size="xs"
-        className={`h-8 min-w-0 px-3 aria-invalid:border-rose-400 aria-invalid:focus-visible:ring-rose-500/20 max-[540px]:h-10 pointer-coarse:h-11 ${mobile ? "!h-11 !pr-24" : ""}`}
+        className={`h-8 min-w-0 px-3 aria-invalid:border-rose-400 aria-invalid:focus-visible:ring-rose-500/20 max-[540px]:h-10 pointer-coarse:h-11 ${mobile ? `!h-11 ${state.inputValue ? "!pr-24" : "!pr-12"}` : ""}`}
         data-testid={`${testIdPrefix}-address`}
         onKeyDownCapture={event => {
           navigateSelection.current = event.key === "Enter" && !event.nativeEvent.isComposing;
+          if (!mobile && event.key === "Tab" && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey &&
+              !event.nativeEvent.isComposing && open && clearHistoryRef.current) {
+            // Combobox Tab normally commits/closes its list before the footer
+            // action can receive focus. Keep selection and navigation separate.
+            event.preventDefault();
+            event.stopPropagation();
+            clearHistoryRef.current.focus();
+            return;
+          }
           if (event.key === "Enter" && !event.nativeEvent.isComposing &&
               (!state?.isOpen || state.selectionManager.focusedKey == null)) {
             // A custom address must still submit when matching suggestions are
@@ -257,7 +287,7 @@ const AddressControls = forwardRef<HTMLInputElement, Pick<BrowserAddressFieldPro
   return mobile ? <MobileFocusDialog isOpen onOpenChange={open => { if (!open) onCancel(); }}
     dialogAriaLabel="Enter an address" dismissLabel="Back" header={form} dialogRef={dialogRef}
     data-testid={`${testIdPrefix}-address-editor`}>
-    {errorMessage && <p id={`${id}-error`} role="alert" className="px-4 py-2 text-sm text-rose-600 dark:text-rose-400">{errorMessage}</p>}
+    {errorMessage && <Text id={`${id}-error`} role="alert" variant="bodyCompact" tone="danger" className="px-4 py-2">{errorMessage}</Text>}
     {open && menu}
   </MobileFocusDialog> : form;
 });

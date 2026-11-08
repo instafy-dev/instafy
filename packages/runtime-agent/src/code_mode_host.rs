@@ -124,7 +124,7 @@ mod tests {
             .build()
             .await
             .expect("load Codex config");
-        crate::codex_policy::apply_runtime_codex_policy(&mut config, false).expect("policy");
+        crate::codex_policy::apply_runtime_codex_policy(&mut config, false, false).expect("policy");
         (home, config)
     }
 

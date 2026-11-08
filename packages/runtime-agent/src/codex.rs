@@ -1922,8 +1922,8 @@ impl CodexClient {
             // Runtime-scoped execution turns should not inherit external base instructions.
             base_instructions,
             show_raw_agent_reasoning: Some(show_raw_reasoning),
-            // Web search stays off on every lane (`codex_policy`), whatever
-            // CODEX_ENABLE_WEB_SEARCH says.
+            // codex_policy derives native search from the controller grant and turn type;
+            // CODEX_ENABLE_WEB_SEARCH cannot authorize it.
             ..Default::default()
         };
 
@@ -2128,7 +2128,15 @@ impl CodexClient {
         }
         // The loaded config is complete now (provider, MCP servers, model id). Pin billing,
         // instructions and features before anything reads it.
-        crate::codex_policy::apply_runtime_codex_policy(&mut config, bounded)?;
+        crate::codex_policy::apply_runtime_codex_policy(
+            &mut config,
+            bounded,
+            options.final_output_schema != CodexFinalOutputSchema::RoutingPreflight
+                && options
+                    .proxy_auth
+                    .as_ref()
+                    .is_some_and(|auth| auth.allows_native_web_search()),
+        )?;
         crate::codex_policy::apply_native_subagent_limit(
             &mut config,
             runtime_settings.map(|settings| settings.max_native_subagents),
@@ -2291,6 +2299,7 @@ impl CodexClient {
                     &required_execution,
                     &run_instructions,
                     options.project_id.map(|id| (id, self.workspace_dir())),
+                    auth_manager.clone(),
                 ),
                 Arc::new(EmptyUserInstructionsProvider),
                 None,
@@ -4974,14 +4983,17 @@ impl TurnLifecycleContributor for TurnStartTokenUsageRecorder {
 /// The extension registry a run hands Codex. It gives every turn on the run's threads the
 /// run's own instructions (`run_instructions`), records each turn's baseline into
 /// `turn_start_token_usage`, which the run's `CodexEventStreamAdapter` reads, and enforces
-/// `required_execution` on the threads the run arms.
+/// `required_execution` on the threads the run arms. Native search uses the same scoped proxy
+/// authentication; the run's search mode keeps it unavailable without controller authority.
 fn codex_extension_registry(
     turn_start_token_usage: &TurnStartTokenUsage,
     required_execution: &RequiredExecutionGate,
     run_instructions: &RunInstructions,
     project_context: Option<(uuid::Uuid, &Path)>,
+    auth_manager: Arc<AuthManager>,
 ) -> Arc<ExtensionRegistry<Config>> {
     let mut extensions = ExtensionRegistryBuilder::new();
+    codex_web_search_extension::install(&mut extensions, auth_manager);
     extensions.prompt_contributor(Arc::new(run_instructions::RunInstructionsContext::new(
         run_instructions,
     )));
@@ -5029,6 +5041,7 @@ pub(crate) async fn start_test_turn(
         &RequiredExecutionGate::default(),
         &RunInstructions::default(),
         None,
+        AuthManager::from_auth_for_testing(codex_login::CodexAuth::from_api_key("inert")),
     );
     for contributor in registry.turn_lifecycle_contributors() {
         contributor
@@ -8122,6 +8135,7 @@ mod tests {
             &gate,
             &RunInstructions::default(),
             None,
+            AuthManager::from_auth_for_testing(codex_login::CodexAuth::from_api_key("inert")),
         );
         gate.arm("thread-a");
         let mut metadata = None;
@@ -12438,6 +12452,7 @@ required = true
             &RequiredExecutionGate::default(),
             &RunInstructions::default(),
             None,
+            AuthManager::from_auth_for_testing(codex_login::CodexAuth::from_api_key("inert")),
         );
         let thread_store = ExtensionData::new("thread-main");
         let contributors = registry.turn_lifecycle_contributors();

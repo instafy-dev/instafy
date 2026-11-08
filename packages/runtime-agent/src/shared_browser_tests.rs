@@ -3829,7 +3829,7 @@ fn chat_browser_run_given(
 /// site, one of which waited 20 seconds for nothing.
 #[tokio::test]
 async fn an_address_no_message_or_page_gave_is_not_opened() {
-    let fixture = EmbeddedControllerFixture::new();
+    let fixture = EmbeddedControllerFixture::new().with_site_policy();
     let chat = Uuid::new_v4();
     let step = |mode: &str, path: &str, body: JsonValue| {
         fixture
@@ -6326,7 +6326,7 @@ impl EmbeddedControllerFixture {
 }
 
 #[test]
-fn the_sent_page_reader_carries_the_link_only_list_and_marks_links_with_it() {
+fn the_sent_page_reader_does_not_mark_sites_without_an_explicit_policy() {
     use std::process::Stdio;
     // What the origin evaluates for Send page to Octo, run against a results
     // page with a link to a link-only site, a script link and an ordinary one.
@@ -6367,7 +6367,7 @@ globalThis.document = { title: "museum", baseURI: "https://search.example/", bod
         links,
         serde_json::json!([
             { "text": "City Museum", "href": "https://museum.example/hours" },
-            { "text": "Hotels nearby", "href": "https://www.booking.com/hotel/x.html", "linkOnly": "Booking.com" }
+            { "text": "Hotels nearby", "href": "https://www.booking.com/hotel/x.html" }
         ])
     );
 }
@@ -10285,9 +10285,78 @@ fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
     ));
 }
 
+#[tokio::test]
+async fn shared_browser_has_no_curated_site_bans_and_ignores_retired_defaults() {
+    let fixture = EmbeddedControllerFixture::new();
+    let navigate = |url: &str| {
+        fixture.call(
+            "safe",
+            "POST",
+            "/v1/navigate",
+            Some(&json!({ "url": url }).to_string()),
+        )
+    };
+    let urls = [
+        "https://www.booking.com/hotel/fixture.html",
+        "https://runrepeat.com/review",
+        "https://www.google.com/search?q=reviews",
+        "https://www.nike.com/shoes",
+        "https://web.archive.org/web/2026/https://www.booking.com/",
+        "https://www-booking-com.translate.goog/hotel",
+    ];
+    // Domain-policy assertions use addresses supplied by the task, through the real chat record.
+    let run = chat_browser_run_given(
+        &fixture,
+        Uuid::new_v4(),
+        json!({ "prompt_text": format!("Read these pages: {}", urls.join(" ")) }),
+    );
+    for url in urls {
+        payload_of(&navigate(url));
+    }
+    assert!(
+        failure_of(&navigate("https://www.nike.com/not-given"))
+            .contains("only addresses it was given")
+    );
+    for retired in [
+        include_str!("jobs/legacy/web-research-link-only-v1.json"),
+        include_str!("jobs/legacy/web-research-link-only-v2.json"),
+        include_str!("jobs/legacy/web-research-link-only-v3.json"),
+    ] {
+        fixture.write_space_link_only(&format!("\n{retired}\n"));
+        payload_of(&navigate("https://www.booking.com/hotel/fixture.html"));
+    }
+    // Minimal custom policies retain the generic wrapper handling they previously inherited.
+    fixture.write_space_link_only(
+        &json!({"schema": "instafy.link-only-sites@1", "sites": [{"name": "Booking.com", "match": ["booking.com"]}]}).to_string(),
+    );
+    for url in [
+        "https://www.booking.com/hotel/fixture.html",
+        "https://web.archive.org/web/2026/https://www.booking.com/",
+        "https://www-booking-com.translate.goog/hotel",
+    ] {
+        assert!(failure_of(&navigate(url)).contains("Booking.com"), "{url}");
+    }
+    let edited = include_str!("jobs/legacy/web-research-link-only-v3.json").replace(
+        "\"reviewed\": \"2026-10-27\"",
+        "\"reviewed\": \"2026-11-07\"",
+    );
+    assert_ne!(
+        edited,
+        include_str!("jobs/legacy/web-research-link-only-v3.json")
+    );
+    fixture.write_space_link_only(&edited);
+    assert!(
+        failure_of(&navigate("https://www.booking.com/hotel/fixture.html"))
+            .contains("Booking.com is link-only")
+    );
+    fixture.write_space_link_only(LINK_ONLY_SITES_DATA);
+    payload_of(&navigate("https://www.booking.com/hotel/fixture.html"));
+    end_chat_browser_run(run);
+}
+
 #[test]
 fn octos_tab_that_moved_itself_onto_a_link_only_site_is_not_read() {
-    let fixture = EmbeddedControllerFixture::new();
+    let fixture = EmbeddedControllerFixture::new().with_site_policy();
     fixture.prepare_routine_start("page-target");
     let tab_id = fixture.open_tab("https://example.test/report")["tabId"]
         .as_str()
@@ -10330,7 +10399,7 @@ fn octos_tab_that_moved_itself_onto_a_link_only_site_is_not_read() {
 
 #[test]
 fn octos_tabs_never_open_a_link_only_site() {
-    let fixture = EmbeddedControllerFixture::new();
+    let fixture = EmbeddedControllerFixture::new().with_site_policy();
     fixture.prepare_routine_start("page-target");
     let refused = failure_of(&fixture.call(
         "safe",
@@ -11383,7 +11452,7 @@ fn each_of_octos_tabs_keeps_one_label_in_prompts_and_list_tabs_while_it_is_open(
 
 #[test]
 fn octo_never_opens_or_reads_a_link_only_site_on_the_page_the_person_chose() {
-    let fixture = EmbeddedControllerFixture::new();
+    let fixture = EmbeddedControllerFixture::new().with_site_policy();
     let decisions = ["allow_origin", "allow_once", "allow_once"];
     for url in [
         "https://www.booking.com/hotel/fixture.html",
@@ -11484,7 +11553,7 @@ fn octo_never_opens_or_reads_a_link_only_site_on_the_page_the_person_chose() {
 /// end the run, and the next source opens in the same run.
 #[test]
 fn a_refused_search_the_turn_chose_goes_on_to_the_next_source() {
-    let fixture = EmbeddedControllerFixture::new();
+    let fixture = EmbeddedControllerFixture::new().with_site_policy();
     fixture.prepare_routine_start("page-target");
     let (refused, requests) = fixture.call_deciding(
         "safe",
@@ -12100,7 +12169,7 @@ impl EmbeddedControllerFixture {
 
 #[test]
 fn octo_reads_nothing_of_a_page_that_reached_a_link_only_site_while_or_before_it_was_read() {
-    let fixture = EmbeddedControllerFixture::new();
+    let fixture = EmbeddedControllerFixture::new().with_site_policy();
     fixture.prepare_routine_start("page-target");
 
     // A timed redirect to a link-only site commits while the snapshot reads
@@ -12158,7 +12227,7 @@ fn octo_reads_nothing_of_a_page_that_reached_a_link_only_site_while_or_before_it
 
 #[test]
 fn a_frame_from_a_link_only_site_inside_an_ordinary_page_does_not_fail_octos_step() {
-    let fixture = EmbeddedControllerFixture::new();
+    let fixture = EmbeddedControllerFixture::new().with_site_policy();
     fixture.prepare_routine_start("page-target");
     let click = |mode: &str| {
         let snapshot_id = fixture.snapshot_id_in(mode);
@@ -12205,7 +12274,7 @@ fn a_frame_from_a_link_only_site_inside_an_ordinary_page_does_not_fail_octos_ste
 
 #[test]
 fn a_link_only_site_is_refused_however_its_address_writes_the_host() {
-    let fixture = EmbeddedControllerFixture::new();
+    let fixture = EmbeddedControllerFixture::new().with_site_policy();
     fixture.prepare_routine_start("page-target");
     for url in [
         "https://WWW.BOOKING.COM./hotel",
@@ -12233,6 +12302,8 @@ fn a_link_only_site_is_refused_however_its_address_writes_the_host() {
 // The link-only list on every route Octo uses: the readers' shared table of
 // cases (wrappers, host spelling), and the sites a space's own copy adds.
 
+const EXPLICIT_SITE_POLICY: &str =
+    include_str!("../../browser-action-policy/test/link-only-policy.json");
 const LINK_ONLY_CASES: &str = include_str!("../../browser-action-policy/test/link-only-cases.json");
 
 impl EmbeddedControllerFixture {
@@ -12269,6 +12340,11 @@ impl EmbeddedControllerFixture {
             .env("INSTAFY_SHARED_BROWSER_FAKE_REDIRECT_URL", url)
             .env("INSTAFY_SHARED_BROWSER_FAKE_ANSWER_LINK", link);
         command.output().expect("run the answered click")
+    }
+
+    fn with_site_policy(self) -> Self {
+        self.write_space_link_only(EXPLICIT_SITE_POLICY);
+        self
     }
 
     fn write_space_link_only(&self, content: &str) {
@@ -12365,14 +12441,12 @@ fn check_link_only_case(
 #[test]
 fn every_case_in_the_readers_shared_table_is_stopped_or_let_through_at_the_redirect_hop() {
     let cases: JsonValue = serde_json::from_str(LINK_ONLY_CASES).expect("cases JSON");
-    let fixture = EmbeddedControllerFixture::new();
+    let fixture = EmbeddedControllerFixture::new().with_site_policy();
     fixture.prepare_routine_start("page-target");
     let mut authority_since = std::time::Instant::now();
     let bundled = cases["bundled"].as_array().expect("bundled cases");
     let space_cases = cases["spaceCopy"]["cases"].as_array().expect("space cases");
-    // Both kinds are in the table: sites refused and sites that load (the
-    // bundled list bars agents on every site, so a "no-reuse" one comes from
-    // the space's copy).
+    // Both kinds are in the explicit test policy table: sites refused and sites that load.
     for kind in ["no-agents", "no-reuse"] {
         assert!(
             space_cases
@@ -12386,9 +12460,17 @@ fn every_case_in_the_readers_shared_table_is_stopped_or_let_through_at_the_redir
     for case in bundled {
         check_link_only_case(&fixture, case, false, &mut authority_since);
     }
-    // With the space's copy, its additions hold too, and the bundled list
-    // still does: a copy can make a site stricter, never looser.
-    fixture.write_space_link_only(&cases["spaceCopy"]["list"].to_string());
+    // Combine explicit policy entries to exercise strictest-match behavior.
+    let mut policy: JsonValue = serde_json::from_str(EXPLICIT_SITE_POLICY).unwrap();
+    for field in ["sites", "wrappers"] {
+        if let Some(extra) = cases["spaceCopy"]["list"][field].as_array() {
+            policy[field]
+                .as_array_mut()
+                .unwrap()
+                .extend(extra.iter().cloned());
+        }
+    }
+    fixture.write_space_link_only(&policy.to_string());
     for case in space_cases {
         check_link_only_case(&fixture, case, false, &mut authority_since);
     }
@@ -12399,7 +12481,7 @@ fn every_case_in_the_readers_shared_table_is_stopped_or_let_through_at_the_redir
 
 #[test]
 fn octo_never_opens_a_translator_cache_or_archive_copy_of_a_link_only_site() {
-    let fixture = EmbeddedControllerFixture::new();
+    let fixture = EmbeddedControllerFixture::new().with_site_policy();
     fixture.prepare_routine_start("page-target");
     for (path, url, named) in [
         (
@@ -12442,7 +12524,7 @@ fn octo_never_opens_a_translator_cache_or_archive_copy_of_a_link_only_site() {
 }
 
 #[test]
-fn the_spaces_copy_of_the_list_adds_sites_and_never_removes_a_bundled_one() {
+fn the_spaces_explicit_policy_controls_its_sites_and_can_be_removed() {
     let fixture = EmbeddedControllerFixture::new();
     fixture.prepare_routine_start("page-target");
     let navigate = |url: &str| {
@@ -12456,12 +12538,14 @@ fn the_spaces_copy_of_the_list_adds_sites_and_never_removes_a_bundled_one() {
     // Without a copy, a site only a space lists is opened.
     payload_of(&navigate("https://www.shop.example/item"));
 
-    // The space's copy adds a site and a wrapper; a copy without Booking.com
-    // does not unlist it.
+    // Explicit rules apply only to the sites the workspace names.
     fixture.write_space_link_only(
         &json!({
             "schema": "instafy.link-only-sites@1",
-            "sites": [{ "name": "Example Shop", "match": ["shop.example"], "why": "terms bar AI agents" }],
+            "sites": [
+                { "name": "Example Shop", "match": ["shop.example"], "why": "workspace policy" },
+                { "name": "Booking.com", "match": ["booking.com"], "why": "workspace policy" }
+            ],
             "wrappers": [{ "name": "Example proxy", "match": ["proxy.example"], "embeds": ["subdomain"] }],
         })
         .to_string(),
@@ -12484,7 +12568,7 @@ fn the_spaces_copy_of_the_list_adds_sites_and_never_removes_a_bundled_one() {
     assert!(status.get("linkOnlyListWarnings").is_none(), "{status}");
 
     // A copy that is not a list, or not a plain file, is left out with a
-    // warning, and the bundled list still applies.
+    // warning. It does not introduce a product-level domain restriction.
     let outside = fixture.hostile_cwd.join("elsewhere.json");
     std::fs::write(
         &outside,
@@ -12508,11 +12592,7 @@ fn the_spaces_copy_of_the_list_adds_sites_and_never_removes_a_bundled_one() {
         } else {
             fixture.write_space_link_only(copy);
         }
-        let error = failure_of(&navigate("https://www.booking.com/hotel/fixture.html"));
-        assert!(
-            error.contains("Booking.com is link-only"),
-            "{copy}: {error}"
-        );
+        payload_of(&navigate("https://www.booking.com/hotel/fixture.html"));
         payload_of(&navigate("https://www.shop.example/item"));
         payload_of(&navigate("https://linked.example/"));
         let status = payload_of(&fixture.call("safe", "GET", "/v1/status", None));
@@ -12531,7 +12611,7 @@ fn the_spaces_copy_of_the_list_adds_sites_and_never_removes_a_bundled_one() {
 
 #[test]
 fn octos_step_never_loads_a_page_that_says_it_is_a_copy_of_a_link_only_site() {
-    let fixture = EmbeddedControllerFixture::new();
+    let fixture = EmbeddedControllerFixture::new().with_site_policy();
     fixture.prepare_routine_start("page-target");
     let answer = |name: &str| (format!("Fetch.continueRequest"), name.to_string());
     // A short archive address names no site; the answer's Memento header
@@ -12578,8 +12658,7 @@ fn octos_step_never_loads_a_page_that_says_it_is_a_copy_of_a_link_only_site() {
 
 #[cfg(unix)]
 #[test]
-fn a_space_copy_too_large_to_read_or_that_is_a_pipe_is_left_out_and_the_bundled_list_still_applies()
-{
+fn a_space_copy_too_large_to_read_or_that_is_a_pipe_does_not_add_restrictions() {
     let fixture = EmbeddedControllerFixture::new();
     fixture.prepare_routine_start("page-target");
     let navigate = |url: &str| {
@@ -12605,7 +12684,7 @@ fn a_space_copy_too_large_to_read_or_that_is_a_pipe_is_left_out_and_the_bundled_
             .contains("Example Shop is link-only")
     );
 
-    // Over 256 KiB, the copy is left out and the bundled list still applies.
+    // Over 256 KiB, the copy is left out without introducing domain restrictions.
     fixture.write_space_link_only(&space_copy("x".repeat(300 * 1024)));
     // A named pipe in its place is not waited on: no writer ever opens it.
     let pipe = fixture.hostile_cwd.join("link-only-pipe");
@@ -12616,11 +12695,7 @@ fn a_space_copy_too_large_to_read_or_that_is_a_pipe_is_left_out_and_the_bundled_
             std::fs::remove_file(&fixture.space_link_only).expect("remove the large copy");
             std::fs::rename(&pipe, &fixture.space_link_only).expect("put the pipe in its place");
         }
-        let error = failure_of(&navigate("https://www.booking.com/hotel/fixture.html"));
-        assert!(
-            error.contains("Booking.com is link-only"),
-            "{case}: {error}"
-        );
+        payload_of(&navigate("https://www.booking.com/hotel/fixture.html"));
         payload_of(&navigate("https://www.shop.example/item"));
         let status = payload_of(&fixture.call("safe", "GET", "/v1/status", None));
         let warnings = status["linkOnlyListWarnings"].to_string();

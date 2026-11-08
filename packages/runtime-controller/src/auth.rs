@@ -536,10 +536,12 @@ pub(crate) fn router() -> Router<AppState> {
 pub(crate) struct ProxyJobBinding {
     pub(crate) job_id: Uuid,
     pub(crate) lease_attempt: i32,
+    pub(crate) native_web_search: bool,
 }
 
 #[derive(Serialize)]
 struct ProxyTokenClaims {
+    native_web_search: bool,
     aud: &'static str,
     iss: &'static str,
     sub: String,
@@ -629,6 +631,8 @@ pub(crate) fn issue_proxy_envelope(
     let exp = issued_at + ChronoDuration::seconds(config.proxy_token_ttl_seconds);
 
     let claims = ProxyTokenClaims {
+        native_web_search: credential_id.is_some()
+            && job_binding.is_some_and(|binding| binding.native_web_search),
         aud: "proxy",
         iss: "runtime-controller",
         sub: format!("proxy:{}:{}", project_id, runtime_id),
@@ -1140,6 +1144,7 @@ mod tests {
             &issue(Some(ProxyJobBinding {
                 job_id,
                 lease_attempt: 3,
+                native_web_search: false,
             })),
         );
         assert_eq!(bound["job_id"], json!(job_id.to_string()));
@@ -1156,6 +1161,43 @@ mod tests {
     }
 
     #[test]
+    fn native_search_claim_requires_both_a_job_binding_and_byo_credential() {
+        let mut config = base_app_config();
+        config.proxy_signing_secret = Some("proxy-secret".to_string());
+        let project = Uuid::new_v4();
+        let runtime = Uuid::new_v4();
+        let credential = Uuid::new_v4();
+        let binding = ProxyJobBinding {
+            job_id: Uuid::new_v4(),
+            lease_attempt: 1,
+            native_web_search: true,
+        };
+        for (credential_id, job, expected) in [
+            (Some(&credential), Some(binding), true),
+            (None, Some(binding), false),
+            (Some(&credential), None, false),
+            (None, None, false),
+        ] {
+            let envelope = issue_proxy_envelope(
+                &config,
+                &project,
+                &runtime,
+                None,
+                credential_id,
+                job,
+                None,
+                None,
+                None,
+            )
+            .expect("proxy envelope");
+            assert_eq!(
+                proxy_token_claims(&config, &envelope.token)["native_web_search"],
+                json!(expected)
+            );
+        }
+    }
+
+    #[test]
     fn proxy_token_sha256_is_lowercase_hex_of_the_token_bytes() {
         assert_eq!(
             proxy_token_sha256("abc"),
@@ -1166,6 +1208,7 @@ mod tests {
     /// A job token with the given issue time, signed with `config`'s secret.
     fn job_token_issued_at(config: &AppConfig, issued_at: i64, exp: i64) -> String {
         let claims = ProxyTokenClaims {
+            native_web_search: false,
             aud: "proxy",
             iss: "runtime-controller",
             sub: "proxy:project:runtime".to_string(),

@@ -600,22 +600,21 @@ only in the visible browser, so the rules are the ones a person sees:
   belong to no tab and are not checked. A WebSocket reports no connected
   address, so a name that changes its answer between Desktop's lookup and
   Chromium's connection is not caught for a WebSocket.
-- **Never a link-only site.** Sites whose terms or robots.txt bar AI agents
-  (the `no-agents` sites in the `instafy-web-research` skill's
-  `references/link-only-sites.json`: Booking.com, Airbnb, Amazon, Google search
-  and Maps and others; a site with no kind, or an unknown one, counts), and a
-  translator's, cache's or archive's copy of one (the list's `wrappers`), are
-  never read or driven by the agent. Desktop bundles that same file, the one
-  runtime-agent embeds, at build time, and a test fails when the bundled copy
-  differs from the skill's file. The matching is
+- **Optional site policy.** Instafy ships no site denylist. The bundled
+  `instafy-web-research/references/link-only-sites.json` has an empty `sites`
+  array; a valid empty policy permits public sites subject to the other
+  browser permissions and checks. Provider-native research uses the provider's
+  access policy. A self-hosted build may configure `no-agents` rules, which
+  refuse a matching site and configured translator, cache or archive copies;
+  a missing or unknown kind is also restrictive. Desktop bundles that file,
+  the one runtime-agent embeds, at build time. The matching is
   `@instafy/browser-action-policy`'s `linkOnly.js`, shared with the Shared
   Browser and `instafy web read`. Desktop enforces the bundled list: sites a
   space adds to its own copy of the list are enforced by the readers that run in
   the space (`instafy web read`, the Shared Browser), but no Personal Browser
   channel carries a space's files, so Desktop does not read that copy. A
-  `no-reuse` site (its terms bar copying its content, not reading it) is not
-  refused; the web-research skill says how its content may be used.
-  `open_tab` and `navigate` to such a site, a link to one, and
+  `no-reuse` rule permits reads while marking content for restricted reuse.
+  For a `no-agents` rule, `open_tab`, `navigate`, links to the site, and
   every page load or redirect hop of a driven tab, and every frame of a page the
   agent opened, that would land on one are refused with `link_only_site`,
   before any prompt or lookup. A copy nested in another wrapper (a
@@ -632,8 +631,9 @@ only in the visible browser, so the rules are the ones a person sees:
   every tab while the agent is paused, shows nothing of its page, as for any
   other site. A form the agent submits to such a site is refused before it
   asks, like a link. Without a
-  valid list, every agent-driven step on a web page fails closed with
-  `link_only_list_unavailable`. The person opens such a site themselves and may
+  valid policy, every agent-driven step on a web page fails closed with
+  `link_only_list_unavailable`; an empty `sites` array is valid. The person
+  opens a restricted site themselves and may
   use **Send page to Octo**, which is their own action. A refusal of a link-only
   site ends that address, not the task: it tells the agent to go on with the
   maker's, venue's or reviewer's own site, and to give the person the plain link
@@ -738,7 +738,7 @@ stay refused, never searched for.
   menu; Desktop keeps the choice on the device (`personalBrowserSearchEngine` in
   its config) and falls back to the list's default.
 - These are the person's own searches in their own browser. Octo never searches
-  through them, and an engine's own pages may be link-only for Octo. The Shared
+  through them, and an explicit site policy may restrict an engine's pages. The Shared
   Browser's address bar does not search.
 - A Desktop that predates search keeps the old address bar: a single word opens
   as a host name.

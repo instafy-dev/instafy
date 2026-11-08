@@ -1634,7 +1634,10 @@ async fn read_model_body(
     Ok(bytes)
 }
 
-async fn read_model_error_body(response: reqwest::Response, max_bytes: usize) -> Result<String> {
+pub(crate) async fn read_model_error_body(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<String> {
     match read_model_body(response, None, max_bytes).await {
         Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
         Err(error)
@@ -2427,7 +2430,9 @@ fn parse_codex_rate_limit_window(
 /// Returns `None` when no usable window is present so callers can skip
 /// reporting entirely. Never fails: malformed or absent headers are simply
 /// dropped, keeping the user's response path unaffected.
-fn parse_codex_rate_limit_headers(headers: &reqwest::header::HeaderMap) -> Option<Value> {
+pub(crate) fn parse_codex_rate_limit_headers(
+    headers: &reqwest::header::HeaderMap,
+) -> Option<Value> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs() as i64)
