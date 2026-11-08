@@ -2981,7 +2981,8 @@ unless the policy is `"covered"`.
   a "Warranty" link it never opened, and wrote the warranty as not found with
   nothing unread. When it names any,
   the runtime runs the turn once more on its own thread, told only those
-  pages, before the build: once a turn, and never after a Stop, a pause for the
+  pages (a page it read already only for a tab or link that line names on
+  it), before the build: once a turn, and never after a Stop, a pause for the
   person, a step whose approval ended the turn, or a step the browser refused
   as the person's own. Its steps show in the turn's line and Details as the
   turn's own do, its words join the turn's (so a first line that said a page

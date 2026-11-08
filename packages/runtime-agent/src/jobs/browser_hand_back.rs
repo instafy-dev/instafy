@@ -893,13 +893,15 @@ pub(super) fn leave_out_addresses_never_opened(
 
 /// What the second pass of a browser turn whose findings go back to the building turn reads
 /// (`jobs::read_the_unread_pages`): only the pages its unread line named, as it wrote them,
-/// and to end as before. Its own unread line starts no third pass.
+/// and to end as before. A page it read already is opened again only for a tab or link the line
+/// names on it, such as a product page's Specs tab ([`UNREAD_LINE`]). Its own unread line starts
+/// no third pass.
 pub(super) fn unread_pages_prompt(pages: &[String]) -> String {
     let named = serde_json::to_string(pages)
         .unwrap_or_default()
         .replace('`', "\\u0060");
     format!(
-        "Your unread line named pages this request still needs: {named}. Read only those now, as your part of this request says, and no page you already read. Then end your reply as before: one finding line per page you read now, and the unread line for any of them you still didn't open."
+        "Your unread line named pages this request still needs: {named}. Read only those now, as your part of this request says, and no page you already read, except to open a tab or link your line names on it. Then end your reply as before: one finding line per page you read now, and the unread line for any of them you still didn't open."
     )
 }
 
@@ -3009,6 +3011,14 @@ mod tests {
             "{prompt}"
         );
         assert!(!prompt.contains('`'), "{prompt}");
+        // A page it read already is opened again only for a tab or link the line names on it: a
+        // value written as not found beside a product page's own tab for it is read there.
+        assert!(
+            prompt.contains(
+                "and no page you already read, except to open a tab or link your line names on it."
+            ),
+            "{prompt}"
+        );
         let metadata = routed_turn(true);
         let mut turn = execution(&format!("Read 1 page.\n{read}\n{{\"unread\": [\"x\"]}}"));
         move_findings_into_details(&reading_the_note(browser_job(metadata)), &mut turn);
