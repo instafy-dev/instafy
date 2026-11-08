@@ -80,7 +80,8 @@ try        Run one script intent as a viewer's click would (same input, environm
            Nothing is written to the site. Run it for every script intent before telling anyone the site works.
            --save: also store the accepted records in the site, exactly as a click's would be (same checks,
            provenance and merge), so the page opens with the values, each with its source and age. Use it to fill
-           a new page (one try per item); a served page shows them after \`command <dir> reload '{}'\`.
+           a new page (one try per item). In a space every open page shows them once the change is saved;
+           elsewhere a served page shows them after \`command <dir> reload '{}'\`.
 `;
 
 function parseArgs(argv) {
@@ -379,8 +380,12 @@ function locate(dir) {
   if (!found) fail(`no running binder for ${dir} (start one with: instafy-bind serve <dir>)`);
   const abs = fs.realpathSync(path.resolve(dir));
   const sites = found.state.sites || [];
-  const site = sites.find((s) => fs.existsSync(s.dir) && fs.realpathSync(s.dir) === abs) || (sites.length === 1 ? sites[0] : null);
-  if (!site) fail(`${dir} is a gallery; name one site folder (${sites.map((s) => s.name).join(", ")})`);
+  // The binder's own folder names its one site (a folder of sites that holds only one). Any other folder below it that
+  // is none of its sites is a page something else serves: a command for it would reach this binder's viewers instead.
+  const atRoot = fs.realpathSync(found.root) === abs;
+  const site = sites.find((s) => fs.existsSync(s.dir) && fs.realpathSync(s.dir) === abs) || (atRoot && sites.length === 1 ? sites[0] : null);
+  if (!site && atRoot) fail(`${dir} is a gallery; name one site folder (${sites.map((s) => s.name).join(", ")})`);
+  if (!site) fail(`no running binder serves ${dir} (the binder above it serves ${sites.map((s) => s.name).join(", ") || "no site"})`);
   return { url: found.state.url, root: found.root, site };
 }
 

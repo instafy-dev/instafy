@@ -76,8 +76,8 @@ own kind of page.
    the phone screenshot.
 3. Never post preview, tunnel or localhost URLs. A public link only when the user asks for one:
    `instafy-frontend-previews`.
-4. After an edit no new card is needed; reload the open page if the builder can (`instafy bind command <dir>
-   reload '{}'`). If the server stopped, rerun the same `instafy preview open`.
+4. After an edit no new card is needed: once your change is saved, every open view of the page loads it again by
+   itself. If the server stopped, rerun the same `instafy preview open`.
 
 ## 4. Reply
 

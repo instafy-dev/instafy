@@ -452,12 +452,13 @@ async fn the_stopped_turns_report_ends_the_job_here_only_when_recorded() {
     assert!(StoppedTurnChanges::of_lost_lease(&anyhow!("lease lost")).is_none());
 }
 
-// A local test, Nov 5: a Stop during the save kept a turn's change to a bound
-// page, but the page open in two places showed it only after a Reload: the
-// turn never got to its own reload. Once the controller records what the
-// stopped turn changed, every view open on that site gets the reload a turn
-// sends after it changes a bound site, from the workspace, with no
-// credential, as after an Undo.
+// A local test, Nov 5: a Stop kept a turn's change to a bound page, but the
+// page open in two places showed it only after a Reload: the turn never got
+// to its own reload. Once the controller records what a stopped turn that
+// never saved changed, every view open on that site gets the reload, from the
+// workspace, with no credential, as after an Undo. A turn whose save ran
+// before the Stop reached it sent that reload right after its save, as every
+// saved change does: its report sends no second one.
 #[cfg(unix)]
 #[test]
 fn a_change_a_stop_kept_reloads_the_views_open_on_its_site() {
@@ -522,7 +523,7 @@ exit 1
         .enable_all()
         .build()
         .unwrap();
-    let workspace = runtime.block_on(async {
+    runtime.block_on(async {
         let (mut config, mut received) = controller(StatusCode::OK).await;
         config.workspace_root = sandbox.join("root");
         let processor = JobProcessor::new(Arc::new(config.clone()));
@@ -550,12 +551,56 @@ exit 1
             .to_string(),
         )
         .unwrap();
+        let registration = crate::jobs::tests::test_registration_with_proxy();
+        let client = ControllerClient::new(&config).unwrap();
+        let reloads = || {
+            fs::read_to_string(sandbox.join("seen"))
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.starts_with("args=bind "))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+
+        // The Stop reached the turn while its model ran: it lost its lease
+        // with its change in the folder, never saved.
+        let start = TurnStart::default();
+        let before = super::super::collect_git_status_porcelain(&workspace)
+            .await
+            .unwrap();
+        start.record(&workspace, &before);
         fs::write(
             workspace.join("sites/porto/app.js"),
             "tip: \"Arrive at opening\"\n",
         )
         .unwrap();
-        // The turn's model was done and its save ran when the Stop reached it.
+        let error = start
+            .attach_to_lost_lease(Err(anyhow!("lease lost")))
+            .await
+            .expect_err("the turn lost its lease");
+        let changes = StoppedTurnChanges::of_lost_lease(&error).expect("the turn changed a file");
+        assert!(
+            processor
+                .report_stopped_turn(&client, &registration, &job, changes)
+                .await
+        );
+        received.try_recv().expect("one end report");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while reloads().is_empty() && std::time::Instant::now() < until {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            reloads(),
+            vec![format!(
+                "args=bind command ./sites/porto reload {{}} | cwd={} | job=",
+                workspace.canonicalize().unwrap().display()
+            )]
+        );
+
+        // The Stop reached the next turn after its model was done and its
+        // save ran: that save sent the site its reload already.
+        fs::write(workspace.join("sites/porto/app.js"), "tip: \"Go early\"\n").unwrap();
         let execution = finished_execution(vec![
             json!({
                 "kind": "apply/files",
@@ -568,34 +613,14 @@ exit 1
         ]);
         let changes = StoppedTurnChanges::of_finished_turn(workspace.clone(), &execution)
             .expect("the turn changed a file");
-        let registration = crate::jobs::tests::test_registration_with_proxy();
-        let client = ControllerClient::new(&config).unwrap();
         assert!(
             processor
                 .report_stopped_turn(&client, &registration, &job, &changes)
                 .await
         );
         received.try_recv().expect("one end report");
-        workspace
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert_eq!(reloads().len(), 1, "{:?}", reloads());
     });
-
-    let seen = || fs::read_to_string(sandbox.join("seen")).unwrap_or_default();
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !seen().contains("args=bind ") && std::time::Instant::now() < until {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let reloads: Vec<String> = seen()
-        .lines()
-        .filter(|line| line.starts_with("args=bind "))
-        .map(str::to_string)
-        .collect();
-    assert_eq!(
-        reloads,
-        vec![format!(
-            "args=bind command ./sites/porto reload {{}} | cwd={} | job=",
-            workspace.canonicalize().unwrap().display()
-        )]
-    );
     drop(runtime);
 }

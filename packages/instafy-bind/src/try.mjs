@@ -132,7 +132,7 @@ export async function tryIntent(siteDir, name, rawParams = "{}", { allowLocal = 
   if (save && exit === 0 && accepted.length) {
     const file = writeRecords(dir, targetOf(name, def), accepted, { attribution: bound.attribution || [] });
     saved = { file: file.rel, records: file.applied.length, version: file.version };
-    lines.push(`saved ${file.applied.length} record(s) to ${file.rel} (version ${file.version}); a page that is already open shows them after a reload command`);
+    lines.push(`saved ${file.applied.length} record(s) to ${file.rel} (version ${file.version})`);
   } else if (save) lines.push("saved nothing: the try failed");
   writeTried(dir, name, { hash: handlerHash(resolved.handler), ok: exit === 0, at: new Date().toISOString() });
   return { exit, lines, accepted, rejected, saved, error: failure ? { code: failure.code, message: failure.message } : null };

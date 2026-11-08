@@ -17,7 +17,10 @@
 //! its model is done, while its changes are saved: the controller then refuses
 //! the job's completion, and the job loop sends the same report of the files
 //! the finished turn's reply would have listed, with its save
-//! ([`StoppedTurnChanges::of_finished_turn`]).
+//! ([`StoppedTurnChanges::of_finished_turn`]). A Stop that reaches the
+//! controller once the model is done but before the save is let in refuses
+//! that save: the turn then ends as one that lost its lease, with its change
+//! kept and never saved ([`a_stop_refused_the_save`]).
 //!
 //! The report is the turn's step that names the edit, as a finished turn's
 //! step does, and the files, as a finished turn's reply lists them. The step
@@ -26,9 +29,11 @@
 //! The controller takes the report only from the runtime that held the job,
 //! once, for a job it cancelled moments before, and only to record it: the
 //! job stays cancelled and its charge stays as the Stop left it. The turn's
-//! line then names the edit, with Review changes and Undo. The turn never got
-//! to its own reload, so every view open on a site it changed loads it again,
-//! as after an Undo, and the site's preview is pictured again.
+//! line then names the edit, with Review changes and Undo. A turn whose save
+//! ran before the Stop reached it sent its sites' reload after that save, as
+//! every saved change does; for one that never saved, every view open on a
+//! site it changed loads it again now, as after an Undo, and the site's
+//! preview is pictured again.
 //!
 //! A job whose lease was lost to a stop of this runtime is back in the queue,
 //! not cancelled: the controller turns its report down, and the job's next
@@ -43,6 +48,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Result;
 use parking_lot::Mutex;
@@ -52,9 +58,30 @@ use tracing::info;
 use super::preview_pictures::{changed_paths, reload_and_picture_changed_sites};
 use super::{CodexFileDescriptor, GitStatusEntry, JobExecution, JobMessage, JobProcessor};
 use crate::controller::{ControllerClient, LeaseJob, MAX_AGENT_METADATA_ARRAY_ITEMS, Registration};
+use crate::job_cancel::JobCancelSignal;
 
 /// The step's id in its turn: one per stopped turn.
 const STOPPED_TURN_STEP_ID: &str = "stopped-turn-files";
+
+/// How long a turn whose save failed waits to learn whether a Stop refused
+/// it: the job's heartbeat asks the controller every second.
+const STOP_NOTICE: Duration = Duration::from_secs(2);
+
+/// Whether a Stop refused the save of a turn whose model was done. The
+/// controller lets no save in for a job it stopped, so a Stop that reached it
+/// before the save's lease (or the origin's token) was granted fails the
+/// save, and the job's heartbeat sets `cancel` within about a second. Such a
+/// turn ends as one that lost its lease: its report records the change it
+/// kept, never saved, and sends that change's one reload. Any other failed
+/// save fails the turn, as before.
+pub(super) async fn a_stop_refused_the_save(cancel: Option<&JobCancelSignal>) -> bool {
+    let Some(cancel) = cancel else {
+        return false;
+    };
+    tokio::time::timeout(STOP_NOTICE, cancel.cancelled())
+        .await
+        .is_ok()
+}
 
 /// How a turn's folder began, for what the turn changed should it lose its
 /// lease. Set once the turn has taken the folder's `git status`.
@@ -315,11 +342,12 @@ impl JobProcessor {
 
     /// What a stopped turn changed goes to the controller in one end report.
     /// A Stop cancelled the job, and the controller records the report on its
-    /// turn; the job then ended here, and the open views of the sites it
-    /// changed reload and their previews are pictured again
-    /// ([`reload_and_picture_changed_sites`]). A job a stop of this runtime
-    /// put back in the queue is turned down, and keeps its record of how its
-    /// turn began for its next lease. Whether the controller recorded it.
+    /// turn; the job then ended here, and, unless the turn's own save ran and
+    /// reloaded them, the open views of the sites it changed reload and their
+    /// previews are pictured again ([`reload_and_picture_changed_sites`]). A
+    /// job a stop of this runtime put back in the queue is turned down, and
+    /// keeps its record of how its turn began for its next lease. Whether the
+    /// controller recorded it.
     pub(crate) async fn report_stopped_turn(
         &self,
         client: &ControllerClient,
@@ -347,10 +375,14 @@ impl JobProcessor {
                     "recorded what the stopped turn changed"
                 );
                 super::turn_baseline::forget(&changes.workspace_dir, job.id);
-                // The change is kept in the folder, but the turn never got to
-                // its own reload: every open view of a site it changed loads
-                // it, then the site is pictured again, as after an Undo.
-                if let Ok(project_id) = self.project_id_for_job(job) {
+                // The change is kept in the folder. A turn whose save ran
+                // reloaded the open views of the sites it changed after that
+                // save; one that never saved did not: every open view of a
+                // site it changed loads it, then the site is pictured again,
+                // as after an Undo.
+                if changes.save.is_none()
+                    && let Ok(project_id) = self.project_id_for_job(job)
+                {
                     reload_and_picture_changed_sites(
                         changes.workspace_dir.clone(),
                         project_id,
