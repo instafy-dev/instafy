@@ -28,10 +28,12 @@
 //
 // The card. A page someone asked for ends with its card: run in the site's folder, `instafy preview open --start`
 // serves the site with `serve --preview`, keeps it serving after the turn and posts the card. So in a space `init`
-// names that command as its next step, and until a preview of the space shows the site a check that passes runs it
-// itself (titled from the page) and any other check ends with it. The command serves a site only from inside the
-// space's workspace (the CLI's resolveWorkspaceRoot: WORKSPACE_PROJECT_DIR, else WORKSPACE_DIR/<space>); anywhere
-// else the binder runs on its own and names no card.
+// names that command as its next step, and until a preview of the space shows the site any check ends with it. A check
+// that passes on a new page runs it itself (titled from the page): one whose card was never opened, which the space's
+// record of its pages (`.instafy/pages/pages.json`, the CLI's space-pages.ts) does not hold. A page it holds had its
+// card, in this chat or another, and may be stopped on purpose, or stopped with the machine; its check only names the
+// command. The command serves a site only from inside the space's workspace (the CLI's resolveWorkspaceRoot:
+// WORKSPACE_PROJECT_DIR, else WORKSPACE_DIR/<space>); anywhere else the binder runs on its own and names no card.
 // Whether a preview shows a folder is read from the same state file: `instafy preview open` records with each preview
 // its space and the folder its site is served from (`siteDir`, relative to the space's workspace), which the runtime
 // also reads to take a card's picture again after a turn changes that folder. That folder is the one the CLI runs in
@@ -180,6 +182,36 @@ function workspaceOf(env, space) {
   if (project) return space === own ? project : null;
   const base = clean(env.WORKSPACE_DIR);
   return base && /^[\w-]+$/.test(space) ? path.join(base, space) : null;
+}
+
+/** The space's workspace as the CLI resolves it (resolveWorkspaceRoot): WORKSPACE_PROJECT_DIR, else
+ *  WORKSPACE_DIR/<space> for the space the environment names; null without one. */
+function spaceWorkspace(env) {
+  const project = clean(env.WORKSPACE_PROJECT_DIR);
+  if (project) return project;
+  const base = clean(env.WORKSPACE_DIR);
+  const own = clean(env.SPACE_ID) ?? clean(env.CONTROLLER_SPACE_ID);
+  return base && own && /^[\w-]+$/.test(own) ? path.join(base, own) : null;
+}
+
+/** The space's record of its pages, in its workspace: `instafy preview open` writes each page's folder there the first
+ *  time its card is opened, with the chat the card went to (the CLI's space-pages.ts). */
+const PAGES_RECORD = path.join(".instafy", "pages", "pages.json");
+
+/** Whether the space's record of its pages holds the site in `dir`: a page whose card was opened before, in this chat or
+ *  another, which a person may have stopped since, or which stopped with the machine. */
+export function pageRecorded(dir, { env = process.env } = {}) {
+  const root = spaceWorkspace(env);
+  if (root === null) return false;
+  const folder = path.relative(realOr(root), realOr(dir)).split(path.sep).join("/");
+  if (!folder || folder === ".." || folder.startsWith("../") || path.isAbsolute(folder)) return false;
+  let pages;
+  try {
+    pages = JSON.parse(fs.readFileSync(path.join(root, PAGES_RECORD), "utf8"))?.pages;
+  } catch {
+    return false;
+  }
+  return Array.isArray(pages) && pages.some((page) => typeof page?.folder === "string" && page.folder.replace(/^\.\//, "").replace(/\/+$/, "") === folder);
 }
 
 /** Whether a preview the CLI opened for this space shows the site in `dir`: one it recorded with that folder as the

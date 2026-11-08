@@ -26,13 +26,24 @@ function space() {
   const home = path.join(base, "home");
   fs.mkdirSync(project, { recursive: true });
   fs.mkdirSync(home);
-  // `instafy` on the turn's PATH, for the card's command a passing check runs: it notes where it ran and with what, and
-  // answers as `instafy preview open --json` does
+  // `instafy` on the turn's PATH, for the card's command a passing check runs: it notes where it ran and with what,
+  // writes the page in the space's record of its pages the first time its card is opened, and answers, as
+  // `instafy preview open --json` does
   const bin = path.join(base, "bin");
   const cardLog = path.join(base, "cards.jsonl");
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, "card.mjs"), `import fs from "node:fs";
-fs.appendFileSync(${JSON.stringify(cardLog)}, JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2) }) + "\\n");
+import path from "node:path";
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(cardLog)}, JSON.stringify({ cwd: process.cwd(), args }) + "\\n");
+const root = fs.realpathSync(process.env.WORKSPACE_PROJECT_DIR || path.join(process.env.WORKSPACE_DIR, process.env.SPACE_ID));
+const file = path.join(root, ".instafy", "pages", "pages.json");
+let pages = [];
+try { pages = JSON.parse(fs.readFileSync(file, "utf8")).pages; } catch {}
+const folder = path.relative(root, process.cwd()).split(path.sep).join("/");
+if (!pages.some((page) => page.folder === folder)) pages.unshift({ folder, title: args[args.indexOf("--title") + 1], server: ["instafy", "bind"], openedAt: new Date().toISOString() });
+fs.mkdirSync(path.dirname(file), { recursive: true });
+fs.writeFileSync(file, JSON.stringify({ version: 1, pages }));
 process.stdout.write(JSON.stringify({ status: "live", port: 24087 }, null, 2) + "\\n");
 `);
   fs.writeFileSync(path.join(bin, "instafy"), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(bin, "card.mjs"))} "$@"\n`, { mode: 0o755 });
@@ -57,6 +68,12 @@ process.stdout.write(JSON.stringify({ status: "live", port: 24087 }, null, 2) + 
     preview,
     record,
     open: (siteDir, extra = {}) => record(preview(siteDir, extra)),
+    // what `instafy preview open` writes in the space's record of its pages, kept with the space's files (`.instafy/`)
+    pages: (...folders) => {
+      const file = path.join(project, ".instafy", "pages", "pages.json");
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify({ version: 1, pages: folders.map(({ folder, chat }) => ({ folder, title: "A page", ...(chat ? { conversationId: chat } : {}), server: ["instafy", "bind"], openedAt: "2026-11-08T08:15:00.000Z" })) }, null, 2));
+    },
     // the card commands a check ran: [{ cwd, args }]
     cards: () => (fs.existsSync(cardLog) ? fs.readFileSync(cardLog, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : []),
     done: () => fs.rmSync(base, { recursive: true, force: true }),
@@ -101,11 +118,14 @@ test("until a preview shows the site, a check that passes posts its card itself,
     assert.equal(lastLine(passed.stdout), "}");
     assert.doesNotMatch(passed.stdout, /^next:/m);
     assert.deepEqual(s.cards(), [{ cwd: fs.realpathSync(path.join(s.project, "sites", "laptops")), args: cardArgs("Compare three options") }]);
+    // the card's command wrote the page in the space's record of its pages: no check posts it again, and while this
+    // machine shows no preview of it, a check names the command, as before
     const json = JSON.parse(s.run(["check", "sites/laptops", ...expect, "--json"]).stdout);
     assert.equal(json.ok, true);
-    assert.deepEqual(json.card, { posted: true, command: titled, answer: { status: "live", port: 24087 } });
-    assert.equal(json.next, undefined);
-    assert.equal(s.cards().length, 2);
+    assert.equal(json.card, undefined);
+    assert.equal(json.next, `post its card: (cd sites/laptops && ${OPEN})`);
+    assert.equal(lastLine(s.run(["check", "sites/laptops", ...expect]).stdout), `next: post its card: (cd sites/laptops && ${OPEN})`);
+    assert.equal(s.cards().length, 1);
 
     // a check that fails says what to fix, and still ends with the card's command
     const failed = s.run(["check", "sites/laptops", "--expect", "Option D"]);
@@ -129,9 +149,51 @@ test("until a preview shows the site, a check that passes posts its card itself,
 
     // a preview of another folder is not this site's card
     s.open("sites/other");
-    const before = s.cards().length;
-    assert.match(s.run(["check", "sites/laptops", ...expect]).stdout, /^Posted its card: /m);
-    assert.equal(s.cards().length, before + 1);
+    assert.equal(lastLine(s.run(["check", "sites/laptops", ...expect]).stdout), `next: post its card: (cd sites/laptops && ${OPEN})`);
+    assert.equal(s.cards().length, 1);
+  } finally {
+    s.done();
+  }
+});
+
+// A check that passes posts the card of a new page: one whose card was never opened, so the space's record of its pages
+// (where `instafy preview open` writes each page with the chat its card went to) has no row for it. A page with a row
+// had its card: another chat's page, a page whose site a person asked to stop, or any page once the space's machine
+// started again, when this machine's home folder has no record of its preview. Posting there would send that page's
+// card to whichever chat ran the check, or start a site someone stopped: the check names the card's command instead,
+// as before.
+test("a passing check posts no card for a page the space's record holds: another chat's, a stopped one, or after a restart", () => {
+  const s = space();
+  try {
+    s.run(["init", "sites/laptops", "--starter", "compare"]);
+    s.run(["init", "sites/tablets", "--starter", "compare"]);
+    s.pages({ folder: "sites/laptops", chat: "6f0e3c7d-2b19-4d8a-9a51-b0f6a1de2c4e" }, { folder: "sites/old-plan" });
+    const expect = ["--expect", "Option A, Option B, Option C"];
+    const held = s.run(["check", "sites/laptops", ...expect]);
+    assert.equal(held.status, 0, held.stdout + held.stderr);
+    assert.equal(lastLine(held.stdout), `next: post its card: (cd sites/laptops && ${OPEN})`);
+    assert.doesNotMatch(held.stdout, /^Posted its card/m);
+    const json = JSON.parse(s.run(["check", "sites/laptops", ...expect, "--json"]).stdout);
+    assert.equal(json.next, `post its card: (cd sites/laptops && ${OPEN})`);
+    assert.equal(json.card, undefined);
+    // run from inside the folder, or with the record's folder written "./sites/laptops/", it is the same page
+    assert.doesNotMatch(s.run(["check", ".", ...expect], { cwd: path.join(s.project, "sites", "laptops") }).stdout, /^Posted its card/m);
+    s.pages({ folder: "./sites/laptops/" });
+    assert.doesNotMatch(s.run(["check", "sites/laptops", ...expect]).stdout, /^Posted its card/m);
+    assert.deepEqual(s.cards(), []);
+    // a page the record does not hold is new: it gets its card
+    assert.match(s.run(["check", "sites/tablets", ...expect]).stdout, /^Posted its card: /m);
+    assert.deepEqual(s.cards().map((card) => card.cwd), [fs.realpathSync(path.join(s.project, "sites", "tablets"))]);
+
+    // a space whose workspace is its own folder (WORKSPACE_PROJECT_DIR) keeps the record there
+    const folder = path.join(s.base, "folder-b");
+    fs.mkdirSync(path.join(folder, ".instafy", "pages"), { recursive: true });
+    const b = { PATH: s.env.PATH, HOME: s.env.HOME, WORKSPACE_PROJECT_DIR: folder, SPACE_ID: SPACE };
+    assert.equal(s.run(["init", "sites/laptops", "--starter", "compare"], { cwd: folder, environment: b }).status, 0);
+    fs.writeFileSync(path.join(folder, ".instafy", "pages", "pages.json"), JSON.stringify({ version: 1, pages: [{ folder: "sites/laptops", title: "A page", server: ["instafy", "bind"], openedAt: "2026-11-08T08:15:00.000Z" }] }));
+    const own = s.run(["check", "sites/laptops", ...expect], { cwd: folder, environment: b });
+    assert.equal(lastLine(own.stdout), `next: post its card: (cd sites/laptops && ${OPEN})`, own.stdout);
+    assert.equal(s.cards().length, 1);
   } finally {
     s.done();
   }
@@ -175,6 +237,9 @@ test("a page that loads another page's files fails the check with the command th
     const passed = s.run(["check", "sites/framework-13-vs-16", ...expect]);
     assert.equal(passed.status, 0, passed.stdout + passed.stderr);
     assert.deepEqual(s.cards(), [{ cwd: fs.realpathSync(page), args: cardArgs("Framework Laptop 13 vs 16") }]);
+    // once: its next check finds it in the space's record of its pages
+    assert.doesNotMatch(s.run(["check", "sites/framework-13-vs-16", ...expect]).stdout, /^Posted its card/m);
+    assert.equal(s.cards().length, 1);
 
     // nothing in its folder reaches above it, and it serves on its own, as its card serves it
     for (const file of filesIn(page)) assert.doesNotMatch(fs.readFileSync(file, "utf8"), /\.\.\//, file);
@@ -293,8 +358,10 @@ test("another space's preview is not this site's card, though their folders have
     const passed = run(["check", "sites/laptops", ...expect]);
     assert.equal(passed.status, 0, passed.stdout + passed.stderr);
     assert.match(passed.stdout, /^Posted its card: ran \(cd sites\/laptops && instafy preview open /m);
-    assert.equal(JSON.parse(run(["check", "sites/laptops", ...expect, "--json"]).stdout).card.posted, true);
-    assert.deepEqual(s.cards().map((card) => card.cwd), Array(2).fill(fs.realpathSync(path.join(folder, "sites", "laptops"))));
+    assert.deepEqual(s.cards().map((card) => card.cwd), [fs.realpathSync(path.join(folder, "sites", "laptops"))]);
+    // written in its own space's record of its pages, it is posted once
+    assert.equal(JSON.parse(run(["check", "sites/laptops", ...expect, "--json"]).stdout).next, `post its card: (cd sites/laptops && ${OPEN})`);
+    assert.equal(s.cards().length, 1);
     // its own preview of the folder is its card
     s.record(s.preview("sites/laptops"), s.preview("sites/laptops", { projectId: OTHER_SPACE, localPort: 24088 }));
     const shown = run(["check", "sites/laptops", ...expect]);

@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { UNAVAILABLE_KEYS, checkSite, checkValues, htmlLines, htmlText, jsonStrings, leavesFolder, names, parseExpect, uncitedRows } from "../src/check.mjs";
+import { UNAVAILABLE_KEYS, checkSite, checkValues, htmlLines, htmlText, jsonStrings, names, parseExpect, servedPath, uncitedRows } from "../src/check.mjs";
 import { readScript } from "../src/script-text.mjs";
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "instafy-bind.mjs");
@@ -716,11 +716,78 @@ test("check fails a page that loads a file from outside its folder, and names th
   }
 });
 
-test("a path climbs out of a site's folder only above its top", () => {
-  for (const [ref, from, out] of [
-    ["../other/site.js", "", true], ["./../other/site.js", "", true], ["a/../../x.js", "", true], ["..\\other\\x.js", "", true],
-    ["../../x.js", "sub", true], ["../theme.css", "sub", false], ["a/../x.js", "", false], ["theme.css?v=2", "", false],
-    ["/theme.css", "", false], ["//cdn.example/x.js", "", false], ["https://cdn.example/x.js", "", false],
-    ["data:image/png;base64,AAAA", "", false], ["#top", "", false], ["", "", false],
-  ]) assert.equal(leavesFolder(ref, from), out, `${ref} from "${from}"`);
+test("a path climbs out of a site's folder only above its top, and a page's <base href> moves where it starts", () => {
+  const out = { out: true };
+  const at = (file, rooted = false) => ({ path: file, rooted });
+  for (const [ref, from, base, served] of [
+    ["../other/site.js", "", null, out], ["./../other/site.js", "", null, out], ["a/../../x.js", "", null, out], ["..\\other\\x.js", "", null, out],
+    ["%2e%2e/other/x.js", "", null, out], ["../../x.js", "sub", null, out], ["../theme.css", "sub", null, at("theme.css")],
+    ["a/../x.js", "", null, at("x.js")], ["theme.css?v=2", "", null, at("theme.css")], ["/theme.css", "sub", null, at("theme.css", true)],
+    ["/sites/other/site.js", "", null, at("sites/other/site.js", true)], ["//cdn.example/x.js", "", null, null],
+    ["https://cdn.example/x.js", "", null, null], ["data:image/png;base64,AAAA", "", null, null], ["#top", "", null, null], ["", "", null, null],
+    // relative paths start from the page's <base href>
+    ["site.js", "", "../other/", out], ["site.js", "", "../other/index.html", out], ["site.js", "", "/sites/other/", at("sites/other/site.js", true)],
+    ["site.js", "", "js/", at("js/site.js")], ["site.js", "", "page.html", at("site.js")], ["site.js", "", "https://cdn.example/lib/", null],
+    ["/theme.css", "", "../other/", at("theme.css", true)],
+  ]) assert.deepEqual(servedPath(ref, from, base), served, `${ref} from "${from}" under ${base}`);
+});
+
+// A page is served from its own folder at "/". A path from that root that names no file of the folder but one of a
+// folder above it ("/sites/framework-laptops/site.js", or "/framework-laptops/site.js" as a folder of sites serves it),
+// a <base href> that moves the page's paths into another folder, and a link in the folder to another folder's file
+// (the binder never serves one) each load another page's files: served on its own, the page gets 404s for them. The
+// check fails each with the init line. A path from the root to a file of its own folder, a missing icon, an address of
+// another site, a data: URL, the binder's own files and a link that points at a page still pass.
+test("check fails a page that loads another page's files by a path from the root, through its <base href> or a link", () => {
+  const space = fs.mkdtempSync(path.join(os.tmpdir(), "bind-check-root-"));
+  try {
+    const sites = path.join(space, "sites");
+    const first = path.join(sites, "framework-laptops");
+    execFileSync(process.execPath, [BIN, "init", first, "--starter", "compare"], { env: cleanEnv });
+    const page = (name, html, files = {}) => {
+      const dir = path.join(sites, name);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "index.html"), `<!doctype html><title>Two laptops</title>${html}<h1>Framework Laptop 13</h1>`);
+      for (const [file, body] of Object.entries(files)) fs.writeFileSync(path.join(dir, file), body);
+      return dir;
+    };
+    const fails = (dir, loads, init) => {
+      const name = path.relative(sites, dir);
+      const out = run("check", dir, "--expect", "Framework Laptop 13");
+      assert.equal(out.status, 1, `${name}: ${out.stdout}${out.stderr}`);
+      assert.deepEqual(checkSite(dir, ["Framework Laptop 13"]).outside, loads, name);
+      assert.match(out.stdout, new RegExp(`^Give it its own files: .*\`instafy bind init ${dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} --starter ${init}\``, "m"), `${name}: ${out.stdout}`);
+      return out.stdout;
+    };
+    const root = page("root-path", '<link rel="stylesheet" href="/sites/framework-laptops/theme.css"><script src="/sites/framework-laptops/site.js"></script><script src="/sites/framework-laptops/app.js"></script>');
+    const said = fails(root, [{ file: "index.html", loads: ["/sites/framework-laptops/theme.css", "/sites/framework-laptops/site.js", "/sites/framework-laptops/app.js"] }], "compare");
+    assert.match(said, /Load each from the page's own folder \(theme\.css, not \/sites\/framework-laptops\/theme\.css\), then check again\.$/m);
+    fails(page("gallery-path", '<script src="/framework-laptops/app.js"></script>'), [{ file: "index.html", loads: ["/framework-laptops/app.js"] }], "compare");
+    fails(page("base-out", '<base href="../framework-laptops/"><link rel="stylesheet" href="theme.css"><script src="app.js"></script>'), [{ file: "index.html", loads: ["theme.css", "app.js"] }], "compare");
+    fails(page("base-root", '<base href="/sites/framework-laptops/"><script src="app.js"></script>'), [{ file: "index.html", loads: ["app.js"] }], "compare");
+    // a script's path from the root, and an import map's path
+    fails(page("script-root", '<script src="app.js"></script>', { "app.js": 'fetch("/sites/framework-laptops/data.json"); site.post("/api/save");' }), [{ file: "app.js", loads: ["/sites/framework-laptops/data.json"] }], "blank");
+    fails(page("import-map", '<script type="importmap">{"imports": {"app": "../framework-laptops/app.js"}}</script>'), [{ file: "index.html", loads: ["../framework-laptops/app.js"] }], "compare");
+    // links to the other page's files: theme.css and site.js, and a folder of pictures
+    const linked = page("linked", '<link rel="stylesheet" href="theme.css"><script src="site.js"></script><img src="img/a.png" alt="">');
+    fs.symlinkSync(path.join(first, "theme.css"), path.join(linked, "theme.css"));
+    fs.symlinkSync("../framework-laptops/site.js", path.join(linked, "site.js"));
+    fs.mkdirSync(path.join(first, "pictures"));
+    fs.symlinkSync("../framework-laptops/pictures", path.join(linked, "img"));
+    const links = fails(linked, [{ file: "img", link: "../framework-laptops/pictures" }, { file: "site.js", link: "../framework-laptops/site.js" }, { file: "theme.css", link: "../framework-laptops/theme.css" }], "blank");
+    assert.match(links, /^OUTSIDE: img is a link to \.\.\/framework-laptops\/pictures; site\.js is a link to \.\.\/framework-laptops\/site\.js; theme\.css is a link to \.\.\/framework-laptops\/theme\.css, from outside /m);
+    assert.match(links, /^Give it its own files: delete the links first \(img, site\.js and theme\.css; that leaves the files they point to alone\), then `instafy bind init .* --starter blank` adds the starter's files it lacks and keeps yours\. Copy \.\.\/framework-laptops\/pictures into its folder too\. Then check again\.$/m);
+
+    // the page's own files from the root, a missing icon, other sites, data: and the binder's own files pass
+    const own = page("own", `<link rel="stylesheet" href="/theme.css"><link rel="icon" href="/favicon.ico"><link rel="canonical" href="../framework-laptops/">
+<script src="/__bind/client.js"></script><script src="https://cdn.jsdelivr.net/npm/x@1.0.0/x.js"></script><img src="data:image/png;base64,AAAA" alt="">
+<a href="/sites/framework-laptops/">the other comparison</a><script src="/js/app.js"></script><img src="/my%20photo.png" alt="">
+<script type="application/ld+json">{"url": "../framework-laptops/index.html"}</script>`, { "theme.css": "body { background: url(/img/bg.png) }", "data.json": "{}", "my photo.png": "" });
+    fs.mkdirSync(path.join(own, "js"));
+    fs.writeFileSync(path.join(own, "js", "app.js"), 'fetch("/data.json"); fetch("../data.json");');
+    assert.deepEqual(checkSite(own, ["Framework Laptop 13"]).outside, []);
+    assert.equal(run("check", own, "--expect", "Framework Laptop 13").status, 0);
+  } finally {
+    fs.rmSync(space, { recursive: true, force: true });
+  }
 });

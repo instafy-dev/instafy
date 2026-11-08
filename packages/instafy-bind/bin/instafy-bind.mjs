@@ -17,7 +17,7 @@ import { envNameRefusal } from "../src/executors/script.mjs";
 import { DEFAULT_AGENT_BUDGET_PER_HOUR } from "../src/budget.mjs";
 import { handlerHash, readTried, tryIntent } from "../src/try.mjs";
 import { cardTitle, checkReport } from "../src/check.mjs";
-import { cardArgs, cardCommand, inFolder, inSpace, previewShows, shellWord } from "../src/preview-host.mjs";
+import { cardArgs, cardCommand, inFolder, inSpace, pageRecorded, previewShows, shellWord } from "../src/preview-host.mjs";
 
 const HELP = `instafy-bind: a website plus a generic backend that turns clicks into typed intents.
 
@@ -71,9 +71,9 @@ check      Does the site show every item the request named (each product, stop o
            another site), so it cannot tell. It also fails a page that loads a file from outside its folder (a
            page is served from its own folder) and names the init command that gives it its own files. Items:
            --expect, plus an "expect" array in data.json. Run it before telling anyone the page is done. In a
-           space, while no preview shows the site, a check that passes serves it and posts its card itself, and
-           any other check ends with the command that does: a failing check never holds the card back, except
-           for a page that loads files from outside its folder.
+           space, while no preview shows the site, a check that passes on a new page (one whose card was never
+           opened) serves it and posts its card itself, and any other check ends with the command that does: a
+           failing check never holds the card back, except for a page that loads files from outside its folder.
 command    Push a command (select, highlight, toast, reload) to every open viewer. Uses the
            admin token in .bind/admin-token.
 confirm    Approve (or --no: decline) jobs waiting for confirmation.
@@ -626,7 +626,8 @@ async function main() {
       if (!rest[0]) fail('usage: instafy-bind check <dir> --expect "<item>,<item>" [--json]', 64);
       let report;
       try {
-        report = checkReport(rest[0], flags.expect ?? [], { json: Boolean(flags.json), card: cardStep(rest[0]), post: () => postCard(rest[0]) });
+        // a new page's check posts its card; a page the space's record holds had one, and its check only names the command
+        report = checkReport(rest[0], flags.expect ?? [], { json: Boolean(flags.json), card: cardStep(rest[0]), post: pageRecorded(rest[0]) ? null : () => postCard(rest[0]) });
       } catch (error) {
         fail(error.message, 64);
       }

@@ -2383,7 +2383,7 @@ mod tests {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
         let doc = flat(AGENTS_DOC_TEMPLATE);
         for needle in [
-            "A fact or tip no page you read this turn gives says \"not checked\", in the reply and on any page you make or change, or stays out.",
+            "A fact or tip you add to the reply or a page says \"not checked\", or stays out, unless the person gave it or a page gives it: one you read this turn, or one in Instafy's browser's findings.",
             "When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\") or which page you didn't reach, never that a site or page lacks it or didn't load, unless a page you read says so.",
             "Say only steps this turn did or started.",
             "offer it as a next step instead",
@@ -2429,11 +2429,14 @@ mod tests {
     /// advice, and the reply said it too, with no "not checked" (a local test, Nov 8): the rule
     /// named only a fact, and a turn that changed a page read it, among the words for replies, as a
     /// rule for the reply alone. It names a tip as well, and the page as well as the reply, in the
-    /// one place every turn reads. The copy from before is upgraded.
+    /// one place every turn reads. It is about what the turn adds, so a page's values from earlier
+    /// turns keep their pages, and it leaves out what the person gave (a note in their own words)
+    /// and what Instafy's browser's findings give, which a building turn cites by their pages. The
+    /// copy from before is upgraded.
     #[test]
     fn a_tip_no_page_gave_says_not_checked_on_the_page_as_in_the_reply() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let rule = "- A fact or tip no page you read this turn gives says \"not checked\", in the reply and on any page you make or change, or stays out.";
+        let rule = "- A fact or tip you add to the reply or a page says \"not checked\", or stays out, unless the person gave it or a page gives it: one you read this turn, or one in Instafy's browser's findings.";
         let doc = flat(AGENTS_DOC_TEMPLATE);
         let replies = doc
             .split("## Replies")
