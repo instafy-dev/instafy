@@ -525,3 +525,292 @@ printf '{"previewId":"preview-1","description":"Livraria Lello","takenAt":%s}' "
     controller_task.await??;
     Ok(())
 }
+
+const LEASED_CHILD: &str = "INSTAFY_STOPPED_AS_LEASED_TEST_CHILD";
+const LEASED_TEST_NAME: &str =
+    "stopped_turn::a_build_stopped_as_it_was_leased_writes_nothing_into_its_thread";
+const BUILD_REQUEST: &str = "Add each laptop's warranty from its own page.";
+
+/// A local test, Nov 8: the person pressed Stop in the gap between a browser
+/// turn and its build, 0.14 s after the build was leased. The build heard of it
+/// only from its next heartbeat, a second after its lease, and by then had
+/// written its whole request into its thread, which then held a turn nobody
+/// asked for. A job asks for its lease before it writes its turn: this one is
+/// told the lease is gone, and nothing reaches the model or the thread.
+#[test]
+fn a_build_stopped_as_it_was_leased_writes_nothing_into_its_thread() -> Result<()> {
+    if std::env::var(LEASED_CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(LEASED_CHILD, LEASED_TEST_NAME, "stopped-as-leased");
+    }
+    const STACK: usize = 32 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("stopped-as-leased-proxy".to_string())
+        .stack_size(STACK)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .thread_stack_size(STACK)
+                .build()?
+                .block_on(run_stopped_as_leased())
+        })?
+        .join()
+        .map_err(|_| anyhow::anyhow!("stopped-as-leased fixture panicked"))?
+}
+
+/// Every request that reaches the model, answered with a short reply.
+async fn answer_and_count(
+    State(requests): State<Arc<StdMutex<Vec<Value>>>>,
+    Json(body): Json<Value>,
+) -> axum::response::Response {
+    requests.lock().unwrap().push(body);
+    response(json!({
+        "id":"msg_done","type":"message","role":"assistant","status":"completed",
+        "content":[{"type":"output_text","text":"Added the warranty column."}]
+    }))
+}
+
+/// The controller cancelled the job right after it was leased: every heartbeat
+/// says the lease is gone.
+async fn lease_gone() -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({ "message": "agent job lease is no longer active" })),
+    )
+        .into_response()
+}
+
+/// The files under `dir` whose text holds `needle`.
+fn files_holding(dir: &Path, needle: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if fs::read(&path)
+                .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(needle))
+            {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+async fn run_stopped_as_leased() -> Result<()> {
+    let _env = env_guard().await;
+    let workspace_root = TempDir::new()?;
+    let runtime_home = TempDir::new()?;
+    let project_id = Uuid::new_v4();
+    let workspace = workspace_root.path().join(project_id.to_string());
+    fs::create_dir_all(workspace.join("sites/porto"))?;
+    fs::write(workspace.join(PAGE), SAVED_PAGE)?;
+    git_in(&workspace, &["init", "-q", "-b", "main"])?;
+    git_in(&workspace, &["add", PAGE])?;
+    git_in(
+        &workspace,
+        &[
+            "-c",
+            "user.name=Instafy Test",
+            "-c",
+            "user.email=test@instafy.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "main",
+        ],
+    )?;
+
+    let auth_path = runtime_home.path().join("auth.json");
+    fs::write(
+        &auth_path,
+        json!({"OPENAI_API_KEY":"inert-stopped-turn-runtime-key"}).to_string(),
+    )?;
+    let mut settings = Vec::new();
+    for (key, value) in [
+        ("PROXY_REQUIRE_CONTROLLER_AUTH", "false"),
+        ("PROXY_REQUIRE_CREDENTIAL_CLAIM", "false"),
+        ("OPENAI_API_KEY", "inert-stopped-turn-runtime-key"),
+        ("CODEX_API_KEY", "inert-stopped-turn-runtime-key"),
+        ("CODEX_MODEL", "gpt-5.5"),
+        ("CODEX_MODEL_PROVIDER", "openai"),
+        ("CODEX_DISABLED", "false"),
+        ("CODEX_SANDBOX_MODE", "workspace-write"),
+        ("CODEX_ENABLE_WEB_SEARCH", "false"),
+        ("CODEX_RUNTIME_REASONING_EFFORT", "low"),
+        ("CODEX_RUN_TIMEOUT_SECONDS", "45"),
+    ] {
+        settings.push(EnvGuard::set(key, value));
+    }
+    settings.push(EnvGuard::set(
+        "CODEX_HOME",
+        runtime_home.path().to_string_lossy(),
+    ));
+    settings.push(EnvGuard::set(
+        "CODEX_AUTH_PATH",
+        auth_path.to_string_lossy(),
+    ));
+
+    let requests: Arc<StdMutex<Vec<Value>>> = Arc::new(StdMutex::new(Vec::new()));
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let upstream = listener.local_addr()?;
+    let app = Router::new()
+        .route("/backend-api/codex/responses", post(answer_and_count))
+        .with_state(requests.clone());
+    let (stub_shutdown, stub_rx) = oneshot::channel();
+    let stub_task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = stub_rx.await;
+            })
+            .await
+    });
+    let stub_guard = ChildGuard::new(stub_shutdown);
+
+    let controller = Arc::new(Controller::default());
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let controller_url = Url::parse(&format!("http://{}", listener.local_addr()?))?;
+    let app = Router::new()
+        .route("/agent/heartbeat", post(lease_gone))
+        .route("/agent/message", post(job_message))
+        .route("/agent/stopped", post(stopped_report))
+        .with_state(controller.clone());
+    let (controller_shutdown, controller_rx) = oneshot::channel();
+    let controller_task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = controller_rx.await;
+            })
+            .await
+    });
+    let controller_guard = ChildGuard::new(controller_shutdown);
+
+    let port = reserve_port()?;
+    let proxy_address = SocketAddr::from(([127, 0, 0, 1], port));
+    let credentials = auth::Credentials::ApiKey {
+        key: PROVIDER_KEY.to_string(),
+        endpoint: Some(format!("http://{upstream}/backend-api/codex/responses")),
+        default_model: Some("gpt-5.5".to_string()),
+    };
+    let (proxy_shutdown, proxy_rx) = oneshot::channel();
+    let proxy_task = tokio::spawn(proxy::run_proxy_with_shutdown(
+        proxy_address,
+        Some(credentials),
+        async {
+            let _ = proxy_rx.await;
+        },
+    ));
+    let proxy_guard = ChildGuard::new(proxy_shutdown);
+    wait_for_port(port).await?;
+    settings.push(EnvGuard::set(
+        "OPENAI_BASE_URL",
+        format!("http://{proxy_address}/v1"),
+    ));
+
+    let config = Arc::new(Config {
+        controller_base_url: controller_url.clone(),
+        controller_jwks_url: controller_url.join("/.well-known/jwks.json")?,
+        project_id,
+        runtime_id: None,
+        runtime_lease_id: None,
+        provider: "test-runtime".to_string(),
+        runtime_version: "test".to_string(),
+        capabilities: json!({}),
+        metadata: json!({}),
+        lease_scope: None,
+        workspace_manifest: None,
+        tenant_projects: Vec::new(),
+        parent_lease_id: None,
+        poll_interval: Duration::from_millis(10),
+        lease_wait: Duration::ZERO,
+        lease_max_jobs: 1,
+        lease_seconds: 30,
+        heartbeat_seconds: 30,
+        workspace_root: workspace_root.path().to_path_buf(),
+        project_workspace_override: None,
+        strict_mode: false,
+        dev_isolation_mode: false,
+        display_name: None,
+        origin: None,
+        codex_bin: None,
+        require_codex_bin: false,
+        runtime_access_token: Some("inert-stopped-turn-runtime-token".to_string()),
+        parent_dispositions_runtime_on_shutdown: false,
+    });
+    let client = Arc::new(ControllerClient::new(&config)?);
+    let executor = AgentExecutor::new(config.clone());
+    let job = LeaseJob {
+        id: Uuid::new_v4(),
+        intent: Some("feature".to_string()),
+        project_id: Some(project_id),
+        run_id: Some(Uuid::new_v4()),
+        conversation_id: None,
+        session_id: None,
+        credential_id: None,
+        payload: json!({
+            "prompt_text": BUILD_REQUEST,
+            "metadata":{"execution_mode":"apply","agentRoutingPreflight":{},"runtimeExpectations":{
+                "workspaceFileChanges":true,"commandExecution":false,"genericMcpToolExecution":false
+            }}
+        }),
+        proxy: None,
+        controller_token: None,
+        controller_token_scopes: None,
+        controller_token_expires_at: None,
+        workspace_token: None,
+        workspace_token_scopes: None,
+        workspace_token_expires_at: None,
+        lease_attempts: 1,
+        grants: Vec::new(),
+        grant_token: None,
+    };
+    let mut registration = registration_for_live(Uuid::new_v4());
+    registration.heartbeat_url = controller_url.join("/agent/heartbeat")?;
+
+    // The job as the job loop runs it, before any heartbeat of its own told it
+    // of the Stop.
+    let result = tokio::time::timeout(
+        Duration::from_secs(90),
+        executor.run_apply_with_progress(
+            client.clone(),
+            &registration,
+            &job,
+            Some(JobCancelSignal::new()),
+            None,
+        ),
+    )
+    .await
+    .context("the stopped build did not end")?;
+    let error = match result {
+        Ok(execution) => anyhow::bail!("the build ran its turn: {}", execution.summary),
+        Err(error) => error,
+    };
+    assert!(
+        is_lease_lost(&error),
+        "it ends on its lost lease: {error:#}"
+    );
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "nothing reached the model"
+    );
+    let written = files_holding(runtime_home.path(), BUILD_REQUEST);
+    assert!(
+        written.is_empty(),
+        "no thread holds its request: {written:?}"
+    );
+    assert_eq!(fs::read_to_string(workspace.join(PAGE))?, SAVED_PAGE);
+
+    drop(settings);
+    drop(proxy_guard);
+    drop(stub_guard);
+    drop(controller_guard);
+    proxy_task.await??;
+    stub_task.await??;
+    controller_task.await??;
+    Ok(())
+}

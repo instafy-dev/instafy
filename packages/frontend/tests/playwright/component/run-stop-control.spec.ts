@@ -200,7 +200,7 @@ test("failure retries exact jobs; stale completion and accepted requests are dis
   expect(errors).toEqual([]);
 });
 
-test("the persisted notice continues with one fresh targeted turn", async ({ page }) => {
+test("the persisted notice carries the stopped request on in one turn", async ({ page }) => {
   const errors = await openFixture(page);
   await page.getByTestId("chat-run-stop-button").click();
   await expect(page.getByTestId("chat-run-stop-notice")).toContainText("Stopped");

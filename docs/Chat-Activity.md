@@ -205,7 +205,10 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 
 A Stop cancels the turn's job on the controller at once. The turn learns of it from its next
 heartbeat (every running job sends one each second) or from a report the controller refuses, and
-then shuts down. A step the model sent in between has run: an edit is in the space's folder, and
+then shuts down. Right before it writes its request into its thread, a job asks the controller
+whether it still holds its lease, so a Stop that came as it was being leased (in the gap between a
+browser turn and its build, say) leaves nothing in the thread and reaches no model. A step the
+model sent in between has run: an edit is in the space's folder, and
 the job's own save at its end keeps it. The executor that ran the turn then sends the job's one
 end report (`POST /agent/stopped`): the paths whose `git status` changed during the turn, as one
 `file_change` step and the `apply/files` artifact a finished turn's reply carries

@@ -209,6 +209,37 @@ export function readChatRunStopNotice(message: ChatMessage) {
   };
 }
 
+/** The prompt metadata naming the Stop whose turn a press of Continue carries on. */
+export const CONTINUED_STOP_METADATA_KEY = "continuedStopMessageId";
+
+/** The Stop a prompt carries on (Continue), from its own or its stored prompt metadata. */
+export function readContinuedStop(message: Pick<ChatMessage, "role" | "metadata">): string | null {
+  if (message.role !== "user" || !isRecord(message.metadata)) return null;
+  const metadata = message.metadata;
+  for (const record of [metadata, metadata["prompt_metadata"], metadata["promptMetadata"]]) {
+    const stop = isRecord(record) ? normalizeString(record[CONTINUED_STOP_METADATA_KEY]) : null;
+    if (stop) return stop;
+  }
+  return null;
+}
+
+/**
+ * The prompts of presses of Continue whose Stop the chat shows: each carries
+ * on the stopped request in its own words, or sends its build again, so the
+ * chat draws no bubble for it, and the new turn's row follows the stopped one.
+ */
+export function continuePromptIds(messages: readonly ChatMessage[]): Set<string> {
+  const stops = new Set(messages
+    .filter((message) => getControllerConversationNoticeKind(message) === "run_cancellation")
+    .map((message) => message.id));
+  return new Set(messages
+    .filter((message) => {
+      const stop = readContinuedStop(message);
+      return stop !== null && stops.has(stop);
+    })
+    .map((message) => message.id));
+}
+
 export function getControllerConversationNoticeKind(
   message: ChatMessage,
 ): ControllerConversationNoticeKind | null {
