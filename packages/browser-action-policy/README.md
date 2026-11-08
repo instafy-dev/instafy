@@ -105,13 +105,15 @@ load `redaction.js` first.
   `redaction.js` first.
 
 - `linkOnly.js`: whether an address is on a site the `instafy-web-research`
-  skill keeps link-only (`references/link-only-sites.json`, skill-owned data;
-  this file only enforces it). `linkOnlyListFrom(bundled, additions)` compiles
+  workspace keeps link-only (`references/link-only-sites.json`, optional policy data;
+  this file only enforces it). The shipped policy excludes no sites; its generic wrapper
+  and placeholder definitions support custom policies and impose no restrictions by themselves.
+  `linkOnlyListFrom(bundled, additions)` compiles
   the bundled list plus what a space's copy adds (a copy only adds; one that is
-  not a list is left out with a warning; no usable bundled list gives `null`,
-  and a host then reads nothing). Each site has a `kind`: `no-agents` (its
-  terms bar AI agents or automated access; also a site with no kind or an
-  unknown one) or `no-reuse` (its terms bar copying, not reading). Where
+  not a list is left out with a warning; an explicitly empty list is valid, while
+  missing or malformed bundled data gives `null`,
+  and a host then reads nothing). Each site has a `kind`: `no-agents` (configured to restrict agent access; also a site with no kind or an
+  unknown one) or `no-reuse` (configured to restrict reuse, not reading). Where
   several entries match, the strictest wins, so a space's copy can make a site
   stricter and never looser. `linkOnlyMatch(list, address)` returns
   `{ site, why, kind, via }` or `null`, and a reader refuses the address only

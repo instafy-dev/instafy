@@ -1,0 +1,247 @@
+{
+  "schema": "instafy.link-only-sites@1",
+  "about": "Explicit test policy for matching, redirects, wrappers and guided-link validation. Not a shipped site policy.",
+  "placeholders": {
+    "query": {
+      "format": "text",
+      "about": "what to search for: a place, area, hotel or product"
+    },
+    "checkin": {
+      "format": "date",
+      "about": "arrival date"
+    },
+    "checkout": {
+      "format": "date",
+      "about": "departure date"
+    },
+    "adults": {
+      "format": "count",
+      "about": "adults"
+    },
+    "children": {
+      "format": "count",
+      "about": "children"
+    },
+    "rooms": {
+      "format": "count",
+      "about": "rooms"
+    }
+  },
+  "sites": [
+    {
+      "name": "Booking.com",
+      "match": [
+        "booking.com"
+      ],
+      "kind": "no-agents",
+      "why": "restricted by this test policy",
+      "home": "https://www.booking.com/",
+      "search": "https://www.booking.com/searchresults.html?ss={query}&checkin={checkin}&checkout={checkout}&group_adults={adults}&group_children={children}&no_rooms={rooms}"
+    },
+    {
+      "name": "Agoda",
+      "match": [
+        "agoda.com",
+        "agoda.net"
+      ],
+      "kind": "no-agents",
+      "why": "restricted by this test policy",
+      "home": "https://www.agoda.com/",
+      "deepLinks": false
+    },
+    {
+      "name": "Airbnb",
+      "match": [
+        "airbnb.*"
+      ],
+      "kind": "no-agents",
+      "why": "restricted by this test policy",
+      "home": "https://www.airbnb.com/",
+      "search": "https://www.airbnb.com/s/{query}/homes?checkin={checkin}&checkout={checkout}&adults={adults}&children={children}"
+    },
+    {
+      "name": "Amazon",
+      "match": [
+        "amazon.*",
+        "amzn.*",
+        "amzn.asia",
+        "a.co"
+      ],
+      "kind": "no-agents",
+      "why": "restricted by this test policy",
+      "home": "https://www.amazon.com/",
+      "search": "https://www.amazon.com/s?k={query}"
+    },
+    {
+      "name": "Nike",
+      "match": [
+        "nike.com"
+      ],
+      "kind": "no-agents",
+      "why": "restricted by this test policy",
+      "home": "https://www.nike.com/",
+      "search": "https://www.nike.com/w?q={query}"
+    },
+    {
+      "name": "Expedia group",
+      "match": [
+        "expedia.*",
+        "hotels.*",
+        "vrbo.*"
+      ],
+      "kind": "no-agents",
+      "why": "restricted by this test policy",
+      "home": "https://www.expedia.com/",
+      "deepLinks": false
+    },
+    {
+      "name": "Trip.com",
+      "match": [
+        "trip.com",
+        "ctrip.com"
+      ],
+      "kind": "no-agents",
+      "why": "restricted by this test policy",
+      "home": "https://www.trip.com/",
+      "deepLinks": false
+    },
+    {
+      "name": "Tripadvisor",
+      "match": [
+        "tripadvisor.*"
+      ],
+      "kind": "no-agents",
+      "why": "restricted by this test policy",
+      "home": "https://www.tripadvisor.com/",
+      "deepLinks": false
+    },
+    {
+      "name": "Google search, Maps, Travel and Hotels",
+      "match": [
+        "google.*",
+        "goo.gl"
+      ],
+      "kind": "no-agents",
+      "why": "restricted by this test policy",
+      "home": "https://www.google.com/",
+      "search": "https://www.google.com/maps/search/?api=1&query={query}"
+    },
+    {
+      "name": "RunRepeat",
+      "match": [
+        "runrepeat.com"
+      ],
+      "kind": "no-agents",
+      "why": "restricted by this test policy",
+      "home": "https://runrepeat.com/"
+    }
+  ],
+  "wrappers": [
+    {
+      "name": "Google Translate's page proxy",
+      "match": [
+        "translate.goog"
+      ],
+      "embeds": [
+        "subdomain-dashes"
+      ],
+      "why": "serves a site's pages at www-example-com.translate.goog"
+    },
+    {
+      "name": "the AMP cache",
+      "match": [
+        "cdn.ampproject.org"
+      ],
+      "embeds": [
+        "subdomain-dashes",
+        "path"
+      ],
+      "why": "serves a site's pages at www-example-com.cdn.ampproject.org/c/s/www.example.com/"
+    },
+    {
+      "name": "Google's page cache",
+      "match": [
+        "webcache.googleusercontent.com"
+      ],
+      "embeds": [
+        "path",
+        "query"
+      ],
+      "why": "serves copies at /search?q=cache:www.example.com/"
+    },
+    {
+      "name": "the Wayback Machine",
+      "match": [
+        "archive.org"
+      ],
+      "embeds": [
+        "path",
+        "query"
+      ],
+      "why": "serves copies at web.archive.org/web/<time>/<address>"
+    },
+    {
+      "name": "archive.today",
+      "match": [
+        "archive.today",
+        "archive.ph",
+        "archive.is",
+        "archive.li",
+        "archive.vn",
+        "archive.fo",
+        "archive.md"
+      ],
+      "embeds": [
+        "path",
+        "query"
+      ],
+      "why": "serves copies at archive.ph/<time>/<address> and archive.ph/newest/<address>"
+    },
+    {
+      "name": "the Jina reader proxy",
+      "match": [
+        "r.jina.ai"
+      ],
+      "embeds": [
+        "path"
+      ],
+      "why": "serves a site's text at r.jina.ai/<address>"
+    },
+    {
+      "name": "Yandex's page translator",
+      "match": [
+        "translated.turbopages.org"
+      ],
+      "embeds": [
+        "path"
+      ],
+      "why": "serves a site's pages at translated.turbopages.org/proxy_u/<languages>/https/<host>/<path>"
+    },
+    {
+      "name": "12ft.io",
+      "match": [
+        "12ft.io"
+      ],
+      "embeds": [
+        "path",
+        "query"
+      ],
+      "why": "serves a site's pages at 12ft.io/<address> and 12ft.io/proxy?q=<address>"
+    },
+    {
+      "name": "an open fetch proxy",
+      "match": [
+        "corsproxy.io",
+        "api.allorigins.win",
+        "cors-anywhere.herokuapp.com",
+        "thingproxy.freeboard.io",
+        "api.codetabs.com"
+      ],
+      "embeds": [
+        "path",
+        "query"
+      ],
+      "why": "fetches any page and serves it at its own address, such as corsproxy.io/?url=<address> or api.allorigins.win/raw?url=<address>"
+    }
+  ]
+}

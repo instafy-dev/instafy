@@ -13,6 +13,8 @@
 // search results name, each "not checked" (its row names the result's site in "found"); placeholder rows ("candidate
 // 1/2/3") and rows that say nowhere where they come from fail.
 import fs from "node:fs";
+// @ts-expect-error -- shared explicit fixture policy exported by the plain JS eval module
+import { TEST_SITE_POLICY } from "./web-search-eval.mjs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -100,7 +102,7 @@ function startTurn(fixtures: string, { key }: { key: boolean }) {
     INSTAFY_PROJECT_ID: `compare-${turnNo}`,
     ...(key ? { BRAVE_SEARCH_API_KEY: KEY } : {}),
   };
-  const common = { now: () => time.clock, skillRoots: [] as string[], env, cwd: tmp };
+  const common = { now: () => time.clock, skillRoots: [] as string[], bundledLinkOnly: TEST_SITE_POLICY, env, cwd: tmp };
   const searches: Transcript[] = [];
   const reads: Transcript[] = [];
   const findings: Transcript[] = [];
@@ -189,7 +191,7 @@ async function referenceTurn({ key }: { key: boolean }): Promise<Transcript> {
   const priced = new Set(key ? ["s8", "q5"] : ["q5"]);
   const links: Transcript[] = [];
   for (const item of CASE.items.filter((i) => !priced.has(i.slug))) {
-    const guided = webLink("amazon", { query: item.name }, { skillRoots: [], env, cwd: tmp });
+    const guided = webLink("amazon", { query: item.name }, { skillRoots: [], bundledLinkOnly: TEST_SITE_POLICY, env, cwd: tmp });
     if (guided.ok === false) throw new Error(guided.error);
     links.push({ site: "amazon", query: item.name, link: guided.link, slug: item.slug });
   }
@@ -228,7 +230,7 @@ async function officialDownTurn(): Promise<Transcript> {
   const links: Record<string, string> = {};
   const guided: Transcript[] = [];
   for (const item of kase.items) {
-    const g = webLink("amazon", { query: item.name }, { skillRoots: [], env, cwd: tmp });
+    const g = webLink("amazon", { query: item.name }, { skillRoots: [], bundledLinkOnly: TEST_SITE_POLICY, env, cwd: tmp });
     if (g.ok === false) throw new Error(g.error);
     links[item.slug] = g.link;
     guided.push({ site: "amazon", query: item.name, link: g.link });
@@ -261,7 +263,7 @@ async function searchOnlyTurn(): Promise<Transcript> {
   const links: Record<string, string> = {};
   const guided: Transcript[] = [];
   for (const item of kase.items) {
-    const g = webLink("amazon", { query: item.name }, { skillRoots: [], env, cwd: tmp });
+    const g = webLink("amazon", { query: item.name }, { skillRoots: [], bundledLinkOnly: TEST_SITE_POLICY, env, cwd: tmp });
     if (g.ok === false) throw new Error(g.error);
     links[item.slug] = g.link;
     guided.push({ site: "amazon", query: item.name, link: g.link });
@@ -405,11 +407,11 @@ describe("the shopping comparison eval (fixtures)", () => {
     const research = flat(fs.readFileSync(path.join(skills, "instafy-web-research/SKILL.md"), "utf8"));
     for (const rule of [
       "## Comparing items",
-      "None there, or a stop: say so (\"price not found on <page>\", \"<page> is closed to automated reads\")",
+      "Missing or refused: say where/why, then try an allowed shop.",
       "`instafy web search \"<name> price\" --json`, or `--chain reference-search` for shops' official sites",
-      "a link-only shop gets `instafy web link <site> query=<name>` (Guided mode)",
-      "never a remembered or guessed price",
-      "that many per item, each on that exact model, by a publisher other than the maker, the shops and each other (a sibling model's review does not count)",
+      "a shop restricted by workspace policy can use Guided mode.",
+      "Never remember or guess a price.",
+      "that many per exact model, from independent publishers, not its maker/shops or a sibling model.",
       "Short: \"<item>: 1 of 2 reviews found\", in the reply and on the page, citing only those reviews.",
       "an item with no price read this turn is listed as \"price unknown\", never as within it",
       "each fact not read marked unknown with why.",
@@ -417,8 +419,8 @@ describe("the shopping comparison eval (fixtures)", () => {
       "- An item only a result names is \"not checked\".",
       "and an item's name as its official page gives it",
       "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with steps 3 and 5.",
-      "for reviews, a reviewer's home page, then its links.",
-      "An address that does not answer: once more with `www.` added or removed, as its `tell` says.",
+      "reviewers' homepages and links.",
+      "An address that does not answer: once with `www.` added or removed, as its `tell` says.",
       "Its `offer` (the key card, a `request_secret` action) may go in your reply once; never ask for a key in chat or wait for it.",
       "A failed search or site never ends the turn without the page: every item stays on it, each fact not read marked unknown with why.",
     ]) {

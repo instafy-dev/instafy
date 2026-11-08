@@ -3550,6 +3550,27 @@ name = "codex-utils-template"
 version = "0.166.0"
 
 [[package]]
+name = "codex-web-search-extension"
+version = "0.166.0"
+dependencies = [
+ "codex-api",
+ "codex-core",
+ "codex-extension-api",
+ "codex-extension-items",
+ "codex-http-client",
+ "codex-login",
+ "codex-model-provider",
+ "codex-model-provider-info",
+ "codex-otel",
+ "codex-protocol",
+ "codex-tools",
+ "http 1.4.0",
+ "schemars 0.8.22",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "codex-websocket-auth"
 version = "0.166.0"
 dependencies = [
@@ -10069,6 +10090,7 @@ dependencies = [
  "codex-shell-command",
  "codex-utils-absolute-path",
  "codex-utils-path-uri",
+ "codex-web-search-extension",
  "flate2",
  "futures-util",
  "http 1.4.0",

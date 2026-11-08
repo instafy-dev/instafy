@@ -83,6 +83,11 @@ pub(super) async fn renew(
         Some(ProxyJobBinding {
             job_id,
             lease_attempt: request.lease_attempt,
+            native_web_search: crate::credentials::credential_allows_native_web_search(
+                &transaction,
+                credential_id.as_ref(),
+            )
+            .await?,
         }),
         handle.as_deref(),
         name.as_deref(),

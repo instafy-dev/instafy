@@ -29,7 +29,8 @@ const require = createRequire(import.meta.url);
 const linkOnlyApi = require("../../browser-action-policy/linkOnly.js");
 const SKILL_DIR = new URL("../../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/", import.meta.url);
 export const SKILL = fs.readFileSync(new URL("SKILL.md", SKILL_DIR), "utf8");
-const LINK_ONLY = linkOnlyApi.linkOnlyListFrom(JSON.parse(fs.readFileSync(new URL("references/link-only-sites.json", SKILL_DIR), "utf8"))).list;
+export const TEST_SITE_POLICY = JSON.parse(fs.readFileSync(new URL("../../browser-action-policy/test/link-only-policy.json", import.meta.url), "utf8"));
+const LINK_ONLY = linkOnlyApi.linkOnlyListFrom(TEST_SITE_POLICY).list;
 const PROVIDERS = JSON.parse(fs.readFileSync(new URL("references/search-providers.json", SKILL_DIR), "utf8"));
 
 /** Whether an address is on a site whose terms bar AI agents (or a copy of one), by the readers' own matcher. */

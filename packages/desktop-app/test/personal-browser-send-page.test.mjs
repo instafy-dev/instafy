@@ -17,6 +17,8 @@ const require = createRequire(import.meta.url);
 const security = require(path.join(packageRoot, "dist/personalBrowserSecurity.js"));
 const publicLookup = async () => [{ address: "93.184.216.34", family: 4 }];
 const pageBridge = require(path.join(packageRoot, "dist/personalBrowserPageBridge.js"));
+const linkOnlyModule = require(path.join(packageRoot, "dist/personalBrowserLinkOnly.js"));
+const TEST_POLICY = JSON.parse(fs.readFileSync(path.join(packageRoot, "../browser-action-policy/test/link-only-policy.json"), "utf8"));
 const control = require(path.join(packageRoot, "dist/personalBrowserControlServer.js"));
 const hostCode = ts.transpileModule(
   fs.readFileSync(path.join(packageRoot, "src/personalBrowserHost.ts"), "utf8"),
@@ -53,7 +55,7 @@ function fixture(page) {
     "./browserTabExplorePage": { createBrowserTabExplorePage() { throw new Error("Unexpected native Explore page"); } },
     // Agent navigation resolves its host: here every fixture name is public, and nothing reaches the network.
     "./personalBrowserSecurity": { ...security, checkPersonalBrowserAgentTabUrl: (url) => security.checkPersonalBrowserAgentTabUrl(url, publicLookup) },
-    "./personalBrowserLinkOnly": require(path.join(packageRoot, "dist/personalBrowserLinkOnly.js")),
+    "./personalBrowserLinkOnly": { ...linkOnlyModule, PERSONAL_BROWSER_LINK_ONLY_GUARD: linkOnlyModule.createPersonalBrowserLinkOnlyGuard(TEST_POLICY) },
     "./personalBrowserRequestGuard": require(path.join(packageRoot, "dist/personalBrowserRequestGuard.js")),
     "./personalBrowserRedaction": require(path.join(packageRoot, "dist/personalBrowserRedaction.js")),
     "./personalBrowserActionPolicy": require(path.join(packageRoot, "dist/personalBrowserActionPolicy.js")),

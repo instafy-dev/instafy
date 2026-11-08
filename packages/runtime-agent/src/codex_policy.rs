@@ -3,7 +3,7 @@
 //! Every runtime run applies this policy to its loaded Codex `Config` before a
 //! thread manager or thread sees it. It keeps billing fixed across Codex bumps
 //! (no paid service tier, a 272k context window), keeps OpenAI's hosted web
-//! search off on every lane, blocks experimental tools the
+//! search scoped to controller-authorized ChatGPT turns, blocks experimental tools the
 //! runtime cannot deliver, composes the instructions of every lane (upstream's
 //! prompt without its Codex-product sections, or the runtime's own, plus
 //! Instafy's Destructive Actions section), and sets every Codex feature through
@@ -46,8 +46,8 @@ const DESTRUCTIVE_ACTIONS_TITLE: &str = "Destructive Actions";
 ///   Instafy has its own connectors and skills.
 /// - `# Using skills`: runtime-agent does not use Codex's native skill loading.
 ///   Its extension registry (`codex::codex_extension_registry`) holds only the
-///   run's instructions and project preferences (World State sections), the
-///   turn-usage recorder and the required-execution gate. It never installs
+///   run's instructions and project preferences (World State sections), the native
+///   search extension, the turn-usage recorder and the required-execution gate. It never installs
 ///   `codex_skills_extension`, which at rust-v0.166.0 is what renders the
 ///   "## Skills" / "### Available skills" catalog this section refers to and
 ///   serves `skills.list` / `skills.read`. Instafy skills under `.agents/skills`
@@ -156,7 +156,11 @@ fn compose_catalog_instructions(template: &str) -> String {
 /// `bounded` marks a turn whose only tools are one trusted broker's MCP server:
 /// a Shared or Personal Browser turn's browser, or a granted turn's
 /// `provider-mcp`.
-pub(crate) fn apply_runtime_codex_policy(config: &mut Config, bounded: bool) -> Result<()> {
+pub(crate) fn apply_runtime_codex_policy(
+    config: &mut Config,
+    bounded: bool,
+    native_search: bool,
+) -> Result<()> {
     // Billing: never request a paid service tier. Codex does not apply a model's
     // default tier on its own; FastMode (below) is the other way to select one.
     config.service_tier = None;
@@ -198,17 +202,25 @@ pub(crate) fn apply_runtime_codex_policy(config: &mut Config, bounded: bool) -> 
     // Model traffic uses only the configured provider route (the Instafy proxy).
     config.respect_system_proxy = false;
 
-    // No hosted web search on any lane, for every kind of AI (Lite, own keys,
-    // ChatGPT logins): Octo searches the web only through Instafy's own
-    // command, which keeps the web-research skill's link-only sites
-    // link-only and caps searches per turn. OpenAI's search can do neither,
-    // and Codex has no setting to block sites. The feature pins below keep
-    // the search features off; the proxy drops the tool from every request
-    // as well.
+    // Only a controller-authorized ChatGPT job may use provider-hosted retrieval. Config files,
+    // environment variables and client metadata cannot enable it. Browser and granted turns
+    // still have only their broker's tools. The proxy independently verifies the credential.
+    let search_mode = if native_search && !bounded {
+        WebSearchMode::Live
+    } else {
+        WebSearchMode::Disabled
+    };
     config
         .web_search_mode
-        .set(WebSearchMode::Disabled)
-        .context("Codex requirements keep web search on, which the Instafy runtime never allows")?;
+        .set(search_mode)
+        .context("Codex web-search requirements conflict with the authorized runtime policy")?;
+    // Native search follows the controller capability, including a custom-named proxy provider.
+    // The feature flag below still lets the model choose its normal search transport.
+    config.model_provider.supports_standalone_web_search = search_mode == WebSearchMode::Live;
+    if let Some(provider) = config.model_providers.get_mut(&config.model_provider_id) {
+        provider.supports_standalone_web_search =
+            config.model_provider.supports_standalone_web_search;
+    }
 
     if bounded {
         // A model whose catalog entry selects multi-agent v2 (gpt-6-luna) gets the child-agent
@@ -216,7 +228,7 @@ pub(crate) fn apply_runtime_codex_policy(config: &mut Config, bounded: bool) -> 
         config.agents_enabled = false;
     }
 
-    apply_feature_policy(&mut config.features, bounded)
+    apply_feature_policy(&mut config.features, bounded, native_search)
 }
 
 /// Pin the controller's child capacity after local configuration has loaded. V2
@@ -297,12 +309,14 @@ enum FeaturePin {
     /// image generation through prompt injection; a granted turn acts with a
     /// person's device, so its tools are its broker's and nothing else.
     OffInBounded,
+    /// Provider-hosted search authorized by the job's controller grant, outside bounded turns.
+    NativeSearch,
 }
 
 /// Every Codex feature, with no catch-all arm: a feature added upstream fails
 /// the build until its runtime value is chosen here.
 fn feature_pin(feature: Feature) -> FeaturePin {
-    use FeaturePin::{Off, OffInBounded, On, Upstream};
+    use FeaturePin::{NativeSearch, Off, OffInBounded, On, Upstream};
     match feature {
         // Billing: Fast mode selects the paid priority tier, Ultra Fast mode the paid
         // `ultrafast` tier (on by default upstream), even from an agent role's config.
@@ -333,9 +347,10 @@ fn feature_pin(feature: Feature) -> FeaturePin {
         // the run timeout instead of failing with the connection error.
         Feature::UnboundedConnectionRetries => Off,
 
-        // OpenAI's hosted web search, cached or live, and its standalone form:
-        // off on every lane (see `apply_runtime_codex_policy`).
-        Feature::StandaloneWebSearch | Feature::WebSearchCached | Feature::WebSearchRequest => Off,
+        // Let each model select hosted Responses search or native web.run (Responses Lite).
+        // Do not force the experimental standalone path for other models.
+        Feature::StandaloneWebSearch | Feature::WebSearchCached => Off,
+        Feature::WebSearchRequest => NativeSearch,
 
         // Upstream removed the in-process V8 runtime, so code-mode-only models (the catalog's
         // `code_mode_only` entries, GPT-6 Luna and the own-AI default among them) run every
@@ -540,22 +555,27 @@ fn feature_pin(feature: Feature) -> FeaturePin {
     }
 }
 
-fn pinned_value(feature: Feature, bounded: bool) -> Option<bool> {
+fn pinned_value(feature: Feature, bounded: bool, native_search: bool) -> Option<bool> {
     match feature_pin(feature) {
         FeaturePin::Upstream => None,
         FeaturePin::On => Some(true),
         FeaturePin::Off => Some(false),
         FeaturePin::OffInBounded => bounded.then_some(false),
+        FeaturePin::NativeSearch => Some(native_search && !bounded),
     }
 }
 
 /// Sets every pinned feature in one update, so Codex normalizes dependencies
 /// once (CodeModeOnly implies CodeMode), then fails closed if a managed
 /// requirement or normalization kept any pin from holding.
-fn apply_feature_policy(features: &mut ManagedFeatures, bounded: bool) -> Result<()> {
+fn apply_feature_policy(
+    features: &mut ManagedFeatures,
+    bounded: bool,
+    native_search: bool,
+) -> Result<()> {
     let mut next = features.get().clone();
     for spec in FEATURES {
-        if let Some(enabled) = pinned_value(spec.id, bounded) {
+        if let Some(enabled) = pinned_value(spec.id, bounded, native_search) {
             next.set_enabled(spec.id, enabled);
         }
     }
@@ -563,7 +583,7 @@ fn apply_feature_policy(features: &mut ManagedFeatures, bounded: bool) -> Result
         .set(next)
         .context("Codex feature requirements conflict with the Instafy runtime policy")?;
     for spec in FEATURES {
-        if let Some(enabled) = pinned_value(spec.id, bounded)
+        if let Some(enabled) = pinned_value(spec.id, bounded, native_search)
             && features.enabled(spec.id) != enabled
         {
             bail!(
@@ -883,7 +903,7 @@ mod tests {
         // Child agents may switch to any catalog model, so every entry is composed, and a
         // renamed Codex-product section anywhere in the catalog fails here.
         let (_home, mut config) = load_config("gpt-6-luna", None, "").await;
-        apply_runtime_codex_policy(&mut config, false).expect("policy");
+        apply_runtime_codex_policy(&mut config, false, false).expect("policy");
         let catalog = config.model_catalog.as_ref().expect("catalog");
         assert!(catalog.models.len() >= POLICY_MODELS.len());
         let fallback = construct_model_info_offline("byo-provider-model", &config);
@@ -999,7 +1019,7 @@ mod tests {
                 let context = format!("{model} / {lane_name}");
                 let lane_instructions = runtime_base_instructions(lane, None);
                 let (_home, mut config) = load_config(model, lane_instructions.clone(), "").await;
-                apply_runtime_codex_policy(&mut config, lane.browser && lane.mcp)
+                apply_runtime_codex_policy(&mut config, lane.browser && lane.mcp, false)
                     .expect("apply runtime policy");
                 let resolved = construct_model_info_offline(model, &config);
                 pin_instructions_for_resolved_model(&mut config, &resolved);
@@ -1059,7 +1079,7 @@ mod tests {
             "",
         )
         .await;
-        apply_runtime_codex_policy(&mut config, false).expect("policy");
+        apply_runtime_codex_policy(&mut config, false, false).expect("policy");
         assert_eq!(
             effective_instructions(&config),
             format!("{custom}\n\n{}", destructive_actions_section())
@@ -1073,13 +1093,13 @@ mod tests {
             "",
         )
         .await;
-        apply_runtime_codex_policy(&mut config, false).expect("policy");
+        apply_runtime_codex_policy(&mut config, false, false).expect("policy");
         assert_eq!(effective_instructions(&config), own);
 
         // A model outside the catalog resolves to Codex's fallback prompt, which the catalog
         // policy cannot reach.
         let (_home, mut config) = load_config("byo-provider-model", None, "").await;
-        apply_runtime_codex_policy(&mut config, true).expect("policy");
+        apply_runtime_codex_policy(&mut config, true, false).expect("policy");
         let resolved = construct_model_info_offline("byo-provider-model", &config);
         assert!(resolved.used_fallback_model_metadata);
         let fallback = template(&resolved).to_string();
@@ -1102,7 +1122,7 @@ mod tests {
         for model in POLICY_MODELS {
             let (_home, mut config) = load_config(model, None, "").await;
             assert_eq!(config.model_context_window, None);
-            apply_runtime_codex_policy(&mut config, false).expect("policy");
+            apply_runtime_codex_policy(&mut config, false, false).expect("policy");
             assert_eq!(config.model_context_window, Some(MAX_BILLED_CONTEXT_WINDOW));
             let resolved = construct_model_info_offline(model, &config);
             let window = resolved.resolved_context_window().expect("window");
@@ -1130,7 +1150,7 @@ mod tests {
         assert!(config.service_tier.is_some());
         assert!(config.features.enabled(Feature::FastMode));
         assert!(config.features.enabled(Feature::UltrafastMode));
-        apply_runtime_codex_policy(&mut config, false).expect("policy");
+        apply_runtime_codex_policy(&mut config, false, false).expect("policy");
         assert_eq!(config.model_context_window, Some(MAX_BILLED_CONTEXT_WINDOW));
         assert_eq!(
             config.model_auto_compact_token_limit,
@@ -1149,7 +1169,7 @@ mod tests {
         // A smaller configured window is kept.
         let (_home, mut config) =
             load_config("gpt-6-luna", None, "model_context_window = 128000\n").await;
-        apply_runtime_codex_policy(&mut config, false).expect("policy");
+        apply_runtime_codex_policy(&mut config, false, false).expect("policy");
         assert_eq!(config.model_context_window, Some(128_000));
     }
 
@@ -1165,7 +1185,7 @@ mod tests {
             "upstream GPT-6 Luna no longer advertises the blocked tools; revisit BLOCKED_MODEL_TOOLS"
         );
         let (_home, mut config) = load_config("gpt-6-luna", None, "").await;
-        apply_runtime_codex_policy(&mut config, false).expect("policy");
+        apply_runtime_codex_policy(&mut config, false, false).expect("policy");
         let catalog = config.model_catalog.as_ref().expect("catalog");
         assert!(!catalog.models.is_empty());
         for model in &catalog.models {
@@ -1200,7 +1220,7 @@ mod tests {
         apply_native_subagent_limit(&mut config, None);
         assert_eq!(config.agent_max_threads, Some(40));
         assert_eq!(config.multi_agent_v2.max_concurrent_threads_per_session, 41);
-        apply_runtime_codex_policy(&mut config, false).unwrap();
+        apply_runtime_codex_policy(&mut config, false, false).unwrap();
         apply_native_subagent_limit(
             &mut config,
             Some(NativeSubagentLimit::try_from(10).unwrap()),
@@ -1214,7 +1234,7 @@ mod tests {
         assert_eq!(config.agent_max_threads, Some(3));
         assert_eq!(config.multi_agent_v2.max_concurrent_threads_per_session, 4);
 
-        apply_runtime_codex_policy(&mut config, true).unwrap();
+        apply_runtime_codex_policy(&mut config, true, false).unwrap();
         let restricted_features = config.features.clone();
         apply_native_subagent_limit(
             &mut config,
@@ -1235,7 +1255,7 @@ mod tests {
     async fn bounded_turns_get_no_patch_tool_on_any_model() {
         for bounded in [false, true] {
             let (_home, mut config) = load_config("gpt-5.5", None, "").await;
-            apply_runtime_codex_policy(&mut config, bounded).expect("policy");
+            apply_runtime_codex_policy(&mut config, bounded, false).expect("policy");
             for slug in POLICY_MODELS {
                 let resolved = construct_model_info_offline(slug, &config);
                 if bounded {
@@ -1257,7 +1277,7 @@ mod tests {
     async fn upstream_multi_agent_version_and_code_mode_stay_as_shipped() {
         // Owner decision (Sep 30): take upstream's multi-agent v2 for GPT-6 Luna.
         let (_home, mut config) = load_config("gpt-6-luna", None, "").await;
-        apply_runtime_codex_policy(&mut config, false).expect("policy");
+        apply_runtime_codex_policy(&mut config, false, false).expect("policy");
         for slug in POLICY_MODELS {
             let upstream = upstream_model(slug);
             let resolved = construct_model_info_offline(slug, &config);
@@ -1275,10 +1295,10 @@ mod tests {
         let config_toml = "[features]\nsleep_tool = true\nrespect_system_proxy = true\nsystem_proxy_fallback = true\nshell_snapshot = true\nsend_message_to_user_async = true\ncurrent_time_reminder = true\ncode_mode_host = false\nshell_tool = true\napps = true\nunbounded_connection_retries = true\nwake_on_agent_messages = true\nmcp_connection_sharing = true\n";
         for bounded_browser in [false, true] {
             let (_home, mut config) = load_config("gpt-6-luna", None, config_toml).await;
-            apply_runtime_codex_policy(&mut config, bounded_browser).expect("policy");
+            apply_runtime_codex_policy(&mut config, bounded_browser, false).expect("policy");
             assert!(!config.respect_system_proxy);
             for spec in FEATURES {
-                match pinned_value(spec.id, bounded_browser) {
+                match pinned_value(spec.id, bounded_browser, false) {
                     Some(enabled) => {
                         assert_eq!(config.features.enabled(spec.id), enabled, "{}", spec.key)
                     }
@@ -1311,7 +1331,7 @@ mod tests {
         use codex_rmcp_client::McpProtocolMode;
         for bounded in [false, true] {
             let (_home, mut config) = load_config("gpt-6-luna", None, "").await;
-            apply_runtime_codex_policy(&mut config, bounded).expect("policy");
+            apply_runtime_codex_policy(&mut config, bounded, false).expect("policy");
             assert_eq!(
                 config.mcp_protocol_mode(),
                 McpProtocolMode::Legacy,
@@ -1338,80 +1358,56 @@ mod tests {
                 Some("Text from a config file."),
                 "the config file sets it before the policy runs"
             );
-            apply_runtime_codex_policy(&mut config, bounded).expect("policy");
+            apply_runtime_codex_policy(&mut config, bounded, false).expect("policy");
             assert_eq!(config.developer_instructions, None, "bounded={bounded}");
         }
     }
 
-    /// Every kind of AI a runtime turn runs on, as its job arrives: Lite runs the managed model,
-    /// an own OpenAI key or a ChatGPT login the own-AI default unless the person picked another.
-    /// Each comes with a Codex config that asks for web search the way a person's own setup could
-    /// (`web_search = "live"`, the legacy feature flags), plus what CODEX_ENABLE_WEB_SEARCH=1 used
-    /// to ask for. Search must be off for all of them on every lane. All of them reach OpenAI
-    /// through the Instafy proxy, which drops the tool as well (openai-proxy-server's
-    /// `web_search_never_reaches_openai_on_any_lease`).
+    /// Local files and legacy flags cannot authorize search. A verified ChatGPT grant enables
+    /// live retrieval only on ordinary turns; bounded broker lanes retain their narrow tools.
     #[tokio::test]
-    async fn web_search_is_disabled_for_every_kind_of_ai_on_every_lane() {
-        use runtime_contracts::own_ai_model::{OWN_AI_DEFAULT_MODEL_ID, OWN_AI_SMALL_MODEL_ID};
-        let kinds = [
-            ("Lite", OWN_AI_SMALL_MODEL_ID, ""),
-            (
-                "own OpenAI key",
-                OWN_AI_DEFAULT_MODEL_ID,
-                "web_search = \"live\"\n",
-            ),
-            (
-                "own OpenAI key on an older model",
-                "gpt-5.5",
-                "web_search = \"cached\"\n",
-            ),
-            (
-                "ChatGPT login",
-                OWN_AI_DEFAULT_MODEL_ID,
-                "[features]\nweb_search_request = true\nweb_search_cached = true\nstandalone_web_search = true\n",
-            ),
-        ];
-        for (kind, model, config_toml) in kinds {
-            for bounded_browser in [false, true] {
-                let lane = if bounded_browser {
-                    "a browser turn"
-                } else {
-                    "an ordinary turn"
-                };
-                let home = tempfile::tempdir().expect("codex home");
-                std::fs::write(home.path().join("config.toml"), config_toml).expect("config.toml");
-                let mut config = ConfigBuilder::default()
-                    .codex_home(home.path().to_path_buf())
-                    .harness_overrides(ConfigOverrides {
-                        model: Some(model.to_string()),
-                        cwd: Some(home.path().to_path_buf()),
-                        tools_web_search_request: Some(true),
-                        ..Default::default()
-                    })
-                    .build()
-                    .await
-                    .expect("load Codex config");
-                assert_ne!(
-                    config.web_search_mode.value(),
-                    WebSearchMode::Disabled,
-                    "{kind}: the config asks for search before the policy runs"
-                );
-                apply_runtime_codex_policy(&mut config, bounded_browser).expect("policy");
-                assert_eq!(
-                    config.web_search_mode.value(),
-                    WebSearchMode::Disabled,
-                    "{kind} on {lane}"
-                );
-                for feature in [
-                    Feature::StandaloneWebSearch,
-                    Feature::WebSearchCached,
-                    Feature::WebSearchRequest,
-                ] {
-                    assert!(
-                        !config.features.enabled(feature),
-                        "{kind} on {lane}: {}",
-                        feature.key()
+    async fn native_search_requires_controller_authority_and_an_unbounded_turn() {
+        for local_setting in [
+            "web_search = \"live\"\n",
+            "web_search = \"disabled\"\n",
+            "[features]\nweb_search_request = true\nweb_search_cached = true\nstandalone_web_search = true\n",
+        ] {
+            for native_search in [false, true] {
+                for bounded in [false, true] {
+                    let (_home, mut config) = load_config("gpt-6-luna", None, local_setting).await;
+                    config.model_provider.name = "Custom proxy".into();
+                    config.model_provider.supports_standalone_web_search = !native_search;
+                    config.model_providers.insert(
+                        config.model_provider_id.clone(),
+                        config.model_provider.clone(),
                     );
+                    apply_runtime_codex_policy(&mut config, bounded, native_search)
+                        .expect("policy");
+                    let allowed = native_search && !bounded;
+                    assert_eq!(
+                        config.web_search_mode.value(),
+                        if allowed {
+                            WebSearchMode::Live
+                        } else {
+                            WebSearchMode::Disabled
+                        },
+                        "native_search={native_search}, bounded={bounded}, local={local_setting}"
+                    );
+                    assert_eq!(config.features.enabled(Feature::WebSearchRequest), allowed);
+                    assert_eq!(
+                        config.model_provider.supports_standalone_web_search,
+                        allowed
+                    );
+                    assert_eq!(
+                        config.model_providers[&config.model_provider_id]
+                            .supports_standalone_web_search,
+                        allowed
+                    );
+                    assert!(!config.features.enabled(Feature::WebSearchCached));
+                    assert!(!config.features.enabled(Feature::StandaloneWebSearch));
+                    if bounded {
+                        assert!(!config.agents_enabled);
+                    }
                 }
             }
         }
@@ -1425,7 +1421,7 @@ mod tests {
         next.enable(Feature::CodeModeOnly);
         next.enable(Feature::CodeMode);
         features.set(next).expect("enable code mode");
-        apply_feature_policy(&mut features, true).expect("bounded browser policy");
+        apply_feature_policy(&mut features, true, false).expect("bounded browser policy");
         assert!(!features.enabled(Feature::CodeModeOnly));
         assert!(!features.enabled(Feature::CodeMode));
         assert!(features.enabled(Feature::CodeModeHost));
