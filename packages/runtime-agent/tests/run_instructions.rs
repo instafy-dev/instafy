@@ -1748,8 +1748,9 @@ async fn run_follow_ups_from_the_chat(harness: &mut Harness) {
 /// browser, also when public pages could answer it and whether or not that work found its answer,
 /// that a bare "keep going" carries on what a page here left open and a change that needs what a
 /// web page says browses first, that send research ending in a page to the browser from the
-/// first message, and that keep a map, or a page or change made only from what the chat already
-/// found and confirmed, out of it. Each browser turn is told that it reads pages in Instafy's browser
+/// first message, and that keep a map, a change in the person's own words to a page or map here,
+/// and a page or change made only from what the chat found and confirmed, out of it, in a line of
+/// their own. Each browser turn is told that it reads pages in Instafy's browser
 /// and Octo builds in the chat, never only that it is read-only, with no write-scope guardrail,
 /// mode or rationale above that line. The page is one building turn,
 /// which reads every browser turn as page data and none outside it.
@@ -1768,7 +1769,7 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "browser work goes on whether or not it found its answer",
             ),
             (
-                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on. So is a change that needs what a web page says. A map",
+                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on. So is a change that needs what a web page says.\n- Stay `direct` (`required`) for a map,",
                 "a bare \"keep going\" carries on what a page here left open, and a change that needs a web page browses first",
             ),
             (
@@ -1776,8 +1777,8 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "research ending in a page goes to the browser from the first message",
             ),
             (
-                "A map (\"on a map\") is `direct` and a change of files (`required`): its skill finds and cites its places itself. So is a page or change made only from what this chat already found and confirmed.",
-                "a map, or a page or change made only from what the chat found and confirmed, stays direct",
+                "- Stay `direct` (`required`) for a map, for a change in the person's own words to a page or map here (a note, a name, a color), and for a page or change made only from what this chat found and confirmed.",
+                "a map, a change in the person's own words and a page or change made only from what the chat found and confirmed stay direct",
             ),
         ] {
             ensure!(

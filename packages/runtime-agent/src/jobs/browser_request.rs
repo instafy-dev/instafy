@@ -134,9 +134,9 @@ impl BrowserRequest {
 
 /// The task of the card for a message the routing step sent straight to the browser in a chat
 /// with earlier turns: the person's words, then the routing step's `summary` as one quoted line.
-/// A browser turn reads only the chat's browser turns, so without it the words can lean on a
-/// reply it never saw ("Fill in what's still missing."), while the routing step read the whole
-/// chat. Like every card's task, the line
+/// A browser turn reads the chat's browser turns and the person's own messages, never Octo's
+/// replies, so without it the words can lean on a reply it never saw ("Fill in what's still
+/// missing."), while the routing step read the whole chat. Like every card's task, the line
 /// names no address the person could not have seen in the chat (`seen`: its messages and
 /// replies), such as one a page, a tool's output or a guess gave: a summary that names one, or
 /// one that can't be checked ([`named_hosts`]), is left out, as is an empty one or one that only

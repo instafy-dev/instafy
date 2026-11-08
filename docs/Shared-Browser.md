@@ -999,10 +999,21 @@ snapshot, and a browser turn cannot read a skill file, so such a turn is given
 the skill's "Finding a page" section again, from the space's own copy. A chat's
 browser thread holds only its browser turns: each starts from what it is asked
 (the person's words or a card's task), and a new or lost browser thread is
-given the chat's earlier browser turns, never Octo's building turns, files or
-command output, and after them which of the requests those turns were asked the
-person stopped, or undid the change of, since the first of those turns; a
-restored one is given those since its own last turn
+given the chat's earlier browser turns and, of the building turns, only the
+person's own messages that still stand, in their words: never Octo's replies
+there, files, command output or the lines that describe what the person
+attached, nor Studio's words for a Continue, a site's Ask Octo (whose words the
+page chose), an answer to Octo's question (written from its header) or a
+message the person stopped or whose change they undid. A restored one is given
+the person's messages since its own last turn after its restore note, the
+newest 8. A chat's first browser part once read only "Fill in what's still
+missing.", with a summary that named no laptop, though the person's first
+message there named both (a local test, Nov 8). After them it is given which
+of the requests the browser turns were asked the person stopped, or undid the
+change of, since the first of those turns; a
+restored one is given those since its own last turn, and one that read a
+message of the person's they then stopped, or whose change they undid, starts
+again from the replay, which leaves it out
 ([Chat activity](Chat-Activity.md#a-stopped-turns-changes)). Codex withdraws the space's `AGENTS.md` from a
 turn without the workspace, so it is given that file's "Replies" too (how a reply
 reads: plain words, no error codes, file paths or inside words, "not checked" on
@@ -1402,11 +1413,15 @@ price, opening hours, reviews) stays with Octo, whose turn reads public pages
 itself. A change that needs what a web page says is `browser_then_build` too:
 a change's building turn opens no browser, and one asked to add each laptop's
 warranty "from its own page" asked the person to send the pages (a local test,
-Nov 7). Only a map ("on a map") stays with Octo, since a map's skill finds
-and cites its places itself, and its turn is a change of files; and so does a
-page or change made only from what the chat already found and confirmed: a
-page that needs what no reply here confirmed, such as a route, is
-`browser_then_build`. A comparison that named no site to use first once stayed with
+Nov 7). A map ("on a map") stays with Octo, since a map's skill finds and
+cites its places itself, and so do a change in the person's own words to a page
+or map here (a note, a name, a color) and a page or change made only from what
+the chat already found and confirmed, each a change of files, in a line of
+their own: as the last sentences of the `browser_then_build` line they read as
+more of its rules, and a note the person wrote for a map went to the browser,
+read two sites nobody asked for and gained a sentence the person didn't write
+(a local test, Nov 8). A page that needs what no reply here confirmed, such as
+a route, is `browser_then_build`. A comparison that named no site to use first once stayed with
 Octo too, under a rule written for maps, and its building turn, which must
 change files and so cannot ask for the browser, met a maker's robots.txt and
 no search key (a local test, Nov 6). A message that carries on the chat's
@@ -1433,8 +1448,9 @@ whether to answer at all), with no attachments. That message's job then runs
 no model turn of its own: it posts one card marked `routed`, whose task is the
 person's own words, and no reply. In a chat with earlier turns, the words are
 followed by one quoted line, "What this carries on: …", with the routing step's
-summary, since the browser turn reads none of the building turns, nor what the
-routing step made of the chat's browser turns: in a chat with browser turns, a
+summary, since the browser turn reads nothing of the building turns but the
+person's own messages, nor what the routing step made of the chat's browser
+turns: in a chat with browser turns, a
 page to share told only the person's words opened nothing, and a fill-in
 re-read the pages its first pass had read (a local test, Nov 7). The section asks that summary to name the items, place or site the
 chat names, by name and not by address, and what to find: one that named no
@@ -1453,7 +1469,8 @@ from the person's own message: they leave that copy out and quote the
 browser turn with its reply alone (only a continuation the controller
 checked as the routed card's own, `browserCardTurn.routed`, whose message is
 in the same history). A browser turn on a new thread reads that copy as the
-turn's request, since it reads nothing else of the chat. A routed card
+turn's request, with its summary line, and leaves the person's own message
+out. A routed card
 Studio cannot open by itself shows as any card does, with its reason; once the
 person presses it, or once its browser turn fails or is stopped before it
 shows anything, it leaves the chat as any opened card does, since nothing is
@@ -2905,9 +2922,13 @@ unless the policy is `"covered"`.
   browser turn as one quoted block of its request and its findings (one that
   carries on the person's own message with its findings alone: the message is
   in that replay already), and a turn that listed none with none. A Let Octo
-  continue press reads as one line there, not as Studio's instructions in the
-  person's name, and a hand-back's own stored words read as nothing there and
-  in the routing step's history: the person's message is in it already. The
+  continue press reads as one line there and in the routing step's history
+  ("The person let Octo continue in the browser."), not as Studio's
+  instructions in the person's name: the routing step for "keep going" once
+  read both presses of its chat as the person's words, and its summary for the
+  browser repeated them (a local test, Nov 8). A hand-back's own stored words
+  read as nothing there and in the routing step's history: the person's
+  message is in it already. The
   history the controller gives a job keeps each browser turn's findings note,
   though it wears the stamp of the progress rows it leaves out (`source:
   agent`, `kind: update`, `outcome: in_progress`, with `details.browserFindings`):

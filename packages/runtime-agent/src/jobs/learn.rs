@@ -575,6 +575,11 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // From before a route from an operator's journey planner went to the stop the place's own
     // page names, read first, and said which stop it used.
     include_str!("legacy/browser-automation-v37.md"),
+    // From before a map, a change in the person's own words to a page or map here and a page or
+    // change made only from what this chat found and confirmed stayed `direct` in a line of their
+    // own, not at the end of `browser_then_build`'s, and the routing step read that a routed
+    // browser turn sees the person's words, not only their message.
+    include_str!("legacy/browser-automation-v38.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,
