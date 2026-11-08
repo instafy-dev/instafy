@@ -83,11 +83,16 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
   // reads, its own address, its links and those its text spells out. navigate and
   // open_tab open a path past a site's root only when one of them gave it: a
   // turn opened article addresses it made up. Kept as fingerprints of the
-  // address's site and path (givenAddressKey), newest last. runtime-agent
-  // holds the same bounds and key (`shared_browser.rs`).
+  // address's site and path (givenAddressKey), newest last, with those of the
+  // sites the messages named and the pages read were on (givenSiteKey), for a
+  // refused address's way on. Beside them, `typed` holds the addresses the
+  // person's own messages gave (typedAddressKey), which only runtime-agent
+  // writes: one opens without the word check (`shared-browser-cli.js`).
+  // runtime-agent holds the same bounds and keys (`shared_browser.rs`).
   const GIVEN_FILE = "given.json";
   const GIVEN_MAX_BYTES = 192 * 1024;
   const MAX_GIVEN_ADDRESSES = 4_000;
+  const MAX_TYPED_ADDRESSES = 256;
   const HEX_32_PATTERN = /^[0-9a-f]{32}$/;
   const UNANSWERED_ADDRESS_MS = 10 * 60 * 1000;
   // That a step of this run acted in the chat's own tab, the page the person
@@ -449,6 +454,28 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
   function givenAddressKey(rawUrl) {
     const address = givenAddressSitePath(rawUrl);
     return address ? sha256(`${address.site}${address.path}`).slice(0, 32) : null;
+  }
+
+  // The fingerprint a site is kept by among the given addresses: the first 32
+  // hex digits of the SHA-256 of the site alone, which no address's equals,
+  // since an address's always ends in its path. runtime-agent keys a site the
+  // same way.
+  function givenSiteKey(rawUrl) {
+    const address = givenAddressSitePath(rawUrl);
+    return address ? sha256(address.site).slice(0, 32) : null;
+  }
+
+  // The fingerprint an address the person typed is kept by: its site and path
+  // as givenAddressKey has them, then its query and fragment as written, so
+  // another query or fragment on the same path is another address.
+  // runtime-agent keys the addresses the person's messages name the same way.
+  function typedAddressKey(rawUrl) {
+    const address = givenAddressSitePath(rawUrl);
+    if (!address) {
+      return null;
+    }
+    const url = new URL(String(rawUrl));
+    return sha256(`${address.site}${address.path}${url.search}${url.hash}`).slice(0, 32);
   }
 
   function destinationBinding(rawUrl) {
@@ -1380,11 +1407,13 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       }
     }
 
-    // The run's record of the addresses a message or a page gave, as
-    // fingerprints, or null when the run has none (runtime-agent starts one
-    // with every run; a run it did not start, as in a test, has none) or it
-    // cannot be read or belongs to another run.
-    function givenAddresses(authority) {
+    // The run's record of the addresses and sites a message or a page gave
+    // (`addresses`), and of the addresses the person's own messages gave
+    // (`typed`, which only runtime-agent writes), as fingerprints, or null
+    // when the run has none (runtime-agent starts one with every run; a run it
+    // did not start, as in a test, has none) or it cannot be read or belongs
+    // to another run.
+    function givenRecord(authority) {
       let raw;
       try {
         raw = readJson(path.join(approvalDir, GIVEN_FILE), GIVEN_MAX_BYTES, false);
@@ -1401,9 +1430,23 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       ) {
         return null;
       }
-      return raw.addresses
+      const fingerprints = (list, max) => (Array.isArray(list) ? list : [])
         .filter((address) => typeof address === "string" && HEX_32_PATTERN.test(address))
-        .slice(-MAX_GIVEN_ADDRESSES);
+        .slice(-max);
+      return {
+        addresses: fingerprints(raw.addresses, MAX_GIVEN_ADDRESSES),
+        typed: fingerprints(raw.typed, MAX_TYPED_ADDRESSES),
+      };
+    }
+
+    // The run's record as of the step, or null (givenRecord).
+    function currentGivenRecord() {
+      try {
+        return givenRecord(readAuthority(initialAuthority));
+      } catch (_) {
+        // The step's own authority check says why it cannot go on.
+        return null;
+      }
     }
 
     // Whether `rawUrl` is a path past a site's root that no message and no
@@ -1414,31 +1457,53 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       if (!address || address.path === "/") {
         return false;
       }
-      let authority;
-      try {
-        authority = readAuthority(initialAuthority);
-      } catch (_) {
-        // The step's own authority check says why it cannot go on.
-        return false;
-      }
-      const given = givenAddresses(authority);
-      return given !== null && !given.includes(givenAddressKey(rawUrl));
+      const record = currentGivenRecord();
+      return record !== null && !record.addresses.includes(givenAddressKey(rawUrl));
+    }
+
+    // Whether the chat was given the site of `rawUrl`: the person's messages
+    // or the task named an address on it, or the chat's browser turns read a
+    // page on it. A page's link to a site gives that address, not the site: a
+    // review page's link to a search engine (to follow it there) would
+    // otherwise send a refused search back to that search engine. A run with
+    // no record was given none.
+    function siteGiven(rawUrl) {
+      const key = givenSiteKey(rawUrl);
+      const record = key ? currentGivenRecord() : null;
+      return record !== null && record.addresses.includes(key);
+    }
+
+    // Whether the person's own messages gave exactly this address, its query
+    // and fragment included: their words only, never a page's, the task's or a
+    // tool's. A run with no record has none.
+    function typedByThePerson(rawUrl) {
+      const key = typedAddressKey(rawUrl);
+      const record = key ? currentGivenRecord() : null;
+      return record !== null && record.typed.includes(key);
     }
 
     // Keeps the addresses a page gave (its own, its links and those its text
-    // spells out) in the run's record. Best effort: one that is not kept is refused later, and found
-    // again from the site's root.
-    function rememberGiven(rawUrls) {
-      const keys = [...new Set(rawUrls.map(givenAddressKey).filter(Boolean))];
+    // spells out), and the sites of the pages read past their site's root
+    // (`siteUrls`: the page's own address), in the run's record. A site's root
+    // opens without anyone giving it, so reading one gives nothing of its
+    // site: a search engine's home page a turn opened by itself would come
+    // back as the way on after a refusal there. Best effort: one that is not
+    // kept is refused later, and found again from the site's root.
+    function rememberGiven(rawUrls, siteUrls = []) {
+      const sites = siteUrls.filter((rawUrl) => givenAddressSitePath(rawUrl)?.path !== "/");
+      const keys = [
+        ...new Set([...rawUrls.map(givenAddressKey), ...sites.map(givenSiteKey)].filter(Boolean)),
+      ];
       if (!keys.length) {
         return;
       }
       try {
         const authority = readAuthority(initialAuthority);
-        const given = givenAddresses(authority);
-        if (given === null) {
+        const record = givenRecord(authority);
+        if (record === null) {
           return;
         }
+        const given = record.addresses;
         const added = new Set(keys);
         const next = [...given.filter((address) => !added.has(address)), ...keys].slice(-MAX_GIVEN_ADDRESSES);
         // A page read again gives nothing new.
@@ -1447,7 +1512,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
         }
         atomicWriteJson(
           path.join(approvalDir, GIVEN_FILE),
-          { version: 1, ...authority, addresses: next },
+          { version: 1, ...authority, addresses: next, typed: record.typed },
           GIVEN_MAX_BYTES,
         );
       } catch (_) {
@@ -1492,6 +1557,8 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       openedLateThisRun,
       rememberOpenedLate,
       addressNotGiven,
+      siteGiven,
+      typedByThePerson,
       rememberGiven,
       chatTabUsed,
       markChatTabUsed,

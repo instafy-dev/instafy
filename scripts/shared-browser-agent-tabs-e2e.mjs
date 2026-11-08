@@ -666,23 +666,34 @@ export async function runSharedBrowserAgentTabsFixture() {
 
     // 15. An address no message and no page gave is never opened.
     // runtime-agent starts each run's record of the addresses its chat was
-    // given with those the task names (written here the same way: the task
-    // named one review), and each page the run reads adds its own address,
-    // its links and the addresses its text spells out. A made-up address is
-    // refused before any prompt or load, with where to go instead.
+    // given with those the task names and their sites (written here the same
+    // way: the task named one review), and each page the run reads adds its
+    // own address and site, its links and the addresses its text spells out.
+    // A made-up address is refused before any prompt or load, with where to
+    // go instead: its site's root on a site the chat was given, else the
+    // official site of what the task names.
     startRun([]);
+    const siteOf = (url) => `${url.hostname.replace(/^www\./u, "")}${url.port ? `:${url.port}` : ""}`;
+    const fingerprint = (text) => createHash("sha256").update(text).digest("hex").slice(0, 32);
     const givenKey = (address) => {
       const url = new URL(address);
-      const site = `${url.hostname.replace(/^www\./u, "")}${url.port ? `:${url.port}` : ""}`;
-      return createHash("sha256").update(`${site}${url.pathname.replace(/\/+$/u, "") || "/"}`).digest("hex").slice(0, 32);
+      return fingerprint(`${siteOf(url)}${url.pathname.replace(/\/+$/u, "") || "/"}`);
     };
+    const givenSiteKey = (address) => fingerprint(siteOf(new URL(address)));
     const givenPath = path.join(approvalDirectory, "given.json");
     writeProtectedJson(givenPath, {
       version: 1, ownerId: authority.ownerId, runId: authority.runId,
       initiatorUserId: authority.initiatorUserId, browserPageId: runPageId,
-      addresses: [givenKey(`${reviewsSite}/laptops/named`)],
+      addresses: [givenKey(`${reviewsSite}/laptops/named`), givenSiteKey(reviewsSite)],
     });
-    const madeUp = `No message and no page Octo read gave this address, so it was not opened: Octo opens only addresses it was given. Open ${reviewsSite}/ and follow its links to the page, or use the site's own search.`;
+    const madeUp = `No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given. Open ${reviewsSite}/ and follow its links to the page, or use the site's own search.`;
+    // A site nobody gave, a search engine's say: never its root.
+    const nobodyGave = await refused(/./u, "POST", "/v1/navigate", { url: "https://www.search.test/maps" }, []);
+    assert.ok(
+      nobodyGave.includes("Open the official site of what the task names (the venue's, operator's, shop's or reviewer's; for a route, the operator's journey planner), and follow its links or use its own search.") &&
+        !nobodyGave.includes("search.test"),
+      `/v1/navigate: ${nobodyGave}`,
+    );
     const promptsBeforeMadeUp = prompts.length;
     const pagesBeforeMadeUp = browserPages().length;
     const madeUpWords = await refused(/./u, "POST", "/v1/navigate", { url: `${reviewsSite}/laptops/three` }, []);

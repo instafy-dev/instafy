@@ -261,6 +261,39 @@ fn persons_messages_for_the_browser(entries: &[JsonValue]) -> BTreeMap<usize, &s
         .collect()
 }
 
+/// The person's own words in a chat's history, in their words ([`persons_words`]): each message
+/// they wrote that reads as theirs ([`reads_as_persons_own`]) and still stands, the one a browser
+/// turn carries on included, and none they stopped ([`stopped_requests`]) or whose change they
+/// undid ([`taken_back_runs`]), nor a hidden one: never Octo's replies or cards, a card's or the
+/// routing step's task, a page's Ask Octo or a tool's output. A browser run that carries on the
+/// routing step's card for one of them is told the addresses in it were typed
+/// (`jobs::persons_typed_addresses`).
+pub(super) fn persons_own_words(entries: &[JsonValue]) -> Vec<&str> {
+    let stopped: HashSet<&str> = stopped_requests(entries)
+        .into_iter()
+        .flat_map(|stopped| stopped.runs)
+        .collect();
+    let taken_back = taken_back_runs(entries);
+    let hidden = |entry: &JsonValue| {
+        [
+            "/metadata/presentation/hidden",
+            "/metadata/details/presentation/hidden",
+        ]
+        .iter()
+        .any(|pointer| entry.pointer(pointer) == Some(&JsonValue::Bool(true)))
+    };
+    entries
+        .iter()
+        .filter(|entry| reads_as_persons_own(entry) && !hidden(entry))
+        .filter(|entry| {
+            !entry_text(entry, "runId")
+                .is_some_and(|run| stopped.contains(run) || taken_back.contains(run))
+        })
+        .filter_map(|entry| Some(persons_words(entry_text(entry, "content")?)))
+        .filter(|words| !words.is_empty())
+        .collect()
+}
+
 /// What the controller adds to a message of the person's for what they attached
 /// (runtime-controller `format_image_attachment_context_for_agent` and
 /// `chat_attachments::format_history_context`): each file's name and place in the space, and

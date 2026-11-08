@@ -7433,6 +7433,7 @@ impl JobProcessor {
                         .clone(),
                     shared_browser_chat(job),
                     &crate::shared_browser::given_addresses_from_payload(&job.payload),
+                    &persons_typed_addresses(&job.payload),
                 )?,
             )
         } else {
@@ -15886,8 +15887,9 @@ fn terminal_shared_browser_summary(code: &str) -> &'static str {
         "approval_timeout" => {
             "Your OK didn't come in time, so I didn't do that step. Send a message when you're ready and I'll ask again."
         }
+        // What they do next: the step is final, so the turn tries nothing else.
         "approval_denied" => {
-            "You said no, so that step didn't happen, and nothing from it was sent."
+            "You said no, so that step didn't happen, and nothing from it was sent. Tell Octo what to try instead."
         }
         // The page moved to another site after the person's yes, or a
         // second yes in the run was left unused because the control changed.
@@ -17602,6 +17604,37 @@ fn browser_routing_snapshot_for_job(
         && prompt_text.trim().encode_utf16().count() <= ROUTED_BROWSER_TASK_MAX_UTF16_UNITS)
         .then(|| format_browser_routing_preflight_snapshot(workspace_dir))
         .flatten()
+}
+
+/// The addresses the person typed, which a browser run opens without the word check
+/// (`shared_browser::typed_addresses_in`): those of the run's request when it carries on the card
+/// the routing step posted for the sender's own message, as the controller checked on its send
+/// ([`browser_hand_back::carries_on_a_routed_card`]), less the routing step's summary line after
+/// them, and only when the chat's history holds those words as a message of theirs that still
+/// stands ([`conversation_context::persons_own_words`]): never a site's Ask Octo routed to the
+/// browser, whose words the page chose. No other message of the history gives one: it doesn't
+/// say who wrote each, and in a shared chat a teammate's address is not the person's OK. A card
+/// a turn wrote, a page or a tool names none.
+pub(crate) fn persons_typed_addresses(payload: &JsonValue) -> Vec<String> {
+    let routed = payload
+        .get("metadata")
+        .is_some_and(browser_hand_back::carries_on_a_routed_card);
+    let Some(request) = payload
+        .get("prompt_text")
+        .and_then(JsonValue::as_str)
+        .filter(|_| routed)
+    else {
+        return Vec::new();
+    };
+    let words = browser_request::routed_task_words(request).trim();
+    let entries = payload
+        .get("conversation_history")
+        .and_then(JsonValue::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    if !conversation_context::persons_own_words(entries).contains(&words) {
+        return Vec::new();
+    }
+    crate::shared_browser::typed_addresses_in(&[words])
 }
 
 /// The task of the card for a message the routing step sent straight to Instafy's browser: the
@@ -30622,8 +30655,9 @@ mod tests {
             ));
 
             let expected = match code {
+                // What they do next, since the turn tries nothing else.
                 "approval_denied" => {
-                    "You said no, so that step didn't happen, and nothing from it was sent."
+                    "You said no, so that step didn't happen, and nothing from it was sent. Tell Octo what to try instead."
                 }
                 // Not a safety stop: the person said yes, and the page moved on.
                 "approval_stale" => {

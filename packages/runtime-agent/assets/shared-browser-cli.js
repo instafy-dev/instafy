@@ -5092,7 +5092,7 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
     refuseUnansweredAddress(url);
     refuseUngivenAddress(url);
     const step = classifyStep("navigate", null, { url });
-    if (step.verdict === "ask" || CONSEQUENTIAL_ACTION_PATTERN.test(url)) {
+    if (step.verdict === "ask" || addressWordsAsk(url)) {
       throw new Error(
         "Octo's own tabs are for reading, and this address does more than show a page, so no tab was opened. Leave it to the person.",
       );
@@ -5211,7 +5211,7 @@ function opensInChatTab(method, requestPath, body, tabs) {
   } catch (_) {
     return false;
   }
-  return classifyStep("navigate", null, { url }).verdict !== "ask" && !CONSEQUENTIAL_ACTION_PATTERN.test(url);
+  return classifyStep("navigate", null, { url }).verdict !== "ask" && !addressWordsAsk(url);
 }
 
 // Runs inside the page through Playwright, so it must not use anything from
@@ -5553,18 +5553,44 @@ function refuseUnansweredAddress(url) {
 // address its text spells out), refused at once, before anything asks or loads. A turn opened two article
 // addresses it guessed on a reviewer's site, one of which waited 20 seconds
 // for nothing. The site's root, and an address on no public site (left to the
-// browser's own network rules), always go on.
+// browser's own network rules), always go on. The refusal says where to go
+// instead: that site's root, links and search when the chat was given the
+// site (siteGiven: a message or the task named it, or a page read there past
+// its root), else the official site of what the task names. Sent to the
+// root of any site it refused, a route question opened a search engine nobody
+// named and asked the person to let it send a search, which they refused (a
+// local test, Nov 8). A refused address was never opened, so the turn writes
+// no finding line for it: runtime-agent reads the refusal by its words
+// (`shared_browser::address_not_given`) and leaves out one it wrote anyway.
+const OFFICIAL_SITE_WAY_ON =
+  "Open the official site of what the task names (the venue's, operator's, shop's or reviewer's; for a route, the operator's journey planner), and follow its links or use its own search.";
 function refuseUngivenAddress(url) {
   if (!actionPolicy.isPublicHost(new URL(url).hostname) || !approvalProtocol.addressNotGiven(url)) {
     return;
   }
+  const wayOn = approvalProtocol.siteGiven(url)
+    ? `Open ${new URL(url).origin}/ and follow its links to the page, or use the site's own search.`
+    : OFFICIAL_SITE_WAY_ON;
   throw new Error(
-    `No message and no page Octo read gave this address, so it was not opened: Octo opens only addresses it was given. Open ${new URL(url).origin}/ and follow its links to the page, or use the site's own search.`,
+    `No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given. ${wayOn}`,
   );
 }
 
+// Whether an address's words alone make opening it more than a reading step
+// (navigate asks for it, open_tab refuses it): a word of
+// CONSEQUENTIAL_ACTION_PATTERN in it, unless the person's own messages gave
+// this exact address (typedByThePerson): they asked for it by typing it. The
+// address the person typed, httpbin.org/forms/post, asked before anything
+// else for its "post" (a local test, Nov 8). The policy's own address check
+// (classifyAddress: files, sign-out, exports, one-time links, action
+// addresses) still judges every address, and a form's submit still asks.
+function addressWordsAsk(url) {
+  return CONSEQUENTIAL_ACTION_PATTERN.test(url) && !approvalProtocol.typedByThePerson(url);
+}
+
 // Keeps the addresses a page gives, for refuseUngivenAddress: its own, its
-// links' and the addresses its text spells out. A page that may show a secret
+// links' and the addresses its text spells out, and the page's own site when
+// it is past the site's root (rememberGiven). A page that may show a secret
 // gives them too: only their fingerprints are kept.
 function rememberGivenAddresses(rawUrl, interactive, text) {
   const links = interactive.map(({ description }) => {
@@ -5574,7 +5600,7 @@ function rememberGivenAddresses(rawUrl, interactive, text) {
       return null;
     }
   });
-  approvalProtocol.rememberGiven([rawUrl, ...links, ...addressesInText(text)].filter(Boolean));
+  approvalProtocol.rememberGiven([rawUrl, ...links, ...addressesInText(text)].filter(Boolean), [rawUrl]);
 }
 
 // The addresses a text spells out, read as runtime-agent reads a task's
@@ -6131,7 +6157,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // browsing. Under routine browsing, an address for a site the run has not
     // used yet does not ask on its own.
     const step = classifyStep("navigate", null, { url });
-    const readingStep = step.verdict !== "ask" && !CONSEQUENTIAL_ACTION_PATTERN.test(url);
+    const readingStep = step.verdict !== "ask" && !addressWordsAsk(url);
     assertMayOpen(url);
     refuseUnansweredAddress(url);
     refuseUngivenAddress(url);

@@ -407,7 +407,7 @@ fn a_browser_turn_that_answers_in_words_may_open_a_reviewers_own_site() {
         );
         assert!(
             prompt.contains(
-                "or the home page of the official site of what the task names (for reviews, a reviewer's own site). Prefer available native search for discovery; never invent a page path."
+                "else the official site of what the task names (for reviews, a reviewer's own site) and its links and search. Prefer available native search for discovery; never invent a page path."
             ),
             "{transport}"
         );

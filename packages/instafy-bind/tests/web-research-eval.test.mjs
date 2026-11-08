@@ -275,10 +275,10 @@ test("research and browser policy checks match the current skills", () => {
   // "Finding a page" is the browser skill's, and the research skill points to it.
   const browser = flat(BROWSER_SKILL);
   const finding = {
-    no_guessed_paths: ["Open an address the person or a skill gave, a link on a page you read (print a page's links with its text), or the home page of the official site of what the task names (for reviews, a reviewer's own site).", "never invent a page path"],
+    no_guessed_paths: ["Open an address the person or a skill gave or a link on a page you read (print a page's links with its text), else the official site of what the task names (for reviews, a reviewer's own site) and its links and search.", "never invent a page path"],
     missing_page_searched: ["A page that says it is missing (\"not found\", \"are you lost?\"): use that site's own search box or menu."],
-    configured_sites_not_opened: ["Search engines are not categorically blocked", "an explicit workspace policy refusal ends that page"],
-    facts_from_own_page: ["comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: its destination is the stop the place's own page names, so read that page first; choose the stations and the day and time the person travels (a daytime hour when they gave none), press its button and read the route off the page it shows, saying which stop and which day and time it is for), not a listing or a kiosk page: those only lead to it."],
+    configured_sites_not_opened: ["Use a search engine only if the person named one or no official site is known", "an explicit workspace policy refusal ends that page"],
+    facts_from_own_page: ["comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: its destination is the stop the place's own page names, so read that page first; choose the stations and the day and time the person travels (a daytime hour when they gave none), press its button and read the route off the page it shows), not a listing or a kiosk page: those only lead to it."],
   };
   for (const [id, needles] of Object.entries(finding)) for (const needle of needles) assert.ok(browser.includes(needle), `${id}: ${needle}`);
   assert.ok(skill.includes('"Finding a page" not loaded? Print it:'));

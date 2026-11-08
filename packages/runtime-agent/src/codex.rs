@@ -11374,7 +11374,7 @@ required = true
     #[test]
     fn the_adapter_keeps_the_addresses_the_browser_refused_as_not_given_unprojected() {
         let mut adapter = CodexEventStreamAdapter::default();
-        const REFUSED: &str = "No message and no page Octo read gave this address, so it was not opened: Octo opens only addresses it was given. Open https://www.tomshardware.com/ and follow its links to the page, or use the site's own search.";
+        const REFUSED: &str = "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given. Open the official site of what the task names (the venue's, operator's, shop's or reviewer's; for a route, the operator's journey planner), and follow its links or use its own search.";
         const DOWN: &str =
             "The site did not answer in time, so nothing was opened and the page is still blank.";
         let end = |call: usize, tool: &str, url: &str, reason: &str| {

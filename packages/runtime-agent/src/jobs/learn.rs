@@ -585,6 +585,10 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // own, not at the end of `browser_then_build`'s, and the routing step read that a routed
     // browser turn sees the person's words, not only their message.
     include_str!("legacy/browser-automation-v38.md"),
+    // From before a page was found at the official site of what the task names first and a
+    // search engine only when the person named one or no official site was known, and a route's
+    // finding named its end stop and whose pick it was, what it left out and when its legs ran.
+    include_str!("legacy/browser-automation-v39.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,

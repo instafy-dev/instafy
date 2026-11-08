@@ -174,7 +174,8 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   grows in the reply's place, above the cards, in the turn's own row. A turn whose browser step
   ended its run on the approval lane (a step the person said no to or left, or a page waiting for
   their input) shows no draft: the runtime replies with its own sentence ("You said no, so that
-  step didn't happen, and nothing from it was sent."), never the model's words before it. The file
+  step didn't happen, and nothing from it was sent. Tell Octo what to try instead."), never the
+  model's words before it. The file
   changes stay under the reply and its cards. Run traces keep their full view.
 - Octo is not asked for replies the person could send next, and none is shown or sent for them:
   Enter in an empty composer sends nothing, and the composer's own completion, when the person
