@@ -20,7 +20,7 @@ const query = new URLSearchParams(location.search);
 const surface = query.get('surface') ?? 'toast-warning';
 const long = query.get('text') !== 'short';
 document.documentElement.classList.toggle('dark', query.get('theme') === 'dark');
-const counters = { retry: 0, dismiss: 0, stop: 0, shown: 0, closed: 0, probes: 0, recovered: 0, undo: 0, send: 0, cancel: 0 };
+const counters = { retry: 0, dismiss: 0, stop: 0, shown: 0, closed: 0, probes: 0, recovered: 0, undo: 0, send: 0, cancel: 0, view: 0 };
 let probeKind = query.get('issue') ?? 'connection';
 if (query.get('safeArea') === '1') {
   for (const [side, value] of Object.entries({top: 28, right: 20, bottom: 24, left: 20})) document.documentElement.style.setProperty(`--instafy-safe-area-inset-${side}`, `${value}px`);
@@ -105,6 +105,11 @@ function Review() {
     });
     api.information = (message = 'Your export is ready.') => showStatus(message as string, 'info', 5000, {
       id: 'review-information', behavior: {kind: 'informational'}, forceVisible: true,
+    });
+    // A waiting prompt's toast, whose message opens its chat as View does.
+    api.opensOnPress = () => showStatus('Octo is waiting for your OK in “Open httpbin.org in your browser, fill in the order form and send it”.', 'info', 0, {
+      id: 'review-opens-on-press', behavior: {kind: 'action-required'}, nonPreemptive: true,
+      actionLabel: 'View', onAction: () => {counters.view++; setLastAction('Chat opened');}, actionOnPress: true,
     });
     api.deadlineUndo = () => showStatus('Chat moved to trash.', 'info', 6000, {
       id: 'review-deadline', behavior: {kind: 'deadline', expiresAt: Date.now() + 6000},

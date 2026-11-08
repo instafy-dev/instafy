@@ -1,5 +1,5 @@
 {
-  "about": "Messages with the chat they were sent in, and the route the routing step should give each. The routing check builds each case's routing input with the runtime's own code and asks the routing model. history holds the chat's earlier entries as the runtime receives them; the message is added after them. Nine cases were sent in a recorded local test, each with the entries its routing step received there: map-trip, comparison-page, comparison-fill-in, page-from-findings, browser-named, browser-follow-up, keep-going-open-route, browser-sign-in and browser-form. keep-going-after-stop-and-undo was not: its chat is keep-going-open-route's up to the first Undo, with the route exchange taken out, the request and reply that named the route edited to match, and that reply's offer of more cut. page-from-unconfirmed-findings and keep-going-route-open-after-stop-and-undo were sent in a later recorded local test, each with the entries its routing step received there, a path's space id replaced as in keep-going-open-route. comparison-fill-in-after-a-reply and keep-going-unconfirmed-route-after-stops-and-undo were sent in a third recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-findings-with-the-route-unconfirmed and keep-going-after-a-page-made-from-findings were sent in a fourth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-confirmed-findings was not sent: its chat is browser-follow-up's, with a message that asks for a page of the hours alone. map-weekend was sent in none of them, and plain-answer and rewrite-names-a-map come from the Octo turn eval's cases.",
+  "about": "Messages with the chat they were sent in, and the route the routing step should give each. The routing check builds each case's routing input with the runtime's own code and asks the routing model. history holds the chat's earlier entries as the runtime receives them; the message is added after them. Nine cases were sent in a recorded local test, each with the entries its routing step received there: map-trip, comparison-page, comparison-fill-in, page-from-findings, browser-named, browser-follow-up, keep-going-open-route, browser-sign-in and browser-form. keep-going-after-stop-and-undo was not: its chat is keep-going-open-route's up to the first Undo, with the route exchange taken out, the request and reply that named the route edited to match, and that reply's offer of more cut. page-from-unconfirmed-findings and keep-going-route-open-after-stop-and-undo were sent in a later recorded local test, each with the entries its routing step received there, a path's space id replaced as in keep-going-open-route. comparison-fill-in-after-a-reply and keep-going-unconfirmed-route-after-stops-and-undo were sent in a third recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-findings-with-the-route-unconfirmed and keep-going-after-a-page-made-from-findings were sent in a fourth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. warranty-from-each-laptops-page and keep-going-after-two-stops-and-an-undo were sent in a fifth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-confirmed-findings was not sent: its chat is browser-follow-up's, with a message that asks for a page of the hours alone. map-weekend was sent in none of them, and plain-answer and rewrite-names-a-map come from the Octo turn eval's cases. Every hand-back's stored prompt, Stop notice, report of what a stopped turn kept, and Undo line carries the metadata the controller writes on it that the runtime reads (the card a hand-back carries on, who stopped which runs, what was kept, which run's change was undone): where a recording kept only its words and kind, the rest is filled in as the controller writes it.",
   "cases": [
     {
       "id": "map-trip",
@@ -69,7 +69,14 @@
           "role": "user",
           "content": "Continue building with what the browser turn found.",
           "runId": "run-3",
-          "createdAt": "2026-11-04T08:18:28.378Z"
+          "createdAt": "2026-11-04T08:18:28.378Z",
+          "metadata": {
+            "browserHandBack": {
+              "version": 1,
+              "cardJobId": "card-1",
+              "browserJobId": "job-run-2"
+            }
+          }
         },
         {
           "role": "assistant",
@@ -350,7 +357,16 @@
           "runId": "run-6",
           "createdAt": "2026-11-04T08:38:24.831Z",
           "metadata": {
-            "kind": "run_cancellation"
+            "source": "controller",
+            "kind": "run_cancellation",
+            "details": {
+              "reason": "Stopped",
+              "runIds": [
+                "run-6"
+              ],
+              "stopRequested": true,
+              "actorUserId": "person-1"
+            }
           }
         },
         {
@@ -374,7 +390,9 @@
             "kind": "change_undone",
             "presentation": {
               "hidden": true
-            }
+            },
+            "undoneRunId": "run-7",
+            "actorUserId": "person-1"
           }
         },
         {
@@ -398,7 +416,9 @@
             "kind": "change_undone",
             "presentation": {
               "hidden": true
-            }
+            },
+            "undoneRunId": "run-8",
+            "actorUserId": "person-1"
           }
         },
         {
@@ -413,7 +433,16 @@
           "runId": "run-9",
           "createdAt": "2026-11-04T08:48:27.281Z",
           "metadata": {
-            "kind": "run_cancellation"
+            "source": "controller",
+            "kind": "run_cancellation",
+            "details": {
+              "reason": "Stopped",
+              "runIds": [
+                "run-9"
+              ],
+              "stopRequested": true,
+              "actorUserId": "person-1"
+            }
           }
         },
         {
@@ -422,7 +451,15 @@
           "runId": "run-9",
           "createdAt": "2026-11-04T08:48:29.155Z",
           "metadata": {
-            "kind": "update"
+            "source": "agent",
+            "kind": "update",
+            "outcome": "canceled",
+            "messageType": "file_change",
+            "details": {
+              "paths": [
+                "/workspace/00000000-0000-4000-8000-000000000001/sites/livraria-lello/app.js"
+              ]
+            }
           }
         },
         {
@@ -434,7 +471,9 @@
             "kind": "change_undone",
             "presentation": {
               "hidden": true
-            }
+            },
+            "undoneRunId": "run-9",
+            "actorUserId": "person-1"
           }
         }
       ],
@@ -442,7 +481,7 @@
       "expect": {
         "route": "browser_then_build"
       },
-      "why": "What the chat left open is the route its page marks not confirmed. The changes the person stopped or undid are not carried on."
+      "why": "What the chat left open is the route its page marks not confirmed. The changes the person stopped or undid, and their notices, are not in the routing step's input."
     },
     {
       "id": "keep-going-after-stop-and-undo",
@@ -504,7 +543,16 @@
           "runId": "run-6",
           "createdAt": "2026-11-04T08:38:24.831Z",
           "metadata": {
-            "kind": "run_cancellation"
+            "source": "controller",
+            "kind": "run_cancellation",
+            "details": {
+              "reason": "Stopped",
+              "runIds": [
+                "run-6"
+              ],
+              "stopRequested": true,
+              "actorUserId": "person-1"
+            }
           }
         },
         {
@@ -528,7 +576,9 @@
             "kind": "change_undone",
             "presentation": {
               "hidden": true
-            }
+            },
+            "undoneRunId": "run-7",
+            "actorUserId": "person-1"
           }
         }
       ],
@@ -540,7 +590,7 @@
           "conditional"
         ]
       },
-      "why": "Only a change the person stopped and one they undid are left, and a bare \"keep going\" carries on neither: it goes direct, and the routing step requires no change. Whether the turn after it leaves the undone change alone only a real turn shows."
+      "why": "The routing step reads neither the change the person stopped nor the one they undid, so nothing is left to carry on: a bare \"keep going\" goes direct, and the routing step requires no change. Whether the turn after it leaves the undone change alone only a real turn shows."
     },
     {
       "id": "page-from-unconfirmed-findings",
@@ -725,7 +775,14 @@
           "role": "user",
           "content": "Continue building with what the browser turn found.",
           "runId": "run-7",
-          "createdAt": "2026-11-05T22:52:54.134Z"
+          "createdAt": "2026-11-05T22:52:54.134Z",
+          "metadata": {
+            "browserHandBack": {
+              "version": 1,
+              "cardJobId": "card-5",
+              "browserJobId": "job-run-6"
+            }
+          }
         },
         {
           "role": "assistant",
@@ -745,7 +802,16 @@
           "runId": "run-8",
           "createdAt": "2026-11-05T22:55:46.134Z",
           "metadata": {
-            "kind": "run_cancellation"
+            "source": "controller",
+            "kind": "run_cancellation",
+            "details": {
+              "reason": "Stopped",
+              "runIds": [
+                "run-8"
+              ],
+              "stopRequested": true,
+              "actorUserId": "person-1"
+            }
           }
         },
         {
@@ -786,7 +852,14 @@
           "role": "user",
           "content": "Continue building with what the browser turn found.",
           "runId": "run-11",
-          "createdAt": "2026-11-05T22:56:40.719Z"
+          "createdAt": "2026-11-05T22:56:40.719Z",
+          "metadata": {
+            "browserHandBack": {
+              "version": 1,
+              "cardJobId": "card-9",
+              "browserJobId": "job-run-10"
+            }
+          }
         },
         {
           "role": "assistant",
@@ -794,7 +867,16 @@
           "runId": "run-11",
           "createdAt": "2026-11-05T22:56:56.821Z",
           "metadata": {
-            "kind": "run_cancellation"
+            "source": "controller",
+            "kind": "run_cancellation",
+            "details": {
+              "reason": "Stopped",
+              "runIds": [
+                "run-11"
+              ],
+              "stopRequested": true,
+              "actorUserId": "person-1"
+            }
           }
         },
         {
@@ -803,7 +885,15 @@
           "runId": "run-11",
           "createdAt": "2026-11-05T22:56:58.470Z",
           "metadata": {
-            "kind": "update"
+            "source": "agent",
+            "kind": "update",
+            "outcome": "canceled",
+            "messageType": "file_change",
+            "details": {
+              "paths": [
+                "/workspace/00000000-0000-4000-8000-000000000001/sites/livraria-lello/app.js"
+              ]
+            }
           }
         },
         {
@@ -815,7 +905,9 @@
             "kind": "change_undone",
             "presentation": {
               "hidden": true
-            }
+            },
+            "undoneRunId": "run-11",
+            "actorUserId": "person-1"
           }
         }
       ],
@@ -823,7 +915,7 @@
       "expect": {
         "route": "browser_then_build"
       },
-      "why": "What the chat left open is the route its page marks not confirmed, and the page here shows it. The section the person stopped and the tip they stopped and undid are not carried on."
+      "why": "What the chat left open is the route its page marks not confirmed, and the page here shows it. The section the person stopped and the tip they stopped and undid are not in the routing step's input."
     },
     {
       "id": "comparison-fill-in-after-a-reply",
@@ -954,7 +1046,14 @@
           "role": "user",
           "content": "Continue building with what the browser turn found.",
           "runId": "run-7",
-          "createdAt": "2026-11-06T09:57:09.668Z"
+          "createdAt": "2026-11-06T09:57:09.668Z",
+          "metadata": {
+            "browserHandBack": {
+              "version": 1,
+              "cardJobId": "card-5",
+              "browserJobId": "job-run-6"
+            }
+          }
         },
         {
           "role": "assistant",
@@ -974,7 +1073,16 @@
           "runId": "run-8",
           "createdAt": "2026-11-06T10:00:39.582Z",
           "metadata": {
-            "kind": "run_cancellation"
+            "source": "controller",
+            "kind": "run_cancellation",
+            "details": {
+              "reason": "Stopped",
+              "runIds": [
+                "run-8"
+              ],
+              "stopRequested": true,
+              "actorUserId": "person-1"
+            }
           }
         },
         {
@@ -989,7 +1097,16 @@
           "runId": "run-9",
           "createdAt": "2026-11-06T10:01:57.932Z",
           "metadata": {
-            "kind": "run_cancellation"
+            "source": "controller",
+            "kind": "run_cancellation",
+            "details": {
+              "reason": "Stopped",
+              "runIds": [
+                "run-9"
+              ],
+              "stopRequested": true,
+              "actorUserId": "person-1"
+            }
           }
         },
         {
@@ -998,7 +1115,15 @@
           "runId": "run-9",
           "createdAt": "2026-11-06T10:01:59.717Z",
           "metadata": {
-            "kind": "update"
+            "source": "agent",
+            "kind": "update",
+            "outcome": "canceled",
+            "messageType": "file_change",
+            "details": {
+              "paths": [
+                "/workspace/00000000-0000-4000-8000-000000000001/sites/porto-visit/app.js"
+              ]
+            }
           }
         },
         {
@@ -1010,7 +1135,9 @@
             "kind": "change_undone",
             "presentation": {
               "hidden": true
-            }
+            },
+            "undoneRunId": "run-9",
+            "actorUserId": "person-1"
           }
         }
       ],
@@ -1018,7 +1145,7 @@
       "expect": {
         "route": "browser_then_build"
       },
-      "why": "The page here marks the metro route not confirmed, and the replies say it is unverified. A tip and a section the person stopped, one of them undone, are not carried on."
+      "why": "The page here marks the metro route not confirmed, and the replies say it is unverified. A tip and a section the person stopped, one of them undone, are not in the routing step's input."
     },
     {
       "id": "page-from-findings-with-the-route-unconfirmed",
@@ -1189,7 +1316,16 @@
           "runId": "run-6",
           "createdAt": "2026-11-06T19:08:27.415Z",
           "metadata": {
-            "kind": "run_cancellation"
+            "source": "controller",
+            "kind": "run_cancellation",
+            "details": {
+              "reason": "Stopped",
+              "runIds": [
+                "run-6"
+              ],
+              "stopRequested": true,
+              "actorUserId": "person-1"
+            }
           }
         },
         {
@@ -1204,7 +1340,16 @@
           "runId": "run-7",
           "createdAt": "2026-11-06T19:09:27.233Z",
           "metadata": {
-            "kind": "run_cancellation"
+            "source": "controller",
+            "kind": "run_cancellation",
+            "details": {
+              "reason": "Stopped",
+              "runIds": [
+                "run-7"
+              ],
+              "stopRequested": true,
+              "actorUserId": "person-1"
+            }
           }
         },
         {
@@ -1213,7 +1358,15 @@
           "runId": "run-7",
           "createdAt": "2026-11-06T19:09:29.177Z",
           "metadata": {
-            "kind": "update"
+            "source": "agent",
+            "kind": "update",
+            "outcome": "canceled",
+            "messageType": "file_change",
+            "details": {
+              "paths": [
+                "/workspace/00000000-0000-4000-8000-000000000001/sites/porto-lello/index.html"
+              ]
+            }
           }
         },
         {
@@ -1225,7 +1378,9 @@
             "kind": "change_undone",
             "presentation": {
               "hidden": true
-            }
+            },
+            "undoneRunId": "run-7",
+            "actorUserId": "person-1"
           }
         }
       ],
@@ -1233,7 +1388,364 @@
       "expect": {
         "route": "browser_then_build"
       },
-      "why": "The page this chat made from what it found marks the metro route unconfirmed, and its replies say so: a bare \"keep going\" carries that on in the browser, and Octo then changes the page. The section the person stopped and the tip they stopped and undid are not carried on."
+      "why": "The page this chat made from what it found marks the metro route unconfirmed, and its replies say so: a bare \"keep going\" carries that on in the browser, and Octo then changes the page. The section the person stopped and the tip they stopped and undid are not in the routing step's input."
+    },
+    {
+      "id": "warranty-from-each-laptops-page",
+      "history": [
+        {
+          "role": "user",
+          "content": "Compare the three latest Framework laptops: CPU, battery, weight, price, with two independent reviews each, as a comparison page.",
+          "runId": "run-1",
+          "createdAt": "2026-11-07T21:02:32.275Z"
+        },
+        {
+          "role": "user",
+          "content": "Compare the three latest Framework laptops: CPU, battery, weight, price, with two independent reviews each, as a comparison page.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-07T21:02:40.553Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Compare the three latest Framework laptops: CPU, battery, weight, price, with two independent reviews each, as a comparison page.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              },
+              "browserHandsBack": true
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "I read 8 pages on Framework, Phoronix, PCWorld, and Gizmodo. The three newest laptop models shown on Framework’s site are Laptop 13 Pro, Laptop 12 (Series 3), and Laptop 16 (AI 300). Their official pages show, respectively: Intel Core Ultra Series 3, 74Wh, 1.4kg; Intel Core Series 3 up to 4.8GHz, 50Wh, 1.3kg; and AMD Ryzen AI 300 up to 12 cores/5.1GHz, 85Wh, 2.1kg with the Expansion Bay Shell or 2.4kg with Graphics Module. Current Austrian DIY starting prices were €1,349, €619, and €1,409. Independent review coverage found this turn was only sufficient for Laptop 13 Pro: Phoronix, Gizmodo, and PCWorld each review it. PCWorld’s page reports 3.13lb, a 74Wh battery, and its reviewed configuration’s $1,823 MSRP; Gizmodo reports around 5 hours in its daily-use test and a $2,900 starting price for its review configuration. Two independent reviews each for Laptop 12 and Laptop 16 were not read, so those review comparisons remain incomplete. These are source observations, not a finished comparison page.\n\nI couldn't find any of the requested independent review pages. Notebookcheck's search was covered by a cookie notice that the browser could not clear, and Tom's Hardware's search address did not return a page. I didn't open any of the previously read pages again.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-07T21:06:30.067Z"
+        },
+        {
+          "role": "user",
+          "content": "Continue building with what the browser turn found.",
+          "runId": "run-3",
+          "createdAt": "2026-11-07T21:06:30.483Z",
+          "metadata": {
+            "browserHandBack": {
+              "version": 1,
+              "cardJobId": "card-1",
+              "browserJobId": "job-run-2"
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Built the Framework laptop comparison page with CPU, battery, weight, Austrian DIY starting price, and linked review details. The available pages provided multiple independent reviews for the 13 Pro, but not two reviews each for the Laptop 12 and Laptop 16; those gaps are marked on the page.\n\nAssumed: “latest” means the 13 Pro, Laptop 12, and Laptop 16 named on Framework’s homepage; prices are Austrian DIY starting prices.",
+          "runId": "run-3",
+          "createdAt": "2026-11-07T21:08:33.773Z"
+        },
+        {
+          "role": "user",
+          "content": "Fill in what's still missing.",
+          "runId": "run-4",
+          "createdAt": "2026-11-07T21:12:10.891Z"
+        },
+        {
+          "role": "user",
+          "content": "Fill in what's still missing.",
+          "runId": "run-5",
+          "lane": "browser",
+          "createdAt": "2026-11-07T21:12:16.856Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-4",
+              "browserAutoStarted": true,
+              "dispatchContent": "Fill in what's still missing.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-4",
+                "routed": true
+              },
+              "browserHandsBack": true
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "I read the Framework Laptop 12 and Laptop 16 configuration pages, but the remaining independent reviews are still missing. The Laptop 12 reviewer's site search was covered by a cookie notice I couldn't dismiss; the other review pages weren't reached. I didn't reopen any previously read review pages.\n\nThe prior unread reviews are still unavailable. I couldn't open independently sourced review pages directly because no reviewer links were present among the pages I was allowed to read; the Notebookcheck search page was already blocked by its cookie notice. I read only the Framework Laptop 12 product page for product information, not as an independent review.",
+          "runId": "run-5",
+          "lane": "browser",
+          "createdAt": "2026-11-07T21:14:32.950Z"
+        },
+        {
+          "role": "user",
+          "content": "Continue building with what the browser turn found.",
+          "runId": "run-6",
+          "createdAt": "2026-11-07T21:14:33.232Z",
+          "metadata": {
+            "browserHandBack": {
+              "version": 1,
+              "cardJobId": "card-4",
+              "browserJobId": "job-run-5"
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "I added the missing Laptop 12 details and clarified the review counts on the comparison page. The 13 Pro has three independent reviews listed; I still couldn’t find two reviews each for the Laptop 12 and Laptop 16. Notebookcheck was blocked, Tom’s Hardware had no page at the address checked, and review search was unavailable.",
+          "runId": "run-6",
+          "createdAt": "2026-11-07T21:15:56.383Z"
+        }
+      ],
+      "message": "Add each laptop's warranty from its own page.",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "A change that needs what a web page says: each laptop's own page, which this chat's browser work found. The building turn of a change opens no browser, so the browser reads the pages first and Octo then adds what they say."
+    },
+    {
+      "id": "keep-going-after-two-stops-and-an-undo",
+      "history": [
+        {
+          "role": "user",
+          "content": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+          "runId": "run-1",
+          "createdAt": "2026-11-07T21:25:16.173Z"
+        },
+        {
+          "role": "user",
+          "content": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-07T21:25:21.970Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "I couldn't read Visit Porto because the page stayed busy and showed no content, so I couldn't verify Livraria Lello's opening hours.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-07T21:26:34.043Z"
+        },
+        {
+          "role": "user",
+          "content": "Now find how to get there by metro from São Bento.",
+          "runId": "run-3",
+          "createdAt": "2026-11-07T21:27:19.345Z"
+        },
+        {
+          "role": "user",
+          "content": "Now find how to get there by metro from São Bento.",
+          "runId": "run-4",
+          "lane": "browser",
+          "createdAt": "2026-11-07T21:27:25.471Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-3",
+              "browserAutoStarted": true,
+              "dispatchContent": "Now find how to get there by metro from São Bento.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-3",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "The Metro do Porto journey planner shows São Bento as the starting station, but its cookie notice blocked using the planner, so I couldn't confirm a route to Livraria Lello. Please clear the cookie notice on the metro page, then I can check the route.",
+          "runId": "run-4",
+          "lane": "browser",
+          "createdAt": "2026-11-07T21:28:33.387Z"
+        },
+        {
+          "role": "user",
+          "content": "Confirm the metro route in the operator's journey planner.",
+          "runId": "run-5",
+          "createdAt": "2026-11-07T21:29:20.414Z"
+        },
+        {
+          "role": "user",
+          "content": "Confirm the metro route in the operator's journey planner.",
+          "runId": "run-6",
+          "lane": "browser",
+          "createdAt": "2026-11-07T21:29:26.920Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-5",
+              "browserAutoStarted": true,
+              "dispatchContent": "Confirm the metro route in the operator's journey planner.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-5",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Finished in the browser.",
+          "runId": "run-6",
+          "lane": "browser",
+          "createdAt": "2026-11-07T21:31:38.915Z"
+        },
+        {
+          "role": "user",
+          "content": "Put the hours and the metro route on a small page I can share.",
+          "runId": "run-7",
+          "createdAt": "2026-11-07T21:32:20.066Z"
+        },
+        {
+          "role": "user",
+          "content": "Put the hours and the metro route on a small page I can share.",
+          "runId": "run-8",
+          "lane": "browser",
+          "createdAt": "2026-11-07T21:32:26.001Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-7",
+              "browserAutoStarted": true,
+              "dispatchContent": "Put the hours and the metro route on a small page I can share.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-7",
+                "routed": true
+              },
+              "browserHandsBack": true
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "runId": "run-8",
+          "lane": "browser",
+          "createdAt": "2026-11-07T21:32:36.545Z"
+        },
+        {
+          "role": "user",
+          "content": "Continue building with what the browser turn found.",
+          "runId": "run-9",
+          "createdAt": "2026-11-07T21:32:36.653Z",
+          "metadata": {
+            "browserHandBack": {
+              "version": 1,
+              "cardJobId": "card-7",
+              "browserJobId": "job-run-8"
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "I made a small Livraria Lello visit page with the official daily hours and links to both official sites. The metro route from São Bento remains unconfirmed because the operator’s planner didn’t provide a readable route; please verify it before travelling.\n\nPeople in this space can open the page. For a link anyone can open, ask me for a public link.\n\nAssumed: the official hours are useful without a specific visit date.",
+          "runId": "run-9",
+          "createdAt": "2026-11-07T21:35:08.652Z"
+        },
+        {
+          "role": "user",
+          "content": "Add a short \"Before you go\" section to that page.",
+          "runId": "run-10",
+          "createdAt": "2026-11-07T21:36:49.419Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Stopped this run.",
+          "runId": "run-10",
+          "createdAt": "2026-11-07T21:37:02.868Z",
+          "metadata": {
+            "source": "controller",
+            "kind": "run_cancellation",
+            "details": {
+              "reason": "Stopped",
+              "runIds": [
+                "run-10"
+              ],
+              "stopRequested": true,
+              "actorUserId": "person-1"
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": "Add a one-line tip about the best time to visit.",
+          "runId": "run-11",
+          "createdAt": "2026-11-07T21:38:08.686Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Stopped this run.",
+          "runId": "run-11",
+          "createdAt": "2026-11-07T21:38:40.290Z",
+          "metadata": {
+            "source": "controller",
+            "kind": "run_cancellation",
+            "details": {
+              "reason": "Stopped",
+              "runIds": [
+                "run-11"
+              ],
+              "stopRequested": true,
+              "actorUserId": "person-1"
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Applied file changes: /workspace/00000000-0000-4000-8000-000000000001/sites/lello-visit/app.js",
+          "runId": "run-11",
+          "createdAt": "2026-11-07T21:38:42.941Z",
+          "metadata": {
+            "source": "agent",
+            "kind": "update",
+            "outcome": "canceled",
+            "messageType": "file_change",
+            "details": {
+              "paths": [
+                "/workspace/00000000-0000-4000-8000-000000000001/sites/lello-visit/app.js"
+              ]
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "The person undid the change from “Add a one-line tip about the best time to visit.”",
+          "createdAt": "2026-11-07T21:39:35.076Z",
+          "metadata": {
+            "source": "controller",
+            "kind": "change_undone",
+            "presentation": {
+              "hidden": true
+            },
+            "undoneRunId": "run-11",
+            "actorUserId": "person-1"
+          }
+        }
+      ],
+      "message": "keep going",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "The page here marks the metro route unconfirmed, and its reply says so: a bare \"keep going\" carries that on in the browser, and Octo then changes the page. The section the person stopped and the tip they stopped and undid are not in the routing step's input."
     },
     {
       "id": "browser-sign-in",

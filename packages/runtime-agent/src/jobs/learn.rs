@@ -407,6 +407,10 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // page asked for from what Octo knows said so ("from": "memory"), and an item whose own page
     // wasn't opened, the lede's missing items and a tip from no page each said what they are.
     include_str!("legacy/interactive-artifacts-v12.md"),
+    // From before whose page a turn changes was said only in every writing turn's instructions,
+    // with the space's pages and the chat that made each, a reply's `Assumed:` line was only for a
+    // default the person didn't give, and a note on a page said where Octo looked, never its tools.
+    include_str!("legacy/interactive-artifacts-v13.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),
@@ -551,6 +555,12 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     include_str!("legacy/browser-automation-v34.md"),
     // Before native retrieval and removing Instafy-owned website restrictions.
     include_str!("legacy/browser-automation-v35.md"),
+    // From before a change that needs what a web page says was `browser_then_build`, and one made
+    // only from what this chat found and confirmed stayed `direct` as such a page does, with the
+    // building turn's own reads and cards left to an answer in words, a map was a change of files,
+    // and the routing step's `summary` went with the person's words in every chat, not only in
+    // one with no browser turn yet.
+    include_str!("legacy/browser-automation-v36.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,
@@ -3049,7 +3059,7 @@ mod tests {
     /// a link anyone can open, not as an assumption. For "a small page I can share", a reply said
     /// "Assumed: you wanted a simple visit-info page, not a public link." and never said either (a
     /// local test, Nov 4); others said "Built and opened…" (nothing was opened), "the provided
-    /// read" and "updated for viewers". A vague ask's defaults keep their one `Assumed:` line. The
+    /// read" and "updated for viewers". A vague ask's defaults keep their `Assumed:` line. The
     /// replies to send as-is, which Studio never shows, go, from the research team's final reply
     /// too, which follows the hub's step 4 and offers to add an item the page leaves out. Unedited
     /// earlier copies are upgraded.
@@ -3063,7 +3073,9 @@ mod tests {
                 .expect("reply section"),
         );
         assert!(reply.contains("A page they want to share says in one line who can open it (people in this space) and how to get a link anyone can open (ask for a public link), not as an assumption."));
-        assert!(reply.contains("ONE `Assumed:` line for the defaults you chose"));
+        assert!(reply.contains(
+            "An `Assumed:` line only for a default you chose that the person didn't give"
+        ));
         assert!(reply.contains("never point them to it or say it opened"));
         assert!(reply.contains("\"the provided read\" or \"updated for viewers\""));
         let page = flat(INTERACTIVE_ARTIFACTS_TEMPLATE);

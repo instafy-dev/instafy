@@ -1746,9 +1746,10 @@ async fn run_follow_ups_from_the_chat(harness: &mut Harness) {
 /// (ix) Chain N: a message typed in the chat right after a browser turn. The routing step reads
 /// the browser skill's lines that keep a message that carries on this chat's browser work in the
 /// browser, also when public pages could answer it and whether or not that work found its answer,
-/// that a bare "keep going" carries on what a page here left open, that send research ending in
-/// a page to the browser from the first message, and that keep a map, or a page made only from
-/// what the chat already found and confirmed, out of it. Each browser turn is told that it reads pages in Instafy's browser
+/// that a bare "keep going" carries on what a page here left open and a change that needs what a
+/// web page says browses first, that send research ending in a page to the browser from the
+/// first message, and that keep a map, or a page or change made only from what the chat already
+/// found and confirmed, out of it. Each browser turn is told that it reads pages in Instafy's browser
 /// and Octo builds in the chat, never only that it is read-only, with no write-scope guardrail,
 /// mode or rationale above that line. The page is one building turn,
 /// which reads every browser turn as page data and none outside it.
@@ -1767,16 +1768,16 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "browser work goes on whether or not it found its answer",
             ),
             (
-                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on. A map",
-                "a bare \"keep going\" carries on what a page here left open",
+                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on. So is a change that needs what a web page says. A map",
+                "a bare \"keep going\" carries on what a page here left open, and a change that needs a web page browses first",
             ),
             (
                 "So is research whose answer ends in a page (a comparison, prices, a route), from the first message.",
                 "research ending in a page goes to the browser from the first message",
             ),
             (
-                "A map (\"on a map\") is `direct`: its skill finds and cites its places itself. So is a page made only from what this chat already found and confirmed.",
-                "a map, or a page made only from what the chat found and confirmed, stays direct",
+                "A map (\"on a map\") is `direct` and a change of files (`required`): its skill finds and cites its places itself. So is a page or change made only from what this chat already found and confirmed.",
+                "a map, or a page or change made only from what the chat found and confirmed, stays direct",
             ),
         ] {
             ensure!(
@@ -1952,7 +1953,7 @@ fn check_a_fill_in_after_a_reply(harness: &Harness) -> Result<()> {
     ensure!(r1.routed, "L1 was not sent straight to the browser");
     ensure!(
         input_text(first_sampling_request(r1)).contains(
-            "with your `summary` while this chat has no browser turn: name in it the items, place or site this chat names (by name, not an address), and what to find."
+            "with your `summary`: name in it the items, place or site this chat names (by name, not an address), and what to find."
         ),
         "L1's routing call was never told what its summary names"
     );

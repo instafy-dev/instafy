@@ -289,14 +289,37 @@ function formatFileCount(count: number): string {
 }
 
 /**
+ * The page the files make up, as its folder names it, when every one of them
+ * is in the same page's folder (`sites/<name>/`, where the space's pages are
+ * made); null otherwise.
+ */
+function pageOfFiles(entries: ResolvedChatFileChange[]): string | null {
+  let page: string | null = null;
+  for (const { workspacePath } of entries) {
+    const [top, name, ...inside] = workspacePath.split("/");
+    if (top !== "sites" || !name || inside.length === 0 || (page !== null && name !== page)) {
+      return null;
+    }
+    page = name;
+  }
+  return page;
+}
+
+/**
  * What the row says for a site's files: "Created the site" when the turn
  * that made the site created every one of them, "Changed the site" otherwise,
- * never a file count or the lines in them. Null when the files are no site's.
+ * never a file count or the lines in them. In a chat with no site of its own,
+ * files that are all one page's name that page ("Changed framework-laptops"),
+ * never a file in it ("data.json"). Null when the files are no site's.
  */
 function siteChangeLabel(site: boolean, madeTheSite: boolean, files: ChatMessageFileChange[]): string | null {
   const entries = resolveUniqueChatFileChanges(files);
-  if (!site || entries.length === 0) {
+  if (entries.length === 0) {
     return null;
+  }
+  if (!site) {
+    const page = pageOfFiles(entries);
+    return page === null ? null : `Changed ${page}`;
   }
   return madeTheSite && entries.every((entry) => entry.file.changeType === "created") ? "Created the site" : "Changed the site";
 }

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { memo, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Button } from "../../../src/components/Button";
 import { Text } from "../../../src/components/Text";
@@ -32,6 +32,7 @@ const SCENARIOS = [
   ["other", "Another person's turn"], ["viewer", "Read-only viewer"],
   ["failure", "Cancel request fails"], ["timeout", "Cancel request times out"],
   ["stale", "Run finished before Stop"], ["requested", "Accepted · waiting for live status"],
+  ["long", "A long chat · Stop's request before its redraw"],
 ] as const;
 type Scenario = typeof SCENARIOS[number][0];
 const command = "pnpm --filter @instafy/frontend exec playwright test tests/playwright/component/run-stop-control.spec.ts --reporter=list";
@@ -79,6 +80,28 @@ function Rail({ single, running }: { single: boolean; running: boolean }) {
   />;
 }
 
+// When the Stop was pressed, when its request went out and when a long chat
+// had drawn "Stopping…", in the page's clock.
+type StopTiming = { pressedAt?: number; sentAt?: number; drawnAt?: number };
+const stopTiming = ((window as Window & { __stopTiming?: StopTiming }).__stopTiming = {});
+addEventListener("pointerdown", (event) => {
+  if ((event.target as Element | null)?.closest?.('[data-testid="chat-run-stop-button"]')) stopTiming.pressedAt ??= performance.now();
+}, true);
+
+// A long chat redraws every row when the Stop's state changes: 60 rows that
+// take 2.5 ms each, as a long chat's rows do in a development build.
+const LongChatRow = memo(function LongChatRow({ index, phase }: { index: number; phase: string }) {
+  const until = performance.now() + 2.5;
+  while (performance.now() < until) { /* drawing */ }
+  return <Text as="p" variant="caption" tone="muted">Row {index + 1} · {phase}</Text>;
+});
+function LongChat({ phase }: { phase: string }) {
+  useLayoutEffect(() => { if (phase === "stopping") stopTiming.drawnAt ??= performance.now(); }, [phase]);
+  return <div className="max-h-24 overflow-hidden" data-testid="long-chat">
+    {Array.from({ length: 60 }, (_, index) => <LongChatRow key={index} index={index} phase={phase} />)}
+  </div>;
+}
+
 function Simulation({ scenario }: { scenario: Scenario }) {
   const [targets, setTargets] = useState<ChatRunStopTarget[]>(() => scenario === "two" ? [OCTO, SCRIBE]
     : [{ ...OCTO, initiatingUserId: scenario === "other" ? "another-person" : VIEWER }]);
@@ -93,6 +116,12 @@ function Simulation({ scenario }: { scenario: Scenario }) {
     cancelJobs: async (conversationId, jobIds) => {
       if (conversationId !== CONVERSATION) throw new Error("Incorrect conversation");
       setRequests(current => [...current, [...jobIds]]);
+      if (scenario === "long") {
+        // As the real request does: the sign-in lookup takes the session's
+        // lock, then the request goes out.
+        await navigator.locks.request("fixture-session", async () => {});
+        stopTiming.sentAt ??= performance.now();
+      }
       if (scenario === "timeout") return new Promise(() => {});
       await new Promise(resolve => setTimeout(resolve, 750));
       if (scenario === "failure") throw new Error("Simulated connection failure. Try again.");
@@ -134,6 +163,7 @@ function Simulation({ scenario }: { scenario: Scenario }) {
     <section className="min-h-52 rounded-2xl border border-slate-200 bg-white px-4 py-5 dark:border-slate-700 dark:bg-[var(--color-studio-dark-panel)]" aria-label="Live preview" data-testid="stop-preview">
       <Text as="p" variant="caption" tone="muted" className="mb-5">{scenario === "viewer" ? "Read-only access" : "Live activity"}</Text>
         {useRail ? <div className="mx-auto max-w-2xl"><Rail single={scenario === "command"} running={running} /></div> : null}
+        {scenario === "long" ? <LongChat phase={controller.phase} /> : null}
         <ChatTypingRows peerTypingLabel={null} isAssistantTyping={running}
           isAssistantTypingCoveredByJobThreadPreview={useRail}
           typingAgents={identities} hasMultipleTypingAgents={identities.length > 1}

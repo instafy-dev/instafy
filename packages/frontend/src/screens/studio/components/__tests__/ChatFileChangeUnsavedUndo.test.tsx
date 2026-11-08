@@ -72,8 +72,10 @@ import { ChatLaterChangesContext, conversationLaterChanges } from "../chatLaterC
 import { REQUEST_MESSAGE_UNDO_EVENT } from "../messageUndoRequest";
 import type { ChatMessage, ChatMessageFileChange } from "../../types";
 
-const APP = "sites/porto-lello/app.js";
-const PLAN = "sites/porto-lello/tmp/plan.md";
+// Files outside a page's folder, so each shows its own chip in a chat with no
+// card (a page's files read as the page: ChatFileChangeSite.test.tsx).
+const APP = "porto-lello/app.js";
+const PLAN = "porto-lello/tmp/plan.md";
 // What the stopped turn left in the page, as its report recorded it.
 const LEFT_AS = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 

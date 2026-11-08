@@ -7,6 +7,7 @@ import path from "node:path";
 import kleur from "kleur";
 import { resolveRatholeBinaryForCli } from "./runtime.js";
 import { loadCredentialFreeEnv } from "./bind.js";
+import { conversationIdFromEnvironment } from "./conversations.js";
 import { fetchWithControllerAuth } from "./controller-fetch.js";
 import { extractControllerErrorMessage, formatAuthRejectedError } from "./errors.js";
 import {
@@ -26,6 +27,8 @@ import {
   type Thumbnail,
   type ThumbnailAttempt,
 } from "./preview-thumbnail.js";
+import { resolveRuntimeControllerCredential } from "./runtime-controller-binding.js";
+import { recordPage } from "./space-pages.js";
 import {
   buildRatholeConfig,
   cleanUrl,
@@ -1215,6 +1218,20 @@ function siteRecordFor(
   return site ? { start: site.start } : {};
 }
 
+/**
+ * The chat the server posts this preview's card to: a job's own chat when the job's credential opens it (the server reads
+ * it from the token, never from the request), else `--conversation`.
+ */
+function cardConversation(auth: ResolvedTunnelToken, conversationId: string | undefined): string | undefined {
+  try {
+    const credential = resolveRuntimeControllerCredential();
+    if (credential?.kind === "job" && credential.token === auth.token) return conversationIdFromEnvironment() ?? undefined;
+  } catch {
+    return undefined;
+  }
+  return conversationId;
+}
+
 /** This space's open previews on this machine, by port, with their titles. Empty when the server does not say. */
 async function openPreviewPorts(params: {
   controllerUrl: string;
@@ -1394,6 +1411,17 @@ async function createAndStartClient(params: {
     ...(opts.thumbnail === false ? { noThumbnail: true } : {}),
   };
   upsertPreviewState(entry);
+  // The chat that made the page, in the space's record of its pages: kept with the space's files, so it outlasts this
+  // machine, and an open of the same folder from another chat keeps it. A turn that may write files is told the space's
+  // pages from it, each made in its own chat or in another.
+  const root = serve ? resolveWorkspaceRoot(process.env, projectId) : null;
+  if (serve && root) {
+    try {
+      recordPage(root, { folder: serve.cwd, title, argv: serve.argv, opening: cardConversation(auth, conversationId) });
+    } catch (error) {
+      log(`Could not write the page down in the space's record: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   return { grant, previewId, entry, current };
 }
 

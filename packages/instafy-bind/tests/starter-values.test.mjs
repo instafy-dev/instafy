@@ -856,3 +856,88 @@ test("site.start takes a page's data itself, as well as the address of its data 
     delete APP.empty;
   }
 });
+
+// A page to share (a local test, Nov 7) wrote its two source links as site.link("Livraria Lello official site",
+// "https://…"): the name first, where site.link takes the address first. Both showed as plain text, an address the
+// person could not press, and the reply said "links to both official sites". site.link takes the https address from
+// either argument; anything but an https address is still plain text.
+test("site.link takes the https address from either argument, so a page to share shows its links", async () => {
+  APP.share = `site.start({ data: null, render: function () {
+    site.head({ title: "A visit to the bookshop", lede: "Open daily, 9:00 AM–7:30 PM." });
+    document.getElementById("list").replaceChildren(
+      site.h("article", { "class": "card" }, site.h("p", { text: "Daily, 9:00 AM–7:30 PM." }),
+        site.link("The bookshop's own site", "https://bookshop.example/en/")),
+      site.h("article", { "class": "card" }, site.h("p", { text: "Route not confirmed." }),
+        site.link("https://metro.example/", "The metro's site")),
+      site.h("p", {}, site.link("Not a link", "http://plain.example/"), " ", site.link("javascript:alert(1)", "Not one either")),
+      site.h("p", {}, site.link(undefined, "https://named-only.example/")));
+  } });`;
+  try {
+    const { document } = await draw("share", null);
+    const links = document.getElementById("list").querySelectorAll("a").map((a) => [a.getAttribute("href"), a.textContent]);
+    assert.deepEqual(links, [
+      ["https://bookshop.example/en/", "The bookshop's own site ↗"],
+      ["https://metro.example/", "The metro's site ↗"],
+      // an address with no name to go with it is its own link's words
+      ["https://named-only.example/", "https://named-only.example/ ↗"],
+    ]);
+    const text = document.getElementById("list").textContent.replace("https://named-only.example/ ↗", "");
+    assert.doesNotMatch(text, /https:\/\//, `no address shown as words: ${text}`);
+    assert.match(text, /Not a link/);
+    assert.match(text, /Not one either/);
+  } finally {
+    delete APP.share;
+  }
+});
+
+// A comparison's review note was cut at 100 characters, mid-sentence: "…Tom's Hardware pages had no page at the
+// requested". A note longer than 100 characters ends at a whole word with "…": in the table's cell, in a phone's line
+// of what was not found, and the search result's site a row is named by.
+test("compare: a note longer than 100 characters ends at a whole word, with \"…\"", async () => {
+  const note = "No independent review was read; the two review sites named in the request had no page at the requested addresses.";
+  const result = `${"long-name-".repeat(12)}example.net`;
+  /** `shown` is `full` cut at a whole word: at most 100 characters, ending in "…". */
+  const wholeWords = (shown, full, why) => {
+    assert.ok(shown.endsWith("…") && shown.length <= 100, `${why}: ${shown}`);
+    const kept = shown.slice(0, -1);
+    assert.ok(full.startsWith(kept) && /[\s,.;:]/.test(full.charAt(kept.length)), `${why}: stops mid-word: ${shown}`);
+  };
+  const data = laptopsData();
+  data.items = [
+    item("pro", "Maker Laptop Pro", { cpu: MAKER("Chip Ultra Series 3", "pro"), reviews: { note } }),
+    item("air", "Maker Laptop Air", { cpu: MAKER("Chip Series 3", "air") }, { found: result }),
+  ];
+  const { document: wide } = await draw("compare", data, { width: 1280, search: "?open=air" });
+  wholeWords(rowText(wide, "option:pro").match(/Unknown · (.*?…)/)?.[1] ?? "", note, "the table's cell");
+  const named = wide.getElementById("list").textContent.match(/Named in a search result on (.*?…)/)?.[1] ?? "";
+  assert.ok(named.endsWith("…") && named.length <= 100 && result.startsWith(named.slice(0, -1)), `the result's site: ${named}`);
+  const { document: phone } = await draw("compare", data, { width: 375 });
+  const line = phone.getElementById("list").querySelectorAll("li[data-ref]").find((li) => li.getAttribute("data-ref") === "option:pro").querySelector("p.not-found").textContent;
+  wholeWords(line.match(/Two independent reviews \((.*?…)\)/)?.[1] ?? "", note, "a phone's line");
+  // a note of 100 characters or fewer is shown whole
+  data.items[0].facts.reviews = { note: note.slice(0, 98) };
+  const { document: short } = await draw("compare", data, { width: 1280 });
+  assert.ok(rowText(short, "option:pro").includes(`Unknown · ${note.slice(0, 98)}`), rowText(short, "option:pro"));
+  assert.doesNotMatch(rowText(short, "option:pro"), /…/);
+});
+
+// An item whose own page wasn't opened (the hub gives each of its missing values {"note": "its own page wasn't
+// opened"}) read "Not found yet: Battery, Weight (its own page wasn't opened)" on a phone, as if its page had been
+// looked at. Nobody looked: a phone names those values under "Not checked", apart from what was looked for and not
+// found. The wide table's cells still say why.
+test("compare on a phone: the values of an item whose own page wasn't opened read \"Not checked\"", async () => {
+  const data = laptopsData();
+  const unopened = { note: "its own page wasn't opened" };
+  data.items = [
+    item("pro", "Maker Laptop Pro", { cpu: MAKER("Chip Ultra Series 3", "pro"), battery: MAKER("Up to 20 hours (the maker's claim)", "pro/battery"),
+      weight: { src: "Maker", url: "https://maker.example/pro/specs", date: DAY }, price: { note: "Not checked" }, reviews: { note: "Its own page wasn’t opened." } }),
+    item("air", "Maker Laptop Air", { cpu: unopened, battery: unopened, weight: unopened, price: unopened, reviews: unopened }),
+  ];
+  const { document } = await draw("compare", data, { width: 375 });
+  const line = (ref) => document.getElementById("list").querySelectorAll("li[data-ref]").find((li) => li.getAttribute("data-ref") === ref).querySelector("p.not-found").textContent;
+  assert.equal(line("option:air"), "Not checked: CPU, Battery, Weight, Price and Two independent reviews");
+  assert.match(line("option:pro"), /^Not found yet: Weight \(checked 27 Oct( 2026)? on maker\.example ↗\), Price; not checked: Two independent reviews$/, line("option:pro"));
+  assert.doesNotMatch(document.getElementById("list").textContent, /its own page wasn/i);
+  const { document: wide } = await draw("compare", data, { width: 1280 });
+  assert.match(rowText(wide, "option:air"), /Unknown · its own page wasn't opened/);
+});

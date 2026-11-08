@@ -39,6 +39,10 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   least 1.2 seconds, and a label replaced before its turn came is never shown, so a step that ends
   at once never flashes past (`useSteadyActivityLabel.ts`). The last one holds as long before the
   done line takes its place, except a Stop's: `Stopped · …` shows as soon as the turn is stopped.
+  For the person who pressed Stop, that is when the controller answers: the answer comes once the
+  Stop is committed and names the runs it canceled, which read canceled from it before their own
+  records arrive on the stream (`useChatRunStop.ts`); a Stop that failed, or found its turn already
+  finished, changes nothing.
   `Waiting for you` shows at once, and goes at once when the person
   answered. The typing row before the turn's own line uses the same rule and says `Starting…`
   until then (a run held for an approval, and a long context rewrite, say so instead), and a
@@ -289,13 +293,14 @@ turn's save never took, one the space's history leaves out), the line names the 
 line is kept out of the transcript: no bubble, no notification, never unread and never a chat's
 preview on Home, and no turn, so no credit and no daily message. Only the controller writes it: a
 message a member records never keeps that `kind`, and Studio and the runtime read a line only with
-the controller's `source`. The routing step and every later turn read it with the history, and the
-first turn on a restored thread of either lane after the Undo, whose thread never saw it, reads it
-after its restore note; so "keep going" carries on what is still open, never the change the person
-took back. The files the line names read as undone in their row, which then offers no Undo for them and
+the controller's `source`. Every later turn reads it with the history, and the first turn on a
+restored thread of either lane after the Undo, whose thread never saw it, reads it after its restore
+note; so "keep going" carries on what is still open, never the change the person took back. When the
+line names the run that made the change, the routing step reads neither the line nor that run's
+request and turns: it only picks a route, and an undone change is never one to carry on. The files the line names read as undone in their row, which then offers no Undo for them and
 no stop's Continue, after a reload or a switch of chats too; a file it does not name keeps its state
 (Not saved, say). A row whose files are all undone reads `Undone ›`, its files folded behind it,
-whatever the row read before (`Changed the site`, a file's name); one with some of them undone counts
+whatever the row read before (`Changed the site`, a page's or a file's name); one with some of them undone counts
 them (`Edited 3 files · 1 undone`).
 
 A Stop reaches the next turn of each thread too. From the controller's notice of a press of Stop
@@ -603,7 +608,7 @@ activity line, to the person who started the run only, and the line says `Waitin
   one avatar per turn. The browser view's sheet shares the same approval state, so answering one settles both.
   Another chat's prompt never shows in this chat's browser view, and only the asking chat's Browser tab says
   `Approve` ([Shared Browser](Shared-Browser.md)). While the asking chat is not on screen, a toast names it
-  (`Octo is waiting for your OK in “…”.`, with `View`; a press on its words opens the chat too) and its tab says
+  (`Octo is waiting for your OK in “…”.`, with `View`; a press anywhere on its message opens the chat too) and its tab says
   `Approve`; the prompt itself shows and is answered only in that chat.
 - **Once answered**, or left to expire, the row goes and the turn's done line gains one clause
   after ` · `, and Details an entry with a lock. A step the person said no to, or left, never
