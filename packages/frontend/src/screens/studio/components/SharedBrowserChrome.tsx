@@ -13,6 +13,7 @@ import { Select } from "../../../components/Select";
 import { browserSessionPageIsPlaceholder, type BrowserSessionPage } from "./browserSessionPages";
 import { normalizeBrowserAddress } from "./browserAddress";
 import { BrowserAddressField } from "./BrowserAddressField";
+import { useBrowserAddressDraft } from "./useBrowserAddressDraft";
 import { BrowserChromeShell } from "./BrowserChromeShell";
 import { SendPageToOctoButton } from "./SendPageToOctoButton";
 import { resolveAgentTabIds, sharedBrowserAgentTabLabel, shownBrowserPageTitle } from "./browserAgentTabs";
@@ -154,19 +155,21 @@ export function SharedBrowserChrome({
   const addressInputRef = useRef<HTMLInputElement | null>(null);
   const submittedAddressRef = useRef<string | null>(null);
   const errorId = useId();
-  const [addressDraft, setAddressDraft] = useState(activePageAddress);
   const [addressError, setAddressError] = useState<string | null>(null);
+  const { value: addressDraft, setValue: setAddressDraft } = useBrowserAddressDraft({
+    pageIdentity: activePage?.id ?? null,
+    pageAddress: activePageAddress,
+    inputRef: addressInputRef,
+    onPageChange: () => {
+      submittedAddressRef.current = null;
+      setAddressError(null);
+    },
+  });
   const displayedError = addressError ?? error;
   const busy = pendingAction !== null;
   const humanHasControl = interactionEnabled ?? controlOwner.kind === "human";
   const controlsDisabled = !resolved || !activePage || busy || !humanHasControl;
   const historyPage = activePage as BrowserSessionPageWithHistory | null;
-
-  useEffect(() => {
-    if (document.activeElement !== addressInputRef.current) {
-      setAddressDraft(activePageAddress);
-    }
-  }, [activePage?.id, activePageAddress]);
 
   useEffect(() => {
     if (!error) {
@@ -176,7 +179,7 @@ export function SharedBrowserChrome({
     if (document.activeElement !== addressInputRef.current) {
       setAddressDraft(activePageAddress);
     }
-  }, [activePageAddress, error]);
+  }, [activePageAddress, error, setAddressDraft]);
 
   const navigateToAddress = useCallback((nextAddress: string) => {
     if (!activePage || controlsDisabled || !controls.navigate) {
@@ -191,12 +194,13 @@ export function SharedBrowserChrome({
     if (error) {
       onClearError();
     }
-    setAddressDraft(normalizedAddress);
-    submittedAddressRef.current = normalizedAddress;
+    const displayedAddress = browserSessionPageIsPlaceholder({ url: normalizedAddress }) ? "" : normalizedAddress;
+    setAddressDraft(displayedAddress);
+    submittedAddressRef.current = displayedAddress;
     onNavigate(activePage.id, normalizedAddress);
     addressInputRef.current?.blur();
     return true;
-  }, [activePage, controlsDisabled, controls.navigate, error, onClearError, onNavigate]);
+  }, [activePage, controlsDisabled, controls.navigate, error, onClearError, onNavigate, setAddressDraft]);
 
   const clearDisplayedError = () => {
     setAddressError(null);
@@ -326,6 +330,9 @@ export function SharedBrowserChrome({
                   const submittedAddress = submittedAddressRef.current;
                   submittedAddressRef.current = null;
                   setAddressDraft(submittedAddress ?? activePageAddress);
+                  // Leaving an invalid edit restores the actual page address.
+                  // Command failures remain visible through the separate error prop.
+                  setAddressError(null);
                 }}
                 onValueChange={(value) => {
                   setAddressDraft(value);

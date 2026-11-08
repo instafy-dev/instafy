@@ -912,6 +912,58 @@ describe("PersonalBrowserSurface", () => {
     expect(alert?.textContent).toContain("blocks privileged address types");
   });
 
+  it("shows an empty address field for a fresh native tab", async () => {
+    const model = createModel();
+    model.status = { ...model.status!, agentControlEnabled: false, activeTabId: "blank-tab", url: "about:blank" };
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} />));
+    const input = container.querySelector<HTMLInputElement>('[data-testid="personal-browser-address"]')!;
+    expect(input.value).toBe("");
+    expect(input.placeholder).toBe("Enter an address");
+    await act(async () => { input.focus(); setInputValue(input, "example.com"); });
+    await act(async () => pressEnter(input));
+    expect(model.navigate).toHaveBeenCalledExactlyOnceWith("example.com");
+  });
+
+  it("keeps a blank native address empty after navigating to about:blank again", async () => {
+    const model = createModel();
+    model.status = { ...model.status!, agentControlEnabled: false, activeTabId: "blank-tab", url: "about:blank" };
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} />));
+    const input = container.querySelector<HTMLInputElement>('[data-testid="personal-browser-address"]')!;
+    await act(async () => { input.focus(); setInputValue(input, "about:blank"); });
+    await act(async () => pressEnter(input));
+    expect(model.navigate).toHaveBeenCalledExactlyOnceWith("about:blank");
+    expect(input.value).toBe("");
+  });
+
+  it.each(["https://second.example/", "https://example.com/"])("does not carry a focused address draft to another native tab at %s", async (url) => {
+    const model = createModel();
+    model.status = { ...model.status!, agentControlEnabled: false, activeTabId: "tab-1" };
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} />));
+    const input = container.querySelector<HTMLInputElement>('[data-testid="personal-browser-address"]')!;
+    await act(async () => { input.focus(); setInputValue(input, "draft.example"); });
+    const changed = { ...model, status: { ...model.status!, activeTabId: "tab-2", url } };
+    await act(async () => root.render(<PersonalBrowserSurface active model={changed} />));
+    expect(input.value).toBe(url);
+    expect(model.navigate).not.toHaveBeenCalled();
+    await act(async () => pressEnter(input));
+    expect(model.navigate).toHaveBeenCalledExactlyOnceWith(url);
+  });
+
+  it("keeps typing during a same-tab redirect, but not an owner change", async () => {
+    const model = createModel();
+    model.status = { ...model.status!, agentControlEnabled: false, activeTabId: "tab-1" };
+    await act(async () => root.render(<PersonalBrowserSurface active model={model} />));
+    const input = container.querySelector<HTMLInputElement>('[data-testid="personal-browser-address"]')!;
+    await act(async () => { input.focus(); setInputValue(input, "draft.example"); });
+    const redirected = { ...model, status: { ...model.status!, url: "https://redirect.example/" } };
+    await act(async () => root.render(<PersonalBrowserSurface active model={redirected} />));
+    expect(input.value).toBe("draft.example");
+    const newOwner = { ...redirected, ownerId: "owner-2", status: { ...redirected.status, ownerId: "owner-2" } };
+    await act(async () => root.render(<PersonalBrowserSurface active model={newOwner} />));
+    expect(input.value).toBe("https://redirect.example/");
+    expect(model.navigate).not.toHaveBeenCalled();
+  });
+
   it("navigates on Enter, with no Go button beside the address", async () => {
     const model = createModel();
     model.status = { ...model.status!, agentControlEnabled: false };

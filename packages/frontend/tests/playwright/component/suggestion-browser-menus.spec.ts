@@ -40,8 +40,38 @@ async function fitsViewport(page: Page, surface: Locator) {
   expect(bounds.x + bounds.width).toBeLessThanOrEqual(viewport.width + 1);
   expect(bounds.y).toBeGreaterThanOrEqual(0);
   expect(bounds.y + bounds.height).toBeLessThanOrEqual(viewport.height + 1);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  // Mobile browsers may zoom the visual viewport out to fit an overflowing
+  // popover, making innerWidth grow and hide the very overflow under test.
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 }
+
+test.describe("open browser options during mobile rotation", () => {
+  test.use({ isMobile: true, hasTouch: true });
+  for (const theme of ["light", "dark"]) test(`keeps position and keyboard focus at 320px in ${theme}`, async ({ page }) => {
+    const errors = await configure(page, 320);
+    await page.setViewportSize({ width: 844, height: 390 });
+    await open(page, "sessions", theme);
+    const toggle = page.getByTestId("shared-browser-sessions-toggle");
+    await toggle.click();
+    const sessions = page.getByTestId("shared-browser-session-control");
+    const close = sessions.getByRole("button", { name: "Close browser options" });
+    await close.focus();
+    await page.setViewportSize({ width: 320, height: 740 });
+    await expect.poll(() => page.evaluate(() => innerWidth)).toBe(320);
+    await expect.poll(() => page.evaluate(() => visualViewport?.scale)).toBe(1);
+    await fitsViewport(page, sessions);
+    await touchTargets(sessions.getByRole("dialog").getByRole("button"), 320);
+    await expect(close).toBeFocused();
+    // Rotate back with the same open overlay; it remains usable at either width.
+    await page.setViewportSize({ width: 844, height: 390 });
+    await fitsViewport(page, sessions);
+    await expect(close).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(sessions).toHaveCount(0);
+    await expect(toggle).toBeFocused();
+    expect(errors).toEqual([]);
+  });
+});
 
 async function touchTargets(options: Locator, width: number) {
   if (width >= 640) return;
