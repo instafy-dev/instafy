@@ -158,9 +158,13 @@ const LATER_TURNS_FINDINGS: &str = "\n\nFindings for Octo's later turns:\n";
 /// and only the person's "Fill in what's still missing." filled fourteen (a local test, Nov 6).
 /// A page's own tab or link for a value the turn didn't find there is one of them until it is
 /// opened, so a value written as not found beside a "Warranty" link nobody opened is read in
-/// that pass ([`FINDING_LINES`]). The wrap-up pass, which opens nothing, is told the same.
+/// that pass ([`FINDING_LINES`]). The wrap-up pass, which opens nothing, is told the same. A tab
+/// is named with its page, never by the page's address: one with no address of its own has its
+/// page's, which a finding line lists, and a page the turn's lines list is none to read again
+/// ([`take_unread_pages`]), so no second pass would open the tab.
 const UNREAD_LINE: &str = "After them, one last line `{\"unread\": [\"<a page this request needs that you didn't open>\"]}`, each by its address or what it is (\"<item>'s own page\"), or `{\"unread\": []}` when you opened every one. \
-A page's own tab or link named for a value you didn't find there is one of them until you open it.";
+A page's own tab or link named for a value you didn't find there is one of them until you open it. \
+Name a tab with its page (\"<item>'s Specs tab\"), never by the page's address.";
 
 /// What a browser turn whose findings go back to the building turn ([`hands_back`]) reads last,
 /// after its finding lines' section and right before the request: its part of the request, in plain
@@ -804,7 +808,8 @@ fn unread_line(line: &str) -> Option<Vec<String>> {
 /// Takes a browser turn's unread lines out of its answer, which the person never reads, and
 /// returns the pages they name, in order, each once and at most [`UNREAD_PAGES_MAX`]. A page the
 /// answer's own finding lines list already is none of them: one that stopped the turn is never
-/// tried another way, or gave no answer or page there, and one it read is read.
+/// tried another way, or gave no answer or page there, and one it read is read. A tab on a page
+/// it read is named with that page, in words ([`UNREAD_LINE`]).
 pub(super) fn take_unread_pages(summary: &mut String) -> Vec<String> {
     if !summary.lines().any(|line| unread_line(line).is_some()) {
         return Vec::new();
@@ -1335,8 +1340,13 @@ pub(super) fn format_browser_hand_back_section(metadata: Option<&JsonValue>) -> 
 /// How a hand-back reads a fact that says a value was not found on a page ([`FINDING_LINES`]):
 /// what Octo didn't find there, never what the page lacks. With `AGENTS.md`'s rule alone, a
 /// build turned three "Warranty terms not found on this product page." facts into "…Laptop 12,
-/// 13 Pro, and 16 product pages did not show warranty terms." (a local test, Nov 8).
-const NOT_FOUND_FACT: &str = "A \"not found\" fact means Octo didn't find it there: say \"I didn't find…\" and where you looked, never that a page doesn't show it.";
+/// 13 Pro, and 16 product pages did not show warranty terms." (a local test, Nov 8). Only a value
+/// no other fact gives is one Octo didn't find: a second pass that opens a tab with no address
+/// of its own writes what it found there under its page's address ([`unread_pages_prompt`]),
+/// beside the first pass's "not found", and the controller joins one page's lines into one
+/// finding (runtime-controller `browser_hand_back::findings_from_reply`); and another page may
+/// give what one didn't.
+const NOT_FOUND_FACT: &str = "A \"not found\" fact means Octo didn't find it there: for a value no other fact gives, say \"I didn't find…\" and where you looked, never that a page doesn't show it.";
 
 /// The browser turns of this chat since the building thread's last turn, as
 /// the controller lists them at lease (`browser_turns_since`): what each was
@@ -1904,8 +1914,9 @@ mod tests {
         // Nov 8).
         assert!(
             section.contains(
-                "\n- A \"not found\" fact means Octo didn't find it there: say \"I didn't \
-                 find…\" and where you looked, never that a page doesn't show it.\n"
+                "\n- A \"not found\" fact means Octo didn't find it there: for a value no other \
+                 fact gives, say \"I didn't find…\" and where you looked, never that a page \
+                 doesn't show it.\n"
             ),
             "{section}"
         );
@@ -1930,6 +1941,35 @@ mod tests {
         assert!(!section.contains("findingsLeftOut"), "{section}");
         // No job ids: nothing the turn needs.
         assert!(!section.contains("00000000-0000-4000-8000-0000000000b2"));
+    }
+
+    /// A value another fact gives is no value Octo didn't find. A second pass that opens a tab
+    /// with no address of its own writes what it found there under its page's address, beside
+    /// the first pass's "not found", and the controller joins one page's lines into one finding
+    /// (runtime-controller `browser_hand_back::findings_from_reply`); another page may give what
+    /// one didn't. Told to say "I didn't find…" of every "not found" fact, the build would say it
+    /// of a value the same finding gives.
+    #[test]
+    fn a_value_another_fact_gives_is_not_one_octo_did_not_find() {
+        let mut record = fixtures()["stampedRecord"].clone();
+        let facts = json!(["Warranty not found on this page.", "Warranty: 2 years"]);
+        record["findings"] = json!([{
+            "url": "https://maker.example/laptop-12",
+            "title": "Laptop 12",
+            "facts": facts,
+            "readAt": "2026-10-26T09:30:00Z",
+            "viewer": "Instafy's browser in the workspace",
+        }]);
+        let section = format_browser_hand_back_section(Some(&json!({ "browserHandBack": record })))
+            .expect("section");
+        assert_eq!(fenced_data(&section)["findings"][0]["facts"], facts);
+        assert!(
+            section.contains(
+                "\n- A \"not found\" fact means Octo didn't find it there: for a value no other \
+                 fact gives, say \"I didn't find…\""
+            ),
+            "{section}"
+        );
     }
 
     /// A record as the controller stamps it from a browser turn that read sixteen pages: each
@@ -3029,6 +3069,36 @@ mod tests {
         );
     }
 
+    /// A page's own tab for a value the turn didn't find there is unread until it is opened, and
+    /// one with no address of its own has its page's: named by that address, it is taken for the
+    /// page the turn read and left out, so no second pass opens it. Every turn that writes the
+    /// unread line, and its wrap-up pass, is told to name a tab with its page.
+    #[test]
+    fn an_unread_tab_is_named_with_its_page() {
+        let not_found = r#"{"url": "https://maker.example/laptop-12", "title": "Laptop 12", "facts": ["Warranty not found on this page."]}"#;
+        let mut summary = format!("{not_found}\n{{\"unread\": [\"Laptop 12's Specs tab\"]}}");
+        assert_eq!(take_unread_pages(&mut summary), ["Laptop 12's Specs tab"]);
+        let mut summary =
+            format!("{not_found}\n{{\"unread\": [\"https://maker.example/laptop-12/\"]}}");
+        assert!(take_unread_pages(&mut summary).is_empty());
+
+        let tab = "Name a tab with its page (\"<item>'s Specs tab\"), never by the page's address.";
+        let section =
+            format_browser_findings_contract_section(Some(&routed_turn(true))).expect("contract");
+        assert_eq!(section.matches(tab).count(), 1, "{section}");
+        assert!(finding_lines_pass_prompt(true).contains(tab));
+        // A turn that hands nothing back writes no unread line.
+        assert!(!finding_lines_pass_prompt(false).contains(tab));
+        for metadata in [
+            routed_turn(false),
+            json!({ "browserTransport": "desktop-personal" }),
+        ] {
+            let section =
+                format_browser_findings_contract_section(Some(&metadata)).expect("contract");
+            assert!(!section.contains(tab), "{section}");
+        }
+    }
+
     /// The second pass's findings join the turn's, after the words of both passes, first then
     /// second: the person still reads the first's line that a page stopped the turn. Each pass's
     /// lines are its own: a second pass that wrote none adds the pages its steps opened, by
@@ -3327,7 +3397,7 @@ mod tests {
             )
         );
         assert!(
-            prompt.ends_with("`{\"unread\": []}` when you opened every one. A page's own tab or link named for a value you didn't find there is one of them until you open it. Use no tool, open no page and write no other words."),
+            prompt.ends_with("`{\"unread\": []}` when you opened every one. A page's own tab or link named for a value you didn't find there is one of them until you open it. Name a tab with its page (\"<item>'s Specs tab\"), never by the page's address. Use no tool, open no page and write no other words."),
             "{prompt}"
         );
         let read = r#"{"url": "https://maker.example/laptop-13", "title": "Laptop 13", "facts": ["Battery: 74 Wh"]}"#;

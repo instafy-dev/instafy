@@ -53,7 +53,11 @@ const CITE_LINE: &str = "\n- Cite a page only for a fact listed under it. A find
 /// How a hand-back reads a fact that says a value was not found on a page (runtime-agent
 /// `jobs/browser_hand_back.rs`): a build once said a maker's product pages "did not show warranty
 /// terms" from three such facts.
-const NOT_FOUND_LINE: &str = "\n- A \"not found\" fact means Octo didn't find it there: say \"I didn't find…\" and where you looked, never that a page doesn't show it.\n";
+const NOT_FOUND_LINE: &str = "\n- A \"not found\" fact means Octo didn't find it there: for a value no other fact gives, say \"I didn't find…\" and where you looked, never that a page doesn't show it.\n";
+/// How a turn that may change files reads a public page (`AGENTS.md`'s "Responsiveness", given
+/// with the lane to a turn that runs without that file): a build once read a shop's site with
+/// python's `urllib`.
+const READ_A_PUBLIC_PAGE: &str = "- Read a public page only with `instafy web read <address>` or a reading command a skill names, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.\n";
 /// What the lane of a routed build says (runtime-agent `jobs/mod.rs`).
 const WRITE_LANE: &str = "\nDirect workspace-change response contract:\n";
 const NO_ACTIONS: &str = "- Do not emit `multi_agent_plan`, goals, integrations, browser/location actions, or broad coordination metadata.";
@@ -627,6 +631,9 @@ async fn on_the_cards_thread(space: &Space<'_>) -> Result<()> {
     // find there.
     assert!(prompt.contains(CITE_LINE), "{prompt}");
     assert!(prompt.contains(NOT_FOUND_LINE), "{prompt}");
+    // On the chat's own thread, which runs without the space's `AGENTS.md`, it still reads how to
+    // read a public page, once.
+    assert_eq!(prompt.matches(READ_A_PUBLIC_PAGE).count(), 1, "{prompt}");
     for old in ["the reply is the source", "the list is its index"] {
         assert!(!prompt.contains(old), "{old}: {prompt}");
     }
@@ -750,6 +757,8 @@ async fn as_the_chats_first_building_turn(space: &Space<'_>) -> Result<()> {
     assert!(prompt.contains(NOT_FOUND_LINE), "{prompt}");
     assert!(prompt.contains(WRITE_LANE), "{prompt}");
     assert!(prompt.contains(NO_ACTIONS), "{prompt}");
+    // How it reads a public page, once: a new thread's snapshot holds the space's `AGENTS.md`.
+    assert_eq!(prompt.matches(READ_A_PUBLIC_PAGE).count(), 1, "{prompt}");
 
     // Its reply names no file: the card shows the page. It built with the starter and posted
     // the card from the site's folder.

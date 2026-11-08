@@ -2976,10 +2976,12 @@ unless the policy is `"covered"`.
   continues a building card also ends with one line naming the pages its
   request needs that it didn't open (`{"unread": [...]}`), a page's own tab or
   link for a value it didn't find there among them, as its wrap-up pass below
-  is told too. Told only to say where it looked, a warranty's browser turn read
-  only the last 700 to 1,100 characters of three product pages, each ending in
-  a "Warranty" link it never opened, and wrote the warranty as not found with
-  nothing unread. When it names any,
+  is told too. A tab is named with its page ("Laptop 12's Specs tab"), never by
+  the page's address: a page a finding line lists is none to read again. Told
+  only to say where it looked, a warranty's browser turn read only the last 700
+  to 1,100 characters of three product pages, each ending in a "Warranty" link
+  it never opened, and wrote the warranty as not found with nothing unread.
+  When it names any,
   the runtime runs the turn once more on its own thread, told only those
   pages (a page it read already only for a tab or link that line names on
   it), before the build: once a turn, and never after a Stop, a pause for the
@@ -3047,10 +3049,11 @@ unless the policy is `"covered"`.
   turns since its last turn and its replay of the chat alike, and never reads
   the browser turn's own words. Told plain words for two stops, a build wrote
   "Notebookcheck was blocked" for a search a cookie notice covered. Its
-  hand-back also reads a "not found" fact as what Octo didn't find there: it
-  says "I didn't find…" and where Octo looked, never that a page doesn't show
-  it, as a build once wrote that a maker's product pages "did not show warranty
-  terms" from three such facts. A browser
+  hand-back also reads a "not found" fact as what Octo didn't find there: for a
+  value no other fact gives (a tab opened in the second pass adds its facts to
+  its page's), it says "I didn't find…" and where Octo looked, never that a
+  page doesn't show it, as a build once wrote that a maker's product pages "did
+  not show warranty terms" from three such facts. A browser
   turn that used the browser and wrote no
   finding line would leave a later building turn nothing of the pages it read,
   and one that continues a building card would hand nothing back: it gets the

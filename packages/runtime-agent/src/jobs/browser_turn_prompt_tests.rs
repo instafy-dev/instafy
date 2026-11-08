@@ -981,21 +981,26 @@ fn a_browser_turn_reads_the_whole_page_and_its_own_link_before_a_value_is_not_fo
                   (Specs, Warranty, Support, FAQ).";
     let unread = "A page's own tab or link named for a value you didn't find there is one of them \
                   until you open it.";
+    // A tab with no address of its own has its page's, which a finding line lists: named by it,
+    // the runtime takes it for that page, read already, and no second pass opens the tab.
+    let tab = "Name a tab with its page (\"<item>'s Specs tab\"), never by the page's address.";
 
     let (hand_back, _) = prompt_for_request(tmp.path(), request, routed(true), None);
-    for line in [limits, search, unread] {
+    for line in [limits, search, unread, tab] {
         assert_eq!(hand_back.matches(line).count(), 1, "{line}\n{hand_back}");
     }
     let at = |line: &str| hand_back.find(line).unwrap_or_else(|| panic!("{line}"));
     assert!(at(limits) < at(search), "{hand_back}");
     assert!(at(search) < at(unread), "{hand_back}");
-    assert!(at(unread) < at("\n\nLatest user request:\n"), "{hand_back}");
+    assert!(at(unread) < at(tab), "{hand_back}");
+    assert!(at(tab) < at("\n\nLatest user request:\n"), "{hand_back}");
 
     let (other, _) = prompt_for_request(tmp.path(), request, routed(false), None);
     for line in [limits, search] {
         assert_eq!(other.matches(line).count(), 1, "{line}\n{other}");
     }
     assert!(!other.contains(unread), "{other}");
+    assert!(!other.contains(tab), "{other}");
 }
 
 /// A browser turn whose findings go back to the building turn ends its reply with a finding line

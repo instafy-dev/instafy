@@ -2373,11 +2373,12 @@ mod tests {
     /// A building turn listed its tools, then read a shop's site twice with python's `urllib`:
     /// no robots.txt, budget or pacing, and Details showed only "Ran a command" (a local test,
     /// Nov 8). The research skill says never to fetch pages with curl, wget or ad-hoc scripts,
-    /// but a turn that doesn't load it never reads that. `AGENTS.md`'s "Responsiveness", which
-    /// every building turn reads, says it in one line: a public page is read with `instafy web
-    /// read` or a reading command a skill names, never with a script, while running one to build
-    /// or check the space's own pages stays fine. A browser turn, which has no shell, reads only
-    /// "Replies". The copy from before is upgraded.
+    /// but a turn that doesn't load it never reads that. `AGENTS.md`'s "Responsiveness" says it
+    /// in one line: a public page is read with `instafy web read` or a reading command a skill
+    /// names, never with a script, while running one to build or check the space's own pages
+    /// stays fine. A turn that may change files and runs without the file (that build was a
+    /// required change) is given the same line with its lane (`jobs::PUBLIC_PAGE_RULE`); a
+    /// browser turn, which has no shell, reads only "Replies". The copy from before is upgraded.
     #[test]
     fn agents_doc_says_a_turn_reads_a_public_page_only_with_instafys_reader() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2392,6 +2393,8 @@ mod tests {
         let rule = "- Read a public page only with `instafy web read <address>` or a reading command a skill names, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.";
         assert!(section("## Responsiveness").contains(rule), "{doc}");
         assert!(!section("## Replies").contains("instafy web read"), "{doc}");
+        // The lane's copy is the file's line, word for word.
+        assert!(AGENTS_DOC_TEMPLATE.contains(super::super::PUBLIC_PAGE_RULE));
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
 
         let previous = include_str!("legacy/agents-doc-v17.md");
