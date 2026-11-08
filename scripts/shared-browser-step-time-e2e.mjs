@@ -21,7 +21,7 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // still opens. A page that answers and can be read but has not finished
 // loading when the time is up is that step's answer, which says where to go
 // if it lacks what the task needs, and its address is refused for the rest of
-// the turn only; a prompt the
+// the turn only, its Let Octo continue included; a prompt the
 // person answers after more than the step's time is never cut short. A step
 // whose time runs out still ends as every step ends: a window it opened is
 // closed and said, and a hand-off it had not finished is never left behind. A
@@ -853,12 +853,30 @@ export async function runSharedBrowserStepTimeFixture() {
     const ownSiteAfterLate = await ok("POST", "/v1/navigate", { url: `${bookshop}/bookshop-hours` });
     assert.match(ownSiteAfterLate.payload.visibleText, /Open daily from 10:00 to 19:00\./u);
     assert.equal(prompts.length, promptsBeforeLate, "Nothing asked for the refusals or the place's own site");
+    // Let Octo continue carries on the same request after a pause:
+    // runtime-agent starts that run's record with the chat's addresses and the
+    // pages the paused run opened late (`openedLate`), and the page is refused
+    // there at once too.
+    assert.deepEqual(keptLate.openedLate, [addressKey(`${origin}/things-to-do`), addressKey(`${origin}/listing`)]);
+    const carried = keptLate.addresses;
+    for (const name of fs.readdirSync(approvalDirectory)) fs.rmSync(path.join(approvalDirectory, name), { force: true });
+    const continuedRun = { ...authority, runId: randomUUID(), expiresAtMs: Date.now() + 600_000 };
+    writeProtectedJson(markerPath, continuedRun);
+    writeProtectedJson(path.join(approvalDirectory, "unanswered.json"), {
+      version: 1, ownerId: continuedRun.ownerId, runId: continuedRun.runId,
+      initiatorUserId: continuedRun.initiatorUserId, browserPageId: continuedRun.browserPageId,
+      addresses: carried, openedLate: keptLate.openedLate,
+    });
+    requests.length = 0;
+    const refusedContinued = await runTool("POST", "/v1/navigate", { url: `${origin}/listing` }, ["allow_routine"]);
+    assert.equal(refusedContinued.code, 1, `The page is not opened again once the person lets Octo continue: ${refusedContinued.stdout}`);
+    assert.ok(refusedContinued.stderr.includes(OPENED_LATE_AGAIN_MESSAGE), refusedContinued.stderr);
+    assert.deepEqual(requests, [], "The site was not asked again");
     // The chat's next turn: runtime-agent revokes the run's records and starts
     // the next run's with the addresses that did not answer, the only ones it
     // carries. The page opens again there (its script comes now).
     for (const response of heldScripts.splice(0)) response.destroy();
     holdListingScript = false;
-    const carried = keptLate.addresses;
     for (const name of fs.readdirSync(approvalDirectory)) fs.rmSync(path.join(approvalDirectory, name), { force: true });
     const nextTurn = { ...authority, runId: randomUUID(), expiresAtMs: Date.now() + 600_000 };
     writeProtectedJson(markerPath, nextTurn);
@@ -970,7 +988,7 @@ export async function runSharedBrowserStepTimeFixture() {
         "a form sent to a site that does not answer is not stopped and never reads as nothing opened: the step answers once its time is up and says to check what it did, and the form's late answer lands",
         "a navigation the site answers 404 or 410 for fails as soon as that answer comes, saying the address has no page, even when the rest of its not-found page comes later than a step or there is no page at all; a page that only reads as not found, and a 200, are the step's page",
         "a page that never finishes loading and shows nothing fails once the step's time is up as a site that did not answer, naming the next source, never 'take a snapshot in a moment', and a read of it while it is still busy says the same; its address is then refused at once in the turn, and the place's own site still opens",
-        "a page that answers and can be read but has not finished loading when the step's time is up is the step's answer, read as it is, and says where to go if it lacks what the task needs; its address and the one its redirect led to are refused at once for the rest of the turn, by navigate and open_tab, never kept as a site that did not answer, the place's own site opens, and the chat's next turn opens the page again",
+        "a page that answers and can be read but has not finished loading when the step's time is up is the step's answer, read as it is, and says where to go if it lacks what the task needs; its address and the one its redirect led to are refused at once for the rest of the turn, by navigate and open_tab, never kept as a site that did not answer, the place's own site opens, a Let Octo continue run whose record runtime-agent started with the page refuses it at once too, and the chat's next turn opens the page again",
         "a click that opens a window and keeps the page busy fails once the step's time is up, as it would in its time: the window is closed and never loads anything, then or later",
         "a click whose script sends a request of its own and loads no page, then keeps the page busy, answers once the step's time is up with that page and says to check what the step did; its address is not kept as one that did not answer",
         "a hand-off whose fields the page is too busy to highlight in time answers with the page as it is and leaves no hand-off behind",

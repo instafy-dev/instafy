@@ -569,11 +569,22 @@ Two steps never ask, in Ask too:
   page held in one wrapper, that wrapper speaks of cookies and holds the menu
   and footer too. A pause on a notice's accept alone would show the person
   the accept outlined by itself, and a turn went for an accept twice. A pause
-  whose buttons are all accepts (a bar whose only button accepts, or an
-  accept whose notice's other buttons it cannot find) gets none: Octo never
-  asks anyone to accept cookies, so it is refused, with nothing outlined, in
-  the words a press of the accept gets, and the turn carries on under the
-  notice. It
+  needs a way out of the notice among the buttons it would outline: a
+  refusal, an accept limited to the necessary cookies or a selection, a
+  control that acts on the notice itself and is no accept (its settings
+  panel, a refusal in words no list knows such as "Disagree and close", a
+  close), or a link whose words name its settings ("Cookie settings",
+  "Manage preferences", "Personalizar cookies"). Any other link goes to
+  another page (its cookie policy, "Learn more"), and a pause on one beside
+  the accept asked the person to answer a notice whose only answer was
+  accepting. A pause with no way out (a bar whose only button accepts, an
+  accept beside its policy link, or an accept whose notice's other buttons it
+  cannot find) gets none: Octo never asks anyone to accept cookies, so it is
+  refused, with nothing outlined, in the words a press of the accept gets,
+  and the turn carries on under the notice. In a tab of Octo's own it is
+  refused in the same words, before the words that send a pause to the
+  chat's own tab, so the person's page is never moved for a pause that would
+  be refused. It
   presses none of them; its
   guidance says
   `kind: "cookies"` with fixed labels ("Highlighted button 1") and nothing of
@@ -1509,13 +1520,19 @@ answered, but had not finished loading) keeps its reading, which may hold
 the answer, and the note adds "If this page doesn't show what you need, don't
 open it again in this turn: open the venue's, shop's or operator's own site
 now, else another official source.". `navigate` and `open_tab` then refuse
-its address, and the one a redirect led it to, at once for the rest of the
-run only, with "This address was still loading after 20 seconds earlier in
+its address, and the one a redirect led it to, at once for the rest of that
+request, with "This address was still loading after 20 seconds earlier in
 this turn, so it was not opened again." and the same hint: a turn told only
 to check what the step did read a tourism site twice, 20 seconds each, and
 never tried the bookshop's own site. The run's record keeps them apart from
-the addresses that did not answer (`openedLate` in `unanswered.json`), and
-runtime-agent carries none of them into the chat's next runs. On the turn's
+the addresses that did not answer (`openedLate` in `unanswered.json`).
+runtime-agent carries them only into the run that carries on the same
+request after a pause, Let Octo continue (it names the paused run and no
+card of its own), as it carries that run's approvals: the tourism site's
+second open came once the person had answered its cookie notice. A
+follow-up message's turn, a fresh turn and the chat's later turns start
+without them, and the chat's ten-minute record of sites that did not answer
+never holds them. On the turn's
 line it reads as a page read (or like `status`, "Browsed <site>", on a site
 the run may not read yet), so it adds no new wording and never says a page was
 read when none was. A page still too busy to be read when the time is up (it

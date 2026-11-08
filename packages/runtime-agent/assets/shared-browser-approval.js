@@ -70,9 +70,11 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
   // The same record keeps, under `openedLate`, the addresses a navigate or
   // open_tab of this run opened only as its step's time ran out: a page that
   // answered and was read, but slowly. navigate and open_tab refuse them for
-  // the rest of the run only (runtime-agent carries only `addresses` into the
-  // chat's next runs), so the turn goes on to the place's own site instead of
-  // opening the same slow page again. Fingerprints as `addresses` keeps them.
+  // the rest of the request only (runtime-agent carries them into the run
+  // that carries it on after a pause, Let Octo continue, and only `addresses`
+  // into the chat's next runs), so the turn goes on to the place's own site
+  // instead of opening the same slow page again. Fingerprints as `addresses`
+  // keeps them.
   const MAX_OPENED_LATE_ADDRESSES = 16;
   // The addresses a message or a page gave the chat's browser turns: the ones
   // the person's messages and the turn's task name and the pages the chat's
@@ -117,9 +119,10 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     // writes it; it gives this run nothing, and this script never reads it.
     "chat-tabs.json",
     // The addresses that did not answer in the chat's browser turns, bound to
-    // this run: runtime-agent seeds it with the chat's earlier ones, and this
+    // this run: runtime-agent seeds it with the chat's earlier ones (and, for
+    // a Let Octo continue run, the pages the paused run opened late), and this
     // script adds this run's, and the pages this run opened only as a step's
-    // time ran out, which no later run gets.
+    // time ran out, which only a run carrying on the same request gets.
     UNANSWERED_FILE,
     // The addresses a message or a page gave the chat's browser turns, bound
     // to this run: runtime-agent seeds it, and this script adds what this
@@ -1318,9 +1321,10 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       return unansweredRecord(authority).openedLate.includes(address);
     }
 
-    // Keeps, for this run only, the addresses of a page a navigate or
-    // open_tab opened only as its step's time ran out. Best effort: the step
-    // already answered with the page and its words.
+    // Keeps, for the rest of this request (this run, and the Let Octo
+    // continue run runtime-agent hands them to), the addresses of a page a
+    // navigate or open_tab opened only as its step's time ran out. Best
+    // effort: the step already answered with the page and its words.
     function rememberOpenedLate(rawUrls) {
       const addresses = [...new Set(rawUrls.map(unansweredAddressFingerprint).filter(Boolean))];
       if (!addresses.length) {

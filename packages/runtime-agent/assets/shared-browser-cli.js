@@ -3228,8 +3228,8 @@ async function declineCookieBanner(page, interactive) {
 // named that is a dialog or is named after cookies or consent
 // (inCookieNoticeInPage) joins them. Octo went for a notice's accept twice,
 // and a pause on it alone would have shown the person the accept outlined by
-// itself. A notice with nothing but accepts, no refusal, settings or other
-// way out of it, gets no pause: Octo never asks anyone to accept cookies, and
+// itself. A notice none of whose outlined buttons is a way out of it
+// (noticeWayOut) gets no pause: Octo never asks anyone to accept cookies, and
 // two turns paused on a bar whose one button was its accept, which covered
 // nothing the task needed. It is refused in the words a press of its accept
 // gets, so the turn carries on under it. Null when the controls Octo named
@@ -3260,7 +3260,7 @@ async function cookieNoticeButtons(page, interactive, selected) {
     if (notice.length >= MAX_HUMAN_INPUT_TARGETS) break;
     if (!notice.includes(entry) && (await noticeButton(entry)) && (await inNotice(entry))) notice.push(entry);
   }
-  if (notice.every(({ locator }) => accepts.includes(locator))) {
+  if (!notice.some((entry) => noticeWayOut(entry, pageUrl, accepts))) {
     throw new Error(`${CONSENT_ACCEPT_MESSAGE} [step_refused_consent]`);
   }
   return notice;
@@ -3268,6 +3268,35 @@ async function cookieNoticeButtons(page, interactive, selected) {
 
 // The most controls one pause outlines.
 const MAX_HUMAN_INPUT_TARGETS = 8;
+
+// Words that name a notice's settings or choices, in the languages the action
+// policy's consent words cover: "Cookie settings", "Manage preferences",
+// "Configure your consents", "Personalizar cookies", "Paramètres",
+// "Einstellungen", "Impostazioni", "Instellingen".
+const CONSENT_SETTINGS = /(?<![\p{L}\p{N}])(?:settings?|preferences?|customi[sz]e|personali[sz]e|manage|configure|options|choices|einstellungen|anpassen|verwalten|konfigurieren|optionen|pr[äa]ferenzen|param[èe]tres|param[ée]trer|personnaliser|g[ée]rer|pr[ée]f[ée]rences|choix|configuraci[óo]n|configurar|personalizar|gestionar|preferencias|opciones|impostazioni|personalizza(?:re)?|gestisci|preferenze|opzioni|defini[çc][õo]es|configura[çc][õo]es|gerir|gerenciar|prefer[êe]ncias|op[çc][õo]es|instellingen|aanpassen|beheren|voorkeuren|opties)(?![\p{L}\p{N}])/iu;
+
+// Whether one of a notice's buttons lets the person answer it without
+// accepting: a refusal, an accept limited to the necessary cookies or a
+// selection, a control that acts on the notice itself and is no accept (its
+// settings panel, a refusal in words no list knows, a close), or a link whose
+// words name its settings. Any other link goes to another page (its cookie
+// policy, "Learn more"): a pause on one beside the accept asked the person to
+// answer a notice whose only answer was accepting.
+function noticeWayOut(entry, pageUrl, accepts) {
+  if (accepts.includes(entry.locator)) return false;
+  const step = classifyStep("click", entry.description, { pageUrl });
+  if (step.consentRejection === true || step.consentLimited === true) return true;
+  const destination = resolvedTargetDestination(entry.description, pageUrl);
+  let elsewhere = destination !== null;
+  try {
+    elsewhere = elsewhere && new URL(destination).href.split("#")[0] !== new URL(pageUrl).href.split("#")[0];
+  } catch (_) {
+    // An address that cannot be read goes elsewhere.
+  }
+  if (!elsewhere) return true;
+  const { label, text, ariaLabel, titleAttribute } = entry.description;
+  return CONSENT_SETTINGS.test([label, text, ariaLabel, titleAttribute].filter(Boolean).join(" "));
+}
 
 // Whether a control may be one of a cookie notice's buttons in a pause, by
 // itself (cookieNoticeButtons says where it must sit): turned on, in a
@@ -5434,9 +5463,10 @@ const UNANSWERED_NEXT_SOURCE = "Don't open this address again in this turn: open
 // What a navigate or open_tab adds whose page answered and was read only as
 // the step's time ran out: the page may hold the answer, so it is kept, and
 // its address is refused for the rest of the turn (refuseUnansweredAddress),
-// never kept for the chat's next turns as one that did not answer. A turn
-// told only to check what the step did read a tourism site twice at 20
-// seconds each and never tried the bookshop's own site.
+// a Let Octo continue of the same request included, never kept for the
+// chat's next turns as one that did not answer. A turn told only to check what
+// the step did read a tourism site twice at 20 seconds each and never tried
+// the bookshop's own site.
 const OPENED_LATE_NEXT_SOURCE = "If this page doesn't show what you need, don't open it again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
 const OPENED_LATE_AGAIN_MESSAGE = `This address was still loading after ${STEP_TIME_MS / 1000} seconds earlier in this turn, so it was not opened again. ${UNANSWERED_NEXT_SOURCE}`;
 const UNANSWERED_PAGE_MESSAGE = `The site did not answer in time, so nothing was opened and the page is still blank. ${UNANSWERED_NEXT_SOURCE}`;
@@ -5505,8 +5535,9 @@ function didNotAnswer(message, addresses) {
 // anything asks or loads, so nothing is sent to its site, with the same hint
 // as the step that found it. Only these two steps: the person's own
 // navigation, and the page's own links and forms, are never refused. So is,
-// for the rest of the turn only, a page one of them opened that was read only
-// as its step's time ran out (OPENED_LATE_NEXT_SOURCE).
+// for the rest of the turn only (its Let Octo continue included), a page one
+// of them opened that was read only as its step's time ran out
+// (OPENED_LATE_NEXT_SOURCE).
 function refuseUnansweredAddress(url) {
   if (approvalProtocol.didNotAnswerRecently(url)) {
     throw new Error(UNANSWERED_AGAIN_MESSAGE);
@@ -6009,6 +6040,17 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
 
   if (method === "POST" && requestPath === "/v1/request-human-input") {
     if (inAgentTab()) {
+      // A notice that offers only accepting gets no pause in any tab
+      // (cookieNoticeButtons), so the turn is never sent to move the person's
+      // page for one. A page that changed, or anything else, gets the words
+      // below.
+      const seen = await collectInteractiveElements(page).catch(() => null);
+      if (seen && humanInputFieldsAsObserved(page.url(), seen, body)) {
+        const named = body.indices.map((index) => seen[index]);
+        if (!named.every((entry) => entry && EDITABLE_FIELD_TAGS.has(entry.description.tag))) {
+          await cookieNoticeButtons(page, seen, named);
+        }
+      }
       throw new Error(
         "Octo's own tabs are for reading, so nothing was highlighted. Stop at a sign-in or form and tell the person. When the task needs a page a cookie notice covers, open it in the chat's own tab, the page the person chose (select_tab, then navigate to this address), take a snapshot there and pause on the notice with request_human_input.",
       );

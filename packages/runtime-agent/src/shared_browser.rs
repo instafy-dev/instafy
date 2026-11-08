@@ -322,6 +322,10 @@ pub struct SharedBrowserAgentControlGuard {
     /// The chat the run belongs to, whose addresses that did not answer the
     /// run starts with and leaves (see [`Self::carry_unanswered_addresses`]).
     chat: Option<Uuid>,
+    /// The pages the run this one continues opened only as a step's time ran
+    /// out, which this run refuses too when it carries on the same request
+    /// ([`Self::start_chat_records`]).
+    continued_opened_late: Vec<String>,
 }
 
 #[cfg(test)]
@@ -833,6 +837,10 @@ struct EndedRunGrants {
     approved_origins: Vec<String>,
     routine_browsing_allowed: bool,
     left_page: Option<LeftPageGrants>,
+    /// The pages the run opened only as a step's time ran out, which only a
+    /// run that carries on the same request refuses too
+    /// ([`MAX_OPENED_LATE_ADDRESSES`]).
+    opened_late: Vec<String>,
     ended_at: std::time::Instant,
 }
 
@@ -891,6 +899,14 @@ const UNANSWERED_ADDRESSES_FILE: &str = "unanswered.json";
 const UNANSWERED_ADDRESSES_MAX_BYTES: u64 = 8 * 1024;
 const MAX_UNANSWERED_ADDRESSES: usize = 32;
 const UNANSWERED_ADDRESS_TTL: Duration = Duration::from_secs(10 * 60);
+/// The same record keeps, as `openedLate`, the pages a navigate or open_tab of
+/// the run opened only as its step's time ran out. They are refused for the
+/// rest of that request only: the run that carries it on after a pause (Let
+/// Octo continue) starts with them, and no other run does
+/// ([`SharedBrowserAgentControlGuard::start_chat_records`]). A turn read a
+/// tourism site at 20 seconds, paused on its cookie notice, and once let
+/// continue opened the same page again, 20 seconds more for the same page.
+const MAX_OPENED_LATE_ADDRESSES: usize = 16;
 /// Chats whose addresses this process keeps; the one that ran last is kept
 /// longest.
 const MAX_UNANSWERED_CHATS: usize = 32;
@@ -1010,14 +1026,49 @@ fn read_unanswered_addresses(approval_dir: &Path, binding: &RunBinding) -> Vec<U
         .collect()
 }
 
-/// Starts the run's record with the addresses its chat left, bound to the
-/// exact authority the marker carries.
+/// The pages the run opened only as a step's time ran out (`openedLate` in its
+/// record of addresses), newest last. A record that is missing, bound to
+/// another run or not well formed names none.
+fn read_opened_late_addresses(approval_dir: &Path, binding: &RunBinding) -> Vec<String> {
+    let Some(record) = read_run_record_bounded(
+        approval_dir,
+        UNANSWERED_ADDRESSES_FILE,
+        &[1],
+        binding,
+        UNANSWERED_ADDRESSES_MAX_BYTES,
+    )
+    .ok()
+    .flatten() else {
+        return Vec::new();
+    };
+    let Some(entries) = record.get("openedLate").and_then(JsonValue::as_array) else {
+        return Vec::new();
+    };
+    let addresses: Vec<String> = entries
+        .iter()
+        .filter_map(JsonValue::as_str)
+        .filter(|address| {
+            address.len() == 64
+                && address
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .map(str::to_string)
+        .collect();
+    let excess = addresses.len().saturating_sub(MAX_OPENED_LATE_ADDRESSES);
+    addresses.into_iter().skip(excess).collect()
+}
+
+/// Starts the run's record with the addresses its chat left, and the pages the
+/// run it carries on opened late, bound to the exact authority the marker
+/// carries.
 fn write_unanswered_addresses(
     approval_dir: &Path,
     binding: &RunBinding,
     addresses: &[UnansweredAddress],
+    opened_late: &[String],
 ) -> Result<()> {
-    let payload = serde_json::to_vec(&json!({
+    let mut record = json!({
         "version": 1,
         "ownerId": binding.owner_id,
         "runId": binding.run_id,
@@ -1027,7 +1078,11 @@ fn write_unanswered_addresses(
             .iter()
             .map(|entry| json!({ "address": entry.address, "atMs": entry.at_ms }))
             .collect::<Vec<_>>(),
-    }))?;
+    });
+    if !opened_late.is_empty() {
+        record["openedLate"] = json!(opened_late);
+    }
+    let payload = serde_json::to_vec(&record)?;
     // The temporary name uses the prefix the approval directory cleanup
     // accepts, so a write cut short is revoked with the rest of the run.
     publish_private_file(
@@ -1359,6 +1414,7 @@ fn ended_run_grants(approval_dir: &Path, binding: &RunBinding) -> Option<EndedRu
         approved_origins,
         routine_browsing_allowed,
         left_page: None,
+        opened_late: Vec::new(),
         ended_at: std::time::Instant::now(),
     })
 }
@@ -1534,6 +1590,20 @@ pub fn continued_run_id_from_payload(payload: &JsonValue) -> Option<Uuid> {
         .and_then(|raw| Uuid::parse_str(raw.trim()).ok())
 }
 
+/// Whether a Shared Browser job carries on the request of the run it
+/// continues: Studio's Let Octo continue names that run and no card of its
+/// own. A follow-up message's card turn names the run it goes on from too, but
+/// carries on its own card's request (`browserRequestOf`), as the chat's
+/// history reads them (`conversation_context.rs`).
+pub fn continues_same_request_from_payload(payload: &JsonValue) -> bool {
+    continued_run_id_from_payload(payload).is_some()
+        && payload
+            .get("metadata")
+            .and_then(|metadata| metadata.get("browserRequestOf"))
+            .and_then(JsonValue::as_str)
+            .is_none_or(|card| card.trim().is_empty())
+}
+
 fn remove_owned_agent_control_marker(
     path: &Path,
     expected_owner_id: &str,
@@ -1638,10 +1708,12 @@ impl SharedBrowserAgentControlGuard {
     /// browsing), never the job's or the model's, and its state is written
     /// before any Codex or MCP process starts. `continues_run_id` is the run
     /// Studio's Let Octo continue names: its grants carry over only as
-    /// [`take_continued_run_grants`] allows. `chat` is the job's conversation,
-    /// whose addresses that did not answer the run starts with, and whose
-    /// given addresses it starts with beside `given`, those its own task and
-    /// its chat's history name ([`given_addresses_from_payload`]).
+    /// [`take_continued_run_grants`] allows, and `same_request` says the run
+    /// carries on that run's request ([`continues_same_request_from_payload`]).
+    /// `chat` is the job's conversation, whose addresses that did not answer
+    /// the run starts with, and whose given addresses it starts with beside
+    /// `given`, those its own task and its chat's history name
+    /// ([`given_addresses_from_payload`]).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn acquire(
         run_id: Uuid,
@@ -1649,6 +1721,7 @@ impl SharedBrowserAgentControlGuard {
         browser_page_id: &str,
         display_name: &str,
         continues_run_id: Option<Uuid>,
+        same_request: bool,
         card_site_origins: &[String],
         cancel_signal: JobCancelSignal,
         chat: Option<Uuid>,
@@ -1666,14 +1739,27 @@ impl SharedBrowserAgentControlGuard {
             cancel_signal,
         )?;
         guard.start_window_watch();
-        guard.start_chat_records(chat, unix_time_millis(), given);
+        guard.start_chat_records(chat, unix_time_millis(), given, same_request);
         Ok(guard)
     }
 
     /// Starts the run's records of its chat: the addresses that did not answer
     /// in the chat's earlier runs ([`Self::carry_unanswered_addresses`]), and
-    /// the addresses the run was given ([`Self::start_given_addresses`]).
-    fn start_chat_records(&mut self, chat: Option<Uuid>, now_ms: u64, given: &[String]) {
+    /// the addresses the run was given ([`Self::start_given_addresses`]). A run
+    /// that carries on the request of the run it continues (`same_request`,
+    /// Let Octo continue) also refuses the pages that run opened only as a
+    /// step's time ran out; any other run, a follow-up message's included,
+    /// starts without them.
+    fn start_chat_records(
+        &mut self,
+        chat: Option<Uuid>,
+        now_ms: u64,
+        given: &[String],
+        same_request: bool,
+    ) {
+        if !same_request {
+            self.continued_opened_late.clear();
+        }
         self.carry_unanswered_addresses(chat, now_ms);
         self.start_given_addresses(given);
     }
@@ -1701,21 +1787,25 @@ impl SharedBrowserAgentControlGuard {
     /// Starts the run's record of the addresses that did not answer with
     /// those `chat` left on this browser in the last
     /// [`UNANSWERED_ADDRESS_TTL`], and keeps what the run adds for the chat's
-    /// next runs when it ends. Another chat's are never in it. A record that
-    /// cannot be written leaves the run without them: an address is then
-    /// tried once more.
+    /// next runs when it ends. Another chat's are never in it. The same record
+    /// starts with the pages the run it carries on opened late, when
+    /// [`Self::start_chat_records`] kept them. A record that cannot be written
+    /// leaves the run without them: an address is then tried once more.
     fn carry_unanswered_addresses(&mut self, chat: Option<Uuid>, now_ms: u64) {
         self.chat = chat;
-        let Some(chat) = chat else {
-            return;
-        };
-        let addresses = unanswered_addresses_of(&self.approval_dir, chat, now_ms);
-        if addresses.is_empty() {
+        let addresses = chat
+            .map(|chat| unanswered_addresses_of(&self.approval_dir, chat, now_ms))
+            .unwrap_or_default();
+        let opened_late = std::mem::take(&mut self.continued_opened_late);
+        if addresses.is_empty() && opened_late.is_empty() {
             return;
         }
-        if let Err(error) =
-            write_unanswered_addresses(&self.approval_dir, &self.binding(), &addresses)
-        {
+        if let Err(error) = write_unanswered_addresses(
+            &self.approval_dir,
+            &self.binding(),
+            &addresses,
+            &opened_late,
+        ) {
             tracing::warn!(
                 ?error,
                 "Shared Browser could not carry the addresses that did not answer into this run"
@@ -1816,6 +1906,10 @@ impl SharedBrowserAgentControlGuard {
             || continued
                 .as_ref()
                 .is_some_and(|grants| grants.routine_browsing_allowed);
+        let continued_opened_late = continued
+            .as_ref()
+            .map(|grants| grants.opened_late.clone())
+            .unwrap_or_default();
         let mut approved_origins = continued
             .map(|grants| grants.approved_origins)
             .unwrap_or_default();
@@ -1965,6 +2059,7 @@ impl SharedBrowserAgentControlGuard {
             heartbeat,
             window_watch: None,
             chat: None,
+            continued_opened_late,
         })
     }
 
@@ -2988,6 +3083,7 @@ impl Drop for SharedBrowserAgentControlGuard {
             let ended = ended_run_grants(&self.approval_dir, &self.binding()).map(|grants| {
                 EndedRunGrants {
                     left_page,
+                    opened_late: read_opened_late_addresses(&self.approval_dir, &self.binding()),
                     ..grants
                 }
             });
