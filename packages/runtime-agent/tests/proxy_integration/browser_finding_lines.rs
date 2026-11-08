@@ -835,7 +835,7 @@ pub(super) const DEVICE_PAGE: &str = "https://maker.example/laptop-13";
 /// refuses it with, as its text and its structured content's `error.reason` (the Shared
 /// Browser's `refuseUngivenAddress`, runtime-agent `shared_browser::failed_tool_result`).
 pub(super) const DEVICE_REFUSED: &str = "https://reviews.example/laptop-12";
-pub(super) const DEVICE_REFUSAL: &str = "No message and no page Octo read gave this address, so it was not opened: Octo opens only addresses it was given. Open https://reviews.example/ and follow its links to the page, or use the site's own search.";
+pub(super) const DEVICE_REFUSAL: &str = "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given. Open https://reviews.example/ and follow its links to the page, or use the site's own search.";
 /// A line that writes the refused address as a page with no page there.
 const REFUSED_AS_NO_PAGE: &str =
     r#"{"url": "https://reviews.example/laptop-12", "stopped": "no-page"}"#;

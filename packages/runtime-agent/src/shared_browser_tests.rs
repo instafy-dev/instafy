@@ -3461,7 +3461,7 @@ async fn a_failed_step_with_facts_still_tells_the_model_what_failed() {
 #[tokio::test]
 async fn no_failed_step_reads_as_undefined() {
     use std::os::unix::process::ExitStatusExt;
-    let refused = "No message and no page Octo read gave this address, so it was not opened: Octo opens only addresses it was given. Open https://www.tomshardware.com/ and follow its links to the page, or use the site's own search.";
+    let refused = "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given. Open https://www.tomshardware.com/ and follow its links to the page, or use the site's own search.";
     let failed = |stderr: &str, stdout: &str, exit: i32| {
         failed_call_result(&controller_failure(
             std::process::ExitStatus::from_raw(exit << 8),
@@ -3543,10 +3543,9 @@ async fn no_failed_step_reads_as_undefined() {
         address_not_given("navigate", Some(&asked), stale.structured_content.as_ref()).is_none()
     );
     // The words are the controller's own refusal's.
-    assert!(
-        SHARED_BROWSER_SCRIPT
-            .contains(&format!("so it was not opened: {ADDRESS_NOT_GIVEN_WORDS}."))
-    );
+    assert!(SHARED_BROWSER_SCRIPT.contains(&format!(
+        "so it was not opened and gets no finding line: {ADDRESS_NOT_GIVEN_WORDS}."
+    )));
 }
 
 /// A step that failed, and a result that ends the run (the sign-in pause, a
@@ -3581,7 +3580,7 @@ async fn a_failed_step_or_the_end_of_the_run_reaches_the_model_in_its_own_words(
         ),
         (
             "approval_denied",
-            "Shared Browser consent is blocked for this run (approval_denied).",
+            "The person said no, so this step didn't happen. Don't try it another way.",
         ),
         (
             "approval_timeout",
@@ -3814,7 +3813,7 @@ async fn an_address_that_did_not_answer_is_not_opened_again_in_that_chat_for_ten
 /// A chat's browser run as runtime-agent starts it for a job with `payload`
 /// (`acquire`'s own run start), with its record of the addresses it was given:
 /// those the job's task and the chat's history name and those the chat's
-/// earlier runs were given.
+/// earlier runs were given, and those the person's own messages name.
 fn chat_browser_run_given(
     fixture: &EmbeddedControllerFixture,
     chat: Uuid,
@@ -3837,6 +3836,7 @@ fn chat_browser_run_given(
         Some(chat),
         unix_time_millis(),
         &given_addresses_from_payload(&payload),
+        &crate::jobs::persons_typed_addresses(&payload),
         false,
     );
     (guard, cancel_signal)
@@ -3868,11 +3868,7 @@ async fn an_address_no_message_or_page_gave_is_not_opened() {
             .lines()
             .any(|line| line.contains("\"type\":\"navigate\"") && line.contains(part))
     };
-    let made_up = |site: &str| {
-        format!(
-            "No message and no page Octo read gave this address, so it was not opened: Octo opens only addresses it was given. Open {site}/ and follow its links to the page, or use the site's own search."
-        )
-    };
+    let made_up = |site: &str| made_up_address_words(site);
     let failure = |output: &Output| {
         assert!(!output.status.success());
         String::from_utf8_lossy(&output.stderr).into_owned()
@@ -3941,23 +3937,30 @@ async fn an_address_no_message_or_page_gave_is_not_opened() {
     payload_of(&navigate("https://reviews.example/laptops/one"));
     end_chat_browser_run(run);
 
-    // Another chat's turn was given none of it.
+    // Another chat's turn was given none of it, its site included: the way on
+    // is the official site of what its task names.
     let run = chat_browser_run_given(
         &fixture,
         Uuid::new_v4(),
         json!({ "prompt_text": "Read the report." }),
     );
     let words = failure(&navigate("https://example.test/reports/q3"));
-    assert!(words.contains(&made_up("https://example.test")), "{words}");
+    assert!(words.contains(MADE_UP_ON_A_SITE_NOBODY_GAVE), "{words}");
+    assert!(!words.contains("example.test"), "{words}");
     end_chat_browser_run(run);
 }
 
-/// The words an address no message and no page gave is refused with.
+/// The words an address no message and no page gave is refused with, on a site the chat was
+/// given: back to that site's root, links and search.
 fn made_up_address_words(site: &str) -> String {
     format!(
-        "No message and no page Octo read gave this address, so it was not opened: Octo opens only addresses it was given. Open {site}/ and follow its links to the page, or use the site's own search."
+        "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given. Open {site}/ and follow its links to the page, or use the site's own search."
     )
 }
+
+/// The words an address no message and no page gave is refused with, on a site the chat was
+/// not given: to the official site of what the task names, never the refused site's root.
+const MADE_UP_ON_A_SITE_NOBODY_GAVE: &str = "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given. Open the official site of what the task names (the venue's, operator's, shop's or reviewer's; for a route, the operator's journey planner), and follow its links or use its own search.";
 
 /// A page gives the addresses its text spells out, read as a task's are: with
 /// a scheme or without, and with a parenthesis of its own
@@ -3978,32 +3981,258 @@ async fn a_page_gives_the_addresses_its_text_spells_out() {
             .expect("run the controller")
     };
     let spelled = [
-        (
-            "https://www.reviews.example/laptops/four",
-            "https://www.reviews.example",
-        ),
-        (
-            "https://en.wikipedia.org/wiki/Mercury_(planet)",
-            "https://en.wikipedia.org",
-        ),
+        "https://www.reviews.example/laptops/four",
+        "https://en.wikipedia.org/wiki/Mercury_(planet)",
     ];
     let run = chat_browser_run_given(
         &fixture,
         Uuid::new_v4(),
         json!({ "prompt_text": "Read the page." }),
     );
-    for (url, site) in spelled {
+    // Nothing gave them, nor their sites, before the page is read.
+    for url in spelled {
         let words = failure_of(&navigate(url));
         assert!(
-            words.contains(&made_up_address_words(site)),
+            words.contains(MADE_UP_ON_A_SITE_NOBODY_GAVE),
             "{url}: {words}"
         );
     }
     payload_of(&fixture.call("spelled-addresses", "GET", "/v1/snapshot", None));
-    for (url, _) in spelled {
+    for url in spelled {
         payload_of(&navigate(url));
     }
     end_chat_browser_run(run);
+}
+
+/// A refused address's way on names its site's root only on a site the chat
+/// was given: one the person's messages or the task named, by an address or by
+/// its name alone, or one the chat's browser turns read a page on. On any other
+/// site, a search engine's included, it is the official site of what the task
+/// names, in the chat's own tab and in a tab of Octo's own alike. Sent to the
+/// root of whatever site it refused, a route question opened a search engine
+/// nobody named and asked the person to let it send a search, which they
+/// refused (a local test, Nov 8). A page's link or text gives its address,
+/// never its site.
+#[tokio::test]
+async fn a_refused_address_names_its_sites_root_only_on_a_site_the_chat_was_given() {
+    let fixture = EmbeddedControllerFixture::new();
+    let step = |path: &str, url: &str| {
+        fixture
+            .command_for(
+                "safe",
+                "page-target",
+                "POST",
+                path,
+                Some(&json!({ "url": url }).to_string()),
+            )
+            .output()
+            .expect("run the controller")
+    };
+    let asked = "When is the bookshop open? Check www.visit.example, then how to get there by metro.";
+    let chat = Uuid::new_v4();
+    let run = chat_browser_run_given(
+        &fixture,
+        chat,
+        json!({
+            "prompt_text": asked,
+            "conversation_history": [{ "role": "user", "content": asked }],
+        }),
+    );
+    // The site the person named by its name alone: back to its root.
+    let words = failure_of(&step("/v1/navigate", "https://www.visit.example/en/bookshop"));
+    assert!(
+        words.contains(&made_up_address_words("https://www.visit.example")),
+        "{words}"
+    );
+    // A site nobody named: the official site of what the task names, and no
+    // word of the refused site, in either tab.
+    for path in ["/v1/tabs/open", "/v1/navigate"] {
+        let words = failure_of(&step(path, "https://www.search.example/maps"));
+        assert!(words.contains(MADE_UP_ON_A_SITE_NOBODY_GAVE), "{path}: {words}");
+        assert!(!words.contains("search.example"), "{path}: {words}");
+    }
+    assert!(!fixture.approval_dir.join("request.json").exists());
+    // A page the turn reads gives its own site.
+    payload_of(&fixture.call("spelled-addresses", "GET", "/v1/snapshot", None));
+    let words = failure_of(&step("/v1/navigate", "https://example.test/made-up/page"));
+    assert!(
+        words.contains(&made_up_address_words("https://example.test")),
+        "{words}"
+    );
+    // An address its text spells out on another site gives that address, not
+    // the site, until the turn reads a page there.
+    let words = failure_of(&step("/v1/navigate", "https://www.reviews.example/laptops/five"));
+    assert!(words.contains(MADE_UP_ON_A_SITE_NOBODY_GAVE), "{words}");
+    payload_of(&step("/v1/navigate", "https://www.reviews.example/laptops/four"));
+    let words = failure_of(&step("/v1/navigate", "https://www.reviews.example/laptops/five"));
+    assert!(
+        words.contains(&made_up_address_words("https://www.reviews.example")),
+        "{words}"
+    );
+    end_chat_browser_run(run);
+
+    // The chat's next run keeps the sites it was given, the page's included;
+    // another chat's run was given none of them.
+    let run = chat_browser_run_given(&fixture, chat, json!({ "prompt_text": "Read the page." }));
+    let words = failure_of(&step("/v1/navigate", "https://example.test/made-up/page"));
+    assert!(
+        words.contains(&made_up_address_words("https://example.test")),
+        "{words}"
+    );
+    end_chat_browser_run(run);
+    let run = chat_browser_run_given(
+        &fixture,
+        Uuid::new_v4(),
+        json!({ "prompt_text": "Read the page." }),
+    );
+    let words = failure_of(&step("/v1/navigate", "https://example.test/made-up/page"));
+    assert!(words.contains(MADE_UP_ON_A_SITE_NOBODY_GAVE), "{words}");
+    end_chat_browser_run(run);
+}
+
+/// An address the person's own message gave opens without the word check:
+/// "post" in httpbin.org/forms/post, the address in the person's message,
+/// asked before anything else (a local test, Nov 8). The policy's own address
+/// check still judges it, and the form's submit still asks. The same address
+/// given only by a page, or by a task the person didn't write, still asks to
+/// open.
+#[tokio::test]
+async fn an_address_the_person_typed_opens_without_the_word_check() {
+    let fixture = EmbeddedControllerFixture::new();
+    let address = "https://example.test/forms/post";
+    let navigate = |url: &str| {
+        fixture.call_deciding(
+            "safe",
+            "POST",
+            "/v1/navigate",
+            Some(&json!({ "url": url }).to_string()),
+            &["deny"],
+        )
+    };
+    let asked = "Open example.test/forms/post in your browser, fill in a test pizza order with made-up details and submit it.";
+    let run = chat_browser_run_given(
+        &fixture,
+        Uuid::new_v4(),
+        json!({
+            "prompt_text": asked,
+            "conversation_history": [{ "role": "user", "content": asked }],
+        }),
+    );
+    // How many times a navigation to the form went out.
+    let went = || {
+        fixture
+            .action_log()
+            .lines()
+            .filter(|line| line.contains("\"type\":\"navigate\"") && line.contains("forms/post"))
+            .count()
+    };
+    // The address as the person typed it opens with no prompt.
+    let (opened, requests) = navigate(address);
+    assert!(requests.is_empty(), "{requests:?}");
+    payload_of(&opened);
+    assert_eq!(went(), 1, "{}", fixture.action_log());
+    // Another address on that path with an action word of its own is not
+    // what they typed: it still asks.
+    let (other, requests) = navigate("https://example.test/forms/post?then=delete");
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0]["kind"], "action", "{requests:?}");
+    assert!(!other.status.success());
+    assert!(!fixture.action_log().contains("then=delete"));
+    end_chat_browser_run(run);
+
+    let run = chat_browser_run_given(
+        &fixture,
+        Uuid::new_v4(),
+        json!({
+            "prompt_text": asked,
+            "conversation_history": [{ "role": "user", "content": asked }],
+        }),
+    );
+    // The form's submit still asks, and nothing is sent without an answer.
+    let snapshot_id = fixture.snapshot_id_in("submit-order");
+    let (submitted, requests) = fixture.call_deciding(
+        "submit-order",
+        "POST",
+        "/v1/click",
+        Some(&json!({ "index": 0, "snapshotId": snapshot_id }).to_string()),
+        &["deny"],
+    );
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(
+        requests[0]["display"]["label"]
+            .as_str()
+            .is_some_and(|label| label.contains("Submit order")),
+        "{requests:?}"
+    );
+    assert!(!submitted.status.success());
+    end_chat_browser_run(run);
+
+    // Given only by a page the chat read, or by a card's task a turn wrote,
+    // the address opens (it was given) but asks first.
+    let read = json!({ "url": address, "title": "Pizza order", "facts": ["An order form."] });
+    for payload in [
+        json!({
+            "prompt_text": "Fill in a test pizza order on that form and submit it.",
+            "conversation_history": [
+                { "role": "user", "content": "Order a test pizza on the form you found." },
+                { "role": "assistant", "lane": "browser", "content": read.to_string() },
+            ],
+        }),
+        json!({ "prompt_text": "Open example.test/forms/post and submit a test order." }),
+    ] {
+        let run = chat_browser_run_given(&fixture, Uuid::new_v4(), payload.clone());
+        let (asked_first, requests) = navigate(address);
+        assert_eq!(requests.len(), 1, "{payload}: {requests:?}");
+        assert_eq!(requests[0]["kind"], "action", "{payload}: {requests:?}");
+        assert!(!asked_first.status.success(), "{payload}");
+        assert_eq!(went(), 1, "{payload}: {}", fixture.action_log());
+        end_chat_browser_run(run);
+    }
+}
+
+/// Only the person's own words give an address they typed: their messages in
+/// the chat's history, and a routed card's request, whose words are theirs,
+/// without the routing step's summary line. Never Octo's replies, a page the
+/// chat read, an earlier browser task or a card a turn wrote.
+#[test]
+fn only_the_persons_own_words_give_an_address_they_typed() {
+    let key = |address: &str| approval_test_sha256(address)[..32].to_string();
+    let routed = json!({
+        "browserTransport": "shared",
+        "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+        "browserCardTurn": {
+            "version": 1,
+            "cardJobId": "00000000-0000-4000-8000-0000000000a1",
+            "routed": true,
+        },
+    });
+    let mut payload = json!({
+        "prompt_text": "Open example.test/forms/post and submit it.\n\nWhat this carries on: \"Then open https://example.test/forms/delete.\"",
+        "metadata": routed,
+        "conversation_history": [
+            { "role": "user", "content": "Pay on https://WWW.Shop.example/basket/?step=pay#now first." },
+            { "role": "assistant", "content": "Its form is at https://example.test/forms/send." },
+            {
+                "role": "assistant",
+                "lane": "browser",
+                "content": json!({ "url": "https://example.test/forms/save", "title": "Form", "facts": ["A form."] }).to_string(),
+            },
+            { "role": "user", "lane": "browser", "content": "Open https://example.test/forms/publish." },
+        ],
+    });
+    assert_eq!(
+        crate::jobs::persons_typed_addresses(&payload),
+        vec![
+            key("shop.example/basket?step=pay#now"),
+            key("example.test/forms/post"),
+        ]
+    );
+    // A card a turn wrote is no message of the person's.
+    payload["metadata"] = json!({ "browserTransport": "shared" });
+    assert_eq!(
+        crate::jobs::persons_typed_addresses(&payload),
+        vec![key("shop.example/basket?step=pay#now")]
+    );
 }
 
 /// A chat's history gives the addresses the person named in it, those its
@@ -4106,9 +4335,10 @@ fn a_tasks_addresses_are_kept_by_their_site_and_path() {
         )
         .is_empty()
     );
+    // With the address, the run is given its site (a fingerprint of the site alone).
     assert_eq!(
         given_addresses_from_payload(&json!({ "prompt_text": "Open https://example.test/a b" })),
-        vec![key("example.test/a")]
+        vec![key("example.test/a"), key("example.test")]
     );
     // A parenthesis is part of an address only when the address opens it.
     assert_eq!(
@@ -10259,7 +10489,7 @@ async fn a_page_opened_late_is_refused_only_in_the_run_that_carries_on_its_reque
             Duration::from_secs(60),
         )
         .expect("acquire run");
-        guard.start_chat_records(Some(chat), unix_time_millis(), &[], same_request);
+        guard.start_chat_records(Some(chat), unix_time_millis(), &[], &[], same_request);
         (guard, cancel_signal)
     };
     let end = |(guard, cancel_signal): (SharedBrowserAgentControlGuard, JobCancelSignal)| {
@@ -13766,9 +13996,16 @@ async fn mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result()
             "The person has not answered the browser's approval prompt yet, so the step was not performed. End this turn now: do not retry or call another browser tool. Say in one short sentence what you were waiting for their OK on. They will continue in a new message when they are ready.",
             false,
         ),
+        // The person said no: what a turn repeats in its note says so, and that it tries
+        // nothing else, never that the run's consent is blocked or to start a fresh run.
         (
             "approval_denied",
-            "Shared Browser consent is blocked for this run (approval_denied). Start a fresh browser run before requesting another browser action.",
+            "The person said no, so this step didn't happen. Don't try it another way.",
+            true,
+        ),
+        (
+            "approval_stale_or_replayed",
+            "Shared Browser consent is blocked for this run (approval_stale_or_replayed). Start a fresh browser run before requesting another browser action.",
             true,
         ),
     ] {
@@ -13813,7 +14050,7 @@ async fn mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result()
     *latch.terminal_consent_failure.lock().await = Some("approval_denied");
     *latch.terminal_step.lock().await = Some("search");
     let blocked = wire.call("snapshot", json!({})).await;
-    let text = "Shared Browser consent is blocked for this run (approval_denied). Start a fresh browser run before requesting another browser action.";
+    let text = "The person said no, so this step didn't happen. Don't try it another way.";
     assert_eq!(
         blocked["result"],
         json!({

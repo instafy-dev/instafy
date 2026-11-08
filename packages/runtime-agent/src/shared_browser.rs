@@ -115,10 +115,12 @@ const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 // and keeps what the run adds when the run ends (`UNANSWERED_ADDRESSES_FILE`).
 //
 // `given.json` names the addresses a message or a page gave the chat's browser
-// turns, the only paths past a site's root navigate and open_tab open. It is
-// run-scoped too: the guard starts it with the addresses the run's own task
-// names and those the chat's earlier runs were given, and keeps what the run
-// adds when the run ends (`GIVEN_ADDRESSES_FILE`).
+// turns, the only paths past a site's root navigate and open_tab open, and the
+// sites they were on, and, apart, the addresses the person's own messages gave,
+// which open without the word check. It is run-scoped too: the guard starts it
+// with the addresses the run's own task names and those the chat's earlier
+// runs were given, and keeps what the run adds when the run ends
+// (`GIVEN_ADDRESSES_FILE`).
 //
 // `chat-tab-used.json` says that a step of the run acted in the chat's own
 // tab: until one has, open_tab opens its page there, as the turn's first page,
@@ -1102,11 +1104,17 @@ fn write_unanswered_addresses(
 /// ([`given_addresses_from_payload`]) and those the chat's earlier runs on this
 /// browser were given; the controller script adds each page the run reads, its
 /// own address, its links and the addresses its text spells out. Kept as fingerprints
-/// ([`given_address_key`]), newest last. `assets/shared-browser-approval.js`
-/// holds the same bounds and key.
+/// ([`given_address_key`]), newest last, with those of the sites the task, the messages and
+/// the pages read name ([`given_site_key`]): a refused address's way on is its site's root only
+/// on a site the chat was given. Beside them, `typed` holds the addresses the person's own
+/// messages gave ([`typed_addresses_in`]), which open without the word check; the controller
+/// script never adds one. `assets/shared-browser-approval.js` holds the same bounds and keys.
 const GIVEN_ADDRESSES_FILE: &str = "given.json";
 const GIVEN_ADDRESSES_MAX_BYTES: u64 = 192 * 1024;
 const MAX_GIVEN_ADDRESSES: usize = 4_000;
+/// The most addresses the person's own messages give a run (`MAX_TYPED_ADDRESSES` in the
+/// approval script), newest last.
+const MAX_TYPED_ADDRESSES: usize = 256;
 /// Chats whose given addresses this process keeps; the one that ran last is
 /// kept longest.
 const MAX_GIVEN_CHATS: usize = 32;
@@ -1127,7 +1135,40 @@ static GIVEN_ADDRESSES: Mutex<Vec<((PathBuf, Uuid), Vec<String>)>> = Mutex::new(
 /// so neither counts. The approval script keys the addresses a page gives the
 /// same way (`givenAddressKey`).
 fn given_address_key(url: &reqwest::Url) -> Option<String> {
-    use sha2::Digest;
+    let (site, path) = given_site_and_path(url)?;
+    Some(given_fingerprint(&format!("{site}{path}")))
+}
+
+/// The fingerprint a site is kept by among the given addresses: the first 32 hex digits of the
+/// SHA-256 of the site alone, as [`given_address_key`] has it, which no address's equals, since
+/// an address's always ends in its path. The approval script keys the site of a page it reads
+/// the same way (`givenSiteKey`).
+fn given_site_key(url: &reqwest::Url) -> Option<String> {
+    given_site_and_path(url).map(|(site, _)| given_fingerprint(&site))
+}
+
+/// The fingerprint an address the person typed is kept by: its site and path as
+/// [`given_address_key`] has them, then its query and fragment as written, so another query or
+/// fragment on the same path is another address. The approval script keys the address a step
+/// opens the same way (`typedAddressKey`).
+fn typed_address_key(url: &reqwest::Url) -> Option<String> {
+    let (site, path) = given_site_and_path(url)?;
+    let query = url
+        .query()
+        .filter(|query| !query.is_empty())
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
+    let fragment = url
+        .fragment()
+        .filter(|fragment| !fragment.is_empty())
+        .map(|fragment| format!("#{fragment}"))
+        .unwrap_or_default();
+    Some(given_fingerprint(&format!("{site}{path}{query}{fragment}")))
+}
+
+/// An http(s) address's site (the host in lower case without `www.`, and a port other than the
+/// scheme's own) and path (without a trailing slash, `/` for the site's root).
+fn given_site_and_path(url: &reqwest::Url) -> Option<(String, String)> {
     if !matches!(url.scheme(), "http" | "https") {
         return None;
     }
@@ -1139,14 +1180,17 @@ fn given_address_key(url: &reqwest::Url) -> Option<String> {
         .port()
         .map(|port| format!(":{port}"))
         .unwrap_or_default();
-    let digest = sha2::Sha256::digest(format!("{host}{port}{path}").as_bytes());
-    Some(
-        digest
-            .iter()
-            .take(16)
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
-    )
+    Some((format!("{host}{port}"), path.to_string()))
+}
+
+/// The first 32 hex digits of the SHA-256 of `text`.
+fn given_fingerprint(text: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(text.as_bytes())
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// The fingerprints of the addresses a browser turn was given before it
@@ -1158,11 +1202,17 @@ fn given_address_key(url: &reqwest::Url) -> Option<String> {
 /// which a runtime that started again no longer holds. No reply gives one by
 /// its words: a turn's reply can name an address it made up, and one that
 /// stopped it (a finding with `stopped`) was not read. A site's root needs
-/// none: it always opens.
+/// none: it always opens. With them, the sites those texts name, a site's name
+/// alone included ([`given_sites_in_text`]), and those of the pages read.
 pub fn given_addresses_from_payload(payload: &JsonValue) -> Vec<String> {
     fn text<'a>(entry: &'a JsonValue, key: &str) -> Option<&'a str> {
         entry.get(key).and_then(JsonValue::as_str)
     }
+    let named = |content: &str| {
+        let mut named = given_addresses_in_text(content);
+        named.extend(given_sites_in_text(content));
+        named
+    };
     let mut addresses = Vec::new();
     for entry in payload
         .get("conversation_history")
@@ -1174,20 +1224,38 @@ pub fn given_addresses_from_payload(payload: &JsonValue) -> Vec<String> {
             continue;
         };
         if text(entry, "role") == Some("user") {
-            addresses.extend(given_addresses_in_text(content));
+            addresses.extend(named(content));
         } else if text(entry, "lane") == Some("browser") {
             addresses.extend(pages_read_in(content));
         }
     }
-    addresses.extend(given_addresses_in_text(
-        text(payload, "prompt_text").unwrap_or_default(),
-    ));
+    addresses.extend(named(text(payload, "prompt_text").unwrap_or_default()));
     newest_given_addresses(addresses)
+}
+
+/// The fingerprints of the addresses the person's own words (`words`: each message of theirs,
+/// as the chat's history holds it) name, as typed: each `http(s)://` address, each site name
+/// with a path written without one, and each site's name alone, read as its root, by
+/// [`typed_address_key`]. The controller script opens one of them without the word check
+/// (`typedByThePerson`): the person's message named httpbin.org/forms/post, and "post" in it
+/// asked before anything else (a local test, Nov 8). Only the person's words give one: never a
+/// task a turn or the routing step wrote, a page or a tool's output.
+pub fn typed_addresses_in(words: &[&str]) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for url in words.iter().flat_map(|text| urls_named_in(text, true)) {
+        if let Some(key) = typed_address_key(&url)
+            && !keys.contains(&key)
+        {
+            keys.push(key);
+        }
+    }
+    let excess = keys.len().saturating_sub(MAX_TYPED_ADDRESSES);
+    keys.split_off(excess)
 }
 
 /// The fingerprints of the pages a browser turn's finding lines say it read
 /// (`{"url": …, "title": …, "facts": […]}`, one JSON object a line), never one
-/// that stopped it.
+/// that stopped it, and of their sites.
 fn pages_read_in(text: &str) -> Vec<String> {
     let mut end = text.len().min(MAX_TASK_TEXT_BYTES);
     while !text.is_char_boundary(end) {
@@ -1203,7 +1271,8 @@ fn pages_read_in(text: &str) -> Vec<String> {
                 .and_then(JsonValue::as_str)
                 .and_then(|url| reqwest::Url::parse(url).ok())
         })
-        .filter_map(|url| given_address_key(&url))
+        .flat_map(|url| [given_address_key(&url), given_site_key(&url)])
+        .flatten()
         .collect()
 }
 
@@ -1212,6 +1281,37 @@ fn pages_read_in(text: &str) -> Vec<String> {
 /// ("visitporto.travel/en/lello"), read as `https`. The controller script reads
 /// the addresses a page's text spells out the same way (`addressesInText`).
 fn given_addresses_in_text(text: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    for url in urls_named_in(text, false) {
+        if let Some(key) = given_address_key(&url)
+            && !keys.contains(&key)
+        {
+            keys.push(key);
+        }
+    }
+    newest_given_addresses(keys)
+}
+
+/// The fingerprints of the sites `text` names ([`given_site_key`]): those of its addresses, and
+/// each site's name written alone ("www.visitporto.travel"), which names no address to open but
+/// does name the site: a refused address there goes back to the site's own root, links and
+/// search.
+fn given_sites_in_text(text: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    for url in urls_named_in(text, true) {
+        if let Some(key) = given_site_key(&url)
+            && !keys.contains(&key)
+        {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+/// The addresses `text` names, in the first [`MAX_TASK_TEXT_BYTES`] of it: each `http(s)://`
+/// address, each site name with a path written without one, read as `https`, and, with
+/// `bare_sites`, each site's name written alone, read as its root.
+fn urls_named_in(text: &str, bare_sites: bool) -> Vec<reqwest::Url> {
     let mut end = text.len().min(MAX_TASK_TEXT_BYTES);
     while !text.is_char_boundary(end) {
         end -= 1;
@@ -1236,7 +1336,7 @@ fn given_addresses_in_text(text: &str) -> Vec<String> {
                     | '»'
             )
     };
-    let mut keys = Vec::new();
+    let mut urls = Vec::new();
     for word in text[..end].split(delimiter) {
         let lower = word.to_ascii_lowercase();
         let scheme_at = ["http://", "https://"]
@@ -1249,7 +1349,7 @@ fn given_addresses_in_text(text: &str) -> Vec<String> {
                 let word = address_end(word.trim_start_matches('('));
                 let host = word.split('/').next().unwrap_or_default();
                 let labels: Vec<&str> = host.split('.').collect();
-                let site_name = word.contains('/')
+                let site_name = (bare_sites || word.contains('/'))
                     && labels.len() >= 2
                     && labels.iter().all(|label| {
                         !label.is_empty()
@@ -1266,13 +1366,9 @@ fn given_addresses_in_text(text: &str) -> Vec<String> {
             }
             None => None,
         };
-        if let Some(key) = address.as_ref().and_then(given_address_key)
-            && !keys.contains(&key)
-        {
-            keys.push(key);
-        }
+        urls.extend(address);
     }
-    newest_given_addresses(keys)
+    urls
 }
 
 /// An address as a sentence holds it, less the sentence's own marks after it
@@ -1366,12 +1462,13 @@ fn read_given_addresses(approval_dir: &Path, binding: &RunBinding) -> Vec<String
     )
 }
 
-/// Starts the run's record of the addresses it was given, bound to the exact
-/// authority the marker carries.
+/// Starts the run's record of the addresses it was given, and of those the person's own messages
+/// gave (`typed`), bound to the exact authority the marker carries.
 fn write_given_addresses(
     approval_dir: &Path,
     binding: &RunBinding,
     addresses: &[String],
+    typed: &[String],
 ) -> Result<()> {
     let payload = serde_json::to_vec(&json!({
         "version": 1,
@@ -1380,6 +1477,7 @@ fn write_given_addresses(
         "initiatorUserId": binding.initiator_user_id,
         "browserPageId": binding.browser_page_id,
         "addresses": addresses,
+        "typed": typed,
     }))?;
     publish_private_file(
         &approval_dir.join(format!(".instafy-approval-given-{}", Uuid::new_v4())),
@@ -1713,7 +1811,8 @@ impl SharedBrowserAgentControlGuard {
     /// `chat` is the job's conversation, whose addresses that did not answer
     /// the run starts with, and whose given addresses it starts with beside
     /// `given`, those its own task and its chat's history name
-    /// ([`given_addresses_from_payload`]).
+    /// ([`given_addresses_from_payload`]), with `typed`, those the person's own
+    /// messages name ([`typed_addresses_in`]).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn acquire(
         run_id: Uuid,
@@ -1726,6 +1825,7 @@ impl SharedBrowserAgentControlGuard {
         cancel_signal: JobCancelSignal,
         chat: Option<Uuid>,
         given: &[String],
+        typed: &[String],
     ) -> Result<Self> {
         let mut guard = Self::acquire_at(
             agent_control_file_path(),
@@ -1739,7 +1839,7 @@ impl SharedBrowserAgentControlGuard {
             cancel_signal,
         )?;
         guard.start_window_watch();
-        guard.start_chat_records(chat, unix_time_millis(), given, same_request);
+        guard.start_chat_records(chat, unix_time_millis(), given, typed, same_request);
         Ok(guard)
     }
 
@@ -1755,28 +1855,33 @@ impl SharedBrowserAgentControlGuard {
         chat: Option<Uuid>,
         now_ms: u64,
         given: &[String],
+        typed: &[String],
         same_request: bool,
     ) {
         if !same_request {
             self.continued_opened_late.clear();
         }
         self.carry_unanswered_addresses(chat, now_ms);
-        self.start_given_addresses(given);
+        self.start_given_addresses(given, typed);
     }
 
     /// Starts the run's record of the addresses it was given: `given` (those
     /// its task and its chat's history name, [`given_addresses_from_payload`])
-    /// and those its chat's earlier runs on this browser were given. Every run
-    /// has one, empty or not: the controller script refuses a made-up address
-    /// only in a run that has it, so one that cannot be written leaves the run
-    /// without that check.
-    fn start_given_addresses(&self, task: &[String]) {
+    /// and those its chat's earlier runs on this browser were given, with
+    /// `typed`, those the person's own messages name ([`typed_addresses_in`]).
+    /// Every run has one, empty or not: the controller script refuses a
+    /// made-up address only in a run that has it, so one that cannot be written
+    /// leaves the run without that check, and asks for every address the word
+    /// check finds.
+    fn start_given_addresses(&self, task: &[String], typed: &[String]) {
         let earlier = self
             .chat
             .map(|chat| given_addresses_of(&self.approval_dir, chat))
             .unwrap_or_default();
         let addresses = newest_given_addresses(earlier.into_iter().chain(task.iter().cloned()));
-        if let Err(error) = write_given_addresses(&self.approval_dir, &self.binding(), &addresses) {
+        if let Err(error) =
+            write_given_addresses(&self.approval_dir, &self.binding(), &addresses, typed)
+        {
             tracing::warn!(
                 ?error,
                 "Shared Browser could not start the record of the addresses this run was given"
@@ -3272,6 +3377,13 @@ fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
         "approval_timeout" => (
             "The person has not answered the browser's approval prompt yet, so the step was not performed. End this turn now: do not retry or call another browser tool. Say in one short sentence what you were waiting for their OK on. They will continue in a new message when they are ready.".to_string(),
             false,
+        ),
+        // The person said no: the words a turn repeats in its note, and why it tries nothing
+        // else. Told the run's consent was blocked and to start a fresh run, a browser part
+        // repeated those words in its Details note (a local test, Nov 8).
+        "approval_denied" => (
+            "The person said no, so this step didn't happen. Don't try it another way.".to_string(),
+            true,
         ),
         _ => (
             format!(

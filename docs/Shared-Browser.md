@@ -1622,8 +1622,17 @@ a `url` and no `stopped`), so a runtime that started again still opens them. No
 reply gives an address by its words: a turn's findings listed an article
 address it made up as stopped. Any other is refused at once, before any prompt
 or load, with "No message and no page Octo read gave this address, so it was
-not opened: Octo opens only addresses it was given. Open <the site> and follow
-its links to the page, or use the site's own search." runtime-agent reads the
+not opened and gets no finding line: Octo opens only addresses it was given."
+and where to go instead: "Open <the site> and follow its links to the page, or
+use the site's own search." only on a site the chat was given (the person's
+messages or the task named an address on it, or the site's name alone, or the
+chat's browser turns read a page on it; a page's link or text gives its
+address, never its site), and otherwise "Open the official site of what the
+task names (the venue's, operator's, shop's or reviewer's; for a route, the
+operator's journey planner), and follow its links or use its own search."
+Sent to the root of whatever site it refused, a route question opened a search
+engine nobody named and asked the person to let it send a search, which they
+refused. runtime-agent reads the
 refusal by those words, the only thing its result says: the browser never
 opened such an address, so it leaves out a finding line, of any pass of the
 turn, that gives it as a page that stopped the turn, unless a step opened it.
@@ -1639,12 +1648,12 @@ address counts by its site and path: the host in lower case without `www.`, a
 port other than the scheme's own, and the path without a trailing slash,
 whatever its query or fragment. The run's approval directory keeps them as
 fingerprints (`given.json`, the first 32 hex digits of the SHA-256 of each
-site and path, at most 4,000, newest last): runtime-agent starts it with the
-addresses the task and the history name and those the chat's earlier runs on
-this browser were given, the controller script adds each page the run reads,
-and runtime-agent carries them, in memory, into the chat's next runs and into
-no other chat's. A run without the record (one runtime-agent did not start)
-refuses nothing.
+site and path, and of each site given alone, at most 4,000, newest last):
+runtime-agent starts it with the addresses and sites the task and the history
+name and those the chat's earlier runs on this browser were given, the
+controller script adds each page the run reads and its site, and runtime-agent
+carries them, in memory, into the chat's next runs and into no other chat's. A
+run without the record (one runtime-agent did not start) refuses nothing.
 
 Whether the site answered is judged by the load's own request,
 never by the tab's address, which a page's script may change while the load
@@ -1674,6 +1683,20 @@ asking the site again, while the target of a redirect the site sent late in
 the step still opens. A navigation the site
 answers 404 or 410 for fails within a second or two, even when the rest of its
 not-found page would come later than a step's time (see below).
+
+**An address the person typed opens without the word check.** `navigate` asks
+for an address with an action word in it ("post", "delete", "send", …), and
+`open_tab` refuses one, even under routine browsing, unless the person's own
+messages gave that exact address (its query and fragment included): their
+messages in the chat's history that still stand, and a routed card's request,
+whose words are theirs, never Octo's replies, a card a turn wrote, the routing
+step's summary, a page or a tool's output. runtime-agent writes those
+addresses into the same record, apart (`typed`, the first 32 hex digits of the
+SHA-256 of each address's site, path, query and fragment, at most 256), and
+the controller script never adds one. The address check of risky addresses
+(files, sign-out, exports, one-time links, action addresses) still judges every
+address, and a form's submit still asks. The address the person typed,
+`httpbin.org/forms/post`, asked before anything else for its "post".
 
 Each read of a page finds its controls with one query and describes them all in
 one call to the page, so the describer's source (over 50 KB with the rules it
@@ -1742,7 +1765,9 @@ while the person is away. What the person reads tells the two apart, with no cod
 prompt, gone by then, reads "Your OK didn't come in time, so I didn't do that
 step. Send a message when you're ready and I'll ask again.", never that Octo is
 still waiting, a denial reads "You said no, so that step didn't
-happen, and nothing from it was sent.", `approval_stale` (the page changed
+happen, and nothing from it was sent. Tell Octo what to try instead.", and the
+step tells the turn "The person said no, so this step didn't happen. Don't try
+it another way.", `approval_stale` (the page changed
 after the yes) reads "The page changed after you said yes, so I didn't do that
 step. Send a message and I'll ask again.", and every other terminal code reads one plain
 message. Each speaks
