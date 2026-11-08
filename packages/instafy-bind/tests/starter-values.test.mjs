@@ -438,18 +438,24 @@ test("compare: the page names what is missing under the headline on every screen
     title: "Three laptops compared",
     lede: "The Laptop 12 starts lowest and is lightest; the 16 has the largest battery.",
     sort: [],
-    columns: [{ key: "cpu", label: "CPU", type: "text" }, { key: "battery", label: "Battery", type: "text" }, { key: "reviews", label: "Independent reviews", type: "text" }],
+    columns: [{ key: "cpu", label: "CPU", type: "text" }, { key: "battery", label: "Battery", type: "text" }, { key: "reviews", label: "Independent reviews", type: "text" },
+      { key: "price", label: "List price", type: "price" }],
     items: [
+      // a review's list price and an estimate name their pages by their sites too
       item("12", "Maker Laptop 12", { cpu: at("Chip 3", "Maker Laptop 12 specs", "https://maker.example/laptop12?tab=specs"),
-        battery: at("50 Wh", "Maker Laptop 12 specs and overview", "https://maker.example/laptop12?tab=overview"), reviews: { note: "no independent review read" } },
+        battery: at("50 Wh", "Maker Laptop 12 specs and overview", "https://maker.example/laptop12?tab=overview"), reviews: { note: "no independent review read" },
+        price: { ...at("$999", "Review One / Maker", "https://review-one.example/12"), list: true } },
       { sources: [{ url: "https://maker.example/laptop12?tab=specs" }, { name: "Maker Laptop 12 overview", url: "https://maker.example/laptop12?tab=overview" }] }),
       item("13-pro", "Maker Laptop 13 Pro", { cpu: at("Chip 5", "Maker", "https://maker.example/laptop13pro"),
-        battery: at("74 Wh", "Review One / Maker", "https://review-one.example/13-pro"), reviews: at("Review One · Review Two", "Review One / Review Two reviews", "https://review-one.example/13-pro") },
+        battery: at("74 Wh", "Review One / Maker", "https://review-one.example/13-pro"), reviews: at("Review One · Review Two", "Review One / Review Two reviews", "https://review-one.example/13-pro"),
+        price: { ...at("$1,299", "Review Two / Maker", "https://www.review-two.example/13-pro/price"), list: true } },
       { sources: [{ name: "Review One review", url: "https://review-one.example/13-pro" }, { name: "Review Two review", url: "https://www.review-two.example/13-pro" }, { url: "https://review-two.example/13-pro/page-2" }] }),
       item("16", "Maker Laptop 16", { cpu: at("Chip 7", "Maker Laptop 16 specs", "https://maker.example/laptop16?tab=specs"),
-        battery: at("85 Wh", "Maker Laptop 16 specs", "https://maker.example/laptop16"), reviews: { note: "no independent review read" } }),
+        battery: { ...at("about 85 Wh", "Review Two / Maker", "https://review-two.example/16"), est: true }, reviews: { note: "no independent review read" },
+        price: { ...at("$1,499", "Review One / Maker", "https://review-one.example/16"), list: true } }),
     ],
-    unchecked: ["Independent reviews of the Laptop 12 and the Laptop 16"],
+    // only what no cell says: the line under the headline names each row's missing values
+    unchecked: ["Prices of configurations other than the base model"],
   };
   for (const width of [1280, 375]) {
     const { document } = await draw("compare", data, { width, search: "?open=13-pro" });
@@ -459,6 +465,9 @@ test("compare: the page names what is missing under the headline on every screen
     assert.equal(box.hidden, false, `${width}px`);
     assert.equal(box.previousElementSibling, document.getElementById("lede"), `${width}px: right under the lede`);
     assert.equal((document.body.textContent.match(/Still missing/g) || []).length, 1, `${width}px: said once, in that line`);
+    // the gap itself is named there and in its cells, nowhere else: not by the title, the lede, the footer or a row
+    for (const id of ["title", "lede", "notes"]) assert.doesNotMatch(document.getElementById(id).textContent, /independent review/i, `${width}px: #${id}`);
+    assert.equal(document.getElementById("list").querySelectorAll(".not-found").length, 0, `${width}px: no row names it again`);
     // every link names its page's site; none keeps a name of its own
     const links = document.querySelectorAll("a").map((a) => [a.textContent.replace(/ ↗$/, ""), new URL(a.getAttribute("href")).hostname.replace(/^www\./, "")]);
     assert.ok(links.length >= 6, JSON.stringify(links));

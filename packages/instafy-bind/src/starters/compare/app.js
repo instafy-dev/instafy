@@ -28,7 +28,8 @@
  *                          checked". `instafy bind check` fails a row with neither: a guess or a placeholder. Each
  *                          source is named by its page's site ("Sources: maker.com ↗"), so a name never says
  *                          something its link doesn't.
- *   unchecked: ["what was not checked", …]     listed once in the footer, on an empty page too
+ *   unchecked: ["what was not checked", …]     listed once in the footer, on an empty page too: only what no cell
+ *                          says, since the line under the headline names each row's missing values from its cells
  *   from: "memory"         only when the person asked for the page from what Octo knows, with nothing looked up: each
  *                          fact is just {"v"} (or a {"note"}), with no "src", "url" or "date", and no store or filter
  *                          (`instafy bind check` fails them), and reads "<value>, not checked", as a ranked row's value

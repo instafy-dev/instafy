@@ -877,21 +877,27 @@ try {
     const fact = (v, src, url) => ({ v, src, url, date: day });
     const laptops = (d) => ({
       ...d, title: "Three laptops compared", lede: "The Laptop 12 starts lowest and is lightest; the 16 has the largest battery.", sort: [], filter: undefined,
-      columns: [{ key: "cpu", label: "CPU", type: "text" }, { key: "battery", label: "Battery", type: "text" }, { key: "reviews", label: "Independent reviews", type: "text" }],
+      columns: [{ key: "cpu", label: "CPU", type: "text" }, { key: "battery", label: "Battery", type: "text" }, { key: "reviews", label: "Independent reviews", type: "text" },
+        { key: "price", label: "List price", type: "price" }],
       items: [
+        // a review's list price and an estimate name their pages by their sites too
         { ref: "laptop:12", name: "Maker Laptop 12", why: "Lowest starting price",
           sources: [{ url: "https://maker.example/laptop12?tab=specs" }, { name: "Maker Laptop 12 overview", url: "https://maker.example/laptop12?tab=overview" }],
           facts: { cpu: fact("Chip 3", "Maker Laptop 12 specs", "https://maker.example/laptop12?tab=specs"),
-            battery: fact("50 Wh", "Maker Laptop 12 specs", "https://maker.example/laptop12?tab=specs"), reviews: { note: "no independent review read" } } },
+            battery: fact("50 Wh", "Maker Laptop 12 specs", "https://maker.example/laptop12?tab=specs"), reviews: { note: "no independent review read" },
+            price: { ...fact("$999", "Review One / Maker", "https://review-one.example/12"), list: true } } },
         { ref: "laptop:13-pro", name: "Maker Laptop 13 Pro", why: "The lightest 13-inch",
           sources: [{ name: "Review One review", url: "https://review-one.example/13-pro" }, { name: "Review Two review", url: "https://www.review-two.example/13-pro" }],
           facts: { cpu: fact("Chip 5", "Maker", "https://maker.example/laptop13pro?tab=specs"), battery: fact("74 Wh", "Review One / Maker", "https://review-one.example/13-pro"),
-            reviews: fact("Review One · Review Two", "Review One / Review Two reviews", "https://review-one.example/13-pro") } },
+            reviews: fact("Review One · Review Two", "Review One / Review Two reviews", "https://review-one.example/13-pro"),
+            price: { ...fact("$1,299", "Review Two / Maker", "https://www.review-two.example/13-pro/price"), list: true } } },
         { ref: "laptop:16", name: "Maker Laptop 16", why: "The largest battery", sources: [{ url: "https://maker.example/laptop16?tab=specs" }],
           facts: { cpu: fact("Chip 7", "Maker Laptop 16 specs", "https://maker.example/laptop16?tab=specs"),
-            battery: fact("85 Wh", "Maker Laptop 16 specs", "https://maker.example/laptop16?tab=specs"), reviews: { note: "no independent review read" } } },
+            battery: { ...fact("about 85 Wh", "Review Two / Maker", "https://review-two.example/16"), est: true }, reviews: { note: "no independent review read" },
+            price: { ...fact("$1,499", "Review One / Maker", "https://review-one.example/16"), list: true } } },
       ],
-      unchecked: ["Independent reviews of the Laptop 12 and the Laptop 16"],
+      // only what no cell says: the line under the headline names each row's missing values
+      unchecked: ["Prices of configurations other than the base model"],
     });
     const site = await staticServer(makeSite("compare-says-missing", "compare", laptops));
     for (const [width, height] of [[390, 844], [1280, 800]]) {
@@ -909,6 +915,10 @@ try {
               lines: shown ? [...box.querySelectorAll(".not-found")].map((p) => p.innerText) : [],
               underLede: !!box && box.previousElementSibling === lede,
               saidMissing: (document.body.innerText.match(/Still missing/g) || []).length,
+              // the gap itself, outside that line and the cells: the title, the lede, the footer and any row's own line
+              gapElsewhere: ["title", "lede", "notes"].map((id) => document.getElementById(id).innerText)
+                .concat([...document.querySelectorAll("#list .not-found")].map((p) => p.innerText))
+                .filter((text) => /independent review/i.test(text)),
               links: [...document.querySelectorAll("a[href]")].map((a) => ({ text: a.innerText.replace(/\s*↗\s*$/, "").trim(), site: new URL(a.href).hostname.replace(/^www\./, "") })),
               details: [...document.querySelectorAll(".more .cap")].map((p) => p.innerText).filter((t) => /^Sources:/.test(t)),
               overflow: document.documentElement.scrollWidth - innerWidth,
@@ -918,6 +928,7 @@ try {
           eq(seen.lines, ["Still missing for Maker Laptop 12 and Maker Laptop 16: Independent reviews (no independent review read)"], `${where}: the page names the missing reviews itself`);
           ok(seen.underLede, `${where}: right under the lede`);
           eq(seen.saidMissing, 1, `${where}: said in that one line, by no row and in no other line`);
+          eq(seen.gapElsewhere, [], `${where}: the missing reviews are named in that line and their cells only`);
           eq(seen.lede, "The Laptop 12 starts lowest and is lightest; the 16 has the largest battery.", `${where}: the lede is the verdict as written`);
           ok(seen.links.length >= 6, `${where}: the page links its sources (${seen.links.length})`);
           for (const link of seen.links) eq(link.text, link.site, `${where}: a source is named by its page's site`);
