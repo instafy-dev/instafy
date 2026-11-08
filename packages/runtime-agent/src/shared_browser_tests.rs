@@ -9,6 +9,9 @@ use super::*;
 use crate::mcp_test_wire::{McpWire, wire_result};
 
 const SNAPSHOT_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/// The run's record that a step acted in the chat's own tab (the approval script's
+/// `CHAT_TAB_USED_FILE`).
+const CHAT_TAB_USED_FIXTURE_FILE: &str = "chat-tab-used.json";
 
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_string()).collect()
@@ -1387,6 +1390,27 @@ impl EmbeddedControllerFixture {
             std::fs::Permissions::from_mode(0o600),
         )
         .expect("protect approval fixture state");
+        // These runs start as a turn that already acted in the chat's own tab, so open_tab opens a
+        // tab of Octo's own; a turn's first page is tested on its own
+        // (`a_turns_first_open_tab_opens_its_page_in_the_chats_own_tab`).
+        let used = json!({
+            "version": 1,
+            "ownerId": self.owner_id,
+            "runId": self.run_id,
+            "initiatorUserId": self.initiator_user_id,
+            "browserPageId": page_id,
+        });
+        std::fs::write(
+            self.approval_dir.join(CHAT_TAB_USED_FIXTURE_FILE),
+            serde_json::to_vec(&used).expect("chat tab record JSON"),
+        )
+        .expect("write approval fixture chat tab record");
+    }
+
+    /// Starts the prepared run as a turn that has not acted in the chat's own tab yet.
+    fn forget_chat_tab_use(&self) {
+        std::fs::remove_file(self.approval_dir.join(CHAT_TAB_USED_FIXTURE_FILE))
+            .expect("forget the chat tab record");
     }
 
     fn command_for(
@@ -9462,6 +9486,61 @@ fn failure_of(output: &Output) -> String {
 /// "Tried opening <site>", not done), and never as the browser going away.
 /// The tab open_tab opened for it closes again. Any other answer is the
 /// step's page.
+/// A turn opened a journey planner with `open_tab`, in a tab of its own, for the third time
+/// running: there neither a cookie notice's pause nor the planner's prompt can happen, though its
+/// run instructions say to work in the chat's own tab and open a tab of its own only to keep a
+/// second page open (a local test, Nov 7). A turn's first open_tab, before any step of it acted in
+/// the chat's own tab, opens its page there, as navigate does, and says so; reading the page first
+/// does not count. Once the turn has used that tab, open_tab opens a tab of Octo's own.
+#[test]
+fn a_turns_first_open_tab_opens_its_page_in_the_chats_own_tab() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    fixture.forget_chat_tab_use();
+    let tabs_before = fixture.browser_tabs();
+    payload_of(&fixture.call("safe", "GET", "/v1/snapshot", None));
+    let first = payload_of(&fixture.call(
+        "safe",
+        "POST",
+        "/v1/tabs/open",
+        Some(&json!({ "url": "https://example.test/planner" }).to_string()),
+    ));
+    assert!(first.get("openedTab").is_none(), "{first}");
+    assert!(first.get("tabId").is_none(), "{first}");
+    assert!(
+        first["message"].as_str().unwrap_or_default().contains(
+            "This turn's first page opened in the chat's own tab, not in a new one: open_tab opens a tab of Octo's own only to keep a second page open at the same time."
+        ),
+        "{first}"
+    );
+    assert_eq!(first["activity"]["step"], "navigate", "{first}");
+    assert_eq!(fixture.browser_tabs(), tabs_before, "a tab was opened");
+    assert!(
+        fixture.approval_dir.join(CHAT_TAB_USED_FIXTURE_FILE).exists(),
+        "the chat's tab was not marked used"
+    );
+
+    let second = fixture.open_tab("https://example.test/hours");
+    assert_eq!(second["openedTab"], true, "{second}");
+    let tab_id = second["tabId"].as_str().expect("Octo's own tab");
+    assert_eq!(
+        fixture.tab_record()["tabs"]
+            .as_array()
+            .expect("tabs")
+            .iter()
+            .map(|tab| tab["tabId"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec![tab_id]
+    );
+    assert!(
+        !second["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("first page"),
+        "{second}"
+    );
+}
+
 #[test]
 fn an_address_with_no_page_fails_its_navigate_and_open_tab() {
     const NO_PAGE: &str =

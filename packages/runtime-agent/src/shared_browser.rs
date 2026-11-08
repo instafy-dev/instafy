@@ -120,6 +120,10 @@ const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 // names and those the chat's earlier runs were given, and keeps what the run
 // adds when the run ends (`GIVEN_ADDRESSES_FILE`).
 //
+// `chat-tab-used.json` says that a step of the run acted in the chat's own
+// tab: until one has, open_tab opens its page there, as the turn's first page,
+// instead of in a tab of Octo's own. It is run-scoped too.
+//
 // `leftover-tabs.json` and `chat-tabs.json` are the files that outlive a run.
 // The leftover record names Octo's tabs from an earlier run that could not be
 // closed yet (that run ended without a confirmed shutdown, or the browser did
@@ -128,7 +132,7 @@ const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 // tab record names the tab each run left open as its chat's page (see
 // `tab_kept_for_the_chat`), so every viewer of the chat finds that page, after
 // a reload or on another device too. Neither grants anything.
-const APPROVAL_FIXED_FILES: [&str; 12] = [
+const APPROVAL_FIXED_FILES: [&str; 13] = [
     "request.json",
     "decision.json",
     "state.json",
@@ -141,6 +145,7 @@ const APPROVAL_FIXED_FILES: [&str; 12] = [
     CHAT_TABS_FILE,
     UNANSWERED_ADDRESSES_FILE,
     GIVEN_ADDRESSES_FILE,
+    "chat-tab-used.json",
 ];
 const AGENT_TABS_FILE: &str = "tabs.json";
 const KEPT_AGENT_TABS_FILE: &str = "kept-tabs.json";

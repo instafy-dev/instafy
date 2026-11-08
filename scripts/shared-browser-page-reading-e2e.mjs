@@ -56,8 +56,9 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    link, no reject) is the person's step, like a sign-in: a click under it
 //    and a press of its accept are refused in the same words, which say to
 //    pause on it, and the Personal Browser's policy gives them too. A pause
-//    on its buttons highlights them for the person, says it is a cookie
-//    notice, and hands over no page text; the browser presses none of them.
+//    on its buttons highlights all of them for the person, a pause on its
+//    accept alone too, and nothing outside it, says it is a cookie notice,
+//    and hands over no page text; the browser presses none of them.
 //    A button, field, sign-in or commit the page dresses up in a notice
 //    beside its accept, or one outside any notice, gets no pause; a notice
 //    that speaks only of privacy, and one whose accept allows ("Allow all"),
@@ -896,6 +897,45 @@ export async function runSharedBrowserPageReadingFixture() {
       "the notice's buttons are not highlighted",
     );
     assert.equal(await consentAnswer(), null, "the pause pressed the notice");
+    // b'. A pause on the notice's accept alone outlines every button of the
+    // notice, its settings beside its accept, and nothing outside it: a turn
+    // went for a notice's accept twice, and a pause on it alone would have
+    // shown the person the accept outlined by itself. A notice with an accept
+    // limited to the necessary cookies shows that one and its settings too;
+    // and a button a page dresses up beside its accept is never outlined.
+    for (const [address, named, outlined, notice] of [
+      ["/reading/cookie-notice", "Accept all cookies", ["solid", "solid"], "#consent-backdrop a, #consent-backdrop button"],
+      ["/reading/allow-notice", "Allow all", ["solid", "solid", "solid"], ".cookie-banner a, .cookie-banner button"],
+      ["/reading/dressed-notice", "Accept all cookies", ["", "solid"], ".cookie-bar button"],
+    ]) {
+      reading = await read(address);
+      const actionsBeforeAccept = fs.readFileSync(actionsPath, "utf8").length;
+      const acceptPause = await runTool("POST", "/v1/request-human-input", { indices: [control(reading, named).index], snapshotId: reading.snapshotId });
+      assert.equal(acceptPause.code, 1, acceptPause.stdout);
+      assert.match(acceptPause.stderr, /\[cookie_notice_required_non_retryable\]/u, `${address}: ${acceptPause.stderr}`);
+      assert.deepEqual(
+        await runPage.evaluate((selector) => Array.from(document.querySelectorAll(selector), (element) => element.style.outlineStyle), notice),
+        outlined,
+        `${address}: the notice's buttons outlined`,
+      );
+      assert.deepEqual(
+        await runPage.evaluate(() => Array.from(document.querySelectorAll("body > h1 ~ * a, body > p a"))
+          .filter((element) => !element.closest("[class*=cookie], #consent-backdrop"))
+          .map((element) => element.style.outlineStyle)
+          .filter(Boolean)),
+        [],
+        `${address}: something outside the notice is outlined`,
+      );
+      const acceptEvents = fs.readFileSync(actionsPath, "utf8").slice(actionsBeforeAccept).trim().split("\n")
+        .map((line) => JSON.parse(line)).filter((event) => event.type === "human_input");
+      assert.deepEqual(
+        acceptEvents[0].humanInputRequest.fields,
+        outlined.filter(Boolean).map((_, index) => ({ label: `Highlighted button ${index + 1}` })),
+        address,
+      );
+      assert.equal(await consentAnswer(), null, `${address}: the pause pressed the notice`);
+    }
+    reading = await read("/reading/cookie-notice");
     // c. A button outside any notice, and one a page dresses up beside a
     // notice's accept, get no pause.
     const outside = await runTool("POST", "/v1/request-human-input", { indices: [control(reading, "Plan a journey").index], snapshotId: reading.snapshotId });
@@ -949,7 +989,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "password, card and code fields in a frame or a shadow root carry no value into the reading, a frame's fields are never listed, a key in a shadow root's read-only field or in a control's name the list leaves out still makes a secret screen, and a code in boxes of its own is masked",
         "a section marked open is no control, and a click whose middle lands on a form's button or a frame inside the control is refused, sending and asking nothing",
         "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, and a cover that goes within a moment is waited for",
-        "a cookie notice the browser could not decline is the person's step: a click under it and a press of its accept are refused in the words the Personal Browser's policy gives too, a pause highlights its buttons as a cookie notice with no page text and presses none of them, a button outside a notice, or a button, field, sign-in or commit dressed up beside its accept, gets no pause, a notice that speaks only of privacy or whose accept allows takes it, and once the person answered it the next step works",
+        "a cookie notice the browser could not decline is the person's step: a click under it and a press of its accept are refused in the words the Personal Browser's policy gives too, a pause highlights its buttons as a cookie notice with no page text and presses none of them, a pause on its accept alone outlines every button of the notice and nothing outside it, never a button dressed up beside the accept, a button outside a notice, or a button, field, sign-in or commit dressed up beside its accept, gets no pause, a notice that speaks only of privacy or whose accept allows takes it, and once the person answered it the next step works",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",

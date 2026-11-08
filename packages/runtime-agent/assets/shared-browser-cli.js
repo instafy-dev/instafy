@@ -3166,7 +3166,12 @@ async function declineCookieBanner(page, interactive) {
 // browser takes by itself while it reads (its settings link, "Learn more").
 // So a page can't dress a field, a payment, a sign-in, a deletion or a
 // commit ("Book now") up as a notice's button to get a pause. A notice in a
-// frame is never listed, so never handed over.
+// frame is never listed, so never handed over. The pause outlines every such
+// button of the notice, the ones Octo named first, up to the pause's eight,
+// and nothing outside it (beside one Octo named, in one small part of the
+// page): Octo went for a notice's accept twice, and a pause on it alone would
+// have shown the person the accept outlined by itself. Null when the controls
+// Octo named are not a notice's buttons.
 async function cookieNoticeButtons(page, interactive, selected) {
   const pageUrl = page.url();
   const accepts = interactive
@@ -3176,25 +3181,43 @@ async function cookieNoticeButtons(page, interactive, selected) {
       return step.verdict === "refuse" && step.category === "consent";
     })
     .map(({ locator }) => locator);
-  if (!accepts.length) return false;
+  if (!accepts.length) return null;
+  const beside = async (entry, others) => (await entry.locator
+    .evaluate(cookieBannerInPage, { kind: "cookie-banner", others, anyConsent: true })
+    .catch(() => false)) === true;
+  const noticeButton = async (entry) => cookieNoticeAnswerOrLink(entry, pageUrl) && (await beside(entry, accepts));
   for (const entry of selected) {
-    if (!entry || EDITABLE_FIELD_TAGS.has(entry.description.tag) ||
-        entry.description.policy?.consentContext !== true || entry.description.disabled === true) return false;
-    const { description } = entry;
-    const inNotice = classifyStep("click", description, { pageUrl });
-    const alone = classifyStep("click", { ...description, policy: { ...description.policy, consentContext: false } }, { pageUrl });
-    const answer = (inNotice.verdict === "refuse" && inNotice.category === "consent") ||
-      inNotice.consentLimited === true || inNotice.consentRejection === true;
-    if (alone.verdict === "refuse") return false;
-    if (answer
-      ? alone.category !== "permission" && ROUTINE_CONFIRMED_CATEGORIES.has(alone.category)
-      : !routineCovers(alone, description) || isFormSubmissionControl(description)) return false;
-    const beside = await entry.locator
-      .evaluate(cookieBannerInPage, { kind: "cookie-banner", others: accepts, anyConsent: true })
-      .catch(() => false);
-    if (beside !== true) return false;
+    if (!(await noticeButton(entry))) return null;
   }
-  return true;
+  const named = selected.map(({ locator }) => locator);
+  const notice = [...selected];
+  for (const entry of interactive) {
+    if (notice.length >= MAX_HUMAN_INPUT_TARGETS) break;
+    if (!notice.includes(entry) && (await noticeButton(entry)) && (await beside(entry, named))) notice.push(entry);
+  }
+  return notice;
+}
+
+// The most controls one pause outlines.
+const MAX_HUMAN_INPUT_TARGETS = 8;
+
+// Whether a control may be one of a cookie notice's buttons in a pause, by
+// itself (cookieNoticeButtons says where it must sit): turned on, in a
+// consent banner as the describer found it, and the notice's own answer that
+// alone asks only as an accept or allow word does, or a step the browser takes
+// by itself while it reads.
+function cookieNoticeAnswerOrLink(entry, pageUrl) {
+  if (!entry || EDITABLE_FIELD_TAGS.has(entry.description.tag) ||
+      entry.description.policy?.consentContext !== true || entry.description.disabled === true) return false;
+  const { description } = entry;
+  const inNotice = classifyStep("click", description, { pageUrl });
+  const alone = classifyStep("click", { ...description, policy: { ...description.policy, consentContext: false } }, { pageUrl });
+  const answer = (inNotice.verdict === "refuse" && inNotice.category === "consent") ||
+    inNotice.consentLimited === true || inNotice.consentRejection === true;
+  if (alone.verdict === "refuse") return false;
+  return answer
+    ? alone.category === "permission" || !ROUTINE_CONFIRMED_CATEGORIES.has(alone.category)
+    : routineCovers(alone, description) && !isFormSubmissionControl(description);
 }
 
 // The model-facing view of the page: what a person can see of it. Text,
@@ -3497,6 +3520,13 @@ async function targetLocator(page, body) {
   };
 }
 
+// The control a step holds, as approvedTarget compares it after the prompt:
+// its page's address and the text around it now.
+async function askedNow(page, target) {
+  const place = await controlPlace(target.locator);
+  return { locator: target.locator, url: page.url(), around: place ? place.around : null };
+}
+
 // The latest reading recorded (recordObservedControls), when it is the step's
 // own snapshot, of this tab at this address; null otherwise.
 function recordedReading(page, body) {
@@ -3678,8 +3708,19 @@ async function clickLanding(target) {
 // a pinned bar), the click would go to that: the control is brought to the
 // middle of the view, past a pinned header, and a cover that is still there
 // after a short settle refuses the step at once, in words, where Playwright
-// would wait out its timeout.
+// would wait out its timeout. A click that asks the person is looked at before
+// they are asked (refuseUnlandableClick), so nobody is asked about a click that
+// cannot land, and again here, as the page may have changed while they
+// answered: a person waited 45 seconds to allow a search button a cookie
+// notice covered, which was then refused, and the turn's line still said they
+// allowed a click.
 async function clickControlItself(page, target) {
+  await refuseUnlandableClick(page, target);
+  await target.locator.click();
+}
+
+// Refuses a click that would not land on its control (clickControlItself).
+async function refuseUnlandableClick(page, target) {
   const landing = await settledLanding(page, target);
   if (landing.other) {
     throw new Error(
@@ -3687,7 +3728,6 @@ async function clickControlItself(page, target) {
     );
   }
   await refuseCovered(page, target, landing);
-  await target.locator.click();
 }
 
 // Where a click on the control lands, once it is in view and what covers it
@@ -3720,44 +3760,32 @@ async function refuseCovered(page, target, landing) {
   const control = quotedControlLabel(target.description);
   const cover = await coverWords(page, landing.cover);
   throw new Error(
-    (await coveredBefore(page, target, { mark: true }))
+    (await coveredBefore(page, target))
       ? `Something else on the page still covers ${control}${cover}, so nothing was clicked. Leave this step to the person and tell them what covers it.`
       : `Something else on the page covers ${control}${cover}, so nothing was clicked. Take a fresh snapshot and try once more.`,
   );
 }
 
-// A control a cover took once on its page is looked at again before anyone
-// is asked: one a cover still takes is left to the person at once, so the
-// person is never asked again for a click that cannot land.
-async function refuseStillCovered(page, target) {
-  if (!(await coveredBefore(page, target))) return;
-  const landing = await settledLanding(page, target);
-  if (!landing.other) await refuseCovered(page, target, landing);
-}
-
 // Runs inside the page. Whether a cover took the control on this page before,
-// marking it now with `request.mark`. The mark is the document's, like the
-// withheld mark (withholdDocumentInPage): the page cannot take it away, and a
-// new page loads without it. A document the page froze reads as marked.
+// marking it now. The mark is the document's, like the withheld mark
+// (withholdDocumentInPage): the page cannot take it away, and a new page loads
+// without it. A document the page froze reads as marked.
 function coveredBeforeInPage(request) {
   const key = Symbol.for(request.key);
   const before = Object.getOwnPropertyDescriptor(document, key) !== undefined || !Object.isExtensible(document);
-  if (!before && request.mark === true) Object.defineProperty(document, key, { value: true });
+  if (!before) Object.defineProperty(document, key, { value: true });
   return before;
 }
 
 const COVERED_CONTROL_KEY = "instafy.sharedBrowser.coveredControl";
-// A page that cannot be asked counts as marked once a cover took the control,
-// so its words end the tries, and as not marked before anyone is asked, so
-// the step goes on to its prompt as it would without the mark.
-async function coveredBefore(page, target, { mark = false } = {}) {
+// A page that cannot be asked counts as marked, so its words end the tries.
+async function coveredBefore(page, target) {
   const before = await page
     .evaluate(coveredBeforeInPage, {
       kind: "covered-mark",
       key: `${COVERED_CONTROL_KEY}.${targetFingerprint(target.description)}`,
-      mark,
     })
-    .catch(() => mark);
+    .catch(() => true);
   return before === true;
 }
 
@@ -4160,6 +4188,61 @@ async function freeSiteSearch(page, target, typed) {
 // the tab may post a form nowhere: a page script that turns the search into
 // a post is stopped before it leaves the browser.
 const FREE_SEARCH_POST_ORIGINS = Object.freeze([]);
+
+// Runs inside the page with the form submission rules joined in front
+// (SEARCH_FIELD_OF_BUTTON_IN_PAGE), so it must not use anything from this
+// file's scope. The field Enter in which sends exactly what a click on
+// `element` sends: the one text field of the form of the button the click
+// reaches, when Enter there clicks that very button (the form's default
+// button) and nothing blocks it. Null for any other control, and for a form
+// with no text field or more than one (a planner's start and end): its button
+// is no site search's own.
+function searchFieldOfButtonInPage(forms, element) {
+  const TEXT_TYPES = new Set(["text", "search", "email", "url", "tel", "password", "number"]);
+  try {
+    const button = forms.keyActivatedButton(element);
+    const form = button ? button.form : null;
+    if (!(form instanceof HTMLFormElement)) return null;
+    const controls = Array.from(Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, "elements").get.call(form));
+    const fields = controls.filter((control) =>
+      control instanceof HTMLInputElement && TEXT_TYPES.has(String(control.type).toLowerCase()));
+    if (fields.length !== 1) return null;
+    const implicit = forms.implicitSubmission(fields[0]);
+    return implicit && implicit.form === form && implicit.button === button && !implicit.blocked ? fields[0] : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+const SEARCH_FIELD_OF_BUTTON_IN_PAGE = new Function(
+  "...args",
+  `return (${searchFieldOfButtonInPage})((${formSubmission.formSubmissionRulesInPage})(), ...args);`,
+);
+
+// A click on the page's own search button, which goes without a prompt when
+// Enter in its search field would (freeSiteSearch, the same test on the same
+// field): the button is the one Enter there clicks, so the click sends what
+// Enter sends. A turn kept the person waiting to allow a click on a site's
+// search button, where Enter in its field would have asked nothing. A
+// planner's button, whose form has two fields or none, still asks. The field
+// is described as a reading describes it, and kept nowhere.
+async function freeSiteSearchButton(page, target) {
+  if (target.description.policy?.formSubmission !== "button" || !approvalProtocol.routineBrowsingAllowed()) {
+    return false;
+  }
+  const handle = await (async () => target.locator.evaluateHandle(SEARCH_FIELD_OF_BUTTON_IN_PAGE))().catch(() => null);
+  const field = typeof handle?.asElement === "function" ? handle.asElement() : null;
+  if (!field) {
+    await (async () => handle?.dispose())().catch(() => {});
+    return false;
+  }
+  try {
+    const description = await describeElement(field, target.description.index, null);
+    return description !== null && (await freeSiteSearch(page, { description, locator: field }, null));
+  } finally {
+    await field.dispose().catch(() => {});
+  }
+}
 
 // A list the page draws as a select: the control `choose` sets. A list a page
 // builds from other elements is clicked and typed into instead.
@@ -4991,6 +5074,41 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
   throw new Error("Unsupported Shared Browser method/path combination");
 }
 
+// The steps that act in the tab they run in. One that ran in the chat's own
+// tab marks it used for the run (chatTabUsed), so a later open_tab opens a
+// tab of Octo's own; reading the page (snapshot, status) does not.
+const CHAT_TAB_STEPS = new Set(["/v1/navigate", "/v1/click", "/v1/type", "/v1/choose", "/v1/press", "/v1/scroll"]);
+// Set by execute: the step acts in the chat's own tab, and it is the turn's
+// first page, which open_tab opened there (opensInChatTab).
+let chatTabStep = false;
+let openedInChatTab = false;
+// What the turn's first open_tab says once its page opened in the chat's own
+// tab. A turn opened a journey planner in a tab of its own for the third time,
+// where neither a cookie notice's pause nor the planner's prompt can happen,
+// though its run instructions say to work in the chat's tab and open a tab of
+// its own only to keep a second page open.
+const OPENED_IN_CHAT_TAB =
+  "This turn's first page opened in the chat's own tab, not in a new one: open_tab opens a tab of Octo's own only to keep a second page open at the same time.";
+
+// Whether an open_tab opens its page in the chat's own tab instead: the run
+// has opened no tab of its own and no step of it has acted in the chat's tab
+// yet, so there is no second page to keep open. Only a plain address, which
+// open_tab itself would open: one it refuses as doing more than show a page
+// is still refused in its own words.
+function opensInChatTab(method, requestPath, body, tabs) {
+  if (method !== "POST" || requestPath !== "/v1/tabs/open") return false;
+  if (tabs.registry.lastTabNumber !== 0 || tabs.registry.tabs.length !== 0 || approvalProtocol.chatTabUsed()) {
+    return false;
+  }
+  let url;
+  try {
+    url = validateNavigationUrl(body.url, null);
+  } catch (_) {
+    return false;
+  }
+  return classifyStep("navigate", null, { url }).verdict !== "ask" && !CONSEQUENTIAL_ACTION_PATTERN.test(url);
+}
+
 // The step within its time (STEP_TIME_MS): its own answer, or, once its time is
 // up, the page as it is.
 async function executeWithinStepTime(browser, browserSession, method, requestPath, body) {
@@ -5002,14 +5120,15 @@ async function executeWithinStepTime(browser, browserSession, method, requestPat
     stepClock.expired.then(() => null),
   ]);
   stepClock.stop();
-  if (finished) {
-    if ("error" in finished) throw finished.error;
-    return finished.value;
-  }
+  if (finished && "error" in finished) throw finished.error;
   // What the step still does stops at its next action (assertStepOnTime), and
   // its own answer no longer reaches anyone.
-  step.catch(() => {});
-  return await pageAsItIs(browser);
+  if (!finished) step.catch(() => {});
+  const result = finished ? finished.value : await pageAsItIs(browser);
+  if (chatTabStep) approvalProtocol.markChatTabUsed();
+  return openedInChatTab
+    ? { ...result, message: [result.message, OPENED_IN_CHAT_TAB].filter(Boolean).join(" ") }
+    : result;
 }
 
 // Resolves to `promise`'s value, or to `fallback` once `ms` have passed.
@@ -5075,22 +5194,26 @@ function waitedAddresses(load, now) {
 }
 
 // The answer of a step whose time ran out: the page as it is now, read like a
-// snapshot within LATE_READ_MS, or its address alone when the page is too busy
-// to be read. It says that the step's time ran out, so Octo checks what the step
-// did before it acts again. Its activity says what it is: a read of the page,
-// or, for the address alone, the page it is on, as status names it. A load the
-// step started whose site has not answered, whatever page the tab showed before
-// and whatever started it, is stopped first (stopUnansweredLoad): while it
-// waits, Instafy's browser cannot be reached by the next step, and it would land
-// after the step ended. So the step opened nothing, and it fails (its line
-// reads as the step it tried) saying the site did not answer and where to go
-// next, never the page the tab still shows, nor the blank page's "Call
-// navigate", which sent Octo to load the same site again. A site that answered
-// as the time ran out has its page, which is read as it is, and a load the
-// browser did not confirm stopped is still busy. A tab that is still blank is
-// stopped and answered the same way. The step's guards still hold while the
-// page is read, then end as a step's guards end: a window it opened is closed,
-// and what they stopped fails the step as it would have in its time.
+// snapshot within LATE_READ_MS. It says that the step's time ran out, so Octo
+// checks what the step did before it acts again, and its activity says it is a
+// read of the page (or, on a site not approved yet, a look at the page it is
+// on, as status names it). A load the step started whose site has not
+// answered, whatever page the tab showed before and whatever started it, is
+// stopped first (stopUnansweredLoad): while it waits, Instafy's browser cannot
+// be reached by the next step, and it would land after the step ended. So the
+// step opened nothing, and it fails (its line reads as the step it tried)
+// saying the site did not answer and where to go next, never the page the tab
+// still shows, nor the blank page's "Call navigate", which sent Octo to load
+// the same site again. A site that answered as the time ran out has its page,
+// which is read as it is. A page still too busy to be read, a load the browser
+// did not confirm stopped and a tab still blank fail the same way, as a site
+// that did not answer (BUSY_UNANSWERED_MESSAGE): a turn told only "Take a
+// snapshot in a moment" opened the same busy site again and never tried the
+// place's own. Only a step that sent a form answers with a busy page's address
+// alone, and says to check what the step did: the form reached its site. The
+// step's guards still hold while the page is read, then end as a step's
+// guards end: a window it opened is closed, and what they stopped fails the
+// step as it would have in its time.
 async function pageAsItIs(browser) {
   const guards = [...openStepGuards];
   const load = await stopUnansweredLoad(guards);
@@ -5113,27 +5236,25 @@ async function pageAsItIs(browser) {
   }
   await within(GUARD_RELEASE_MS, Promise.all(guards.map((guard) => guard.release())));
   if (stopped) throw stopped;
-  const view = unanswered ? null : read ?? addressOnly(resolvedPage);
-  const readSomething = read && view.blank !== true && !isBusyPageResult(read);
+  if (unanswered) {
+    throw didNotAnswer(load.stopped ? unansweredLoadMessage(load.page) : BUSY_UNANSWERED_MESSAGE, load.addresses);
+  }
+  const view = read ?? addressOnly(resolvedPage);
+  if (view.blank === true) {
+    const stoppedBlankLoad = await within(GUARD_RELEASE_MS, stopLoading(resolvedPage).catch(() => false), false);
+    throw didNotAnswer(stoppedBlankLoad ? UNANSWERED_PAGE_MESSAGE : BUSY_UNANSWERED_MESSAGE, waitedOpeningAddress());
+  }
+  // A form the step sent has reached its site, so its page, busy or not, is
+  // the step's answer, and Octo checks what it did: it never sends it again.
+  if (isBusyPageResult(view) && !guards.some((guard) => guard.sentForm())) {
+    throw didNotAnswer(BUSY_UNANSWERED_MESSAGE, busyLoadAddresses(guards));
+  }
   // Only a page that was read is "the page as it is now"; a busy one says so
   // in its own message.
+  const readSomething = read !== null && !isBusyPageResult(read);
   const note = `This step was still running after ${STEP_TIME_MS / 1000} seconds, so it stopped where it was. ${
     readSomething ? "This is the page as it is now: check" : "Check"
   } what the step did before you act again.`;
-  if (unanswered) {
-    throw load.stopped
-      ? didNotAnswer(unansweredLoadMessage(load.page), load.addresses)
-      : new Error(`${BUSY_PAGE_MESSAGE} ${note}`);
-  }
-  if (view.blank === true) {
-    const stoppedBlankLoad = await within(GUARD_RELEASE_MS, stopLoading(resolvedPage).catch(() => false), false);
-    throw stoppedBlankLoad
-      ? didNotAnswer(
-        UNANSWERED_PAGE_MESSAGE,
-        openingAddress && Date.now() - openingAddress.startedAt >= UNANSWERED_WAIT_MS ? [openingAddress.url] : [],
-      )
-      : new Error(`${BUSY_PAGE_MESSAGE} ${note}`);
-  }
   emitAction({ type: "nav_result", label: view.title || view.url, url: view.url });
   return withActivity(
     { ...view, stepTimedOut: true, message: [view.message, note].filter(Boolean).join(" ") },
@@ -5151,6 +5272,12 @@ const BUSY_PAGE_MESSAGE = "The page is still busy, so it could not be read yet. 
 const UNANSWERED_NEXT_SOURCE = "Don't open this address again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
 const UNANSWERED_PAGE_MESSAGE = `The site did not answer in time, so nothing was opened and the page is still blank. ${UNANSWERED_NEXT_SOURCE}`;
 const UNANSWERED_LOADED_PAGE_MESSAGE = `The site did not answer in time, so nothing was opened and the tab still shows the page it showed before. ${UNANSWERED_NEXT_SOURCE}`;
+// What a step answers whose page was still busy when its time ran out (too
+// busy to be read, still loading, or still blank): its site did not answer
+// in time either, so it gets the same next source and its address the same
+// memory (didNotAnswer), and a browser turn calls it `timed-out` as it does
+// the site that sent nothing.
+const BUSY_UNANSWERED_MESSAGE = `The site did not answer in time, so nothing on its page could be read. ${UNANSWERED_NEXT_SOURCE}`;
 // What navigate and open_tab answer for an address that did not answer in the
 // chat's browser turns in the last 10 minutes (refuseUnansweredAddress): a turn
 // opened such an address again in its next turn, and once more after the hint.
@@ -5162,6 +5289,24 @@ let openingAddress = null;
 
 function unansweredLoadMessage(page) {
   return isBlankPage(page) ? UNANSWERED_PAGE_MESSAGE : UNANSWERED_LOADED_PAGE_MESSAGE;
+}
+
+// The address navigate or open_tab was opening, once it waited
+// UNANSWERED_WAIT_MS, for a page still blank or busy when the step's time ran
+// out.
+function waitedOpeningAddress() {
+  return openingAddress && Date.now() - openingAddress.startedAt >= UNANSWERED_WAIT_MS ? [openingAddress.url] : [];
+}
+
+// The addresses to keep for a page still busy when the step's time ran out:
+// those of the newest load the step started, by the same waits as a load
+// whose site sent nothing (waitedAddresses), and the address navigate or
+// open_tab was opening. A page the step's load only just brought, or a load a
+// page's script started late in the step, had barely waited, and is not kept.
+function busyLoadAddresses(guards) {
+  const now = Date.now();
+  const loads = guards.map((guard) => guard.newestLoad()).filter(Boolean);
+  return [...new Set([...loads.flatMap((load) => waitedAddresses(load, now)), ...waitedOpeningAddress()])];
 }
 
 // A step that failed on its own wait for the page a load would bring (a click
@@ -5312,7 +5457,13 @@ async function execute(browser, browserSession, method, requestPath, body) {
   approvalProtocol.authority();
   const tabs = await prepareTabs(browser, browserSession);
   if (requestPath.startsWith("/v1/tabs")) {
-    return await executeTabCommand(browser, method, requestPath, body, tabs);
+    if (!opensInChatTab(method, requestPath, body, tabs)) {
+      return await executeTabCommand(browser, method, requestPath, body, tabs);
+    }
+    // The turn's first page: navigate in the chat's own tab, and say so.
+    openedInChatTab = true;
+    requestPath = "/v1/navigate";
+    body = { url: body.url };
   }
   if (typeof body.tabId === "string") {
     // snapshot and navigate may name the tab they act on.
@@ -5322,6 +5473,7 @@ async function execute(browser, browserSession, method, requestPath, body) {
       "The tab Octo was using was closed, so nothing was done. Call list_tabs, then select_tab.",
     );
   }
+  chatTabStep = method === "POST" && CHAT_TAB_STEPS.has(requestPath) && !inAgentTab();
   const page = await resolveExpectedPage(browser);
   page.setDefaultTimeout(15_000);
   await page.bringToFront();
@@ -5401,6 +5553,11 @@ async function guardStepDocuments(page) {
   // request's, for a redirect's next hop), so a stop keeps only an address
   // that waited (waitedAddresses).
   let waitingLoad = null;
+  // The tab's newest such load, answered or not, for a page still busy when
+  // the step's time is up (busyLoadAddresses), and whether the tab sent a
+  // form (a load that is no GET) during the step.
+  let newestLoad = null;
+  let sentForm = false;
   // When each of the tab's document requests left the browser.
   const requestedAt = new WeakMap();
   const tabDocument = (request) => {
@@ -5424,6 +5581,8 @@ async function guardStepDocuments(page) {
     waitingLoad = sendsNothing(request)
       ? { page, request, answered: false, requestedAt: now, loadStartedAt: requestedAt.get(first) ?? now }
       : null;
+    newestLoad = waitingLoad;
+    sentForm ||= waitingLoad === null;
   };
   const loadAnswered = (response) => {
     if (waitingLoad && waitingLoad.request === response.request()) {
@@ -5532,6 +5691,10 @@ async function guardStepDocuments(page) {
     },
     // The load the step started that its site has not answered yet, if any.
     unansweredLoad: () => waitingLoad,
+    // The newest load the step started that sends nothing, answered or not.
+    newestLoad: () => newestLoad,
+    // Whether the step's tab sent a form, which reached its site.
+    sentForm: () => sentForm,
     // Ends the guard once, whoever asks first: the step, or pageAsItIs once
     // the step's time is up (a busy page can hold the step's own release).
     release: () => (released ??= (async () => {
@@ -5682,12 +5845,13 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       pageChangedUnderStep = true;
       throw new Error("The page changed; take a fresh snapshot before requesting human input");
     }
-    const selected = body.indices.map((index) => interactive[index]);
     // Editable fields (a sign-in, a form), or the buttons of a cookie notice
-    // the browser could not decline. The browser itself presses neither: the
-    // person answers the notice on the page.
-    const fields = selected.every((entry) => entry && EDITABLE_FIELD_TAGS.has(entry.description.tag));
-    if (!fields && !(await cookieNoticeButtons(page, interactive, selected))) {
+    // the browser could not decline, all of them. The browser itself presses
+    // neither: the person answers the notice on the page.
+    const named = body.indices.map((index) => interactive[index]);
+    const fields = named.every((entry) => entry && EDITABLE_FIELD_TAGS.has(entry.description.tag));
+    const selected = fields ? named : await cookieNoticeButtons(page, interactive, named);
+    if (!selected) {
       throw new Error("Human input targets must be observed editable fields, or the buttons of a cookie notice");
     }
     for (const entry of selected) assertControlOn(entry.description);
@@ -5810,14 +5974,27 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // is no link and sends no form. Its step lets no form post leave the tab.
     const consentRejection = step.verdict === "allow" && step.consentRejection === true &&
       !rawDestination && !clickSubmission && !isFormSubmissionControl(target.description);
-    const readingStep = consentRejection || (routineCovers(step, target.description) &&
-      !isFormSubmissionControl(target.description));
     if (rawDestination) {
       assertMayOpen(rawDestination);
     }
     refuseNewWindowOrNestedSubmission(clickSubmission);
+    // A click on the page's own search button goes without a prompt under
+    // routine browsing, as Enter in its search field does; every other
+    // submission asks.
+    const freeSearch = !consentRejection && documents !== null && !isConsequentialAction(target.description) &&
+      (await freeSiteSearchButton(page, target));
+    const readingStep = freeSearch || consentRejection || (routineCovers(step, target.description) &&
+      !isFormSubmissionControl(target.description));
     refuseUnlessReadingStep(readingStep, step);
-    await refuseStillCovered(page, target);
+    // A click that asks the person is looked at where it would land first, so
+    // nobody is asked about a click that cannot land; one nobody is asked
+    // about is looked at right before it is made (clickControlItself). The
+    // person is then asked about the page as it is: the look may have brought
+    // the control into view, and the page may have answered that.
+    if (!consentRejection && !(readingStep && approvalProtocol.routineBrowsingAllowed())) {
+      await refuseUnlandableClick(page, target);
+      target = { ...target, asked: await askedNow(page, target) };
+    }
     if (
       destination.destinationOrigin &&
       destination.destinationOrigin !== sourceOrigin
@@ -5828,13 +6005,16 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
         { destinationUrl: rawDestination },
       );
     }
+    if (freeSearch) {
+      stepKind = "search";
+    }
     if (!consentRejection) {
       await allowStepOnce({
         operation: "click",
         label: promptLabel(
           target.description,
           "Activate this control",
-          await sentFields(target, clickSubmission),
+          freeSearch ? NO_SENT_FIELDS : await sentFields(target, clickSubmission),
           approvalCategoryTitle(step),
         ),
         categoryTitle: approvalCategoryTitle(step),
@@ -5855,8 +6035,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       destination,
     );
     const withholding = await withholdBeforeStep(page, step);
-    documents?.limitFormPosts(consentRejection
-      ? []
+    documents?.limitFormPosts(consentRejection || freeSearch
+      ? FREE_SEARCH_POST_ORIGINS
       : stepPostOrigins(readingStep, sourceOrigin, clickSubmission, destination));
     const box = target.description.box;
     const size = await viewport(page);
@@ -5884,7 +6064,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const chose = !moved && isCheckableDescription(target.description);
     return withActivity(
       { ...await snapshotAfterStep(page, withholding), ...(checked ? { done: checked } : {}) },
-      stepActivity(page, chose ? "choose" : "click", stepApproval()),
+      freeSearch ? stepActivity(page, "search", "free") : stepActivity(page, chose ? "choose" : "click", stepApproval()),
     );
   }
 

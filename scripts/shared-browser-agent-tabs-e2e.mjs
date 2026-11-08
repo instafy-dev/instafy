@@ -43,6 +43,8 @@ const scriptSource = [
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// What a turn's first open_tab says once its page opened in the chat's own tab.
+const OPENED_IN_CHAT_TAB = "This turn's first page opened in the chat's own tab, not in a new one: open_tab opens a tab of Octo's own only to keep a second page open at the same time.";
 // What a step Octo's own tabs do not take answers: where to take it instead.
 const OWN_TAB_STEP = /Octo's own tabs don't take this step, so nothing was done there\. Open this page in the chat's own tab with navigate \(its tabId is the one list_tabs shows opened by the person\) and take the step there; the browser asks the person as usual\./u;
 
@@ -158,6 +160,9 @@ export async function runSharedBrowserAgentTabsFixture() {
     const transport = await listenSite("transport", {
       "/": { title: "Transport", body: "<p>Lines and fares.</p>" },
       "/tram-15": { title: "Tram 15", body: "<p>Tram 15 runs to the tower every 10 minutes.</p>" },
+      // The operator's journey planner, whose button sends its form.
+      "/journeys": { title: "Plan a journey", body: "<form action=\"/journey\" method=\"get\"><p><label>From <select name=\"from\"><option>Central</option></select></label></p><p><label>To <select name=\"to\"><option>Tower</option></select></label></p><p><button>Plan your journey</button></p></form>" },
+      "/journey?from=Central&to=Tower": { title: "Your journey", body: "<p>Central to Tower: tram 15, 3 stops, 12 minutes.</p>" },
     });
     servers.push(transport.server);
     // A reviewer's site, at a name of its own (mapped to loopback below):
@@ -306,16 +311,44 @@ export async function runSharedBrowserAgentTabsFixture() {
     ]);
     const pageWithUrl = (url) => browserPages().find((entry) => entry.url() === url);
 
-    // 1. Octo opens a visible tab. In Ask, the site is approved in that tab
-    // with one prompt that names the tab and the page it opens; plain
-    // navigations on that site in the tab then ask nothing.
+    // 0. A turn's first open_tab, before any step of the turn acted in the
+    // chat's own tab, opens its page there, as navigate does, and says so:
+    // reading the page first does not count. A turn opened a journey planner
+    // in a tab of its own three times running, where neither a cookie
+    // notice's pause nor the planner's prompt can happen. Here the planner's
+    // button asks the person once and runs. Octo then takes the chat's tab
+    // back to the person's page.
+    await ok("GET", "/v1/status");
+    const firstPage = await ok("POST", "/v1/tabs/open", { url: `${transport.origin}/journeys` }, ["allow_origin"]);
+    assert.equal(firstPage.openedTab, undefined, "A tab was opened for the turn's first page");
+    assert.equal(firstPage.tabId, undefined, "The turn's first page is not in the chat's own tab");
+    assert.ok(firstPage.message.includes(OPENED_IN_CHAT_TAB), firstPage.message);
+    assert.deepEqual(firstPage.activity, { step: "navigate", url: `${transport.origin}/journeys`, approval: "once" });
+    assert.equal(runPage.url(), `${transport.origin}/journeys`);
+    assert.equal(browserPages().length, 1, "A tab was opened for the turn's first page");
+    // Asked as navigate asks, for the site in the chat's own tab.
+    assert.deepEqual(prompts.map((prompt) => [prompt.kind, prompt.display.label]), [["origin", `Open ${transport.origin}/journeys`]]);
+    const firstButton = firstPage.interactiveElements.find((element) => element.label === "Plan your journey");
+    assert.ok(firstButton, "The planner's button is observed");
+    const journey = await ok("POST", "/v1/click", { index: firstButton.index, snapshotId: firstPage.snapshotId }, ["allow_once"]);
+    assert.equal(prompts.length, 2, "The planner's button asked once");
+    assert.match(prompts.at(-1).display.label, /Plan your journey/u);
+    assert.match(journey.visibleText, /3 stops, 12 minutes/u);
+    await ok("POST", "/v1/navigate", { url: `${research.origin}/` }, ["allow_origin"]);
+    const promptsBeforeOwnTab = prompts.length;
+
+    // 1. Once the turn has used the chat's own tab, Octo opens a visible tab
+    // of its own. In Ask, the site is approved in that tab with one prompt
+    // that names the tab and the page it opens; plain navigations on that
+    // site in the tab then ask nothing.
     const opened = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/timetable` }, ["allow_origin"]);
     const firstTab = opened.tabId;
     assert.equal(opened.openedTab, true);
     assert.equal(opened.browserPageId, runPageId);
     assert.match(opened.visibleText, /Trains leave every 20 minutes/);
+    assert.doesNotMatch(opened.message ?? "", /first page/u);
     // One prompt: the site in the new tab, naming the exact page it opens.
-    assert.deepEqual(prompts.map((prompt) => [prompt.kind, prompt.display.label]), [
+    assert.deepEqual(prompts.slice(promptsBeforeOwnTab).map((prompt) => [prompt.kind, prompt.display.label]), [
       ["origin", `Octo's tab 1: Open ${sources.origin}/timetable in a new tab`],
     ]);
     assert.ok(prompts.every((prompt) => prompt.browserPageId === runPageId));
@@ -326,10 +359,11 @@ export async function runSharedBrowserAgentTabsFixture() {
     assert.equal(await timetable.evaluate(() => document.hasFocus()), true, "Octo's tab is in front");
     assert.equal(await runPage.evaluate(() => document.hasFocus()), false);
     assert.deepEqual(tabsRecord().tabs, [{ tabId: firstTab, number: 1, approvedOrigins: [sources.origin] }]);
-    assert.deepEqual(state().approvedOrigins, [], "The tab's site approval is the tab's only");
+    // The chat's own tab holds only the sites approved there (in 0).
+    assert.deepEqual(state().approvedOrigins, [transport.origin, research.origin], "The tab's site approval is the tab's only");
     const listed = await ok("GET", "/v1/tabs");
     assert.deepEqual(listed.tabs.map((tab) => [tab.openedBy, tab.label ?? null, tab.current, tab.originApproved]), [
-      ["person", null, false, false],
+      ["person", null, false, true],
       ["octo", "Octo's tab 1", true, true],
     ]);
     const navigation = fs.readFileSync(actionsPath, "utf8").trim().split("\n").map(JSON.parse)
@@ -604,6 +638,9 @@ export async function runSharedBrowserAgentTabsFixture() {
     // read a planner in its own tab, stopped at its button and replied that
     // it couldn't run the planner from its reading tab.
     startRun([]);
+    // The turn reads the person's page first, so its open_tab opens a tab of
+    // its own (0).
+    await ok("POST", "/v1/navigate", { url: `${research.origin}/` }, ["allow_origin"]);
     const plannerTab = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/planner` }, ["allow_origin"]);
     const plan = (reading) => {
       const button = reading.interactiveElements.find((element) => element.label === "Plan your journey");
@@ -682,6 +719,7 @@ export async function runSharedBrowserAgentTabsFixture() {
       fixtureVersion: 3,
       prompts: prompts.length,
       checks: [
+        "a turn's first open_tab, before any step of it acted in the chat's own tab, opens its page there and says so, and a planner's button there asks once and runs; once the turn used that tab, open_tab opens a tab of Octo's own",
         "visible agent tab in the run's browser context, brought to front",
         "per-tab site approval, asked once for a new tab",
         "form submission refused in an agent tab before any prompt",
