@@ -4028,7 +4028,8 @@ async fn a_refused_address_names_its_sites_root_only_on_a_site_the_chat_was_give
             .output()
             .expect("run the controller")
     };
-    let asked = "When is the bookshop open? Check www.visit.example, then how to get there by metro.";
+    let asked =
+        "When is the bookshop open? Check www.visit.example, then how to get there by metro.";
     let chat = Uuid::new_v4();
     let run = chat_browser_run_given(
         &fixture,
@@ -4039,7 +4040,10 @@ async fn a_refused_address_names_its_sites_root_only_on_a_site_the_chat_was_give
         }),
     );
     // The site the person named by its name alone: back to its root.
-    let words = failure_of(&step("/v1/navigate", "https://www.visit.example/en/bookshop"));
+    let words = failure_of(&step(
+        "/v1/navigate",
+        "https://www.visit.example/en/bookshop",
+    ));
     assert!(
         words.contains(&made_up_address_words("https://www.visit.example")),
         "{words}"
@@ -4048,7 +4052,10 @@ async fn a_refused_address_names_its_sites_root_only_on_a_site_the_chat_was_give
     // word of the refused site, in either tab.
     for path in ["/v1/tabs/open", "/v1/navigate"] {
         let words = failure_of(&step(path, "https://www.search.example/maps"));
-        assert!(words.contains(MADE_UP_ON_A_SITE_NOBODY_GAVE), "{path}: {words}");
+        assert!(
+            words.contains(MADE_UP_ON_A_SITE_NOBODY_GAVE),
+            "{path}: {words}"
+        );
         assert!(!words.contains("search.example"), "{path}: {words}");
     }
     assert!(!fixture.approval_dir.join("request.json").exists());
@@ -4061,10 +4068,19 @@ async fn a_refused_address_names_its_sites_root_only_on_a_site_the_chat_was_give
     );
     // An address its text spells out on another site gives that address, not
     // the site, until the turn reads a page there.
-    let words = failure_of(&step("/v1/navigate", "https://www.reviews.example/laptops/five"));
+    let words = failure_of(&step(
+        "/v1/navigate",
+        "https://www.reviews.example/laptops/five",
+    ));
     assert!(words.contains(MADE_UP_ON_A_SITE_NOBODY_GAVE), "{words}");
-    payload_of(&step("/v1/navigate", "https://www.reviews.example/laptops/four"));
-    let words = failure_of(&step("/v1/navigate", "https://www.reviews.example/laptops/five"));
+    payload_of(&step(
+        "/v1/navigate",
+        "https://www.reviews.example/laptops/four",
+    ));
+    let words = failure_of(&step(
+        "/v1/navigate",
+        "https://www.reviews.example/laptops/five",
+    ));
     assert!(
         words.contains(&made_up_address_words("https://www.reviews.example")),
         "{words}"
