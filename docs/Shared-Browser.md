@@ -1700,8 +1700,9 @@ does not invoke its normal missing-action retry. The user starts a new turn if
 they want to try again. This keeps “Deny” from becoming a sequence of repeated
 consent prompts, and an unanswered prompt from becoming a chain of prompts
 while the person is away. What the person reads tells the two apart, with no code: an unanswered
-prompt reads "I'm waiting for your OK to continue in Instafy's browser. I
-haven't done that step yet.", a denial reads "You said no, so that step didn't
+prompt, gone by then, reads "Your OK didn't come in time, so I didn't do that
+step. Send a message when you're ready and I'll ask again.", never that Octo is
+still waiting, a denial reads "You said no, so that step didn't
 happen, and nothing from it was sent.", `approval_stale` (the page changed
 after the yes) reads "The page changed after you said yes, so I didn't do that
 step. Send a message and I'll ask again.", and every other terminal code reads one plain
@@ -2101,9 +2102,11 @@ the browser, or that a passing upstream error ended, runs once more, with its ow
 request and nothing added. A browser turn that carries on the person's own
 message and asked Octo to make it hands that message to the building turn
 instead (see "Hand-back"). Any other turn with no instrumented action evidence
-fails closed instead of presenting an unverified prose success. The person reads
-one plain sentence for it ("Octo didn't open a page in the browser, so this turn
-stopped."); the artifact beside it keeps the machine-readable reason.
+fails closed instead of presenting an unverified prose success, unless its
+message has a build after it, which then makes it (see "Hand-back"). The person
+reads one plain sentence for it and what they can do ("Octo didn't open a page in
+the browser. Say which site to look at, or try again."); the artifact beside it
+keeps the machine-readable reason.
 
 Page content is untrusted. Browser-only turns therefore have no local execution
 environment, project MCP servers, web search, plugins, image generation, child
@@ -2932,8 +2935,9 @@ unless the policy is `"covered"`.
   turn's own do, its words join the turn's (so a first line that said a page
   stopped the turn stays) and its findings join the turn's, each pass's lines
   its own: a second pass that wrote none adds the pages its steps opened, by
-  address, and a turn whose answer holds no finding line gets no second pass,
-  only the wrap-up pass below. A page its finding lines list already, read or
+  address, and a turn whose answer holds no finding line gets the wrap-up pass
+  below first, which also asks for its unread line, and the second pass then
+  reads the pages that line names. A page its finding lines list already, read or
   stopped at, is never one the second pass is told to read. A second pass that
   stops for the person (a pause, a step's approval that ended it) ends the
   turn with the words that say what they do next, which it posts, and its note
@@ -2994,7 +2998,11 @@ unless the policy is `"covered"`.
   finding line would leave a later building turn nothing of the pages it read,
   and one that continues a building card would hand nothing back: it gets the
   runtime's wrap-up pass on its own thread, which holds those
-  pages, asked for the finding lines alone, and not billed, as a recovery retry
+  pages, asked for the finding lines alone (and, for a turn that continues a
+  building card and had no second pass yet, its unread line after them: asked
+  for the lines alone, a comparison's turn that said in words which pages it
+  hadn't reached lost that list, and its page was built with five of fifteen
+  facts), and not billed, as a recovery retry
   is not (docs/Credits-Billing.md). The pass keeps the turn's browser tools,
   approvals and Stop, a message the person sends meanwhile never steers it,
   and its answer is not used if it took a step. With still none, or for a turn
@@ -3007,7 +3015,13 @@ unless the policy is `"covered"`.
   the person's (it paused for their input on the page, a step's approval ended
   it, or a page it opened showed a secret) gets neither: its reply says what
   they do next, so it stays in the chat as the turn wrote it, and Studio sends
-  no hand-back for it. The
+  no hand-back for it. Where the runtime's own words replace that reply (a
+  pause in Instafy's browser, or a step's approval that ended the turn), the
+  finding lines the turn wrote for the pages it read still go into its note, so
+  a later building turn reads the pages it read before it stopped. Its lines
+  for pages that stopped it don't: the person's next step acts on the page it
+  stopped at, and passed on, every such line of three turns that paused on a
+  cookie notice was out of date or untrue by the time a build read it. The
   fixtures in
   `packages/runtime-controller/src/browser_hand_back_fixtures.json` pin the
   three halves together.
@@ -3030,7 +3044,20 @@ unless the policy is `"covered"`.
   Details. One that answered in words alone opened no page and fails as any
   such turn does; on the person's device, its one retry reads the build request
   first, and that build request ends the turn the same way instead of failing
-  it. The person's
+  it. A turn in Instafy's browser whose card does continue building, from a
+  message the routing step sent there with a build after it, that opened no
+  page and is not run again (no passing upstream error or unreachable browser
+  ended it) hands the message to its build the same way, whatever it answered:
+  its note says only that it opened no page, and the build makes the change
+  from the person's words and what the chat found before, reads no site the
+  message doesn't name, and says plainly what it couldn't find. So does one
+  whose look left a step in the browser's log (a cookie notice the browser
+  declined by itself) but whose steps opened no page and whose wrap-up pass
+  wrote no line: which look a turn took never decides whether the message is
+  made. One whose first attempt opened a page and that is run again ends with
+  the pages of both attempts, whatever the retry did. Failed in
+  its place, a note on a map, a Continue after a Stop and a fill-in each needed
+  Try again, and the note's Try again opened two sites nobody named. The person's
   message has no answer until the building turn gives one, so the controller
   sends this hand-back itself, in the name of the person who sent the browser
   turn, as soon as that turn's completion is committed
@@ -3042,15 +3069,21 @@ unless the policy is `"covered"`.
   dispatch and checks as Studio's, except that the card need not continue
   building and the browser turn need not have read a page or replied, and only
   for a card the routing step posted; it stamps `buildRequest` with the
-  message's own words as `personRequest`, an empty reply and no findings. The
+  message's own words as `personRequest`, an empty reply and no findings, and
+  `continueBuilding` when the card does continue building. The
   chat shows neither the card nor, once the hand-back is in it, the browser
   turn or the hand-back's prompt: the person reads their message and then the
   building turn. The building turn reads those words as the person's request
-  and makes what they ask, reading any public page it needs itself. A refusal
+  and makes what they ask, reading any public page it needs itself; with
+  `continueBuilding`, from what the chat found before instead, as above: told
+  to read any page it needs, such a build could read the sites nobody named
+  that the failed turn's Try again read. A refusal
   because the conversation moved on (someone wrote after the browser turn, or
   the building lane is busy) changes nothing; any other refusal (no prompts or
   credits left) leaves its plain reason as the browser turn's reply. Any other
-  browser turn that opened no page fails, with no retry in the browser.
+  browser turn that opened no page fails, with no retry in the browser, and
+  says what the person can do ("Octo didn't open a page in the browser. Say
+  which site to look at, or try again.").
 - **Stale pins.** A pin to a session that is gone moves to the space's own live
   browser when there is one.
 - **Clear data restarts the same machine.** The controller call is unchanged.

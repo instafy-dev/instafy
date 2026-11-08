@@ -34,12 +34,16 @@
 //!
 //! One browser turn hands back without reading a page: one that carries on a
 //! card the routing step posted for the person's own message, opened no page
-//! and asked Octo to make what the message asks (the runtime's Details note,
+//! and asked Octo to make what the message asks, or opened no page with the
+//! build after it anyway (the runtime's Details note,
 //! [`BUILD_REQUEST_NOTE_KEY`]; runtime-agent `jobs/browser_hand_back.rs`). The
 //! message asked for something a browser turn cannot make, so its words go to
 //! the building turn as the person's request, whether or not the card
 //! continues building, and the record carries nothing of the browser turn
-//! ([`BUILD_REQUEST_RECORD_KEY`]). The person's message has no answer until
+//! ([`BUILD_REQUEST_RECORD_KEY`]); when the card does continue building, the
+//! record says so ([`CONTINUE_BUILDING_RECORD_KEY`]): that message needed a
+//! website, so its build works from what the chat found before and reads no
+//! site nobody named. The person's message has no answer until
 //! that building turn gives one, so the controller sends this hand-back itself,
 //! in the person's name, as soon as the browser turn's completion is committed
 //! ([`hand_back_build_request`]): it never waits for a page of theirs to be
@@ -164,6 +168,10 @@ pub(crate) const HAND_BACK_NOTHING_READ_CODE: &str = "browser_hand_back_nothing_
 pub(crate) const BUILD_REQUEST_NOTE_KEY: &str = "browserBuildRequest";
 /// The key a hand-back record that carries such a message has.
 pub(crate) const BUILD_REQUEST_RECORD_KEY: &str = "buildRequest";
+/// The key such a record has beside it when the message's card has its build
+/// after the browser (`continueBuilding`): the message needed a website, and its
+/// browser turn opened none (runtime-agent `CONTINUE_BUILDING_RECORD_KEY`).
+pub(crate) const CONTINUE_BUILDING_RECORD_KEY: &str = "continueBuilding";
 /// What a hand-back the controller sends for such a message records in place
 /// of its prompt, after the agent's name. Studio leaves it out: the person
 /// reads their message and then the building turn.
@@ -1274,6 +1282,12 @@ pub(crate) async fn require_hand_back(
             ));
         }
         record[BUILD_REQUEST_RECORD_KEY] = json!(true);
+        // Its card has the build after the browser: the message needed a
+        // website, and the runtime tells the build to make it from the person's
+        // words and what the chat found before, reading no site nobody named.
+        if card_continues_building(transaction, conversation_id, &card_job_id).await? {
+            record[CONTINUE_BUILDING_RECORD_KEY] = json!(true);
+        }
         return Ok(CheckedHandBack {
             record,
             continues: ContinuedTurn::of(&card_payload),
@@ -2302,6 +2316,10 @@ mod tests {
         let fixtures = fixtures();
         assert_eq!(fixtures["buildRequestNoteKey"], BUILD_REQUEST_NOTE_KEY);
         assert_eq!(fixtures["buildRequestRecordKey"], BUILD_REQUEST_RECORD_KEY);
+        assert_eq!(
+            fixtures["continueBuildingRecordKey"],
+            CONTINUE_BUILDING_RECORD_KEY
+        );
     }
 
     /// A browser turn whose findings go back to the building turn posts no
