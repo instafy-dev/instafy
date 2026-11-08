@@ -308,10 +308,11 @@ test("check names a source line only when it can tell it links no page", () => {
   assert.deepEqual(unlinked(page(`h("p", { "class": "trust" }, "Source: " + hours.src + " · checked " + hours.date),
       h("p", { "class": "trust" }, \`Source: \${hours.src}\`), h("p", { "class": "trust" }, "Hours unknown on Livraria Lello · checked 8 Nov")`)),
     ["Source: · checked", "Source:", "Hours unknown on Livraria Lello · checked 8 Nov"]);
-  // a fact with its source and no page draws a source line that links nothing; one with its page, an estimate, and a
-  // value from what Octo knows do not
+  // a fact with its source and no page draws a source line that links nothing; one with its page, an estimate, a value
+  // from what Octo knows, and a file's or a script's "src" do not
   assert.deepEqual(unlinked(`(function () {
   var hours = { v: "Daily 9:00-19:30", src: "Livraria Lello", date: "2026-11-08" };
+  var media = { v: 2, src: "photo.jpg" }, player = { v: "1.0", src: "https://cdn.example/player.js" };
   var facts = { walk: { "v": "about 10 min", "src": "Octo's estimate", "est": true }, memory: { v: "Open daily" }, linked: ${fact},
     stop: { v: "Lapa", src: "Metro do Porto", url: "metroporto.pt/planner", date: "2026-11-08" } };
   site.start({ data: null, render: function () {

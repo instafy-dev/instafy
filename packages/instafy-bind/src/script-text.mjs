@@ -314,6 +314,8 @@ function drop(toks, [s, e], ctx) {
 
 // What a name alone can be that is never an element.
 const NO_ELEMENT = new Set(["null", "undefined", "true", "false"]);
+// A "src" that is a file or an address (an image's, a script's), never the name of a fact's source.
+const FILE_SRC = /^(?:[a-z][\w+.-]*:)?\/\/|\.(?:m?js|css|png|jpe?g|gif|svg|webp|avif|ico|mp4|webm|mp3|wav|json|html?)$/i;
 
 /** Whether an element's child [s, e) is one the check reads whole: text (a string, a template, or a sum, which is text
  *  whatever it adds), a number, null or a truth value, a call of a helper or of site.cite or site.trust, or a list of
@@ -349,7 +351,7 @@ function unlinkedFacts(toks) {
     const src = single(key("src"));
     const url = single(key("url"));
     const est = single(key("est"));
-    if (!v || !src || src.t !== "str" || !src.v.trim() || (est && isId(est, "true"))) continue;
+    if (!v || !src || src.t !== "str" || !src.v.trim() || FILE_SRC.test(src.v.trim()) || (est && isId(est, "true"))) continue;
     // an address the script works out may well be a page's; one written out links a page only when it is https
     if (key("url") && (url?.t !== "str" || /^\s*https:\/\//i.test(url.v))) continue;
     const value = single(v)?.t === "str" ? single(v).v.trim() : "";
