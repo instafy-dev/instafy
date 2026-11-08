@@ -947,6 +947,57 @@ fn a_browser_turn_that_hands_back_reads_its_part_right_before_the_request() {
     }
 }
 
+/// A browser turn writes a value as not found on a page only after it searched the whole text its
+/// step returned and opened that page's own tab or link named for it, and a turn whose findings go
+/// back to the building turn names such a link it didn't open in its unread line, which its second
+/// pass reads. Told only to say where it looked, a warranty's browser part printed the last 1,100
+/// and 700 characters of three product pages, each ending in a "Warranty" link it never opened,
+/// wrote the warranty as not found with nothing unread, and the build replied that the pages did
+/// not show it (a local test, Nov 8). Each fact carries what it doesn't confirm, since later turns
+/// read only these lines. A turn that hands nothing back is told the same of a value it didn't
+/// find, and nothing of an unread line.
+#[test]
+fn a_browser_turn_reads_the_whole_page_and_its_own_link_before_a_value_is_not_found() {
+    let tmp = space();
+    let routed = |hands_back: bool| {
+        json!({
+            "browserTransport": "shared",
+            "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+            "browserHandsBack": hands_back,
+            "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "00000000-0000-4000-8000-0000000000a1",
+                "routed": true,
+            },
+            "writeScope": {"mode": "read_only"},
+        })
+    };
+    let request = "Add each laptop's warranty from its own page.";
+    let limits = "Octo's later turns read only these lines, never your reply's words, so a fact \
+                  carries what it doesn't confirm: which of its values you chose, not the page, \
+                  and what it leaves out.";
+    let search = "Before a value goes under a page as not found, search the whole text the step \
+                  returned (never a slice), and open that page's own tab or link named for it \
+                  (Specs, Warranty, Support, FAQ).";
+    let unread = "A page's own tab or link named for a value you didn't find there is one of them \
+                  until you open it.";
+
+    let (hand_back, _) = prompt_for_request(tmp.path(), request, routed(true), None);
+    for line in [limits, search, unread] {
+        assert_eq!(hand_back.matches(line).count(), 1, "{line}\n{hand_back}");
+    }
+    let at = |line: &str| hand_back.find(line).unwrap_or_else(|| panic!("{line}"));
+    assert!(at(limits) < at(search), "{hand_back}");
+    assert!(at(search) < at(unread), "{hand_back}");
+    assert!(at(unread) < at("\n\nLatest user request:\n"), "{hand_back}");
+
+    let (other, _) = prompt_for_request(tmp.path(), request, routed(false), None);
+    for line in [limits, search] {
+        assert_eq!(other.matches(line).count(), 1, "{line}\n{other}");
+    }
+    assert!(!other.contains(unread), "{other}");
+}
+
 /// A browser turn whose findings go back to the building turn ends its reply with a finding line
 /// per page, and the replies guide it reads never tells it to keep its findings out of a reply:
 /// one that ended with none handed back nothing, and nothing was built (a local test, Nov 3). The

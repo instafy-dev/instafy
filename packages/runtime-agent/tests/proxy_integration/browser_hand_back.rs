@@ -50,6 +50,10 @@ const BUILT_BY_HAND: &str =
     "Built a responsive comparison page at `sites/laptops/index.html` with the maker's figures.";
 /// How a hand-back cites what the browser found (runtime-agent `jobs/browser_hand_back.rs`).
 const CITE_LINE: &str = "\n- Cite a page only for a fact listed under it. A finding with `stopped` was not read: say which page and why in plain words, never the stop's own word (`login`: the page asked to sign in; `captcha`: the page showed a check that a person is browsing; `paywall`: the page is behind a paywall; `blocked`: the page couldn't be read; `robots`: the page asks automated browsers not to read it; `download`: the page was a file to download; `secret`: the page showed private details, so Octo stopped there; `link-only`: the page is on a site Octo only links to; `no-page`: the page wasn't at the address Octo tried; `timed-out`: the page didn't answer in time; `covered`: the page was covered by a cookie notice or dialog the browser couldn't close; any other: the page couldn't be read), and do not try it another way.\n";
+/// How a hand-back reads a fact that says a value was not found on a page (runtime-agent
+/// `jobs/browser_hand_back.rs`): a build once said a maker's product pages "did not show warranty
+/// terms" from three such facts.
+const NOT_FOUND_LINE: &str = "\n- A \"not found\" fact means Octo didn't find it there: say \"I didn't find…\" and where you looked, never that a page doesn't show it.\n";
 /// What the lane of a routed build says (runtime-agent `jobs/mod.rs`).
 const WRITE_LANE: &str = "\nDirect workspace-change response contract:\n";
 const NO_ACTIONS: &str = "- Do not emit `multi_agent_plan`, goals, integrations, browser/location actions, or broad coordination metadata.";
@@ -619,8 +623,10 @@ async fn on_the_cards_thread(space: &Space<'_>) -> Result<()> {
     );
     assert!(prompt.contains("Battery: 74 Wh"), "{prompt}");
     assert!(prompt.contains("Price: from 619 euros"), "{prompt}");
-    // A page is cited only for a fact listed under it.
+    // A page is cited only for a fact listed under it, and a value not found is what Octo didn't
+    // find there.
     assert!(prompt.contains(CITE_LINE), "{prompt}");
+    assert!(prompt.contains(NOT_FOUND_LINE), "{prompt}");
     for old in ["the reply is the source", "the list is its index"] {
         assert!(!prompt.contains(old), "{old}: {prompt}");
     }
@@ -741,6 +747,7 @@ async fn as_the_chats_first_building_turn(space: &Space<'_>) -> Result<()> {
     assert!(!prompt.contains("The person's request,"), "{prompt}");
     assert!(!prompt.contains("cannot open the browser"), "{prompt}");
     assert!(prompt.contains(CITE_LINE), "{prompt}");
+    assert!(prompt.contains(NOT_FOUND_LINE), "{prompt}");
     assert!(prompt.contains(WRITE_LANE), "{prompt}");
     assert!(prompt.contains(NO_ACTIONS), "{prompt}");
 

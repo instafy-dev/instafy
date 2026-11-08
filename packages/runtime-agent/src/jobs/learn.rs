@@ -155,6 +155,9 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     include_str!("legacy/agents-doc-v15.md"),
     // From before a reply never asked the person to accept cookies or tracking.
     include_str!("legacy/agents-doc-v16.md"),
+    // From before a turn read a public page only with `instafy web read` or a reading command a
+    // skill names, never with curl, wget, python, node or another script.
+    include_str!("legacy/agents-doc-v17.md"),
 ];
 /// Whether `text` is a copy of `AGENTS.md` Instafy ships, the current one or an earlier one. A
 /// copy a space edited, or a team's own, is not: its rules are the space's.
@@ -2360,6 +2363,39 @@ mod tests {
 
         let previous = include_str!("legacy/agents-doc-v16.md");
         assert!(!flat(previous).contains(rule));
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join(AGENTS_DOC_FILENAME);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
+    }
+
+    /// A building turn listed its tools, then read a shop's site twice with python's `urllib`:
+    /// no robots.txt, budget or pacing, and Details showed only "Ran a command" (a local test,
+    /// Nov 8). The research skill says never to fetch pages with curl, wget or ad-hoc scripts,
+    /// but a turn that doesn't load it never reads that. `AGENTS.md`'s "Responsiveness", which
+    /// every building turn reads, says it in one line: a public page is read with `instafy web
+    /// read` or a reading command a skill names, never with a script, while running one to build
+    /// or check the space's own pages stays fine. A browser turn, which has no shell, reads only
+    /// "Replies". The copy from before is upgraded.
+    #[test]
+    fn agents_doc_says_a_turn_reads_a_public_page_only_with_instafys_reader() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let doc = flat(AGENTS_DOC_TEMPLATE);
+        let section = |name: &str| {
+            doc.split(name)
+                .nth(1)
+                .and_then(|rest| rest.split("## ").next())
+                .map(str::to_string)
+                .expect("section")
+        };
+        let rule = "- Read a public page only with `instafy web read <address>` or a reading command a skill names, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.";
+        assert!(section("## Responsiveness").contains(rule), "{doc}");
+        assert!(!section("## Replies").contains("instafy web read"), "{doc}");
+        assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+
+        let previous = include_str!("legacy/agents-doc-v17.md");
+        assert!(!flat(previous).contains("instafy web read"));
         let workspace = tempdir().expect("workspace");
         let path = workspace.path().join(AGENTS_DOC_FILENAME);
         fs::write(&path, previous).unwrap();
