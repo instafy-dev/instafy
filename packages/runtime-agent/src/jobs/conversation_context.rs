@@ -757,6 +757,45 @@ fn repeated_person_messages(entries: &[JsonValue]) -> HashSet<usize> {
     repeated
 }
 
+/// The history without the browser turns of `jobs`: every browser entry of a run one of whose
+/// entries names one of those jobs, as the controller stamps a job's rows (`metadata.jobId`). A
+/// browser turn another section of the prompt quotes in full stays out of the replay, which
+/// would quote its findings again (`browser_hand_back::browser_turns_quoted_elsewhere`). None
+/// when none goes.
+pub fn leave_out_browser_turns(history: Option<&JsonValue>, jobs: &[String]) -> Option<JsonValue> {
+    if jobs.is_empty() {
+        return None;
+    }
+    let entries = history?.as_array()?;
+    let runs: HashSet<&str> = entries
+        .iter()
+        .filter(|entry| is_browser_entry(entry))
+        .filter(|entry| {
+            entry
+                .pointer("/metadata/jobId")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|job| {
+                    jobs.iter()
+                        .any(|left| left.eq_ignore_ascii_case(job.trim()))
+                })
+        })
+        .filter_map(|entry| entry_text(entry, "runId"))
+        .collect();
+    if runs.is_empty() {
+        return None;
+    }
+    Some(JsonValue::Array(
+        entries
+            .iter()
+            .filter(|entry| {
+                !(is_browser_entry(entry)
+                    && entry_text(entry, "runId").is_some_and(|run| runs.contains(run)))
+            })
+            .cloned()
+            .collect(),
+    ))
+}
+
 /// Whether an assistant entry is the Details note a browser turn moved its findings into
 /// (`browser_hand_back::move_findings_into_details`).
 fn is_findings_note(entry: &JsonValue) -> bool {
@@ -2062,7 +2101,7 @@ mod tests {
         let history = json!([
             {"role": "user", "content": "Confirm the metro route in the operator's journey planner.", "runId": "run-1", "lane": "browser"},
             {"role": "assistant", "content": lines, "runId": "run-1", "lane": "browser", "metadata": {"details": {"browserFindings": {"pages": 1, "pagesRead": 1}}}},
-            {"role": "assistant", "content": "The journey planner allowed selecting São Bento as the start, but did not display a route result.", "runId": "run-1", "lane": "browser"},
+            {"role": "assistant", "content": "On en.metrodoporto.pt: The journey planner allowed selecting São Bento as the start, but did not display a route result.", "runId": "run-1", "lane": "browser"},
         ]);
         let context =
             build_prompt_conversation_context(Some(&history), None, ThreadLane::SharedBrowser);

@@ -1507,13 +1507,14 @@ reply gives an address by its words: a turn's findings listed an article
 address it made up as stopped. Any other is refused at once, before any prompt
 or load, with "No message and no page Octo read gave this address, so it was
 not opened: Octo opens only addresses it was given. Open <the site> and follow
-its links to the page, or use the site's own search." Its result says so as a
-fact too (`structuredContent.error.code: "address_not_given"`): the browser
-never opened such an address, so runtime-agent leaves out a finding line that
-gives it as a page that stopped the turn, unless a later step opened it, and it
-stays in the turn's unread line for the second pass to find by the site's
-links. A turn read two such refusals as "undefined", wrote one as `no-page`,
-and its page said the site had no page at that address. A turn opened two article
+its links to the page, or use the site's own search." runtime-agent reads the
+refusal by those words, the only thing its result says: the browser never
+opened such an address, so it leaves out a finding line, of any pass of the
+turn, that gives it as a page that stopped the turn, unless a step opened it.
+It stays in the turn's unread line for the second pass to find by the site's
+links, and a turn whose only line it was still gets that pass. A turn read two
+such refusals as "undefined", wrote one as `no-page`, and its page said the
+site had no page at that address. A turn opened two article
 addresses it made up on a reviewer's site, one of which waited 20 seconds for
 nothing, with the browser skill's "Never … a guessed path" in its thread. A
 site's root always opens, an address on no public site is left to the
@@ -1679,8 +1680,11 @@ a time, not from code, reads only a result's structured content when it has
 one, so a refused step still tells it what to do, with its `[step_refused_…]`
 code, and a turn that printed a step's `r.structuredContent`, as a successful
 step's text tells it to, read two refused addresses, a stale snapshot and the
-tab limit as "undefined". The owner-local observation's failure answers the
-same way.
+tab limit as "undefined". A step whose arguments the server refused (a click
+with no fresh snapshot) answers the same way, not with a protocol error, which
+reaches a code cell with no structured content; a tool it does not offer is
+still one. The owner-local observation's failures answer the same way, and so
+do the Personal Browser's, with the host's code beside the reason.
 If the client temporarily loses its network, it retains the exact visible
 request, shows reconnecting state, and retries the bounded poll/decision path;
 the origin's one-use fingerprint and replay checks remain authoritative.
@@ -2805,7 +2809,11 @@ unless the policy is `"covered"`.
   though it wears the stamp of the progress rows it leaves out (`source:
   agent`, `kind: update`, `outcome: in_progress`, with `details.browserFindings`):
   left out with them, a page built after three question turns read each as
-  `{"findings":[]}` and read their sites again itself. Nor
+  `{"findings":[]}` and read their sites again itself. A browser turn another
+  section of the building turn's prompt quotes in full stays out of its replay:
+  the one its hand-back carries on, and, for a turn that left its thread for
+  another mode, those since that thread's last turn; else it read the same
+  findings twice. Nor
   does a browser turn's findings note reach the routing step's history: it is
   Details, and its lines quote page text; nor any other replay but its browser
   turn's own. It takes no
@@ -2869,11 +2877,13 @@ unless the policy is `"covered"`.
   the browser." in place of the words, as earlier runtimes did. A turn that
   no hand-back follows and that wrote no words of its own (a question's turn,
   or one whose every page stopped it: no hand-back follows a turn that read no
-  page) posts what its finding lines say: each page's facts, then each page
-  that stopped it, by its site, in plain words ("The page on visitporto.travel
-  didn't answer in time."), and "Finished in the browser." only when they give
-  neither. Told only that line, the person never read that a journey planner
-  "did not display a route result". The building turn cannot open the
+  page) posts what its finding lines say: each page's facts after its site
+  ("On livrarialello.pt: Open daily, 09:00 to 19:30."), as a fact may name its
+  page only as "this page", then each page that stopped it, by its site, in
+  plain words ("The page on visitporto.travel didn't answer in time."), one
+  sentence for a site and a stop, and "Finished in the browser." only when they
+  give neither. Told only that line, the person never read that a journey
+  planner "did not display a route result". The building turn cannot open the
   browser, so the browser turn reads what the request needs before it ends:
   each item's own page from the links it read and, for reviews, each
   reviewer's own site, by an observed address, the site's search box or other
@@ -2891,11 +2901,13 @@ unless the policy is `"covered"`.
   fact listed under it, reads a page that stopped the browser turn as its stop
   in plain words, never the stop's own word (each stop has its words:
   `timed-out`, the page didn't answer in time; `covered`, the page was covered
-  by a cookie notice or dialog the browser couldn't close; and so on), in its
-  hand-back, the browser turns since its last turn and its replay of the chat
-  alike, and never reads the browser turn's own words. Told plain words for
-  two stops, a build wrote "Notebookcheck was blocked" for a search a cookie
-  notice covered. A browser turn that used the browser and wrote no
+  by a cookie notice or dialog the browser couldn't close; and so on, each true
+  in a reply that shows no address; `blocked`, which the controller makes of
+  any word it does not list, couldn't be read), in its hand-back, the browser
+  turns since its last turn and its replay of the chat alike, and never reads
+  the browser turn's own words. Told plain words for two stops, a build wrote
+  "Notebookcheck was blocked" for a search a cookie notice covered. A browser
+  turn that used the browser and wrote no
   finding line would leave a later building turn nothing of the pages it read,
   and one that continues a building card would hand nothing back: it gets the
   runtime's wrap-up pass on its own thread, which holds those

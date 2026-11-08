@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
 const modulePath = path.join(packageRoot, "dist", "personalBrowserControlServer.js");
-const { PersonalBrowserControlServer } = await import(modulePath);
+const { PersonalBrowserControlServer, PersonalBrowserControlError } = await import(modulePath);
 
 function requestJson(url, options = {}) {
   const target = new URL(url);
@@ -273,7 +273,7 @@ test("Personal Browser exposes only its bounded operations as authenticated MCP 
         },
       },
     });
-    assert.equal(unknownArgument.body.error.code, -32602);
+    assertRefusedStep(unknownArgument);
     assert.equal(calls.length, 1);
 
     const selectorArgument = await requestJson(`${credentials.controlUrl}/mcp`, {
@@ -286,7 +286,7 @@ test("Personal Browser exposes only its bounded operations as authenticated MCP 
         params: { name: "click", arguments: { selector: "button" } },
       },
     });
-    assert.equal(selectorArgument.body.error.code, -32602);
+    assertRefusedStep(selectorArgument);
     assert.equal(calls.length, 1);
 
     const tabWithScript = await requestJson(`${credentials.controlUrl}/mcp`, {
@@ -299,7 +299,7 @@ test("Personal Browser exposes only its bounded operations as authenticated MCP 
         params: { name: "open_tab", arguments: { url: "https://example.test", background: true } },
       },
     });
-    assert.equal(tabWithScript.body.error.code, -32602, "open_tab has no hidden or background variant");
+    assertRefusedStep(tabWithScript, "open_tab has no hidden or background variant");
     assert.equal(calls.length, 1);
 
     const opened = await requestJson(`${credentials.controlUrl}/mcp`, {
@@ -326,6 +326,17 @@ test("Personal Browser exposes only its bounded operations as authenticated MCP 
     await server.stop();
   }
 });
+
+// A step whose arguments the browser refused ran nowhere, and says why as any failed step does:
+// in its text and as its structured content's `error.reason`.
+function assertRefusedStep(answer, message) {
+  assert.equal(answer.body.error, undefined, message);
+  assert.equal(answer.body.result.isError, true, message);
+  const [text] = answer.body.result.content;
+  assert.equal(typeof text.text, "string", message);
+  assert.notEqual(text.text, "", message);
+  assert.deepEqual(answer.body.result.structuredContent, { error: { reason: text.text } }, message);
+}
 
 test("binding rotation while a request body is streaming prevents operation dispatch", async () => {
   const calls = [];
@@ -430,6 +441,62 @@ test("a Personal Browser step's result holds its page once, beside one line that
     const navigate = await call("navigate", { url: "https://example.test/" });
     assert.equal(navigate.content[0].text, "Opened the page. Its result is in structuredContent.");
     assert.deepEqual(navigate.structuredContent, results.navigate);
+  } finally {
+    await server.stop();
+  }
+});
+
+// A step that failed reaches the agent with why, as its text and as its structured content's
+// `error.reason`, beside the browser's code for it: a code cell that printed a step's
+// `r.structuredContent`, as a successful step's text tells it to, read "undefined" for a protocol
+// error, which reaches the agent with no structured content. A tool the browser doesn't offer is
+// no step of it.
+test("a failed Personal Browser step says why in its result, never as a protocol error", async () => {
+  const server = new PersonalBrowserControlServer({
+    handle: async (operation) => {
+      if (operation === "click") {
+        throw new PersonalBrowserControlError(403, "activation_denied", "The user denied the browser activation.");
+      }
+      throw new Error("the page crashed");
+    },
+    logger: () => {},
+  });
+  const credentials = await server.bindProject("failed-step-project");
+  const target = new URL(credentials.controlUrl);
+  const headers = {
+    Authorization: `Bearer ${credentials.token}`,
+    Host: target.host,
+    "X-Instafy-Project-Id": "failed-step-project",
+    "Content-Type": "application/json",
+  };
+  const call = async (name, args) =>
+    (await requestJson(`${credentials.controlUrl}/mcp`, {
+      method: "POST",
+      headers,
+      body: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
+    })).body;
+  try {
+    const denied = await call("click", { index: 0 });
+    assert.equal(denied.error, undefined);
+    assert.deepEqual(denied.result, {
+      content: [{ type: "text", text: "The user denied the browser activation." }],
+      structuredContent: {
+        error: { reason: "The user denied the browser activation.", code: "activation_denied" },
+      },
+      isError: true,
+    });
+    const failed = await call("snapshot", {});
+    assert.equal(failed.error, undefined);
+    assert.deepEqual(failed.result, {
+      content: [{ type: "text", text: "Personal Browser tool failed." }],
+      structuredContent: {
+        error: { reason: "Personal Browser tool failed.", code: "personal_browser_failed" },
+      },
+      isError: true,
+    });
+    const unknown = await call("evaluate", {});
+    assert.equal(unknown.error.code, -32602);
+    assert.equal(unknown.result, undefined);
   } finally {
     await server.stop();
   }

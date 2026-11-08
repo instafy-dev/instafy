@@ -11315,15 +11315,16 @@ required = true
     /// The addresses the browser refused to open because no message or page gave them, kept
     /// for the turn's findings (`jobs::browser_hand_back::leave_out_addresses_never_opened`) and
     /// never projected: each `navigate` or `open_tab` refused so, once, as it asked for the
-    /// address. Any other failure, and any other step, names none.
+    /// address, read by the refusal's own words, the only thing its result says. Any other
+    /// failure, and any other step, names none.
     #[test]
     fn the_adapter_keeps_the_addresses_the_browser_refused_as_not_given_unprojected() {
         let mut adapter = CodexEventStreamAdapter::default();
-        let end = |call: usize, tool: &str, url: &str, code: Option<&str>| {
-            let mut error = json!({ "reason": "No message and no page Octo read gave this address, so it was not opened." });
-            if let Some(code) = code {
-                error["code"] = json!(code);
-            }
+        const REFUSED: &str = "No message and no page Octo read gave this address, so it was not opened: Octo opens only addresses it was given. Open https://www.tomshardware.com/ and follow its links to the page, or use the site's own search.";
+        const DOWN: &str =
+            "The site did not answer in time, so nothing was opened and the page is still blank.";
+        let end = |call: usize, tool: &str, url: &str, reason: &str| {
+            let error = json!({ "reason": reason });
             Event {
                 id: "evt_mcp_end".to_string(),
                 msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
@@ -11341,7 +11342,7 @@ required = true
                     plugin_id: None,
                     duration: Duration::from_millis(1),
                     result: Ok(CallToolResult {
-                        content: vec![json!({"type": "text", "text": "refused"})],
+                        content: vec![json!({"type": "text", "text": reason})],
                         structured_content: Some(json!({ "error": error })),
                         is_error: Some(true),
                         meta: None,
@@ -11354,21 +11355,11 @@ required = true
         };
         let search = "https://www.tomshardware.com/search?searchTerm=Framework%20Laptop%2012";
         for event in [
-            end(1, "navigate", search, Some("address_not_given")),
-            end(
-                2,
-                "open_tab",
-                "https://reviews.example/laptop-12",
-                Some("address_not_given"),
-            ),
-            end(3, "navigate", search, Some("address_not_given")),
-            end(4, "navigate", "https://down.example/page", None),
-            end(
-                5,
-                "click",
-                "https://reviews.example/laptop-16",
-                Some("address_not_given"),
-            ),
+            end(1, "navigate", search, REFUSED),
+            end(2, "open_tab", "https://reviews.example/laptop-12", REFUSED),
+            end(3, "navigate", search, REFUSED),
+            end(4, "navigate", "https://down.example/page", DOWN),
+            end(5, "click", "https://reviews.example/laptop-16", REFUSED),
         ] {
             for projected in adapter.collect(&event) {
                 assert!(!projected.to_string().contains("https://"), "{projected}");

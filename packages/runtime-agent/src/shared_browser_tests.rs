@@ -3429,8 +3429,9 @@ async fn a_failed_step_with_facts_still_tells_the_model_what_failed() {
 /// refusal's own way on ("Open https://www.tomshardware.com/ and follow its
 /// links to the page") never reached it, and it wrote the refused address as a
 /// page that doesn't exist. Every failed step's structured content now holds
-/// its words (`error.reason`), whatever else it carries, and an address
-/// refused because nothing gave it says so as a fact (`error.code`).
+/// its words (`error.reason`), whatever else it carries, and nothing they
+/// don't say: the run reads an address refused because nothing gave it by
+/// those words.
 #[tokio::test]
 async fn no_failed_step_reads_as_undefined() {
     use std::os::unix::process::ExitStatusExt;
@@ -3492,23 +3493,18 @@ async fn no_failed_step_reads_as_undefined() {
         assert!(structured["error"]["reason"].is_string(), "{structured}");
         assert!(view.direct.contains(words), "{}", view.direct);
     }
-    // Only the refusal of an address nothing gave is that fact.
+    // Nothing beyond the step's own words: the refusal of an address nothing gave is read by
+    // those words, as the run's steps read it, by the address the step asked for.
     let refusal = failed(refused, "", 1);
     assert_eq!(
-        refusal.structured_content.as_ref().unwrap()["error"]["code"],
-        ADDRESS_NOT_GIVEN_CODE
+        refusal.structured_content,
+        Some(json!({ "error": { "reason": refused } }))
     );
     let stale = failed(
         "Shared Browser snapshot is stale; take a fresh snapshot before acting",
         "",
         1,
     );
-    assert!(
-        stale.structured_content.as_ref().unwrap()["error"]
-            .get("code")
-            .is_none()
-    );
-    // As the run's steps read it, by the address the step asked for.
     let structured = refusal.structured_content.clone();
     let asked =
         json!({ "url": "https://www.tomshardware.com/search?searchTerm=Framework%20Laptop%2012" });
@@ -13473,21 +13469,42 @@ async fn mcp_wire_offers_the_bounded_operations_and_refuses_any_other_call() {
     ))
     .unwrap();
     assert_eq!(listed["result"], tools, "{listed:#}");
+    // A tool the browser doesn't offer is no step of it.
+    let answer = wire.call("upload", json!({})).await;
+    assert_eq!(
+        answer["error"],
+        json!({ "code": -32602, "message": "unknown Shared Browser tool upload" }),
+        "{answer}"
+    );
+    assert!(answer.get("result").is_none(), "{answer}");
+    // A step whose arguments the browser refused ran nowhere, and says why as every failed
+    // step does, in its text and its structured content: answered with a protocol error, it
+    // reached a code cell with no structured content, and a turn that printed
+    // `r.structuredContent` read "undefined" four times for clicks with no fresh snapshot (a
+    // local test, Nov 4).
     for (name, arguments, message) in [
-        ("upload", json!({}), "unknown Shared Browser tool upload"),
         (
             "status",
             json!({ "verbose": true }),
             "Shared Browser status does not accept arguments",
         ),
+        (
+            "click",
+            json!({ "index": 3 }),
+            "Shared Browser action requires one valid index and its fresh snapshotId",
+        ),
     ] {
         let answer = wire.call(name, arguments).await;
+        assert!(answer.get("error").is_none(), "{answer}");
         assert_eq!(
-            answer["error"],
-            json!({ "code": -32602, "message": message }),
+            answer["result"],
+            json!({
+                "content": [{ "type": "text", "text": message }],
+                "structuredContent": { "error": { "reason": message } },
+                "isError": true,
+            }),
             "{answer}"
         );
-        assert!(answer.get("result").is_none(), "{answer}");
     }
 }
 

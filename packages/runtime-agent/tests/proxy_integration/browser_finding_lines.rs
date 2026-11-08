@@ -132,6 +132,24 @@ fn a_device_browser_turn_that_paused_for_the_person_keeps_its_reply_via_proxy() 
     run_on_a_large_stack(Case::Device(Device::Pauses))
 }
 
+/// A whole device turn whose first step the browser refused because no message or page gave its
+/// address, and that wrote that address as a page with no page there: the browser never opened
+/// it, so its job leaves the line out, as the run reported the refusal
+/// (`CodexRunOutput::browser_not_given`). Told only "undefined" of such a refusal, a
+/// comparison's browser part wrote the address as `no-page`, and its page said Tom's Hardware
+/// "had no page at the address checked" (a local test, Nov 7).
+#[test]
+fn a_device_browser_turns_refused_address_is_no_finding_via_proxy() -> Result<()> {
+    if std::env::var(CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(
+            CHILD,
+            "browser_hand_back::finding_lines::a_device_browser_turns_refused_address_is_no_finding_via_proxy",
+            "browser-finding-lines-device-refused",
+        );
+    }
+    run_on_a_large_stack(Case::Device(Device::RefusedAddress))
+}
+
 /// A hand-back turn whose page showed a secret stops there and tells the person which control
 /// shows it: that reply stays theirs.
 #[test]
@@ -176,6 +194,9 @@ enum Device {
     Pauses,
     /// The page it opens shows a secret, which it stops at.
     MeetsASecret,
+    /// Its first step is refused an address nothing gave; it opens the maker's page and writes
+    /// that address as a page with no page there.
+    RefusedAddress,
 }
 
 fn run_on_a_large_stack(case: Case) -> Result<()> {
@@ -327,6 +348,16 @@ async fn provider_request(
                 // A first answer that used no browser, which the runtime tries again.
                 (Device::ReadsOnRetry, false, _) => final_answer(
                     "I'll compare the three laptops on a page once I have read them.",
+                    json!([]),
+                ),
+                (Device::RefusedAddress, _, 0) => {
+                    device_step("refused", "navigate", json!({ "url": DEVICE_REFUSED }))
+                }
+                (Device::RefusedAddress, _, 1) => {
+                    device_step("open", "navigate", json!({ "url": DEVICE_PAGE }))
+                }
+                (Device::RefusedAddress, _, _) => final_answer(
+                    &format!("{REFUSED_WORDS}\n{READ_13}\n{REFUSED_AS_NO_PAGE}"),
                     json!([]),
                 ),
                 (_, _, 0) => device_step("open", "navigate", json!({ "url": DEVICE_PAGE })),
@@ -748,6 +779,16 @@ pub(super) const DEVICE_NAMESPACE: &str = "mcp__instafy_personal_browser";
 pub(super) const DEVICE_TOKEN: &str = "inert-finding-lines-device-token";
 /// The page the turn opens there, and the address that browser reports for the step.
 pub(super) const DEVICE_PAGE: &str = "https://maker.example/laptop-13";
+/// An address no message and no page gave, which the browser refuses to open, and the words it
+/// refuses it with, as its text and its structured content's `error.reason` (the Shared
+/// Browser's `refuseUngivenAddress`, runtime-agent `shared_browser::failed_tool_result`).
+pub(super) const DEVICE_REFUSED: &str = "https://reviews.example/laptop-12";
+pub(super) const DEVICE_REFUSAL: &str = "No message and no page Octo read gave this address, so it was not opened: Octo opens only addresses it was given. Open https://reviews.example/ and follow its links to the page, or use the site's own search.";
+/// A line that writes the refused address as a page with no page there.
+const REFUSED_AS_NO_PAGE: &str =
+    r#"{"url": "https://reviews.example/laptop-12", "stopped": "no-page"}"#;
+/// What a device turn whose step was refused that address replies, before its lines.
+const REFUSED_WORDS: &str = "Read the Laptop 13's own page.";
 /// What a turn that paused for the person to sign in replies.
 const PAUSE_WORDS: &str = "Sign in on the highlighted fields in the browser on this device, then choose Let Octo continue.";
 /// What a turn whose page showed a secret replies.
@@ -815,6 +856,19 @@ pub(super) async fn device_browser(
                 .unwrap_or_default()
                 .to_string();
             state.calls.lock().unwrap().push(tool.clone());
+            if tool == "navigate"
+                && payload
+                    .pointer("/params/arguments/url")
+                    .and_then(Value::as_str)
+                    == Some(DEVICE_REFUSED)
+            {
+                return Json(json!({ "jsonrpc": "2.0", "id": id, "result": {
+                    "content": [{ "type": "text", "text": DEVICE_REFUSAL }],
+                    "structuredContent": { "error": { "reason": DEVICE_REFUSAL } },
+                    "isError": true,
+                }}))
+                .into_response();
+            }
             let structured = match tool.as_str() {
                 "request_human_input" => json!({
                     "humanInputRequired": true,
@@ -992,6 +1046,19 @@ async fn a_whole_device_turn(
             assert_eq!(ended.summary, "", "no reply bubble");
             assert_eq!(notes.len(), 1, "{:?}", ended.final_messages);
             assert_eq!(notes[0].content, format!("{PROMISED_BUILD}\n\n{line}"));
+            assert_eq!(
+                notes[0].metadata.as_ref().unwrap()["browserFindings"],
+                json!({ "pages": 1, "pagesRead": 1 })
+            );
+        }
+        Device::RefusedAddress => {
+            // The address the browser refused is no page that stopped the turn: its line goes,
+            // so every finding left is a page read, and the hand-back carries the turn's words.
+            assert_eq!(calls, ["navigate", "navigate"]);
+            assert_eq!(summary, format!("{REFUSED_WORDS}\n{READ_13}"));
+            assert_eq!(ended.summary, "", "no reply bubble");
+            assert_eq!(notes.len(), 1, "{:?}", ended.final_messages);
+            assert_eq!(notes[0].content, format!("{REFUSED_WORDS}\n\n{READ_13}"));
             assert_eq!(
                 notes[0].metadata.as_ref().unwrap()["browserFindings"],
                 json!({ "pages": 1, "pagesRead": 1 })

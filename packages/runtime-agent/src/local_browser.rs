@@ -417,8 +417,14 @@ impl ServerHandler for LocalBrowserMcpServer {
                 None,
             ));
         }
-        let parsed = parse_observe_request(request.arguments)
-            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+        // An observation whose arguments it refused failed as any other does, with why in its
+        // structured content too ([`observation_result`]).
+        let parsed = match parse_observe_request(request.arguments) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return Ok(observation_result(Err(anyhow!("{error}"))).into());
+            }
+        };
         let _guard = self.execution_lock.lock().await;
         Ok(
             observation_result(execute_observation(&self.config, &self.workspace, parsed).await)
@@ -1304,22 +1310,29 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(listed["result"], tools, "{listed:#}");
-        for (name, arguments, message) in [
-            ("navigate", json!({}), "unknown owner-local browser tool"),
-            (
-                "observe",
-                json!({ "observations": [] }),
-                "observe requires a URL string",
-            ),
-        ] {
-            let answer = wire.call(name, arguments).await;
-            assert_eq!(
-                answer["error"],
-                json!({ "code": -32602, "message": message }),
-                "{answer}"
-            );
-            assert!(answer.get("result").is_none(), "{answer}");
-        }
+        // A tool the browser doesn't offer is no observation.
+        let answer = wire.call("navigate", json!({})).await;
+        assert_eq!(
+            answer["error"],
+            json!({ "code": -32602, "message": "unknown owner-local browser tool" }),
+            "{answer}"
+        );
+        assert!(answer.get("result").is_none(), "{answer}");
+        // An observation whose arguments it refused failed as any other does, with why in its
+        // text and its structured content: a protocol error reaches a code cell with none, and a
+        // cell that prints `r.structuredContent` reads "undefined".
+        let answer = wire.call("observe", json!({ "observations": [] })).await;
+        assert!(answer.get("error").is_none(), "{answer}");
+        let reason = "Owner-local browser observation failed: observe requires a URL string";
+        assert_eq!(
+            answer["result"],
+            json!({
+                "content": [{ "type": "text", "text": reason }],
+                "structuredContent": { "error": { "reason": reason } },
+                "isError": true,
+            }),
+            "{answer}"
+        );
     }
 
     #[tokio::test]

@@ -3386,8 +3386,18 @@ impl ServerHandler for SharedBrowserMcpServer {
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> std::result::Result<CallToolResponse, McpError> {
         let tool = request.name.to_string();
-        let browser_request = mcp_tool_request(&tool, request.arguments)
-            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+        let browser_request = match mcp_tool_request(&tool, request.arguments) {
+            Ok(browser_request) => browser_request,
+            // A tool the browser doesn't offer is no step of it.
+            Err(error) if !self.tools.iter().any(|offered| offered.name == tool) => {
+                return Err(McpError::invalid_params(error.to_string(), None));
+            }
+            // A step whose arguments the browser refused ran nowhere, and says why as every
+            // failed step does ([`failed_tool_result`]): a protocol error reaches a code cell
+            // with no structured content, and a turn that printed `r.structuredContent` read
+            // "undefined" for a click with no fresh snapshot (a local test, Nov 4).
+            Err(error) => return Ok(failed_tool_result(&error.to_string()).into()),
+        };
         // rmcp may dispatch independent requests concurrently. The approval
         // protocol deliberately owns one fixed runtime-local request slot, so
         // serialize every browser observation and mutation through the same
@@ -3438,24 +3448,22 @@ fn failed_call_result(error: &anyhow::Error) -> CallToolResult {
 /// The words of the controller's refusal of an address no message and no page the chat read
 /// gave (`refuseUngivenAddress` in `assets/shared-browser-cli.js`).
 const ADDRESS_NOT_GIVEN_WORDS: &str = "Octo opens only addresses it was given";
-/// The code a failed step's structured content gives that refusal (`error.code`).
-pub(crate) const ADDRESS_NOT_GIVEN_CODE: &str = "address_not_given";
 
 /// The address a `navigate` or `open_tab` asked for that the browser refused to open because no
-/// message and no page the chat read gave it ([`ADDRESS_NOT_GIVEN_CODE`] in the call's
-/// structured content), as the call's arguments name it; None for any other call. The browser
-/// never opened it, so no finding of the turn stands for it
-/// (`jobs::browser_hand_back::leave_out_addresses_never_opened`).
+/// message and no page the chat read gave it, as the call's arguments name it: its failed
+/// result's words (`error.reason`) are that refusal's ([`ADDRESS_NOT_GIVEN_WORDS`]), the only
+/// thing the result says. None for any other call. The browser never opened it, so no finding of
+/// the turn stands for it (`jobs::browser_hand_back::leave_out_addresses_never_opened`).
 pub(crate) fn address_not_given(
     tool: &str,
     arguments: Option<&JsonValue>,
     structured: Option<&JsonValue>,
 ) -> Option<String> {
     if !matches!(tool, "navigate" | "open_tab")
-        || structured?
-            .pointer("/error/code")
-            .and_then(JsonValue::as_str)
-            != Some(ADDRESS_NOT_GIVEN_CODE)
+        || !structured?
+            .pointer("/error/reason")
+            .and_then(JsonValue::as_str)?
+            .contains(ADDRESS_NOT_GIVEN_WORDS)
     {
         return None;
     }
@@ -3548,19 +3556,15 @@ fn network_failure(message: &str) -> Option<NetworkFailure> {
 /// tab limit as "undefined", so a refusal's own way on ("Open
 /// https://www.tomshardware.com/ and follow its links to the page") never
 /// reached it (a local test, Nov 7), and a model that calls the tools one at a
-/// time reads only a result's structured content when it has one. A refused
-/// address no message or page gave says so as a fact too
-/// ([`ADDRESS_NOT_GIVEN_CODE`]).
+/// time reads only a result's structured content when it has one. It says
+/// nothing its words don't: the run reads a refused address by them
+/// ([`address_not_given`]).
 fn failed_tool_result(message: &str) -> CallToolResult {
     if let Some(failure) = network_failure(message) {
         return network_failure_tool_result(&failure);
     }
     let mut result = CallToolResult::error(vec![ContentBlock::text(message.to_string())]);
-    let mut error = json!({ "reason": message });
-    if message.contains(ADDRESS_NOT_GIVEN_WORDS) {
-        error["code"] = json!(ADDRESS_NOT_GIVEN_CODE);
-    }
-    result.structured_content = Some(json!({ "error": error }));
+    result.structured_content = Some(json!({ "error": { "reason": message } }));
     result
 }
 
