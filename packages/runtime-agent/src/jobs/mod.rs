@@ -9890,10 +9890,11 @@ impl JobProcessor {
                 .as_ref()
                 .map(workspace_commit::PreTurnRefreshOutcome::not_saved_sentences)
                 .unwrap_or_default();
-            // The previews whose sites the turn changed start taking a new
-            // picture while its changes are saved; the reply does not wait
-            // for it.
-            let mut retry_pictures = None;
+            // Once the turn's changes are saved, the open views of the sites
+            // they changed reload and the previews are pictured again; the
+            // reply waits for neither.
+            let mut retry_picture_files = None;
+            let mut retry_saved = false;
             if commit_to_workspace {
                 let retry_commit_files = if read_only_workspace {
                     retry_outcome.files.clone()
@@ -9905,14 +9906,6 @@ impl JobProcessor {
                     ))
                     .await
                 };
-                retry_pictures = Some(preview_pictures::PictureRetake::start(
-                    &workspace_dir,
-                    project_id,
-                    read_only_workspace,
-                    &retry_commit_files,
-                    cancel_signal.clone(),
-                    self.picture_sender(),
-                ));
                 if let Some(token) = workspace_token.as_deref() {
                     if !retry_commit_files.is_empty() {
                         if let Some(sender) = progress_sender
@@ -9950,6 +9943,7 @@ impl JobProcessor {
                         {
                             Ok(Some(result)) => {
                                 retry_artifacts.push(origin_apply_artifact(&result, None));
+                                retry_saved = true;
                                 retry_not_saved.extend(result.not_saved_sentences());
                                 if let Some(sender) = progress_sender
                                     .as_ref()
@@ -9979,20 +9973,20 @@ impl JobProcessor {
                         "metadata": { "reason": "missing_controller_token" }
                     }));
                 }
+                retry_picture_files = Some(retry_commit_files);
             }
             // The card's picture changes in place once it is sent.
-            retry_pictures
-                .unwrap_or_else(|| {
-                    preview_pictures::PictureRetake::start(
-                        &workspace_dir,
-                        project_id,
-                        read_only_workspace,
-                        &retry_outcome.files,
-                        cancel_signal.clone(),
-                        self.picture_sender(),
-                    )
-                })
-                .detach();
+            preview_pictures::reload_and_picture_turn_sites(
+                &workspace_dir,
+                project_id,
+                read_only_workspace,
+                retry_picture_files
+                    .as_deref()
+                    .unwrap_or(&retry_outcome.files),
+                retry_saved,
+                cancel_signal.clone(),
+                self.picture_sender(),
+            );
 
             if read_only_workspace
                 && (retry_reported_files_len > 0 || !retry_read_only_changed_paths.is_empty())
@@ -10205,9 +10199,11 @@ impl JobProcessor {
             .as_ref()
             .map(workspace_commit::PreTurnRefreshOutcome::not_saved_sentences)
             .unwrap_or_default();
-        // The previews whose sites the turn changed start taking a new
-        // picture while its changes are saved; the reply does not wait for it.
-        let mut pictures = None;
+        // Once the turn's changes are saved, the open views of the sites they
+        // changed reload and the previews are pictured again; the reply waits
+        // for neither.
+        let mut picture_files = None;
+        let mut saved = false;
         if commit_to_workspace {
             let commit_files = if read_only_workspace {
                 outcome.files.clone()
@@ -10219,14 +10215,6 @@ impl JobProcessor {
                 ))
                 .await
             };
-            pictures = Some(preview_pictures::PictureRetake::start(
-                &workspace_dir,
-                project_id,
-                read_only_workspace,
-                &commit_files,
-                cancel_signal.clone(),
-                self.picture_sender(),
-            ));
             if let Some(token) = workspace_token.as_deref() {
                 if !commit_files.is_empty() {
                     if let Some(sender) = progress_sender
@@ -10264,6 +10252,7 @@ impl JobProcessor {
                     {
                         Ok(Some(result)) => {
                             artifacts.push(origin_apply_artifact(&result, None));
+                            saved = true;
                             not_saved.extend(result.not_saved_sentences());
                             if let Some(sender) = progress_sender
                                 .as_ref()
@@ -10293,20 +10282,18 @@ impl JobProcessor {
                     "metadata": { "reason": "missing_controller_token" }
                 }));
             }
+            picture_files = Some(commit_files);
         }
         // The card's picture changes in place once it is sent.
-        pictures
-            .unwrap_or_else(|| {
-                preview_pictures::PictureRetake::start(
-                    &workspace_dir,
-                    project_id,
-                    read_only_workspace,
-                    &outcome.files,
-                    cancel_signal.clone(),
-                    self.picture_sender(),
-                )
-            })
-            .detach();
+        preview_pictures::reload_and_picture_turn_sites(
+            &workspace_dir,
+            project_id,
+            read_only_workspace,
+            picture_files.as_deref().unwrap_or(&outcome.files),
+            saved,
+            cancel_signal.clone(),
+            self.picture_sender(),
+        );
 
         if read_only_workspace && (reported_files_len > 0 || !read_only_changed_paths.is_empty()) {
             artifacts.push(build_read_only_write_blocked_artifact(

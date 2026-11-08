@@ -62,6 +62,9 @@ mod pages_of_their_own_chats;
 #[path = "proxy_integration/proxy_stream.rs"]
 mod proxy_stream;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "proxy_integration/saved_change_reload.rs"]
+mod saved_change_reload;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "proxy_integration/stopped_turn.rs"]
 mod stopped_turn;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

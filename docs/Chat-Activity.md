@@ -231,8 +231,10 @@ these changes were saved"), and a later turn saves only what it changes itself. 
 while it saved shows what that save left, with its version.
 
 The step stays in the history later turns read, so a turn that goes on, or undoes it, knows what
-the stopped turn left. The turn never got to its own reload, so every view open on a site it changed
-loads it again, as after an Undo (below), and the site's preview is pictured again.
+the stopped turn left. A turn whose save ran before the Stop reached it reloaded the views open on
+the sites it changed right after that save, as every saved change does (below); for one that never
+saved, every view open on a site it changed loads it again now, as after an Undo, and the site's
+preview is pictured again.
 
 Undo under a stopped turn's unsaved files puts them back as the saved version has them, in the
 folder the turn ran in, with no message and no turn, behind Studio's own "Undo this change?"
@@ -267,20 +269,28 @@ local edit is in the way, keeps every local edit, and pushes nothing. Neither th
 line waits for the folder. A Desktop folder is where the version was saved, so it holds it
 already.
 
-Either Undo changes a site's files with no turn, so no turn tells the pages people have open, and a
-change a Stop kept never got its turn's reload. Once the folder holds the files as the Undo (or the
-Stop) left them, the machine does, for each site whose open preview's folder holds one of them
-(`jobs/preview_pictures.rs`), in a turn's order: it sends the site's reload, the one a turn sends
-after it changes a bound site (`instafy bind command <site> reload '{}'`, from the workspace, with
-no credential), so every open view of the page, on every device, loads it again; then it pictures
-the site again for its card, so the check's own page never takes that reload halfway. The binder
-that serves the site takes the reload. A map that `uw host` serves takes none, and needs none when
-the Undo puts back the map's earlier reload stamp: the map skill's last step (`uw reload`) writes
-one into `data/version.json`, the change's save keeps it, and the host watches that file and
-reloads every open view itself when it changes. A map change made without that step, and a plain
-folder no binder serves, show the Undo after their Reload. The machine runs no `uw reload` for an
-Undo: it writes `data/version.json`, a change no save takes after an Undo, which a stop would keep
-as unsaved work and which the next Undo's folder follow would refuse to move past.
+Every change to a site's files reloads the views people have open on it, from the machine, never
+from a turn: a turn's change once its save is done, either Undo once the folder holds the files as
+the Undo left them, and a change a Stop kept that its turn never saved, once the controller has the
+stop's report (a turn whose save ran before the Stop reached it sent its own after that save, so
+none is sent twice). For each site whose open preview's folder holds one of the changed files
+(`jobs/preview_pictures.rs`), the machine sends the site's reload, `instafy bind command <site>
+reload '{}'` from the workspace with no credential, so every open view of the page, on every
+device, loads it again; then it pictures the site again for its card, so the check's own page never
+takes that reload halfway. No skill tells a turn to send a reload of its own: one from the machine
+covers every page, whichever skill made it.
+
+The command finds the server of the site's folder by the `.bind/server.json` in that folder or the
+nearest one above it, which names the server's address and the folder and address prefix of each
+site it serves, and posts `{"name":"reload","args":{}}` to `<address><prefix>/__bind/command` on
+the loopback address, with the admin token kept in `.bind/admin-token` beside that file. The server
+sends each open view of the site a `reload` command over its events stream, and answers how many
+views it sent it to (`{"viewers": n}`). `instafy bind serve` is such a server, and so is any other
+that answers the same way. A site whose server takes no reload (a dev server that reloads its own
+views, a plain file server) keeps its open views as they are until they load again; the machine
+logs that and shows it to nobody. The machine runs nothing that writes into a site's folder for a
+reload: after an Undo that would be a change no save takes, which a stop would keep as unsaved work
+and which the next Undo's folder follow would refuse to move past.
 
 An Undo that worked leaves one line in the chat's history, in the controller's words: "The person
 undid the change from “…”", quoting the person's request that made the change (`POST

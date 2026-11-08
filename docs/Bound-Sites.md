@@ -232,9 +232,9 @@ page data. The block says the message line was written from the site's own words
 There is no separate result channel; Octo answers through the site's own files, as the skill says ("When someone asks
 from a site"): it reads `bound.json` (`agent.prompt` is the recipe), adds typed `instafy.records@1` records (`type`,
 `ref`, `attr`, `value`, `prov`) to the intent's `target.records` file and replies in one line. When Studio answers
-`done`, the bind client fetches the site's records again, so the clicker's page shows them; other open pages get them
-on their next load or from `instafy bind command <dir> reload '{}'`, which needs the binder's admin token and so does
-not work from a turn in an isolated workspace.
+`done`, the bind client fetches the site's records again, so the clicker's page shows them; every other open page loads
+them once the turn's change is saved, when the machine sends the site its reload (docs/Chat-Activity.md), so the turn
+sends none of its own.
 
 ## 2b. Location, follow mode and first draw (the page's half)
 
@@ -415,7 +415,8 @@ site (an `index.html` and no `bound.json`) gets the client added to its pages.
 
 ## 5. What is not here yet
 
-- A structured result channel for asks: Octo writes records into the site's files and reloads open pages (§2a).
+- A structured result channel for asks: Octo writes records into the site's files, and open pages load them once the
+  change is saved (§2a).
 - Ask caps across Studio tabs: one ask at a time holds per tab; the controller's six in ten minutes is kept in each
   controller process's memory.
 - A trusted intent list in Studio: Studio takes an ask's label, `say` and `confirm` from the page (Octo checks

@@ -5,21 +5,23 @@
 //! check takes the card's picture again. A turn that stops before its check
 //! leaves the card with the picture from before the change: a map opened
 //! early keeps its blank starter, with none of the places added after it.
-//! So while a turn's changes are saved, each preview this machine has open
-//! for the space whose site the turn changed after it was last pictured is
-//! checked once more, at the size its picture comes from (`instafy preview
-//! check --desktop`). The reply does not wait for it: the check goes on after
-//! the reply is posted, and the card's picture changes in place once it is
-//! sent (the controller announces `preview.thumbnail_updated`). The check
-//! keeps the picture in a file (`--picture-to`), and this runtime sends it with
-//! its own credential, which still works once the turn has ended (the turn's
-//! own ends with it). The check is given no credential at all: it goes on
-//! while the next turn may run, another member's with other granted secrets,
-//! and any process here can read another's environment, so it gets only what
-//! a helper that outlives a turn may have and the settings it reads
-//! ([`PREVIEW_CHECK_ENV_KEYS`]). A picture is not sent once a newer one was
-//! taken (the next turn's own check records its time before it sends), and a
-//! turn that is stopped, or whose changes could not be saved, stops it.
+//! So at a turn's end, once its changes are saved, each preview this machine
+//! has open for the space whose site the turn changed after it was last
+//! pictured is checked once more, at the size its picture comes from
+//! (`instafy preview check --desktop`). The reply does not wait for it: the
+//! check goes on after the reply is posted, and the card's picture changes in
+//! place once it is sent (the controller announces
+//! `preview.thumbnail_updated`). The check keeps the picture in a file
+//! (`--picture-to`), and this runtime sends it with its own credential, which
+//! still works once the turn has ended (the turn's own ends with it). The
+//! check is given no credential at all: it goes on while the next turn may
+//! run, another member's with other granted secrets, and any process here can
+//! read another's environment, so it gets only what a helper that outlives a
+//! turn may have and the settings it reads ([`PREVIEW_CHECK_ENV_KEYS`]). A
+//! picture is not sent once a newer one was taken (the next turn's own check
+//! records its time before it sends). A turn whose changes could not be saved
+//! checks nothing, and the check of a change no save took stops when its turn
+//! is stopped.
 //!
 //! `instafy preview open` records each preview in the CLI's state file
 //! (`~/.instafy/cli-preview-state.json`): its id, port and path, the folder its
@@ -39,13 +41,14 @@
 //! the check began, and logs the check's first problem in the check's own
 //! words, never the page's text. The card then shows no picture.
 //!
-//! A person's Undo puts a site's files back with no turn (`/git/revert` on
-//! this machine's origin), so no turn sends the site's reload either. The
-//! runtime sends it then, as a turn would, to every open view of each site
-//! the Undo changed, and then pictures those sites again
-//! ([`picture_sites_people_revert`]). It does the same for a change a Stop
-//! kept: the stopped turn never got to its own reload
-//! ([`reload_and_picture_changed_sites`]).
+//! Every open view of a site loads it again when its files change: the
+//! runtime sends the site's reload, then pictures it again
+//! ([`reload_and_picture_changed_sites`]), once a turn's change to it is
+//! saved ([`reload_and_picture_turn_sites`]), after a person's Undo puts its
+//! files back with no turn (`/git/revert` on this machine's origin,
+//! [`picture_sites_people_revert`]), and for a change a Stop kept that its
+//! turn never saved. No turn sends a reload of its own: one from here covers
+//! every page, whichever skill made it.
 
 use std::ffi::OsString;
 use std::future::Future;
@@ -87,7 +90,7 @@ const PICTURE_FILE: &str = "card.jpg";
 const MAX_PICTURE_BYTES: u64 = 512 * 1024;
 /// What the check writes beside the picture is small.
 const MAX_PICTURE_FACTS_BYTES: u64 = 16 * 1024;
-/// At most this many sites are sent their reload after one Undo.
+/// At most this many sites are sent their reload after one change.
 const MAX_RELOADS: usize = 8;
 /// How long sending one site's reload may take.
 const RELOAD_TIMEOUT: Duration = Duration::from_secs(10);
@@ -260,14 +263,14 @@ pub(crate) fn picture_sites_people_revert(
     });
 }
 
-/// Files of a space changed with no turn to tell the pages people have open
-/// (a person's Undo, or a change a Stop kept before its turn's own reload):
-/// sends each open site they changed its reload, so every open view shows the
-/// files as they are now ([`reload_reverted_sites`]), then, as a turn checks
-/// its site after its reload, pictures again, with `sender`, each open
+/// A space's files changed (a turn's saved change, a person's Undo, or a
+/// change a Stop kept that its turn never saved): sends each open site they
+/// changed its reload, so every open view shows the files as they are now
+/// ([`reload_changed_sites`]), then pictures again, with `sender`, each open
 /// preview whose site changed after it was last pictured: a check's own page
-/// never takes the reload halfway through its picture. It goes on by itself;
-/// the checks are the ones a turn's end runs, within the same time.
+/// never takes the reload halfway through its picture. It goes on by itself,
+/// and a Stop stops none of it: the change is kept. The checks are the ones a
+/// turn's end runs, within the same time.
 pub(super) fn reload_and_picture_changed_sites(
     workspace_dir: std::path::PathBuf,
     project_id: Uuid,
@@ -278,21 +281,51 @@ pub(super) fn reload_and_picture_changed_sites(
         return;
     }
     tokio::spawn(async move {
-        reload_reverted_sites(&workspace_dir, &project_id, &changed).await;
+        reload_changed_sites(&workspace_dir, &project_id, &changed).await;
         PictureRetake::start_for_paths(&workspace_dir, project_id, changed, None, sender).detach();
     });
 }
 
-/// The folders of the sites an Undo or a Stop changed (`changed`, places in
-/// the workspace) that someone may have open: the previews in `state` (the
-/// CLI's state file) that this machine has open for `project_id`, with a
-/// tunnel client still running, whose folder holds a changed path. As for a
-/// picture, a path in the folder of another of the space's sites inside a
-/// site's folder is that other site's change only. Each folder once, at most
+/// A turn's end, once its changes went through the save (`files`, as the
+/// save lists them): a change the save took (`saved`) reloads every open view
+/// of each site it changed and then pictures those sites again, as an Undo
+/// does ([`reload_and_picture_changed_sites`]). One change, one reload: the
+/// turn's own skills send none, and a Stop that reaches the turn later sends
+/// no second one. A change no save took is only pictured again, and that
+/// stops with the turn ([`PictureRetake`]); a Stop that keeps such a change
+/// sends its reload with the stop's report. A read-only turn changed nothing.
+/// The reply waits for none of it.
+pub(super) fn reload_and_picture_turn_sites(
+    workspace_dir: &Path,
+    project_id: Uuid,
+    read_only: bool,
+    files: &[CodexFileDescriptor],
+    saved: bool,
+    cancel: Option<JobCancelSignal>,
+    sender: Option<Arc<dyn PictureSender>>,
+) {
+    if saved && !read_only {
+        reload_and_picture_changed_sites(
+            workspace_dir.to_path_buf(),
+            project_id,
+            changed_paths(files),
+            sender,
+        );
+        return;
+    }
+    PictureRetake::start(workspace_dir, project_id, read_only, files, cancel, sender).detach();
+}
+
+/// The folders of the sites a change touched (`changed`, places in the
+/// workspace) that someone may have open: the previews in `state` (the CLI's
+/// state file) that this machine has open for `project_id`, with a tunnel
+/// client still running, whose folder holds a changed path. As for a picture,
+/// a path in the folder of another of the space's sites inside a site's
+/// folder is that other site's change only. Each folder once, at most
 /// [`MAX_RELOADS`], as the command names it: `./<folder>`, or `.` for the
 /// workspace, so a folder never reads as an option. A folder outside the
 /// workspace is never named.
-pub(super) fn reverted_sites(
+pub(super) fn sites_to_reload(
     state: &JsonValue,
     project_id: &Uuid,
     changed: &[String],
@@ -353,22 +386,27 @@ pub(super) fn reverted_sites(
     sites
 }
 
-/// Sends each open site an Undo or a Stop changed ([`reverted_sites`]) its
-/// reload, the one a turn sends after it changes a bound site (`instafy bind
-/// command <site> reload '{}'`): every open view of it, on every device,
-/// loads the page again, so nobody keeps seeing what the site no longer is.
-/// The binder that serves the site's folder takes it; a site no binder serves
-/// gets nothing this way. A map that `uw host` serves reloads its open views
-/// itself when the Undo puts back its earlier reload stamp: the map skill's
-/// `uw reload` writes one into `data/version.json`, the change's save keeps
-/// it, and the host watches that file. That reload is not run here: it
-/// writes the file, a change of the site that no save takes after an Undo,
-/// which a stop would keep as unsaved work and which the next Undo's folder
-/// follow would refuse to move past. Every site is sent its reload at once:
-/// a binder that does not answer holds up the pictures by one reload's time
-/// at most. The command gets no credential, as a check does
-/// ([`check_environment`]).
-async fn reload_reverted_sites(workspace_dir: &Path, project_id: &Uuid, changed: &[String]) {
+/// Sends each open site a change touched ([`sites_to_reload`]) its reload,
+/// `instafy bind command <site> reload '{}'` run from the workspace. The
+/// command finds the server of the site's folder by the `.bind/server.json`
+/// in that folder or the nearest one above it (the server's address and the
+/// folder and address prefix of each site it serves), and posts
+/// `{"name":"reload","args":{}}` to `<address><prefix>/__bind/command` on
+/// loopback, with the admin token kept in `.bind/admin-token` beside that
+/// file. The server sends every open view of the site, on every device, a
+/// `reload` command over its events stream, each view loads the page again,
+/// so nobody keeps seeing what the site no longer is, and it answers how many
+/// views it sent it to (`{"viewers": n}`). `instafy bind serve` is such a
+/// server; any other that answers the same way takes the reload as it does.
+/// A site no server takes it for keeps its open views as they are until they
+/// load again, which is logged and shown to nobody: a server that reloads its
+/// own views is no fault. Nothing that writes into a site's folder runs here:
+/// after an Undo, that would be a change no save takes, which a stop would
+/// keep as unsaved work and which the next Undo's folder follow would refuse
+/// to move past. Every site is sent its reload at once: a server that does
+/// not answer holds up the pictures by one reload's time at most. The command
+/// gets no credential, as a check does ([`check_environment`]).
+async fn reload_changed_sites(workspace_dir: &Path, project_id: &Uuid, changed: &[String]) {
     let Some(home) = std::env::var_os("HOME") else {
         return;
     };
@@ -376,7 +414,7 @@ async fn reload_reverted_sites(workspace_dir: &Path, project_id: &Uuid, changed:
     let Some(state) = read_state(&state_file).await else {
         return;
     };
-    let sites = reverted_sites(&state, project_id, changed, client_runs);
+    let sites = sites_to_reload(&state, project_id, changed, client_runs);
     if sites.is_empty() {
         return;
     }
@@ -1547,7 +1585,7 @@ mod tests {
         ]});
         let sites = |changed: &[&str]| {
             let changed: Vec<String> = changed.iter().map(|path| path.to_string()).collect();
-            reverted_sites(&state, &project, &changed, |pid| pid == 4242)
+            sites_to_reload(&state, &project, &changed, |pid| pid == 4242)
         };
         assert_eq!(
             sites(&[
@@ -1575,7 +1613,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let root_sites =
-            |paths: &[&str]| reverted_sites(&root, &project, &changed(paths), |pid| pid == 4242);
+            |paths: &[&str]| sites_to_reload(&root, &project, &changed(paths), |pid| pid == 4242);
         assert_eq!(root_sites(&["sites/lello/app.js"]), ["./sites/lello"]);
         assert_eq!(root_sites(&["notes/todo.md"]), ["."]);
         // A folder name that starts like an option is still named as a folder,
@@ -1586,7 +1624,7 @@ mod tests {
             site("preview-escape", "sites/../../etc", json!({ "localPort": 4182 })),
         ]});
         let odd_sites =
-            |paths: &[&str]| reverted_sites(&odd, &project, &changed(paths), |pid| pid == 4242);
+            |paths: &[&str]| sites_to_reload(&odd, &project, &changed(paths), |pid| pid == 4242);
         assert_eq!(odd_sites(&["-x/index.html"]), ["./-x"]);
         assert!(odd_sites(&["sites"]).is_empty());
     }
