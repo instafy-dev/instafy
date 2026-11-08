@@ -7164,8 +7164,14 @@ mod tests {
             assert!(instructions.contains(
                 "or `[step_refused_consent]` is final in every approval mode: do not retry it or look for another control that does the same. Revealing or copying a credential, signing in and choosing files are the user's steps: tell the user which step is theirs, and for a sign-in use `request_human_input` on its fields."
             ));
-            assert!(!instructions.contains("accepting cookies"), "{instructions}");
-            assert!(!instructions.contains("the notice's buttons"), "{instructions}");
+            assert!(
+                !instructions.contains("accepting cookies"),
+                "{instructions}"
+            );
+            assert!(
+                !instructions.contains("the notice's buttons"),
+                "{instructions}"
+            );
             assert!(!instructions.contains("read on under"), "{instructions}");
             assert!(!instructions.contains(reject_line));
         }
