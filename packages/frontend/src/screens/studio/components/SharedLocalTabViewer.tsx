@@ -12,11 +12,21 @@ import { BrowserToolsPopover } from "./BrowserToolsPopover";
 import { Button, IconButton } from "../../../components/Button";
 import { Select } from "../../../components/Select";
 import { Text } from "../../../components/Text";
+import { Surface } from "../../../components/Surface";
+import { LoadingStatus } from "../../../components/LoadingStatus";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { StudioMenuAction } from "../../../components/aria/StudioMenu";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { browserShareClient, type BrowserShare } from "../../../services/runtimeController/browserShares";
-import { DARK_PANEL_BORDER_CLASS } from "../../../theme/darkSurfaces";
+
+type ConnectionPhase = "connecting" | "live" | "closed" | "error" | "ended";
+const CONNECTION_COPY: Record<ConnectionPhase, string> = {
+  connecting: "Connecting…",
+  live: "Live tab from a desktop · View only",
+  closed: "Connection closed. Reconnect to check this share.",
+  error: "Could not connect. Check your connection and try again.",
+  ended: "Sharing ended or access was removed.",
+};
 
 export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { projectId: string; share: BrowserShare; onClose: () => void; onEnded: (id: string) => void }) {
   const [videoStream,setVideoStream]=useState<MediaStream|null>(null);
@@ -30,9 +40,20 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
     return ()=>{videoElement.srcObject=null;};
   },[videoElement,videoStream]);
   const [image, setImage] = useState<string | null>(null);
-  const [state, setState] = useState("Connecting…");
-  const [canReconnect, setCanReconnect] = useState(false);
+  const [connectionPhase, setConnectionPhase] = useState<ConnectionPhase>("connecting");
+  const canReconnect = connectionPhase === "closed" || connectionPhase === "error";
+  const reconnectRef = useRef<HTMLButtonElement>(null);
+  const modeTriggerRef = useRef<HTMLButtonElement>(null);
+  // A retry remains focusable while pending. Return to a persistent control
+  // before the first frame removes it, but never steal focus from other tools.
+  const finishReconnectFocus = useCallback(() => {
+    if (reconnectRef.current && document.activeElement === reconnectRef.current) {
+      modeTriggerRef.current?.focus({ preventScroll: true });
+    }
+  }, []);
   const [connectionAttempt, setConnectionAttempt] = useState(0);
+  const state = connectionPhase === "connecting" && connectionAttempt > 0
+    ? "Reconnecting…" : CONNECTION_COPY[connectionPhase];
   const [explore,setExplore] = useState<LocalExploreState | null>(null);
   const exploreRef = useRef(explore); exploreRef.current = explore;
   const exploring = Boolean(explore?.view);
@@ -71,8 +92,7 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
   },[surface,sendInput,explore?.view?.viewId,control?.grant?.id]);
   useEffect(() => {
     const abort = new AbortController();
-    setState("Connecting…");
-    setCanReconnect(false);
+    setConnectionPhase("connecting");
     setPanOnly(false);
     setZoom("fit");
     let imageUrl: string | null = null;
@@ -81,7 +101,7 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
     void browserShareClient(projectId).then(async client => {
       if (abort.signal.aborted) return null;
       if (connectionAttempt > 0 && !(await client.list()).some(entry => entry.id === share.id)) {
-        if (!abort.signal.aborted) { setState("Sharing ended or access was removed."); onEnded(share.id); }
+        if (!abort.signal.aborted) { finishReconnectFocus(); setConnectionPhase("ended"); onEnded(share.id); }
         return null;
       }
       return typeof RTCPeerConnection!=="undefined" ? client.connect(share.id,"watch",abort.signal,undefined,undefined,1) : client.connect(share.id,"watch",abort.signal);
@@ -132,17 +152,17 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
         armStall();
         const previous = imageUrl;
         imageUrl = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
-        setImage(imageUrl); setState("Live tab from a desktop · View only");
+        finishReconnectFocus(); setImage(imageUrl); setConnectionPhase("live");
         if (previous) URL.revokeObjectURL(previous);
       });
       socket.addEventListener("close", () => {
         if (abort.signal.aborted) return;
         window.clearTimeout(stalled); socketRef.current=null; clear();
-        setState("Connection closed. Reconnect to check this share."); setCanReconnect(true);
+        setConnectionPhase("closed");
       });
-    }).catch(() => { if (!abort.signal.aborted) { clear(); setState("Could not connect. Check your connection and try again."); setCanReconnect(true); } });
+    }).catch(() => { if (!abort.signal.aborted) { clear(); setConnectionPhase("error"); } });
     return () => { abort.abort(); videoRef.current?.dispose();videoRef.current=null;acknowledgeFrame.current=null; socketRef.current=null; controlRef.current=null; exploreRef.current=null; window.clearTimeout(stalled); if (imageUrl) URL.revokeObjectURL(imageUrl); };
-  }, [projectId, share.id, onEnded, connectionAttempt]);
+  }, [projectId, share.id, onEnded, connectionAttempt, finishReconnectFocus]);
   const [modeOpen, setModeOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
@@ -182,11 +202,11 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
   // A shared tab can be narrow inside a wide desktop layout. Keep the current
   // mode readable, with Release available in More when the pane is crowded.
   const narrowToolbar = bounds.width > 0 && bounds.width < 360;
-  const panel = <section aria-label="Shared local browser tab" className={`relative flex min-h-0 min-w-0 flex-col overflow-hidden border border-slate-300 bg-slate-950 ${DARK_PANEL_BORDER_CLASS} ${fullscreen ? "h-full border-0" : "rounded-lg"}`} style={{ paddingBottom: keyboardOccupiedHeight }} data-testid="local-browser-share-viewer">
+  const panel = <Surface role="region" aria-label="Shared local browser tab" tone="default" radius={fullscreen ? "none" : "lg"} shadow="none" className={`relative flex min-h-0 min-w-0 flex-col overflow-hidden ${fullscreen ? "h-full border-0" : ""}`} style={{ paddingBottom: keyboardOccupiedHeight }} data-testid="local-browser-share-viewer">
     <div role="toolbar" aria-label="Shared tab controls" data-testid="local-tab-toolbar" className="flex min-h-12 min-w-0 shrink-0 items-center gap-2 bg-slate-100 p-1 text-slate-800 dark:bg-slate-900 dark:text-slate-100">
       {exploring ? <IconButton className="shrink-0" variant="ghost" aria-label="Back in your browsing page" onPress={() => command("exploreNavigate", {viewId:explore!.view!.viewId,action:"back"})}><NavArrowLeft aria-hidden="true" className="h-5 w-5" /></IconButton> : null}
       <BrowserToolsPopover label="Shared tab view" isOpen={modeOpen} onOpenChange={setModeOpen} trigger={
-        <Button preset="toolbar" variant="ghost" className="min-w-0 max-w-56" aria-label="Choose shared tab view" data-testid="local-tab-view-mode">
+        <Button ref={modeTriggerRef} preset="toolbar" variant="ghost" className="min-w-0 max-w-56" aria-label="Choose shared tab view" data-testid="local-tab-view-mode">
           <span className="truncate">{exploring ? "Browsing" : selfControls ? "You control" : explore?.requested ? "Browse requested" : control?.requested ? "Control requested" : "Following"}</span><NavArrowDown aria-hidden="true" className="h-4 w-4 shrink-0" />
         </Button>
       }>
@@ -194,7 +214,12 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
         <Text variant="caption" tone="muted">{exploring ? "Your page and scroll are separate. Website logins and saved data are shared. Reload to see others’ changes; behavior depends on the website." : "Watch the owner’s page, or ask to browse with your own page and scroll. Independent browsing shares this browser’s website logins and saved data."}</Text>
         {explore?.available ? <Button preset="inline" variant="secondary" data-testid="local-tab-explore-action" isDisabled={!exploring && selfControls} onPress={() => { command(exploring || explore.requested ? "exploreReturn" : "exploreRequest", exploring || explore.requested ? {} : {viewport:viewerViewport()}); setModeOpen(false); }}>{exploring ? "Follow owner again" : explore.requested ? "Cancel browsing request" : "Browse independently"}</Button> : null}
       </BrowserToolsPopover>
-      <span role="status" className="sr-only">{exploring ? "Browsing independently · Shared website session" : hasPicture && selfControls ? "Live tab · You control" : hasPicture && control?.grant ? "Live tab · Another participant controls" : state}</span>
+      <span role="status" className="sr-only" data-testid="local-tab-connection-status">{
+        !hasPicture ? connectionPhase === "live" ? "Loading shared page…" : state
+          : exploring ? "Browsing independently · Shared website session"
+            : selfControls ? "Live tab · You control"
+              : control?.grant ? "Live tab · Another participant controls" : state
+      }</span>
       <div className="ml-auto flex shrink-0 items-center gap-2">
       {selfControls && !exploring && !narrowToolbar ? <Button preset="inline" className="shrink-0" variant="secondary" data-testid="local-tab-control-action" aria-label="Release control" onPress={() => command("releaseControl")}>Release</Button> : null}
       <RemoteBrowserMobileKeyboard inlineTrigger enabled={(selfControls || exploring) && !panOnly && hasPicture} onMessage={sendInput} onOccupiedHeightChange={setKeyboardOccupiedHeight} />
@@ -219,10 +244,29 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
       <IconButton className="shrink-0" variant="ghost" aria-label="Leave shared tab" onPress={onClose}><Xmark aria-hidden="true" className="h-5 w-5" /></IconButton>
       </div>
     </div>
-    {!hasPicture ? <div className="flex items-center justify-between gap-2 p-3 text-xs text-slate-300"><span>{state}</span>{canReconnect ? <Button preset="inline" variant="secondary" data-testid="local-tab-reconnect" onPress={() => { setCanReconnect(false); setConnectionAttempt(attempt => attempt + 1); }}>Reconnect</Button> : null}</div> : null}
+    {!hasPicture ? (
+      <div className="min-w-0 p-3" data-testid="local-tab-connection-feedback">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
+          <div className="min-w-0 flex-1 basis-48" aria-hidden="true">
+            {(connectionPhase === "connecting" && connectionAttempt === 0) || connectionPhase === "live" ? (
+              <LoadingStatus>{connectionPhase === "live" ? "Loading shared page…" : state}</LoadingStatus>
+            ) : <Text variant="bodyCompact" tone="secondary">{state}</Text>}
+          </div>
+          {canReconnect || (connectionAttempt > 0 && connectionPhase === "connecting") ? (
+            <Button ref={reconnectRef} preset="inline" variant="secondary"
+              isPending={connectionPhase === "connecting"} pendingLabel="beside"
+              data-testid="local-tab-reconnect" onPress={() => {
+                if (!canReconnect) return;
+                setConnectionPhase("connecting");
+                setConnectionAttempt(attempt => attempt + 1);
+              }}>Reconnect</Button>
+          ) : null}
+        </div>
+      </div>
+    ) : null}
     <div className={`relative min-h-0 min-w-0 ${fullscreen ? "flex flex-1 flex-col" : ""}`}>
     <div ref={setViewport} tabIndex={hasPicture ? 0 : undefined} role="region" aria-label="Shared tab image viewport" data-testid="local-browser-share-pan"
-      className={`relative min-h-0 min-w-0 overflow-auto overscroll-contain ${fullscreen ? "flex-1" : ""}`}
+      className={`relative min-h-0 min-w-0 overflow-auto overscroll-contain bg-slate-950 ${fullscreen ? "flex-1" : ""}`}
       style={fullscreen ? undefined : { height: exploring ? "min(55vh,480px)" : hasPicture ? inlineHeight : 0, maxHeight: "55vh" }}>
       {image || videoStream ? <div className="grid min-h-full min-w-full place-items-center" style={{ width, height }}>
         <div ref={setSurface} tabIndex={(selfControls || exploring) && !panOnly ? 0 : -1}
@@ -232,14 +276,14 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
             onLoad={event=>{acknowledgeFrame.current?.();if(videoRef.current?.playing)return;const img=event.currentTarget;setImageSize(current=>current.width===img.naturalWidth && current.height===img.naturalHeight ? current : {width:img.naturalWidth,height:img.naturalHeight});}} /> : null}
           {videoStream ? <video ref={setVideoElement} autoPlay muted playsInline aria-label="Live shared browser tab"
             className={videoReady ? "block max-w-none" : "absolute inset-0 opacity-0"} style={{width,height}} data-testid="local-browser-share-video"
-            onLoadedData={event=>{if(event.currentTarget.srcObject!==videoStream || !videoRef.current?.decoded(videoStream))return;acknowledgeFrame.current?.();setVideoReady(true);setState("Live tab from a desktop · View only");const v=event.currentTarget;setImageSize({width:v.videoWidth,height:v.videoHeight});}}
+            onLoadedData={event=>{if(event.currentTarget.srcObject!==videoStream || !videoRef.current?.decoded(videoStream))return;acknowledgeFrame.current?.();finishReconnectFocus();setVideoReady(true);setConnectionPhase("live");const v=event.currentTarget;setImageSize({width:v.videoWidth,height:v.videoHeight});}}
             onResize={event=>{const v=event.currentTarget;if(videoRef.current?.playing && v.srcObject===videoStream && v.videoWidth && v.videoHeight)setImageSize(current=>current.width===v.videoWidth && current.height===v.videoHeight ? current : {width:v.videoWidth,height:v.videoHeight});}} /> : null}
         </div>
       </div> : null}
     </div>
     {hasPicture && !selfControls && !exploring ? <RemoteControlSurface controller="Another participant" working /> : null}
     </div>
-  </section>;
+  </Surface>;
   // Moving the presentation into a dialog keeps this component's socket alive.
   // Zoom and native overflow change only the local image, never the host page.
   return fullscreen ? <StudioDialogModal isOpen onOpenChange={setFullscreen} isDismissable dialogAriaLabel="Shared browser tab"
