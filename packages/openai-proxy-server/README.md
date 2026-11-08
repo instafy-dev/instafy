@@ -710,6 +710,26 @@ Gemini Code Assist upstream gets every developer and system message in that
 leading message instead, as before: their providers differ on instructions after
 the first message, and some refuse the developer role.
 
+### Requests that share their start
+
+A `prompt_cache_key` that begins `instafy-shared-start-` is the one key the runtime
+gives every thread that opens the same way: each chat's routing step, a new thread
+every time, whose request opens with the same tool list, instructions and routing
+instructions in every chat, up to the person's own words. Codex gives every item of
+a thread its own `id`, and every message the `turn_id` and `create_time` of its
+turn, so two such requests still differ from their first item with an id on. On a
+Responses upstream the proxy sends the items that open such a request (every one
+ahead of the first item the model wrote or a tool returned) alike from every thread:
+each message without those three, as the proxy's own first message goes and as
+Codex sends a standard model its base instructions without a turn or a time, and
+the tool list with an id of the form Codex gives it (`at_` and a UUID), made from
+the scoped key and the list where Codex uses its thread. So every chat's routing step in a space
+reaches the provider alike up to the person's words. What an item holds, and what
+its passthrough says it is and where it came from, go as they came, and nothing
+later in the request names what changed: a tool call and its output name each
+other by `call_id`. Every request under its own thread's key goes as it came, and
+the key itself is scoped as every key is.
+
 Only imported Codex Responses requests round-trip `x-codex-turn-state`. The proxy
 returns a signed, bounded, one-hour opaque envelope and accepts it back only for
 the same project, credential, endpoint, account, resolved model and root session.
