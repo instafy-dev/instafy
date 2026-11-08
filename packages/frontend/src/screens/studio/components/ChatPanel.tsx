@@ -5876,6 +5876,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     hasNewer: messageTargetActive && messageContext.hasNewer,
     queuedSends: combinedChatSendQueue,
     submitMessage,
+    // A build stopped after its browser turn finished starts again as Try
+    // again sends a hand-back again.
+    resendHandBack: resendBrowserRequest,
   });
 
   // A send from the browser's own composer that the submit flow would refuse

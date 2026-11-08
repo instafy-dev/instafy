@@ -11,7 +11,7 @@ use tracing::warn;
 use crate::active_turn_input::ActiveTurnInputReceiver;
 use crate::config::Config;
 use crate::controller::{ControllerClient, LeaseJob, Registration};
-use crate::job_cancel::JobCancelSignal;
+use crate::job_cancel::{JobCancelSignal, LeaseCheck};
 use crate::jobs::rolling_saves;
 use crate::jobs::stopped_turn::StoppedTurnChanges;
 use crate::jobs::{JobExecution, JobMessage, JobProcessor, JobProgress};
@@ -216,6 +216,9 @@ impl AgentExecutor {
         active_turn_input: Option<ActiveTurnInputReceiver>,
     ) -> Result<JobExecution> {
         let lease_lost_signal = Some(lease_lost_signal.unwrap_or_default());
+        if let Some(signal) = lease_lost_signal.as_ref() {
+            signal.check_lease_with(lease_check(client.clone(), registration.clone(), job.id));
+        }
         let (proxy_auth, _proxy_auth_guard) = crate::job_proxy_auth::for_job(
             client.clone(),
             registration,
@@ -321,6 +324,30 @@ impl AgentExecutor {
         finish_progress_dispatch(progress_tx, progress_task, job.id).await;
         result
     }
+}
+
+/// How long a job waits for the controller's answer to whether it still holds its lease before
+/// it goes on as its last heartbeat said.
+const LEASE_CHECK_WAIT: Duration = Duration::from_secs(2);
+
+/// Asks the controller, with a heartbeat, whether a job still holds its lease: a lost lease (a
+/// Stop cancelled the job) says no. Any other failure, or no answer within [`LEASE_CHECK_WAIT`],
+/// is a passing one, which the job's next heartbeat meets again.
+fn lease_check(
+    client: Arc<ControllerClient>,
+    registration: Registration,
+    job_id: uuid::Uuid,
+) -> LeaseCheck {
+    Arc::new(move || {
+        let client = client.clone();
+        let registration = registration.clone();
+        Box::pin(async move {
+            !matches!(
+                tokio::time::timeout(LEASE_CHECK_WAIT, client.heartbeat(&registration, job_id)).await,
+                Ok(Err(error)) if is_lease_lost(&error)
+            )
+        })
+    })
 }
 
 fn spawn_progress_dispatch(

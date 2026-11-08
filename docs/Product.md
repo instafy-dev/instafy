@@ -86,10 +86,17 @@ is not a physical executor shutdown acknowledgment; failures and timeouts remain
 retry for the same jobs. Separately queued messages are preserved and remain eligible for normal
 delivery; Stop does not pause the chat's queue. It suppresses the selected plan's follow-up when
 all remaining workers were stopped. A muted persisted notice identifies who asked
-the agent to stop. **Continue**, when the chat is idle and writable and the stopped turn is still its
+the agent to stop. **Continue**, when the chat is idle and writable, the stopped turn is still its
 latest (nobody wrote after it, also after a reload; in a chat opened at a searched message, once its
-newest messages are shown), sends a fresh targeted request to check existing work before proceeding;
-it does not replay the original turn or consume a draft.
+newest messages are shown) and its request is the viewer's own, carries that request on in nobody's
+words: when the browser turn of a message had finished and the Stop came before or during its build,
+the build starts again from what that turn found (the same hand-back, which the controller checks as
+any, up to half an hour after that browser turn ended), with no routing step and no browser turn;
+otherwise the stopped request runs again under its own words, when they are words the viewer wrote
+(not a site's Ask Octo or an answer to Octo's question). Once the viewer undid a change of any turn
+of that request, it offers no Continue. The chat shows no bubble for it, History names the save by
+the request, the composer's draft stays as it was, and a Continue the controller refuses leaves the
+button.
 
 For local interaction review without credentials or real cancellations, run:
 `pnpm --filter @instafy/frontend exec vite --config tests/fixtures/run-stop-control/vite.config.ts --host 127.0.0.1 --port 5208`

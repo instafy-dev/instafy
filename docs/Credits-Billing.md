@@ -368,6 +368,12 @@ card (1 credit, "Turns Instafy starts by itself" below), so stopping its browser
 credits in all. A turn Instafy started by itself follows its own rule below:
 stopped, it costs nothing unless it had already done what that rule charges for.
 
+**Continue** under a stopped turn sends no words of its own. When the stopped turn was the build
+after a browser turn that had finished, it sends that build's hand-back again, a hand-back too
+("Turns Instafy starts by itself" below). Otherwise it sends the stopped request again in the
+person's name, which runs as any message they send does: it holds its reserve, uses a daily prompt
+slot, and costs what its turns use.
+
 ### Undo
 
 **Undo** under a turn's files is no message, so it costs nothing and uses no daily prompt slot:
@@ -402,8 +408,9 @@ charged for. There are three:
   card's own task. Studio opens it by itself, or the person presses the card; billing cannot tell
   the two apart, and both ask only what Octo asked.
 
-**Try again** on a hand-back whose turn failed sends that hand-back again (its claim on the
-browser turn, never the words its prompt is stored with), so it is a hand-back too, charged as one.
+**Try again** on a hand-back whose turn failed, and **Continue** on one the person stopped, send
+that hand-back again (its claim on the browser turn, never the words its prompt is stored with), so
+each is a hand-back too, charged as one.
 
 Each kind reserves its credit at dispatch like any other. A hand-back or an automatic retry is
 charged when it ends with a reply (it succeeded and posted something that is not empty), and its

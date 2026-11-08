@@ -80,6 +80,8 @@ const OCTO = { id: "786d5f34-547e-4ca7-8a85-4e1dedec2401", handle: "octo", avata
 const HAND_BACK_NOTICE = "Octo continued with what it found in the browser";
 /** The Seville map's building turn: the hand-back's run and the job that ran it. */
 const SEVILLE_BUILD = { jobId: "4e9714c9-3bf5-4695-8611-6a58fb38cff0", runId: "a64022f9-e961-4e00-a854-3a7499157929" };
+/** The hand-back's stored prompt. */
+const SEVILLE_HAND_BACK_PROMPT = "88b4fc1b-8237-4ba2-996d-c369c6ebd5ab";
 
 function chatOf(rows: StoredRow[]): ChatMessage[] {
   return rows.map((row) => mapControllerMessageToChat({
@@ -175,7 +177,12 @@ describe("a message Octo answers in its browser and then builds from what it fou
     now: number,
     drafts: ReplyDraft[] = [],
     given?: { runs: RunRecord[] },
-    stop?: { submit: SubmitMessageFn; viewerUserId?: string; labels?: ReadonlyMap<string, string> },
+    stop?: {
+      submit: SubmitMessageFn;
+      viewerUserId?: string;
+      labels?: ReadonlyMap<string, string>;
+      resendHandBack?: (handBack: ChatMessage, metadata: Record<string, unknown>) => Promise<boolean>;
+    },
   ) {
     vi.setSystemTime(now);
     const messages = chat.filter((message) => message.timestamp <= now);
@@ -212,6 +219,7 @@ describe("a message Octo answers in its browser and then builds from what it fou
         hasNewer: false,
         queuedSends: [],
         submitMessage: stop.submit,
+        resendHandBack: stop.resendHandBack,
       }}>{rows}</StopNotices>
     ) : rows;
     await act(async () => {
@@ -499,17 +507,20 @@ describe("a message Octo answers in its browser and then builds from what it fou
     // The line is no live region: a screen reader hears the Stop from the row.
     const heard = (row: HTMLElement) => Array.from(row.querySelectorAll('[role="status"]')).map((element) => element.textContent);
     expect(heard(turn)).toContain("Stopped");
-    // Continue sends what it sent from the notice's own row.
+    // The browser turn had finished: Continue starts its build again, the
+    // same hand-back, and sends no message.
+    const resendHandBack = vi.fn<(handBack: ChatMessage, metadata: Record<string, unknown>) => Promise<boolean>>()
+      .mockResolvedValue(true);
+    await show(chat, stoppedAt + 1_000, [], undefined, { submit, resendHandBack });
     await act(async () => {
-      continueButton!.click();
+      container.querySelector<HTMLElement>('[data-testid="chat-run-stop-continue"]')!.click();
     });
-    expect(submit).toHaveBeenCalledTimes(1);
-    expect(submit).toHaveBeenCalledWith({
-      message: "Continue the stopped turn from its current state. Check what has already finished before proceeding; do not repeat completed actions.",
-      editorState: null,
-      targetAgentHandles: ["octo"],
-      metadata: { continuedStopMessageId: "stop-notice", continuedRunIds: [SEVILLE_BUILD.runId] },
-    }, expect.objectContaining({ automatic: true, intent: "send" }));
+    expect(submit).not.toHaveBeenCalled();
+    expect(resendHandBack).toHaveBeenCalledTimes(1);
+    expect(resendHandBack.mock.calls[0]![0].id).toBe(SEVILLE_HAND_BACK_PROMPT);
+    expect(resendHandBack.mock.calls[0]![1]).toEqual({
+      continuedStopMessageId: "stop-notice", continuedRunIds: [SEVILLE_BUILD.runId],
+    });
 
     // Someone else's Stop names them, in the same row.
     const theirs = [...before, notice("person-2")];
@@ -522,6 +533,81 @@ describe("a message Octo answers in its browser and then builds from what it fou
     expect(heard(view2.turns[0]!)).toEqual(expect.arrayContaining(["Sam stopped this"]));
     expect(heard(view2.turns[0]!)).not.toContain("Stopped");
     expect(container.textContent).not.toContain("asked Octo to stop");
+  });
+
+  // A local test, Nov 8: Continue after a Stop in the gap put "Continue the stopped
+  // turn from its current state. …" in a bubble in the person's name. Its
+  // build, sent again, goes on in the stopped row: no bubble, no line across
+  // the chat, and the row ends with the build's reply, not "Stopped".
+  it("goes on in the stopped row when Continue starts the build again", async () => {
+    const stoppedAt = Date.parse("2026-11-04T08:11:54.000Z");
+    const continuedAt = stoppedAt + 60_000;
+    const notice: ChatMessage = {
+      id: "stop-notice", role: "assistant", authorId: null, content: "Stopped this run.", timestamp: stoppedAt,
+      files: null, messageType: "run_cancellation",
+      metadata: {
+        source: "controller", kind: "run_cancellation", runId: SEVILLE_BUILD.runId,
+        details: {
+          stopRequested: true, actorUserId: PERSON, agentHandles: ["octo"],
+          jobIds: [SEVILLE_BUILD.jobId], runIds: [SEVILLE_BUILD.runId], runStatus: "canceled",
+        },
+      },
+    };
+    const again = { jobId: "5f8a25d0-4c06-4706-9722-4b7a60a2d1b1", runId: "b75133a0-fa72-4f11-b965-4b8a60a3e2c2" };
+    const handBackRow = CHATS.seville.find((row) => row.id === SEVILLE_HAND_BACK_PROMPT)!;
+    const handBackAt = Date.parse(handBackRow.createdAt);
+    const promptMetadata = (handBackRow.metadata as Record<string, Record<string, unknown>>).prompt_metadata!;
+    // The hand-back the controller let through again, and its build: the
+    // stored build of the same map, a minute later.
+    const continued: StoredRow[] = [
+      {
+        ...handBackRow,
+        id: "c0a1b2c3-0000-4000-8000-000000000001",
+        runId: again.runId,
+        createdAt: new Date(continuedAt).toISOString(),
+        metadata: {
+          ...(handBackRow.metadata as Record<string, unknown>),
+          prompt_metadata: {
+            ...promptMetadata,
+            clientMessageId: "continued-hand-back",
+            continuedStopMessageId: notice.id,
+            continuedRunIds: [SEVILLE_BUILD.runId],
+          },
+        },
+      },
+      ...CHATS.seville
+        .filter((row) => (row.metadata as Record<string, unknown> | null)?.jobId === SEVILLE_BUILD.jobId)
+        .map((row, index) => ({
+          ...row,
+          id: `c0a1b2c3-0000-4000-8000-${String(index + 2).padStart(12, "0")}`,
+          runId: again.runId,
+          createdAt: new Date(Date.parse(row.createdAt) - handBackAt + continuedAt).toISOString(),
+          metadata: { ...(row.metadata as Record<string, unknown>), jobId: again.jobId },
+        })),
+    ];
+    const chat = [
+      ...chatOf(CHATS.seville).filter((message) => message.timestamp < stoppedAt),
+      notice,
+      ...chatOf(continued),
+    ];
+    mocks.activeConversation = { controllerId: CONVERSATION, messages: chat };
+    const submit = vi.fn<SubmitMessageFn>().mockResolvedValue(true);
+    const end = Math.max(...chat.map((message) => message.timestamp)) + 1_000;
+    const view = await show(chat, end, [], undefined, { submit });
+    expect(view.turns).toHaveLength(1);
+    expect(view.octoRows).toBe(1);
+    expect(view.lines).toHaveLength(1);
+    expect(view.lines[0]).not.toMatch(/^Stopped/);
+    expect(view.notice).toBe(false);
+    expect(container.textContent).toContain("I built a three-day Seville map");
+    expect(container.querySelector('[data-testid="chat-run-stop-continue"]')).toBeNull();
+    // The person's message shows once: the Continue was no message of theirs.
+    const asked = "Plan 3 days in Seville for a first visit";
+    expect(container.textContent!.split(asked)).toHaveLength(2);
+    // While the build works, the row is at work, not stopped.
+    const working = await show(chat, continuedAt + 10_000, [], undefined, { submit });
+    expect(working.turns).toHaveLength(1);
+    expect(working.lines.some((line) => line.startsWith("Stopped"))).toBe(false);
   });
 
   // A local test, Nov 6: a browser turn whose finding said a page stopped it

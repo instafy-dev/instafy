@@ -7,7 +7,7 @@ import { isRecoverableRuntimeStartAlert as runtimeStartAlertIsRecoverable } from
 import { normalizeAssistantStatusText } from "./assistantStatusHeuristics";
 import { isEmptyCommandExecution } from "./chatContentHelpers";
 import { extractMessageDetails, getMessageType, isHiddenByPresentation } from "./chatMessageMetadata";
-import { getControllerConversationNoticeKind, readChatRunStopNotice } from "./controllerConversationNotice";
+import { continuePromptIds, getControllerConversationNoticeKind, readChatRunStopNotice } from "./controllerConversationNotice";
 import { isGenericProgressLabel, THREAD_ACTION_CARD_TYPES } from "./threadPreviewHelpers";
 import { readEarlierAttempts, readPendingRetry, resolveAutomaticRetryFold } from "./automaticRetryFold";
 import { resolveRoutedBrowserFold } from "./routedBrowserFold";
@@ -415,10 +415,12 @@ export function synthesizeAgentJobThreadMessages(
   // A message sent straight to the browser folds into its browser turn, and
   // a browser card leaves the chat once the browser opened for it.
   const routedFold = resolveRoutedBrowserFold(collapsedAll);
+  // A press of Continue is no message of the person's: its turn's row follows the stopped one.
   const hiddenIds = new Set([
     ...retryFold.hiddenPromptIds,
     ...routedFold.hiddenPromptIds,
     ...routedFold.settledCardIds,
+    ...continuePromptIds(collapsedAll),
   ]);
   for (const [browserJobId, cardId] of routedFold.cardIdByBrowserJobId) {
     // The card says the browser is opening until its browser turn shows

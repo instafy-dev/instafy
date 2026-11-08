@@ -4715,6 +4715,19 @@ fn ensure_lease_held(cancel_signal: Option<&JobCancelSignal>, before: &str) -> R
     Ok(())
 }
 
+/// [`ensure_lease_held`], asking the controller first ([`JobCancelSignal::lease_held`]), right
+/// before a job sends its routing step or its turn to a model: a job hears of a Stop from its
+/// heartbeat, once a second, and a build leased 0.14 s before its Stop went on to write its whole
+/// request into its thread before the next one (a local test, Nov 8).
+async fn confirm_lease_held(cancel_signal: Option<&JobCancelSignal>, before: &str) -> Result<()> {
+    if let Some(signal) = cancel_signal
+        && !signal.lease_held().await
+    {
+        bail!("job lease lost {before}");
+    }
+    Ok(())
+}
+
 fn ensure_bounded_job_uses_bounded_lane(
     job: &LeaseJob,
     prompt_text: &str,
@@ -7665,7 +7678,7 @@ impl JobProcessor {
                 &request.shared_start,
             );
             let _codex_guard = CODEX_EXECUTION_LOCK.lock().await;
-            ensure_lease_held(cancel_signal.as_ref(), "before its routing step")?;
+            confirm_lease_held(cancel_signal.as_ref(), "before its routing step").await?;
             match codex
                 .execute_with_options(&request.prompt, None, preflight_options)
                 .await
@@ -8220,10 +8233,11 @@ impl JobProcessor {
             turn_start.record(&workspace_dir, status);
         }
         let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
-        ensure_lease_held(
+        confirm_lease_held(
             cancel_signal.as_ref(),
             "before its thread was restored and its prompt written",
-        )?;
+        )
+        .await?;
         let shared_browser_action_log_before =
             explicit_shared_browser_execution.then(crate::shared_browser::action_log_len);
 

@@ -106,7 +106,11 @@ function Simulation({ scenario }: { scenario: Scenario }) {
   const [targets, setTargets] = useState<ChatRunStopTarget[]>(() => scenario === "two" ? [OCTO, SCRIBE]
     : [{ ...OCTO, initiatingUserId: scenario === "other" ? "another-person" : VIEWER }]);
   const [requests, setRequests] = useState<string[][]>([]);
-  const [history, setHistory] = useState<ChatMessage[]>([]);
+  // The person's message whose turn the simulation runs: Continue carries it on.
+  const [history, setHistory] = useState<ChatMessage[]>(() => [{
+    id: "fixture-asked", role: "user", authorId: VIEWER, content: "Add each laptop's warranty from its own page.",
+    timestamp: 0, files: null, metadata: { runId: OCTO.runId },
+  }]);
   const [continuations, setContinuations] = useState<string[][]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [labelExpanded, setLabelExpanded] = useState(false);
@@ -150,10 +154,11 @@ function Simulation({ scenario }: { scenario: Scenario }) {
       const handles = override?.targetAgentHandles ?? [];
       setContinuations(current => [...current, [...handles]]);
       await new Promise(resolve => setTimeout(resolve, 350));
-      setHistory(current => [...current, { ...message, id: crypto.randomUUID(), role: "user",
-        content: override?.message ?? "", metadata: override?.metadata ?? null }]);
-      setTargets(handles.map(handle => ({ ...(handle === "scribe" ? SCRIBE : OCTO),
-        jobId: crypto.randomUUID(), runId: crypto.randomUUID(), initiatingUserId: VIEWER })));
+      const next = handles.map(handle => ({ ...(handle === "scribe" ? SCRIBE : OCTO),
+        jobId: crypto.randomUUID(), runId: crypto.randomUUID(), initiatingUserId: VIEWER }));
+      setHistory(current => [...current, { ...message, id: crypto.randomUUID(), role: "user", authorId: VIEWER,
+        content: override?.message ?? "", metadata: { ...(override?.metadata ?? {}), runId: next[0]?.runId } }]);
+      setTargets(next);
       return true;
     },
   });

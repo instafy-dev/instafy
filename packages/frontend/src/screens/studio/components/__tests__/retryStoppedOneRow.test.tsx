@@ -203,13 +203,14 @@ describe("a Stop while a failed turn is tried again", () => {
     expect(stopped.continues).toBe(1);
     const continueButton = stopped.turns[0]!.querySelector<HTMLElement>('[data-testid="chat-run-stop-continue"]');
     expect(continueButton).not.toBeNull();
-    // Continue carries the stopped resend on, as from the notice's own row.
+    // Continue carries the stopped resend on, as from the notice's own row:
+    // the question again, in the person's own words.
     await act(async () => {
       continueButton!.click();
     });
     expect(submit).toHaveBeenCalledTimes(1);
     expect(submit).toHaveBeenCalledWith({
-      message: "Continue the stopped turn from its current state. Check what has already finished before proceeding; do not repeat completed actions.",
+      message: QUESTION,
       editorState: null,
       targetAgentHandles: ["octo"],
       metadata: { continuedStopMessageId: "7e2a4d3c-9f3a-4b77-9c65-3b4c5d6e7f86", continuedRunIds: [RETRY_RUN] },
@@ -220,6 +221,36 @@ describe("a Stop while a failed turn is tried again", () => {
     expect(later.turns).toHaveLength(1);
     expect(later.lines).toEqual(["Stopped"]);
     expect(later.noticeRows).toBe(0);
+  });
+
+  // A local test, Nov 8: Continue put a sentence in a bubble in the person's name.
+  // It carries the question on in the person's own words, which the chat
+  // already shows: no second bubble, and the new turn's row follows the
+  // stopped one.
+  it("shows no bubble for Continue, and the new turn's row after the stopped one", async () => {
+    const CONTINUE_RUN = "8f3c5e4d-0a4b-4c88-8d76-4c5d6e7f8091";
+    const CONTINUE_JOB = "9a4d6f5e-1b5c-4d99-9e87-5d6e7f809102";
+    const stoppedChat = [...SENT_AGAIN, RETRY_USAGE, stopNotice([RETRY_JOB])];
+    const continued = [
+      ...stoppedChat,
+      stored({
+        id: "7e2a4d3c-9f3a-4b77-9c65-3b4c5d6e7f87", role: "user", time: "06:01:00.000", content: QUESTION,
+        runId: CONTINUE_RUN, metadata: { prompt_metadata: {
+          client: { userId: PERSON, sessionId: "session-1" }, clientMessageId: "send-3",
+          continuedStopMessageId: "7e2a4d3c-9f3a-4b77-9c65-3b4c5d6e7f86", continuedRunIds: [RETRY_RUN],
+        } },
+      }),
+      stored({
+        id: "7e2a4d3c-9f3a-4b77-9c65-3b4c5d6e7f88", role: "assistant", time: "06:01:09.000",
+        content: "Livraria Lello opens at 9:00 on Sunday.", runId: CONTINUE_RUN,
+        metadata: { agent: OCTO, jobId: CONTINUE_JOB, source: "agent", outcome: "succeeded" },
+      }),
+    ];
+    const view = await show(continued, "06:01:10.000", retryRun("canceled", RETRY_JOB));
+    expect(view.text.split(QUESTION)).toHaveLength(2);
+    expect(view.text).toContain("Livraria Lello opens at 9:00 on Sunday.");
+    expect(view.text.indexOf("Stopped")).toBeLessThan(view.text.indexOf("Livraria Lello opens"));
+    expect(view.continues).toBe(0);
   });
 
   it("is one stopped row when the resend was stopped before its job showed anything", async () => {
