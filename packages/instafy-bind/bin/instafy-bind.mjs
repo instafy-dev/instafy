@@ -4,7 +4,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import readline from "node:readline";
 import { createBinder, discoverSites, trimEnd } from "../src/server.mjs";
 import { initSite, STARTER_NAMES } from "../src/init.mjs";
@@ -16,8 +16,8 @@ import { COMMAND_NAMES, safeText } from "../src/protocol.mjs";
 import { envNameRefusal } from "../src/executors/script.mjs";
 import { DEFAULT_AGENT_BUDGET_PER_HOUR } from "../src/budget.mjs";
 import { handlerHash, readTried, tryIntent } from "../src/try.mjs";
-import { checkReport } from "../src/check.mjs";
-import { cardCommand, inFolder, inSpace, previewShows, shellWord } from "../src/preview-host.mjs";
+import { cardTitle, checkReport } from "../src/check.mjs";
+import { cardArgs, cardCommand, inFolder, inSpace, pageRecorded, previewShows, shellWord } from "../src/preview-host.mjs";
 
 const HELP = `instafy-bind: a website plus a generic backend that turns clicks into typed intents.
 
@@ -68,9 +68,12 @@ check      Does the site show every item the request named (each product, stop o
            they were read, and a filter that would count a row whose value is unknown; and it notes the rows a
            filter lists apart. Exit 1 when an item is missing or a value needs fixing; 2 when there is nothing to
            check, or when a script holds an item's words where the check cannot place them (or fetches text from
-           another site), so it cannot tell. Items: --expect, plus an "expect" array in data.json. Run it before
-           telling anyone the page is done. In a space, while no preview shows the site, every answer ends with
-           the command that serves it and posts its card: a failing check never holds the card back.
+           another site), so it cannot tell. It also fails a page that loads a file from outside its folder (a
+           page is served from its own folder) and names the init command that gives it its own files. Items:
+           --expect, plus an "expect" array in data.json. Run it before telling anyone the page is done. In a
+           space, while no preview shows the site, a check that passes on a new page (one whose card was never
+           opened) serves it and posts its card itself, and any other check ends with the command that does: a
+           failing check never holds the card back, except for a page that loads files from outside its folder.
 command    Push a command (select, highlight, toast, reload) to every open viewer. Uses the
            admin token in .bind/admin-token.
 confirm    Approve (or --no: decline) jobs waiting for confirmation.
@@ -364,6 +367,24 @@ function cardStep(dir) {
   return sites.length === 1 && sites[0].prefix === "" && !previewShows(dir) ? cardCommand(dir) : null;
 }
 
+// How long the card's command may take: it may wait for another preview command on this machine, then for the site to
+// answer, then for its picture.
+const CARD_TIMEOUT_MS = 300_000;
+
+/** The card's step for the site in `dir`, taken by a check that passes: its command, run in the site's folder and titled
+ *  from the page. `{ ok, command, output, error }`: whether it posted the card, the command as a shell would say it,
+ *  what it printed, and why it did not. */
+function postCard(dir) {
+  const title = cardTitle(dir);
+  const command = cardCommand(dir, title);
+  const run = spawnSync("instafy", cardArgs(title), { cwd: dir, env: process.env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: CARD_TIMEOUT_MS });
+  const output = String(run.stdout ?? "").trim();
+  if (!run.error && run.status === 0) return { ok: true, command, output };
+  const said = String(run.stderr || run.stdout || "").trim().split("\n").slice(-3).join(" ").trim();
+  const error = run.error?.code === "ENOENT" ? "the instafy command was not found" : run.error ? run.error.message : said || `its command ended with ${run.signal ?? `exit ${run.status}`}`;
+  return { ok: false, command, output, error };
+}
+
 /** The `instafy preview open` command that shows one site of the binder serving `root` in Studio's preview card. */
 function previewCommand(port, site, root) {
   // Printed for a shell: keep the title inside double quotes without anything the shell would expand.
@@ -605,7 +626,8 @@ async function main() {
       if (!rest[0]) fail('usage: instafy-bind check <dir> --expect "<item>,<item>" [--json]', 64);
       let report;
       try {
-        report = checkReport(rest[0], flags.expect ?? [], { json: Boolean(flags.json), card: cardStep(rest[0]) });
+        // a new page's check posts its card; a page the space's record holds had one, and its check only names the command
+        report = checkReport(rest[0], flags.expect ?? [], { json: Boolean(flags.json), card: cardStep(rest[0]), post: pageRecorded(rest[0]) ? null : () => postCard(rest[0]) });
       } catch (error) {
         fail(error.message, 64);
       }

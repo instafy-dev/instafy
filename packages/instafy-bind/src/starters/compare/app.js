@@ -1,5 +1,5 @@
 /* Compare starter: 2-8 options side by side. A table when the page is wide, a list on phones, same order and ids: a
- * phone's row shows the values found, each with its source line, and names the rest once ("Not found yet: Weight
+ * phone's row shows the values found, each with its source line, and names the rest once ("Still missing: Weight
  * (checked 17 Oct on maker.com ↗), Price"). You design the content in data.json; keep theme.css and site.js.
  * Restyle only when asked.
  *
@@ -36,9 +36,10 @@
  *   Each value cites its page and day ("checked 17 Oct on maker.com ↗"), and no cell is blank: a source you read
  *   without finding the value on it is the fact without "v" ({"src", "url", "date"}): "Not found · checked 17 Oct on
  *   maker.com ↗"; any other missing value reads "Unknown", with {"note": "the store blocks price checks"} saying why.
- *   A value of an item whose own page wasn't opened is {"note": "its own page wasn't opened"}: nobody looked for it, so
- *   a phone names it under "Not checked", apart from what was looked for and not found. Never a dash. A value cites only a page that gives it: a count of what you found ("1 of 2 reviews found") cites a
- *   page it counts, and with none found it is {"note": "no review of this model read"}, citing no page.
+ *   A value of an item whose own page wasn't opened is {"note": "its own page wasn't opened"}. A phone names each
+ *   missing value once, under "Still missing", with its note. Never a dash. A value cites only a page that gives it: a
+ *   count of what you found ("1 of 2 reviews found") cites a page it counts, and with none found it is {"note": "no
+ *   review of this model read"}, citing no page.
  * When one page gives most of a column on one date, the cells show just the value and one line under the list cites
  * that page; so does a row whose own values come from one other page ("Option C (Support and Ride): checked 16 Oct on
  * fleetfeet.com ↗"). Any other cell keeps its own caption.
@@ -402,8 +403,8 @@
 
   /** Phones: one list, a row per option. The sorted value (with its caption) sits on the right, so you compare by
    * scanning down the right edge; the values found follow as facts in the same order on every row, each with its
-   * source line. What was not found is named once under them ("Not found yet: Weight (checked 17 Oct on maker.com
-   * ↗), Price"), with the page it was looked for on, not a stack of "Unknown"s. */
+   * source line. What is missing is named once under them ("Still missing: Weight (checked 17 Oct on maker.com ↗),
+   * Price"), with the page it was looked for on, not a stack of "Unknown"s. */
   function cards(data, items, st, shared) {
     var cols = columns(data);
     var def = sortDef(data, st);
@@ -415,7 +416,7 @@
         var el = cell(item, c, shared, c === sortCol ? c.label : undefined);
         var looked = lookedFor(item, c);
         if (!looked && !isGap(item, c, el)) return el;
-        gaps.push({ label: String(c.label || c.key), note: gapNote(valueOf(item, c), c), page: looked, unchecked: !looked && notOpened(valueOf(item, c)) });
+        gaps.push({ label: String(c.label || c.key), note: gapNote(valueOf(item, c), c), page: looked });
         return null;
       });
       var top = sortCol ? drawn[cols.indexOf(sortCol)] : null;
@@ -435,7 +436,7 @@
   /** A value looked for on a page and not found there, a fact with its page and no value ({"src", "url", "date"}): that
    * fact, for the line of what was not found, which names the page ("Weight (checked 17 Oct on maker.com ↗)"); null
    * for any other value, and for a price whose store can be opened or checked, which keeps its row. Its cell said "Not
-   * found · checked …" on the row, above a "Not found yet" line that left it out: one card used the words for two
+   * found · checked …" on the row, above a line of what was missing that left it out: one card used the words for two
    * things. */
   function lookedFor(item, col) {
     var f = valueOf(item, col);
@@ -462,31 +463,23 @@
     if (label && rest.indexOf(label) === 0) rest = rest.slice(label.length).trim();
     return !rest || /^(unknown|to confirm|((is|are|was|were) )?not (yet )?(checked|verified|found|known|listed|read)( yet)?)$/.test(rest) ? "" : site.clip(note);
   }
-  /** A value nobody looked for: the note an item whose own page wasn't opened gives each value it lacks. */
-  function notOpened(f) {
-    var note = String((f && f.note) || "").replace(/\s+/g, " ").trim();
-    return !site.shown(f) && /^its own page (wasn['\u2019]t|was not) opened\.?$/i.test(note);
-  }
-  /** "Not found yet: Weight, Price, Reviews"; values missing for one reason share it, and values looked for on one page
-   * share that page: "Not found yet: Price and Battery (maker.example did not answer), Weight (checked 17 Oct on
-   * maker.com ↗), Suction". Values nobody looked for, an item's whose own page wasn't opened, are named apart: "Not
-   * checked: Price, Reviews". On a page from what Octo knows nothing was looked for: "Not known: Price". */
+  /** "Still missing: Weight, Price, Reviews": every missing value once, under one heading whatever its note says (looked
+   * for and not found, or never looked for). Values missing for one reason share it, and values looked for on one page
+   * share that page: "Still missing: Price and Battery (maker.example did not answer), Weight (checked 17 Oct on
+   * maker.com ↗), Suction". On a page from what Octo knows nothing was looked for: "Not known: Price". */
   function notFound(gaps) {
     var parts = [];
-    var unchecked = memory ? [] : gaps.filter(function (g) { return g.unchecked; });
     gaps.forEach(function (g) {
-      if (unchecked.indexOf(g) >= 0) return;
       var key = g.page || g.note ? (g.page ? citeKey(g.page) : "") + "|" + g.note : "";
       var same = key ? parts.filter(function (p) { return p.key === key; })[0] : null;
       if (same) same.labels.push(g.label); else parts.push({ key: key, note: g.note, page: g.page, labels: [g.label] });
     });
-    var out = parts.length ? [memory ? "Not known: " : "Not found yet: "] : [];
+    var out = parts.length ? [memory ? "Not known: " : "Still missing: "] : [];
     parts.forEach(function (p, i) {
       out.push((i ? ", " : "") + and(p.labels));
       if (p.page) out.push(" (" + (p.note ? p.note + " · " : ""), site.cite(p.page), ")");
       else if (p.note) out.push(" (" + p.note + ")");
     });
-    if (unchecked.length) out.push((parts.length ? "; not checked: " : "Not checked: ") + and(unchecked.map(function (g) { return g.label; })));
     return out;
   }
 })();

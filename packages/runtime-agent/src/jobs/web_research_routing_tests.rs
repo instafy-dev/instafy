@@ -1195,7 +1195,7 @@ fn anything_not_read_on_a_page_says_not_checked_or_stays_out() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     // One wording, the replies guide's, which every turn reads (a browser turn its "Replies"
     // section): the browser skill said it a second way, and the research skill a third.
-    let line = "- A fact no page you read this turn states says \"not checked\", or stays out.";
+    let line = "- A fact or tip you add to the reply or a page says \"not checked\", or stays out, unless the person gave it or a page gives it: one you read this turn, or one in Instafy's browser's findings.";
     let agents = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/assets/instafy/AGENTS.md"

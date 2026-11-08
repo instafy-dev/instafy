@@ -608,7 +608,7 @@ try {
       ok(/Not counted as €600 or less/.test(await page.locator("#group-unknown").innerText()), `${label}: and that they are not counted as within the limit`);
       ok(/1 more over €600 · Show/.test(await text(page)), `${label}: the row over the limit leaves one line`);
       const none = (await page.locator("#row-none").innerText()).replace(/\s+/g, " ");
-      ok(/Not found/.test(none) && !/Not listed/.test(none) && /checked 27 Oct( 2026)? on maker\.example ↗/.test(none), `${label}: a page read without the price says where it was looked for and cites it: ${none}`);
+      ok((label === "phone" ? /Still missing: Price/ : /Not found/).test(none) && !/Not listed/.test(none) && /checked 27 Oct( 2026)? on maker\.example ↗/.test(none), `${label}: a page read without the price says where it was looked for and cites it: ${none}`);
       ok(!/—/.test(none), `${label}: a dash is never drawn as a value: ${none}`);
       const blocked = (await page.locator("#row-blocked").innerText()).replace(/\s+/g, " ");
       ok(/(Price unknown|Unknown) · shop-two\.example blocks automated price checks/.test(blocked), `${label}: a blocked shop says why: ${blocked}`);
@@ -658,9 +658,9 @@ try {
       weight: { v: i.ref.slice(-1) === "a" ? "8.9 oz" : "9.1 oz", src: "Maker", url: "https://example.com/specs", date: "2026-10-17" },
       rating: { v: "4.5 of 5", src: "Reviews", url: "https://example.com/reviews", date: "2026-10-16" } } })) })));
     const missing = {
-      "row-pro": "Not found yet: Weight, Price, Two independent reviews",
-      "row-air": "Not found yet: Battery, Weight, Price, Two independent reviews",
-      "row-max": "Not found yet: Battery, Weight, Price, Two independent reviews",
+      "row-pro": "Still missing: Weight, Price, Two independent reviews",
+      "row-air": "Still missing: Battery, Weight, Price, Two independent reviews",
+      "row-max": "Still missing: Battery, Weight, Price, Two independent reviews",
     };
     for (const width of [320, 375, 414]) {
       for (const scheme of ["light", "dark"]) {
