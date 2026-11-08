@@ -1017,6 +1017,7 @@ describe("usePersonalBrowserBridge address-bar search", () => {
   let root: Root;
   let current: InstafyDesktopPersonalBrowserStatus;
   let resultRef: MutableRefObject<HookResult | null>;
+  let statusListener: (status: InstafyDesktopPersonalBrowserStatus) => void;
   type DesktopBridge = NonNullable<Window["instafyDesktop"]>;
   let navigateTo: ReturnType<typeof vi.fn<NonNullable<DesktopBridge["personalBrowserNavigate"]>>>;
   let search: ReturnType<typeof vi.fn<NonNullable<DesktopBridge["personalBrowserSearch"]>>>;
@@ -1037,10 +1038,10 @@ describe("usePersonalBrowserBridge address-bar search", () => {
     let choice = { engines: [{ id: "duckduckgo", name: "DuckDuckGo" }, { id: "brave", name: "Brave Search" }], selected: "duckduckgo" };
     window.instafyDesktop = {
       notify: vi.fn(async () => undefined),
-      onPersonalBrowserStatus: vi.fn(() => () => undefined),
+      onPersonalBrowserStatus: vi.fn((listener) => { statusListener = listener; return () => undefined; }),
       personalBrowserClose: vi.fn(async () => (current = personalBrowserStatus())),
       personalBrowserOpen: vi.fn(async (options) => {
-        current = personalBrowserStatus({ state: "ready", ownerId: options.ownerId, projectId: "project-1", url: "https://app.example.test/" });
+        current = personalBrowserStatus({ state: "ready", ownerId: options.ownerId, projectId: "project-1", activeTabId: "tab-1", url: "https://app.example.test/" });
         return current;
       }),
       personalBrowserNavigate: navigateTo,
@@ -1067,6 +1068,56 @@ describe("usePersonalBrowserBridge address-bar search", () => {
     delete window.instafyDesktop;
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
     vi.restoreAllMocks();
+  });
+
+  it("clears invalid-address feedback when the native browser changes tabs", async () => {
+    await mount(false);
+    await act(async () => { await resultRef.current!.navigate("javascript:alert(1)"); });
+    expect(resultRef.current?.navigationError).not.toBeNull();
+    await act(async () => { statusListener({ ...current, activeTabId: "tab-2", url: "https://second.example/" }); });
+    expect(resultRef.current?.navigationError).toBeNull();
+  });
+
+  it.each(["success", "failure"])("ignores a delayed navigation %s after changing tabs", async (outcome) => {
+    await mount(false);
+    const firstTab = current;
+    const response = deferred<InstafyDesktopPersonalBrowserStatus>();
+    navigateTo.mockImplementationOnce(() => response.promise.then((value) => {
+      if (outcome === "failure") throw new Error("Old tab failed");
+      return value;
+    }));
+    let navigation!: Promise<InstafyDesktopPersonalBrowserStatus | null>;
+    await act(async () => { navigation = resultRef.current!.navigate("https://next.example/"); });
+    await act(async () => { statusListener({ ...current, activeTabId: "tab-2", url: "https://second.example/" }); });
+    await act(async () => {
+      response.resolve({ ...firstTab, url: "https://next.example/" });
+      await navigation;
+    });
+    expect(resultRef.current?.status).toMatchObject({ state: "ready", activeTabId: "tab-2", url: "https://second.example/" });
+    expect(resultRef.current?.navigationError).toBeNull();
+  });
+
+  it.each([
+    ["goBack", "personalBrowserGoBack"],
+    ["goForward", "personalBrowserGoForward"],
+    ["reload", "personalBrowserReload"],
+  ] as const)("ignores a delayed %s reply or failure after leaving its native tab", async (action, bridgeAction) => {
+    await mount(false);
+    for (const fail of [false, true]) {
+      const firstTab = { ...current, activeTabId: "tab-1", url: "https://first.example/" };
+      await act(async () => statusListener(firstTab));
+      const response = deferred<InstafyDesktopPersonalBrowserStatus>();
+      window.instafyDesktop![bridgeAction] = vi.fn(() => response.promise.then((value) => {
+        if (fail) throw new Error("Old tab failed");
+        return value;
+      }));
+      let command!: Promise<InstafyDesktopPersonalBrowserStatus | null>;
+      await act(async () => { command = resultRef.current![action](); });
+      await act(async () => statusListener({ ...current, activeTabId: "tab-2", url: "https://second.example/" }));
+      await act(async () => { response.resolve(firstTab); await command; });
+      expect(resultRef.current?.status).toMatchObject({ state: "ready", activeTabId: "tab-2", url: "https://second.example/" });
+      expect(resultRef.current?.navigationError).toBeNull();
+    }
   });
 
   it("searches words that are not an address and opens addresses as addresses", async () => {

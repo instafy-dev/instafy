@@ -1,4 +1,4 @@
-import { useContext, useMemo, useRef, type ReactNode } from "react";
+import { useContext, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
 import {
   DEFAULT_SLOT,
   Dialog,
@@ -57,9 +57,49 @@ export function StudioPopover({
   triggerRef,
   ...props
 }: StudioPopoverProps) {
-  const popoverRef = useRef<HTMLElement | null>(null);
+  const [popoverNode, setPopoverNode] = useState<HTMLElement | null>(null);
   const contextValue = useContext(PopoverContext);
   const resolvedContainerPadding = containerPadding ?? (layout ? 8 : undefined);
+
+  useLayoutEffect(() => {
+    if (!layout || !popoverNode) return;
+    const doc = popoverNode.ownerDocument;
+    const view = doc.defaultView;
+    if (!view) return;
+    let layoutWidth = doc.documentElement.clientWidth;
+    let frame = 0;
+    const keepInsideLayoutViewport = () => {
+      const box = popoverNode.getBoundingClientRect();
+      const padding = resolvedContainerPadding ?? 0;
+      const left = Math.min(Math.max(box.left, padding), Math.max(padding, layoutWidth - padding - box.width));
+      const delta = left - box.left;
+      if (Math.abs(delta) < 0.5) return;
+      // React Aria freezes positioning while visualViewport.scale changes.
+      // After rotation, a stale offscreen popover can itself zoom the mobile
+      // viewport out, preventing Aria from correcting its position. Clamp to
+      // the layout viewport, without remounting or losing keyboard focus.
+      const positionedLeft = Number.parseFloat(popoverNode.style.left);
+      if (Number.isFinite(positionedLeft)) popoverNode.style.left = `${positionedLeft + delta}px`;
+    };
+    const onResize = () => {
+      const width = doc.documentElement.clientWidth;
+      // Pinch zoom and the on-screen keyboard change the visual viewport only;
+      // let React Aria retain its normal behavior for those interactions.
+      if (!width || width === layoutWidth) return;
+      layoutWidth = width;
+      keepInsideLayoutViewport();
+      view.cancelAnimationFrame(frame);
+      frame = view.requestAnimationFrame(keepInsideLayoutViewport);
+    };
+    view.addEventListener("resize", onResize);
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(onResize) : null;
+    observer?.observe(doc.documentElement);
+    return () => {
+      view.removeEventListener("resize", onResize);
+      observer?.disconnect();
+      view.cancelAnimationFrame(frame);
+    };
+  }, [layout, popoverNode, resolvedContainerPadding]);
 
   const resolvedCloseOnInteractOutside = useMemo(() => {
     const context = (() => {
@@ -94,7 +134,7 @@ export function StudioPopover({
       {...props}
       data-studio-popover=""
       data-studio-popover-layout={layout}
-      ref={popoverRef}
+      ref={setPopoverNode}
       offset={offset ?? (layout ? 6 : undefined)}
       containerPadding={resolvedContainerPadding}
       isNonModal={isNonModal}

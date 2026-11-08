@@ -398,6 +398,21 @@ describe("phone address editor", () => {
     expect(container.querySelector('[data-testid="test-browser-address-trigger"]')!.textContent).toBe("Enter an address");
   });
 
+  it.each(["cancel", "lose control"])("restores an empty address for a blank tab on %s", async (action) => {
+    await open();
+    const page = { url: "about:blank", title: "" };
+    await act(async () => root.render(<Fixture key="phone" page={page} />));
+    await type("unfinished.example");
+    if (action === "cancel") {
+      await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Back"]')!.click());
+    } else {
+      await act(async () => root.render(<Fixture key="phone" page={page} disabled />));
+    }
+    expect(dialog()).toBeNull();
+    expect(container.querySelector('[data-testid="test-browser-address-trigger"]')!.textContent).not.toContain("about:blank");
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
   it("restores the latest observed page when cancelling or losing control", async () => {
     await open();
     await type("unfinished.example");

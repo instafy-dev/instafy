@@ -46,6 +46,7 @@ describe("StudioPopover content scrolling boundary", () => {
     await act(async () => root.unmount());
     await act(async () => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
     container.remove();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
@@ -99,6 +100,26 @@ describe("StudioPopover content scrolling boundary", () => {
     expect(popover.classList.contains("p-3")).toBe(true);
     expect(popover.style.getPropertyValue("--studio-popover-max-width")).toBe("");
     expect(renderedPopoverProps.mock.lastCall?.[0]).toMatchObject({ offset: undefined, containerPadding: undefined });
+  });
+
+  it("keeps an open menu inside the layout viewport after rotation without moving focus", async () => {
+    const layoutWidth = vi.spyOn(document.documentElement, "clientWidth", "get").mockReturnValue(844);
+    await act(async () => root.render(<MenuFixture onSelect={vi.fn()} />));
+    await click("menu-trigger");
+    const popover = document.querySelector<HTMLElement>('[data-testid="menu-popover"]')!;
+    const option = popover.querySelector<HTMLElement>('[role="menuitemradio"]')!;
+    await act(async () => option.focus());
+    popover.style.left = "512px";
+    vi.spyOn(popover, "getBoundingClientRect").mockImplementation(() => ({
+      left: Number.parseFloat(popover.style.left), width: 296,
+    }) as DOMRect);
+    layoutWidth.mockReturnValue(320);
+    await act(async () => window.dispatchEvent(new Event("resize")));
+    expect(Number.parseFloat(popover.style.left)).toBeGreaterThanOrEqual(8);
+    expect(Number.parseFloat(popover.style.left) + 296).toBeLessThanOrEqual(312);
+    expect(document.activeElement).toBe(option);
+    await key("Escape");
+    expect(document.querySelector('[data-testid="menu-popover"]')).toBeNull();
   });
 
   it("uses the form preset for shared field pickers while preserving explicit placement", async () => {

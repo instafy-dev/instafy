@@ -13,6 +13,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserSessionPage } from "../browserSessionPages";
+import type { ChatBrowserTabOpening } from "../useChatBrowserView";
 
 type Viewer = {
   canvas: HTMLCanvasElement;
@@ -118,6 +119,7 @@ describe("a chat's Browser view", () => {
     onPresenceChange?: (presence: unknown) => void;
     /** RFB's view-only lane, for a person who does not drive. */
     viewOnlyLane?: boolean;
+    chatTabOpening?: ChatBrowserTabOpening | null;
   }) {
     await act(async () => root.render(<BrowserSessionModal isOpen transportActive={options.active ?? true}
       onOpenChange={noop} projectId={projectId} currentUserId="user-1"
@@ -127,6 +129,7 @@ describe("a chat's Browser view", () => {
       sharedBrowserRfbCapabilities={{ renderScale: 1, maxFramebufferPixels: 8_294_400, viewOnly: options.viewOnlyLane }}
       conversationId="chat-github"
       chatPageIds={options.chatPageIds === undefined ? [CHAT_TAB] : options.chatPageIds}
+      chatTabOpening={options.chatTabOpening}
       anotherChatTurn={options.anotherChatTurn ?? false}
       agentArrival={options.arriving ? { site: null } : null}
       onPresenceChange={options.onPresenceChange}
@@ -149,6 +152,28 @@ describe("a chat's Browser view", () => {
   const address = () => document.querySelector<HTMLInputElement>('[data-testid="shared-browser-address"]')?.value ??
     document.querySelector('[data-testid="shared-browser-address-trigger"]')!.textContent;
   const note = () => document.querySelector('[data-testid="browser-session-agent-arrival"]')?.textContent ?? null;
+
+  it.each([false, true])("offers a tab retry on a connected browser without exposing another chat (compact %s)", async (compact) => {
+    const retry = vi.fn();
+    const pages = [tab(OTHER_TAB, PICO, true)];
+    const opening = { pending: true, error: null, onRetry: retry };
+    await render({ pages, compact, chatPageIds: [], chatTabOpening: opening });
+    expect(document.querySelector('[data-testid="browser-session-loading-notice"]')?.textContent).toBe("Opening this chat’s tab…");
+    expect(document.querySelector('[data-testid="browser-session-error-retry"]')).toBeNull();
+    expect(viewer()).toBeNull();
+    const failed = { ...opening, pending: false, error: "Instafy's browser could not open a tab for this chat. Try again." };
+    await render({ pages, compact, chatPageIds: [], chatTabOpening: failed });
+    expect(document.querySelector('[data-testid="browser-session-error-notice"]')?.textContent).toContain(failed.error);
+    const viewport = document.querySelector('[data-testid="browser-session-viewport"]')!;
+    expect(viewport.classList.contains("bg-slate-100")).toBe(true);
+    expect(viewport.classList.contains("dark:bg-slate-950")).toBe(true);
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-session-error-retry"]')!.click());
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(viewer()).toBeNull();
+    expect(address()).not.toContain("raspberrypi");
+    await render({ pages: [tab(CHAT_TAB, "about:blank", true)], compact, chatTabOpening: failed });
+    expect(document.querySelector('[data-testid="browser-session-error-notice"]')).toBeNull();
+  });
 
   it("draws the chat's own tab, and leaves the stage blank with no address and no viewer while another tab is in front", async () => {
     await render({ pages: [tab(CHAT_TAB, GITHUB, true), tab(OTHER_TAB, PICO, false)] });

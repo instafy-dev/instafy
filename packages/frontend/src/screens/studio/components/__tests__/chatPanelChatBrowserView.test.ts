@@ -50,8 +50,10 @@ describe("ChatPanel's chat Browser view", () => {
     expect(view).toContain("pages: sharedBrowserChromePages,");
     expect(view).toContain("chatTurnUnderWay: chatBrowserTurnUnderWay,");
     expect(chatPanel).toContain("chatPageIds={chatViewPageIds}");
-    expect(chatPanel).toContain("tab: chatViewStepTabId ? { id: chatViewStepTabId, isActive: chatViewStepTabActive } : null,");
-    expect(chatPanel).toContain("else if (step === \"focus\" && chatViewStepTabId) void focusSharedBrowserPageQuietly(chatViewStepTabId)");
+    expect(chatPanel).toContain("tabId: chatViewStepTabId,");
+    expect(chatPanel).toContain("tabActive: chatViewStepTabActive,");
+    expect(chatPanel).toContain("focusTab: focusSharedBrowserPageQuietly,");
+    expect(chatPanel).toContain("chatTabOpening={chatTabOpening}");
   });
 });
 
