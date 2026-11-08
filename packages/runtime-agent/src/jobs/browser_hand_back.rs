@@ -745,8 +745,9 @@ pub(super) fn finding_lines_of(answer: &str) -> Option<String> {
 /// it, and nothing else of it; None when it wrote none. What a turn that stopped for the person
 /// passes on: the page it stopped at is the one the person's next step acts on, and a later turn
 /// reads it then. Passed on, every such line of three turns that paused on a cookie notice was
-/// out of date or untrue by the time the page's build read it: two of the pages were read right
-/// after the person's step, and the notice on the other covered nothing (a local test, Nov 8).
+/// out of date or untrue by the time the page's build read it: two of the pages were read or left
+/// right after the person's step, and the notice on the third covered nothing (a local test,
+/// Nov 8).
 pub(super) fn read_lines_of(answer: &str) -> Option<String> {
     let lines: Vec<String> = split_findings(answer)?
         .1
