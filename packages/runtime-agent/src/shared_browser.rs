@@ -3391,8 +3391,18 @@ impl ServerHandler for SharedBrowserMcpServer {
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> std::result::Result<CallToolResponse, McpError> {
         let tool = request.name.to_string();
-        let browser_request = mcp_tool_request(&tool, request.arguments)
-            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+        let browser_request = match mcp_tool_request(&tool, request.arguments) {
+            Ok(browser_request) => browser_request,
+            // A tool the browser doesn't offer is no step of it.
+            Err(error) if !self.tools.iter().any(|offered| offered.name == tool) => {
+                return Err(McpError::invalid_params(error.to_string(), None));
+            }
+            // A step whose arguments the browser refused ran nowhere, and says why as every
+            // failed step does ([`failed_tool_result`]): a protocol error reaches a code cell
+            // with no structured content, and a turn that printed `r.structuredContent` read
+            // "undefined" for a click with no fresh snapshot (a local test, Nov 4).
+            Err(error) => return Ok(failed_tool_result(&error.to_string()).into()),
+        };
         // rmcp may dispatch independent requests concurrently. The approval
         // protocol deliberately owns one fixed runtime-local request slot, so
         // serialize every browser observation and mutation through the same
@@ -3415,19 +3425,13 @@ impl ServerHandler for SharedBrowserMcpServer {
     }
 }
 
-/// A failed call's result, with what the controller said of its step
-/// (`activity`): a step the person allowed that then did not happen, such as a
-/// control the page changed after their yes, lists their yes in Details. A
-/// call that could not reach the browser at all says so (`browserUnavailable`):
-/// the browser never answered its step, so that step does not stand in for the
-/// browser work of the turn (runtime-agent's retry of a turn with none still
-/// runs).
-///
-/// A model that calls the tools one at a time (not from code) reads only a
-/// result's structured content when it has one, so structured content that
-/// carries these facts also carries the failure's own words (`error.reason`),
-/// as a page the network did not deliver does: a refused step still tells it
-/// what to do, and its `[step_refused_…]` code.
+/// A failed call's result ([`failed_tool_result`]), with what the controller
+/// said of its step (`activity`): a step the person allowed that then did not
+/// happen, such as a control the page changed after their yes, lists their yes
+/// in Details. A call that could not reach the browser at all says so
+/// (`browserUnavailable`): the browser never answered its step, so that step
+/// does not stand in for the browser work of the turn (runtime-agent's retry of
+/// a turn with none still runs).
 fn failed_call_result(error: &anyhow::Error) -> CallToolResult {
     let mut result = failed_tool_result(&format!("{error:#}"));
     let activity = error
@@ -3436,26 +3440,40 @@ fn failed_call_result(error: &anyhow::Error) -> CallToolResult {
     let unavailable = error
         .downcast_ref::<BrowserUnavailable>()
         .map(|_| JsonValue::Bool(true));
-    for (field, value) in [("activity", activity), ("browserUnavailable", unavailable)] {
-        let Some(value) = value else { continue };
-        match result.structured_content.as_mut() {
-            Some(JsonValue::Object(structured)) => {
+    if let Some(JsonValue::Object(structured)) = result.structured_content.as_mut() {
+        for (field, value) in [("activity", activity), ("browserUnavailable", unavailable)] {
+            if let Some(value) = value {
                 structured.insert(field.to_string(), value);
-            }
-            _ => {
-                let reason = result
-                    .content
-                    .iter()
-                    .find_map(|content| content.as_text().map(|text| text.text.clone()))
-                    .unwrap_or_default();
-                result.structured_content = Some(json!({
-                    "error": { "reason": reason },
-                    field: value,
-                }));
             }
         }
     }
     result
+}
+
+/// The words of the controller's refusal of an address no message and no page the chat read
+/// gave (`refuseUngivenAddress` in `assets/shared-browser-cli.js`).
+const ADDRESS_NOT_GIVEN_WORDS: &str = "Octo opens only addresses it was given";
+
+/// The address a `navigate` or `open_tab` asked for that the browser refused to open because no
+/// message and no page the chat read gave it, as the call's arguments name it: its failed
+/// result's words (`error.reason`) are that refusal's ([`ADDRESS_NOT_GIVEN_WORDS`]), the only
+/// thing the result says. None for any other call. The browser never opened it, so no finding of
+/// the turn stands for it (`jobs::browser_hand_back::leave_out_addresses_never_opened`).
+pub(crate) fn address_not_given(
+    tool: &str,
+    arguments: Option<&JsonValue>,
+    structured: Option<&JsonValue>,
+) -> Option<String> {
+    if !matches!(tool, "navigate" | "open_tab")
+        || !structured?
+            .pointer("/error/reason")
+            .and_then(JsonValue::as_str)?
+            .contains(ADDRESS_NOT_GIVEN_WORDS)
+    {
+        return None;
+    }
+    let url = arguments?.get("url")?.as_str()?.trim();
+    (!url.is_empty()).then(|| url.to_string())
 }
 
 /// A page that did not load because of the network: one of Chromium's
@@ -3536,12 +3554,23 @@ fn network_failure(message: &str) -> Option<NetworkFailure> {
 /// A failed call's result. A page the network did not deliver says so in
 /// plain words, with the browser's code only in `error.details`; any other
 /// failure says what the browser said of its step (its controller's own,
-/// masked sentence, [`controller_failure`]), with nothing before it.
+/// masked sentence, [`controller_failure`]), with nothing before it. Either way
+/// its words are its structured content's `error.reason` too, as a successful
+/// step's page is its structured content: a turn that printed a step's
+/// `r.structuredContent` read two refused addresses, a stale snapshot and the
+/// tab limit as "undefined", so a refusal's own way on ("Open
+/// https://www.tomshardware.com/ and follow its links to the page") never
+/// reached it (a local test, Nov 7), and a model that calls the tools one at a
+/// time reads only a result's structured content when it has one. It says
+/// nothing its words don't: the run reads a refused address by them
+/// ([`address_not_given`]).
 fn failed_tool_result(message: &str) -> CallToolResult {
-    match network_failure(message) {
-        Some(failure) => network_failure_tool_result(&failure),
-        None => CallToolResult::error(vec![ContentBlock::text(message.to_string())]),
+    if let Some(failure) = network_failure(message) {
+        return network_failure_tool_result(&failure);
     }
+    let mut result = CallToolResult::error(vec![ContentBlock::text(message.to_string())]);
+    result.structured_content = Some(json!({ "error": { "reason": message } }));
+    result
 }
 
 fn network_failure_tool_result(failure: &NetworkFailure) -> CallToolResult {

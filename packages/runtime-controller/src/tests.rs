@@ -29212,6 +29212,200 @@ async fn load_conversation_history_for_agent_limit_skips_progress_rows() -> anyh
     Ok(())
 }
 
+/// A local test, Nov 7: three question turns in Instafy's browser, then "Put
+/// the hours and the metro route on a small page I can share.". The page's
+/// build read each browser turn as `{"findings":[]}` and read their sites
+/// again itself: each turn's findings note, which a later building turn reads
+/// it by, wears a progress row's stamp, and the history left it out with the
+/// progress rows. The notes stay now, in their browser turns, while every
+/// other progress row of those turns stays out before the limit.
+#[tokio::test]
+async fn load_conversation_history_for_agent_keeps_browser_findings_notes() -> anyhow::Result<()> {
+    let Some((mut client, connection_handle)) = connect_test_db().await? else {
+        eprintln!("skipping agent history test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    client
+        .batch_execute(
+            "CREATE TEMP TABLE conversation_messages (
+                id uuid PRIMARY KEY,
+                conversation_id uuid not null,
+                prompt_id uuid,
+                run_id uuid,
+                role text not null,
+                content text not null,
+                metadata jsonb,
+                created_at timestamptz not null default now()
+            );
+            CREATE TEMP TABLE agent_jobs (
+                id uuid PRIMARY KEY,
+                run_id uuid,
+                conversation_id uuid,
+                payload jsonb NOT NULL DEFAULT '{}'::jsonb
+            );",
+        )
+        .await?;
+
+    let conversation_id = Uuid::new_v4();
+    let progress = |message_type: &str| {
+        json!({
+            "source": "agent",
+            "kind": "update",
+            "outcome": "in_progress",
+            "messageType": message_type,
+        })
+    };
+    // As the controller stamps the note the runtime posts
+    // (`build_agent_update_metadata`).
+    let note = |pages: usize, read: usize| {
+        let mut note = progress("status");
+        note["details"] = json!({
+            "kind": "agent_message",
+            "browserFindings": { "pages": pages, "pagesRead": read },
+        });
+        note
+    };
+    let hours = r#"{"url":"https://visitporto.travel/en-GB","stopped":"timed-out"}"#;
+    let metro = r#"{"url":"https://www.metrodoporto.pt/","title":"Metro do Porto - A Vida em Movimento","facts":["The journey planner's start station was São Bento."]}"#;
+    let planner = r#"{"url":"https://en.metrodoporto.pt/","title":"Metro do Porto - A Vida em Movimento","facts":["The journey planner allowed selecting São Bento as the start, but did not display a route result."]}"#;
+    let turns = [
+        (
+            "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.",
+            hours,
+            note(1, 0),
+            "I couldn't read Visit Porto because the page stayed busy and showed no content.",
+        ),
+        (
+            "Now find how to get there by metro from São Bento.",
+            metro,
+            note(1, 1),
+            "The Metro do Porto journey planner shows São Bento as the starting station.",
+        ),
+        (
+            "Confirm the metro route in the operator's journey planner.",
+            planner,
+            note(1, 1),
+            "Finished in the browser.",
+        ),
+    ];
+    let mut minute = 0;
+    let mut insert =
+        |run_id: Option<Uuid>, role: &str, content: &str, metadata: serde_json::Value| {
+            minute += 1;
+            (
+                Uuid::new_v4(),
+                run_id,
+                role.to_string(),
+                content.to_string(),
+                metadata,
+                minute,
+            )
+        };
+    let mut rows = Vec::new();
+    for (request, lines, metadata, reply) in &turns {
+        let run_id = Uuid::new_v4();
+        client
+            .execute(
+                "INSERT INTO agent_jobs (id, run_id, conversation_id, payload)
+                 VALUES ($1, $2, $3, '{\"metadata\": {\"browserTransport\": \"shared\"}}'::jsonb)",
+                &[&Uuid::new_v4(), &run_id, &conversation_id],
+            )
+            .await?;
+        rows.push(insert(None, "user", request, json!({})));
+        rows.push(insert(Some(run_id), "user", request, json!({})));
+        for index in 0..40 {
+            let message_type = ["mcp_tool_call", "token_usage", "reasoning", "status"][index % 4];
+            rows.push(insert(
+                Some(run_id),
+                "assistant",
+                &format!("step {index}"),
+                progress(message_type),
+            ));
+        }
+        rows.push(insert(Some(run_id), "assistant", lines, metadata.clone()));
+        rows.push(insert(
+            Some(run_id),
+            "assistant",
+            reply,
+            json!({"source": "agent", "outcome": "succeeded"}),
+        ));
+    }
+    let page = "Put the hours and the metro route on a small page I can share.";
+    rows.push(insert(None, "user", page, json!({})));
+    for (id, run_id, role, content, metadata, minute) in &rows {
+        client
+            .execute(
+                "INSERT INTO conversation_messages
+                   (id, conversation_id, run_id, role, content, metadata, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6::jsonb,
+                         '2026-01-01T00:00:00Z'::timestamptz + ($7::int * interval '1 minute'))",
+                &[
+                    id,
+                    &conversation_id,
+                    run_id,
+                    role,
+                    content,
+                    &PgJson(metadata),
+                    &(*minute as i32),
+                ],
+            )
+            .await?;
+    }
+
+    let transaction = client.transaction().await?;
+    let history = crate::agent::load_conversation_history_for_agent(
+        &transaction,
+        &conversation_id,
+        None,
+        None,
+        None,
+        20,
+    )
+    .await
+    .expect("load agent history");
+    let seen: Vec<(&str, &str, Option<&str>)> = history
+        .iter()
+        .map(|entry| {
+            (
+                entry["role"].as_str().expect("role"),
+                entry["content"].as_str().expect("content"),
+                entry["lane"].as_str(),
+            )
+        })
+        .collect();
+    let mut expected = Vec::new();
+    for (request, lines, _, reply) in &turns {
+        expected.extend([
+            ("user", *request, None),
+            ("user", *request, Some("browser")),
+            ("assistant", *lines, Some("browser")),
+            ("assistant", *reply, Some("browser")),
+        ]);
+    }
+    expected.push(("user", page, None));
+    assert_eq!(seen, expected);
+    // The note keeps what a later building turn reads it by.
+    let notes: Vec<&serde_json::Value> = history
+        .iter()
+        .filter(|entry| {
+            entry["metadata"]["details"]
+                .get("browserFindings")
+                .is_some()
+        })
+        .collect();
+    assert_eq!(notes.len(), 3);
+    assert_eq!(
+        notes[0]["metadata"]["details"]["browserFindings"],
+        json!({ "pages": 1, "pagesRead": 0 })
+    );
+    assert_eq!(notes[0]["runId"], history[1]["runId"]);
+
+    transaction.rollback().await?;
+    connection_handle.abort();
+    Ok(())
+}
+
 /// Oct 1: the agent read the controller's startup notice and an earlier run's
 /// raw 429 error as its own replies. Its leased history now leaves the
 /// dispatch notice out and reads the failed run as a label, while a scheduled
