@@ -1343,10 +1343,14 @@ a space whose copy of the skill lacks it keeps today's routes. Research whose
 answer ends in a page (a comparison, prices, a route) is `browser_then_build`
 from the first message too, while research answered in a reply (facts, a
 price, opening hours, reviews) stays with Octo, whose turn reads public pages
-itself. Only a map ("on a map") stays with Octo, since a map's skill finds
-and cites its places itself, and so does a page made only from what the chat
-already found and confirmed: a page that needs what no reply here confirmed,
-such as a route, is `browser_then_build`. A comparison that named no site to use first once stayed with
+itself. A change that needs what a web page says is `browser_then_build` too:
+a change's building turn opens no browser, and one asked to add each laptop's
+warranty "from its own page" asked the person to send the pages (a local test,
+Nov 7). Only a map ("on a map") stays with Octo, since a map's skill finds
+and cites its places itself, and its turn is a change of files; and so does a
+page or change made only from what the chat already found and confirmed: a
+page that needs what no reply here confirmed, such as a route, is
+`browser_then_build`. A comparison that named no site to use first once stayed with
 Octo too, under a rule written for maps, and its building turn, which must
 change files and so cannot ask for the browser, met a maker's robots.txt and
 no search key (a local test, Nov 6). A message that carries on the chat's
@@ -1358,12 +1362,10 @@ that it never carries on a change the person stopped or undid, and says which;
 the routing section no longer says so, since a real "keep going" stayed with
 Octo on that clause (a local test, Nov 6). A message that names the browser still stays with Octo when the browser
 turn could not do it alone: it sees only the person's words (with the routing
-step's summary of what they carry on while the chat has no browser turn) and
-the chat's earlier browser turns, so a message whose browser part needs what
-this space or another chat holds (what a page, map or file here says, or, once
-the chat has a browser turn, what a reply that was not the browser's named), a
-site that runs in this space, or a message that says not to use the browser is
-not sent there. Its building turn reads what the browser part needs and names
+step's summary of what they carry on) and the chat's earlier browser turns, so
+a message whose browser part needs what this space or another chat holds (what
+a page, map or file here says), a site that runs in this space, or a message
+that says not to use the browser is not sent there. Its building turn reads what the browser part needs and names
 it in a card, which hands back to a build when the message changes something
 here: such a turn changes no file itself, so it can ask for the browser. The
 routes are offered only for the
@@ -1373,10 +1375,12 @@ hand-back, a worker, a plan, an unattended run or a browser turn) and that
 Octo answers for sure (not a group chat's message that Octo first decides
 whether to answer at all), with no attachments. That message's job then runs
 no model turn of its own: it posts one card marked `routed`, whose task is the
-person's own words, and no reply. In a chat with earlier turns but no browser
-turn yet, the words are followed by one quoted line, "What this carries on:
-…", with the routing step's summary, since the browser turn reads nothing of
-those turns. The section asks that summary to name the items, place or site the
+person's own words, and no reply. In a chat with earlier turns, the words are
+followed by one quoted line, "What this carries on: …", with the routing step's
+summary, since the browser turn reads none of the building turns, nor what the
+routing step made of the chat's browser turns: in a chat with browser turns, a
+page to share told only the person's words opened nothing, and a fill-in
+re-read the pages its first pass had read (a local test, Nov 7). The section asks that summary to name the items, place or site the
 chat names, by name and not by address, and what to find: one that named no
 laptop sent its browser turn to a blank page with nothing to look up (a local
 test, Nov 6). Like any card's task, the line names no address the person could
@@ -1402,7 +1406,14 @@ browser turn, its hand-back and every check on them are a card's, except that
 its browser turn is the person's own turn for billing (its task is their
 words; [Credits and billing](Credits-Billing.md)), and its hand-back gives the
 building turn the message's words as the person's request: that building
-thread never saw the message. A building or chat turn that finds mid-task that
+thread never saw the message. The routing step's history leaves out a request the person
+stopped, once they sent another message after its Stop, and one whose change
+they undid, with every entry of its runs, its Stop's notice and its Undo line:
+the routing step only picks a route, and "keep going" once read a stopped
+section and an undone tip as unfinished work and stayed with Octo (a local
+test, Nov 7). A request stopped right before the message stays, as the chat
+showed it, since that message may say what to do instead. A building turn
+still reads each Stop and Undo line. A building or chat turn that finds mid-task that
 it needs the browser still asks with its own card. It never starts, stops or replaces a
 machine for this, and every other card waits for the person's press, apart
 from a routed card that goes on from the person's own browser turn in the
@@ -2790,9 +2801,12 @@ unless the policy is `"covered"`.
   in that replay already), and a turn that listed none with none. A Let Octo
   continue press reads as one line there, not as Studio's instructions in the
   person's name, and a hand-back's own stored words read as nothing there and
-  in the routing step's history: the person's message is in it already. Nor
-  does a browser turn's findings note reach the routing step's history: it is
-  Details, and its lines quote page text. It takes no
+  in the routing step's history: the person's message is in it already. The
+  routing step's history reads a browser turn's findings note only as one line
+  the runtime writes, how many pages that turn read ("Octo read 10 pages in
+  Instafy's browser."): the note is Details, and its lines quote page text. A
+  browser part that reads every page posts no words of its own, so without
+  that line the routing step saw no browser work in such a chat. It takes no
   routing step: its route is decided (build in this chat), and the findings it
   builds from are in its own prompt, which a routing step never sees. So it
   runs in the lane a routed build runs in: it edits the space and ends in plain

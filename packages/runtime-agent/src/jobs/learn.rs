@@ -551,6 +551,12 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     include_str!("legacy/browser-automation-v34.md"),
     // Before native retrieval and removing Instafy-owned website restrictions.
     include_str!("legacy/browser-automation-v35.md"),
+    // From before a change that needs what a web page says was `browser_then_build`, and one made
+    // only from what this chat found and confirmed stayed `direct` as such a page does, with the
+    // building turn's own reads and cards left to an answer in words, a map was a change of files,
+    // and the routing step's `summary` went with the person's words in every chat, not only in
+    // one with no browser turn yet.
+    include_str!("legacy/browser-automation-v36.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,

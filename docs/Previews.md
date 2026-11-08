@@ -17,7 +17,8 @@ Instafy's browser cannot show a space's own sites: its safety policy blocks the 
    when. `instafy preview check --port <port>` takes a local headless look first. A turn on a restored provider thread
    and a direct workspace-change turn (such as "make a page and show me a preview") load no workspace memory snapshot,
    so their prompt names the workflow skills that match the request strongly (at most three,
-   with the file to read), and the browser rule on every turn that can ask for Instafy's browser says that it opens public addresses only.
+   with the file to read). A direct change emits no browser action, so there the research skill's
+   `instafy web read` line takes the browser skill's place, as the way to read a public page. The browser rule on every turn that can ask for Instafy's browser says that it opens public addresses only.
 2. The CLI checks that something is listening, asks the controller for a preview, starts a rathole client for it and
    tells the controller it is ready. It never prints a URL. Its JSON output has ids, the port, the path, a status and
    `viewerHostSuffix` (for a dev server's allowed-hosts list).
