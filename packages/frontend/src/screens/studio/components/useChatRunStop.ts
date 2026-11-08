@@ -1,7 +1,9 @@
 import { startTransition, useCallback, useEffect, useId, useRef, useState } from "react";
+import { endReplyDraftRun } from "../../../conversations/replyDrafts";
+import { useOptionalRuntimeState } from "../../../runtime/RuntimeStateProvider";
 import { stopConversationJobs, type ControllerConversationStopResult } from "../../../services/runtimeController/conversationStop";
 import { chatRunStopEscapeBlocked } from "./chatRunStopEscape";
-import { chatRunStopNeedsConfirmation, groupChatRunStopTargets, type ChatRunStopTarget } from "./chatRunStopTargets";
+import { chatRunStopNeedsConfirmation, groupChatRunStopTargets, runsCanceledByStop, type ChatRunStopTarget } from "./chatRunStopTargets";
 
 export type { ChatRunStopTarget } from "./chatRunStopTargets";
 export const CHAT_RUN_STOP_TIMEOUT_MS = 20_000;
@@ -43,8 +45,10 @@ export function useChatRunStop(options: ChatRunStopOptions) {
   const { conversationId, targets, canStop, active = true } = options;
   const [storedState, setState] = useState(() => emptyState(conversationId));
   const state = storedState.conversationId === conversationId ? storedState : emptyState(conversationId);
-  const latest = useRef({ options, state });
-  latest.current = { options, state };
+  // The chat's run records, where the Stop's answer is written.
+  const runRecords = useOptionalRuntimeState();
+  const latest = useRef({ options, state, runRecords });
+  latest.current = { options, state, runRecords };
   const operation = useRef(0);
   const busy = useRef(false);
   const mounted = useRef(true);
@@ -103,6 +107,19 @@ export function useChatRunStop(options: ChatRunStopOptions) {
         acceptedJobIds: [...new Set([...previous.acceptedJobIds, ...acknowledged.map((target) => target.jobId)])],
         error: unfinished.length ? "Some turns did not confirm the stop. Retry those turns." : null,
       }));
+      // The answer comes once the controller has committed the Stop, as the
+      // run's own record on its stream does, which can take longer to arrive.
+      // The runs it canceled read canceled now, as that record would make
+      // them (their reply drafts end too), so the turn's row says "Stopped"
+      // as the answer lands. A Stop that failed, timed out or found its turn
+      // already finished writes nothing.
+      const records = latest.current.runRecords;
+      if (records) {
+        for (const run of runsCanceledByStop(result, records.runs)) {
+          endReplyDraftRun(run.id);
+          records.upsertRun(run);
+        }
+      }
       if (acknowledged.length) current.onStopped?.(result, acknowledged);
     } catch (error) {
       if (isCurrent()) setState((previous) => ({
