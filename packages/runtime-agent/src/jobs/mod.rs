@@ -10496,14 +10496,19 @@ impl JobProcessor {
         // A browser turn's only tools are its browser's: what it is told is what it can use.
         let browser_turn = is_browser_turn(job);
         // Whose page a turn that may write files changes: the rule, then the space's pages, each
-        // made in this chat or in another.
+        // made in this chat or in another. A browser turn or a read-only one never reads the
+        // space's record of its pages.
         let page_rule = [
             PAGE_OF_ITS_OWN_CHAT_RULE,
-            &space_pages::space_pages_lines(
-                workspace_dir,
-                job.conversation_id.as_ref(),
-                &space_pages::installed_page_commands(),
-            ),
+            &if browser_turn || metadata_requests_read_only_workspace(job.payload.get("metadata")) {
+                String::new()
+            } else {
+                space_pages::space_pages_lines(
+                    workspace_dir,
+                    job.conversation_id.as_ref(),
+                    &space_pages::installed_page_commands(),
+                )
+            },
         ]
         .concat();
         let cross_chat_context_lookup = !lead_continuation_checkpoint

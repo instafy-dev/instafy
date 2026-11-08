@@ -1312,7 +1312,9 @@ mod tests {
         }
         std::fs::create_dir_all(sandbox.workspace.join(".instafy/pages"))?;
         std::fs::write(
-            sandbox.workspace.join(crate::jobs::space_pages::PAGES_RECORD),
+            sandbox
+                .workspace
+                .join(crate::jobs::space_pages::PAGES_RECORD),
             json!({ "version": 1, "pages": [{
                 "folder": "sites/framework-laptops",
                 "title": "Framework laptops",
@@ -1322,7 +1324,12 @@ mod tests {
             }]})
             .to_string(),
         )?;
-        assert!(!sandbox.home.join(".instafy/cli-preview-state.json").exists());
+        assert!(
+            !sandbox
+                .home
+                .join(".instafy/cli-preview-state.json")
+                .exists()
+        );
         let mut servers = Vec::new();
         let mut outcomes = Vec::new();
         for (id, folder, title) in [

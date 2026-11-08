@@ -21,9 +21,9 @@ export type RecordedPage = {
   // The chat that made the page. Absent for a page from before the record (one a wake wrote down): no later open claims
   // it, and every chat reads it as another chat's.
   conversationId?: string;
-  // How the site is served: its program's name and first argument (`["instafy", "bind"]`, `["uw", "host"]`). The runtime
-  // lists only pages made for the person, whose site Instafy's page server or an installed skill's command serves, and
-  // never the person's own app.
+  // How the site is served: its program's name and first argument (`["instafy", "bind"]`, `["uw", "host"]`). The
+  // runtime lists only pages made for the person, whose site Instafy's page server or an installed skill's command
+  // serves, and never the person's own app.
   server: string[];
   openedAt: string;
 };
@@ -38,20 +38,22 @@ function readPages(file: string): RecordedPage[] {
   const pages = (parsed as { pages?: unknown })?.pages;
   if (!Array.isArray(pages)) return [];
   return pages.filter(
-    (page): page is RecordedPage => !!page && typeof page === "object" && typeof (page as RecordedPage).folder === "string",
+    (page): page is RecordedPage =>
+      !!page && typeof page === "object" && typeof (page as RecordedPage).folder === "string",
   );
 }
 
-/** `["instafy", "bind"]` for `instafy bind serve . --port {port} --preview`: the program's name and its first argument. */
+/** The program's name and its first argument: `["instafy", "bind"]` for `instafy bind serve . --port {port}`. */
 export function serverOf(argv: string[]): string[] {
   const [program, first] = argv;
   return program === undefined ? [] : [path.basename(program), ...(first === undefined ? [] : [first])];
 }
 
 /**
- * Writes down the page in `folder` (relative to the space's workspace `root`) whose card this open posted to `opening`:
- * with the chat the record already keeps for that folder, else `opening`. A folder that is gone from the workspace leaves
- * the record. The workspace itself is the person's own site, no page a chat made, and is not written down.
+ * Writes down the page in `folder` (relative to the space's workspace `root`) whose card this open posted to
+ * `opening`: with the chat the record already keeps for that folder, else `opening`. A folder that is gone from the
+ * workspace leaves the record. The workspace itself is the person's own site, no page a chat made, and is not written
+ * down.
  */
 export function recordPage(
   root: string,
@@ -77,7 +79,8 @@ export function recordPage(
   const ignore = path.join(dir, ".gitignore");
   if (!fs.existsSync(ignore)) fs.writeFileSync(ignore, PAGES_RECORD_IGNORE);
   const temporary = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify({ version: 1, pages: [recorded, ...kept].slice(0, MAX_RECORDED) }, null, 2)}\n`);
+  const body = { version: 1, pages: [recorded, ...kept].slice(0, MAX_RECORDED) };
+  fs.writeFileSync(temporary, `${JSON.stringify(body, null, 2)}\n`);
   fs.renameSync(temporary, file);
   return recorded;
 }

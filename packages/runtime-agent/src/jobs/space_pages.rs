@@ -58,9 +58,38 @@ pub(crate) fn space_pages_lines(
     let Some(record) = read_record(workspace_dir) else {
         return String::new();
     };
+    forget_gone_pages(workspace_dir, &record);
     pages_lines(&record, conversation_id, page_commands, |folder| {
         workspace_dir.join(folder).is_dir()
     })
+}
+
+/// A page whose folder is gone (an Undo took away the turn that made it) leaves the record, so a
+/// page made later in a folder of the same name is written down with the chat that makes it, never
+/// with the chat that made the old one. A turn that may write reads the record before it starts,
+/// so before any page of its own is there. The record is written only when it is still the one
+/// read: an open of another chat writing it meanwhile is never undone.
+fn forget_gone_pages(workspace_dir: &Path, record: &JsonValue) {
+    let Some(pages) = record.get("pages").and_then(JsonValue::as_array) else {
+        return;
+    };
+    let kept: Vec<&JsonValue> = pages
+        .iter()
+        .filter(|page| entry_folder(page).is_some_and(|folder| workspace_dir.join(folder).is_dir()))
+        .collect();
+    if kept.len() == pages.len() {
+        return;
+    }
+    let Ok(dir) = WorkspaceDir::open(workspace_dir).and_then(|w| w.open_dir(PAGES_RECORD_DIR))
+    else {
+        return;
+    };
+    let Ok(text) = serde_json::to_string_pretty(&json!({ "version": 1, "pages": kept })) else {
+        return;
+    };
+    if read_record(workspace_dir).as_ref() == Some(record) {
+        let _ = dir.replace_file("pages.json", &mut text.as_bytes(), false);
+    }
 }
 
 /// The commands installed skills provide on this runtime: a site one of them serves is a page.
@@ -388,6 +417,54 @@ mod tests {
         assert_eq!(space_pages_lines(workspace.path(), Some(&chat), &[]), "");
     }
 
+    /// An Undo took away the turn that made a page, folder and all. The record forgets that page
+    /// when a writing turn next reads it, so a page another chat then makes in a folder of the same
+    /// name is written down with that chat, not with the chat whose page was undone.
+    #[test]
+    fn a_page_whose_folder_is_gone_leaves_the_record() {
+        let (undone, later) = (Uuid::new_v4(), Uuid::new_v4());
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("sites/kept")).unwrap();
+        write_record(
+            workspace.path(),
+            vec![
+                page(
+                    "sites/framework-laptops",
+                    "Undone",
+                    Some(&undone),
+                    &PAGE_SERVER,
+                ),
+                page("sites/kept", "Kept", Some(&undone), &PAGE_SERVER),
+            ],
+        );
+        assert_eq!(
+            space_pages_lines(workspace.path(), Some(&later), &[]),
+            "- The space's pages:\n  - \"Kept\", in `sites/kept/`: made in another chat.\n"
+        );
+        let record = read_record(workspace.path()).unwrap();
+        let folders: Vec<_> = record["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(entry_folder)
+            .collect();
+        assert_eq!(folders, ["sites/kept"]);
+        // the same folder made again, and woken before any open: no chat, never the undone one's
+        std::fs::create_dir_all(workspace.path().join("sites/framework-laptops")).unwrap();
+        record_woken_page(
+            workspace.path(),
+            "sites/framework-laptops",
+            "Framework laptops",
+            &["instafy".to_string(), "bind".to_string()],
+        )
+        .unwrap();
+        assert!(
+            space_pages_lines(workspace.path(), Some(&undone), &[]).contains(
+                "\"Framework laptops\", in `sites/framework-laptops/`: made in another chat."
+            )
+        );
+    }
+
     /// At most `MAX_PAGES` pages, and a title is one plain line of at most the CLI's length.
     #[test]
     fn a_few_pages_at_most_each_on_one_line() {
@@ -422,8 +499,21 @@ mod tests {
             )],
         );
         let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
-        let bind = argv(&["/usr/local/bin/instafy", "bind", "serve", ".", "--port", "20001"]);
-        record_woken_page(workspace.path(), "sites/framework-laptops", "Renamed", &bind).unwrap();
+        let bind = argv(&[
+            "/usr/local/bin/instafy",
+            "bind",
+            "serve",
+            ".",
+            "--port",
+            "20001",
+        ]);
+        record_woken_page(
+            workspace.path(),
+            "sites/framework-laptops",
+            "Renamed",
+            &bind,
+        )
+        .unwrap();
         record_woken_page(workspace.path(), "./sites/porto/", "Porto", &bind).unwrap();
         record_woken_page(workspace.path(), ".", "The app", &bind).unwrap();
         let lines = space_pages_lines(workspace.path(), Some(&maker), &[]);
@@ -434,8 +524,9 @@ mod tests {
              \x20 - \"Framework laptops\", in `sites/framework-laptops/`: made in this chat.\n"
         );
         assert!(
-            space_pages_lines(workspace.path(), Some(&other), &[])
-                .contains("\"Framework laptops\", in `sites/framework-laptops/`: made in another chat.")
+            space_pages_lines(workspace.path(), Some(&other), &[]).contains(
+                "\"Framework laptops\", in `sites/framework-laptops/`: made in another chat."
+            )
         );
         assert_eq!(
             std::fs::read(workspace.path().join(PAGES_RECORD_DIR).join(".gitignore")).unwrap(),

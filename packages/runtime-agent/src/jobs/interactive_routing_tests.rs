@@ -664,8 +664,16 @@ fn a_writing_turn_is_told_which_chat_made_each_of_the_spaces_pages() {
         fs::create_dir_all(tmp.path().join(folder)).unwrap();
     }
     let recorded = [
-        recorded_page("sites/framework-13-16", "Framework Laptop 13 vs 16", Some(ours)),
-        recorded_page("sites/framework-laptops", "Framework Laptop 12, 13 and 16", Some(theirs)),
+        recorded_page(
+            "sites/framework-13-16",
+            "Framework Laptop 13 vs 16",
+            Some(ours),
+        ),
+        recorded_page(
+            "sites/framework-laptops",
+            "Framework Laptop 12, 13 and 16",
+            Some(theirs),
+        ),
         recorded_page("seville-3-days", "Seville in 3 days", None),
     ];
     let pages = |chat: Uuid, metadata: JsonValue, provider_state: Option<&JsonValue>| {
@@ -809,7 +817,9 @@ fn every_turn_that_may_write_reads_whose_page_it_changes_and_never_whose_app() {
     );
     assert!(rounder.contains(PAGE_OF_ITS_OWN_CHAT_RULE), "{rounder}");
     assert!(
-        PAGE_OF_ITS_OWN_CHAT_RULE.contains("A page made for the person in another chat (a map, a comparison, a page to share)"),
+        PAGE_OF_ITS_OWN_CHAT_RULE.contains(
+            "A page made for the person in another chat (a map, a comparison, a page to share)"
+        ),
         "{PAGE_OF_ITS_OWN_CHAT_RULE}"
     );
     assert!(!rounder.contains("The space's pages"), "{rounder}");
