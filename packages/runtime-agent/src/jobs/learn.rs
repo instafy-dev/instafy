@@ -151,6 +151,8 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     // From before a reply named none of its turn's tabs, checks ("validation passed") or limits ("I
     // can't use a browser here"), and said what is missing and what the person can ask for instead.
     include_str!("legacy/agents-doc-v14.md"),
+    // From before a tip no page gave said "not checked" too, on the page as in the reply.
+    include_str!("legacy/agents-doc-v15.md"),
 ];
 /// Whether `text` is a copy of `AGENTS.md` Instafy ships, the current one or an earlier one. A
 /// copy a space edited, or a team's own, is not: its rules are the space's.
@@ -2386,7 +2388,7 @@ mod tests {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
         let doc = flat(AGENTS_DOC_TEMPLATE);
         for needle in [
-            "A fact no page you read this turn states says \"not checked\", or stays out.",
+            "A fact or tip you add to the reply or a page says \"not checked\", or stays out, unless the person gave it or a page gives it: one you read this turn, or one in Instafy's browser's findings.",
             "When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\") or which page you didn't reach, never that a site or page lacks it or didn't load, unless a page you read says so.",
             "Say only steps this turn did or started.",
             "offer it as a next step instead",
@@ -2426,6 +2428,39 @@ mod tests {
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
         }
+    }
+
+    /// A tip no page gave ("Arrive near opening time for a quieter visit.") went on a page as plain
+    /// advice, and the reply said it too, with no "not checked" (a local test, Nov 8): the rule
+    /// named only a fact, and a turn that changed a page read it, among the words for replies, as a
+    /// rule for the reply alone. It names a tip as well, and the page as well as the reply, in the
+    /// one place every turn reads. It is about what the turn adds, so a page's values from earlier
+    /// turns keep their pages, and it leaves out what the person gave (a note in their own words)
+    /// and what Instafy's browser's findings give, which a building turn cites by their pages. The
+    /// copy from before is upgraded.
+    #[test]
+    fn a_tip_no_page_gave_says_not_checked_on_the_page_as_in_the_reply() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let rule = "- A fact or tip you add to the reply or a page says \"not checked\", or stays out, unless the person gave it or a page gives it: one you read this turn, or one in Instafy's browser's findings.";
+        let doc = flat(AGENTS_DOC_TEMPLATE);
+        let replies = doc
+            .split("## Replies")
+            .nth(1)
+            .and_then(|rest| rest.split("## ").next())
+            .expect("Replies section");
+        assert!(replies.contains(rule), "{replies}");
+        assert_eq!(doc.matches("\"not checked\"").count(), 1, "{doc}");
+        assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+
+        let previous = include_str!("legacy/agents-doc-v15.md");
+        assert!(flat(previous).contains(
+            "- A fact no page you read this turn states says \"not checked\", or stays out."
+        ));
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join(AGENTS_DOC_FILENAME);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
     }
 
     /// A space's unedited copy of a bundled file is brought up to date only when it is one of the
