@@ -529,7 +529,19 @@ printf '{"previewId":"preview-1","description":"Livraria Lello","takenAt":%s}' "
 const LEASED_CHILD: &str = "INSTAFY_STOPPED_AS_LEASED_TEST_CHILD";
 const LEASED_TEST_NAME: &str =
     "stopped_turn::a_build_stopped_as_it_was_leased_writes_nothing_into_its_thread";
+const ROUTED_LEASED_CHILD: &str = "INSTAFY_ROUTED_STOPPED_AS_LEASED_TEST_CHILD";
+const ROUTED_LEASED_TEST_NAME: &str =
+    "stopped_turn::a_message_stopped_as_it_was_leased_asks_no_model_to_route_it";
 const BUILD_REQUEST: &str = "Add each laptop's warranty from its own page.";
+
+/// What the job stopped as it was leased would first send to a model.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FirstModelCall {
+    /// Its turn: a build, which has no routing step.
+    Turn,
+    /// The routing step of the person's message.
+    RoutingStep,
+}
 
 /// A local test, Nov 8: the person pressed Stop in the gap between a browser
 /// turn and its build, 0.14 s after the build was leased. The build heard of it
@@ -542,6 +554,25 @@ fn a_build_stopped_as_it_was_leased_writes_nothing_into_its_thread() -> Result<(
     if std::env::var(LEASED_CHILD).as_deref() != Ok("1") {
         return run_isolated_fixture(LEASED_CHILD, LEASED_TEST_NAME, "stopped-as-leased");
     }
+    run_leased(FirstModelCall::Turn)
+}
+
+/// The same Stop, pressed just after the person sent a message: its job asks
+/// for its lease before its routing step too, so no model is asked to route a
+/// message nobody wants any more.
+#[test]
+fn a_message_stopped_as_it_was_leased_asks_no_model_to_route_it() -> Result<()> {
+    if std::env::var(ROUTED_LEASED_CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(
+            ROUTED_LEASED_CHILD,
+            ROUTED_LEASED_TEST_NAME,
+            "routed-stopped-as-leased",
+        );
+    }
+    run_leased(FirstModelCall::RoutingStep)
+}
+
+fn run_leased(first: FirstModelCall) -> Result<()> {
     const STACK: usize = 32 * 1024 * 1024;
     std::thread::Builder::new()
         .name("stopped-as-leased-proxy".to_string())
@@ -552,7 +583,7 @@ fn a_build_stopped_as_it_was_leased_writes_nothing_into_its_thread() -> Result<(
                 .worker_threads(2)
                 .thread_stack_size(STACK)
                 .build()?
-                .block_on(run_stopped_as_leased())
+                .block_on(run_stopped_as_leased(first))
         })?
         .join()
         .map_err(|_| anyhow::anyhow!("stopped-as-leased fixture panicked"))?
@@ -602,7 +633,7 @@ fn files_holding(dir: &Path, needle: &str) -> Vec<PathBuf> {
     found
 }
 
-async fn run_stopped_as_leased() -> Result<()> {
+async fn run_stopped_as_leased(first: FirstModelCall) -> Result<()> {
     let _env = env_guard().await;
     let workspace_root = TempDir::new()?;
     let runtime_home = TempDir::new()?;
@@ -744,6 +775,13 @@ async fn run_stopped_as_leased() -> Result<()> {
     });
     let client = Arc::new(ControllerClient::new(&config)?);
     let executor = AgentExecutor::new(config.clone());
+    let mut metadata = json!({"execution_mode":"apply","runtimeExpectations":{
+        "workspaceFileChanges":true,"commandExecution":false,"genericMcpToolExecution":false
+    }});
+    // A build was routed already; a message the person just sent was not.
+    if first == FirstModelCall::Turn {
+        metadata["agentRoutingPreflight"] = json!({});
+    }
     let job = LeaseJob {
         id: Uuid::new_v4(),
         intent: Some("feature".to_string()),
@@ -754,9 +792,7 @@ async fn run_stopped_as_leased() -> Result<()> {
         credential_id: None,
         payload: json!({
             "prompt_text": BUILD_REQUEST,
-            "metadata":{"execution_mode":"apply","agentRoutingPreflight":{},"runtimeExpectations":{
-                "workspaceFileChanges":true,"commandExecution":false,"genericMcpToolExecution":false
-            }}
+            "metadata": metadata,
         }),
         proxy: None,
         controller_token: None,

@@ -2,7 +2,14 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createConversationMessage } from "../../../../conversations/conversationSubmitHelpers";
+import {
+  forgetPromptsSentFromThisPageForTests,
+  recordSendFailedForPromptSentFromThisPage,
+  rememberPromptSentFromThisPage,
+} from "../../../../conversations/sentPromptRegistry";
 import type { ChatMessage } from "../../types";
+import { browserHandBackRetry } from "../useBrowserHandBack";
 import { ChatRunStopNotice, ChatRunStopNoticeProvider, stoppedByWords } from "../ChatRunStopNotice";
 import { useChatRunStopContinuation } from "../useChatRunStopContinuation";
 import type { SubmitMessageFn } from "../useChatSubmitFlow";
@@ -180,13 +187,19 @@ describe("persisted run stop notice", () => {
       id: "browser-step", role: "assistant", authorId: null, content: "Tool call completed: instafy_shared_browser/navigate",
       timestamp: 3, files: null, metadata: { jobId: "job-browser", runId: "run-2", messageType: "mcp_tool_call" },
     };
-    const handBack: ChatMessage = {
+    // Its stored copy keeps the controller's record, with when the browser
+    // turn ended (`readAt`), which the controller counts the half hour from.
+    const handBackEnded = (minutesAgo: number): ChatMessage => ({
       id: "hand-back", role: "user", authorId: "viewer", content: "Octo continued with what it found in the browser",
       timestamp: 4, files: null, metadata: {
         runId: "run-3",
-        browserHandBack: { browserJobId: "job-browser", cardJobId: "job-card", version: 1 },
+        browserHandBack: {
+          browserJobId: "job-browser", cardJobId: "job-card", version: 1,
+          readAt: new Date(Date.now() - minutesAgo * 60_000).toISOString().replace(/\.\d+Z$/, "Z"),
+        },
       },
-    };
+    });
+    const handBack = handBackEnded(1);
     const stopOf = (runId: string, jobId: string, timestamp: number): ChatMessage => ({
       id: `stop-${runId}`, role: "assistant", authorId: null, content: "Stopped this run.", timestamp, files: null,
       messageType: "run_cancellation", metadata: { source: "controller", kind: "run_cancellation", runId, details: {
@@ -215,28 +228,95 @@ describe("persisted run stop notice", () => {
 
     // The controller would not start that build again (its lane was busy, or
     // another page started it already): nothing else is sent, never the
-    // request a second time, and the row keeps Continue.
-    it("sends nothing else when the build can't start again", async () => {
+    // request a second time, and the row keeps Continue. The send left its
+    // own copy in the chat, as every send does, which never went out: it
+    // took nothing on from the Stop.
+    it("sends nothing else when the build can't start again, and keeps Continue", async () => {
+      forgetPromptsSentFromThisPageForTests();
       const gapStop = stopOf("run-3", "job-build", Date.now());
-      resendHandBack.mockResolvedValue(false);
-      await render({ messages: [asked0, card, browserTurn, browserStep, handBack, gapStop], resendHandBack });
+      const messages = [asked0, card, browserTurn, browserStep, handBack, gapStop];
+      resendHandBack.mockImplementation(async (prompt, metadata) => {
+        const resent = browserHandBackRetry(prompt, metadata)!;
+        const copy = createConversationMessage("user", resent.extras.display, "viewer", {
+          ...resent.extras.metadata, clientMessageId: "continue-copy",
+        });
+        rememberPromptSentFromThisPage(copy);
+        recordSendFailedForPromptSentFromThisPage(copy);
+        messages.push(copy);
+        await render({ messages: [...messages] });
+        return false;
+      });
+      await render({ messages: [...messages], resendHandBack });
       let sent: boolean | undefined;
       await act(async () => { sent = await controls!.onContinue(gapStop); });
       expect(sent).toBe(false);
       expect(resendHandBack).toHaveBeenCalledTimes(1);
       expect(submit).not.toHaveBeenCalled();
       expect(controls!.canContinue(gapStop)).toBe(true);
+      forgetPromptsSentFromThisPageForTests();
     });
 
-    // A browser turn's findings go back to its build for half an hour: later,
-    // the request runs again.
+    // The controller hands a browser turn's findings back for half an hour
+    // after that turn ended, not after the Stop: later, the request runs again.
     it("runs the request again once its browser turn is too old to build from", async () => {
       const gapStop = stopOf("run-3", "job-build", Date.now() - 31 * 60_000);
       submit.mockResolvedValue(true);
-      await render({ messages: [asked0, card, browserTurn, browserStep, handBack, gapStop], resendHandBack });
+      await render({ messages: [asked0, card, browserTurn, browserStep, handBackEnded(31), gapStop], resendHandBack });
       await act(async () => { await controls!.onContinue(gapStop); });
       expect(resendHandBack).not.toHaveBeenCalled();
       expect(submit).toHaveBeenCalledWith(expect.objectContaining({ message: WARRANTY }), expect.anything());
+
+      // A Stop late in a long build: its browser turn ended over half an
+      // hour ago, though the Stop came only 22 minutes ago.
+      submit.mockClear();
+      const buildStop = { ...stopOf("run-3", "job-build", Date.now() - 22 * 60_000), id: "stop-late-in-the-build" };
+      await render({ messages: [asked0, card, browserTurn, browserStep, handBackEnded(32), buildStop] });
+      await act(async () => { await controls!.onContinue(buildStop); });
+      expect(resendHandBack).not.toHaveBeenCalled();
+      expect(submit).toHaveBeenCalledWith(expect.objectContaining({ message: WARRANTY }), expect.anything());
+    });
+
+    // After a reload the chat holds only its newest messages: a long browser
+    // turn's opening, its card and the person's message may be older.
+    // Starting the build again needs only the hand-back, which is the
+    // person's own (the controller checks that too).
+    it("starts the build again when the chat shows only the build's last messages", async () => {
+      const gapStop = stopOf("run-3", "job-build", Date.now());
+      resendHandBack.mockResolvedValue(true);
+      await render({ messages: [browserStep, handBack, gapStop], resendHandBack });
+      expect(controls!.canContinue(gapStop)).toBe(true);
+      await act(async () => { await controls!.onContinue(gapStop); });
+      expect(resendHandBack).toHaveBeenCalledWith(handBack, { continuedStopMessageId: gapStop.id, continuedRunIds: ["run-3"] });
+      // Someone else's hand-back is not theirs to start again.
+      await render({ messages: [browserStep, { ...handBack, authorId: "teammate" }, gapStop] });
+      expect(controls!.canContinue(gapStop)).toBe(false);
+    });
+
+    // Continue sends the request again, every turn of it: an Undo of any of
+    // them (here the turn that posted the browser card) is the person taking
+    // it back, as the runtime reads it (`stopped_requests`).
+    it("does not carry the request on once the person undid a change of any of its turns", async () => {
+      const ownCard: ChatMessage = {
+        ...card, metadata: { ...card.metadata, details: { browserRequest: { task: "Read each warranty page.", location: "auto", continueBuilding: true } } },
+      };
+      const undoneRun1: ChatMessage = {
+        id: "undo-run-1", role: "assistant", authorId: null, timestamp: 9, files: null,
+        content: `The person undid the change from “${WARRANTY}”`,
+        metadata: { source: "controller", kind: "change_undone", presentation: { hidden: true },
+          undoneMessageId: "files-1", undoneRunId: "run-1" },
+      };
+      const browserStop = stopOf("run-2", "job-browser", Date.now());
+      submit.mockResolvedValue(true);
+      resendHandBack.mockResolvedValue(true);
+      await render({ messages: [asked0, ownCard, browserTurn, browserStep, browserStop, undoneRun1], resendHandBack });
+      expect(controls!.canContinue(browserStop)).toBe(false);
+      await act(async () => { await controls!.onContinue(browserStop); });
+      const gapStop = stopOf("run-3", "job-build", Date.now());
+      await render({ messages: [asked0, ownCard, browserTurn, browserStep, handBack, gapStop, undoneRun1] });
+      expect(controls!.canContinue(gapStop)).toBe(false);
+      await act(async () => { await controls!.onContinue(gapStop); });
+      expect(submit).not.toHaveBeenCalled();
+      expect(resendHandBack).not.toHaveBeenCalled();
     });
 
     // A Stop while the browser turn read: the request runs again under the
@@ -255,6 +335,47 @@ describe("persisted run stop notice", () => {
         metadata: { continuedStopMessageId: browserStop.id, continuedRunIds: ["run-2"] },
       }, expect.objectContaining({ automatic: true, intent: "send" }));
     });
+  });
+
+  // Continue sends the stopped request's words in the person's name, so only
+  // words they wrote: never the line Studio wrote for a site's Ask Octo from
+  // the page's own words (the page chose them, and its turn reads them as
+  // page data only with `siteIntent`), nor an answer the controller wrote.
+  it("never sends words the person didn't write as their request", async () => {
+    const siteAsk: ChatMessage = {
+      ...asked, content: "Is size 10 in stock for Karhu ikoni 3? · via Running shoes",
+      metadata: { runId: "run-1", prompt_metadata: { siteIntent: {
+        previewId: "preview-1", askId: "ask-1", intent: "check_stock", label: "Check stock", ref: "karhu-ikoni-3",
+        params: { size: "10" }, verified: true,
+      } } },
+    };
+    const answer: ChatMessage = {
+      ...asked, content: "City: Porto", metadata: { runId: "run-1", userInputRequestId: "question-1" },
+    };
+    for (const request of [siteAsk, answer]) {
+      await render({ messages: [request, notice] });
+      expect(controls!.canContinue(notice)).toBe(false);
+      expect(container.querySelector('[data-testid="chat-run-stop-continue"]')).toBeNull();
+      await act(async () => { await controls!.onContinue(notice); });
+    }
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  // A teammate's message that names the viewer's earlier run as one it
+  // carries on: its Stop is no turn of the viewer's request, so Continue
+  // would bring back an older request of theirs nobody stopped here.
+  it("carries on only a turn the viewer sent", async () => {
+    const theirs: ChatMessage = {
+      id: "theirs", role: "user", authorId: "teammate", content: "Make the table wider.", timestamp: 2, files: null,
+      metadata: { runId: "run-5", prompt_metadata: { continuedStopMessageId: "stop-0", continuedRunIds: ["run-1"] } },
+    };
+    const theirStop: ChatMessage = { ...notice, id: "stop-5", timestamp: 3, metadata: { details: {
+      stopRequested: true, actorUserId: "viewer", agentHandles: ["octo"], jobIds: ["job-5"], runIds: ["run-5"],
+    } } };
+    await render({ messages: [asked, theirs, theirStop] });
+    expect(controls!.canContinue(theirStop)).toBe(false);
+    await act(async () => { await controls!.onContinue(theirStop); });
+    expect(submit).not.toHaveBeenCalled();
   });
 
   it("allows retry after failed submission but considers queued continuation accepted", async () => {
