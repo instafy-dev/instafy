@@ -380,6 +380,66 @@ describe("SharedBrowserChrome", () => {
     expect(onReload).not.toHaveBeenCalled();
   });
 
+  it("clears invalid-address feedback when another tab is selected", async () => {
+    const model = props();
+    await act(async () => root.render(<SharedBrowserChrome {...model} />));
+    const input = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-address"]')!;
+    await act(async () => { input.focus(); setInputValue(input, "javascript:alert(1)"); });
+    await act(async () => pressEnter(input));
+    expect(container.querySelector('[data-testid="shared-browser-error"]')).not.toBeNull();
+    await act(async () => root.render(<SharedBrowserChrome {...model} pages={[page({ id: "page-2", url: "https://second.example/" })]} />));
+    expect(input.value).toBe("https://second.example/");
+    expect(input.getAttribute("aria-invalid")).not.toBe("true");
+    expect(container.querySelector('[data-testid="shared-browser-error"]')).toBeNull();
+    expect(model.onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("clears abandoned address validation when restoring the actual page address", async () => {
+    const model = props();
+    await act(async () => root.render(<SharedBrowserChrome {...model} />));
+    const input = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-address"]')!;
+    await act(async () => { input.focus(); setInputValue(input, "javascript:alert(1)"); });
+    await act(async () => pressEnter(input));
+    expect(container.querySelector('[data-testid="shared-browser-error"]')?.textContent).toContain("Enter an http:// or https:// address.");
+    await act(async () => input.blur());
+    expect(input.value).toBe("https://example.com/");
+    expect(container.querySelector('[data-testid="shared-browser-error"]')).toBeNull();
+    expect(model.onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("keeps command failures visible when the address field loses focus", async () => {
+    const error = "The browser could not reload this page.";
+    const model = props({ error });
+    await act(async () => root.render(<SharedBrowserChrome {...model} />));
+    const input = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-address"]')!;
+    await act(async () => input.focus());
+    await act(async () => input.blur());
+    expect(container.querySelector('[data-testid="shared-browser-error"]')?.textContent).toContain(error);
+    expect(model.onClearError).not.toHaveBeenCalled();
+  });
+
+  it("keeps a blank address empty when explicitly navigating to about:blank again", async () => {
+    const model = props({ pages: [page({ url: "about:blank" })] });
+    await act(async () => root.render(<SharedBrowserChrome {...model} />));
+    const input = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-address"]')!;
+    await act(async () => { input.focus(); setInputValue(input, "about:blank"); });
+    await act(async () => pressEnter(input));
+    expect(model.onNavigate).toHaveBeenCalledExactlyOnceWith("page-1", "about:blank");
+    expect(input.value).toBe("");
+  });
+
+  it.each(["https://second.example/", "https://example.com/"])("does not carry a focused draft into another tab at %s", async (url) => {
+    const model = props();
+    await act(async () => root.render(<SharedBrowserChrome {...model} />));
+    const input = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-address"]')!;
+    await act(async () => { input.focus(); setInputValue(input, "draft.example"); });
+    await act(async () => root.render(<SharedBrowserChrome {...model} pages={[page({ id: "page-2", url })]} />));
+    expect(input.value).toBe(url);
+    expect(model.onNavigate).not.toHaveBeenCalled();
+    await act(async () => pressEnter(input));
+    expect(model.onNavigate).toHaveBeenCalledExactlyOnceWith("page-2", url);
+  });
+
   it("keeps an in-progress edit while focused and catches up after blur", async () => {
     const model = props();
     await act(async () => root.render(<SharedBrowserChrome {...model} />));

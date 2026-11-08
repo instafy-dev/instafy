@@ -161,9 +161,10 @@ export function useBrowserSessionPages(params: {
   }>({ scopeKey, capabilities: null, resolved: false, retryable: false, unsupported: false });
   const [commandState, setCommandState] = useState<{
     scopeKey: string;
+    pageId: string | null;
     pending: RuntimeBrowserSessionPageCommandAction | null;
     error: string | null;
-  }>({ scopeKey, pending: null, error: null });
+  }>({ scopeKey, pageId: null, pending: null, error: null });
   const preferredActivePageIdRef = useRef<{ scopeKey: string; pageId: string | null }>({
     scopeKey,
     pageId: null,
@@ -200,7 +201,9 @@ export function useBrowserSessionPages(params: {
   const capabilitiesUnsupported =
     capabilityState.scopeKey === scopeKey ? capabilityState.unsupported : false;
   const commandPending = commandState.scopeKey === scopeKey ? commandState.pending : null;
-  const commandError = commandState.scopeKey === scopeKey ? commandState.error : null;
+  // A delayed failure from one tab must not mark the address of another invalid.
+  const commandError = commandState.scopeKey === scopeKey &&
+    commandState.pageId === pages.find((page) => page.isActive)?.id ? commandState.error : null;
   // One unbroken run of `browser_host_not_ready` answers for this scope: when
   // it began, and whether it has lasted past the bound. Any page read that
   // succeeds, and any change of scope, ends it. Token and gateway failures
@@ -489,7 +492,7 @@ export function useBrowserSessionPages(params: {
       const requestScope = scopeKey;
       const generation = ++commandGenerationRef.current;
       commandPendingRef.current = { scopeKey: requestScope, generation };
-      setCommandState({ scopeKey: requestScope, pending: params.action, error: null });
+      setCommandState({ scopeKey: requestScope, pageId, pending: params.action, error: null });
       const commandIsCurrent = () =>
         scopeIsCurrent(requestScope) &&
         commandPendingRef.current?.scopeKey === requestScope &&
@@ -509,6 +512,7 @@ export function useBrowserSessionPages(params: {
         if (!commanded) {
           setCommandState({
             scopeKey: requestScope,
+            pageId,
             pending: params.action,
             error: "Shared browser controls are unavailable.",
           });
@@ -521,6 +525,7 @@ export function useBrowserSessionPages(params: {
         }
         setCommandState({
           scopeKey: requestScope,
+          pageId,
           pending: params.action,
           error: error instanceof Error ? error.message : "Shared browser command failed.",
         });
@@ -695,7 +700,7 @@ export function useBrowserSessionPages(params: {
       retryable: false,
       unsupported: false,
     });
-    setCommandState({ scopeKey, pending: null, error: null });
+    setCommandState({ scopeKey, pageId: null, pending: null, error: null });
     // Each open counts its own run of not-ready answers: closing the browser
     // and opening it again never brings back an earlier one.
     setNotReadyState(null);

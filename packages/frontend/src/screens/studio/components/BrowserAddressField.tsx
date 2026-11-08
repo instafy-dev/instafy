@@ -13,6 +13,7 @@ import { StudioListBox, StudioListBoxItem } from "../../../components/aria/Studi
 import { BrowserToolsOverlayContext } from "./BrowserToolsPopover";
 import { BrowserAddressMenuAnchorContext } from "./BrowserChromeShell";
 import { useBrowserAddressHistory, type BrowserAddressHistoryEntry } from "./browserAddressHistory";
+import { browserSessionPageIsPlaceholder } from "./browserSessionPages";
 
 type BrowserAddressFieldProps = Pick<InputProps, "value" | "placeholder" | "disabled" | "onBlur"> & {
   testIdPrefix: string;
@@ -60,18 +61,21 @@ export const BrowserAddressField = forwardRef<HTMLInputElement, BrowserAddressFi
   const suggestions = useMemo(() => entries.filter(entry =>
     !query || `${entry.title} ${entry.url}`.toLocaleLowerCase().includes(query),
   ).slice(0, 8), [entries, query]);
+  const restoredAddress = currentPage
+    ? browserSessionPageIsPlaceholder(currentPage) ? "" : currentPage.url
+    : originalValue.current;
 
   useEffect(() => {
     if (!editing) return;
-    if (disabled) onValueChange(currentPage?.url ?? originalValue.current);
+    if (disabled) onValueChange(restoredAddress);
     if (desktop || disabled) setEditing(false);
-  }, [desktop, disabled, editing, currentPage?.url, onValueChange]);
+  }, [desktop, disabled, editing, restoredAddress, onValueChange]);
 
   const navigate = (address: string) => {
     if (!disabled && onNavigate(address)) setEditing(false);
   };
   const cancel = () => {
-    onValueChange(currentPage?.url ?? originalValue.current);
+    onValueChange(restoredAddress);
     setEditing(false);
   };
 

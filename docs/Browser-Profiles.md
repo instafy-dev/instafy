@@ -186,6 +186,13 @@ and Escape dismisses the list. On desktop, Tab moves from the field to
 suggestion. Shift+Tab returns to the field; Tab again continues through the
 toolbar. Clearing history or pressing Escape from that action returns focus
 to the field.
+An address draft belongs to the tab being edited. Switching tabs replaces it
+with the new tab's address and clears local validation feedback; redirects in
+the same tab leave a focused edit alone. A delayed navigation failure stays
+with its originating tab and cannot mark another tab's address invalid.
+If the browser connects before it can open this chat's tab, the view shows the
+failed attempt with **Try again**. That action retries the chat's own tab once,
+when you hold control; it never opens another chat's page or restarts the machine.
 Suggestions show site icons with a globe fallback. Icons load directly from the
 site's `/favicon.ico` without a referrer; no third-party favicon service is used.
 

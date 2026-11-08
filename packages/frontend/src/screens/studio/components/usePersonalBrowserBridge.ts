@@ -156,6 +156,8 @@ export function usePersonalBrowserBridge({
   const [runtimePollTimedOut, setRuntimePollTimedOut] = useState(false);
   const [agentError, setAgentError] = useState<string | null>(null);
   const [navigationError, setNavigationError] = useState<string | null>(null);
+  const navigationPageRef = useRef<string | null>(null);
+  const navigationPageEpochRef = useRef(0);
   const [clearDataState, setClearDataState] =
     useState<PersonalBrowserClearDataState>("idle");
   const [clearDataError, setClearDataError] = useState<string | null>(null);
@@ -294,6 +296,12 @@ export function usePersonalBrowserBridge({
       runtimeStartAttemptEpochRef.current += 1;
     }
     observeHandoffStatus(next);
+    const pageIdentity = JSON.stringify([next.ownerId ?? null, next.activeTabId ?? null]);
+    if (navigationPageRef.current !== pageIdentity) {
+      navigationPageRef.current = pageIdentity;
+      navigationPageEpochRef.current += 1;
+      setNavigationError(null);
+    }
     setStatus(next);
     setChecked(true);
   }, [observeHandoffStatus]);
@@ -701,6 +709,7 @@ export function usePersonalBrowserBridge({
         bridge: NonNullable<Window["instafyDesktop"]>,
         ownerId: string,
       ) => Promise<InstafyDesktopPersonalBrowserStatus> | undefined,
+      isCurrent: () => boolean = () => true,
     ) => {
       const bridge = browserBridge();
       const ownerId = personalBrowserOwnerIdRef.current;
@@ -709,6 +718,7 @@ export function usePersonalBrowserBridge({
       }
       try {
         const result = await operation(bridge, ownerId);
+        if (!isCurrent()) return null;
         if (
           result &&
           personalBrowserOwnerIdRef.current === ownerId &&
@@ -720,7 +730,7 @@ export function usePersonalBrowserBridge({
       } catch (error) {
         if (
           mountedRef.current &&
-          personalBrowserOwnerIdRef.current === ownerId
+          personalBrowserOwnerIdRef.current === ownerId && isCurrent()
         ) {
           setStatus((previous) => statusWithError(previous, error));
         }
@@ -729,6 +739,21 @@ export function usePersonalBrowserBridge({
     },
     [updateStatus],
   );
+
+  // These commands belong to the tab they began on. Selecting a different
+  // tab is deliberate, so selectTab uses invoke directly instead.
+  const invokePageCommand = useCallback(async (
+    operation: Parameters<typeof invoke>[0],
+    unavailableMessage?: string,
+  ) => {
+    const ownerId = personalBrowserOwnerIdRef.current;
+    const pageEpoch = navigationPageEpochRef.current;
+    const isCurrent = () => mountedRef.current && personalBrowserOwnerIdRef.current === ownerId &&
+      navigationPageEpochRef.current === pageEpoch;
+    const result = await invoke(operation, isCurrent);
+    if (!result && unavailableMessage && isCurrent()) setNavigationError(unavailableMessage);
+    return result;
+  }, [invoke]);
 
   // Address-bar search: the engines the Desktop offers (the web-research
   // skill's list) and the one in use. An older Desktop offers none, and words
@@ -771,13 +796,10 @@ export function usePersonalBrowserBridge({
       const input = personalBrowserAddressInput(rawUrl);
       if (input.kind === "search" && canSearch) {
         setNavigationError(null);
-        const result = await invoke((bridge, ownerId) =>
+        return invokePageCommand((bridge, ownerId) =>
           bridge.personalBrowserSearch?.({ query: input.query, ownerId }),
+          "That search could not be opened. Try again.",
         );
-        if (!result) {
-          setNavigationError("That search could not be opened. Try again.");
-        }
-        return result;
       }
       const url = normalizePersonalBrowserUrl(rawUrl);
       if (!url) {
@@ -789,28 +811,25 @@ export function usePersonalBrowserBridge({
         return null;
       }
       setNavigationError(null);
-      const result = await invoke((bridge, ownerId) =>
+      return invokePageCommand((bridge, ownerId) =>
         bridge.personalBrowserNavigate?.({ url, ownerId }),
+        "That page could not be opened. Check the address and try again.",
       );
-      if (!result) {
-        setNavigationError("That page could not be opened. Check the address and try again.");
-      }
-      return result;
     },
-    [canSearch, invoke],
+    [canSearch, invokePageCommand],
   );
   const clearNavigationError = useCallback(() => setNavigationError(null), []);
   const goBack = useCallback(
-    () => invoke((bridge, ownerId) => bridge.personalBrowserGoBack?.({ ownerId })),
-    [invoke],
+    () => invokePageCommand((bridge, ownerId) => bridge.personalBrowserGoBack?.({ ownerId })),
+    [invokePageCommand],
   );
   const goForward = useCallback(
-    () => invoke((bridge, ownerId) => bridge.personalBrowserGoForward?.({ ownerId })),
-    [invoke],
+    () => invokePageCommand((bridge, ownerId) => bridge.personalBrowserGoForward?.({ ownerId })),
+    [invokePageCommand],
   );
   const reload = useCallback(
-    () => invoke((bridge, ownerId) => bridge.personalBrowserReload?.({ ownerId })),
-    [invoke],
+    () => invokePageCommand((bridge, ownerId) => bridge.personalBrowserReload?.({ ownerId })),
+    [invokePageCommand],
   );
   /** Shows another tab. Desktop refuses it while Octo has control. */
   const selectTab = useCallback(
