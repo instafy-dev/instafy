@@ -166,7 +166,9 @@ for (const width of [320, 390, 768, 1280]) for (const theme of ["light", "dark"]
     await expect(sessions.getByRole("button", { name: "Copy resume link", exact: true })).toHaveCount(0);
     await touchTargets(advanced, width);
     await advanced.click();
-    await expect(sessions.getByRole("button", { name: "Resume Shared session review-workspace-machine", exact: true })).toContainText("Current");
+    // Each session reads by name, never by its machine's id.
+    await expect(sessions.getByRole("button", { name: /^This space's machine/ })).toContainText("Current");
+    await expect(sessions).not.toContainText("review-workspace-machine");
     await touchTargets(sessions.getByRole("dialog").getByRole("button"), width);
     await expect(sessions.getByRole("textbox", { name: "Shared Browser resume link" })).toBeVisible();
     await fitsViewport(page, sessions);
@@ -175,7 +177,7 @@ for (const width of [320, 390, 768, 1280]) for (const theme of ["light", "dark"]
     await expect(toggle).toBeFocused();
     await toggle.click();
     await advanced.click();
-    const next = sessions.getByRole("button", { name: "Resume Shared session a1b2c3d4-review-session", exact: true });
+    const next = sessions.getByRole("button", { name: /^Session 1(?!\d)/ });
     await next.focus();
     await next.press("Enter");
     await expect(sessions).toHaveCount(0);
@@ -192,7 +194,9 @@ for (const width of [320, 390, 768, 1280]) for (const theme of ["light", "dark"]
     await toggle.click();
     await expect(sessions.getByRole("button", { name: "Start new session", exact: true })).toBeDisabled();
     await expect(sessions.getByRole("button", { name: "Refresh sessions", exact: true })).toBeDisabled();
-    for (const row of await sessions.getByRole("button", { name: /^Resume Shared session / }).all()) await expect(row).toBeDisabled();
+    const rows = await sessions.getByRole("button", { name: /^(This space's machine|Session \d+)/ }).all();
+    expect(rows).toHaveLength(3);
+    for (const row of rows) await expect(row).toBeDisabled();
     await expect(sessions.getByRole("alert")).toHaveText("Could not refresh sessions. Your current browser is still available.");
     await fitsViewport(page, sessions);
     expect(errors).toEqual([]);

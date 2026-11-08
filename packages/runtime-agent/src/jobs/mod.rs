@@ -2436,6 +2436,27 @@ fn pinned_skill_section(workspace_dir: &Path, pinned: &PinnedSkill) -> Option<St
     ))
 }
 
+/// `AGENTS.md`'s rule for reading a public page, in its "Responsiveness", word for word. A turn
+/// that may change files and runs without that file (a required change, a turn on a restored
+/// thread, a lookup of another chat: `broad_contextual_instruction_suppression_reason`) is given
+/// it with its lane when the space's own copy says it ([`pinned_public_page_rule`]), as it is
+/// given that copy's "Replies" ([`pinned_replies_section`]). Given "Replies" alone, a required
+/// change's build listed its tools, then read a shop's site twice with python's `urllib`: no
+/// robots.txt, budget or pacing, and Details showed only "Ran a command" (a local test, Nov 8). A
+/// browser turn has no shell and is never given it.
+const PUBLIC_PAGE_RULE: &str = "- Read a public page only with `instafy web read <address>` or a reading command a skill names, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.\n";
+
+/// [`PUBLIC_PAGE_RULE`] when the space's own `AGENTS.md` says it. None when it doesn't: a copy the
+/// space edited, or a team's own, is the space's.
+fn pinned_public_page_rule(workspace_dir: &Path) -> Option<&'static str> {
+    let (text, _) = read_text_file_lossy_truncated(
+        workspace_dir,
+        &workspace_dir.join(learn::AGENTS_DOC_FILENAME),
+        PROJECT_MEMORY_MAX_FILE_BYTES,
+    )?;
+    text.contains(PUBLIC_PAGE_RULE).then_some(PUBLIC_PAGE_RULE)
+}
+
 /// `AGENTS.md`'s replies guide ([`BROWSER_TURN_REPLIES_SECTION`]), from the space's own copy,
 /// for a browser turn on a restored thread. None when the space's copy has no such section.
 fn pinned_replies_section(workspace_dir: &Path) -> Option<String> {
@@ -11185,6 +11206,16 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 - Finish with a short reply about what changed, as AGENTS.md's Replies says. Do not wrap it in JSON or paste full file contents; changed files are detected from disk.\n\
                 - Do not emit `multi_agent_plan`, goals, integrations, browser/location actions, or broad coordination metadata.\n",
             );
+            // A turn that loads no memory snapshot (a required change, a lookup of another chat,
+            // a turn on a restored thread) also runs without the space's `AGENTS.md`
+            // (`broad_contextual_instruction_suppression_reason`; a restored thread is told "The
+            // previously provided AGENTS.md instructions no longer apply"). From the space's own
+            // copy, it is given the file's rule for reading a public page with the lane
+            // ([`pinned_public_page_rule`]), and its "Replies", the guide the reply line names, as
+            // a browser turn on a restored thread is.
+            let without_agents_md = stateful_thread_restored
+                || direct_workspace_file_change
+                || cross_chat_context_lookup;
             append_prompt_section(
                 &mut prompt,
                 &mut prompt_section_metrics,
@@ -11193,23 +11224,17 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                     "\nDirect workspace-change invariants:\n\
                 - Use workspace-relative paths only. Never write outside the active workspace.\n",
                     page_rule.as_str(),
+                    without_agents_md
+                        .then(|| pinned_public_page_rule(workspace_dir))
+                        .flatten()
+                        .unwrap_or_default(),
                     "- Do not create submodules or gitlinks unless the user explicitly asked for one.\n\
                 - Imported or nested repositories are ordinary directories unless the user explicitly asks to preserve nested Git metadata.\n\
                 - Keep the final summary short: what changed and important caveats.\n",
                 ]
                 .concat(),
             );
-            // The replies guide the reply line names. A turn that loads no memory snapshot (a
-            // required change, a lookup of another chat, a turn on a restored thread) also runs
-            // without the space's `AGENTS.md` (`broad_contextual_instruction_suppression_reason`;
-            // a restored thread is told "The previously provided AGENTS.md instructions no
-            // longer apply"), so it is given its "Replies", as a browser turn on a restored
-            // thread is.
-            if (stateful_thread_restored
-                || direct_workspace_file_change
-                || cross_chat_context_lookup)
-                && let Some(section) = pinned_replies_section(workspace_dir)
-            {
+            if without_agents_md && let Some(section) = pinned_replies_section(workspace_dir) {
                 append_prompt_section(
                     &mut prompt,
                     &mut prompt_section_metrics,
@@ -24287,7 +24312,9 @@ mod tests {
     /// a page turn said "The page is open in Studio" when only its card was
     /// posted. A turn that is given no `AGENTS.md` (one on a restored thread, a
     /// required change's first attempt, one that looks up another chat) is
-    /// given that section with the lane.
+    /// given that section with the lane, and the file's rule for reading a
+    /// public page: a required change's build that read only "Replies" read a
+    /// shop's site twice with python's `urllib` (a local test, Nov 8).
     #[test]
     fn a_file_changing_turn_replies_as_agents_md_says() {
         let tmp = tempdir().expect("temp dir");
@@ -24298,6 +24325,11 @@ mod tests {
         let start = agents_doc.find("## Replies").expect("section");
         let replies_rule = "Name a site, page or file by what it is";
         assert!(agents_doc[start..].contains(replies_rule));
+        let reading_rule = "- Read a public page only with `instafy web read <address>` or a \
+                            reading command a skill names, where robots.txt, budgets and Details \
+                            apply; never with curl, wget, python, node or another script. \
+                            Running those to build or check this space's own pages is fine.\n";
+        assert!(agents_doc[..start].contains(reading_rule));
         let restored_state =
             json!({"defaultThreadId":"existing-thread", "historyReplayRequired":false});
         // (a required change, a restored thread, a lookup of another chat). A lookup's thread
@@ -24392,7 +24424,38 @@ mod tests {
             // Given with the lane, it is that section alone (a new thread's snapshot holds the
             // whole file).
             assert_eq!(prompt.contains("## Responsiveness"), !pinned, "{case}");
+            // Every such turn reads how to read a public page, once: in its snapshot, or with the
+            // lane when the file is left out.
+            assert_eq!(prompt.matches(reading_rule).count(), 1, "{case}");
         }
+        // A team's own `AGENTS.md` that reads pages another way is the space's: a required
+        // change is given its "Replies" and no other rule for reading a page.
+        fs::write(
+            tmp.path().join(learn::AGENTS_DOC_FILENAME),
+            agents_doc.replace(reading_rule, "- Read pages as this team's guide says.\n"),
+        )
+        .unwrap();
+        let mut job = test_lease_job(Some("feature"), json!({ "metadata": {} }));
+        job.project_id = Some(project_id);
+        let mut preflight =
+            test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, false, false);
+        preflight.workspace_file_change_requirement = WorkspaceFileChangeRequirement::Required;
+        let job = job_with_agent_routing_preflight(&job, &preflight);
+        let (prompt, _, _) = processor
+            .build_prompt_with_text(
+                &project_id,
+                &job,
+                tmp.path(),
+                "Put the hours on a small page I can share.",
+                true,
+                None,
+                &[],
+                None,
+                None,
+            )
+            .expect("prompt should build");
+        assert!(prompt.contains("From `AGENTS.md` (this thread may predate it):\n## Replies\n"));
+        assert!(!prompt.contains("Read a public page only with"), "{prompt}");
         // The retry of a file-changing turn ends the same way.
         let retry =
             codex_plain_write_task_retry_prompt("Put the hours on a small page I can share.");

@@ -263,6 +263,7 @@ function StudioLayoutInner() {
     setIsProjectLauncherOpen,
   } = useWorkspaceUi();
   const [projectLauncherPreferredOrgId, setProjectLauncherPreferredOrgId] = useState<string | null>(null);
+  const [projectLauncherPreferredOrgName, setProjectLauncherPreferredOrgName] = useState<string | null>(null);
   const {
     conversationWorkspace,
     tabs: workspaceTabs,
@@ -1365,6 +1366,10 @@ function StudioLayoutInner() {
 
   const handleNewProject = (preferredOrgId?: string | null) => {
     setProjectLauncherPreferredOrgId(preferredOrgId ?? null);
+    // The name the team list shows for that team, so New space reads it at once.
+    setProjectLauncherPreferredOrgName(preferredOrgId
+      ? readCachedControllerOrgs(user?.email).find((org) => org.id === preferredOrgId)?.name ?? null
+      : null);
     setIsProjectLauncherOpen(true);
     showStatus("Start a new space with a prompt or template.", "info", 3500);
   };
@@ -2196,9 +2201,12 @@ function StudioLayoutInner() {
       <ProjectLauncher
         open={isProjectLauncherOpen}
         preferredOrgId={projectLauncherPreferredOrgId}
+        preferredOrgName={projectLauncherPreferredOrgName}
+        currentUserId={currentUserId}
         onClose={() => {
           setIsProjectLauncherOpen(false);
           setProjectLauncherPreferredOrgId(null);
+          setProjectLauncherPreferredOrgName(null);
         }}
         onCreateBlank={handleCreateBlankProject}
         onCreateFromGithub={handleCreateGithubProject}

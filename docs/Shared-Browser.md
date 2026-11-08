@@ -2964,15 +2964,27 @@ unless the policy is `"covered"`.
   line in the runtime's log with the turn's job.
   Every browser turn is asked to end its reply with one finding per page, one
   JSON object per line, each fact under a page it read that states it rather
-  than one that only quotes it, a value it looked for on a page and didn't find
-  under that page as where it looked ("runtime not found on this page"), never
-  that the page lacks it, and a page that stopped it as a stop with its word
+  than one that only quotes it, and carrying what it doesn't confirm (which of
+  its values the turn chose rather than the page, and what it leaves out),
+  since later turns read only these lines; a value it looked for on a page and
+  didn't find under that page as where it looked ("runtime not found on this
+  page"), never that the page lacks it, and only after it searched the whole
+  text the step returned (never a slice) and opened that page's own tab or link
+  named for the value; and a page that stopped it as a stop with its word
   (`no-page`, `timed-out` and `covered` among them). A turn whose reply answers the person
   drafts it as it writes, up to its first finding line. A browser turn that
   continues a building card also ends with one line naming the pages its
-  request needs that it didn't open (`{"unread": [...]}`). When it names any,
+  request needs that it didn't open (`{"unread": [...]}`), a page's own tab or
+  link for a value it didn't find there among them, as its wrap-up pass below
+  is told too. A tab is named with its page ("Laptop 12's Specs tab"), never by
+  the page's address: a page a finding line lists is none to read again. Told
+  only to say where it looked, a warranty's browser turn read only the last 700
+  to 1,100 characters of three product pages, each ending in a "Warranty" link
+  it never opened, and wrote the warranty as not found with nothing unread.
+  When it names any,
   the runtime runs the turn once more on its own thread, told only those
-  pages, before the build: once a turn, and never after a Stop, a pause for the
+  pages (a page it read already only for a tab or link that line names on
+  it), before the build: once a turn, and never after a Stop, a pause for the
   person, a step whose approval ended the turn, or a step the browser refused
   as the person's own. Its steps show in the turn's line and Details as the
   turn's own do, its words join the turn's (so a first line that said a page
@@ -3036,7 +3048,12 @@ unless the policy is `"covered"`.
   any word it does not list, couldn't be read), in its hand-back, the browser
   turns since its last turn and its replay of the chat alike, and never reads
   the browser turn's own words. Told plain words for two stops, a build wrote
-  "Notebookcheck was blocked" for a search a cookie notice covered. A browser
+  "Notebookcheck was blocked" for a search a cookie notice covered. Its
+  hand-back also reads a "not found" fact as what Octo didn't find there: for a
+  value no other fact gives (a tab opened in the second pass adds its facts to
+  its page's), it says "I didn't find…" and where Octo looked, never that a
+  page doesn't show it, as a build once wrote that a maker's product pages "did
+  not show warranty terms" from three such facts. A browser
   turn that used the browser and wrote no
   finding line would leave a later building turn nothing of the pages it read,
   and one that continues a building card would hand nothing back: it gets the

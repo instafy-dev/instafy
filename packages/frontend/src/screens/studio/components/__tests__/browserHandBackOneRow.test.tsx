@@ -24,12 +24,15 @@ import { resolveTypingAgentLanes } from "../chatAssistantIdentity";
 import { ChatTypingRows } from "../ChatTypingRows";
 import { ChatRunStopNoticeProvider } from "../ChatRunStopNotice";
 import { useChatRunStopContinuation } from "../useChatRunStopContinuation";
+import { browserHandBackRetry } from "../useBrowserHandBack";
 import type { SubmitMessageFn } from "../useChatSubmitFlow";
 import { collapseLifecycleMessages, shouldDisplayChatMessage, synthesizeAgentJobThreadMessages } from "../chatMessagePresentation";
+import { formatConversationTranscript } from "../chatTranscriptCopy";
 import { ConversationMessageRows } from "../ConversationMessageRows";
 import { routedBrowserWaitingKeys } from "../routedBrowserFold";
 import { resolveJobThreadTypingCoverage, resolveTranscriptTailKey } from "../typingIndicatorState";
 import storedChats from "./fixtures/browserHandBackChats.json";
+import continuedChat from "./fixtures/stoppedHandBackContinueChat.json";
 
 // A message Octo answers in its browser and then builds from what it found
 // reads as one answer: one Octo row from the send to the card, with one line,
@@ -608,6 +611,198 @@ describe("a message Octo answers in its browser and then builds from what it fou
     const working = await show(chat, continuedAt + 10_000, [], undefined, { submit });
     expect(working.turns).toHaveLength(1);
     expect(working.lines.some((line) => line.startsWith("Stopped"))).toBe(false);
+  });
+
+  // A local test, Nov 8: "Add each laptop's warranty from its own page." Its
+  // browser turn opened three pages, and the person pressed Stop in the gap
+  // before its build: one row, "Stopped · opened 3 pages on frame.work", with
+  // Continue. Continue sent that build again. Then the row read "Status
+  // unavailable" for 3.4 s, a second Octo row ("Starting…") stood under it
+  // for 9.6 s, and the reply that came still ended in "Stopped", after a
+  // reload too. Below are that chat's stored rows, played at the moments the
+  // screen was read. The Stop's notice left the row once the build sent again
+  // joined it: it stood under the reply as a row of its own, and with the chat
+  // ending in it, the typing row went on. The row, whose build was on its way,
+  // read as gone quiet until its run showed: the browser turn's last row was
+  // a minute and a half old.
+  describe("when Continue sends a build stopped in the gap again", () => {
+    const rows = continuedChat as unknown as StoredRow[];
+    const at = (time: string) => Date.parse(`2026-11-08T${time}Z`);
+    const STOPPED_AT = at("17:55:16.435");
+    const PRESSED_AT = at("17:56:42.084");
+    /** The build the Stop ended (its run and job), its hand-back, and the build Continue sent. */
+    const stopped ={ runId: "9c37b255-d570-426c-ab38-1a5821e19a3f", jobId: "4cbaf1a7-829d-460c-ba21-4d5a26a22fa1" };
+    const handBackId = "05004ba0-0a9d-405b-b4ad-ecc0d9094fa5";
+    const again = { runId: "25802fe7-a525-41eb-808b-b7b41ff3c710", jobId: "66d7c218-dd6d-4503-82d5-4a8d2d49bf8f" };
+
+    /** What the person sees at `now`, with `chat` as the chat holds it then. */
+    async function seen(chat: ChatMessage[], now: number, drafts: ReplyDraft[] = []) {
+      mocks.activeConversation = { controllerId: CONVERSATION, messages: chat.filter((message) => message.timestamp <= now) };
+      const view = await show(chat, now, drafts, undefined, { submit: vi.fn<SubmitMessageFn>().mockResolvedValue(true) });
+      return {
+        ...view,
+        stopRows: container.querySelectorAll('[data-testid="chat-run-stop-notice"]').length,
+        continues: container.querySelectorAll('[data-testid="chat-run-stop-continue"]').length,
+        text: container.textContent ?? "",
+      };
+    }
+
+    /**
+     * Continue pressed under the Stop: the hand-back it sends, and the copy of
+     * it this page holds until the stored one comes back, as the panel sends it.
+     */
+    async function pressContinue(chat: ChatMessage[]) {
+      mocks.activeConversation = { controllerId: CONVERSATION, messages: chat.filter((message) => message.timestamp <= PRESSED_AT) };
+      const resendHandBack = vi.fn<(handBack: ChatMessage, metadata: Record<string, unknown>) => Promise<boolean>>()
+        .mockResolvedValue(true);
+      const submit = vi.fn<SubmitMessageFn>().mockResolvedValue(true);
+      const before = await show(chat, PRESSED_AT, [], undefined, { submit, resendHandBack });
+      expect(before.lines).toHaveLength(1);
+      expect(before.lines[0]).toMatch(/^Stopped · opened 3 pages on frame\.work/);
+      await act(async () => {
+        container.querySelector<HTMLElement>('[data-testid="chat-run-stop-continue"]')!.click();
+      });
+      expect(submit).not.toHaveBeenCalled();
+      expect(resendHandBack).toHaveBeenCalledTimes(1);
+      const [handBack, metadata] = resendHandBack.mock.calls[0]!;
+      expect(handBack.id).toBe(handBackId);
+      const sent = browserHandBackRetry(handBack, metadata)!;
+      const stored = chat.find((message) => message.role === "user" && message.metadata?.runId === again.runId)!;
+      const storedPrompt = (stored.metadata as Record<string, Record<string, unknown>>).prompt_metadata!;
+      // What it sent is what the chat stored for it.
+      expect(metadata).toEqual({
+        continuedStopMessageId: storedPrompt.continuedStopMessageId,
+        continuedRunIds: storedPrompt.continuedRunIds,
+      });
+      const local: ChatMessage = {
+        id: "continue-sent-from-this-page",
+        role: "user",
+        authorId: PERSON,
+        content: sent.extras.display,
+        timestamp: PRESSED_AT + 50,
+        files: null,
+        metadata: { ...sent.extras.metadata, clientMessageId: storedPrompt.clientMessageId },
+      };
+      return local;
+    }
+
+    function withStepBeforeTheStop(): ChatMessage[] {
+      // The same chat, had the build shown a step before the Stop.
+      const step = rows.find((row) => (row.metadata as Record<string, unknown> | null)?.jobId === again.jobId)!;
+      return chatOf([
+        ...rows.filter((row) => Date.parse(row.createdAt) < STOPPED_AT - 1_000),
+        {
+          ...step,
+          id: "build-step-before-the-stop",
+          runId: stopped.runId,
+          createdAt: new Date(STOPPED_AT - 600).toISOString(),
+          metadata: { ...(step.metadata as Record<string, unknown>), jobId: stopped.jobId },
+        },
+        ...rows.filter((row) => Date.parse(row.createdAt) >= STOPPED_AT - 1_000),
+      ].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)));
+    }
+
+    it("goes on as one row from Continue to its reply, never gone quiet or stopped", async () => {
+      const chat = chatOf(rows);
+      const local = await pressContinue(chat);
+      const sentChat = [...chat.filter((message) => message.timestamp <= PRESSED_AT), local];
+      const draft = (now: number, text: string): ReplyDraft => ({
+        conversationId: CONVERSATION, jobId: again.jobId, runId: again.runId, attempt: 0, segment: 1, seq: 3,
+        text, startedAt: now, updatedAt: now,
+      });
+      const moments = [
+        // Its copy in the chat, its run not known yet.
+        { at: "17:56:42.236", view: await seen(sentChat, at("17:56:42.236")) },
+        // Its stored prompt back, its run started: before the build's first step.
+        { at: "17:56:42.684", view: await seen(chat, at("17:56:42.684")) },
+        { at: "17:56:45.652", view: await seen(chat, at("17:56:45.652")) },
+        // The build's steps.
+        { at: "17:56:47.120", view: await seen(chat, at("17:56:47.120")) },
+        { at: "17:56:50.394", view: await seen(chat, at("17:56:50.394")) },
+        // Its reply on its way.
+        { at: "17:56:52.298", view: await seen(chat, at("17:56:52.298"), [draft(at("17:56:52.298"), "Framework")]) },
+        // Its reply, and a reload after it.
+        { at: "17:56:53.544", view: await seen(chat, at("17:56:53.544")) },
+        { at: "reload", view: await seen(chat, at("17:58:00.000")) },
+      ];
+      const wrong = moments.flatMap(({ at: moment, view }) => [
+        ...(view.turns.length !== 1 || view.octoRows !== 1 ? [`${moment}: ${view.octoRows} Octo rows`] : []),
+        ...(view.typingRow ? [`${moment}: a typing row under the turn's row`] : []),
+        ...(view.stopRows > 0 ? [`${moment}: "Stopped" in a row of its own`] : []),
+        ...view.lines.filter((line) => line === "Status unavailable" || line.startsWith("Stopped"))
+          .map((line) => `${moment}: "${line}"`),
+      ]);
+      expect(wrong).toEqual([]);
+      // "Starting…" until the build's first step, then at work, then its reply.
+      const lines = moments.map(({ view }) => view.lines);
+      expect(lines.slice(0, 3)).toEqual([["Starting…"], ["Starting…"], ["Starting…"]]);
+      for (const atWork of lines.slice(3, 6)) {
+        expect(atWork).toHaveLength(1);
+        expect(atWork[0]).toMatch(/…$/);
+        expect(atWork[0]).not.toBe("Starting…");
+      }
+      expect(lines.slice(6)).toEqual([["Opened 3 pages on frame.work"], ["Opened 3 pages on frame.work"]]);
+      const done = moments.at(-1)!.view;
+      expect(done.text).toContain("did not show warranty terms");
+      expect(done.continues).toBe(0);
+      // The person's message shows once: neither Continue nor the build sent again is theirs.
+      expect(done.text.split("Add each laptop's warranty from its own page.")).toHaveLength(2);
+    });
+
+    it("reads as starting, not stopped, when the stopped build had shown a step", async () => {
+      const chat = withStepBeforeTheStop();
+      const local = await pressContinue(chat);
+      const sentChat = [...chat.filter((message) => message.timestamp <= PRESSED_AT), local];
+      for (const view of [await seen(sentChat, at("17:56:42.236")), await seen(chat, at("17:56:42.684"))]) {
+        expect(view).toMatchObject({ octoRows: 1, typingRow: false, stopRows: 0, lines: ["Starting…"] });
+      }
+      const done = await seen(chat, at("17:56:53.544"));
+      expect(done).toMatchObject({ octoRows: 1, typingRow: false, stopRows: 0 });
+      expect(done.lines.some((line) => line.startsWith("Stopped"))).toBe(false);
+    });
+
+    // On its way, the build reads as starting, also while this page doesn't
+    // know its run yet. Its run gone quiet as this page knows it (queued over
+    // five minutes, or at work with no word for half an hour) still reads so.
+    it("still reads gone quiet once the run it waits on has", async () => {
+      const known = at("17:56:42.684");
+      const chat = chatOf(rows).filter((message) => message.timestamp <= known);
+      const run = runsAt(chatOf(rows), known).find((candidate) => candidate.id === again.runId)!;
+      const views: Record<string, string[]> = {};
+      for (const [status, minutes] of [["queued", 4], ["queued", 6], ["in_progress", 29], ["in_progress", 31]] as const) {
+        await act(async () => root.unmount());
+        root = createRoot(container);
+        mocks.activeConversation = { controllerId: CONVERSATION, messages: chat };
+        const since = new Date(known).toISOString();
+        const view = await show(chat, known + minutes * 60_000, [], { runs: [{ ...run, status, createdAt: since, updatedAt: since }] },
+          { submit: vi.fn<SubmitMessageFn>().mockResolvedValue(true) });
+        expect(view).toMatchObject({ octoRows: 1, typingRow: false });
+        views[`${status} ${minutes} min`] = view.lines;
+      }
+      expect(views).toEqual({
+        "queued 4 min": ["Starting…"],
+        "queued 6 min": ["Status unavailable"],
+        "in_progress 29 min": ["Starting…"],
+        "in_progress 31 min": ["Status unavailable"],
+      });
+    });
+
+    // Copy conversation says what the chat reads: "Stopped" while the turn is
+    // stopped, and only its reply once Continue's build answered. It added the
+    // Stop after that reply, as if the build had been stopped.
+    it("copies as it reads: stopped until Continue, then the reply alone", () => {
+      const copied = (chat: ChatMessage[], now: number) => {
+        const collapsed = collapseLifecycleMessages(chat.filter((message) => message.timestamp <= now));
+        return formatConversationTranscript(synthesizeAgentJobThreadMessages(collapsed, collapsed.filter(shouldDisplayChatMessage)));
+      };
+      for (const chat of [chatOf(rows), withStepBeforeTheStop()]) {
+        expect(copied(chat, PRESSED_AT)).toMatch(/\n\nAssistant: Stopped this run\.$/);
+        const done = copied(chat, at("17:56:53.544"));
+        expect(done).not.toContain("Stopped this run.");
+        expect(done).toMatch(/^User: Add each laptop's warranty from its own page\.\n\nAssistant: Framework’s Laptop 12/);
+        expect(done).toMatch(/still missing\.$/);
+      }
+    });
   });
 
   // A local test, Nov 6: a browser turn whose finding said a page stopped it
