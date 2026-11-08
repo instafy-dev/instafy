@@ -564,8 +564,9 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
   );
   const showResumeConversation = resumeConversation && sections.showResume ? resumeConversation : null;
   const visibleRecentChats = sections.recentChats;
-  // A chat listed above Recent activity whose In progress row stepped aside
-  // for it says what that row said ("Run in progress") on its own row.
+  // A chat listed above Recent activity whose In progress row, or last
+  // Stop or failure, stepped aside for it says what that row said ("Run in
+  // progress", "Stopped") on its own row.
   const liveStatusFor = (chatKey: string | null) => {
     const live = chatKey === null ? undefined : sections.liveByChat.get(chatKey);
     return live ? statusSubtitle(live, viewerUserId) : null;

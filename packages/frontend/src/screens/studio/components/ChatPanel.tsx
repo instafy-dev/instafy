@@ -6506,6 +6506,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   key="conversation-message-rows"
                   messages={transcriptMessages}
                   allConversationMessages={collapsedConversationMessages}
+                  historyReady={messageTargetActive || Boolean(jobThread) || hasResolvedRecentHistory}
                   timedSyntheticRows={timedSyntheticRows}
                   currentUserId={currentUserId}
                   chatClientSessionId={chatClientSessionId}

@@ -111,7 +111,7 @@ for (const layout of [
     await expect(panel).toBeVisible();
     const link = page.getByRole("textbox", { name: "Shared Browser resume link", exact: true });
     await expect(link).not.toBeVisible();
-    await page.getByText("Session details", { exact: true }).tap();
+    await page.getByText("Advanced", { exact: true }).tap();
     await expect(link).toBeVisible();
     const value = await link.inputValue();
     const locator = new URL(value);
@@ -176,9 +176,9 @@ for (const layout of [
     await page.getByRole("button", { name: `Resume Shared session ${lastRuntime}`, exact: true }).tap();
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await toggle.tap();
-    // A fresh menu keeps secondary details collapsed, including after changing sessions.
+    // A fresh menu keeps Advanced collapsed, including after changing sessions.
     await expect(link).not.toBeVisible();
-    await page.getByText("Session details", { exact: true }).tap();
+    await page.getByText("Advanced", { exact: true }).tap();
     await expect(link).toHaveValue(new RegExp(lastRuntime));
     await expect(profile).toContainText("Not confirmed as a save from this session.");
     await page.getByRole("button", { name: "Refresh sessions", exact: true }).tap();

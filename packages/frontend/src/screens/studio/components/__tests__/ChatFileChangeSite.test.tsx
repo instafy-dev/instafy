@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessageFileChange } from "../../types";
 import { ChatFileChangeList } from "../ChatFileChangeList";
-import { ChatSiteContext, conversationSite } from "../chatSiteContext";
+import { CHAT_HISTORY_WAIT_MS, ChatSiteContext, conversationSite, useKnownChatSite, type ChatSite } from "../chatSiteContext";
 
 // Every file reads as 100 added lines. Nothing here may hit the network.
 const fetchDiff = vi.hoisted(() =>
@@ -140,7 +140,7 @@ describe("the files a site turn created", () => {
   it("reads as the site in a chat that has a site, whichever turn opened its card", async () => {
     await act(async () => {
       root.render(
-        <ChatSiteContext.Provider value={{ firstChangeAt: 1_000 }}>
+        <ChatSiteContext.Provider value={{ firstChangeAt: 1_000, pageTitles: new Map() }}>
           <ChatFileChangeList files={[created("lisbon-3-days")]} projectId="project-1" messageTimestamp={1_000} />
         </ChatSiteContext.Provider>,
       );
@@ -154,7 +154,7 @@ describe("the files a site turn created", () => {
   it("reads Changed the site for a later turn whose files are all new", async () => {
     await act(async () => {
       root.render(
-        <ChatSiteContext.Provider value={{ firstChangeAt: 1_000 }}>
+        <ChatSiteContext.Provider value={{ firstChangeAt: 1_000, pageTitles: new Map() }}>
           <ChatFileChangeList files={[created("lisbon-3-days/packing.html")]} projectId="project-1" messageTimestamp={5_000} />
         </ChatSiteContext.Provider>,
       );
@@ -163,7 +163,7 @@ describe("the files a site turn created", () => {
     // A turn that opened the card made its site, whenever it came.
     await act(async () => {
       root.render(
-        <ChatSiteContext.Provider value={{ firstChangeAt: 1_000 }}>
+        <ChatSiteContext.Provider value={{ firstChangeAt: 1_000, pageTitles: new Map() }}>
           <ChatFileChangeList files={[created("hello/index.html")]} projectId="project-1" messageTimestamp={5_000} madeSite />
         </ChatSiteContext.Provider>,
       );
@@ -171,12 +171,61 @@ describe("the files a site turn created", () => {
     expect(toggle()?.textContent).toBe("Created the site");
   });
 
+  // A local test, Nov 8: "Changed framework-13-vs-16" named a page by its
+  // folder, and a map's row read "Changed seville-3-days" for 0.2 s on a
+  // switch to its chat, then "Created the site".
+  it("names every page by the title its card in this chat gives it, else by its folder", async () => {
+    const seville: ChatSite = { firstChangeAt: 1_000, pageTitles: new Map([["seville-3-days", "Three days in Seville"]]) };
+    const show = async (site: ChatSite | null, files: ChatMessageFileChange[], messageTimestamp: number) => {
+      await act(async () => {
+        root.render(
+          <ChatSiteContext.Provider value={site}>
+            <ChatFileChangeList files={files} projectId="project-1" messageTimestamp={messageTimestamp} />
+          </ChatSiteContext.Provider>,
+        );
+      });
+    };
+    await show(seville, ["sites/seville-3-days/index.html", "sites/seville-3-days/map.config.json"].map(created), 1_000);
+    expect(toggle()?.textContent).toBe("Created Three days in Seville");
+    await show(seville, [changed("sites/seville-3-days/map.config.json")], 5_000);
+    expect(toggle()?.textContent).toBe("Changed Three days in Seville");
+    // A page this chat holds no card of reads by its folder, in a chat with a site or none.
+    await show(seville, [changed("sites/framework-laptops/data.json")], 5_000);
+    expect(toggle()?.textContent).toBe("Changed framework-laptops");
+    await show(null, [changed("sites/framework-laptops/data.json")], 5_000);
+    expect(toggle()?.textContent).toBe("Changed framework-laptops");
+    // Files that are no one page's keep the site's line.
+    await show(seville, [changed("sites/seville-3-days/map.config.json"), changed("README.md")], 5_000);
+    expect(toggle()?.textContent).toBe("Changed the site");
+  });
+
+  it("waits for the chat's history rather than name its page one way, then another", async () => {
+    const files = [changed("sites/seville-3-days/map.config.json")];
+    const seen: string[] = [];
+    const render = async (site: ChatSite | null | undefined) => {
+      await act(async () => {
+        root.render(
+          <ChatSiteContext.Provider value={site}>
+            <ChatFileChangeList files={files} projectId="project-1" messageTimestamp={5_000} />
+          </ChatSiteContext.Provider>,
+        );
+      });
+      seen.push(container.textContent ?? "");
+    };
+    // The history is still coming in: the card that names the page may yet arrive.
+    await render(undefined);
+    await render({ firstChangeAt: 1_000, pageTitles: new Map([["seville-3-days", "Three days in Seville"]]) });
+    expect(seen[0]).toBe("");
+    expect(seen.some((text) => text.includes("seville-3-days"))).toBe(false);
+    expect(toggle()?.textContent).toBe("Changed Three days in Seville");
+  });
+
   it("folds files shown before the chat had a site behind the site's line once it has one", async () => {
     const files = ["map/index.html", "map/data.json"].map(created);
     const render = async (hasSite: boolean) => {
       await act(async () => {
         root.render(
-          <ChatSiteContext.Provider value={hasSite ? { firstChangeAt: 1_000 } : null}>
+          <ChatSiteContext.Provider value={hasSite ? { firstChangeAt: 1_000, pageTitles: new Map() } : null}>
             <ChatFileChangeList files={files} projectId="project-1" messageTimestamp={1_000} />
           </ChatSiteContext.Provider>,
         );
@@ -190,6 +239,50 @@ describe("the files a site turn created", () => {
   });
 });
 
+describe("the chat's site for its rows", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let latest: ChatSite | null | undefined = undefined;
+  const site: ChatSite = { firstChangeAt: 1, pageTitles: new Map() };
+
+  function Rows({ ready, chatKey }: { ready: boolean; chatKey: string }) {
+    latest = useKnownChatSite(site, ready, chatKey);
+    return null;
+  }
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.useFakeTimers();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.useRealTimers();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("is unknown until the chat's history is in, and known after a while if it never comes", async () => {
+    await act(async () => root.render(<Rows ready={false} chatKey="chat-a" />));
+    expect(latest).toBeUndefined();
+    await act(async () => root.render(<Rows ready chatKey="chat-a" />));
+    expect(latest).toBe(site);
+    // Another chat waits for its own history, at most a few seconds.
+    await act(async () => root.render(<Rows ready={false} chatKey="chat-b" />));
+    expect(latest).toBeUndefined();
+    await act(async () => { vi.advanceTimersByTime(CHAT_HISTORY_WAIT_MS - 1); });
+    expect(latest).toBeUndefined();
+    await act(async () => { vi.advanceTimersByTime(1); });
+    expect(latest).toBe(site);
+    // Waiting for one chat never stands for another.
+    await act(async () => root.render(<Rows ready={false} chatKey="chat-c" />));
+    expect(latest).toBeUndefined();
+  });
+});
+
 describe("the chat's site", () => {
   const card = { id: "card", role: "assistant" as const, content: "", timestamp: 3_000, messageType: "action_request",
     metadata: { jobId: "open-job", messageType: "action_request",
@@ -197,11 +290,33 @@ describe("the chat's site", () => {
   const files = (id: string, jobId: string, timestamp: number) => ({ id, role: "assistant" as const, content: "",
     timestamp, metadata: { jobId }, files: [created(`map/${id}.json`)] });
 
+  it("names each page by the card of the turn whose files are that page's", () => {
+    const pageCard = (id: string, jobId: string, title: string, timestamp: number) => ({ ...card, id, timestamp,
+      metadata: { ...card.metadata, jobId, details: { ...card.metadata.details, title } } });
+    const pageFiles = (id: string, jobId: string, paths: string[], timestamp: number) => ({ id, role: "assistant" as const,
+      content: "", timestamp, metadata: { jobId }, files: paths.map(created) });
+    const site = conversationSite([
+      pageFiles("made", "make-job", ["sites/seville-3-days/index.html", "sites/seville-3-days/map.config.json"], 1_000),
+      pageCard("card-1", "make-job", "Three days in Seville", 1_100),
+      pageFiles("note", "note-job", ["sites/seville-3-days/map.config.json"], 2_000),
+      // A turn whose files are two pages' names neither.
+      pageFiles("both", "both-job", ["sites/a/data.json", "sites/b/data.json"], 3_000),
+      pageCard("card-2", "both-job", "Two pages", 3_100),
+    ]);
+    expect([...site!.pageTitles]).toEqual([["seville-3-days", "Three days in Seville"]]);
+    // The chat's one card names its one page, whichever turn opened it.
+    const later = conversationSite([
+      pageFiles("made", "make-job", ["sites/lisbon/index.html"], 1_000),
+      pageCard("card-1", "open-job", "Lisbon in 3 days", 2_000),
+    ]);
+    expect([...later!.pageTitles]).toEqual([["lisbon", "Lisbon in 3 days"]]);
+  });
+
   it("has none without a site's card, and dates its first change by that turn's newest files", () => {
     expect(conversationSite([files("a", "map-job", 1_000)])).toBeNull();
     // The map turn saved twice; its row shows the newer files, as the chat's first change.
     expect(conversationSite([files("a", "map-job", 1_000), files("b", "map-job", 2_000), card, files("c", "later-job", 4_000)]))
-      .toEqual({ firstChangeAt: 2_000 });
-    expect(conversationSite([card])).toEqual({ firstChangeAt: null });
+      .toEqual({ firstChangeAt: 2_000, pageTitles: new Map() });
+    expect(conversationSite([card])).toEqual({ firstChangeAt: null, pageTitles: new Map() });
   });
 });

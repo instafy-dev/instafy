@@ -77,6 +77,7 @@ import { ChatPanel } from "./studio/components/ChatPanel";
 import {
   chatReadingOwnPrompts,
   openChatAwaitingOk,
+  useStudioTabTitle,
   WaitingBrowserPrompts,
   withChatsAwaitingOk,
 } from "./studio/components/WaitingBrowserPrompts";
@@ -151,7 +152,6 @@ import {
   executeGithubProjectImport,
   formatGithubImportSuccessMessage,
 } from "./studio/components/githubImport";
-import { SOCIAL_CARD_IMAGE, applyPageMeta } from "../utils/seo";
 import { isPersonalOrgName } from "../org/orgNaming";
 import { buildStudioViewportStyle, shouldHideContextWhileTyping } from "./studioViewport";
 import { useStudioViewportState } from "./useStudioViewportState";
@@ -284,6 +284,7 @@ function StudioLayoutInner() {
     activeTab: activeWorkspaceTab,
     setPanelTabMeta,
     conversationSurfaces,
+    conversationBrowser,
   } =
     useWorkspaceTabs();
   const requestHistoryPush = useCallback(() => {
@@ -620,16 +621,6 @@ function StudioLayoutInner() {
   }, [homeAttentionFeed.needs]);
 
   useEffect(() => {
-    // While the open space is blocked, or none is open, the title names none.
-    const projectName = activeProjectId && !controllerProjectMissing ? (activeProjectName ?? "").trim() : "";
-    applyPageMeta({
-      title: projectName ? `${projectName} · Instafy` : "Instafy",
-      description: "Chat with Octo, edit files, and manage your space in Instafy.",
-      image: SOCIAL_CARD_IMAGE,
-    });
-  }, [activeProjectId, activeProjectName, controllerProjectMissing]);
-
-  useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
@@ -721,6 +712,14 @@ function StudioLayoutInner() {
   // The chats where a prompt of the person's browser turn waits, off screen
   // (WaitingBrowserPrompts): their tabs say Approve.
   const [chatsAwaitingOk, setChatsAwaitingOk] = useState<ReadonlySet<string>>(() => new Set());
+  // The chat on screen reads its own prompts; its Browser view says Approve.
+  const chatOnScreen = chatReadingOwnPrompts(activeWorkspaceTab?.kind, visibleConversationControllerId);
+  // While the open space is blocked, or none is open, the title names none.
+  // While a prompt waits, here or in another chat, it says so instead.
+  useStudioTabTitle(
+    activeProjectId && !controllerProjectMissing ? (activeProjectName ?? "").trim() : "",
+    chatsAwaitingOk.size > 0 || (chatOnScreen !== null && conversationBrowser.attention),
+  );
   const updateConversationSurfaces = conversationSurfaces.update;
   const viewChatAwaitingOk = useCallback((chat: { conversationId: string; localId: string | null }) => {
     if (!activeProjectId) return;
@@ -2218,7 +2217,7 @@ function StudioLayoutInner() {
         projectId={activeProjectId}
         runs={runs}
         chats={conversations}
-        chatOnScreen={chatReadingOwnPrompts(activeWorkspaceTab?.kind, visibleConversationControllerId)}
+        chatOnScreen={chatOnScreen}
         onView={viewChatAwaitingOk}
         onWaitingChange={setChatsAwaitingOk}
       />

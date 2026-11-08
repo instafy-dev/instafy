@@ -67,7 +67,10 @@ export function useSharedBrowserApproval({
    * the read.
    */
   acceptsRequest?: (request: RuntimeSharedBrowserApprovalRequest) => boolean;
-  /** A run that may raise a prompt is active: poll every 1.5 s. Defaults to true. */
+  /**
+   * A run that may raise a prompt is active: poll every 1.5 s, also while the
+   * page is hidden. Defaults to true.
+   */
   runActive?: boolean;
 }) {
   const [pending, setPending] = useState<RuntimeSharedBrowserPendingApproval | null>(null);
@@ -136,18 +139,25 @@ export function useSharedBrowserApproval({
     let failingSinceMs: number | null = null;
     // The next read is due one delay after the last answer: 400 ms while a
     // prompt is shown, 1.5 s while a run may raise one, otherwise a slow
-    // safety read; none while hidden. Coming back reads at once if it is due.
-    // Failed reads back off; no two reads start closer than the minimum gap.
+    // safety read. A hidden page keeps the 1.5 s read while a run may raise
+    // a prompt or one waits, so the prompt, and the tab's title, reach a
+    // person who looked away (a browser slows a hidden page's timers to about
+    // once a second anyway); with no run it reads nothing until the page
+    // shows again, and coming back reads at once if a read is due. Failed
+    // reads back off; no two reads start closer than the minimum gap.
     const schedule = () => {
       if (timerId !== null) window.clearTimeout(timerId);
       timerId = null;
       if (cancelled || inFlight || scopeRef.current !== scope) return;
-      const delay = adaptivePollDelay(
-        Boolean(pendingRef.current) || runActiveRef.current,
-        pendingRef.current ? APPROVAL_PENDING_POLL_INTERVAL_MS : APPROVAL_IDLE_POLL_INTERVAL_MS,
-        APPROVAL_QUIET_POLL_INTERVAL_MS,
-        APPROVAL_QUIET_IDLE_POLL_INTERVAL_MS,
-      );
+      const fast = Boolean(pendingRef.current) || runActiveRef.current;
+      const delay = fast && pollingGateState() === "hidden"
+        ? APPROVAL_IDLE_POLL_INTERVAL_MS
+        : adaptivePollDelay(
+          fast,
+          pendingRef.current ? APPROVAL_PENDING_POLL_INTERVAL_MS : APPROVAL_IDLE_POLL_INTERVAL_MS,
+          APPROVAL_QUIET_POLL_INTERVAL_MS,
+          APPROVAL_QUIET_IDLE_POLL_INTERVAL_MS,
+        );
       if (delay === null) return;
       const backedOff = failures > 0
         ? Math.max(delay, Math.min(APPROVAL_FAILURE_MAX_POLL_INTERVAL_MS, delay * 2 ** Math.min(failures, 8)))
@@ -209,13 +219,9 @@ export function useSharedBrowserApproval({
         schedule();
       }
     };
+    // A run that may raise a prompt started: read now, hidden or not.
     const kick = () => {
       if (cancelled || inFlight) return;
-      // Hidden: owe the read to the return instead of reading now.
-      if (pollingGateState() === "hidden") {
-        lastSettledAt = 0;
-        return;
-      }
       if (timerId !== null) window.clearTimeout(timerId);
       void poll();
     };

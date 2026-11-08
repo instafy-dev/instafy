@@ -149,6 +149,32 @@ describe("an automatic retry reads as one turn", () => {
     expect(isAutomaticRetryPending(rows[1])).toBe(true);
   });
 
+  // A local test, Nov 8: after a reload, a note whose browser part failed and
+  // was tried again read as two rows, the failure ("Retried") and its retry:
+  // the stored resend of a browser task names no run.
+  it("folds a stored resend that names no run into the turn that first wrote after it", () => {
+    const rows = transcript([
+      prompt,
+      ...failedAttempt,
+      resend({ automatic: false }),
+      step("retry-pwd", RETRY_JOB, RETRY_RUN, 6),
+      retryReply,
+    ]);
+
+    expect(rows.map((row) => row.id)).toEqual(["prompt", `agent-job-thread:${RETRY_JOB}`]);
+    expect(readEarlierAttempts(rows[1]).map((attempt) => attempt.map((entry) => entry.id))).toEqual([
+      ["retry-status", "failed-pwd", "failure"],
+    ]);
+
+    // Not a turn after someone's prompt, nor one that wrote before the resend.
+    const asked = message({ id: "asked", role: "user", authorId: "user-2", content: "Rename the page.", timestamp: 5.5 });
+    const afterPrompt = transcript([prompt, ...failedAttempt, resend({ automatic: false }), asked, step("retry-pwd", RETRY_JOB, RETRY_RUN, 6), retryReply]);
+    expect(afterPrompt.map((row) => row.id)).toContain(`agent-job-thread:${FAILED_JOB}`);
+    const running = step("running-pwd", RETRY_JOB, RETRY_RUN, 4.5);
+    const before = transcript([prompt, ...failedAttempt, running, resend({ automatic: false }), step("retry-pwd", RETRY_JOB, RETRY_RUN, 6), retryReply]);
+    expect(before.map((row) => row.id)).toContain(`agent-job-thread:${FAILED_JOB}`);
+  });
+
   it("leaves a resend the controller has not taken to the page that sent it", () => {
     // No run yet: the page that sent it shows "Trying again…" while it goes
     // out, and its failure block again if it never does.

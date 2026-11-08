@@ -74,7 +74,7 @@ describe("SharedBrowserCollaborationControls", () => {
 
   it("keeps participants and release control inline on a wide surface", async () => {
     await render({ compact: false, children: <button>Let Octo continue</button> });
-    expect(find("shared-browser-participants")?.getAttribute("aria-label")).toContain("Taylor, Anna");
+    expect(find("shared-browser-participants")?.getAttribute("aria-label")).toBe("In Shared Browser: Anna, you");
     expect(status()?.textContent).toBe("You control");
     expect(container.textContent).toContain("Let Octo continue");
     expect(action()?.dataset.action).toBe("release");
@@ -89,7 +89,7 @@ describe("SharedBrowserCollaborationControls", () => {
       children: <button>Let Octo continue</button>,
     });
     expect(container.querySelectorAll("button")).toHaveLength(1);
-    expect(trigger().getAttribute("aria-label")).toContain("You control. Taylor, Anna, Grace");
+    expect(trigger().getAttribute("aria-label")).toContain("You control. Anna, Grace, you");
     expect(find("shared-browser-participants")?.textContent).toContain("+2");
     expect(status()).toBeNull();
     expect(action()).toBeNull();
@@ -106,7 +106,7 @@ describe("SharedBrowserCollaborationControls", () => {
     expect(participantsList().compareDocumentPosition(action()!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const continueControl = Array.from(document.querySelectorAll("button")).find(button => button.textContent === "Let Octo continue")!;
     expect(participantsList().compareDocumentPosition(continueControl) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(participantRow("self").textContent).toContain("Taylor (you)");
+    expect(participantRow("self").querySelector("[data-participant-name]")?.textContent).toBe("You");
     expect(participantRow("peer").textContent).toBe("Anna");
     expect(participantRow("third").textContent).toBe("Grace");
     expect(document.body.textContent).toContain("Let Octo continue");
@@ -353,6 +353,23 @@ describe("SharedBrowserCollaborationControls", () => {
     expect(document.body.textContent).not.toContain("Control syncing");
   });
 
+  // A local test, Nov 8: alone in the browser, its toolbar read "Browser
+  // participants: playwright" with "PL": the first part of the person's email.
+  it.each([false, true])("never names the person by their account's label, only as you (compact=%s)", async (compact) => {
+    await render({ compact, client: client({ state: {
+      revision: 1, participants: [participant("self", "playwright"), participant("peer", "Anna")],
+      controlOwner: { kind: "human", participantId: "self" }, requests: [],
+    } }) });
+    expect(find("shared-browser-participants")?.getAttribute("aria-label")).toBe("In Shared Browser: Anna, you");
+    expect(find("shared-browser-participants")?.textContent).not.toContain("PL");
+    if (compact) {
+      expect(trigger().getAttribute("aria-label")).toBe("Browser participants and control: You control. Anna, you");
+      await openControls();
+      expect(participantRow("self").querySelector("[data-participant-name]")?.textContent).toBe("You");
+    }
+    expect(document.body.textContent).not.toContain("playwright");
+  });
+
   describe("alone in the browser", () => {
     const alone = (controlOwner: SharedBrowserCollaborationState["controlOwner"]) => client({ state: {
       revision: 1, participants: [participant("self", "Taylor")], controlOwner, requests: [],
@@ -361,10 +378,10 @@ describe("SharedBrowserCollaborationControls", () => {
     it.each([false, true])("shows neither the control chip nor Release when there is nothing to hand over (compact=%s)", async (compact) => {
       await render({ compact, client: alone({ kind: "human", participantId: "self" }) });
       if (compact) {
-        expect(trigger().getAttribute("aria-label")).toBe("Browser participants: Taylor");
+        expect(trigger().getAttribute("aria-label")).toBe("Browser participants: you");
         expect(container.querySelector('[role="status"]')).toBeNull();
         await openControls();
-        expect(participantRow("self").textContent).toContain("Taylor (you)");
+        expect(participantRow("self").querySelector("[data-participant-name]")?.textContent).toBe("You");
       }
       expect(find("shared-browser-participants")).not.toBeNull();
       expect(status()).toBeNull();

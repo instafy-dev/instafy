@@ -16,7 +16,7 @@ import {
 } from "./chatAssistantIdentity";
 import { shouldAssistantMessagesShareVisualGroup } from "./assistantMessageGrouping";
 import { ChatBubbleRow } from "./ChatBubbleRow";
-import { ChatSiteContext, conversationSite } from "./chatSiteContext";
+import { ChatSiteContext, conversationSite, useKnownChatSite } from "./chatSiteContext";
 import { ChatLaterChangesContext, conversationLaterChanges } from "./chatLaterChanges";
 import type { ChatSpeakerMarker } from "./chatSpeakerMarker";
 import {
@@ -186,6 +186,7 @@ function resolveMessageWorkflowSpineKey(
 export function ConversationMessageRows({
   messages,
   allConversationMessages,
+  historyReady = true,
   timedSyntheticRows,
   currentUserId,
   chatClientSessionId,
@@ -213,6 +214,12 @@ export function ConversationMessageRows({
 }: {
   messages: ChatMessage[];
   allConversationMessages?: ChatMessage[] | null;
+  /**
+   * The chat's history has come in. Until then a card may yet arrive, so a
+   * turn's files row, which names its page or site by the chat's cards, waits
+   * (useKnownChatSite) rather than read one way, then another.
+   */
+  historyReady?: boolean;
   timedSyntheticRows?: Array<{ key: string; timestamp: number; element: JSX.Element }>;
   currentUserId: string | null;
   chatClientSessionId: string;
@@ -260,6 +267,7 @@ export function ConversationMessageRows({
     () => conversationSite(allConversationMessages ?? messages),
     [allConversationMessages, messages],
   );
+  const knownSite = useKnownChatSite(site, historyReady, conversationLocalId);
   // What later turns changed, for an Undo that puts a turn's files back.
   const laterChanges = useMemo(
     () => conversationLaterChanges(allConversationMessages ?? messages),
@@ -640,7 +648,7 @@ export function ConversationMessageRows({
   }
 
   return (
-    <ChatSiteContext.Provider value={site}>
+    <ChatSiteContext.Provider value={knownSite}>
       <ChatLaterChangesContext.Provider value={laterChanges}>
         <DeferredChatRows key={conversationLocalId} messageCount={messages.length}>{rows}</DeferredChatRows>
       </ChatLaterChangesContext.Provider>

@@ -151,6 +151,33 @@ describe("arrangeHomeSections", () => {
     expect(resumed.activity).toEqual([]);
   });
 
+  // A local test, Nov 8: a chat stopped in the gap between its message's two
+  // parts sat under Continue working with no "Stopped": that row took its
+  // state only from an In progress row, and the chat's Stopped row stepped aside.
+  it("takes a listed chat's newest dated row as its state when it is a Stop or a failure, and never an older one", () => {
+    const stopped = activityEvent(60, CHAT_A, { kind: "run_stopped" });
+    const failed = activityEvent(55, CHAT_B, { kind: "run_failed", statusLabel: "Run failed" });
+    const sections = arrangeHomeSections({
+      feed: { needs: [], hasCut: false, activity: [day("today", [stopped, failed, activityEvent(50, CHAT_A, { kind: "run_failed" })])] },
+      conversations: [], resumeChatKey: CHAT_A, recentChats: [failed],
+    });
+    expect(sections.liveByChat.get(CHAT_A)?.key).toBe("activity:60");
+    expect(sections.liveByChat.get(CHAT_B)?.key).toBe("activity:55");
+    expect(sections.activity).toEqual([]);
+    // A reply after the Stop is the chat's state: it says nothing of the Stop.
+    const replied = arrangeHomeSections({
+      feed: { needs: [], hasCut: false, activity: [day("today", [activityEvent(70, CHAT_A)]), day("yesterday", [stopped])] },
+      conversations: [], resumeChatKey: CHAT_A, recentChats: [],
+    });
+    expect(replied.liveByChat.size).toBe(0);
+    // A run in progress is the chat's state, whatever ended before it.
+    const running = arrangeHomeSections({
+      feed: { needs: [], hasCut: false, activity: [day(HOME_LIVE_DAY_KEY, [activityEvent(80, CHAT_A, { kind: "running" })]), day("today", [stopped])] },
+      conversations: [], resumeChatKey: CHAT_A, recentChats: [],
+    });
+    expect(running.liveByChat.get(CHAT_A)?.key).toBe("activity:80");
+  });
+
   it("puts the chat Continue working gave way to first under Unread, where a phone still shows it", () => {
     const resumed = activityEvent(10, CHAT_A, { lane: "needs" });
     const newer = [1, 2, 3, 4, 5].map((n) => activityEvent(50 + n, `9999999${n}-9999-4999-8999-999999999999`, { lane: "needs" }));

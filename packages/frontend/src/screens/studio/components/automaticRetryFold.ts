@@ -111,7 +111,11 @@ export function resolveAutomaticRetryFold(messages: readonly ChatMessage[]): Aut
   for (const { prompt, failureId, index } of resends) {
     const failure = failures.get(failureId);
     const retryRunId = runIdOf(prompt);
-    const retryJobId = retryRunId ? jobByRunId.get(retryRunId) : undefined;
+    // A stored resend that names no run (a browser task sent again, after a
+    // reload) is answered by the first job that writes after it.
+    const retryJobId = retryRunId
+      ? jobByRunId.get(retryRunId)
+      : failure ? firstJobAfter(messages, index, jobIdOf(failure)) : undefined;
     if (
       !failure ||
       !repeatsFailedPrompt(messages, prompt, failure) ||
@@ -131,6 +135,23 @@ export function resolveAutomaticRetryFold(messages: readonly ChatMessage[]): Aut
     }
   }
   return { hiddenPromptIds, earlierAttemptByJobId, pendingJobIds, pendingRetryRunIdByJobId };
+}
+
+/**
+ * The job that first wrote after `resendIndex`, and never before it, unless
+ * someone's prompt comes first: the turn that answered the resend.
+ */
+function firstJobAfter(messages: readonly ChatMessage[], resendIndex: number, failedJobId: string): string | undefined {
+  for (const message of messages.slice(resendIndex + 1)) {
+    if (message.role === "user") {
+      return undefined;
+    }
+    const jobId = jobIdOf(message);
+    if (jobId !== "" && jobId !== failedJobId) {
+      return messages.slice(0, resendIndex).some((earlier) => jobIdOf(earlier) === jobId) ? undefined : jobId;
+    }
+  }
+  return undefined;
 }
 
 /**

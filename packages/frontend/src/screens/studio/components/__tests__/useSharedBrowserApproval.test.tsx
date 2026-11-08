@@ -59,6 +59,7 @@ function Harness({
   browserPageId = pending.request.browserPageId,
   originAccessToken = "origin-token",
   accepts,
+  runActive,
 }: {
   active?: boolean;
   browserSessionId?: string;
@@ -66,6 +67,7 @@ function Harness({
   browserPageId?: string;
   originAccessToken?: string;
   accepts?: (request: RuntimeSharedBrowserApprovalRequest) => boolean;
+  runActive?: boolean;
 }) {
   const approval = useSharedBrowserApproval({
     active,
@@ -76,6 +78,7 @@ function Harness({
     originEndpoint: "https://origin.example.test",
     originAccessToken,
     acceptsRequest: accepts,
+    runActive,
   });
   latestApproval = approval;
   const shownApprovalId = approval.pending?.request.approvalId ?? "";
@@ -458,6 +461,64 @@ describe("useSharedBrowserApproval", () => {
     expect(decideApprovalMock).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ pending: nextPending, decision: "allow_once" }),
     );
+  });
+
+  describe("on a hidden page", () => {
+    let visibility: DocumentVisibilityState = "visible";
+    const setVisibility = async (next: DocumentVisibilityState) => {
+      visibility = next;
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+    };
+    beforeEach(() => {
+      visibility = "visible";
+      vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    });
+    afterEach(async () => {
+      await setVisibility("visible");
+      vi.restoreAllMocks();
+    });
+
+    // A local test, Nov 8: with Studio in a background tab, the prompt to
+    // submit a form was never read, never shown, and ran out after 120 s.
+    it("keeps reading every 1.5 s while a run may raise a prompt, so a prompt raised meanwhile is read", async () => {
+      fetchPendingApprovalMock.mockResolvedValue(null);
+      await act(async () => { root.render(<Harness />); });
+      expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(1);
+      await setVisibility("hidden");
+      fetchPendingApprovalMock.mockResolvedValue(pending);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_500); });
+      expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(2);
+      expect(container.querySelector('[data-testid="pending"]')?.textContent).toBe(pending.request.approvalId);
+      // It goes on reading while the prompt waits, so an answer elsewhere is seen too.
+      fetchPendingApprovalMock.mockResolvedValue(null);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_500); });
+      expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(3);
+      expect(container.querySelector('[data-testid="pending"]')?.textContent).toBe("none");
+    });
+
+    it("reads at once when a run starts while the page is hidden", async () => {
+      fetchPendingApprovalMock.mockResolvedValue(null);
+      await act(async () => { root.render(<Harness runActive={false} />); });
+      await setVisibility("hidden");
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(1);
+      fetchPendingApprovalMock.mockResolvedValue(pending);
+      await act(async () => { root.render(<Harness runActive />); });
+      expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(2);
+      expect(container.querySelector('[data-testid="pending"]')?.textContent).toBe(pending.request.approvalId);
+    });
+
+    it("reads nothing while no run may raise a prompt, and reads on the return", async () => {
+      fetchPendingApprovalMock.mockResolvedValue(null);
+      await act(async () => { root.render(<Harness runActive={false} />); });
+      expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(1);
+      await setVisibility("hidden");
+      await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+      expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(1);
+      await setVisibility("visible");
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(2);
+    });
   });
 
   it("does not clear a newly polled approval when an earlier decision completes", async () => {

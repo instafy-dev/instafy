@@ -150,6 +150,30 @@ describe("production Shared modal resume selection", () => {
     expect(mocks.ensure).not.toHaveBeenCalled();
   });
 
+  // A local test, Nov 8: Browser options listed "Copy resume link",
+  // "Session details" and "Refresh sessions" for anyone to read.
+  it("keeps the resume link, the sessions and their details behind one Advanced row", async () => {
+    mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });
+    await render(firstId, true, true);
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!.click());
+    const options = document.querySelector('[role="dialog"][aria-label="Browser options"]')!;
+    const advanced = Array.from(options.querySelectorAll("details"));
+    expect(advanced).toHaveLength(1);
+    expect(advanced[0]!.open).toBe(false);
+    expect(advanced[0]!.querySelector("summary")?.textContent).toBe("Advanced");
+    const outside = (label: string) => Array.from(options.querySelectorAll<HTMLElement>("button, summary"))
+      .filter((control) => (control.getAttribute("aria-label") ?? control.textContent) === label && !advanced[0]!.contains(control));
+    for (const label of ["Copy resume link", "Refresh sessions", `Resume Shared session ${firstId}`]) {
+      expect(outside(label), label).toEqual([]);
+      expect(Array.from(advanced[0]!.querySelectorAll("button")).some((button) =>
+        (button.getAttribute("aria-label") ?? button.textContent) === label), label).toBe(true);
+    }
+    expect(options.textContent).not.toContain("Session details");
+    expect(advanced[0]!.querySelector('[data-testid="shared-browser-current-runtime"]')).not.toBeNull();
+    // Reset stays in sight.
+    expect(advanced[0]!.contains(options.querySelector('[data-testid="shared-browser-clear-data"]'))).toBe(false);
+  });
+
   it("reveals and focuses the resume link when clipboard copying fails", async () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });
     mocks.writeClipboardText.mockRejectedValue(new Error("Clipboard unavailable"));
