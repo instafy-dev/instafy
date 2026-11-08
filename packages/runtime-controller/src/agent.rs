@@ -5386,7 +5386,11 @@ pub(crate) async fn load_conversation_history_for_agent(
     // a follow-up ("dig deeper for every city") reached the agent without the
     // itinerary it referred to. The same progress rows that
     // `should_include_message_in_agent_history` drops are therefore left out
-    // before the limit; that filter still runs on what remains.
+    // before the limit; that filter still runs on what remains. A browser
+    // turn's findings note wears a progress row's stamp and is none: a later
+    // building turn reads that browser turn by it alone, and with the note
+    // left out read three question turns as `{"findings":[]}` and read their
+    // sites again itself (a local test, Nov 7).
     // A granted turn's rows: its person's own words, and their granted turns'
     // replies and notices.
     let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
@@ -5444,6 +5448,8 @@ pub(crate) async fn load_conversation_history_for_agent(
                      lower(btrim(coalesce(metadata->>'source', ''))) = 'agent'
                      and lower(btrim(coalesce(metadata->>'kind', ''))) = 'update'
                      and lower(btrim(coalesce(metadata->>'outcome', ''))) = 'in_progress'
+                     and coalesce(metadata #> '{{details,browserFindings}}',
+                                  metadata #> '{{details,details,browserFindings}}') is null
                    )
                  )
                )
@@ -5640,11 +5646,15 @@ fn should_include_message_in_agent_history(
         .and_then(JsonValue::as_str)
         .map(|value| value.trim().to_ascii_lowercase());
 
+    // A browser turn's findings note (runtime-agent `move_findings_into_details`) wears the
+    // same stamp and is no progress: a later building turn reads that browser turn by it
+    // alone (runtime-agent `conversation_context::is_findings_note`), as the hand-back does
+    // (`browser_hand_back::finding_lines_note`).
     if source.as_deref() == Some("agent")
         && kind.as_deref() == Some("update")
         && outcome.as_deref() == Some("in_progress")
     {
-        return false;
+        return is_browser_findings_note(metadata);
     }
 
     // A dispatch runtime alert is the controller telling the person that no
@@ -5669,6 +5679,16 @@ fn should_include_message_in_agent_history(
     }
 
     true
+}
+
+/// Whether a row is a browser turn's findings note: its details carry
+/// `browserFindings`, where the history query and the hand-back look for it.
+fn is_browser_findings_note(metadata: Option<&JsonMap<String, JsonValue>>) -> bool {
+    let details = metadata.and_then(|map| map.get("details"));
+    [details, details.and_then(|details| details.get("details"))]
+        .into_iter()
+        .flatten()
+        .any(|details| details.get("browserFindings").is_some())
 }
 
 /// Whether a controller `runtime_alert` row is a scheduled run's launch
@@ -7694,6 +7714,40 @@ mod tests {
             "assistant",
             &secret_card,
             Some("secret_request"),
+        ));
+    }
+
+    /// A local test, Nov 7: a page built after three question turns in the
+    /// browser read each of them as `{"findings":[]}`, and read their three
+    /// sites again itself. Each turn's findings note, which a later building
+    /// turn reads it by, wears a progress row's stamp, and the history left it
+    /// out with the progress rows. It stays now, whichever details hold it;
+    /// any other status row with that stamp is still progress.
+    #[test]
+    fn agent_history_keeps_a_browser_turns_findings_note() {
+        let job_id = Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap();
+        let findings = json!({ "pages": 1, "pagesRead": 0 });
+        for details in [
+            json!({ "kind": "agent_message", "browserFindings": findings }),
+            json!({ "details": { "kind": "agent_message", "browserFindings": findings } }),
+        ] {
+            let note = build_agent_update_metadata(&job_id, Some("status"), Some(details.clone()));
+            assert_eq!(note["kind"], json!("update"));
+            assert_eq!(note["outcome"], json!("in_progress"));
+            assert!(
+                should_include_message_in_agent_history("assistant", &note, Some("status")),
+                "{details}"
+            );
+        }
+        let status = build_agent_update_metadata(
+            &job_id,
+            Some("status"),
+            Some(json!({ "kind": "agent_message" })),
+        );
+        assert!(!should_include_message_in_agent_history(
+            "assistant",
+            &status,
+            Some("status"),
         ));
     }
 
