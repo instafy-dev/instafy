@@ -77,6 +77,9 @@ const WINDOW_BUSY_MS = 32_000;
 // How long a form keeps the page busy once a field is highlighted: longer than
 // a step's time, shorter than the step's time and its late read.
 const FORM_BUSY_MS = 24_000;
+// How long a "Load more" button's script keeps the page busy once its request
+// was answered: longer than a step's time and its late read.
+const LOAD_MORE_BUSY_MS = 32_000;
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -95,6 +98,14 @@ const page = (title, body, script = "") => `<!doctype html><html lang="en"><head
 const SEARCH = `<form action="/results" method="get" role="search"><input type="search" name="q" aria-label="Search places"><button>Search</button></form>`;
 const RESULTS = "<p>Results for your search.</p><p><a href=\"/places/tower\">The tower</a></p>";
 const BUSY = `setTimeout(() => { const end = Date.now() + ${BUSY_MS}; while (Date.now() < end) {} }, 100);`;
+// A button whose script sends a request of its own, loading no page, and then
+// keeps the page busy: what the click did happened inside the page.
+const LOAD_MORE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><link rel="icon" href="data:,">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'">
+<title>Events</title></head><body><h1>Events</h1><p>Concerts this week.</p><button id="more" type="button">Load more</button>
+<script>document.getElementById("more").addEventListener("click", () => {
+  fetch("/api/more", { method: "POST" }).then(() => { const end = Date.now() + ${LOAD_MORE_BUSY_MS}; while (Date.now() < end) {} });
+});</script></body></html>`;
 // A button that opens another window, then keeps the page busy; once free, the
 // page sends that window somewhere else.
 const WINDOW = `<button id="open" type="button">Open details</button>`;
@@ -289,6 +300,10 @@ export async function runSharedBrowserStepTimeFixture() {
         }, AFTER_REDIRECT_MS);
         return;
       }
+      if (url.pathname === "/api/more") {
+        response.writeHead(204, { "cache-control": "no-store" }).end();
+        return;
+      }
       if (url.pathname === "/never-loads") {
         response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
         response.write(NEVER_LOADS_START);
@@ -322,6 +337,7 @@ export async function runSharedBrowserStepTimeFixture() {
         "/ask": [page("Ask us", "<form action=\"/slow\" method=\"post\"><label>Your question <input name=\"question\"></label><button>Send question</button></form>")],
         // The bookshop's own site, at a name of its own.
         "/bookshop-hours": [page("Bookshop", "<p>Open daily from 10:00 to 19:00.</p>")],
+        "/events": [LOAD_MORE],
       }[url.pathname];
       if (!body) {
         response.writeHead(404).end();
@@ -739,6 +755,13 @@ export async function runSharedBrowserStepTimeFixture() {
     assert.doesNotMatch(busyPage.stderr, /Take a snapshot in a moment|still busy|Check what the step did/u);
     assert.ok(busyPage.wallMs >= STEP_TIME_MS - 1_000, `It answered when its time was up (${Math.round(busyPage.wallMs)} ms)`);
     assert.ok(busyPage.wallMs < STEP_TIME_MS + LATE_READ_MS + 5_000, `It did not wait for the page (${Math.round(busyPage.wallMs)} ms)`);
+    // A read of that page while it is still busy says the same, never "Take a
+    // snapshot in a moment": a turn read the busy page again, then opened its
+    // address once more instead of the place's own site.
+    const busyRead = await ok("GET", "/v1/snapshot");
+    assert.equal(busyRead.payload.message, BUSY_UNANSWERED_MESSAGE);
+    assert.deepEqual(busyRead.payload.interactiveElements, []);
+    assert.equal(busyRead.payload.activity.step, "status", "A busy page was not read");
     requests.length = 0;
     const busyAgain = await runTool("POST", "/v1/navigate", { url: `${origin}/never-loads` });
     assert.equal(busyAgain.code, 1, `The busy address is refused: ${busyAgain.stdout}`);
@@ -770,6 +793,31 @@ export async function runSharedBrowserStepTimeFixture() {
     await delay(Math.max(0, clickedAt + WINDOW_BUSY_MS + 3_000 - performance.now()));
     assert.deepEqual(context.pages().map((open) => new URL(open.url()).pathname), ["/window"], "Only the run's page is left");
     assert.deepEqual(requests.filter((request) => request.includes("/popup")), [], "The window never loaded anything, then or later");
+
+    // 2b. A click whose script sends a request of its own and loads no page,
+    // then keeps the page busy: the step's time runs out on the page it acted
+    // on, so it answers with that page and says to check what it did, never
+    // that the site did not answer, which would read as nothing done.
+    await ok("POST", "/v1/navigate", { url: `${origin}/events` });
+    const events = await ok("GET", "/v1/snapshot");
+    const more = events.payload.interactiveElements.find((element) => element.label === "Load more");
+    assert.ok(more, "The button is observed");
+    requests.length = 0;
+    const loaded = await runTool("POST", "/v1/click", { index: more.index, snapshotId: events.payload.snapshotId });
+    const loadedAt = performance.now() - loaded.wallMs;
+    assert.equal(loaded.code, 0, `The step answers with the page it acted on: ${loaded.stderr}`);
+    assert.deepEqual(requests, ["POST /api/more"], "The click's own request reached the site");
+    assert.equal(loaded.payload.stepTimedOut, true);
+    assert.equal(
+      loaded.payload.message,
+      `${BUSY_MESSAGE} This step was still running after 20 seconds, so it stopped where it was. Check what the step did before you act again.`,
+    );
+    assert.ok(loaded.wallMs < STEP_TIME_MS + LATE_READ_MS + 10_000, `It did not wait for the busy page (${Math.round(loaded.wallMs)} ms)`);
+    const keptBefore = fs.existsSync(path.join(approvalDirectory, "unanswered.json"))
+      ? JSON.parse(fs.readFileSync(path.join(approvalDirectory, "unanswered.json"), "utf8")).addresses.map((entry) => entry.address)
+      : [];
+    assert.ok(!keptBefore.includes(createHash("sha256").update(`${origin}/events`).digest("hex")), "The page a click acted on was kept as one that did not answer");
+    await delay(Math.max(0, loadedAt + LOAD_MORE_BUSY_MS + 1_000 - performance.now()));
 
     // 3. A hand-off whose fields the page is too busy to highlight in time:
     // the step answers with the page as it is, and no hand-off is left behind
@@ -825,12 +873,13 @@ export async function runSharedBrowserStepTimeFixture() {
         "a link clicked on a page that had loaded, to a site that does not answer, is stopped once the click stops waiting for it and fails the same way, never as the page the tab still shows nor as the click's own timeout; the next step reaches the browser at once, and the site's late answer never lands",
         "a form sent to a site that does not answer is not stopped and never reads as nothing opened: the step answers once its time is up and says to check what it did, and the form's late answer lands",
         "a navigation the site answers 404 or 410 for fails as soon as that answer comes, saying the address has no page, even when the rest of its not-found page comes later than a step or there is no page at all; a page that only reads as not found, and a 200, are the step's page",
-        "a page that never finishes loading and shows nothing fails once the step's time is up as a site that did not answer, naming the next source, never 'take a snapshot in a moment'; its address is then refused at once in the turn, and the place's own site still opens",
+        "a page that never finishes loading and shows nothing fails once the step's time is up as a site that did not answer, naming the next source, never 'take a snapshot in a moment', and a read of it while it is still busy says the same; its address is then refused at once in the turn, and the place's own site still opens",
         "a click that opens a window and keeps the page busy fails once the step's time is up, as it would in its time: the window is closed and never loads anything, then or later",
+        "a click whose script sends a request of its own and loads no page, then keeps the page busy, answers once the step's time is up with that page and says to check what the step did; its address is not kept as one that did not answer",
         "a hand-off whose fields the page is too busy to highlight in time answers with the page as it is and leaves no hand-off behind",
         "a search whose results page keeps the page busy fails once the step's time is up as a site that did not answer, naming the next source, never waiting out the page; its line still names a search, and the results' address is kept as one that did not answer",
       ],
-      timings: { slowAnswerMs: Math.round(slow.wallMs), manyControlsReadMs: Math.round(planner.wallMs), manyControlsChoiceMs: Math.round(chose.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), neverLoadsMs: Math.round(busyPage.wallMs), unansweredLoadMs: Math.round(loading.wallMs), refusedAgainMs: refusedAgain.map((again) => Math.round(again.wallMs)), lateRedirectMs: Math.round(redirected.wallMs), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs), noPageMs },
+      timings: { slowAnswerMs: Math.round(slow.wallMs), manyControlsReadMs: Math.round(planner.wallMs), manyControlsChoiceMs: Math.round(chose.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyClickMs: Math.round(loaded.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), neverLoadsMs: Math.round(busyPage.wallMs), unansweredLoadMs: Math.round(loading.wallMs), refusedAgainMs: refusedAgain.map((again) => Math.round(again.wallMs)), lateRedirectMs: Math.round(redirected.wallMs), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs), noPageMs },
       limitations: ["No model, Studio UI, origin or runtime shutdown guard; those are unit-tested."],
     };
     fs.writeFileSync(resultFile, `${JSON.stringify(result, null, 2)}\n`);

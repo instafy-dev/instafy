@@ -318,6 +318,17 @@ const COOKIE_NOTICE = `<h1>Metro</h1><p style="margin-top:1200px"><a href="/read
 <p>This site uses cookies to work and to measure how it is used.</p>
 <a href="/reading/cookie-settings" role="button">Customize cookies</a> <button type="button" onclick="window.consentAnswer = 'accepted'; document.getElementById('consent-backdrop').remove()">Accept all cookies</button>
 </div></div>`;
+// Small pages held in one wrapper, whose text speaks of cookies all over: a
+// menu and a footer of links outside the notice, and a notice named after
+// cookies; and one whose notice is named nowhere.
+const WRAPPED_NOTICE = `<div id="app"><nav>${["Lines", "Fares", "Tickets", "Maps", "News", "Help", "About"]
+  .map((name) => `<a href="/reading/visit">${name}</a>`).join(" ")}</nav>
+<main><h1>Metro</h1><p><a href="/reading/visit">Plan a journey</a></p></main>
+<div class="cookie-bar"><a href="/reading/cookie-settings" role="button">Customize cookies</a> <button type="button" onclick="window.consentAnswer = 'accepted'">Accept all cookies</button></div>
+<footer><a href="/reading/visit">Privacy</a> · <a href="/reading/visit">Cookies</a> · <a href="/reading/visit">Contact</a></footer></div>`;
+const UNNAMED_NOTICE = `<div id="root"><nav><a href="/reading/visit">Lines</a> <a href="/reading/visit">Fares</a></nav>
+<main><h1>Journey planner</h1><p>Plan a trip.</p></main>
+<div class="notice-box"><p>We use cookies to improve the site.</p><a href="/reading/cookie-settings" role="button">Cookie settings</a> <button type="button" onclick="window.consentAnswer = 'accepted'">Accept all cookies</button></div></div>`;
 const DRESSED_NOTICE = `<h1>Your account</h1><p><a href="/reading/visit">Orders</a></p>
 <div class="cookie-bar" style="position:fixed;left:0;right:0;bottom:0;padding:16px;background:#fff">
 <p>We use cookies.</p>
@@ -400,6 +411,8 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/cookie-notice": page("Metro", COOKIE_NOTICE),
       "site.test /reading/dressed-notice": page("Your account", DRESSED_NOTICE),
       "site.test /reading/allow-notice": page("Museum", ALLOW_NOTICE),
+      "site.test /reading/wrapped-notice": page("Metro", WRAPPED_NOTICE),
+      "site.test /reading/unnamed-notice": page("Journey planner", UNNAMED_NOTICE),
       "site.test /reading/dressed-sign-in": page("Your account", DRESSED_SIGN_IN),
       "site.test /reading/covered": page("Timetable", COVERED),
       "site.test /reading/visit": page("Visit", "<h1>Plan your visit</h1>"),
@@ -935,6 +948,27 @@ export async function runSharedBrowserPageReadingFixture() {
       );
       assert.equal(await consentAnswer(), null, `${address}: the pause pressed the notice`);
     }
+    // b''. On a small page held in one wrapper, whose text speaks of cookies
+    // all over, a pause on the accept still outlines nothing outside the
+    // notice: a notice named after cookies gets its own buttons too, never the
+    // menu or the footer, and one named nowhere only the button Octo named.
+    for (const [address, outlinedNames] of [
+      ["/reading/wrapped-notice", ["Customize cookies", "Accept all cookies"]],
+      ["/reading/unnamed-notice", ["Accept all cookies"]],
+    ]) {
+      reading = await read(address);
+      const wrappedPause = await runTool("POST", "/v1/request-human-input", { indices: [control(reading, "Accept all cookies").index], snapshotId: reading.snapshotId });
+      assert.equal(wrappedPause.code, 1, wrappedPause.stdout);
+      assert.match(wrappedPause.stderr, /\[cookie_notice_required_non_retryable\]/u, `${address}: ${wrappedPause.stderr}`);
+      assert.deepEqual(
+        await runPage.evaluate(() => Array.from(document.querySelectorAll("a, button"))
+          .filter((element) => element.style.outlineStyle)
+          .map((element) => element.textContent.trim())),
+        outlinedNames,
+        `${address}: what the pause outlined`,
+      );
+      assert.equal(await consentAnswer(), null, `${address}: the pause pressed the notice`);
+    }
     reading = await read("/reading/cookie-notice");
     // c. A button outside any notice, and one a page dresses up beside a
     // notice's accept, get no pause.
@@ -989,7 +1023,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "password, card and code fields in a frame or a shadow root carry no value into the reading, a frame's fields are never listed, a key in a shadow root's read-only field or in a control's name the list leaves out still makes a secret screen, and a code in boxes of its own is masked",
         "a section marked open is no control, and a click whose middle lands on a form's button or a frame inside the control is refused, sending and asking nothing",
         "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, and a cover that goes within a moment is waited for",
-        "a cookie notice the browser could not decline is the person's step: a click under it and a press of its accept are refused in the words the Personal Browser's policy gives too, a pause highlights its buttons as a cookie notice with no page text and presses none of them, a pause on its accept alone outlines every button of the notice and nothing outside it, never a button dressed up beside the accept, a button outside a notice, or a button, field, sign-in or commit dressed up beside its accept, gets no pause, a notice that speaks only of privacy or whose accept allows takes it, and once the person answered it the next step works",
+        "a cookie notice the browser could not decline is the person's step: a click under it and a press of its accept are refused in the words the Personal Browser's policy gives too, a pause highlights its buttons as a cookie notice with no page text and presses none of them, a pause on its accept alone outlines every button of the notice and nothing outside it, never a button dressed up beside the accept nor, on a small page held in one wrapper, its menu or footer, a button outside a notice, or a button, field, sign-in or commit dressed up beside its accept, gets no pause, a notice that speaks only of privacy or whose accept allows takes it, and once the person answered it the next step works",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",

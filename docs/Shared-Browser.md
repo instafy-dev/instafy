@@ -557,9 +557,14 @@ Two steps never ask, in Ask too:
   ("Book now") up as a notice's button to get a pause. A notice in a frame is
   never listed, so never handed over. The pause highlights every such button
   of the notice, the ones Octo named first, up to eight, and nothing outside
-  it (only buttons beside one Octo named, in one small part of the page): a
-  pause on a notice's accept alone would show the person the accept outlined
-  by itself, and a turn went for an accept twice. It presses none of them; its
+  it: only buttons inside the container around one Octo named that is a
+  dialog or is named after cookies or consent (its id, class, label or test
+  id, or the title it is labelled by), when that is a small part of the page.
+  A notice that is neither outlines only the buttons Octo named: on a small
+  page held in one wrapper, that wrapper speaks of cookies and holds the menu
+  and footer too. A pause on a notice's accept alone would show the person
+  the accept outlined by itself, and a turn went for an accept twice. It
+  presses none of them; its
   guidance says
   `kind: "cookies"` with fixed labels ("Highlighted button 1") and nothing of
   the page, and ends the run under its own code (`cookie_notice_required`).
@@ -635,7 +640,8 @@ box would have taken without asking.) The conditions:
   `format=csv` makes the search an export that asks, as a navigation to the
   same address would;
 - nothing it sends looks like a key: the field is not a password, code or
-  payment field (refused anyway), and the redaction rules mask none of the
+  payment field (Enter or typing there is refused anyway, and a click on its
+  button asks), and the redaction rules mask none of the
   entries it sends, alone or as `name=value` (so a hidden `code=482910`
   asks): the field with the typed text and the form's other controls, hidden
   fields and the default button included. They are read from the controls
@@ -1029,11 +1035,17 @@ no step of it has acted in the chat's own tab (a `navigate`, click, typing,
 choice, key or scroll there; a reading does not count), opens its page in the
 chat's own tab as `navigate` does, and its result says so: a turn opened a
 journey planner in a tab of its own three times running, where neither a
-cookie notice's pause nor the planner's prompt can happen. The run's
-`chat-tab-used.json` records that a step acted there (runtime-agent clears it
-with the run's other records); one that cannot be read counts as one. An
-address `open_tab` refuses as doing more than show a page is still refused in
-its own words. The
+cookie notice's pause nor the planner's prompt can happen. A page an earlier
+turn left there is replaced, as `navigate` replaces it, unless it is one to
+keep: a page holding what someone typed or chose in its fields (a form the
+person was handed and filled in before Let Octo continue, notes they wrote),
+or a frame for a payment, a password or a code, which navigating away would
+lose; a page on a link-only site, which Octo leaves only when the person asks;
+and a page that cannot be looked at within 2 seconds. Then `open_tab` opens a
+tab of Octo's own as usual. The run's `chat-tab-used.json` records that a step
+acted there (runtime-agent clears it with the run's other records); one that
+cannot be read counts as one. An address `open_tab` refuses as doing more than
+show a page is still refused in its own words. The
 Shared Browser MCP server has `list_tabs`, `open_tab {url}`, `select_tab {tabId}`
 and `close_tab {tabId}`; `snapshot` and `navigate` also take a `tabId`, and every
 other tool acts on the tab `open_tab` or `select_tab` last chose. The Personal
@@ -1492,10 +1504,14 @@ the same next source, and the address the step's load asked for (and the one a
 redirect led it to) kept by the same waits, so a browser turn calls it
 `timed-out` either way. A turn told only "Take a snapshot in a moment" for a
 tourism site that stayed busy opened it again, 26 seconds each time, and never
-tried the place's own site. Only a step that sent a form (anything but a GET)
-still answers with a busy page's masked address alone, "The page is still
-busy, so it could not be read yet. Take a snapshot in a moment." and the note
-to check what it did: the form reached its site, and must never be sent again. A step that can take the tab to
+tried the place's own site. A snapshot of such a page while it is still busy
+says the same, never "Take a snapshot in a moment". Only a step that sent a
+form (anything but a GET), or that loaded no page of its own (a click whose
+script acted inside the page it was on), still answers with a busy page's
+masked address alone, "The page is still busy, so it could not be read yet.
+Take a snapshot in a moment." and the note to check what it did, and its
+address is not kept: the form reached its site, and the script may have done
+what the click was for, so neither must be done again. A step that can take the tab to
 another page (a navigation, a link, a form) keeps its own kind in the turn's
 activity, so Studio knows the tab may be on another page now
 ([Chat Activity](Chat-Activity.md#browser-steps)). A step that started a load (a

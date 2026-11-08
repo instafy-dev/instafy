@@ -3007,6 +3007,58 @@ function cookieBannerInPage(element, request) {
   return false;
 }
 
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Whether `element` sits in the notice of one of
+// `request.others`: the nearest container around that control, below the
+// page's body, that is a dialog or is named after cookies or consent
+// (`request.consent` in its id, class, label or test id, or in the title it is
+// labelled by), as the describer names a banner, when it is a small part of
+// the page. A notice that is neither has no bounds a page's text could not
+// stretch: on a small page in one wrapper, the wrapper speaks of cookies and
+// holds the menu too.
+function inCookieNoticeInPage(element, request) {
+  const doc = element.ownerDocument;
+  const roots = [doc.body, doc.documentElement];
+  const up = (node) => node.assignedSlot || node.parentElement || (node.parentNode && node.parentNode.host) || null;
+  const holds = (container, node) => {
+    for (let current = node, depth = 0; current && depth < 512; current = up(current), depth += 1) {
+      if (current === container) return true;
+    }
+    return false;
+  };
+  const consent = new RegExp(String(request && request.consent), "i");
+  const labelledText = (node) => String(node.getAttribute("aria-labelledby") || "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 8)
+    .map((id) => {
+      const root = typeof node.getRootNode === "function" ? node.getRootNode() : doc;
+      const labelled = (root && typeof root.getElementById === "function" ? root.getElementById(id) : null) || doc.getElementById(id);
+      return (labelled && labelled.textContent) || "";
+    })
+    .join(" ")
+    .slice(0, 400);
+  const noticeOf = (control) => {
+    for (let node = up(control), depth = 0; node && node.nodeType === 1 && !roots.includes(node) && depth < 16; node = up(node), depth += 1) {
+      const named = [
+        ...["id", "class", "aria-label", "data-testid"].map((name) => node.getAttribute(name) || ""),
+        labelledText(node),
+      ].join(" ").slice(0, 800);
+      const dialog = typeof node.matches === "function" &&
+        node.matches("dialog, [role=dialog], [role=alertdialog], [aria-modal=true]");
+      if (dialog || consent.test(named)) {
+        return typeof node.textContent === "string" && node.textContent.length <= 4_000 ? node : null;
+      }
+    }
+    return null;
+  };
+  const others = Array.isArray(request && request.others) ? request.others : [];
+  return others.some((other) => {
+    const notice = other ? noticeOf(other) : null;
+    return notice !== null && notice !== element && holds(notice, element);
+  });
+}
+
 // Words that name a field whose value is a payment detail, a password or a
 // code, in a frame element's own title, name, label or id: a payment
 // provider's card fields sit in such a frame (sensitiveFrameInPage).
@@ -3168,10 +3220,11 @@ async function declineCookieBanner(page, interactive) {
 // commit ("Book now") up as a notice's button to get a pause. A notice in a
 // frame is never listed, so never handed over. The pause outlines every such
 // button of the notice, the ones Octo named first, up to the pause's eight,
-// and nothing outside it (beside one Octo named, in one small part of the
-// page): Octo went for a notice's accept twice, and a pause on it alone would
-// have shown the person the accept outlined by itself. Null when the controls
-// Octo named are not a notice's buttons.
+// and nothing outside it: only a button inside the container around one Octo
+// named that is a dialog or is named after cookies or consent
+// (inCookieNoticeInPage) joins them. Octo went for a notice's accept twice,
+// and a pause on it alone would have shown the person the accept outlined by
+// itself. Null when the controls Octo named are not a notice's buttons.
 async function cookieNoticeButtons(page, interactive, selected) {
   const pageUrl = page.url();
   const accepts = interactive
@@ -3190,10 +3243,13 @@ async function cookieNoticeButtons(page, interactive, selected) {
     if (!(await noticeButton(entry))) return null;
   }
   const named = selected.map(({ locator }) => locator);
+  const inNotice = async (entry) => (await entry.locator
+    .evaluate(inCookieNoticeInPage, { kind: "cookie-notice", others: named, consent: CONSENT_NAMES_SOURCE })
+    .catch(() => false)) === true;
   const notice = [...selected];
   for (const entry of interactive) {
     if (notice.length >= MAX_HUMAN_INPUT_TARGETS) break;
-    if (!notice.includes(entry) && (await noticeButton(entry)) && (await beside(entry, named))) notice.push(entry);
+    if (!notice.includes(entry) && (await noticeButton(entry)) && (await inNotice(entry))) notice.push(entry);
   }
   return notice;
 }
@@ -4163,15 +4219,18 @@ function freeSearchEntries(answer, typed) {
 
 // Enter in the page's own search box, or typing into it with submit, that
 // goes without a prompt (actionPolicy.isFreeSiteSearch): only under routine
-// browsing, and only when every entry the form sends was read, the field's
-// own included, none looks like a key and the address they make is not a
-// risky one. `typed` is the text a type step puts in the field, or null for
-// a press. The entries are tested here and kept nowhere. The step's guard
-// then lets no form post leave the tab (FREE_SEARCH_POST_ORIGINS). In one of
-// Octo's own tabs the page was opened in this run, and routine browsing
-// covers the run's tabs alike.
+// browsing, never in a field for a password, a code, a payment detail or
+// another secret (sensitiveField), and only when every entry the form sends
+// was read, the field's own included, none looks like a key and the address
+// they make is not a risky one. `typed` is the text a type step puts in the
+// field, or null for a press. The entries are tested here and kept nowhere.
+// The step's guard then lets no form post leave the tab
+// (FREE_SEARCH_POST_ORIGINS). In one of Octo's own tabs the page was opened in
+// this run, and routine browsing covers the run's tabs alike.
 async function freeSiteSearch(page, target, typed) {
-  if (!target.description.policy || !approvalProtocol.routineBrowsingAllowed()) return false;
+  if (!target.description.policy || sensitiveField(target.description) || !approvalProtocol.routineBrowsingAllowed()) {
+    return false;
+  }
   const facts = policyTarget(target.description);
   const pageUrl = page.url();
   // The submission itself first, so a step that is no site search reads
@@ -5092,7 +5151,8 @@ const OPENED_IN_CHAT_TAB =
 
 // Whether an open_tab opens its page in the chat's own tab instead: the run
 // has opened no tab of its own and no step of it has acted in the chat's tab
-// yet, so there is no second page to keep open. Only a plain address, which
+// yet, so there is no second page to keep open, unless the page there is one
+// to keep (chatPageKept, which execute asks next). Only a plain address, which
 // open_tab itself would open: one it refuses as doing more than show a page
 // is still refused in its own words.
 function opensInChatTab(method, requestPath, body, tabs) {
@@ -5107,6 +5167,78 @@ function opensInChatTab(method, requestPath, body, tabs) {
     return false;
   }
   return classifyStep("navigate", null, { url }).verdict !== "ask" && !CONSEQUENTIAL_ACTION_PATTERN.test(url);
+}
+
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Whether a field of the page holds a value someone typed or
+// chose, one that is not the page's own default: an input's or a text area's
+// text, a box's tick, a list's choice, a file picked. Hidden fields and buttons
+// are left out (a page's own script sets those), and so are the page's frames,
+// which a reading never reads; open shadow roots count. A page with more
+// elements than it looks at reads as holding some.
+function typedValuesInPage() {
+  const MAX_ELEMENTS = 50_000;
+  const NO_VALUE = new Set(["hidden", "submit", "button", "reset", "image"]);
+  const changed = (element) => {
+    if (element instanceof HTMLInputElement) {
+      const type = String(element.type).toLowerCase();
+      if (NO_VALUE.has(type)) return false;
+      if (type === "checkbox" || type === "radio") return element.checked !== element.defaultChecked;
+      if (type === "file") return Boolean(element.files && element.files.length);
+      return element.value !== element.defaultValue;
+    }
+    if (element instanceof HTMLTextAreaElement) return element.value !== element.defaultValue;
+    if (element instanceof HTMLSelectElement) {
+      const options = Array.from(element.options);
+      if (element.multiple || element.size > 1) return options.some((option) => option.selected !== option.defaultSelected);
+      // A list shows its last option marked selected, else its first one
+      // turned on.
+      let shown = -1;
+      options.forEach((option, index) => {
+        if (option.defaultSelected) shown = index;
+      });
+      if (shown < 0) shown = options.findIndex((option) => !option.disabled);
+      return element.selectedIndex !== shown;
+    }
+    return false;
+  };
+  let seen = 0;
+  const roots = [document];
+  while (roots.length) {
+    const walker = document.createTreeWalker(roots.pop(), NodeFilter.SHOW_ELEMENT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      seen += 1;
+      if (seen > MAX_ELEMENTS || changed(node)) return true;
+      if (node.shadowRoot) roots.push(node.shadowRoot);
+    }
+  }
+  return false;
+}
+
+// How long open_tab looks at the chat's page before it opens the turn's first
+// page there.
+const CHAT_PAGE_LOOK_MS = 2_000;
+
+// Whether the chat's own tab keeps its page, so even the turn's first open_tab
+// opens a tab of Octo's own, as open_tab does to keep a second page open: a
+// page holding what someone typed or chose in its fields (a form the person
+// was handed and filled in before Let Octo continue, notes they wrote), which
+// navigating away would lose, or a frame for a payment, a password or a code
+// (sensitiveFrameInPage); and a page on a link-only site, which Octo leaves
+// only when the person asks. A page that cannot be looked at in time is kept
+// too, and so is one the browser cannot find: open_tab then goes on as itself.
+// A blank tab, or a page an earlier turn left that holds none of these, is
+// the turn's to use.
+async function chatPageKept(browser) {
+  const page = await resolveExpectedPage(browser).catch(() => null);
+  if (!page) return true;
+  if (isBlankPage(page)) return false;
+  if (LINK_ONLY_SITES === null || linkOnlySiteOf(page.url())) return true;
+  const looked = await within(CHAT_PAGE_LOOK_MS, Promise.all([
+    page.evaluate(typedValuesInPage, { kind: "typed-values" }),
+    page.evaluate(sensitiveFrameInPage, { kind: "sensitive-frames", pattern: SENSITIVE_FRAME_SOURCE }),
+  ]).catch(() => null));
+  return !Array.isArray(looked) || looked.some((answer) => answer !== false);
 }
 
 // The step within its time (STEP_TIME_MS): its own answer, or, once its time is
@@ -5209,8 +5341,9 @@ function waitedAddresses(load, now) {
 // did not confirm stopped and a tab still blank fail the same way, as a site
 // that did not answer (BUSY_UNANSWERED_MESSAGE): a turn told only "Take a
 // snapshot in a moment" opened the same busy site again and never tried the
-// place's own. Only a step that sent a form answers with a busy page's address
-// alone, and says to check what the step did: the form reached its site. The
+// place's own. Only a step that sent a form, or opened no page, answers with a
+// busy page's address alone, and says to check what the step did: the form
+// reached its site, and a click's script may have done what it was for. The
 // step's guards still hold while the page is read, then end as a step's
 // guards end: a window it opened is closed, and what they stopped fails the
 // step as it would have in its time.
@@ -5244,9 +5377,14 @@ async function pageAsItIs(browser) {
     const stoppedBlankLoad = await within(GUARD_RELEASE_MS, stopLoading(resolvedPage).catch(() => false), false);
     throw didNotAnswer(stoppedBlankLoad ? UNANSWERED_PAGE_MESSAGE : BUSY_UNANSWERED_MESSAGE, waitedOpeningAddress());
   }
-  // A form the step sent has reached its site, so its page, busy or not, is
-  // the step's answer, and Octo checks what it did: it never sends it again.
-  if (isBusyPageResult(view) && !guards.some((guard) => guard.sentForm())) {
+  // Only a page the step opened (navigate's or open_tab's address, or a load
+  // the step started) is a site that did not answer. A form the step sent has
+  // reached its site, and a step that loaded no page acted on the page it was
+  // on (a script its click ran may have sent something), so that page, busy
+  // or not, is the step's answer, and Octo checks what it did: it never does
+  // it again.
+  const openedPage = openingAddress !== null || guards.some((guard) => guard.newestLoad() !== null);
+  if (isBusyPageResult(view) && openedPage && !guards.some((guard) => guard.sentForm())) {
     throw didNotAnswer(BUSY_UNANSWERED_MESSAGE, busyLoadAddresses(guards));
   }
   // Only a page that was read is "the page as it is now"; a busy one says so
@@ -5424,11 +5562,15 @@ async function stopLoading(page) {
 
 // Whether a read answered that the page is still busy (addressOnly).
 function isBusyPageResult(result) {
-  return result?.message === BUSY_PAGE_MESSAGE;
+  return result?.message === BUSY_PAGE_MESSAGE || result?.message === BUSY_UNANSWERED_MESSAGE;
 }
 
 // The address alone of a page too busy to be read, checked and masked as a
 // snapshot's is. It lists no text and no controls, so no action can use it.
+// A page whose address was already kept as one that did not answer (a step
+// that opened it ran out of time on it) is answered in that step's words,
+// never "Take a snapshot in a moment": a turn read the busy page again and
+// opened its address once more instead of the place's own site.
 function addressOnly(page) {
   if (!page || page.isClosed()) {
     throw new Error("The page could not be read in time, so nothing was read. Take a snapshot.");
@@ -5449,7 +5591,7 @@ function addressOnly(page) {
     visibleText: "",
     secretScreen: false,
     interactiveElements: [],
-    message: BUSY_PAGE_MESSAGE,
+    message: approvalProtocol.didNotAnswerRecently(page.url()) ? BUSY_UNANSWERED_MESSAGE : BUSY_PAGE_MESSAGE,
   };
 }
 
@@ -5457,7 +5599,7 @@ async function execute(browser, browserSession, method, requestPath, body) {
   approvalProtocol.authority();
   const tabs = await prepareTabs(browser, browserSession);
   if (requestPath.startsWith("/v1/tabs")) {
-    if (!opensInChatTab(method, requestPath, body, tabs)) {
+    if (!opensInChatTab(method, requestPath, body, tabs) || (await chatPageKept(browser))) {
       return await executeTabCommand(browser, method, requestPath, body, tabs);
     }
     // The turn's first page: navigate in the chat's own tab, and say so.

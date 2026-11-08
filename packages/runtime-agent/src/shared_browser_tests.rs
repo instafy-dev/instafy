@@ -1031,6 +1031,8 @@ const makePage = (targetId, opened = null) => {
       // "cookie-banner-payment-frame" is a checkout whose card fields sit in
       // a payment provider's frame.
       if (arg && arg.kind === "sensitive-frames") return mode === "cookie-banner-payment-frame";
+      // Whether a field holds what someone typed: none of these pages does.
+      if (arg && arg.kind === "typed-values") return false;
       // The text around each control, read in one call.
       if (arg && arg.kind === "around-all") {
         return Promise.all(arg.elements.map(async (element) =>
@@ -3881,12 +3883,15 @@ async fn an_address_no_message_or_page_gave_is_not_opened() {
         json!({ "prompt_text": "Compare the laptops (read https://www.reviews.example/laptops/one?ref=chat and reviews.example/laptops/two)." }),
     );
     // A made-up review on the same site: refused, and nothing loads, in the
-    // chat's own tab and as a tab of Octo's own.
+    // chat's own tab and as a tab of Octo's own. The turn uses the chat's tab
+    // first (the site's root), so open_tab opens a tab of its own and refuses
+    // the address itself, not as the turn's first page in the chat's tab.
     let words = failure(&navigate("https://reviews.example/laptops/three"));
     assert!(
         words.contains(&made_up("https://reviews.example")),
         "{words}"
     );
+    payload_of(&navigate("https://reviews.example"));
     let words = failure(&step(
         "safe",
         "/v1/tabs/open",
@@ -9588,13 +9593,6 @@ fn failure_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// A guessed address, or a page that is gone: the site answers 404 or 410 for
-/// the page a navigate or open_tab loads, which Details read as opened. The
-/// step fails instead, saying the address has no page and where to look, as
-/// an error result whose step names the site it tried (Details:
-/// "Tried opening <site>", not done), and never as the browser going away.
-/// The tab open_tab opened for it closes again. Any other answer is the
-/// step's page.
 /// A turn opened a journey planner with `open_tab`, in a tab of its own, for the third time
 /// running: there neither a cookie notice's pause nor the planner's prompt can happen, though its
 /// run instructions say to work in the chat's own tab and open a tab of its own only to keep a
@@ -9653,6 +9651,13 @@ fn a_turns_first_open_tab_opens_its_page_in_the_chats_own_tab() {
     );
 }
 
+/// A guessed address, or a page that is gone: the site answers 404 or 410 for
+/// the page a navigate or open_tab loads, which Details read as opened. The
+/// step fails instead, saying the address has no page and where to look, as
+/// an error result whose step names the site it tried (Details:
+/// "Tried opening <site>", not done), and never as the browser going away.
+/// The tab open_tab opened for it closes again. Any other answer is the
+/// step's page.
 #[test]
 fn an_address_with_no_page_fails_its_navigate_and_open_tab() {
     const NO_PAGE: &str =

@@ -108,6 +108,8 @@ export async function runSharedBrowserAgentTabsFixture() {
   try {
     const research = await listenSite("research", {
       "/": { title: "Trip notes", body: "<p>The person's own page.</p>" },
+      // A form the person fills in on their own page.
+      "/notes": { title: "Trip notes", body: "<form><label>Hotel address <textarea name=\"address\"></textarea></label></form>" },
     });
     servers.push(research.server);
     // A link-only ("no-agents") site that really answers (www.nike.com is
@@ -683,16 +685,22 @@ export async function runSharedBrowserAgentTabsFixture() {
     const madeUp = `No message and no page Octo read gave this address, so it was not opened: Octo opens only addresses it was given. Open ${reviewsSite}/ and follow its links to the page, or use the site's own search.`;
     const promptsBeforeMadeUp = prompts.length;
     const pagesBeforeMadeUp = browserPages().length;
-    for (const requestPath of ["/v1/navigate", "/v1/tabs/open"]) {
-      const words = await refused(/./u, "POST", requestPath, { url: `${reviewsSite}/laptops/three` }, []);
-      assert.ok(words.includes(madeUp), `${requestPath}: ${words}`);
-    }
+    const madeUpWords = await refused(/./u, "POST", "/v1/navigate", { url: `${reviewsSite}/laptops/three` }, []);
+    assert.ok(madeUpWords.includes(madeUp), `/v1/navigate: ${madeUpWords}`);
     assert.equal(prompts.length, promptsBeforeMadeUp, "A made-up address asked");
     assert.deepEqual(reviewer.requests, [], "A made-up address reached its site");
-    assert.equal(browserPages().length, pagesBeforeMadeUp, "A tab was opened for a made-up address");
     // The site's root opens, and so do the link its home page gives, the
     // address its text spells out and the one the task named.
     await ok("POST", "/v1/navigate", { url: `${reviewsSite}/` }, ["allow_origin"]);
+    // Once the turn has used the chat's own tab, open_tab opens a tab of
+    // Octo's own (0), and refuses the made-up address itself, before any
+    // prompt, load or tab.
+    const promptsBeforeMadeUpTab = prompts.length;
+    const madeUpTabWords = await refused(/./u, "POST", "/v1/tabs/open", { url: `${reviewsSite}/laptops/three` }, []);
+    assert.ok(madeUpTabWords.includes(madeUp), `/v1/tabs/open: ${madeUpTabWords}`);
+    assert.equal(prompts.length, promptsBeforeMadeUpTab, "A made-up address asked in a tab of Octo's own");
+    assert.equal(browserPages().length, pagesBeforeMadeUp, "A tab was opened for a made-up address");
+    assert.equal(runPage.url(), `${reviewsSite}/`, "The made-up address opened in the chat's own tab");
     await ok("POST", "/v1/navigate", { url: "/laptops/one" }, []);
     await ok("POST", "/v1/navigate", { url: `${reviewsSite}/laptops/two` }, []);
     const named = await ok("POST", "/v1/navigate", { url: `${reviewsSite}/laptops/named?from=chat` }, []);
@@ -712,6 +720,27 @@ export async function runSharedBrowserAgentTabsFixture() {
     assert.ok(!givenRecord.includes("reviews.test") && !givenRecord.includes("laptops"), givenRecord);
     assert.ok(JSON.parse(givenRecord).addresses.includes(givenKey(`${reviewsSite}/laptops/one`)));
 
+    // 16. A turn's first open_tab keeps a page in the chat's own tab that
+    // holds what the person typed (a form they were handed and filled in
+    // before Let Octo continue, notes they wrote), and a page on a link-only
+    // site, which Octo leaves only when the person asks: the page opens in a
+    // tab of Octo's own, and the person's page stays as it was.
+    for (const [address, typed] of [[`${research.origin}/notes`, "Rua das Flores 12"], [linkOnlyReview, null]]) {
+      startRun([]);
+      await runPage.goto(address);
+      if (typed) await runPage.fill("textarea", typed);
+      const promptsBeforeKept = prompts.length;
+      const kept = await ok("POST", "/v1/tabs/open", { url: `${sources.origin}/hours` }, ["allow_origin"]);
+      assert.equal(kept.openedTab, true, `${address}: the turn's first page replaced the person's page`);
+      assert.ok(!String(kept.message ?? "").includes(OPENED_IN_CHAT_TAB), `${address}: ${kept.message}`);
+      assert.deepEqual(prompts.slice(promptsBeforeKept).map((prompt) => prompt.display.label), [
+        `Octo's tab 1: Open ${sources.origin}/hours in a new tab`,
+      ]);
+      assert.equal(runPage.url(), address);
+      if (typed) assert.equal(await runPage.inputValue("textarea"), typed, "What the person typed is gone");
+      await ok("POST", "/v1/tabs/close", { tabId: kept.tabId });
+    }
+
     const actionLog = fs.readFileSync(actionsPath, "utf8");
     assert.ok(!actionLog.includes("booking.com/hotel"), "The link-only address never reached the action feed as a step");
     const result = {
@@ -719,7 +748,7 @@ export async function runSharedBrowserAgentTabsFixture() {
       fixtureVersion: 3,
       prompts: prompts.length,
       checks: [
-        "a turn's first open_tab, before any step of it acted in the chat's own tab, opens its page there and says so, and a planner's button there asks once and runs; once the turn used that tab, open_tab opens a tab of Octo's own",
+        "a turn's first open_tab, before any step of it acted in the chat's own tab, opens its page there and says so, and a planner's button there asks once and runs; once the turn used that tab, open_tab opens a tab of Octo's own, and so does the first one when the chat's page holds what the person typed or is on a link-only site, which stays as it was",
         "visible agent tab in the run's browser context, brought to front",
         "per-tab site approval, asked once for a new tab",
         "form submission refused in an agent tab before any prompt",
@@ -739,7 +768,7 @@ export async function runSharedBrowserAgentTabsFixture() {
         "a plain navigation asks at most once, and its prompt names the exact page",
         "take over mid-prompt, Let Octo continue keeps the page's approvals, and one answer completes an approved navigation",
         "a planner's button in Octo's tab is refused before any prompt, saying to take the step in the chat's own tab, where navigate with its tabId opens the planner and the button asks once and runs",
-        "an address no message and no page gave is refused by navigate and open_tab before any prompt or load; the site's root, a page's link, addresses its text spells out (one with a parenthesis of its own) and one the task named open; a link-only site and a loopback address are judged as before",
+        "an address no message and no page gave is refused by navigate, and by open_tab in a tab of Octo's own, before any prompt or load; the site's root, a page's link, addresses its text spells out (one with a parenthesis of its own) and one the task named open; a link-only site and a loopback address are judged as before",
       ],
       limitations: [
         "No model, Studio UI, origin keep endpoint or runtime shutdown guard; those are unit-tested.",

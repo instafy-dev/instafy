@@ -140,6 +140,8 @@ const SEARCH_CHECKS = `<h1>Searches</h1>
 <form action="/search" method="get"><input type="search" name="q" aria-label="Search, then posted" id="flip"><button>Search</button></form>
 <form action="/journey" method="get"><label>From <input name="from" value="Central"></label> <label>To <input name="to" value="Airport"></label><button>Plan a journey</button></form>
 <form action="/journey" method="get"><label>Destination <input name="to" value="Airport"></label><button>Plan a trip</button></form>
+<form action="/search" method="get" role="search"><input type="search" name="pin" aria-label="Search with your PIN"><button>Search</button></form>
+<form action="/lookup" method="get"><input type="search" name="code" aria-label="Look up an order" autocomplete="one-time-code"><button>Search</button></form>
 <script>
 document.getElementById("formless").addEventListener("keydown", (event) => {
   if (event.key === "Enter") location.assign("/search?q=" + encodeURIComponent(event.target.value));
@@ -740,11 +742,14 @@ export async function runSharedBrowserFormSubmissionFixture() {
     }
     // A click on each of those boxes' own buttons asks the same way, and so do
     // a journey planner's GET buttons: one whose form has two fields, and one
-    // whose one field is no search box.
+    // whose one field is no search box. So does the button of a search box
+    // for a PIN or a one-time code, where Enter is refused as a secret's.
     const buttonAsks = [
       ...asks.filter(([label]) => label !== "Search without a form").map(([label, destination]) => [label, "Search", destination]),
       ["From", "Plan a journey", sites().mall],
       ["Destination", "Plan a trip", sites().mall],
+      ["Search with your PIN", "Search", sites().mall],
+      ["Look up an order", "Search", sites().mall],
     ];
     for (const [label, buttonLabel, destination] of buttonAsks) {
       await runPage.goto(checksPage);
@@ -1090,7 +1095,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
         "a field inside a submit button is refused before any prompt; a control nested deep inside one asks for the button's site",
         "in Ask mode a site's own GET search asks, typed or by Enter",
         "under routine browsing a GET search of the page's own origin goes without a prompt, sends exactly the form's GET and says approval free, in the run's page and in Octo's own tab",
-        "under routine browsing a click on a site's own search button, the one Enter in its box clicks, goes without a prompt by the same test and sends exactly the form's GET; the buttons of every box that asks still ask, and so does a journey planner's GET button, whose form has two fields or no search box",
+        "under routine browsing a click on a site's own search button, the one Enter in its box clicks, goes without a prompt by the same test and sends exactly the form's GET; the buttons of every box that asks still ask, and so do a journey planner's GET button, whose form has two fields or no search box, and the button of a search box for a PIN or a one-time code",
         "a key-like typed value, a default button that posts, another site, another subdomain, no form, a sign-out address, a hidden key-like value (also behind a control named elements), a hidden one-time code, a hidden file format and an unnamed field still ask; a new window, a field inside a submit button and a link-only destination are refused before any prompt",
         "a page script that turns a free search into a post to its own site is stopped by the step's guard",
         "under routine browsing a journey planner's start and end stations are chosen by label with no prompt and nothing sent, its own button asks once naming the fields it sends, and the route is read",
