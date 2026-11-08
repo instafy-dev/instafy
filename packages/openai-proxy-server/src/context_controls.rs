@@ -17,6 +17,13 @@ use crate::proxy_auth::ProxyClaims;
 pub(crate) const TURN_STATE_HEADER: &str = "x-codex-turn-state";
 const MAX_TURN_STATE_BYTES: usize = 4096;
 const MAX_ENVELOPE_BYTES: usize = 8192;
+/// How the runtime begins the one cache key it gives every thread that opens the same way, in
+/// place of the thread's own: each chat's routing step, a new thread every time whose prompt
+/// starts with the same instructions in every chat (`instafy-shared-start-` and a hash of that
+/// start and the model).
+const SHARED_START_KEY_PREFIX: &str = "instafy-shared-start-";
+/// The item field in which Codex sends the turn and the time its thread made an item in.
+const ITEM_METADATA: &str = "internal_chat_message_metadata_passthrough";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -174,6 +181,14 @@ impl ResponseContext {
         })
     }
 
+    /// Whether the request carries the cache key of a start many threads share, rather than
+    /// its own thread's.
+    fn shares_start(&self) -> bool {
+        self.cache_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with(SHARED_START_KEY_PREFIX))
+    }
+
     pub(crate) fn validate_upstream(&self, responses_wire: bool, subscription: bool) -> Result<()> {
         if !responses_wire
             && (self.has_breakpoints || self.cache_options.is_some() || self.retention.is_some())
@@ -300,6 +315,50 @@ fn fingerprint(value: &Value) -> String {
         .collect()
 }
 
+/// Takes out of the items that open `input` (every item ahead of the first one the model wrote
+/// or a tool returned) what names the thread that sent them: an item's own `id`, and the
+/// `turn_id` and `create_time` of its turn. Codex gives every item of a thread these, so two
+/// threads whose requests open with the same text still differ from their first item with an
+/// id on; without them, two threads that share a start send the same items up to where their
+/// prompts differ. Nothing later in such a request names them: a tool call and its output name
+/// each other by `call_id`. Returns whether it took any out.
+pub(crate) fn share_opening_items(input: &mut Value) -> bool {
+    let Some(items) = input.as_array_mut() else {
+        return false;
+    };
+    let mut taken = false;
+    for item in items.iter_mut().take_while(|item| opens_request(item)) {
+        let Some(item) = item.as_object_mut() else {
+            continue;
+        };
+        taken |= item.remove("id").is_some();
+        let Some(Value::Object(metadata)) = item.get_mut(ITEM_METADATA) else {
+            continue;
+        };
+        for field in ["turn_id", "create_time"] {
+            taken |= metadata.remove(field).is_some();
+        }
+        if metadata.is_empty() {
+            item.remove(ITEM_METADATA);
+        }
+    }
+    taken
+}
+
+/// Whether `item` is part of what a request opens with, ahead of anything the model wrote or a
+/// tool returned: a developer, system or user message, or the tool list of a Responses Lite
+/// request.
+fn opens_request(item: &Value) -> bool {
+    match item.get("type").and_then(Value::as_str) {
+        Some("additional_tools") => true,
+        Some("message") => matches!(
+            item.get("role").and_then(Value::as_str),
+            Some("developer" | "system" | "user")
+        ),
+        _ => false,
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ScopedResponseContext {
     controls: ResponseContext,
@@ -316,6 +375,12 @@ impl ScopedResponseContext {
     pub(crate) fn rebind(&self, credentials: &Credentials, model: &str) -> Self {
         self.controls
             .scoped(self.claims.as_ref(), credentials, model, &self.codec)
+    }
+
+    /// Whether the request opens as every thread that shares its start does, so its opening
+    /// items can go upstream as those threads send them ([`share_opening_items`]).
+    pub(crate) fn shares_start(&self) -> bool {
+        self.controls.shares_start()
     }
 
     pub(crate) fn apply_payload(&self, payload: &mut Value, subscription: bool) {
@@ -783,5 +848,52 @@ mod tests {
         // Native Codex sends these even when a BYOC provider uses Chat
         // Completions; keep its existing adaptation instead of rejecting it.
         assert!(native.validate_upstream(false, false).is_ok());
+    }
+
+    #[test]
+    fn only_a_shared_starts_key_shares_the_opening_items_and_only_theirs_go_without_a_thread() {
+        let shares = |key: &str| {
+            ResponseContext::parse(&json!({"prompt_cache_key": key}), &HeaderMap::new())
+                .unwrap()
+                .shares_start()
+        };
+        assert!(shares(
+            "instafy-shared-start-0123456789abcdef0123456789abcdef"
+        ));
+        assert!(!shares("019a5d3e-8977-7e02-a9d0-a72dcaa648c1"));
+        assert!(
+            !ResponseContext::parse(&json!({}), &HeaderMap::new())
+                .unwrap()
+                .shares_start()
+        );
+
+        let mut input = json!([
+            {"type":"additional_tools","id":"at_1","role":"developer","tools":[]},
+            {"type":"message","id":"msg_2","role":"user","content":[],
+             "internal_chat_message_metadata_passthrough":{"turn_id":"t","create_time":1.5,"content_item_kinds":["user.text"]}},
+            {"type":"message","id":"msg_3","role":"user","content":[],
+             "internal_chat_message_metadata_passthrough":{"turn_id":"t","create_time":2.5}},
+            {"type":"reasoning","id":"rs_4","summary":[],
+             "internal_chat_message_metadata_passthrough":{"turn_id":"t"}},
+            {"type":"message","id":"msg_5","role":"user","content":[],
+             "internal_chat_message_metadata_passthrough":{"turn_id":"t","create_time":3.5}}
+        ]);
+        let later = input.as_array().unwrap()[3..].to_vec();
+        assert!(share_opening_items(&mut input));
+        let items = input.as_array().unwrap();
+        assert_eq!(
+            items[..3],
+            [
+                json!({"type":"additional_tools","role":"developer","tools":[]}),
+                // What an item holds keeps its kind; a passthrough left empty goes, as Codex
+                // leaves it off when it has nothing to say.
+                json!({"type":"message","role":"user","content":[],
+                       "internal_chat_message_metadata_passthrough":{"content_item_kinds":["user.text"]}}),
+                json!({"type":"message","role":"user","content":[]}),
+            ]
+        );
+        // From the first item the model wrote on, nothing changes, a later message included.
+        assert_eq!(items[3..], later[..]);
+        assert!(!share_opening_items(&mut input));
     }
 }

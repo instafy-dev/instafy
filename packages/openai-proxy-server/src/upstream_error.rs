@@ -260,6 +260,14 @@ pub(crate) fn refreshable_auth(error: &anyhow::Error) -> bool {
     )
 }
 
+/// Whether upstream refused the request itself, with an HTTP 400.
+pub(crate) fn bad_request(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<UpstreamFailure>(),
+        Some(UpstreamFailure::Http { status, .. }) if *status == StatusCode::BAD_REQUEST
+    )
+}
+
 /// The tool control rejection `error` carries, if it is a 400 whose structured error blames
 /// the tool controls; see [`ToolControlRejection::from_body`].
 pub(crate) fn tool_control_rejection(error: &anyhow::Error) -> Option<&ToolControlRejection> {
