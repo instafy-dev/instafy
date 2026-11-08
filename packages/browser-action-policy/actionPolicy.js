@@ -19,9 +19,10 @@
  *            a host may take it without a prompt in every approval mode,
  *            while it still keeps its own guards (no link, no form). A
  *            control or link in the same banner whose words accept is
- *            refused (`step_refused_consent`): accepting is the person's
- *            step. An accept limited to the necessary cookies or to a
- *            selection saves a refusal, so it asks with `commit` instead
+ *            refused (`step_refused_consent`): Octo never accepts cookies,
+ *            and the page under the banner is still there to use. An accept
+ *            limited to the necessary cookies or to a selection saves a
+ *            refusal, so it asks with `commit` instead
  *
  * A "choose" step picks one option of a list by its label. It is judged like
  * a click on a radio button named by the list's own label and that option:
@@ -453,9 +454,15 @@
       code: "step_refused_upload",
       message: "Choosing or uploading files is the user's step. Ask the user to choose the file themselves.",
     },
+    // A press of a notice's accept: nothing was pressed, and the page under
+    // the notice is still there to read and use. It never says the notice
+    // covers the page (one that covers nothing was then called covered, on a
+    // page made for the person) nor sends anyone to answer it: a turn asked
+    // the person to accept, and paused on a notice whose only button was its
+    // accept.
     consent: {
       code: "step_refused_consent",
-      message: "A cookie notice covers this page, and the browser could not decline it. If the task needs this page, pause on the notice's buttons with request_human_input in the chat's own tab: the person answers it there and chooses Let Octo continue. Otherwise open a link under it by its address, or the official site of the place or service the task is about.",
+      message: "Octo never accepts cookies, so nothing was pressed. Carry on under the notice from a fresh snapshot. If it covers what you need, open that link by its address, or another official source.",
     },
     sensitive: {
       code: "sensitive_input_blocked",
@@ -1080,7 +1087,7 @@
       return refuse("sign_in", "sign-in button");
     }
 
-    // Accepting a cookie or consent banner is the person's step, whatever the
+    // Accepting a cookie or consent banner is never Octo's step, whatever the
     // control is: a button, a purpose's toggle or a link, which would
     // otherwise pass as plain navigation below. A tab only shows part of the
     // banner. An accept limited to the necessary cookies or to a selection

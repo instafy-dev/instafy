@@ -25,7 +25,9 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    is a GET of the page's own origin that sends nothing key-like, in the
 //    run's page and in Octo's own tabs, and lets no form post leave the tab;
 //    every other form step still asks or is refused (a journey planner's GET
-//    button too), and Ask mode asks for each.
+//    button too), and Ask mode asks for each. Typing into such a box without
+//    submit sends nothing and says so, and to press Enter; typing into a
+//    field where Enter would ask says only what the field holds.
 // 4. A journey planner: under routine browsing, choosing a start and an end
 //    station asks nothing and sends nothing, the planner's own button asks
 //    once and the route is read. A list is named by its own label or the
@@ -660,11 +662,20 @@ export async function runSharedBrowserFormSubmissionFixture() {
     assert.deepEqual(promptsSince(start), [], "A site's own GET search asks nothing under routine browsing");
     assert.deepEqual(searches, [sentSearch("q=Bel%C3%A9m+Tower&lang=en")], "It sent exactly the form's GET");
     assert.deepEqual(searched.activity, { step: "search", url: `${sites().mall}/search?q=Bel%C3%A9m+Tower&lang=en`, approval: "free" });
-    // b. Enter in the field, with text typed first, goes the same way.
+    // b. Enter in the field, with text typed first, goes the same way. The
+    // typing sent nothing, and its step says so and what sends it: a turn
+    // typed into a site's search, never pressed Enter, and read the list the
+    // page still showed as no result.
     await runPage.goto(searchPage);
     snapshot = await ok("GET", "/v1/snapshot");
     places = control(snapshot, "Search places");
+    searches.length = 0;
     snapshot = await ok("POST", "/v1/type", { index: places.index, snapshotId: snapshot.snapshotId, text: "Jerónimos" });
+    assert.equal(
+      snapshot.done,
+      "Typed 9 characters into \"Search places\", and the field holds them. A page's reading never shows typed text. Nothing was searched yet: press Enter to search (no prompt needed).",
+    );
+    assert.deepEqual(searches, [], "Typing into the search box sent it");
     places = control(snapshot, "Search places");
     start = prompts.length;
     searches.length = 0;
@@ -706,9 +717,22 @@ export async function runSharedBrowserFormSubmissionFixture() {
     await refused(/approval_denied|denied/i, "POST", "/v1/type", { index: places.index, snapshotId: snapshot.snapshotId, text: KEY_LIKE, submit: true }, ["deny"]);
     assert.deepEqual(promptsSince(start), [["action", "form-submit", sites().mall]]);
     assert.deepEqual(requests, [], "A key-like search was not sent");
+    // d'. Typing into a field where Enter would not go without a prompt (a
+    // journey planner's start, a search posted, a search of another site)
+    // says only what the field holds, never to press Enter, and sends nothing.
+    const checksPage = `${sites().mall}/scenario/search-checks`;
+    for (const label of ["From", "Search, posted", "Search another site"]) {
+      await runPage.goto(checksPage);
+      snapshot = await ok("GET", "/v1/snapshot");
+      start = prompts.length;
+      requests.length = 0;
+      const typedInto = await ok("POST", "/v1/type", { index: control(snapshot, label).index, snapshotId: snapshot.snapshotId, text: "Trindade" });
+      assert.equal(typedInto.done, `Typed 8 characters into "${label}", and the field holds them. A page's reading never shows typed text.`, label);
+      assert.deepEqual(promptsSince(start), [], `${label}: typing asked`);
+      assert.deepEqual(requests, [], `${label}: typing sent something`);
+    }
     // e. Every other search box still asks, or is refused before any prompt,
     // and sends nothing when the person says no.
-    const checksPage = `${sites().mall}/scenario/search-checks`;
     const asks = [
       ["Search, posted", sites().mall],
       ["Search another site", sites().other],
@@ -1096,6 +1120,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
         "in Ask mode a site's own GET search asks, typed or by Enter",
         "under routine browsing a GET search of the page's own origin goes without a prompt, sends exactly the form's GET and says approval free, in the run's page and in Octo's own tab",
         "under routine browsing a click on a site's own search button, the one Enter in its box clicks, goes without a prompt by the same test and sends exactly the form's GET; the buttons of every box that asks still ask, and so do a journey planner's GET button, whose form has two fields or no search box, and the button of a search box for a PIN or a one-time code",
+        "typing into a site's own search box without submit sends nothing and says nothing was searched yet and to press Enter, with no prompt; typing into a journey planner's field, a search that posts or a search of another site says only what the field holds",
         "a key-like typed value, a default button that posts, another site, another subdomain, no form, a sign-out address, a hidden key-like value (also behind a control named elements), a hidden one-time code, a hidden file format and an unnamed field still ask; a new window, a field inside a submit button and a link-only destination are refused before any prompt",
         "a page script that turns a free search into a post to its own site is stopped by the step's guard",
         "under routine browsing a journey planner's start and end stations are chosen by label with no prompt and nothing sent, its own button asks once naming the fields it sends, and the route is read",

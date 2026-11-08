@@ -18,7 +18,10 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // up, as a site that did not answer, instead of waiting for the page, and so
 // does a page that never finishes loading: their words name the next source,
 // their address is refused for the rest of the turn, and the place's own site
-// still opens; a prompt the
+// still opens. A page that answers and can be read but has not finished
+// loading when the time is up is that step's answer, which says where to go
+// if it lacks what the task needs, and its address is refused for the rest of
+// the turn only, its Let Octo continue included; a prompt the
 // person answers after more than the step's time is never cut short. A step
 // whose time runs out still ends as every step ends: a window it opened is
 // closed and said, and a hand-off it had not finished is never left behind. A
@@ -140,6 +143,17 @@ const UNANSWERED_LOADED_MESSAGE = `The site did not answer in time, so nothing w
 // What navigate and open_tab answer for that address while the chat's browser
 // turns refuse it (10 minutes): nothing is asked or loaded.
 const REFUSED_AGAIN_MESSAGE = `This address did not answer in Instafy's browser in the last 10 minutes, so it was not opened again. ${NEXT_SOURCE}`;
+// A tourism site's listing page: its text comes at once, then a script it
+// waits for that does not come in time, so the page has not finished loading
+// when the step's time runs out, and is read as it is then.
+const SLOW_LISTING = `<!doctype html><html lang="en"><head><meta charset="utf-8"><link rel="icon" href="data:,">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'">
+<title>Things to do</title></head><body><h1>Things to do</h1><p>Museums, gardens and shops in the city.</p>
+<p><a href="/places/tower">The tower</a></p><script src="/listing-script"></script><p>More places.</p></body></html>`;
+// What a navigate or open_tab adds whose page was read only as its time ran
+// out, and what they answer for that page's address for the rest of the turn.
+const OPENED_LATE_NEXT_SOURCE = "If this page doesn't show what you need, don't open it again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
+const OPENED_LATE_AGAIN_MESSAGE = `This address was still loading after 20 seconds earlier in this turn, so it was not opened again. ${NEXT_SOURCE}`;
 // How long a step whose site did not answer may take past its time: stopping
 // the load and ending its guards, never a read of the page while it waits.
 const UNANSWERED_ANSWER_MS = 5_000;
@@ -280,6 +294,9 @@ export async function runSharedBrowserStepTimeFixture() {
   const unfinished = [];
   // Pages that never finish loading.
   const neverEnding = [];
+  // The listing page's script, held while `holdListingScript` is set.
+  const heldScripts = [];
+  let holdListingScript = true;
   try {
     const requests = [];
     server = createServer((request, response) => {
@@ -287,6 +304,22 @@ export async function runSharedBrowserStepTimeFixture() {
       requests.push(`${request.method} ${url.pathname}${url.search}`);
       if (url.pathname === "/slow") {
         unanswered.push(response);
+        return;
+      }
+      if (url.pathname === "/listing-script") {
+        if (holdListingScript) {
+          heldScripts.push(response);
+          return;
+        }
+        response.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" }).end("");
+        return;
+      }
+      if (url.pathname === "/things-to-do") {
+        response.writeHead(302, { location: "/listing", "cache-control": "no-store" }).end();
+        return;
+      }
+      if (url.pathname === "/listing") {
+        response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }).end(SLOW_LISTING);
         return;
       }
       if (url.pathname === "/late-redirect") {
@@ -776,6 +809,87 @@ export async function runSharedBrowserStepTimeFixture() {
     assert.equal(prompts.length, promptsBeforeForm + 1, "Nothing asked for the busy page or the place's own site");
     for (const response of neverEnding.splice(0)) response.destroy();
 
+    // 1i. A tourism site whose page answers and can be read, but has not
+    // finished loading when the step's time runs out (a script it waits for
+    // is slow). The step answers with the page as it is, which may hold the
+    // answer, and says where to go if it doesn't: a turn read such a site
+    // twice, 20 seconds each, and never tried the bookshop's own site. Its
+    // address, and the one its redirect led to, are refused at once for the
+    // rest of the turn, never kept as a site that did not answer, so the
+    // chat's next turn may open them again; the place's own site opens.
+    const addressKey = (address) => createHash("sha256").update(new URL(address).toString()).digest("hex");
+    requests.length = 0;
+    const listing = await runTool("POST", "/v1/navigate", { url: `${origin}/things-to-do` });
+    assert.deepEqual(requests, ["GET /things-to-do", "GET /listing", "GET /listing-script"], "The site was asked once for each");
+    assert.equal(listing.code, 0, `The step answers with the page as it is: ${listing.stderr}`);
+    assert.equal(listing.payload.stepTimedOut, true);
+    assert.equal(listing.payload.url, `${origin}/listing`);
+    assert.match(listing.payload.visibleText, /Museums, gardens and shops in the city\./u, "The page was read");
+    assert.equal(
+      listing.payload.message,
+      `This step was still running after 20 seconds, so it stopped where it was. This is the page as it is now: check what the step did before you act again. ${OPENED_LATE_NEXT_SOURCE}`,
+    );
+    assert.ok(listing.wallMs < STEP_TIME_MS + LATE_READ_MS + 5_000, `It answered once its time was up (${Math.round(listing.wallMs)} ms)`);
+    const keptLate = JSON.parse(fs.readFileSync(path.join(approvalDirectory, "unanswered.json"), "utf8"));
+    for (const address of [`${origin}/things-to-do`, `${origin}/listing`]) {
+      assert.ok(!keptLate.addresses.some((entry) => entry.address === addressKey(address)), `${address} was kept as one that did not answer`);
+    }
+    requests.length = 0;
+    const promptsBeforeLate = prompts.length;
+    const refusedLate = [];
+    for (const [requestPath, body] of [
+      ["/v1/navigate", { url: `${origin}/things-to-do` }],
+      ["/v1/navigate", { url: `${origin}/listing` }],
+      ["/v1/tabs/open", { url: `${origin}/listing#shops` }],
+    ]) {
+      const again = await runTool("POST", requestPath, body);
+      assert.equal(again.code, 1, `The page is not opened again in the turn: ${again.stdout}`);
+      assert.equal(again.stdout, "", "A refused step answers with no page");
+      assert.ok(again.stderr.includes(OPENED_LATE_AGAIN_MESSAGE), again.stderr);
+      assert.ok(again.wallMs < 5_000, `It was refused at once (${Math.round(again.wallMs)} ms)`);
+      refusedLate.push(again);
+    }
+    assert.deepEqual(requests, [], "The site was not asked again");
+    const ownSiteAfterLate = await ok("POST", "/v1/navigate", { url: `${bookshop}/bookshop-hours` });
+    assert.match(ownSiteAfterLate.payload.visibleText, /Open daily from 10:00 to 19:00\./u);
+    assert.equal(prompts.length, promptsBeforeLate, "Nothing asked for the refusals or the place's own site");
+    // Let Octo continue carries on the same request after a pause:
+    // runtime-agent starts that run's record with the chat's addresses and the
+    // pages the paused run opened late (`openedLate`), and the page is refused
+    // there at once too.
+    assert.deepEqual(keptLate.openedLate, [addressKey(`${origin}/things-to-do`), addressKey(`${origin}/listing`)]);
+    const carried = keptLate.addresses;
+    for (const name of fs.readdirSync(approvalDirectory)) fs.rmSync(path.join(approvalDirectory, name), { force: true });
+    const continuedRun = { ...authority, runId: randomUUID(), expiresAtMs: Date.now() + 600_000 };
+    writeProtectedJson(markerPath, continuedRun);
+    writeProtectedJson(path.join(approvalDirectory, "unanswered.json"), {
+      version: 1, ownerId: continuedRun.ownerId, runId: continuedRun.runId,
+      initiatorUserId: continuedRun.initiatorUserId, browserPageId: continuedRun.browserPageId,
+      addresses: carried, openedLate: keptLate.openedLate,
+    });
+    requests.length = 0;
+    const refusedContinued = await runTool("POST", "/v1/navigate", { url: `${origin}/listing` }, ["allow_routine"]);
+    assert.equal(refusedContinued.code, 1, `The page is not opened again once the person lets Octo continue: ${refusedContinued.stdout}`);
+    assert.ok(refusedContinued.stderr.includes(OPENED_LATE_AGAIN_MESSAGE), refusedContinued.stderr);
+    assert.deepEqual(requests, [], "The site was not asked again");
+    // The chat's next turn: runtime-agent revokes the run's records and starts
+    // the next run's with the addresses that did not answer, the only ones it
+    // carries. The page opens again there (its script comes now).
+    for (const response of heldScripts.splice(0)) response.destroy();
+    holdListingScript = false;
+    for (const name of fs.readdirSync(approvalDirectory)) fs.rmSync(path.join(approvalDirectory, name), { force: true });
+    const nextTurn = { ...authority, runId: randomUUID(), expiresAtMs: Date.now() + 600_000 };
+    writeProtectedJson(markerPath, nextTurn);
+    writeProtectedJson(path.join(approvalDirectory, "unanswered.json"), {
+      version: 1, ownerId: nextTurn.ownerId, runId: nextTurn.runId,
+      initiatorUserId: nextTurn.initiatorUserId, browserPageId: nextTurn.browserPageId, addresses: carried,
+    });
+    requests.length = 0;
+    const reopened = await ok("POST", "/v1/navigate", { url: `${origin}/listing` }, ["allow_routine"]);
+    assert.equal(reopened.payload.url, `${origin}/listing`);
+    assert.equal(reopened.payload.stepTimedOut, undefined, "The page loaded in its time in the next turn");
+    assert.deepEqual(requests, ["GET /listing", "GET /listing-script"], "The next turn opened the page again");
+
     // 2. A click that opens another window and then keeps the page busy: the
     // step's time runs out, and it still ends as a step does. The window is
     // closed before it loads anything and the step says so, and once the page
@@ -874,18 +988,19 @@ export async function runSharedBrowserStepTimeFixture() {
         "a form sent to a site that does not answer is not stopped and never reads as nothing opened: the step answers once its time is up and says to check what it did, and the form's late answer lands",
         "a navigation the site answers 404 or 410 for fails as soon as that answer comes, saying the address has no page, even when the rest of its not-found page comes later than a step or there is no page at all; a page that only reads as not found, and a 200, are the step's page",
         "a page that never finishes loading and shows nothing fails once the step's time is up as a site that did not answer, naming the next source, never 'take a snapshot in a moment', and a read of it while it is still busy says the same; its address is then refused at once in the turn, and the place's own site still opens",
+        "a page that answers and can be read but has not finished loading when the step's time is up is the step's answer, read as it is, and says where to go if it lacks what the task needs; its address and the one its redirect led to are refused at once for the rest of the turn, by navigate and open_tab, never kept as a site that did not answer, the place's own site opens, a Let Octo continue run whose record runtime-agent started with the page refuses it at once too, and the chat's next turn opens the page again",
         "a click that opens a window and keeps the page busy fails once the step's time is up, as it would in its time: the window is closed and never loads anything, then or later",
         "a click whose script sends a request of its own and loads no page, then keeps the page busy, answers once the step's time is up with that page and says to check what the step did; its address is not kept as one that did not answer",
         "a hand-off whose fields the page is too busy to highlight in time answers with the page as it is and leaves no hand-off behind",
         "a search whose results page keeps the page busy fails once the step's time is up as a site that did not answer, naming the next source, never waiting out the page; its line still names a search, and the results' address is kept as one that did not answer",
       ],
-      timings: { slowAnswerMs: Math.round(slow.wallMs), manyControlsReadMs: Math.round(planner.wallMs), manyControlsChoiceMs: Math.round(chose.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyClickMs: Math.round(loaded.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), neverLoadsMs: Math.round(busyPage.wallMs), unansweredLoadMs: Math.round(loading.wallMs), refusedAgainMs: refusedAgain.map((again) => Math.round(again.wallMs)), lateRedirectMs: Math.round(redirected.wallMs), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs), noPageMs },
+      timings: { slowAnswerMs: Math.round(slow.wallMs), manyControlsReadMs: Math.round(planner.wallMs), manyControlsChoiceMs: Math.round(chose.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyClickMs: Math.round(loaded.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), neverLoadsMs: Math.round(busyPage.wallMs), openedLateMs: Math.round(listing.wallMs), openedLateRefusedMs: refusedLate.map((again) => Math.round(again.wallMs)), unansweredLoadMs: Math.round(loading.wallMs), refusedAgainMs: refusedAgain.map((again) => Math.round(again.wallMs)), lateRedirectMs: Math.round(redirected.wallMs), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs), noPageMs },
       limitations: ["No model, Studio UI, origin or runtime shutdown guard; those are unit-tested."],
     };
     fs.writeFileSync(resultFile, `${JSON.stringify(result, null, 2)}\n`);
     return result;
   } finally {
-    for (const response of [...unanswered, ...unfinished, ...neverEnding]) response.destroy();
+    for (const response of [...unanswered, ...unfinished, ...neverEnding, ...heldScripts]) response.destroy();
     for (const child of children) child.kill("SIGKILL");
     await context?.close().catch(() => {});
     if (server) await new Promise((resolve) => server.close(resolve));

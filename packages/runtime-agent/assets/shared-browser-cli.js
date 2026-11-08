@@ -2350,6 +2350,10 @@ async function heldText(locator) {
   return await within(FIELD_READ_MS, locator.inputValue().catch(() => null), null);
 }
 
+// What a type step without submit adds when Enter in the box it typed into
+// is a site search that goes without a prompt (freeSiteSearch).
+const SEARCH_NOT_SENT = "Nothing was searched yet: press Enter to search (no prompt needed).";
+
 function typedLine(description, text, held, submitted) {
   const field = quotedControlLabel(description);
   const count = Array.from(text).length;
@@ -3224,7 +3228,12 @@ async function declineCookieBanner(page, interactive) {
 // named that is a dialog or is named after cookies or consent
 // (inCookieNoticeInPage) joins them. Octo went for a notice's accept twice,
 // and a pause on it alone would have shown the person the accept outlined by
-// itself. Null when the controls Octo named are not a notice's buttons.
+// itself. A notice none of whose outlined buttons is a way out of it
+// (noticeWayOut) gets no pause: Octo never asks anyone to accept cookies, and
+// two turns paused on a bar whose one button was its accept, which covered
+// nothing the task needed. It is refused in the words a press of its accept
+// gets, so the turn carries on under it. Null when the controls Octo named
+// are not a notice's buttons.
 async function cookieNoticeButtons(page, interactive, selected) {
   const pageUrl = page.url();
   const accepts = interactive
@@ -3251,11 +3260,43 @@ async function cookieNoticeButtons(page, interactive, selected) {
     if (notice.length >= MAX_HUMAN_INPUT_TARGETS) break;
     if (!notice.includes(entry) && (await noticeButton(entry)) && (await inNotice(entry))) notice.push(entry);
   }
+  if (!notice.some((entry) => noticeWayOut(entry, pageUrl, accepts))) {
+    throw new Error(`${CONSENT_ACCEPT_MESSAGE} [step_refused_consent]`);
+  }
   return notice;
 }
 
 // The most controls one pause outlines.
 const MAX_HUMAN_INPUT_TARGETS = 8;
+
+// Words that name a notice's settings or choices, in the languages the action
+// policy's consent words cover: "Cookie settings", "Manage preferences",
+// "Configure your consents", "Personalizar cookies", "Paramètres",
+// "Einstellungen", "Impostazioni", "Instellingen".
+const CONSENT_SETTINGS = /(?<![\p{L}\p{N}])(?:settings?|preferences?|customi[sz]e|personali[sz]e|manage|configure|options|choices|einstellungen|anpassen|verwalten|konfigurieren|optionen|pr[äa]ferenzen|param[èe]tres|param[ée]trer|personnaliser|g[ée]rer|pr[ée]f[ée]rences|choix|configuraci[óo]n|configurar|personalizar|gestionar|preferencias|opciones|impostazioni|personalizza(?:re)?|gestisci|preferenze|opzioni|defini[çc][õo]es|configura[çc][õo]es|gerir|gerenciar|prefer[êe]ncias|op[çc][õo]es|instellingen|aanpassen|beheren|voorkeuren|opties)(?![\p{L}\p{N}])/iu;
+
+// Whether one of a notice's buttons lets the person answer it without
+// accepting: a refusal, an accept limited to the necessary cookies or a
+// selection, a control that acts on the notice itself and is no accept (its
+// settings panel, a refusal in words no list knows, a close), or a link whose
+// words name its settings. Any other link goes to another page (its cookie
+// policy, "Learn more"): a pause on one beside the accept asked the person to
+// answer a notice whose only answer was accepting.
+function noticeWayOut(entry, pageUrl, accepts) {
+  if (accepts.includes(entry.locator)) return false;
+  const step = classifyStep("click", entry.description, { pageUrl });
+  if (step.consentRejection === true || step.consentLimited === true) return true;
+  const destination = resolvedTargetDestination(entry.description, pageUrl);
+  let elsewhere = destination !== null;
+  try {
+    elsewhere = elsewhere && new URL(destination).href.split("#")[0] !== new URL(pageUrl).href.split("#")[0];
+  } catch (_) {
+    // An address that cannot be read goes elsewhere.
+  }
+  if (!elsewhere) return true;
+  const { label, text, ariaLabel, titleAttribute } = entry.description;
+  return CONSENT_SETTINGS.test([label, text, ariaLabel, titleAttribute].filter(Boolean).join(" "));
+}
 
 // Whether a control may be one of a cookie notice's buttons in a pause, by
 // itself (cookieNoticeButtons says where it must sit): turned on, in a
@@ -3744,10 +3785,14 @@ const COVER_LOOK_MS = 100;
 // (declineCookieBanner). A notice still over a control is one it could not
 // decline: one with no reject button, one on a page it presses nothing on,
 // or one that came after the page was read, which the next look declines
-// when it can. Answering it is the person's step, as accepting one is
-// (`step_refused_consent`), so both refusals say the same: pause on it
-// (request_human_input takes a cookie notice's buttons), or go elsewhere.
-const CONSENT_COVER_MESSAGE = actionPolicy.refusalFor("consent").message;
+// when it can. Only a notice that really covers the control says it covers
+// the page: a press of a notice's accept has words of its own
+// (CONSENT_ACCEPT_MESSAGE), as the page under it is still there to use.
+const CONSENT_COVER_MESSAGE = "A cookie notice covers this page, and the browser could not decline it. If the task needs this page, pause on the notice's buttons with request_human_input in the chat's own tab: the person answers it there and chooses Let Octo continue. Otherwise open a link under it by its address, or the official site of the place or service the task is about.";
+// What a press of a notice's accept answers (`step_refused_consent`, the
+// action policy's words), and a pause on a notice that offers nothing but
+// accepting: Octo never accepts cookies and never asks anyone to.
+const CONSENT_ACCEPT_MESSAGE = actionPolicy.refusalFor("consent").message;
 
 async function clickLanding(target) {
   const landing = await target.locator
@@ -5337,7 +5382,9 @@ function waitedAddresses(load, now) {
 // saying the site did not answer and where to go next, never the page the tab
 // still shows, nor the blank page's "Call navigate", which sent Octo to load
 // the same site again. A site that answered as the time ran out has its page,
-// which is read as it is. A page still too busy to be read, a load the browser
+// which is read as it is; when navigate or open_tab opened it, the answer also
+// names the next source, and the page is not opened again in the turn
+// (OPENED_LATE_NEXT_SOURCE). A page still too busy to be read, a load the browser
 // did not confirm stopped and a tab still blank fail the same way, as a site
 // that did not answer (BUSY_UNANSWERED_MESSAGE): a turn told only "Take a
 // snapshot in a moment" opened the same busy site again and never tried the
@@ -5390,9 +5437,14 @@ async function pageAsItIs(browser) {
   // Only a page that was read is "the page as it is now"; a busy one says so
   // in its own message.
   const readSomething = read !== null && !isBusyPageResult(read);
+  // A page navigate or open_tab opened that was read as the time ran out says
+  // where to go if it lacks the answer, and is not opened again in this turn:
+  // the address asked for and the one the page is on.
+  const openedLate = readSomething && openingAddress !== null;
+  if (openedLate) approvalProtocol.rememberOpenedLate([openingAddress.url, resolvedPage?.url()]);
   const note = `This step was still running after ${STEP_TIME_MS / 1000} seconds, so it stopped where it was. ${
     readSomething ? "This is the page as it is now: check" : "Check"
-  } what the step did before you act again.`;
+  } what the step did before you act again.${openedLate ? ` ${OPENED_LATE_NEXT_SOURCE}` : ""}`;
   emitAction({ type: "nav_result", label: view.title || view.url, url: view.url });
   return withActivity(
     { ...view, stepTimedOut: true, message: [view.message, note].filter(Boolean).join(" ") },
@@ -5408,6 +5460,15 @@ const BUSY_PAGE_MESSAGE = "The page is still busy, so it could not be read yet. 
 // address again: a turn read "the place's own site" as the one that had just
 // failed, and opened it a second time.
 const UNANSWERED_NEXT_SOURCE = "Don't open this address again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
+// What a navigate or open_tab adds whose page answered and was read only as
+// the step's time ran out: the page may hold the answer, so it is kept, and
+// its address is refused for the rest of the turn (refuseUnansweredAddress),
+// a Let Octo continue of the same request included, never kept for the
+// chat's next turns as one that did not answer. A turn told only to check what
+// the step did read a tourism site twice at 20 seconds each and never tried
+// the bookshop's own site.
+const OPENED_LATE_NEXT_SOURCE = "If this page doesn't show what you need, don't open it again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
+const OPENED_LATE_AGAIN_MESSAGE = `This address was still loading after ${STEP_TIME_MS / 1000} seconds earlier in this turn, so it was not opened again. ${UNANSWERED_NEXT_SOURCE}`;
 const UNANSWERED_PAGE_MESSAGE = `The site did not answer in time, so nothing was opened and the page is still blank. ${UNANSWERED_NEXT_SOURCE}`;
 const UNANSWERED_LOADED_PAGE_MESSAGE = `The site did not answer in time, so nothing was opened and the tab still shows the page it showed before. ${UNANSWERED_NEXT_SOURCE}`;
 // What a step answers whose page was still busy when its time ran out (too
@@ -5473,10 +5534,16 @@ function didNotAnswer(message, addresses) {
 // minutes is not opened again: navigate and open_tab refuse it at once, before
 // anything asks or loads, so nothing is sent to its site, with the same hint
 // as the step that found it. Only these two steps: the person's own
-// navigation, and the page's own links and forms, are never refused.
+// navigation, and the page's own links and forms, are never refused. So is,
+// for the rest of the turn only (its Let Octo continue included), a page one
+// of them opened that was read only as its step's time ran out
+// (OPENED_LATE_NEXT_SOURCE).
 function refuseUnansweredAddress(url) {
   if (approvalProtocol.didNotAnswerRecently(url)) {
     throw new Error(UNANSWERED_AGAIN_MESSAGE);
+  }
+  if (approvalProtocol.openedLateThisRun(url)) {
+    throw new Error(OPENED_LATE_AGAIN_MESSAGE);
   }
 }
 
@@ -5973,6 +6040,17 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
 
   if (method === "POST" && requestPath === "/v1/request-human-input") {
     if (inAgentTab()) {
+      // A notice that offers only accepting gets no pause in any tab
+      // (cookieNoticeButtons), so the turn is never sent to move the person's
+      // page for one. A page that changed, or anything else, gets the words
+      // below.
+      const seen = await collectInteractiveElements(page).catch(() => null);
+      if (seen && humanInputFieldsAsObserved(page.url(), seen, body)) {
+        const named = body.indices.map((index) => seen[index]);
+        if (!named.every((entry) => entry && EDITABLE_FIELD_TAGS.has(entry.description.tag))) {
+          await cookieNoticeButtons(page, seen, named);
+        }
+      }
       throw new Error(
         "Octo's own tabs are for reading, so nothing was highlighted. Stop at a sign-in or form and tell the person. When the task needs a page a cookie notice covers, open it in the chat's own tab, the page the person chose (select_tab, then navigate to this address), take a snapshot there and pause on the notice with request_human_input.",
       );
@@ -5988,7 +6066,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       throw new Error("The page changed; take a fresh snapshot before requesting human input");
     }
     // Editable fields (a sign-in, a form), or the buttons of a cookie notice
-    // the browser could not decline, all of them. The browser itself presses
+    // the browser could not decline, all of them, never a notice that offers
+    // only accepting (cookieNoticeButtons). The browser itself presses
     // neither: the person answers the notice on the page.
     const named = body.indices.map((index) => interactive[index]);
     const fields = named.every((entry) => entry && EDITABLE_FIELD_TAGS.has(entry.description.tag));
@@ -6322,6 +6401,12 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     assertStepOnTime();
     await target.locator.fill(body.text);
     const held = submitting ? null : await heldText(target.locator);
+    // Text typed into a site's own search box searched nothing yet: a turn
+    // read the list the page still showed as no result. Only where Enter in
+    // the box, as it holds the text now, goes without a prompt (the press
+    // step's own test) does the step say to press it.
+    const searchNotSent = !submitting && held === body.text && held !== "" && documents !== null &&
+      (await within(FIELD_READ_MS, freeSiteSearch(page, target, null).catch(() => false), false));
     if (submitting) {
       assertStepOnTime();
       await target.locator.press("Enter");
@@ -6333,10 +6418,11 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // Typing with submit into a search field is a search, whoever allowed it;
     // into any other field it sends a form.
     const typeKind = submitting ? (step.category === "search" ? "search" : "submit") : "type";
+    const typed = typedLine(target.description, body.text, held, submitting);
     return withActivity(
       {
         ...await snapshotAfterStep(page, withholding),
-        done: typedLine(target.description, body.text, held, submitting),
+        done: searchNotSent ? `${typed} ${SEARCH_NOT_SENT}` : typed,
       },
       stepActivity(page, typeKind, freeSearch ? "free" : stepApproval()),
     );

@@ -3396,9 +3396,9 @@ async fn a_failed_step_with_facts_still_tells_the_model_what_failed() {
     use std::os::unix::process::ExitStatusExt;
     for (stderr, stdout, words) in [
         (
-            "Shared Browser command failed: A cookie notice covers this page, and the browser could not decline it. If the task needs this page, pause on the notice's buttons with request_human_input in the chat's own tab: the person answers it there and chooses Let Octo continue. Otherwise open a link under it by its address, or the official site of the place or service the task is about. [step_refused_consent]",
+            "Shared Browser command failed: Octo never accepts cookies, so nothing was pressed. Carry on under the notice from a fresh snapshot. If it covers what you need, open that link by its address, or another official source. [step_refused_consent]",
             r#"{"ok":false,"activity":{"refused":"consent"}}"#,
-            "pause on the notice's buttons with request_human_input in the chat's own tab",
+            "Carry on under the notice from a fresh snapshot.",
         ),
         (
             "Shared Browser command failed: Shared Browser refuses to type authentication, payment, or identity secrets; let the user enter this value directly",
@@ -3489,11 +3489,11 @@ async fn no_failed_step_reads_as_undefined() {
         ),
         (
             failed(
-                "A cookie notice covers this page, and the browser could not decline it. [step_refused_consent]",
+                "Octo never accepts cookies, so nothing was pressed. [step_refused_consent]",
                 r#"{"ok":false,"activity":{"refused":"consent"}}"#,
                 1,
             ),
-            "A cookie notice covers this page, and the browser could not decline it. [step_refused_consent]",
+            "Octo never accepts cookies, so nothing was pressed. [step_refused_consent]",
         ),
         (
             failed(
@@ -3837,6 +3837,7 @@ fn chat_browser_run_given(
         Some(chat),
         unix_time_millis(),
         &given_addresses_from_payload(&payload),
+        false,
     );
     (guard, cancel_signal)
 }
@@ -5017,6 +5018,17 @@ fn a_type_step_names_the_field_and_how_many_characters_went_in_never_the_text() 
             "Belém Tower",
             true,
             "Typed 11 characters into \"Search places\" and pressed Enter.".to_string(),
+        ),
+        // The same site search without submit searched nothing yet: Enter in it goes without
+        // a prompt, so the step says to press it. A turn typed into a site's search, never
+        // sent it, and read the list the page still showed as no result.
+        (
+            "site-search",
+            "Belém Tower",
+            false,
+            format!(
+                "Typed 11 characters into \"Search places\", and the field holds them.{after} Nothing was searched yet: press Enter to search (no prompt needed)."
+            ),
         ),
     ] {
         let fixture = EmbeddedControllerFixture::new();
@@ -10213,6 +10225,143 @@ async fn let_ai_continue_keeps_the_site_the_person_approved_and_a_fresh_turn_ask
     let (_, requests) = navigate("https://transport.example/tram-15", &["allow_origin"]);
     assert_eq!(requests.len(), 1);
     end(run);
+}
+
+/// A page a run opened only as a step's time ran out is refused for the rest
+/// of that request: the run that carries it on after a pause (Let Octo
+/// continue, which names the run and no card) starts with it, and so does the
+/// next one in that chain. A follow-up message's card turn, which names the
+/// run too, a fresh turn, and the chat's later turns start without it, and the
+/// chat's ten-minute record of sites that did not answer never holds it. A
+/// turn read a tourism site at 20 seconds, paused on its cookie notice, and
+/// once let continue opened the same page again, 20 seconds more.
+#[tokio::test]
+async fn a_page_opened_late_is_refused_only_in_the_run_that_carries_on_its_request() {
+    let directory = tempfile::tempdir().expect("marker tempdir");
+    let path = directory.path().join("agent-control.json");
+    let approval_dir = directory.path().join("approvals");
+    let person = Uuid::new_v4();
+    let chat = Uuid::new_v4();
+    let late = "a".repeat(64);
+    let acquire = |run_id: Uuid, continues: Option<Uuid>, same_request: bool| {
+        let cancel_signal = JobCancelSignal::new();
+        let mut guard = SharedBrowserAgentControlGuard::acquire_continuing(
+            path.clone(),
+            approval_dir.clone(),
+            ApprovalStart::Routine,
+            run_id,
+            person,
+            "page-target",
+            "Octo",
+            continues,
+            &[],
+            cancel_signal.clone(),
+            Duration::from_secs(60),
+        )
+        .expect("acquire run");
+        guard.start_chat_records(Some(chat), unix_time_millis(), &[], same_request);
+        (guard, cancel_signal)
+    };
+    let end = |(guard, cancel_signal): (SharedBrowserAgentControlGuard, JobCancelSignal)| {
+        cancel_signal.confirm_shared_browser_shutdown();
+        drop(guard);
+    };
+    let record = || -> Option<JsonValue> {
+        std::fs::read(approval_dir.join("unanswered.json"))
+            .ok()
+            .map(|bytes| serde_json::from_slice(&bytes).expect("record JSON"))
+    };
+    // What the controller script writes once a navigate's page is read only
+    // as its time ran out: the run's own record, bound to the run.
+    let open_late = || {
+        let marker: JsonValue =
+            serde_json::from_slice(&std::fs::read(&path).expect("marker")).expect("marker JSON");
+        let mut written = record().unwrap_or_else(|| {
+            json!({
+                "version": 1,
+                "ownerId": marker["ownerId"],
+                "runId": marker["runId"],
+                "initiatorUserId": marker["initiatorUserId"],
+                "browserPageId": marker["browserPageId"],
+                "addresses": [],
+            })
+        });
+        written["openedLate"] = json!([late]);
+        let record_path = approval_dir.join("unanswered.json");
+        std::fs::write(
+            &record_path,
+            serde_json::to_vec(&written).expect("record JSON"),
+        )
+        .expect("write record");
+        #[cfg(unix)]
+        std::fs::set_permissions(&record_path, std::fs::Permissions::from_mode(0o600))
+            .expect("protect record");
+    };
+
+    // The turn opens a page late, then pauses for the person: the run ends.
+    let first = Uuid::new_v4();
+    let run = acquire(first, None, false);
+    open_late();
+    end(run);
+    assert!(record().is_none(), "the run's own records are revoked");
+
+    // Let Octo continue carries on that request: its record refuses the page,
+    // bound to the new run, and keeps no address as one that did not answer.
+    let second = Uuid::new_v4();
+    let run = acquire(second, Some(first), true);
+    let carried = record().expect("the continued run's record");
+    assert_eq!(carried["openedLate"], json!([late]));
+    assert_eq!(carried["addresses"], json!([]));
+    assert_eq!(carried["runId"], second.to_string());
+    end(run);
+
+    // It pauses again, and the next Let Octo continue still refuses the page.
+    let third = Uuid::new_v4();
+    let run = acquire(third, Some(second), true);
+    assert_eq!(
+        record().expect("the chain's record")["openedLate"],
+        json!([late])
+    );
+    end(run);
+
+    // A follow-up message's turn names the run it goes on from, with its
+    // grants, but carries on a request of its own: nothing is refused.
+    let run = acquire(Uuid::new_v4(), Some(third), false);
+    assert!(record().is_none(), "{:?}", record());
+    end(run);
+
+    // Nor in the chat's later turns: the page was never kept as a site that
+    // did not answer.
+    let fresh = Uuid::new_v4();
+    let run = acquire(fresh, None, false);
+    open_late();
+    end(run);
+    let run = acquire(Uuid::new_v4(), None, false);
+    assert!(record().is_none(), "{:?}", record());
+    end(run);
+    assert!(unanswered_addresses_of(&approval_dir, chat, unix_time_millis()).is_empty());
+}
+
+/// Let Octo continue carries on the request of the run it names; a follow-up
+/// message's card turn names a run too, but carries on its own card.
+#[test]
+fn only_let_octo_continue_carries_on_the_request_of_the_run_it_names() {
+    let run = Uuid::new_v4().to_string();
+    assert!(continues_same_request_from_payload(
+        &json!({ "metadata": { "browserContinuesRunId": run } })
+    ));
+    assert!(continues_same_request_from_payload(
+        &json!({ "metadata": { "browserContinuesRunId": run, "browserRequestOf": " " } })
+    ));
+    for payload in [
+        json!({}),
+        json!({ "metadata": {} }),
+        json!({ "metadata": { "browserContinuesRunId": "not-a-run" } }),
+        json!({ "metadata": { "browserRequestOf": "job:card" } }),
+        json!({ "metadata": { "browserContinuesRunId": run, "browserRequestOf": "job:card" } }),
+    ] {
+        assert!(!continues_same_request_from_payload(&payload), "{payload}");
+    }
 }
 
 #[test]
