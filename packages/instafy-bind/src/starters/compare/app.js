@@ -296,8 +296,8 @@
         lines.push(h("p", { "class": "cap hidden-line" }, hidden + " more " + (data.filter.rest || "hidden") + " · ",
           h("button", { "class": "link-btn", text: "Show", attrs: { type: "button", "data-key": "show-all" }, on: { click: function () { site.setState({ show: "all" }); } } })));
       }
-      var last = sorted(data) ? missingLine(data, shown, st) : null;
-      if (last) lines.push(last);
+      var missing = sorted(data) ? missingLine(data, shown, st) : null;
+      if (missing) lines.push(missing);
       var from = sharedLine(data, shared, all);
       if (from) lines.push(from);
       if (lines.length) wrap.appendChild(h("div", { "class": "stack tight" }, lines));
