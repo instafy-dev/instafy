@@ -408,6 +408,30 @@ mod tests {
     }
 
     #[test]
+    fn standalone_search_counts_attempts_without_inventing_token_usage() {
+        let (diagnostics, records) = recorder();
+        {
+            let mut attempt = diagnostics.start("fixture-model", "search", &json!({}));
+            attempt.http_status(200);
+            attempt.observe_json(&json!({}));
+        }
+        drop(diagnostics.start("fixture-model", "search", &json!({})));
+        let records = records.lock().unwrap();
+        assert_eq!(records[0]["wireApi"], "search");
+        assert_eq!(records[1]["usage"]["state"], "missing");
+        assert!(
+            records[1]["usage"]["fields"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|value| value == &json!({"state":"missing"}))
+        );
+        assert_eq!(records[2]["outcome"], "completed");
+        assert_eq!(records[3]["attempt"], 2);
+        assert_eq!(records[4]["outcome"], "interrupted");
+    }
+
+    #[test]
     fn unavailable_log_sink_does_not_panic_on_start_or_drop() {
         struct Unavailable(Arc<AtomicU64>);
         impl std::io::Write for Unavailable {

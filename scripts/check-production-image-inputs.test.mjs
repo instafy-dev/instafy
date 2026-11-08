@@ -211,6 +211,7 @@ test("every published Debian service refreshes inherited packages at its release
     ["perl-base", "PERL_BASE_MIN_VERSION", "5.40.1-6+deb13u1"],
     ["apt", "APT_MIN_VERSION", "3.0.4"],
     ["libapt-pkg7.0", "APT_MIN_VERSION", "3.0.4"],
+    ["zlib1g", "ZLIB_MIN_VERSION", "1:1.3.dfsg+really1.3.1-1+deb13u1"],
   ];
   const expected = new Map([
     ["packages/runtime-controller/Dockerfile", ["bookworm", bookwormPackages]],

@@ -427,6 +427,8 @@ const LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-researcher-v2.md"),
     // From before a page robots.txt refuses left the site's other pages open, as its `tell` says.
     include_str!("legacy/research-team-researcher-v3.md"),
+    // Before removing Instafy-owned domain restrictions.
+    include_str!("legacy/research-team-researcher-v4.md"),
 ];
 const SKILL_ROUTER_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -551,6 +553,8 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // chat found and confirmed, and a page with no address given was the official site of what
     // the task names.
     include_str!("legacy/browser-automation-v34.md"),
+    // Before native retrieval and removing Instafy-owned website restrictions.
+    include_str!("legacy/browser-automation-v35.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,
@@ -614,18 +618,21 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     // From before a `request_browser` card was a reader only in a reply-only turn: a turn that
     // must change files has none.
     include_str!("legacy/web-research-v16.md"),
+    // Before native retrieval on verified onboarded ChatGPT connections.
+    include_str!("legacy/web-research-v17.md"),
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"
 ));
-/// Earlier bundled copies of the link-only list a scaffold may replace. A copy a space edited is kept: readers
-/// enforce the bundled list plus what that copy adds.
+/// Earlier generated site policies a scaffold may replace. Edited workspace policies are kept.
 const LEGACY_WEB_RESEARCH_LINK_ONLY_TEMPLATES: &[&str] = &[
     // From before it listed the translators, caches and archives that serve copies of other sites.
     include_str!("legacy/web-research-link-only-v1.json"),
     // From before each site had a kind, the terms it rests on, and guided-mode links.
     include_str!("legacy/web-research-link-only-v2.json"),
+    // Retire the last curated domain list without changing workspace-owned policies.
+    include_str!("legacy/web-research-link-only-v3.json"),
 ];
 const SKILL_READING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

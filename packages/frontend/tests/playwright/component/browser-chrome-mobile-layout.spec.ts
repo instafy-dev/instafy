@@ -272,8 +272,10 @@ for (const width of [320, 360, 390]) {
       expect(target!.right).toBeLessThanOrEqual(width);
     }
     expect(geometry.tabPicker).not.toBeNull();
-    expect(geometry.tabPicker!.height).toBeGreaterThanOrEqual(44);
-    expect(geometry.tabPicker!.width).toBeGreaterThanOrEqual(44);
+    // A narrow viewport still has a fine pointer here: use the shared 32px
+    // toolbar target. The coarse-pointer cases below retain the 44px minimum.
+    expect(geometry.tabPicker!.height).toBeGreaterThanOrEqual(32);
+    expect(geometry.tabPicker!.width).toBeGreaterThanOrEqual(32);
     expect(geometry.tabPicker!.left).toBeGreaterThanOrEqual(0);
     expect(geometry.tabPicker!.right).toBeLessThanOrEqual(width);
     expect(geometry.tabPicker!.top).toBeGreaterThanOrEqual(geometry.chrome!.top);
@@ -524,6 +526,42 @@ test("keeps the unified browser address usable at tablet portrait width", async 
   expect(geometry.documentWidth).toBeLessThanOrEqual(768);
   expect(geometry.chromeFits).toBe(true);
   expect(geometry.addressWidth).toBeGreaterThanOrEqual(96);
+});
+
+test("keyboard history actions preserve the draft and return to the toolbar focus order", async ({ page }) => {
+  await page.setViewportSize({ width: 768, height: 1024 });
+  await page.addInitScript(() => {
+    localStorage.setItem("instafy:browser-address-history:v1:component-browser-user", JSON.stringify([
+      { url: "https://history.example.test/", title: "History review", lastVisitedAt: Date.now() },
+    ]));
+  });
+  await mountCompactBrowserChrome(page, true);
+  const address = page.getByTestId("shared-browser-address");
+  const clear = page.getByRole("button", { name: "Clear recent sites", exact: true });
+  await address.fill("history");
+  await address.press("ArrowDown");
+  await address.press("Tab");
+  await expect(clear).toBeFocused();
+  await expect(address).toHaveValue("history");
+  await page.keyboard.press("Shift+Tab");
+  await expect(address).toBeFocused();
+  await address.press("Tab");
+  await page.keyboard.press("Escape");
+  await expect(address).toBeFocused();
+  await expect(clear).toBeHidden();
+  await address.press("ArrowDown");
+  await address.press("Tab");
+  await page.keyboard.press("Tab");
+  await expect(page.getByTestId("shared-browser-collaboration-toggle")).toBeFocused();
+  await expect(clear).toBeHidden();
+  await address.fill("history");
+  await address.press("Tab");
+  await expect(clear).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(address).toBeFocused();
+  await expect(clear).toBeHidden();
+  expect(await page.evaluate(() => localStorage.getItem("instafy:browser-address-history:v1:component-browser-user"))).toBeNull();
+  expect(await page.evaluate(() => (window as Window & { __browserNavigations?: unknown[] }).__browserNavigations)).toEqual([]);
 });
 
 test("uses one real Chromium action per mobile keyboard control key", async ({ browser, baseURL }) => {

@@ -438,7 +438,7 @@ describe("preview check: exits", () => {
 });
 
 describe.skipIf(!browserOk)("preview check: in a browser", () => {
-  const check = (o: Omit<Parameters<typeof runSiteCheck>[0], "env">) => runSiteCheck({ ...o, env: browserEnv });
+  const check = (o: Omit<Parameters<typeof runSiteCheck>[0], "env">) => runSiteCheck({ cwd: tmp, ...o, env: browserEnv });
 
   it("a healthy page passes: title, both screenshots, HTTP 200", { timeout: 90_000 }, async () => {
     const port = await serve({ "/": { body: GOOD } });
@@ -486,6 +486,9 @@ describe.skipIf(!browserOk)("preview check: in a browser", () => {
   });
 
   it("a redirect hop to a link-only site is blocked and listed, never sent on to the egress proxy", { timeout: 180_000 }, async () => {
+    const policyFile = path.join(tmp, ".agents", "skills", "configured", "references", "link-only-sites.json");
+    fs.mkdirSync(path.dirname(policyFile), { recursive: true });
+    fs.writeFileSync(policyFile, JSON.stringify({ schema: "instafy.link-only-sites@1", sites: [{ name: "Booking.com", match: ["booking.com"] }] }));
     // A stand-in for the egress proxy that records what it is sent; public.example/to-booking redirects to Booking.
     const proxied: string[] = [];
     const proxy = http.createServer((req, res) => {

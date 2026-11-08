@@ -62,6 +62,8 @@ const linkOnlySites = fs.readFileSync(
   path.join(repositoryRoot, "packages/runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"),
   "utf8",
 );
+// Restrictive cases exercise a space's explicit policy, not a product denylist.
+const customLinkOnlyPolicy = path.join(repositoryRoot, "packages/browser-action-policy/test/link-only-policy.json");
 const scriptSource = [
   ...policyScriptNames.map(policyScript),
   `globalThis.__instafyLinkOnlySites = ${linkOnlySites};`,
@@ -424,6 +426,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
         cwd: temporary,
         env: {
           ...environment,
+          INSTAFY_SHARED_BROWSER_SPACE_LINK_ONLY_FILE: customLinkOnlyPolicy,
           INSTAFY_SHARED_BROWSER_PLAYWRIGHT_PATH: playwrightDirectory,
           INSTAFY_SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT: path.dirname(playwrightDirectory),
           INSTAFY_SHARED_BROWSER_PAGE_ID: runPageId,

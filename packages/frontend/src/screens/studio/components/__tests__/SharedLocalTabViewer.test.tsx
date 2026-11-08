@@ -135,6 +135,50 @@ it("only retires a share when a fresh authorized listing confirms it is gone", a
   expect(document.querySelector('[data-testid="local-tab-reconnect"]')).toBeNull();
 });
 
+it("keeps retry focus and prevents repeated attempts until a fresh frame arrives", async () => {
+  const announcement = container.querySelector('[data-testid="local-tab-connection-status"]');
+  await act(async () => socket.dispatchEvent(new Event("close")));
+  const retry = document.querySelector<HTMLButtonElement>('[data-testid="local-tab-reconnect"]')!;
+  await act(async () => { retry.focus(); retry.click(); });
+  expect(document.activeElement).toBe(retry);
+  expect(retry.getAttribute("aria-disabled")).toBe("true");
+  expect(retry.disabled).toBe(false);
+  expect(document.querySelector('[data-testid="local-tab-connection-feedback"]')?.textContent).toContain("Reconnecting…");
+  await act(async () => retry.click());
+  expect(connect).toHaveBeenCalledTimes(2);
+  expect(container.querySelector('[data-testid="local-tab-connection-status"]')).toBe(announcement);
+  expect(announcement?.textContent).toBe("Reconnecting…");
+  await frame();
+  expect(document.querySelector('[data-testid="local-tab-connection-feedback"]')).toBeNull();
+  expect(document.activeElement).toBe(document.querySelector('[data-testid="local-tab-view-mode"]'));
+  expect(container.querySelector('[data-testid="local-tab-connection-status"]')).toBe(announcement);
+  expect(announcement?.textContent).toContain("View only");
+});
+
+it("does not move focus when a retry completes after someone chose another control", async () => {
+  await act(async () => socket.dispatchEvent(new Event("close")));
+  await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="local-tab-reconnect"]')!.click());
+  const leave = document.querySelector<HTMLButtonElement>('[aria-label="Leave shared tab"]')!;
+  await act(async () => leave.focus());
+  await frame();
+  expect(document.activeElement).toBe(leave);
+});
+
+it("retains retry focus after a failed attempt and announces feedback once", async () => {
+  const announcement = container.querySelector('[data-testid="local-tab-connection-status"]');
+  await act(async () => socket.dispatchEvent(new Event("close")));
+  list.mockRejectedValueOnce(new Error("offline"));
+  const retry = document.querySelector<HTMLButtonElement>('[data-testid="local-tab-reconnect"]')!;
+  await act(async () => { retry.focus(); retry.click(); });
+  expect(document.activeElement).toBe(retry);
+  expect(retry.getAttribute("aria-disabled")).not.toBe("true");
+  const announcements = container.querySelectorAll('[role="status"]');
+  expect(announcements).toHaveLength(1);
+  expect(announcements[0]).toBe(announcement);
+  expect(announcements[0].textContent).toContain("Check your connection");
+  expect(ended).not.toHaveBeenCalled();
+});
+
 it("keeps the expanded viewer inside the phone's visible area when the keyboard opens", async () => {
   const viewport = Object.assign(new EventTarget(), { height: 700, offsetTop: 0 });
   vi.stubGlobal("visualViewport", viewport);

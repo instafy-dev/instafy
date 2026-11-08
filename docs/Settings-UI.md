@@ -142,6 +142,13 @@ determines the winner. Arbitrary layout classes remain supported.
 - Provider, credential and model pickers use `FormPickerTrigger` and `FormPickerPopover`.
   Their feature-specific choices and actions remain in each picker. Connect visible field
   labels using a trigger `id`/`htmlFor` or a label ID/`aria-labelledby`.
+  `ControlTrigger` supplies the shared input surface, 12px corners and focus states
+  to both form pickers and the phone browser address field, without an action-button
+  shadow or press nudge. The owning feature supplies menu or dialog semantics.
+  Recent-site labels/descriptions use shared body/caption typography and retain
+  their combobox slots; clearing history is a quiet inline action. On desktop,
+  Tab reaches that action without navigating; clearing or Escape returns focus
+  to the address field, and Tab again continues through the toolbar.
 - Scrolling editors use `StudioDialogModal layout="editor"`, a `StudioDialogHeader`,
   `StudioDialogBody scrollable` and `StudioDialogFooter`. The shared shell owns viewport
   bounds and scrolling; callers may choose width and supply their form contents. Mobile
@@ -638,6 +645,12 @@ retain their compact sizing, and unstyled inputs retain their host layout. Prese
 existing thin outline, 12px default radius
 and visible keyboard focus treatment. Profile's Save action follows the same 44px mobile
 target and uses a compact 36px height on wider fine-pointer screens.
+
+Browser tab selection also uses `Select`. Keep its native behavior when one-tap OS
+selection is appropriate; `nativeTrigger` draws a compact count or icon within the
+shared quiet 8px toolbar target (32px mouse, 44px touch), with a visible keyboard
+focus ring. Give the select an accessible name and keep the full active page title
+in its description. Wider browser panes show the small native text selector.
 
 Use a small, consistent radius scale: 6px for compact search scope chips, 8px for utility icon controls, menu rows
 and segmented options, 12px for navigation rows, form controls and profile actions, and 16px for cards, dialogs and

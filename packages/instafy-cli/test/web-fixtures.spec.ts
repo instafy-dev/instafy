@@ -72,13 +72,14 @@ describe("offline fixtures (INSTAFY_WEB_FIXTURES, test builds only)", () => {
     expect(page.text).toMatch(/closes at 18:00/);
     expect(page.links).toEqual([
       { index: 0, text: "Plan your visit", href: "https://museum.example.org/visit" },
-      { index: 1, text: "Hotels nearby", href: "https://www.booking.com/hotel/se/city-museum-inn.html", linkOnly: true },
+      { index: 1, text: "Hotels nearby", href: "https://www.booking.com/hotel/se/city-museum-inn.html" },
     ]);
     expect(report.warnings[0]).toMatch(/^test build: pages come from the fixtures in .*fixtures[\\/]web, not the web$/);
   });
 
-  it("refuses a Booking page as link-only", async () => {
-    const report = await read(["https://www.booking.com/hotel/se/city-museum-inn.html", "https://museum.example.org/hours"]);
+  it("refuses a page named by an explicit policy", async () => {
+    const policy = JSON.parse(fs.readFileSync(path.resolve(here, "../../browser-action-policy/test/link-only-policy.json"), "utf8"));
+    const report = await read(["https://www.booking.com/hotel/se/city-museum-inn.html", "https://museum.example.org/hours"], { bundledLinkOnly: policy });
     expect(report.viewer).toBe("fixture");
     expect(report.pages[0]).toMatchObject({ status: "stopped", code: "link_only", provenance: { viewer: "fixture" } });
     expect(report.pages[1]).toMatchObject({ status: "read", provenance: { viewer: "fixture" } });

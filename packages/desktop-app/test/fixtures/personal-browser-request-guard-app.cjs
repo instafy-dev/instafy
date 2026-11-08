@@ -8,7 +8,10 @@ const { app, BrowserWindow, session } = require("electron");
 
 const dist = path.join(__dirname, "..", "..", "dist");
 const { installPersonalBrowserRequestGuard } = require(path.join(dist, "personalBrowserRequestGuard.js"));
-const { PERSONAL_BROWSER_LINK_ONLY_GUARD } = require(path.join(dist, "personalBrowserLinkOnly.js"));
+const { createPersonalBrowserLinkOnlyGuard } = require(path.join(dist, "personalBrowserLinkOnly.js"));
+const PERSONAL_BROWSER_LINK_ONLY_GUARD = createPersonalBrowserLinkOnlyGuard(
+  require("../../../browser-action-policy/test/link-only-policy.json"),
+);
 
 app.commandLine.appendSwitch(
   "host-resolver-rules",

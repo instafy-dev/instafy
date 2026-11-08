@@ -6172,8 +6172,8 @@ fn project_memory_version_title(snapshot: &OriginReadSnapshot) -> &'static str {
 
 /// What the bootstrap writes given what the origin holds: missing templates,
 /// templates still exactly as last applied (so a changed template reaches
-/// them), and the managed state file when it changes. A file the user edited
-/// keeps its content and becomes the new baseline.
+/// them), retired bundled site policies, and the managed state file when it
+/// changes. A file the user edited keeps its content.
 fn plan_project_memory_writes(
     snapshot: &OriginReadSnapshot,
 ) -> Result<Vec<ProjectMemoryWriteFile>, (StatusCode, Json<ApiError>)> {
@@ -6227,7 +6227,22 @@ fn plan_project_memory_writes(
             }
             Some(current_content) => {
                 let current_hash = sha256_hex(current_content);
-                let should_update = matches!(tracked_hash, Some(recorded_hash) if recorded_hash == current_hash && recorded_hash != template_hash);
+                // Older runtimes also seeded this policy without the managed
+                // state file. Retire only a known bundled copy; imported or
+                // edited user policies remain effective.
+                let retired_site_policy = template.path
+                    == ".agents/skills/instafy-web-research/references/link-only-sites.json"
+                    && serde_json::from_str::<serde_json::Value>(&template_content)
+                        .ok()
+                        .and_then(|policy| policy.get("retiredDefaultSha256")?.as_array().cloned())
+                        .is_some_and(|hashes| {
+                            let trimmed_hash = sha256_hex(current_content.trim());
+                            hashes
+                                .iter()
+                                .any(|hash| hash.as_str() == Some(&trimmed_hash))
+                        });
+                let should_update = retired_site_policy
+                    || matches!(tracked_hash, Some(recorded_hash) if recorded_hash == current_hash && recorded_hash != template_hash);
 
                 if should_update {
                     files_to_write.push(ProjectMemoryWriteFile {
@@ -7128,6 +7143,47 @@ mod project_memory_bootstrap_tests {
         assert!(writes
             .iter()
             .all(|write| write.path != skill && write.path != sites));
+    }
+
+    #[test]
+    fn untracked_bundled_site_policies_are_retired_but_custom_rules_are_kept() {
+        let path = ".agents/skills/instafy-web-research/references/link-only-sites.json";
+        let current = load_project_memory_template_content(
+            PROJECT_MEMORY_TEMPLATE_FILES
+                .iter()
+                .find(|template| template.path == path)
+                .expect("policy template"),
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&current).unwrap()["sites"],
+            json!([])
+        );
+        for old in [
+            include_str!("../../runtime-agent/src/jobs/legacy/web-research-link-only-v1.json"),
+            include_str!("../../runtime-agent/src/jobs/legacy/web-research-link-only-v2.json"),
+            include_str!("../../runtime-agent/src/jobs/legacy/web-research-link-only-v3.json"),
+        ] {
+            let old = format!("\n{old}\n");
+            let writes = plan_project_memory_writes(&snapshot_with(&[(path, &old)]))
+                .expect("retire an untracked bundled copy");
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|write| write.path == path)
+                    .unwrap()
+                    .content,
+                current
+            );
+
+            let mut edited: Value = serde_json::from_str(&old).unwrap();
+            edited["sites"].as_array_mut().unwrap().push(json!({
+                "name": "Private policy", "match": ["restricted.example"], "kind": "no-agents"
+            }));
+            let edited = edited.to_string();
+            let writes = plan_project_memory_writes(&snapshot_with(&[(path, &edited)]))
+                .expect("preserve a customized policy");
+            assert!(writes.iter().all(|write| write.path != path));
+        }
     }
 
     #[test]

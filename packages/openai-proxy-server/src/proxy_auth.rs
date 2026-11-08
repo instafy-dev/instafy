@@ -13,6 +13,9 @@ pub struct ProxyTokenValidator {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ProxyClaims {
+    /// Controller-derived capability; absent on legacy and non-job grants.
+    #[serde(default)]
+    pub native_web_search: bool,
     #[serde(default, rename = "aud")]
     pub _aud: Option<String>,
     #[serde(default, rename = "iss")]
@@ -151,6 +154,7 @@ mod tests {
         let mut bound = controller_claims();
         bound["job_id"] = json!("44444444-4444-4444-8444-444444444444");
         bound["lease_attempt"] = json!(2);
+        bound["native_web_search"] = json!(true);
         let claims = validator
             .authenticate(&bearer(&bound))
             .expect("a job token is accepted");
@@ -159,6 +163,7 @@ mod tests {
             Some("44444444-4444-4444-8444-444444444444")
         );
         assert_eq!(claims.lease_attempt, Some(2));
+        assert!(claims.native_web_search);
         assert_eq!(
             claims.run_id.as_deref(),
             Some("33333333-3333-4333-8333-333333333333")
@@ -170,6 +175,7 @@ mod tests {
             .expect("a legacy token is still accepted");
         assert_eq!(claims.job_id, None);
         assert_eq!(claims.lease_attempt, None);
+        assert!(!claims.native_web_search);
         assert_eq!(
             claims.run_id.as_deref(),
             Some("33333333-3333-4333-8333-333333333333")

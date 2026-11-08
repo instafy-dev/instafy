@@ -577,6 +577,7 @@ fn issue_proxy_token_with_claims(
     credential_id: Option<&str>,
 ) -> String {
     let claims = ProxyClaims {
+        native_web_search: false,
         _aud: Some("proxy".to_string()),
         _iss: None,
         project_id: project_id.to_string(),

@@ -41,7 +41,7 @@ export const LINK_ONLY_PLACES: readonly string[] = [path.join("references", LINK
 export const BUNDLED_LINK_ONLY_SITES: unknown = bundledLinkOnlySites;
 
 /**
- * A listed site an address is on: `kind` is what its terms bar ("no-agents": AI agents and automated access, so it is
+ * A listed site an address is on: `kind` is what the configured policy restricts ("no-agents": AI agents and automated access, so it is
  * never fetched; "no-reuse": copying, so it is read but not reused), `via` names the wrappers (translator, cache,
  * archive) it was found through.
  */
@@ -84,7 +84,7 @@ export function defaultSkillRoots(cwd: string, env: NodeJS.ProcessEnv): string[]
 }
 
 /** One skill's copy of the list, or why it is left out. Never echoes the file's content. */
-function readLinkOnlyCopy(file: string): { data: unknown } | { warning: string } | null {
+function readLinkOnlyCopy(file: string, retired: ReadonlySet<string>): { data: unknown } | { warning: string } | null {
   let real: string;
   try {
     real = fs.realpathSync(file);
@@ -97,7 +97,10 @@ function readLinkOnlyCopy(file: string): { data: unknown } | { warning: string }
     if (stat.size > MAX_LINK_ONLY_BYTES) {
       return { warning: `${file} is larger than ${MAX_LINK_ONLY_BYTES} bytes and was ignored; the bundled list still applies` };
     }
-    return { data: JSON.parse(fs.readFileSync(real, "utf8")) as unknown };
+    const text = fs.readFileSync(real, "utf8");
+    // Retire only byte-identical shipped defaults, never a user-edited policy.
+    if (retired.has(sha256(text.trim()))) return null;
+    return { data: JSON.parse(text) as unknown };
   } catch (error) {
     const why = error instanceof SyntaxError ? "is not valid JSON" : "could not be read";
     return { warning: `${file} ${why} and was ignored; the bundled list still applies` };
@@ -115,6 +118,10 @@ export function loadLinkOnlyGuard(
   bundled: unknown = BUNDLED_LINK_ONLY_SITES,
   command = "`instafy web read`",
 ): LinkOnlyGuard {
+  const retired = new Set(
+    (bundled && typeof bundled === "object" && "retiredDefaultSha256" in bundled && Array.isArray(bundled.retiredDefaultSha256)
+      ? bundled.retiredDefaultSha256 : []).filter((value): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value)),
+  );
   const additions: Array<{ data: unknown; source: string }> = [];
   const warnings: string[] = [];
   const seen = new Set<string>();
@@ -137,7 +144,7 @@ export function loadLinkOnlyGuard(
         }
         if (seen.has(real)) continue;
         seen.add(real);
-        const copy = readLinkOnlyCopy(file);
+        const copy = readLinkOnlyCopy(file, retired);
         if (!copy) continue;
         if ("warning" in copy) warnings.push(copy.warning);
         else additions.push({ data: copy.data, source: file });
@@ -220,7 +227,7 @@ export function noReuseSite(urls: string[], guard: LinkOnlyGuard): LinkOnlySite 
   return hits.some((hit) => linkOnly.barsAgents(hit)) ? null : (hits[0] ?? null);
 }
 
-/** "Booking.com is link-only (terms bar AI agents); this address is its copy on the Wayback Machine" */
+/** Includes the configured reason and any wrapper provenance. */
 export function linkOnlyMessage(site: LinkOnlySite): string {
   const copy = site.via.length ? `; this address is its copy on ${site.via.join(", then ")}` : "";
   return `${site.name} is link-only (${site.reason})${copy}`;

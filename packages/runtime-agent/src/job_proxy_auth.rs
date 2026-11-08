@@ -90,6 +90,8 @@ struct GrantScope {
     lease_attempt: i32,
     run_id: Option<Uuid>,
     credential_id: Option<Uuid>,
+    #[serde(default)]
+    native_web_search: bool,
     agent_handle: Option<String>,
     agent_display_name: Option<String>,
     agent_description: Option<String>,
@@ -144,6 +146,12 @@ impl Drop for JobProxyAuthGuard {
 }
 
 impl JobProxyAuth {
+    /// The controller's job-bound grant advertises provider-hosted retrieval. The proxy verifies
+    /// its signature and the stored ChatGPT credential again before forwarding any search tool.
+    pub(crate) fn allows_native_web_search(&self) -> bool {
+        self.scope.native_web_search && self.scope.credential_id.is_some()
+    }
+
     pub fn new(
         client: Arc<ControllerClient>,
         registration: &Registration,
@@ -270,7 +278,13 @@ impl JobProxyAuth {
             let replacement = refreshed
                 .map_err(|error| io::Error::other(error.to_string()))
                 .and_then(|envelope| {
-                    let (url, claims, grant) = parse_grant(&envelope)?;
+                    let (url, mut claims, grant) = parse_grant(&envelope)?;
+                    // A rolling controller upgrade may first advertise search on renewal. Keep
+                    // this job's initial tool policy (off) without rejecting an otherwise equal
+                    // grant. Withdrawal from a job that started with search still fails closed.
+                    if !self.scope.native_web_search {
+                        claims.scope.native_web_search = false;
+                    }
                     if url != self.url || claims.scope != self.scope {
                         return Err(invalid_grant(
                             "renewed job proxy grant changed its boundary",
@@ -451,6 +465,10 @@ mod tests {
 
     impl Fixture {
         async fn new() -> Self {
+            Self::with_native_search(None).await
+        }
+
+        async fn with_native_search(native_search: Option<bool>) -> Self {
             let mock = Arc::new(MockController {
                 reply: StdMutex::new((StatusCode::OK, Value::Null)),
                 requests: StdMutex::new(Vec::new()),
@@ -478,11 +496,14 @@ mod tests {
                 "lease_attempts": 1,
             }))
             .unwrap();
-            let initial = envelope(
+            let mut initial = envelope(
                 &job,
                 registration.runtime_id,
                 now + chrono::Duration::seconds(1800),
             );
+            if let Some(enabled) = native_search {
+                change_claim(&mut initial, "native_web_search", json!(enabled));
+            }
             job.proxy = Some(initial.clone());
             *mock.reply.lock().unwrap() = (StatusCode::OK, serde_json::to_value(initial).unwrap());
             let signal = JobCancelSignal::new();
@@ -591,6 +612,42 @@ mod tests {
         assert!(!debug.contains(&fixture.job.proxy.as_ref().unwrap().token));
         assert!(!debug.contains("test-spawn-time-agent"));
         assert!(!debug.contains("proxy.example.invalid"));
+    }
+
+    #[tokio::test]
+    async fn native_search_uses_only_the_job_grant_and_defaults_off() {
+        let fixture = Fixture::new().await;
+        assert!(!fixture.auth.allows_native_web_search());
+        for (claim, credential, expected) in [
+            (false, true, false),
+            (true, true, true),
+            (true, false, false),
+        ] {
+            let mut job = fixture.job.clone();
+            job.payload = json!({"metadata": {"native_web_search": true, "nativeWebSearch": true}});
+            if !credential {
+                job.credential_id = None;
+            }
+            let mut grant = envelope(
+                &job,
+                fixture.registration.runtime_id,
+                *fixture.clock.lock().unwrap() + chrono::Duration::seconds(1800),
+            );
+            change_claim(&mut grant, "native_web_search", json!(claim));
+            job.proxy = Some(grant);
+            let (auth, _guard) = JobProxyAuth::with_clock(
+                fixture.auth.client.clone(),
+                &fixture.registration,
+                &job,
+                None,
+                {
+                    let clock = fixture.clock.clone();
+                    Arc::new(move || *clock.lock().unwrap())
+                },
+            )
+            .unwrap();
+            assert_eq!(auth.allows_native_web_search(), expected);
+        }
     }
 
     #[tokio::test]
@@ -815,6 +872,28 @@ mod tests {
                 "accepted changed {key}"
             );
             assert!(fixture.signal.is_canceled());
+        }
+    }
+
+    #[tokio::test]
+    async fn renewal_keeps_the_initial_search_policy_across_controller_upgrades() {
+        for (initial, renewed, accepted) in [
+            (None, true, true),
+            (Some(false), true, true),
+            (Some(true), true, true),
+            (Some(true), false, false),
+        ] {
+            let fixture = Fixture::with_native_search(initial).await;
+            fixture.advance(1740);
+            let mut replacement = fixture.replacement();
+            change_claim(&mut replacement, "native_web_search", json!(renewed));
+            fixture.reply(replacement);
+            assert_eq!(fixture.auth.resolve().await.is_ok(), accepted);
+            assert_eq!(
+                fixture.auth.allows_native_web_search(),
+                initial.unwrap_or(false)
+            );
+            assert_eq!(fixture.signal.is_canceled(), !accepted);
         }
     }
 

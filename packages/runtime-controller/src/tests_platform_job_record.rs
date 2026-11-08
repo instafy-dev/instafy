@@ -1318,6 +1318,7 @@ async fn verify_proxy_job_token_rejects_forged_expired_wrong_audience_and_unboun
             Some(ProxyJobBinding {
                 job_id: platform_job,
                 lease_attempt: 2,
+                native_web_search: false,
             }),
             None,
             None,

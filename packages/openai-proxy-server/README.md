@@ -154,21 +154,24 @@ Leases without `pinnedModel` (bring-your-own API keys, ChatGPT logins, and lease
 controller that predates the field) forward client tools unchanged, hosted ones included, with
 one exception below.
 
-**No lease forwards OpenAI's hosted web search**, pinned or not: a tool of type `web_search`,
-`web_search_preview` or one of their dated forms, on its own or inside a namespace, in `tools` or
-in a tool-carrying input item, is dropped with reason `hosted`. Web search is off for every kind of
-AI (Lite, own keys and ChatGPT logins) because Octo searches only through Instafy's own commands,
-which keep the web-research skill's link-only sites link-only and cap searches per turn; OpenAI's
-search can do neither. The runtime also sets Codex's web search to disabled on every lane. The
-default tools the proxy gives a ChatGPT login's request that keeps none of its own no longer
-include web search (`CODEX_ENABLE_WEB_SEARCH` is ignored), and the filter runs again on the tools
-the request finally carries.
+**Hosted web search requires an onboarded ChatGPT job.** A controller-signed, job-bound
+`native_web_search` capability enables `web_search`, preview and dated variants only when the
+proxy resolves that job's BYOC credential to ChatGPT tokens with no model pin. The controller
+derives the capability from the live stored credential kind on lease and renewal, never request
+metadata. Missing/legacy grants, own API keys, pinned or unpinned managed credentials, static
+proxy credentials and session grants remain search-disabled. These checks cover nested namespaces,
+`tools`, `additional_tools` and `tool_search_output`; the final default-tool list is filtered too.
+The proxy does not inject search into requests that omit it (`CODEX_ENABLE_WEB_SEARCH` remains
+ignored). Ordinary authorized runtime turns can offer hosted search; browser-control and bounded
+turns keep their existing restrictions. Provider-hosted search is separate from Instafy's direct
+access safeguards, optional user site policies and CLI search allowance; Instafy supplies no curated
+website denylist. Subscription quota and availability remain provider-owned.
 
 With controller integration, static proxy credentials (`OPENAI_API_KEY` or `auth.json`) serve
 the platform lane: managed runs, whose controller-signed job tokens carry a `run_id` and no
 `credential_id`. A job token also names the job and lease attempt it was minted for (`job_id`
-and `lease_attempt`) for the controller's usage metering; the proxy accepts tokens with or
-without them and does not use them yet.
+and `lease_attempt`) for the controller's usage metering. The proxy still accepts legacy tokens
+without that binding for ordinary requests, but native search requires it.
 Set `PROXY_PINNED_MODEL` to the controller's `MANAGED_AI_MODEL_ID` and those
 runs get exactly the pinned-lease policy above. A controller-signed token with neither a
 `credential_id` nor a `run_id` (the agent-login and runtime-register session envelopes) is not a
@@ -178,13 +181,30 @@ every credential-less token earlier, with `proxy token missing valid credential_
 controller and never pinned by the setting. In standalone mode, without a controller, the proxy
 checks no token and its static credentials serve every request unpinned. Without the setting managed
 runs are not pinned: they keep the requested model, speech, transcription and every client tool,
-hosted ones included, and the first one logs a warning that says so.
+hosted ones other than web search included, and the first one logs an unpinned-lane warning.
 A proxy without static credentials ignores the setting. The runtime compose files
 (`docker/docker-compose.runtime.provider.yml` and `docker/docker-compose.runtime.yml`) set it on
 the sidecar from the environment that runs `docker compose`, which on a provider host is the
 provider service's: `PROXY_PINNED_MODEL` there, or else `MANAGED_AI_MODEL_ID`; an explicitly
 empty `PROXY_PINNED_MODEL` means no pin. That entry overrides the sidecar's env file, so a value
 in `proxy-credential-lease.env` has no effect.
+
+### Native standalone search
+
+Codex Responses Lite models use the native `web.run` extension instead of a hosted Responses
+`web_search` tool. `POST /v1/alpha/search` forwards its JSON request to the onboarded ChatGPT
+provider's sibling `alpha/search` endpoint, using the same signed-job capability and resolved
+ChatGPT-only credential checks. Static/managed credentials, API keys and missing capabilities
+are refused. No caller URL, authorization header or account-routing header reaches the provider.
+
+The proxy preserves the search response, including public results, opaque output and future
+fields. It uses the existing model connection/read-silence and response-byte limits; dropping
+the response cancels its upstream body. A rejected expired credential can be renewed once by
+the controller; other provider failures use the existing redacted error and retry-hint handling.
+Codex owns transient retries. Native search diagnostics identify each actual attempt with
+`wireApi: "search"`; completed search has **unknown token usage**, not zero. This route does not
+use managed credit settlement. ChatGPT entitlement/quota are provider-owned and must not be
+inferred from API web-search prices.
 
 ### Tool controls
 

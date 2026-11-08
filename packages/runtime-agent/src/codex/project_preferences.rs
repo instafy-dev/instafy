@@ -202,9 +202,12 @@ mod tests {
         let usage = TurnStartTokenUsage::default();
         let gate = RequiredExecutionGate::default();
         let run = RunInstructions::default();
+        let auth = codex_login::AuthManager::from_auth_for_testing(
+            codex_login::CodexAuth::from_api_key("inert"),
+        );
         // The run's own instructions are always there; preferences only with a project.
         assert_eq!(
-            codex_extension_registry(&usage, &gate, &run, None)
+            codex_extension_registry(&usage, &gate, &run, None, auth.clone())
                 .context_contributors()
                 .len(),
             1
@@ -215,7 +218,8 @@ mod tests {
                 &usage,
                 &gate,
                 &run,
-                Some((Uuid::new_v4(), workspace.path()))
+                Some((Uuid::new_v4(), workspace.path())),
+                auth,
             )
             .context_contributors()
             .len(),
