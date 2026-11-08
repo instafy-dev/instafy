@@ -292,6 +292,23 @@ describe("persisted run stop notice", () => {
       expect(controls!.canContinue(gapStop)).toBe(false);
     });
 
+    // The copy of a hand-back this page sent names only the browser turn it
+    // hands back, until the controller's record arrives: its words are
+    // Studio's, never a request to send again in the person's name.
+    it("never sends a hand-back's own words as the request", async () => {
+      const sentCopy: ChatMessage = {
+        ...handBack, timestamp: Date.now() - 40 * 60_000,
+        metadata: { runId: "run-3", continuesFromBrowserJob: "job-browser" },
+      };
+      const gapStop = stopOf("run-3", "job-build", Date.now() - 39 * 60_000);
+      submit.mockResolvedValue(true);
+      await render({ messages: [asked0, card, browserTurn, browserStep, sentCopy, gapStop], resendHandBack });
+      expect(controls!.canContinue(gapStop)).toBe(false);
+      await act(async () => { await controls!.onContinue(gapStop); });
+      expect(submit).not.toHaveBeenCalled();
+      expect(resendHandBack).not.toHaveBeenCalled();
+    });
+
     // Continue sends the request again, every turn of it: an Undo of any of
     // them (here the turn that posted the browser card) is the person taking
     // it back, as the runtime reads it (`stopped_requests`).

@@ -1,7 +1,7 @@
 import { useCallback, useRef } from "react";
 import { didSendFailForPromptSentFromThisPage } from "../../../conversations/sentPromptRegistry";
 import type { ChatMessage } from "../types";
-import { readBrowserHandBackOf } from "./browserHandBack";
+import { isBrowserNoticePrompt, readBrowserHandBackOf } from "./browserHandBack";
 import {
   BROWSER_CONTINUES_RUN_METADATA_KEY,
   browserRequestFromMessage,
@@ -151,13 +151,15 @@ function requestTrail(messages: readonly ChatMessage[], prompt: ChatMessage): {
 
 /**
  * Whether a message's words are the person's own, so they can be sent again
- * in their name: not the line Studio wrote for a site's Ask Octo from the
- * page's own words (`siteIntent`, which its turn reads as page data only), nor
- * an answer the controller wrote from Octo's question (`userInputRequestId`),
- * as the runtime reads neither as theirs (`reads_as_persons_own`).
+ * in their name: not a prompt Studio sent for Octo (a hand-back, a card's
+ * browser turn, a press of Let Octo continue), nor the line Studio wrote for a
+ * site's Ask Octo from the page's own words (`siteIntent`, which its turn
+ * reads as page data only), nor an answer the controller wrote from Octo's
+ * question (`userInputRequestId`), as the runtime reads none of them as theirs
+ * (`is_person_message`, `reads_as_persons_own`).
  */
 function inPersonsOwnWords(request: ChatMessage): boolean {
-  return !promptRecords(request).some((record) =>
+  return !isBrowserNoticePrompt(request) && !isLetOctoContinuePrompt(request) && !promptRecords(request).some((record) =>
     record["siteIntent"] !== undefined || record["userInputRequestId"] !== undefined);
 }
 
