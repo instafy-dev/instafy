@@ -5,6 +5,7 @@ import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import { afterAll, describe, expect, it } from "vitest";
 import {
@@ -16,7 +17,7 @@ import {
   staticThumbnail,
   thumbnailBudgetMs,
 } from "../src/preview-thumbnail.js";
-import { LINK_ONLY_FILE, LINK_ONLY_SCHEMA, linkOnlySite } from "../src/web-read.js";
+import { LINK_ONLY_FILE, LINK_ONLY_SCHEMA, linkOnlySite, loadLinkOnlyGuard } from "../src/web-read.js";
 import {
   classifyRequest,
   cleanDescription,
@@ -32,7 +33,11 @@ import {
   type RequestRules,
 } from "../src/site-check.js";
 
+const TEST_POLICY = JSON.parse(fs.readFileSync(fileURLToPath(new URL("../../browser-action-policy/test/link-only-policy.json", import.meta.url)), "utf8"));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-preview-thumbnail-"));
+const policyFile = path.join(tmp, ".agents", "skills", "configured", "references", LINK_ONLY_FILE);
+fs.mkdirSync(path.dirname(policyFile), { recursive: true });
+fs.writeFileSync(policyFile, JSON.stringify(TEST_POLICY));
 const servers: Array<http.Server | net.Server> = [];
 const sockets = new Set<net.Socket>();
 afterAll(async () => {
@@ -126,6 +131,14 @@ describe("what a capture or check may load", () => {
   const linkOnly = loadCaptureLinkOnly(tmp, {});
   const rules: RequestRules = { direct: [site], offSite: "proxy", linkOnly };
 
+  it("has no platform site exclusions but keeps network guards", () => {
+    const noRestrictions = { ...rules, linkOnly: loadLinkOnlyGuard([]) };
+    for (const url of ["https://www.booking.com/x", "https://www.amazon.com/x", "wss://www.nike.com/socket"]) {
+      expect(classifyRequest(url, noRestrictions)).toEqual({ kind: "proxy" });
+    }
+    expect(classifyRequest("http://169.254.169.254/", noRestrictions).kind).toBe("blocked");
+  });
+
   it("loads the site's own origin directly, its WebSockets included, and in-page data", () => {
     expect(linkOnly).not.toBeNull();
     expect(classifyRequest(`${site}/app.js`, rules)).toEqual({ kind: "direct" });
@@ -161,7 +174,7 @@ describe("what a capture or check may load", () => {
     expect(classifyRequest("https://example.org:443/a", rules)).toEqual({ kind: "proxy" });
   });
 
-  it("blocks a site whose terms bar reusing its content too, which readers may read: the picture is kept and shown", () => {
+  it("blocks a site configured to restrict reuse: a captured picture would be kept and shown", () => {
     const skills = path.join(tmp, "reuse-space", ".agents", "skills");
     const file = path.join(skills, "instafy-web-research", "references", LINK_ONLY_FILE);
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -323,7 +336,7 @@ describe("without a browser: the page's own og:image, on its own origin only", (
 
   it("is what a capture falls back to when no browser engine is here", async () => {
     const port = await serve({ "/": { body: `<meta property="og:image" content="/og.png">` }, "/og.png": { type: "image/png", body: pngOf(640, 400) } });
-    const result = await captureSiteThumbnail({ port, path: "/", env: { INSTAFY_SHARED_BROWSER_PLAYWRIGHT_PATH: "/definitely/not/here" }, globalRoots: [] });
+    const result = await captureSiteThumbnail({ cwd: tmp, port, path: "/", env: { INSTAFY_SHARED_BROWSER_PLAYWRIGHT_PATH: "/definitely/not/here" }, globalRoots: [] });
     expect(result).toMatchObject({ ok: true, thumbnail: { source: "og_image" } });
   });
 });
@@ -392,7 +405,7 @@ describe.skipIf(!browserOk)("with a browser: the site's own page", () => {
 
   it("a page with its own ready mark is pictured once it says it is drawn, not when its network is quiet", { timeout: 120_000 }, async () => {
     const port = await serve({ "/": { body: drawsLater(4_000) } });
-    const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, budgetMs: 30_000 });
+    const result = await captureSiteThumbnail({ cwd: tmp, port, path: "/", env: browserEnv, budgetMs: 30_000 });
     expect(result.ok, JSON.stringify(result)).toBe(true);
     if (!("thumbnail" in result)) return;
     expect(result.thumbnail.description).toBe("Trip · 3 days · 10 places");
@@ -402,7 +415,7 @@ describe.skipIf(!browserOk)("with a browser: the site's own page", () => {
     const port = await serve({ "/": { body: drawsLater(9_000) } });
     // The usual budget alone ends before the page is drawn; the mark gives it longer. (The budget also covers the
     // browser's start, so it leaves a slow machine a few seconds to reach the page.)
-    const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, budgetMs: 6_000, readyWaitMs: 30_000 });
+    const result = await captureSiteThumbnail({ cwd: tmp, port, path: "/", env: browserEnv, budgetMs: 6_000, readyWaitMs: 30_000 });
     expect(result.ok, JSON.stringify(result)).toBe(true);
     if (!("thumbnail" in result)) return;
     expect(result.thumbnail.description).toBe("Trip · 3 days · 10 places");
@@ -410,7 +423,7 @@ describe.skipIf(!browserOk)("with a browser: the site's own page", () => {
 
   it("a page that never says it is drawn gets no picture, rather than a half-drawn one", { timeout: 120_000 }, async () => {
     const port = await serve({ "/": { body: drawsLater(null) } });
-    const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, budgetMs: 6_000, readyWaitMs: 9_000 });
+    const result = await captureSiteThumbnail({ cwd: tmp, port, path: "/", env: browserEnv, budgetMs: 6_000, readyWaitMs: 9_000 });
     expect(result).toMatchObject({ ok: false, status: "skipped", reason: expect.stringMatching(/^the page still said it was drawing after \d+ s$/) });
   });
 
@@ -448,12 +461,12 @@ describe.skipIf(!browserOk)("with a browser: the site's own page", () => {
 <script>document.querySelector('meta[name="description"]').setAttribute('content',
   'Visit notes in ' + (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark mode' : 'light mode'));</script></body>`;
     const port = await serve({ "/": { body: page(true) }, "/light": { body: page(false) } });
-    const follows = await captureSiteThumbnail({ port, path: "/", env: browserEnv, budgetMs: 30_000 });
+    const follows = await captureSiteThumbnail({ cwd: tmp, port, path: "/", env: browserEnv, budgetMs: 30_000 });
     expect(follows.ok, JSON.stringify(follows)).toBe(true);
     if (!("thumbnail" in follows)) return;
     expect(follows.thumbnail.description).toBe("Visit notes in dark mode");
     expect(await brightness(follows.thumbnail.image)).toBeLessThan(0.3);
-    const lightOnly = await captureSiteThumbnail({ port, path: "/light", env: browserEnv, budgetMs: 30_000 });
+    const lightOnly = await captureSiteThumbnail({ cwd: tmp, port, path: "/light", env: browserEnv, budgetMs: 30_000 });
     expect(lightOnly.ok, JSON.stringify(lightOnly)).toBe(true);
     if (!("thumbnail" in lightOnly)) return;
     expect(await brightness(lightOnly.thumbnail.image)).toBeGreaterThan(0.8);
@@ -475,7 +488,7 @@ describe.skipIf(!browserOk)("with a browser: the site's own page", () => {
 <img src="http://public.example/pic.png"></body>`,
         },
       });
-      const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, proxyServer, budgetMs: 60_000 });
+      const result = await captureSiteThumbnail({ cwd: tmp, port, path: "/", env: browserEnv, proxyServer, budgetMs: 60_000 });
       expect(result.ok, JSON.stringify(result)).toBe(true);
       if (!("thumbnail" in result)) return;
       expect(sniffImage(result.thumbnail.image)).toEqual({ contentType: "image/jpeg", width: 640, height: 400 });
@@ -511,7 +524,7 @@ describe.skipIf(!browserOk)("with a browser: the site's own page", () => {
         },
         "/to-booking.png": { status: 302, body: "", headers: { location: "http://www.booking.com/logo.png" } },
       });
-      const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, proxyServer, budgetMs: 60_000 });
+      const result = await captureSiteThumbnail({ cwd: tmp, port, path: "/", env: browserEnv, proxyServer, budgetMs: 60_000 });
       expect(result.ok, JSON.stringify(result)).toBe(true);
       if (!("thumbnail" in result)) return;
       // Each redirect was followed up to Instafy's own gate, which refused it: nothing reached the egress proxy.
@@ -532,7 +545,7 @@ describe.skipIf(!browserOk)("with a browser: the site's own page", () => {
       "/": { body: `<!doctype html><title>Copy</title><body style="background:#e8f0e6"><h1>Copy</h1><img src="/logo.png"></body>` },
       "/logo.png": { status: 302, body: "", headers: { location: "https://web.archive.org/web/2024/https://www.booking.com/logo.png" } },
     });
-    const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, proxyServer, budgetMs: 60_000 });
+    const result = await captureSiteThumbnail({ cwd: tmp, port, path: "/", env: browserEnv, proxyServer, budgetMs: 60_000 });
     expect(result).toMatchObject({ ok: false, status: "skipped", reason: expect.stringMatching(/Booking\.com/) });
   });
 
@@ -551,7 +564,7 @@ describe.skipIf(!browserOk)("with a browser: the site's own page", () => {
     const before = process.env[forced];
     process.env[forced] = "1";
     try {
-      const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, proxyServer, budgetMs: 60_000 });
+      const result = await captureSiteThumbnail({ cwd: tmp, port, path: "/", env: browserEnv, proxyServer, budgetMs: 60_000 });
       expect(result.ok, JSON.stringify(result)).toBe(true);
       expect(otherSeen).toEqual([]);
       expect(proxied).toContain("GET http://public.example/to-local");
@@ -573,7 +586,7 @@ describe.skipIf(!browserOk)("with a browser: the site's own page", () => {
     servers.push(hung);
     const port = (hung.address() as { port: number }).port;
     const started = Date.now();
-    const result = await captureSiteThumbnail({ port, path: "/", env: browserEnv, budgetMs: 3_000 });
+    const result = await captureSiteThumbnail({ cwd: tmp, port, path: "/", env: browserEnv, budgetMs: 3_000 });
     expect(result).toMatchObject({ ok: false, status: "failed" });
     expect(Date.now() - started).toBeLessThan(60_000);
   });

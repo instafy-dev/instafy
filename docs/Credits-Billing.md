@@ -196,11 +196,20 @@ The tool filter follows the pin, like the model and the audio refusal, not the l
 platform lane is ever pinned, and a user's own key or ChatGPT login is never pinned. The pin needs
 both a controller and a proxy that know `pinnedModel`. Either can be updated first: until both
 are, requests keep the model they ask for. This is separate from the key rollout order in the
-next paragraph. OpenAI's hosted web search is off on every lease, pinned or not, and on every
-runtime lane, for Lite, own keys and ChatGPT logins alike: Octo searches the web only through
-Instafy's own commands, which keep link-only sites link-only, so no turn is billed for OpenAI's
-search. Static proxy
-credentials serving managed turns get the same pin from `PROXY_PINNED_MODEL`, as described above.
+next paragraph. Native web search is available on ordinary turns using an onboarded ChatGPT
+account. The controller identifies that credential for the runtime, and the proxy independently
+requires an authenticated BYO lane with a leased ChatGPT credential. An unpinned lease alone
+does not qualify: managed, static and API-key connections still cannot forward hosted web
+search. Bounded browser and provider-tool turns keep their existing tool restrictions.
+Search on a ChatGPT connection uses that account's provider allowance; Instafy does not infer
+subscription quota consumption from token counts or charge its managed token credits for it.
+Native searches do not use the CLI search counters or direct-reader page budgets. Those limits,
+private-network checks, actual access refusals, explicit user site policies and browser permissions continue
+to apply to Instafy's own readers. Instafy supplies no curated website denylist.
+Codex selects the search transport for the model: Responses Lite uses the proxy's native search
+route. Its provider response has no token-usage receipt, so search attempts are recorded separately
+with unknown usage; model token totals do not measure the account's complete search cost or quota.
+Static proxy credentials serving managed turns get the same pin from `PROXY_PINNED_MODEL`, as described above.
 
 The pricing envs are standard-tier rates, so the platform key also serves only OpenAI's standard
 service tier. `priority` costs about twice as much per token, `flex` and `scale` are priced apart,

@@ -30,6 +30,7 @@ import {
 } from "../src/web-search.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+const TEST_POLICY = JSON.parse(fs.readFileSync(path.resolve(here, "../../browser-action-policy/test/link-only-policy.json"), "utf8"));
 const FIXTURES = path.join(here, "fixtures", "web-search");
 const PROVIDERS_PATH = path.resolve(here, "../../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/search-providers.json");
 const cliBin = path.resolve(here, "..", "bin", "instafy.js");
@@ -74,6 +75,7 @@ function fixtureDeps(env: NodeJS.ProcessEnv, over: Partial<WebSearchDeps> = {}):
     now: () => clock,
     stateDir: path.join(base, "state"),
     skillRoots: [],
+    bundledLinkOnly: TEST_POLICY,
     env: { INSTAFY_WEB_FIXTURES: FIXTURES, ...env },
     cwd: tmp,
     ...over,
@@ -98,6 +100,7 @@ function transportDeps(env: NodeJS.ProcessEnv, transport: SearchTransport, over:
     now: () => clock,
     stateDir: path.join(base, "state"),
     skillRoots: [],
+    bundledLinkOnly: TEST_POLICY,
     env,
     cwd: tmp,
     ...over,
@@ -392,6 +395,7 @@ describe("searching with the space's own key (fixtures)", () => {
           now: Date.now,
           stateDir: path.join(base, "state"),
           skillRoots: [],
+    bundledLinkOnly: TEST_POLICY,
           env,
           cwd: tmp,
         },

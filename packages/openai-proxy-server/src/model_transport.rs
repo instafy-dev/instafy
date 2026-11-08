@@ -36,13 +36,17 @@ impl ModelTransportConfig {
     }
 
     pub(crate) fn http_client(&self) -> Result<reqwest::Client> {
+        self.http_client_builder()
+            .build()
+            .context("failed to create model HTTP client")
+    }
+
+    pub(crate) fn http_client_builder(&self) -> reqwest::ClientBuilder {
         reqwest::Client::builder()
             .connect_timeout(self.connect_timeout)
             // A successful read resets this timer. Do not add a total `.timeout`: that
             // cuts off healthy long responses even while upstream is sending events.
             .read_timeout(self.read_timeout)
-            .build()
-            .context("failed to create model HTTP client")
     }
 }
 

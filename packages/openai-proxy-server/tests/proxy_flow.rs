@@ -234,6 +234,9 @@ struct UpstreamStub {
     audio: Arc<Mutex<Vec<String>>>,
     /// The body of each audio request that reached the provider, as sent.
     audio_bodies: Arc<Mutex<Vec<Vec<u8>>>>,
+    search_body_gate: Arc<tokio::sync::Notify>,
+    search_body_dropped: Arc<AtomicUsize>,
+    hold_search_body: Arc<std::sync::atomic::AtomicBool>,
 }
 
 async fn controller_lease_stub(
@@ -306,6 +309,7 @@ async fn controller_lease_stub(
                 "credentialId": credential_id,
                 "kind": "codex_auth_json",
                 "accessToken": BYO_CHATGPT_STUB_TOKEN,
+                "accountId": "chatgpt-account-stub",
                 "provider": "openai",
                 "defaultModel": "gpt-5.6-sol",
                 "leaseExpiresInSeconds": 60,
@@ -522,6 +526,7 @@ type Stack = (
 );
 
 /// Which proxy a stack runs.
+#[derive(Clone, Copy)]
 enum StackProxy<'a> {
     /// No static credentials (RemoteDynamic), the hosted sidecar.
     Dynamic,
@@ -594,6 +599,10 @@ async fn spawn_stack_with_service_tier_endpoints(
         Router::new()
             .route(UPSTREAM_RESPONSES_PATH, post(upstream_responses_stub))
             .route(UPSTREAM_CHATGPT_PATH, post(upstream_chatgpt_stub))
+            .route(
+                "/backend-api/codex/alpha/search",
+                post(native_search_tests::upstream_search_stub),
+            )
             .route("/v1/audio/speech", post(upstream_audio_stub))
             .route("/v1/audio/transcriptions", post(upstream_audio_stub))
             .with_state(upstream.clone()),
@@ -1587,16 +1596,10 @@ async fn the_proxy_default_tools_never_carry_web_search() -> Result<()> {
 
 #[tokio::test]
 #[serial]
-async fn web_search_never_reaches_openai_on_any_lease() -> Result<()> {
-    // OpenAI's hosted web search is off for every kind of AI: Lite (the
-    // managed lease, pinned, or self-hosted with PROXY_PINNED_MODEL), the
-    // platform lane before the pin reaches it, a person's own OpenAI key, a
-    // person's own ChatGPT login, and an operator's ChatGPT login. Octo
-    // searches only through Instafy's own command, which keeps link-only
-    // sites link-only; OpenAI's search cannot. Whatever shape the tool takes
-    // (codex's, the preview and dated types, inside a namespace) and wherever
-    // the request carries it (`tools`, `additional_tools`, the proxy's own
-    // default tools with CODEX_ENABLE_WEB_SEARCH set), it never goes upstream.
+async fn hosted_search_requires_a_verified_chatgpt_job_grant() -> Result<()> {
+    // Legacy grants deny search on every lane, including nested tools. A signed
+    // capability is necessary but insufficient: only resolved BYOC ChatGPT
+    // material may use it, never an API key or managed/static credentials.
     let _env = [
         EnvGuard::set("CODEX_ENABLE_WEB_SEARCH", Some("1")),
         EnvGuard::set("CODEX_INCLUDE_APPLY_PATCH_TOOL", None),
@@ -1624,6 +1627,7 @@ async fn web_search_never_reaches_openai_on_any_lease() -> Result<()> {
         "stream": false,
         "input": [
             { "type": "additional_tools", "role": "developer", "tools": tools },
+            { "type": "tool_search_output", "tools": tools },
             {
                 "type": "message",
                 "role": "user",
@@ -1674,36 +1678,77 @@ async fn web_search_never_reaches_openai_on_any_lease() -> Result<()> {
             &platform,
         ),
     ];
-    for (name, proxy, managed_pin, token) in lanes {
-        let (proxy_addr, _controller, upstream, _stack_env, _guards) =
-            spawn_stack(Some(MANAGED_STUB_KEY), managed_pin, false, proxy).await?;
-        let (status, body) = responses_with_tools_through_proxy(proxy_addr, token, &tools).await?;
-        assert_eq!(status, StatusCode::OK, "{name} tools: {body}");
-        let (status, body) =
-            post_through_proxy(proxy_addr, token, "/v1/responses", lite_input_only.clone()).await?;
-        assert_eq!(status, StatusCode::OK, "{name} Lite input: {body}");
-        let (status, body) = responses_through_proxy(proxy_addr, token, "gpt-5.6-sol").await?;
-        assert_eq!(status, StatusCode::OK, "{name} no tools: {body}");
-        let (status, body) = chat_through_proxy(proxy_addr, token).await?;
-        assert_eq!(status, StatusCode::OK, "{name} chat: {body}");
+    for (name, proxy, managed_pin, legacy_token) in lanes {
+        for enabled in [false, true] {
+            let token = if enabled {
+                let credential_id = if name == "own ChatGPT login" {
+                    Some(BYO_CHATGPT_CREDENTIAL_ID)
+                } else if name == "own OpenAI key" {
+                    Some(BYO_CREDENTIAL_ID)
+                } else {
+                    None
+                };
+                let mut claims = json!({"aud":"proxy", "iss":"runtime-controller", "sub":"proxy:project:runtime",
+                    "project_id":"11111111-1111-4111-8111-111111111111", "runtime_id":"22222222-2222-4222-8222-222222222222",
+                    "run_id":RUN_ID, "credential_id":credential_id, "exp":chrono::Utc::now().timestamp() + 300 });
+                claims["native_web_search"] = json!(true);
+                claims["job_id"] = json!("77777777-7777-4777-8777-777777777777");
+                claims["lease_attempt"] = json!(1);
+                encode(
+                    &Header::new(Algorithm::HS256),
+                    &claims,
+                    &EncodingKey::from_secret(SIGNING_SECRET.as_bytes()),
+                )?
+            } else {
+                legacy_token.to_string()
+            };
+            let token = token.as_str();
+            let allow_search = enabled && name == "own ChatGPT login";
+            let (proxy_addr, _controller, upstream, _stack_env, _guards) =
+                spawn_stack(Some(MANAGED_STUB_KEY), managed_pin, false, proxy).await?;
+            let (status, body) =
+                responses_with_tools_through_proxy(proxy_addr, token, &tools).await?;
+            assert_eq!(status, StatusCode::OK, "{name} tools: {body}");
+            let (status, body) =
+                post_through_proxy(proxy_addr, token, "/v1/responses", lite_input_only.clone())
+                    .await?;
+            assert_eq!(status, StatusCode::OK, "{name} Lite input: {body}");
+            let (status, body) = responses_through_proxy(proxy_addr, token, "gpt-5.6-sol").await?;
+            assert_eq!(status, StatusCode::OK, "{name} no tools: {body}");
+            let (status, body) = chat_through_proxy(proxy_addr, token).await?;
+            assert_eq!(status, StatusCode::OK, "{name} chat: {body}");
 
-        let bodies = upstream.bodies.lock().expect("body log").clone();
-        assert_eq!(bodies.len(), 4, "{name}: every request went upstream");
-        for (index, body) in bodies.iter().enumerate() {
-            for list in body_tool_lists(body) {
-                assert!(
-                    !carries_hosted_web_search(list),
-                    "{name}: request {index} sent web search upstream: {list}"
+            let bodies = upstream.bodies.lock().expect("body log").clone();
+            assert_eq!(bodies.len(), 4, "{name}: every request went upstream");
+            for (index, body) in bodies.iter().enumerate() {
+                for list in body_tool_lists(body) {
+                    assert!(
+                        !carries_hosted_web_search(list) || allow_search,
+                        "{name}: request {index} sent web search upstream: {list}"
+                    );
+                }
+            }
+            if allow_search {
+                assert_eq!(
+                    bodies[0]["tools"], tools,
+                    "authorized tools retain search settings"
+                );
+                assert_eq!(
+                    bodies[1]["input"][0]["tools"], tools,
+                    "additional tools retain search"
+                );
+                assert_eq!(
+                    bodies[1]["input"][1]["tools"], tools,
+                    "tool search output retains search"
                 );
             }
+            // Unrelated client tools survive on every lane.
+            assert_eq!(
+                bodies[0]["tools"][0]["name"], "exec_command",
+                "{name}: the client's own tool is forwarded"
+            );
         }
-        // The rest of the request's tools still go upstream: only web search is dropped.
-        assert_eq!(
-            bodies[0]["tools"][0]["name"], "exec_command",
-            "{name}: the client's own tool is forwarded"
-        );
     }
-
     Ok(())
 }
 
@@ -4625,3 +4670,6 @@ async fn chat_upstream_partial_usage_keeps_completed_stream_and_exact_chat_round
     );
     Ok(())
 }
+
+#[path = "proxy_flow/native_search_tests.rs"]
+mod native_search_tests;

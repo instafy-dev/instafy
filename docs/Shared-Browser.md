@@ -614,7 +614,7 @@ box, or typing into it with submit, when all of these hold
   (which page script handles, so it still asks);
 - its address has the page's own origin (scheme, host and port: another
   subdomain asks), is public (no loopback, private or local address), and it
-  is not on the link-only list (refused before any prompt, as always);
+  is not denied by an explicitly configured site policy (refused before any prompt);
 - the address it sends is not a risky address (sign-out, export or file
   format, a one-time link, an action address). That is the action with the
   form's entries as its query, as the browser builds it, so a hidden
@@ -970,11 +970,13 @@ which page it didn't reach, never that a site or page lacks it, and only steps
 the turn started). The
 "Finding a page" section, which the
 `instafy-web-research` skill points to (a research turn without the browser
-skill prints just that section with one command), says how every reader finds a
+skill prints just that section with one command), says how direct readers find a
 page: an address the person or a skill gave, a link on a page read (its links
 printed with its text), or the official site's home page (for reviews, a
-reviewer's own site), never a search engine or a guessed path (a turn that
-searches opens a result's page too, by the research skill's "Searching"); a
+reviewer's own site). Available native search is preferred for discovery;
+search-engine pages are not categorically blocked, while their access refusals
+and browser permissions still apply. Never invent a page path. A turn using
+CLI search opens the result's page too, by the research skill's "Searching"; a
 missing page's own site search; a page
 that fails (busy, blank or an
 error page such as a 504) sends the turn to the place's own site at once, in the
@@ -1054,12 +1056,14 @@ Browser has tabs of its own (see Personal-Browser.md).
   it on the page they chose when they asked for it."), a sign-in is refused
   before this in its own words, and a manual field handoff still says to stop
   at a sign-in or form and tell the person.
-- **Never a link-only site, in any tab.** A `no-agents` site on the
-  web-research skill's link-only list (its terms bar AI agents or automated
-  access; a site with no kind, or an unknown one, counts; runtime-agent embeds
-  the skill's `link-only-sites.json` into
-  the controller, with `@instafy/browser-action-policy`'s `linkOnly.js`, the
-  matcher `instafy web read` and the Personal Browser use too), or a
+- **Optional site policy, in every tab.** Instafy ships an empty `sites`
+  array in the web-research skill's `link-only-sites.json`, so no public site
+  is denied by a product-maintained list. Provider-native research follows
+  the provider's access policy. Shared Browser still enforces explicit
+  `no-agents` rules a space or self-hosted build configures; missing or unknown
+  kinds remain restrictive. Runtime-agent embeds the policy with
+  `@instafy/browser-action-policy`'s `linkOnly.js`, the matcher used by
+  `instafy web read` and Personal Browser. A site matching such a rule, or a
   translator's, cache's or archive's copy of one (the list's `wrappers`, such as
   `www-example-com.translate.goog` or `web.archive.org/web/…/<address>`), is
   never opened or read by Octo, in its own tabs and on the
@@ -1069,10 +1073,11 @@ Browser has tabs of its own (see Personal-Browser.md).
   count too; that copy can only add or make a site stricter (the strictest
   kind of every entry that matches wins), and a copy that is not a plain JSON
   file of the list is left out (`status` reports it in `linkOnlyListWarnings`)
-  while the bundled list still applies. A `no-reuse` site (its terms bar
-  copying its content, not reading it) is not refused; the web-research skill
-  says how its content may be used. `open_tab`, `navigate` and a link, form or
-  activation key that leads there are refused before any prompt, and a
+  while the bundled policy still applies. Unedited historical bundled copies
+  are retired when the workspace defaults are refreshed; customized rules
+  are preserved. A `no-reuse` rule permits reads while marking content for
+  restricted reuse. A `no-agents` rule refuses `open_tab`, `navigate` and a
+  link, form or activation key leading to that site before any prompt, and a
   redirect one of Octo's steps causes is stopped by the step's request guard
   before the request leaves the browser. Such a refusal ends that address, not
   the task: it tells Octo to go on with the maker's, venue's or reviewer's own
@@ -1095,8 +1100,8 @@ Browser has tabs of its own (see Personal-Browser.md).
   while it was read (a timed redirect, or a load the guard does not see, such
   as a back/forward cache restore) reports nothing, and the action feed names
   only the site of a link-only page. Octo can only take the tab elsewhere, or
-  close one of its own. Without the list, Octo opens, reads and does nothing
-  in any tab. The person's own browsing is unchanged.
+  close one of its own. A missing or malformed policy stops agent-driven
+  browsing; a valid empty policy does not. The person's own browsing is unchanged.
 - **No other windows.** A form step whose submission opens another window is
   refused before any prompt. A step of Octo's, in any tab, that opens another window
   (a `target="_blank"` link, a script) has that window's requests stopped
@@ -2864,8 +2869,9 @@ unless the policy is `"covered"`.
   follows a turn that read no page. The building turn cannot open the
   browser, so the browser turn reads what the request needs before it ends:
   each item's own page from the links it read and, for reviews, each
-  reviewer's own site, by its address or its own search box, since the turn has
-  no web search, as "Finding a page" says for every reader.
+  reviewer's own site, by an observed address, the site's search box or other
+  permitted discovery. A browser turn has no provider-hosted search tool;
+  "Finding a page" describes how to continue with its available browser.
   Right before the request it reads its part
   of it in plain words: the reading, every page the request needs, while what
   the request asks Octo to make is the building turn's part, from its finding
@@ -3081,8 +3087,7 @@ request Chromium gave up on itself (it navigated away or dropped a speculative
 connection) is not a failed destination and is not logged. At most 30 lines a
 minute are written; the next minute's first line says how many were left out. The per-origin plus
 one-shot confirmation policy above is the sensitive-site action policy for
-otherwise public sites; a future denylist may reduce prompt volume but is not
-an authorization substitute.
+otherwise public sites.
 
 ### Send page to Octo
 

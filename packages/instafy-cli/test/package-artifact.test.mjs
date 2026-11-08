@@ -20,6 +20,10 @@ const packageVersion = JSON.parse(
   readFileSync(path.join(packageRoot, "package.json"), "utf8"),
 ).version;
 
+const bundledSitePolicy = JSON.parse(readFileSync(path.join(
+  packageRoot, "../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json",
+), "utf8"));
+
 function run(command, args, cwd) {
   return execFileSync(command, args, {
     cwd,
@@ -152,6 +156,18 @@ test("npm artifact installs and runs without workspace dependencies", () => {
       run(process.execPath, [installedCli, "--version"], installDirectory).trim(),
       packageVersion,
     );
+    // Exercise the installed artifact's default policy without any network access.
+    assert.throws(() => execFileSync(process.execPath, [installedCli, "web", "read", "http://127.0.0.1/", "--json"], {
+      cwd: installDirectory, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, HOME: installDirectory, USERPROFILE: installDirectory, INSTAFY_SKILL_PACKS_DIR: "" },
+    }), (error) => {
+      assert.equal(error.status, 2);
+      const report = JSON.parse(error.stdout);
+      assert.equal(report.guards.linkOnly.sites, 0);
+      assert.equal(report.guards.linkOnly.wrappers, bundledSitePolicy.wrappers.length);
+      assert.equal(report.pages[0].code, "blocked_address");
+      return true;
+    });
     const installedHelp = run(
       process.execPath,
       [installedCli, "--help"],

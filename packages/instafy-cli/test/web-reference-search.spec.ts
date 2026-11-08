@@ -17,6 +17,7 @@ import {
 } from "../src/web-search.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+const TEST_POLICY = JSON.parse(fs.readFileSync(path.resolve(here, "../../browser-action-policy/test/link-only-policy.json"), "utf8"));
 const ANSWERS = path.join(here, "fixtures", "web-reference");
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-web-reference-"));
 const START = Date.parse("2026-10-27T09:00:00Z");
@@ -69,6 +70,7 @@ function deps(env: NodeJS.ProcessEnv, transport: SearchTransport, over: Partial<
     now: () => START,
     stateDir: path.join(base, "state"),
     skillRoots: [],
+    bundledLinkOnly: TEST_POLICY,
     env,
     cwd: tmp,
     ...over,

@@ -138,8 +138,9 @@ A member can **Present** a site whose page says it can share its view, and the o
 - **What the capture may load.** Only the site's own loopback origin directly. Every other request goes through the
   image's `browser-egress-proxy`, an instance of its own on a free loopback port: public addresses on ports 80 and
   443 only, connected to the address it checked. Another loopback port, `localhost` names, private, link-local,
-  CGNAT, metadata and reserved addresses, and every site on the link-only list (their translator, cache and archive
-  copies too) are blocked, WebSockets included: a `no-agents` site is never fetched, and a `no-reuse` site, which
+  CGNAT, metadata and reserved addresses are blocked, WebSockets included. Instafy's bundled site policy is
+  empty. If the workspace or a skill pack supplies explicit site rules, their translator, cache and archive copies
+  are checked too: a `no-agents` site is never fetched, and a `no-reuse` site, which
   `instafy web read` may read, is not loaded into a picture Instafy keeps and shows. Without the proxy binary nothing off the site's
   origin loads. A redirect is checked too: Playwright follows one without asking the request rules, so every
   connection off the site first passes Instafy's own gate in front of the egress proxy (local and link-local

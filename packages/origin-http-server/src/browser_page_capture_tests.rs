@@ -24,17 +24,14 @@ fn policy_script() -> String {
     )
 }
 
-/// The page reader runtime-agent installs: the policy scripts plus the
-/// link-only matcher and the web-research skill's list (see
-/// `runtime_agent::shared_browser::sent_page_capture_script`).
+/// The page reader with an explicitly configured restrictive policy. The
+/// production default has no denied sites; these cases exercise custom rules.
 fn reader_with_link_only_list() -> String {
     format!(
         "{}\n{}\nglobalThis.__instafyLinkOnlySites = {};",
         policy_script(),
         wrap(include_str!("../../browser-action-policy/linkOnly.js")),
-        include_str!(
-            "../../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"
-        ),
+        include_str!("../../browser-action-policy/test/link-only-policy.json"),
     )
 }
 

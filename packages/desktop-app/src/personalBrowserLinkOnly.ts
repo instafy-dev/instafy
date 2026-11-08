@@ -1,7 +1,7 @@
-// Link-only sites: sites whose terms limit what an agent may do with them.
-// Octo links to a "no-agents" site (its terms bar AI agents or automated
-// access) and never reads or drives it; a "no-reuse" site (its terms bar
-// copying, not reading) is not refused. The list is the instafy-web-research
+// Optional site policies for what an agent may read or drive. The shipped list is empty.
+// Octo links to a "no-agents" site (the configured policy restricts agent
+// access) and never reads or drives it; a "no-reuse" site (the configured policy restricts
+// reuse, not reading) is not refused. The list is the instafy-web-research
 // skill's own data (references/link-only-sites.json). The build bundles that
 // same file, the one runtime-agent embeds, so there is one source; Desktop
 // only enforces it, on every step the agent drives in the Personal Browser.
@@ -45,7 +45,7 @@ export type PersonalBrowserLinkOnlyGuard = {
 };
 
 /**
- * The guard for one copy of the list. A missing, malformed or empty list
+ * The guard for one copy of the list. A valid empty list imposes no site restrictions. Missing or malformed data
  * fails closed: the guard then refuses every web address.
  */
 export function createPersonalBrowserLinkOnlyGuard(data: unknown): PersonalBrowserLinkOnlyGuard {
@@ -87,7 +87,7 @@ export function personalBrowserLinkOnlyMessage(refusal: PersonalBrowserLinkOnlyR
   const copy = refusal.copy
     ? " This page says it is a copy of it."
     : refusal.via?.length ? ` This address is its copy on ${refusal.via.join(", then ")}.` : "";
-  return `${refusal.site} is link-only: its terms bar AI agents or automated access, so the agent never reads, opens or uses it.${copy} ${action} ` +
+  return `${refusal.site} is link-only: the configured site policy prevents the agent from reading, opening or using it.${copy} ${action} ` +
     "Go on with the maker's, venue's or reviewer's own site; give the person this link only if they asked for this site: " +
     "they may open it themselves and use Send page to Octo.";
 }

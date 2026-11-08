@@ -12,6 +12,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::Engine as _;
 use runtime_agent::codex::{CodexClient, CodexConfig, CodexRunOptions};
 use runtime_agent::job_cancel::JobCancelSignal;
 use runtime_agent::task_usage::{TaskUsage, UsagePhase};
@@ -22,6 +23,8 @@ const CHILD_MARKER: &str = "INSTAFY_PROXY_RETRY_TEST_CHILD";
 const API_KEY: &str = "inert-local-retry-test-key";
 const FINAL_TEXT: &str = "LOCAL_RETRY_OK";
 const STEP_TEXT: &str = "LOCAL_RETRY_STEP_DONE";
+const SEARCH_TEXT: &str =
+    "LOCAL_SEARCH_EVIDENCE: https://example.invalid/source reports a local fixture result.";
 const FINISHED_CALL_ID: &str = "call-local-finished";
 const PARTIAL_TEXT: &str = "LOCAL_CUT_SHORT_PARTIAL";
 const TOOL_CMD: &str = "printf x >> tool-count.txt; printf TOOL_APPLIED";
@@ -89,6 +92,7 @@ struct MockState {
     scenario: String,
     request_ready: PathBuf,
     requests: Mutex<Vec<Value>>,
+    search_requests: Mutex<Vec<Value>>,
     errors: Mutex<Vec<String>>,
     /// JSON-RPC methods the Personal Browser MCP endpoint received.
     mcp_methods: Mutex<Vec<String>>,
@@ -272,9 +276,13 @@ async fn responses(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if headers.get("authorization").and_then(|v| v.to_str().ok())
-        != Some(format!("Bearer {API_KEY}").as_str())
-    {
+    let authorization = headers.get("authorization").and_then(|v| v.to_str().ok());
+    let expected_auth = if has_native_search_grant(&state.scenario) {
+        has_job_grant_header(&headers)
+    } else {
+        authorization == Some(format!("Bearer {API_KEY}").as_str())
+    };
+    if !expected_auth {
         state.errors.lock().unwrap().push("unexpected auth".into());
         return StatusCode::UNAUTHORIZED.into_response();
     }
@@ -542,9 +550,33 @@ async fn responses(
             );
         }
         // A bounded browser turn only needs its tool inventory recorded; the parent checks it.
-        "personal_browser_tools" | "personal_browser_behind_proxy" => return answer(FINAL_TEXT),
+        "personal_browser_tools"
+        | "personal_browser_behind_proxy"
+        | "personal_browser_native_search" => return answer(FINAL_TEXT),
         // So does an ordinary turn whose config asks for web search.
-        "web_search_requested" => return answer(FINAL_TEXT),
+        "native_search_authorized" | "native_search_custom_provider" => {
+            if ordinal == 1 && offers_standalone_web_search(&body) {
+                let commands = json!({"search_query":[{"q":"local fixture source"}]});
+                return sse(if offers_namespaced_tool(&body, "web", "run") {
+                    json!({"type":"function_call", "call_id":"local-search",
+                        "namespace":"web", "name":"run", "arguments":commands.to_string()})
+                } else {
+                    json!({"type":"custom_tool_call", "call_id":"local-search", "name":"exec",
+                        "input":format!("const result = await tools.web__run({commands}); text(result);")})
+                });
+            }
+            if ordinal > 1 && !body["input"].to_string().contains(SEARCH_TEXT) {
+                state
+                    .errors
+                    .lock()
+                    .unwrap()
+                    .push("search output did not reach the next model request".into());
+            }
+            return answer(FINAL_TEXT);
+        }
+        "web_search_requested" | "native_search_routing" => {
+            return answer(FINAL_TEXT);
+        }
         "tool_once" => {
             let supplied_history = body["input"].to_string();
             if !supplied_history.contains("TOOL_APPLIED") {
@@ -576,6 +608,34 @@ async fn responses(
         StatusCode::from_u16(code).unwrap(),
         Json(json!({"error":{"message":"local scripted failure","type":"fixture_error","code":"fixture_error"}})),
     )
+        .into_response()
+}
+
+fn has_job_grant_header(headers: &HeaderMap) -> bool {
+    headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|header| {
+            header.starts_with("Bearer e30.") && header.ends_with(".inert-test-signature")
+        })
+}
+
+/// The provider-relative native search route must use the job's proxy credentials, too.
+async fn native_search(
+    State(state): State<Arc<MockState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if !authorized_native_search(&state.scenario) || !has_job_grant_header(&headers) {
+        state
+            .errors
+            .lock()
+            .unwrap()
+            .push("unauthorized native search".into());
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    state.search_requests.lock().unwrap().push(body);
+    Json(json!({"output":SEARCH_TEXT, "results":[{"url":"https://example.invalid/source"}]}))
         .into_response()
 }
 
@@ -727,6 +787,13 @@ fn offers_hosted_web_search(request: &Value) -> bool {
             .any(|item| item["type"] == "additional_tools" && carries(&item["tools"]))
 }
 
+fn offers_standalone_web_search(request: &Value) -> bool {
+    offers_namespaced_tool(request, "web", "run")
+        || offered_tool_names(request)
+            .iter()
+            .any(|name| name == "web__run")
+}
+
 /// The reply of a turn that changed no file on purpose: once the request asks
 /// for the runtime's no-change line, the reply ends with it.
 fn no_change_reply(body: &Value, reply: &str) -> String {
@@ -869,6 +936,8 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         codex_home.join("config.toml"),
         if web_search_requested {
             "cli_auth_credentials_store = \"file\"\nproject_doc_max_bytes = 0\nweb_search = \"live\"\n[features]\napps = false\nweb_search_request = true\nstandalone_web_search = true\nmulti_agent = false\n"
+        } else if scenario == "native_search_custom_provider" {
+            "cli_auth_credentials_store = \"file\"\nproject_doc_max_bytes = 0\n[model_providers.instafy_test]\nname = \"Custom Instafy proxy\"\nwire_api = \"responses\"\n"
         } else {
             "cli_auth_credentials_store = \"file\"\nproject_doc_max_bytes = 0\n[features]\napps = false\nweb_search_request = false\nmulti_agent = false\n"
         },
@@ -877,6 +946,7 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         scenario: scenario.to_string(),
         request_ready: temp.path().join("request-ready"),
         requests: Mutex::new(Vec::new()),
+        search_requests: Mutex::new(Vec::new()),
         errors: Mutex::new(Vec::new()),
         mcp_methods: Mutex::new(Vec::new()),
     });
@@ -885,6 +955,7 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
     stage_code_mode_host_beside_test_binary()?;
     let app = Router::new()
         .route("/v1/responses", post(responses))
+        .route("/v1/alpha/search", post(native_search))
         .route("/mcp", post(personal_browser_mcp))
         .route(
             "/v1/models",
@@ -933,7 +1004,14 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         .env("OPENAI_API_KEY", API_KEY)
         .env("CODEX_API_KEY", API_KEY)
         .env("CODEX_MODEL", test_model())
-        .env("CODEX_MODEL_PROVIDER", "openai")
+        .env(
+            "CODEX_MODEL_PROVIDER",
+            if scenario == "native_search_custom_provider" {
+                "instafy_test"
+            } else {
+                "openai"
+            },
+        )
         .env(
             "CODEX_ENABLE_WEB_SEARCH",
             if web_search_requested {
@@ -980,7 +1058,10 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         .stderr(Stdio::from(output));
     let personal_browser_scenario = matches!(
         scenario,
-        "personal_browser_tools" | "personal_browser_behind_proxy" | "personal_browser_proxied"
+        "personal_browser_tools"
+            | "personal_browser_behind_proxy"
+            | "personal_browser_proxied"
+            | "personal_browser_native_search"
     );
     let poison_proxy = if matches!(
         scenario,
@@ -1054,19 +1135,40 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         "mock fixture errors"
     );
     let requests = state.requests.lock().unwrap();
+    let standalone_search = authorized_native_search(scenario)
+        && requests.first().is_some_and(offers_standalone_web_search);
     assert_eq!(
         requests.len(),
-        expected_requests,
+        expected_requests + usize::from(standalone_search),
         "{scenario}: {diagnostics}"
     );
-    // No lane ever offers OpenAI's hosted web search, on any model: Octo searches only through
-    // Instafy's own command, which keeps link-only sites link-only.
+    // Only the ordinary turn with the controller capability offers native retrieval. Local
+    // config cannot authorize it; routing and browser lanes stay bounded even with that grant.
     for (index, request) in requests.iter().enumerate() {
-        assert!(
-            !offers_hosted_web_search(request),
-            "{scenario} on {}: request {index} offered OpenAI's hosted web search: {}",
+        assert_eq!(
+            offers_hosted_web_search(request) || offers_standalone_web_search(request),
+            authorized_native_search(scenario),
+            "{scenario} on {}: request {index} has the wrong native web search policy: {}",
             test_model(),
-            request["tools"]
+            request
+        );
+        if authorized_native_search(scenario) && !standalone_search {
+            assert!(request["tools"].as_array().unwrap().iter().any(|tool| tool["type"] == "web_search" && tool["external_web_access"] == true));
+        }
+    }
+    let search_requests = state.search_requests.lock().unwrap();
+    assert_eq!(search_requests.len(), usize::from(standalone_search));
+    if let Some(search) = search_requests.first() {
+        assert_eq!(search["model"], test_model());
+        assert_eq!(search["settings"]["external_web_access"], true);
+        assert_eq!(
+            search["commands"]["search_query"][0]["q"],
+            "local fixture source"
+        );
+        assert!(
+            search["input"]
+                .to_string()
+                .contains("Run the supplied local diagnostic")
         );
     }
     // Every lane's prompt reaches the model with Instafy's Destructive Actions section exactly
@@ -1296,10 +1398,30 @@ scenario_test!(
     1
 );
 // OpenAI's hosted web search stays off on an ordinary turn whose config and environment ask for
-// it; every scenario checks that no request offers it.
+// it; no unverified runtime caller can enable it.
 scenario_test!(
     hosted_web_search_stays_off_when_the_config_asks_for_it,
     "web_search_requested",
+    1
+);
+scenario_test!(
+    native_search_uses_the_controller_authorized_proxy_and_returns_evidence,
+    "native_search_authorized",
+    1
+);
+scenario_test!(
+    native_search_works_through_a_custom_named_proxy_provider,
+    "native_search_custom_provider",
+    1
+);
+scenario_test!(
+    routing_preflight_cannot_use_the_jobs_native_search_grant,
+    "native_search_routing",
+    1
+);
+scenario_test!(
+    personal_browser_cannot_use_the_jobs_native_search_grant,
+    "personal_browser_native_search",
     1
 );
 // The Personal Browser bearer must never reach an ambient proxy (HTTP_PROXY, ALL_PROXY, ...).
@@ -1483,6 +1605,81 @@ fn shared_browser_mcp_records_its_own_process_group_before_serving() -> Result<(
     Ok(())
 }
 
+fn authorized_native_search(scenario: &str) -> bool {
+    matches!(
+        scenario,
+        "native_search_authorized" | "native_search_custom_provider"
+    )
+}
+
+fn has_native_search_grant(scenario: &str) -> bool {
+    matches!(
+        scenario,
+        "native_search_authorized"
+            | "native_search_custom_provider"
+            | "native_search_routing"
+            | "personal_browser_native_search"
+    )
+}
+
+// An inert controller grant used only against this test's loopback model endpoint. The proxy's
+// signature and stored-credential checks have their own tests; this proves runtime wiring.
+fn native_search_job_auth() -> Result<(
+    Arc<runtime_agent::job_proxy_auth::JobProxyAuth>,
+    runtime_agent::job_proxy_auth::JobProxyAuthGuard,
+)> {
+    use runtime_agent::controller::{ControllerClient, LeaseJob};
+    let config = runtime_agent::config::Config::from_env()?;
+    let registration = local_registration(config.controller_base_url.clone());
+    let mut job: LeaseJob = serde_json::from_value(json!({
+        "id": Uuid::new_v4(), "project_id": config.project_id,
+        "run_id": Uuid::new_v4(), "credential_id": Uuid::new_v4(), "lease_attempts": 1
+    }))?;
+    let expires = chrono::Utc::now() + chrono::Duration::minutes(30);
+    let claims = json!({
+        "aud": "proxy", "iss": "runtime-controller",
+        "sub": format!("proxy:{}:{}", config.project_id, registration.runtime_id),
+        "project_id": config.project_id, "runtime_id": registration.runtime_id,
+        "job_id": job.id, "run_id": job.run_id, "credential_id": job.credential_id,
+        "lease_attempt": 1, "native_web_search": true, "exp": expires.timestamp()
+    });
+    job.proxy = Some(runtime_contracts::ProxyEnvelopePayload {
+        url: std::env::var("OPENAI_BASE_URL")?,
+        token: format!(
+            "e30.{}.inert-test-signature",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims)?)
+        ),
+        expires_at: Some(expires.to_rfc3339()),
+    });
+    Ok(runtime_agent::job_proxy_auth::JobProxyAuth::new(
+        Arc::new(ControllerClient::new(&config)?),
+        &registration,
+        &job,
+        None,
+    )?)
+}
+
+fn local_registration(origin: reqwest::Url) -> runtime_agent::controller::Registration {
+    runtime_agent::controller::Registration {
+        runtime_id: Uuid::new_v4(),
+        agent_token: "inert-local-agent-token".into(),
+        runtime_token: None,
+        lease_url: origin.clone(),
+        heartbeat_url: origin,
+        stop_url: None,
+        lease_id: None,
+        proxy: None,
+        lease_scope: None,
+        tenant_projects: Vec::new(),
+        workspace_manifest: None,
+        parent_lease_id: None,
+        agent_token_scopes: Vec::new(),
+        agent_token_issued_at: None,
+        agent_token_expires_at: None,
+        agent_token_ttl: None,
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "Child entrypoint; outer tests supply an isolated environment and loopback proxy"]
 async fn isolated_retry_child() -> Result<()> {
@@ -1524,6 +1721,11 @@ async fn isolated_retry_child() -> Result<()> {
         return run_resume_after_writer_release(&client).await;
     }
     let personal_browser = scenario.starts_with("personal_browser_");
+    let native_grant = if has_native_search_grant(&scenario) {
+        Some(native_search_job_auth()?)
+    } else {
+        None
+    };
     let cancel = JobCancelSignal::new();
     let cancel_on_request = scenario == "cancel";
     let signal = cancel.clone();
@@ -1561,6 +1763,12 @@ async fn isolated_retry_child() -> Result<()> {
                 None
             },
             CodexRunOptions {
+                proxy_auth: native_grant.as_ref().map(|(auth, _guard)| auth.clone()),
+                final_output_schema: if scenario == "native_search_routing" {
+                    runtime_agent::codex::CodexFinalOutputSchema::RoutingPreflight
+                } else {
+                    Default::default()
+                },
                 disable_final_output_json_schema: true,
                 allow_plain_text_final_fallback: true,
                 suppress_contextual_instructions: true,
@@ -1570,7 +1778,8 @@ async fn isolated_retry_child() -> Result<()> {
                 expect_browser_session: scenario.starts_with("browser_step_429s")
                     || personal_browser,
                 personal_browser,
-                disable_shell_tool: personal_browser,
+                // Ordinary reply-only research may search without a shell; routing may not.
+                disable_shell_tool: personal_browser || has_native_search_grant(&scenario),
                 // The first request must require a tool; once the tool runs, the next may not.
                 require_first_tool_call: scenario == "tool_once",
                 usage_observer: Some(task_usage.call(UsagePhase::Main)),
@@ -1652,6 +1861,10 @@ async fn isolated_retry_child() -> Result<()> {
             | "personal_browser_tools"
             | "personal_browser_behind_proxy"
             | "web_search_requested"
+            | "native_search_authorized"
+            | "native_search_custom_provider"
+            | "native_search_routing"
+            | "personal_browser_native_search"
     ) {
         assert_eq!(result?.final_json["summary"], FINAL_TEXT);
     } else {
@@ -1916,29 +2129,12 @@ async fn run_resume_after_writer_release(client: &CodexClient) -> Result<()> {
 
 async fn run_routing_job(scenario: &str) -> Result<()> {
     use runtime_agent::config::Config;
-    use runtime_agent::controller::{LeaseJob, Registration};
+    use runtime_agent::controller::LeaseJob;
     use runtime_agent::jobs::{JobMessage, JobProcessor, JobProgress};
     use std::sync::atomic::AtomicBool;
     let config = Arc::new(Config::from_env()?);
     let origin = config.controller_base_url.clone();
-    let registration = Registration {
-        runtime_id: Uuid::new_v4(),
-        agent_token: "inert-local-agent-token".into(),
-        runtime_token: None,
-        lease_url: origin.clone(),
-        heartbeat_url: origin,
-        stop_url: None,
-        lease_id: None,
-        proxy: None,
-        lease_scope: None,
-        tenant_projects: Vec::new(),
-        workspace_manifest: None,
-        parent_lease_id: None,
-        agent_token_scopes: Vec::new(),
-        agent_token_issued_at: None,
-        agent_token_expires_at: None,
-        agent_token_ttl: None,
-    };
+    let registration = local_registration(origin);
     let mut payload = json!({"prompt_text":"What is 3 plus 4?", "metadata":{}});
     if scenario == "ambient_decline" {
         payload = json!({
