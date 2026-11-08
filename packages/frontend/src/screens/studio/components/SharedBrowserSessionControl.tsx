@@ -54,6 +54,12 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
     update();
     return addFloatingSurfaceViewportChangeListener(update);
   }, [open]);
+  // A session to choose, or sessions that could not be read: Advanced opens
+  // by itself, and stays as the person leaves it once that is over.
+  const advancedNeeded = selectionRequired || Boolean(error);
+  useLayoutEffect(() => {
+    if (open && advancedNeeded && detailsRef.current) detailsRef.current.open = true;
+  }, [advancedNeeded, open]);
   return <DialogTrigger isOpen={open} onOpenChange={onOpenChange}>
     <IconButton ref={triggerRef} size="sm" variant="ghost" aria-label="Browser options" title="Browser options"
       className="shrink-0" data-browser-session-safe-zone="true"
@@ -82,10 +88,8 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
           </StudioMenuAction> : null}
           <StudioMenuSeparator />
           {/* What few people need, in words they need not learn, behind one row:
-              the resume link, the machine's sessions and their details. It opens
-              by itself when a session has to be chosen or the sessions could not
-              be read. */}
-          <details ref={detailsRef} className="group" open={selectionRequired || Boolean(error) || undefined}>
+              the resume link, the machine's sessions and their details. */}
+          <details ref={detailsRef} className="group">
             <summary className={`${STUDIO_MENU_NATIVE_ROW_CLASS} list-none [&::-webkit-details-marker]:hidden`}>
               <MenuItemContent end={<NavArrowDown className="transition-transform group-open:rotate-180" aria-hidden="true" />}>Advanced</MenuItemContent>
             </summary>
