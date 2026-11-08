@@ -269,13 +269,14 @@ function makeHome(): string {
   return home;
 }
 
-async function execCli(args: string[], home: string, env: Record<string, string> = {}) {
+async function execCli(args: string[], home: string, env: Record<string, string> = {}, cwd?: string) {
   const childEnv: NodeJS.ProcessEnv = { ...process.env, HOME: home, USERPROFILE: home };
   for (const key of RUNTIME_ENV_KEYS) delete childEnv[key];
   Object.assign(childEnv, env);
-  const child = spawn("node", ["bin/instafy.js", ...args], {
+  const packageDir = new URL("../", import.meta.url).pathname;
+  const child = spawn("node", [path.join(packageDir, "bin/instafy.js"), ...args], {
     env: childEnv,
-    cwd: new URL("../", import.meta.url).pathname,
+    cwd: cwd ?? packageDir,
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stdout = readAll(child.stdout);
@@ -312,7 +313,7 @@ function writeState(home: string, previews: unknown[]) {
 function readState(home: string): {
   previews: Array<{
     previewId: string; pid: number; localPort: number; workdir: string; hostSuffix?: string; studioOrigin?: string;
-    siteDir?: string; pictureAt?: number; noThumbnail?: boolean; conversationId?: string;
+    siteDir?: string; pictureAt?: number; noThumbnail?: boolean;
   }>;
 } {
   return JSON.parse(fs.readFileSync(path.join(home, ".instafy", "cli-preview-state.json"), "utf8"));
@@ -1176,17 +1177,22 @@ describe("instafy preview: the card's summary and picture", () => {
 
   // A turn that may write files is told the space's pages, each made in its own chat or in another: a new chat once
   // took another chat's comparison for its own and wrote over it. The chat that made a page is the one its card went to
-  // (the job's own with a job token, which the server reads from the token; else --conversation). An open of the same
-  // folder from another chat keeps it, an entry from before chats were recorded is never claimed, and a new folder on
-  // the same port is the opening chat's.
-  it("records the chat that made the site, and keeps it when another chat opens the same folder", async () => {
+  // (the job's own with a job token, which the server reads from the token; else --conversation), written down in the
+  // space's record of its pages, with the space's files: a stopped space's next machine starts with a new home folder,
+  // and an open from another chat there still finds the chat that made the page. A page written down with no chat (one
+  // a wake found from before the record) is never claimed, and the workspace itself, the person's own site, is not
+  // written down.
+  it("writes down the chat that made the page in the space's folder, and keeps it on a new machine", async () => {
     const projectId = randomUUID();
     const rathole = makeStubRathole();
     const controller = await startMockController({ projectId });
     const sitePort = await startSite();
-    const home = makeHome();
-    const packages = new URL("../../", import.meta.url).pathname;
-    const job = (conversation: string, workspace = packages) => ({
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-space-"));
+    cleanups.push(() => fs.rmSync(workspace, { recursive: true, force: true }));
+    for (const folder of ["sites/compare", "sites/porto"]) fs.mkdirSync(path.join(workspace, folder), { recursive: true });
+    const file = path.join(workspace, ".instafy", "pages", "pages.json");
+    const pages = () => (JSON.parse(fs.readFileSync(file, "utf8")) as { pages: Array<Record<string, unknown>> }).pages;
+    const job = (conversation: string) => ({
       RUNTIME_ID: randomUUID(),
       RUNTIME_LEASE_ID: "lease-1",
       INSTAFY_CONVERSATION_ID: conversation,
@@ -1194,37 +1200,54 @@ describe("instafy preview: the card's summary and picture", () => {
       CONTROLLER_BASE_URL: controller.url,
       WORKSPACE_PROJECT_DIR: workspace,
     });
-    const args = [...openArgs({ projectId, port: sitePort, rathole: rathole.file }), "--serve-cmd", "python3 -m http.server 8000"];
+    const serveCmd = ["--serve-cmd", "instafy bind serve . --port 8000 --preview"];
+    const args = [...openArgs({ projectId, port: sitePort, rathole: rathole.file }), ...serveCmd];
+    const compare = path.join(workspace, "sites", "compare");
     const [made, other, named] = [randomUUID(), randomUUID(), randomUUID()];
 
     // a job's card goes to the job's own chat, whatever --conversation says
-    const first = await execCli([...args, "--conversation", named], home, job(made));
+    const home = makeHome();
+    const first = await execCli([...args, "--conversation", named], home, job(made), compare);
     expect(first.code, first.stderr).toBe(0);
-    expect(readState(home).previews).toHaveLength(1);
-    expect(readState(home).previews[0]).toMatchObject({ siteDir: "instafy-cli", conversationId: made });
-
-    // the same folder, opened again from another chat, is still the page of the chat that made it
-    const again = await execCli(args, home, job(other));
-    expect(again.code, again.stderr).toBe(0);
-    expect(readState(home).previews).toHaveLength(1);
-    expect(readState(home).previews[0]).toMatchObject({ siteDir: "instafy-cli", conversationId: made });
-
-    // an entry from before chats were recorded is never claimed by the chat that opens it again
-    writeState(home, readState(home).previews.map(({ conversationId: _made, ...entry }) => entry));
-    const legacy = await execCli(args, home, job(other));
-    expect(legacy.code, legacy.stderr).toBe(0);
-    expect(readState(home).previews[0]?.siteDir).toBe("instafy-cli");
+    expect(pages()).toEqual([
+      expect.objectContaining({ folder: "sites/compare", title: "Site preview", conversationId: made, server: ["instafy", "bind"] }),
+    ]);
+    expect(fs.readFileSync(path.join(workspace, ".instafy", "pages", ".gitignore"), "utf8")).toBe("*\n");
+    // the machine's own state never holds it
+    expect(readState(home).previews[0]).toMatchObject({ siteDir: "sites/compare" });
     expect(readState(home).previews[0]).not.toHaveProperty("conversationId");
 
-    // another folder on the port, opened with a member's token: the chat --conversation names
-    const member = await execCli(
-      [...openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file }), "--serve-cmd", "python3 -m http.server 8000", "--conversation", named],
-      home,
-      { WORKSPACE_PROJECT_DIR: new URL("../../../", import.meta.url).pathname },
-    );
-    expect(member.code, member.stderr).toBe(0);
-    expect(readState(home).previews).toHaveLength(1);
-    expect(readState(home).previews[0]).toMatchObject({ siteDir: "packages/instafy-cli", conversationId: named });
+    // a new machine, with a new home folder: the same folder, opened from another chat, is still the page of the chat
+    // that made it
+    const again = await execCli(args, makeHome(), job(other), compare);
+    expect(again.code, again.stderr).toBe(0);
+    expect(pages()).toEqual([expect.objectContaining({ folder: "sites/compare", conversationId: made })]);
+
+    // a page written down with no chat is never claimed by the chat that opens it
+    fs.writeFileSync(file, JSON.stringify({ version: 1, pages: pages().map(({ conversationId: _made, ...page }) => page) }));
+    const legacy = await execCli(args, makeHome(), job(other), compare);
+    expect(legacy.code, legacy.stderr).toBe(0);
+    expect(pages()).toHaveLength(1);
+    expect(pages()[0]).not.toHaveProperty("conversationId");
+
+    // another folder, opened with a member's token: the chat --conversation names, newest first
+    const member = (cwd: string) =>
+      execCli(
+        [...openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: rathole.file }), ...serveCmd, "--conversation", named],
+        makeHome(),
+        { WORKSPACE_PROJECT_DIR: workspace },
+        cwd,
+      );
+    const porto = await member(path.join(workspace, "sites", "porto"));
+    expect(porto.code, porto.stderr).toBe(0);
+    expect(pages().map((page) => [page.folder, page.conversationId])).toEqual([
+      ["sites/porto", named],
+      ["sites/compare", undefined],
+    ]);
+    // the workspace itself is the person's own site: not written down
+    const own = await member(workspace);
+    expect(own.code, own.stderr).toBe(0);
+    expect(pages().map((page) => page.folder)).toEqual(["sites/porto", "sites/compare"]);
   }, 60000);
 
   it("a picture that cannot be uploaded leaves the exit code alone", async () => {

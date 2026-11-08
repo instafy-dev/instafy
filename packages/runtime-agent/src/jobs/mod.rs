@@ -95,7 +95,7 @@ mod skill_routing;
 #[cfg(test)]
 mod skill_routing_eval_tests;
 mod skills;
-mod space_pages;
+pub(crate) mod space_pages;
 pub(crate) mod stopped_turn;
 mod turn_baseline;
 mod turn_continuation;
@@ -206,10 +206,6 @@ pub struct JobProcessor {
     /// [`preview_pictures`]). Set by the agent loop; without it no picture is
     /// taken again at a turn's end.
     picture_sender: Mutex<Option<Arc<dyn preview_pictures::PictureSender>>>,
-    /// The CLI's record of the previews it opened on this machine, which says whose page each of
-    /// the space's pages is ([`space_pages`]): `~/.instafy/cli-preview-state.json` unless a test
-    /// names another.
-    preview_state_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4139,9 +4135,10 @@ const WORKSPACE_IS_CURRENT_RULE: &str = "\
 /// that may write files reads this, whatever skill it reads and whichever form its answer takes,
 /// with the space's pages after it, each made in this chat or in another
 /// ([`space_pages::space_pages_lines`]): a fact in place of the judgement. It is said here only.
-/// The space's own app or site, served from the workspace itself, is no page in that list, and is
-/// changed as asked from any chat.
-const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A request for a new page starts a new folder, even on the same subject. A page another chat made changes only when the person points at that page (\"the laptop comparison\", \"that page\").\n";
+/// It speaks of a page made for the person (a map, a comparison, a page to share), and the list
+/// holds only those: the person's own app or site, from the workspace or a folder of it (an
+/// imported repository), is changed as asked from any chat ("Make the buttons rounder.").
+const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A request for a new page starts a new folder, even on the same subject. A page made for the person in another chat (a map, a comparison, a page to share) changes only when the person points at that page (\"the laptop comparison\", \"that page\").\n";
 
 /// True when a person in this conversation opened a skill setup with
 /// `/skills import ... --start` or `/skills start <name>` and the setup began.
@@ -5806,25 +5803,7 @@ impl JobProcessor {
             isolated_apply: AsyncMutex::new(()),
             provider_mcp_program: None,
             picture_sender: Mutex::new(None),
-            preview_state_file: None,
         }
-    }
-
-    /// Reads whose page each of the space's pages is from `file` rather than this machine's CLI
-    /// state file.
-    #[cfg(test)]
-    pub(super) fn with_preview_state_file(mut self, file: PathBuf) -> Self {
-        self.preview_state_file = Some(file);
-        self
-    }
-
-    /// The CLI's state file the space's pages are read from: the one `instafy preview open` writes
-    /// under this machine's `HOME`.
-    fn preview_state_file(&self) -> Option<PathBuf> {
-        self.preview_state_file.clone().or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(preview_pictures::PREVIEW_STATE_RELATIVE_PATH))
-        })
     }
 
     /// Sends the new picture of an open preview a turn changed with `sender`
@@ -10521,10 +10500,9 @@ impl JobProcessor {
         let page_rule = [
             PAGE_OF_ITS_OWN_CHAT_RULE,
             &space_pages::space_pages_lines(
-                self.preview_state_file().as_deref(),
                 workspace_dir,
-                project_id,
                 job.conversation_id.as_ref(),
+                &space_pages::installed_page_commands(),
             ),
         ]
         .concat();

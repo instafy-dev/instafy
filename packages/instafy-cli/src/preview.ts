@@ -28,6 +28,7 @@ import {
   type ThumbnailAttempt,
 } from "./preview-thumbnail.js";
 import { resolveRuntimeControllerCredential } from "./runtime-controller-binding.js";
+import { recordPage } from "./space-pages.js";
 import {
   buildRatholeConfig,
   cleanUrl,
@@ -178,11 +179,6 @@ type PreviewStateEntry = {
   pictureAt?: number;
   // Opened with `--no-thumbnail`: no picture of the site goes on its card, from a check or at a turn's end either.
   noThumbnail?: boolean;
-  // The chat that made the site: the one whose card the first open of its folder posted (the job's own chat, or
-  // `--conversation`). An open of the same folder from another chat keeps it, and an entry from before it was recorded
-  // stays without one. A turn that may write files is told the space's pages by title, each made in its own chat or in
-  // another, so it never takes another chat's page for its own.
-  conversationId?: string;
 };
 
 type PreviewStateFile = {
@@ -1236,21 +1232,6 @@ function cardConversation(auth: ResolvedTunnelToken, conversationId: string | un
   return conversationId;
 }
 
-/**
- * The chat that made the site in `siteDir`: the one an entry of this space records for that folder (none for an entry
- * from before chats were recorded), else the chat this open posts its card to. A turn of another chat that opens the page
- * again never makes it its own.
- */
-function madeInChat(
-  previews: PreviewStateEntry[],
-  projectId: string,
-  siteDir: string | undefined,
-  opening: string | undefined,
-): string | undefined {
-  const earlier = siteDir === undefined ? null : previews.find((entry) => entry.projectId === projectId && entry.siteDir === siteDir);
-  return earlier ? earlier.conversationId : opening;
-}
-
 /** This space's open previews on this machine, by port, with their titles. Empty when the server does not say. */
 async function openPreviewPorts(params: {
   controllerUrl: string;
@@ -1348,10 +1329,8 @@ async function createAndStartClient(params: {
   const studioOrigin = parseStudioOrigin(grant["studioOrigin"]);
   const state = readStateFile();
   const current = state.previews.find((preview) => preview.previewId === previewId) ?? null;
-  // Read before an older entry on this port is forgotten below: the site's record moves to this preview, and so does
-  // the chat that made it.
+  // Read before an older entry on this port is forgotten below: the site's record moves to this preview.
   const siteRecord = siteRecordFor(site, state.previews, port, projectId);
-  const madeIn = madeInChat(state.previews, projectId, serve?.cwd, cardConversation(auth, conversationId));
 
   // From here on the server holds a preview. Any failure before the client runs closes it again,
   // so no grant or card is left without a tunnel behind it.
@@ -1430,9 +1409,19 @@ async function createAndStartClient(params: {
     // The same preview opened again keeps its picture until a new one is uploaded.
     ...(current?.pictureAt ? { pictureAt: current.pictureAt } : {}),
     ...(opts.thumbnail === false ? { noThumbnail: true } : {}),
-    ...(madeIn ? { conversationId: madeIn } : {}),
   };
   upsertPreviewState(entry);
+  // The chat that made the page, in the space's record of its pages: kept with the space's files, so it outlasts this
+  // machine, and an open of the same folder from another chat keeps it. A turn that may write files is told the space's
+  // pages from it, each made in its own chat or in another.
+  const root = serve ? resolveWorkspaceRoot(process.env, projectId) : null;
+  if (serve && root) {
+    try {
+      recordPage(root, { folder: serve.cwd, title, argv: serve.argv, opening: cardConversation(auth, conversationId) });
+    } catch (error) {
+      log(`Could not write the page down in the space's record: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   return { grant, previewId, entry, current };
 }
 

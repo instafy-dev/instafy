@@ -586,20 +586,22 @@ fn a_comparison_asked_in_a_new_chat_is_the_hubs_and_leaves_another_chats_site_as
 }
 
 /// The prompt a turn of `conversation` with this job metadata gets for `request` in the space
-/// `project`, whose pages the CLI recorded in `state` (its state file's contents).
+/// `project`, whose record of its pages holds `pages`: `.instafy/pages/pages.json` in its
+/// workspace, as `instafy preview open` writes it. Nothing is read from the machine's home folder,
+/// which a stopped space's next machine starts without.
 fn prompt_in_chat(
     workspace: &Path,
-    state: &JsonValue,
+    pages: &[JsonValue],
     project: Uuid,
     conversation: Uuid,
     metadata: JsonValue,
     provider_state: Option<&JsonValue>,
     request: &str,
 ) -> String {
-    let home = tempdir().expect("home");
-    let state_file = home.path().join("cli-preview-state.json");
-    fs::write(&state_file, state.to_string()).unwrap();
-    let processor = test_job_processor(workspace).with_preview_state_file(state_file);
+    let record = workspace.join(space_pages::PAGES_RECORD);
+    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    fs::write(&record, json!({ "version": 1, "pages": pages }).to_string()).unwrap();
+    let processor = test_job_processor(workspace);
     let mut job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
     job.project_id = Some(project);
     job.conversation_id = Some(conversation);
@@ -619,17 +621,14 @@ fn prompt_in_chat(
     prompt
 }
 
-/// A page the CLI recorded for `project`, in `folder`, made in `chat` (none: from before the CLI
-/// recorded it).
-fn recorded_page(project: Uuid, folder: &str, title: &str, chat: Option<Uuid>) -> JsonValue {
+/// A page the space's record holds, in `folder`, made in `chat` (none: from before the record),
+/// served by `server` (its program and first argument).
+fn served_page(folder: &str, title: &str, chat: Option<Uuid>, server: &[&str]) -> JsonValue {
     let mut page = json!({
-        "previewId": format!("preview-{}", folder.replace('/', "-")),
-        "projectId": project.to_string(),
+        "folder": folder,
         "title": title,
-        "localPort": 20_100,
-        "path": "/",
-        "pid": -1,
-        "siteDir": folder,
+        "server": server,
+        "openedAt": "2026-11-08T00:00:00.000Z",
     });
     if let Some(chat) = chat {
         page["conversationId"] = json!(chat.to_string());
@@ -637,15 +636,20 @@ fn recorded_page(project: Uuid, folder: &str, title: &str, chat: Option<Uuid>) -
     page
 }
 
+/// A page made for the person: served by Instafy's page server, as a starter's or a bound site's.
+fn recorded_page(folder: &str, title: &str, chat: Option<Uuid>) -> JsonValue {
+    served_page(folder, title, chat, &["instafy", "bind"])
+}
+
 /// Whose page a turn changes is a fact now, not a judgement. In a new chat, "Make a simple
 /// comparison page of the Framework Laptop 13 and 16 from what you already know, without
 /// browsing." had the rule in its instructions and still wrote over another chat's comparison:
 /// nothing told it which chat made `sites/framework-laptops`. Every turn that may write files reads
 /// the rule (a new page is a new folder; another chat's page changes only when the person points at
-/// it), then the space's pages, each made in this chat or in another, by the chat recorded with the
-/// page's card, not by the chat's history: a long chat whose page has left the history it sends
-/// still reads that page as its own. A page from before the chat was recorded reads as another
-/// chat's, in its own chat too: a follow-up there may start a new folder, never replace a page.
+/// it), then the space's pages, each made in this chat or in another, by the chat the space's record
+/// keeps with the page, not by the chat's history: a long chat whose page has left the history it
+/// sends still reads that page as its own. A page from before the record reads as another chat's,
+/// in its own chat too: a follow-up there may start a new folder, never replace a page.
 #[test]
 fn a_writing_turn_is_told_which_chat_made_each_of_the_spaces_pages() {
     let tmp = tempdir().expect("tmp");
@@ -659,15 +663,15 @@ fn a_writing_turn_is_told_which_chat_made_each_of_the_spaces_pages() {
     ] {
         fs::create_dir_all(tmp.path().join(folder)).unwrap();
     }
-    let state = json!({ "version": 1, "previews": [
-        recorded_page(project, "sites/framework-13-16", "Framework Laptop 13 vs 16", Some(ours)),
-        recorded_page(project, "sites/framework-laptops", "Framework Laptop 12, 13 and 16", Some(theirs)),
-        recorded_page(project, "seville-3-days", "Seville in 3 days", None),
-    ]});
+    let recorded = [
+        recorded_page("sites/framework-13-16", "Framework Laptop 13 vs 16", Some(ours)),
+        recorded_page("sites/framework-laptops", "Framework Laptop 12, 13 and 16", Some(theirs)),
+        recorded_page("seville-3-days", "Seville in 3 days", None),
+    ];
     let pages = |chat: Uuid, metadata: JsonValue, provider_state: Option<&JsonValue>| {
         prompt_in_chat(
             tmp.path(),
-            &state,
+            &recorded,
             project,
             chat,
             metadata,
@@ -691,7 +695,7 @@ fn a_writing_turn_is_told_which_chat_made_each_of_the_spaces_pages() {
         .expect("the invariants");
     assert!(invariants.contains(&rule_and_pages), "{prompt}");
     assert!(
-        PAGE_OF_ITS_OWN_CHAT_RULE.contains("A request for a new page starts a new folder, even on the same subject. A page another chat made changes only when the person points at that page (\"the laptop comparison\", \"that page\")."),
+        PAGE_OF_ITS_OWN_CHAT_RULE.contains("A request for a new page starts a new folder, even on the same subject. A page made for the person in another chat (a map, a comparison, a page to share) changes only when the person points at that page (\"the laptop comparison\", \"that page\")."),
         "{PAGE_OF_ITS_OWN_CHAT_RULE}"
     );
     // The other chat, with no history at all: its page is its own.
@@ -773,21 +777,30 @@ fn a_reply_assumes_only_what_the_person_left_open_and_a_page_names_no_tool() {
 }
 
 /// Whose page a turn changes reached only the turns that answer in plain text, then every turn
-/// that may write files. It speaks of pages, and the space's own app or site, served from the
-/// workspace itself, is no page in the list: a change to the person's own app from a new chat
-/// ("Make the buttons rounder.") still changes that app. A space with no page has no list.
+/// that may write files. It speaks of a page made for the person, and the list holds only those: a
+/// site Instafy's page server serves. The person's own app is no such page, served from the
+/// workspace itself or from a folder of it (an import goes to `repos/<owner>-<repo>`), and its card
+/// opened in another chat: a change to it from a new chat ("Make the buttons rounder.") still
+/// changes that app, and the turn is never told the app is another chat's page. A space with no
+/// page has no list.
 #[test]
 fn every_turn_that_may_write_reads_whose_page_it_changes_and_never_whose_app() {
     let tmp = tempdir().expect("tmp");
     learn::ensure_project_memory_scaffold(tmp.path());
+    for folder in ["repos/acme-shop", "web"] {
+        fs::create_dir_all(tmp.path().join(folder)).unwrap();
+    }
     let project = Uuid::new_v4();
-    let app = json!({ "version": 1, "previews": [
-        recorded_page(project, ".", "My app", Some(Uuid::new_v4())),
-    ]});
+    let elsewhere = Some(Uuid::new_v4());
+    let apps = [
+        served_page("repos/acme-shop", "Acme shop", elsewhere, &["npm", "run"]),
+        served_page("web", "My web app", elsewhere, &["python3", "-m"]),
+        recorded_page(".", "My app", elsewhere),
+    ];
     let direct = json!({ "runtimeExpectations": { "workspaceFileChanges": true } });
     let rounder = prompt_in_chat(
         tmp.path(),
-        &app,
+        &apps,
         project,
         Uuid::new_v4(),
         direct,
@@ -795,8 +808,15 @@ fn every_turn_that_may_write_reads_whose_page_it_changes_and_never_whose_app() {
         "Make the buttons rounder.",
     );
     assert!(rounder.contains(PAGE_OF_ITS_OWN_CHAT_RULE), "{rounder}");
+    assert!(
+        PAGE_OF_ITS_OWN_CHAT_RULE.contains("A page made for the person in another chat (a map, a comparison, a page to share)"),
+        "{PAGE_OF_ITS_OWN_CHAT_RULE}"
+    );
     assert!(!rounder.contains("The space's pages"), "{rounder}");
-    assert!(!rounder.contains("My app"), "{rounder}");
+    assert!(!rounder.contains("made in another chat"), "{rounder}");
+    for title in ["Acme shop", "My web app", "My app"] {
+        assert!(!rounder.contains(title), "{title}: {rounder}");
+    }
     // no page recorded at all
     let plain = direct_write_prompt(tmp.path(), "Make the buttons rounder.");
     assert!(plain.contains(PAGE_OF_ITS_OWN_CHAT_RULE), "{plain}");

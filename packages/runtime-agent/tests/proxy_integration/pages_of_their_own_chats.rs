@@ -7,12 +7,15 @@
 //! Nothing had told it which chat made which folder.
 //!
 //! Each turn that may write files is now told the space's pages, each made in this chat or in
-//! another, from the chat `instafy preview open` recorded with each page's card (here the test
-//! records each card as the CLI does: its own test covers the CLI). The stand-in model does what
-//! the instructions it gets say, and what the model in that test did when they said nothing: it
-//! starts its own folder for a page another chat made, and changes the folder its own chat made.
-//! The first chat's page is then unchanged byte for byte, the new chat's fill-in fills its own
-//! folder, and a long chat whose page has left the history it sends still sees the page as its own.
+//! another, from the space's record of its pages: `instafy preview open` writes the chat each
+//! page's card went to in `.instafy/pages/pages.json`, in the space's own folder (here the test
+//! records each card as the CLI does: its own test covers the CLI). That record outlasts the
+//! machine: a stopped space's next machine starts with a new home folder, so the turns here run with
+//! no CLI state in their home at all. The stand-in model does what the instructions it gets say, and
+//! what the model in that test did when they said nothing: it starts its own folder for a page
+//! another chat made, and changes the folder its own chat made. The first chat's page is then
+//! unchanged byte for byte, the new chat's fill-in fills its own folder, and a long chat whose page
+//! has left the history it sends still sees the page as its own.
 
 use super::*;
 use std::sync::Mutex as StdMutex;
@@ -255,40 +258,34 @@ fn job(
     }
 }
 
-/// The card a page's turn posts with `instafy preview open`, recorded in the CLI's state file as the
-/// CLI records it: newest first, with the chat the card went to.
-fn record_card(
-    home: &Path,
-    project_id: Uuid,
-    conversation_id: Uuid,
-    folder: &str,
-    title: &str,
-) -> Result<()> {
-    let file = home.join(".instafy/cli-preview-state.json");
-    let mut previews = fs::read_to_string(&file)
+/// The card a page's turn posts with `instafy preview open`, written down in the space's record of
+/// its pages as the CLI writes it: newest first, with the chat the card went to, which another
+/// chat's open of the same folder keeps.
+fn record_card(workspace: &Path, conversation_id: Uuid, folder: &str, title: &str) -> Result<()> {
+    let file = workspace.join(".instafy/pages/pages.json");
+    let mut pages = fs::read_to_string(&file)
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|state| state["previews"].as_array().cloned())
+        .and_then(|record| record["pages"].as_array().cloned())
         .unwrap_or_default();
-    previews.insert(
+    let maker = pages
+        .iter()
+        .find(|page| page["folder"] == folder)
+        .map(|page| page["conversationId"].clone())
+        .unwrap_or_else(|| json!(conversation_id.to_string()));
+    pages.retain(|page| page["folder"] != folder);
+    pages.insert(
         0,
         json!({
-            "previewId": format!("preview-{}", previews.len() + 1),
-            "projectId": project_id.to_string(),
+            "folder": folder,
             "title": title,
-            "localPort": 20_000 + previews.len(),
-            "path": "/",
-            "controllerUrl": "http://127.0.0.1:9",
-            "pid": -1,
-            "siteDir": folder,
-            "conversationId": conversation_id.to_string(),
+            "conversationId": maker,
+            "server": ["instafy", "bind"],
+            "openedAt": "2026-11-08T00:00:00.000Z",
         }),
     );
-    fs::create_dir_all(home.join(".instafy"))?;
-    fs::write(
-        &file,
-        json!({ "version": 1, "previews": previews }).to_string(),
-    )?;
+    fs::create_dir_all(workspace.join(".instafy/pages"))?;
+    fs::write(&file, json!({ "version": 1, "pages": pages }).to_string())?;
     Ok(())
 }
 
@@ -429,9 +426,12 @@ async fn run_case() -> Result<()> {
     .context("the comparison's turn failed")?;
     assert_eq!(compared.summary, COMPARED);
     assert_eq!(read(THEIRS)?, THEIR_DATA.as_bytes());
-    record_card(&home, project_id, first_chat, THEIRS, THEIR_TITLE)?;
+    record_card(&workspace, first_chat, THEIRS, THEIR_TITLE)?;
 
-    // A new chat asks for a comparison of two of the same laptops, from what Octo knows.
+    // The space stopped and woke on a new machine: no CLI state in its home folder, only the
+    // space's own record of its pages. A new chat asks for a comparison of two of the same laptops,
+    // from what Octo knows.
+    assert!(!home.join(".instafy/cli-preview-state.json").exists());
     let new_chat_history = vec![person(FROM_MEMORY, "run-2")];
     let remembered = run(job(
         project_id,
@@ -450,7 +450,7 @@ async fn run_case() -> Result<()> {
         .context("the new chat's request")?;
     let prompt = last_user_text(asked);
     assert!(
-        prompt.contains("- A request for a new page starts a new folder, even on the same subject. A page another chat made changes only when the person points at that page (\"the laptop comparison\", \"that page\").\n- The space's pages:\n"),
+        prompt.contains("- A request for a new page starts a new folder, even on the same subject. A page made for the person in another chat (a map, a comparison, a page to share) changes only when the person points at that page (\"the laptop comparison\", \"that page\").\n- The space's pages:\n"),
         "{prompt}"
     );
     assert!(
@@ -463,7 +463,7 @@ async fn run_case() -> Result<()> {
     // its own.
     assert_eq!(read(THEIRS)?, THEIR_DATA.as_bytes());
     assert_eq!(read(OWN)?, OWN_DATA.as_bytes());
-    record_card(&home, project_id, new_chat, OWN, OWN_TITLE)?;
+    record_card(&workspace, new_chat, OWN, OWN_TITLE)?;
 
     // The new chat's fill-in, on its thread: its own page.
     let thread = remembered

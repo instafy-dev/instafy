@@ -4,84 +4,207 @@
 //! already know, without browsing." listed the space's pages, read another chat's comparison in
 //! `sites/framework-laptops`, deleted its data and wrote its own there, so that chat's card showed
 //! the new page. The rule the turn read left it to judge whether the person named that page, and
-//! nothing told it which chat made the folder. `instafy preview open` records the chat each page's
-//! card went to (`conversationId` in the CLI's state file, beside the page's title and folder), so
-//! the turn is told, page by page, whether this chat made it or another one did: a fact in place of
-//! that judgement. It is read from the page's record, not from the chat's history, so a long chat
-//! whose own page has left its history still sees that page as its own.
+//! nothing told it which chat made the folder. So the turn is told, page by page, whether this chat
+//! made it or another one did: a fact in place of that judgement.
 //!
-//! A page opened before the CLI recorded its chat reads as another chat's: told so wrongly, a turn
-//! starts a new folder, or changes the page once the person points at it; told the other way, it
-//! could replace another chat's page. The space's own site, served from the workspace itself, is no
-//! page a chat made for the person: it changes as the person asks, from any chat, and is not listed.
+//! The fact is the space's record of its pages, [`PAGES_RECORD`] in the space's own folder:
+//! `instafy preview open` writes each page there with the chat its card went to, the first time
+//! that folder's card is opened, and keeps that chat when another one opens the same folder again.
+//! It is kept with the space's files, under `.instafy/` (never saved, published, listed or copied
+//! into a scoped worker's copy), so it outlasts the machine: a stopped space's next machine starts
+//! with a new home folder, where the CLI's own record of the previews it opened is gone. It is read
+//! from the record, not from the chat's history, so a long chat whose own page has left its
+//! history still sees that page as its own.
+//!
+//! A page whose chat is not recorded reads as another chat's: told so wrongly, a turn starts a new
+//! folder, or changes the page once the person points at it; told the other way, it could replace
+//! another chat's page. That is a page from before the record: a wake that starts its site again
+//! ([`record_woken_page`]) writes it down with no chat, so no later open claims it.
+//!
+//! Only pages made for the person are listed: a site served by Instafy's page server
+//! (`instafy bind serve`) or by a command an installed skill provides (a map's host). The person's
+//! own app or site, served by its own server from the workspace or from a folder of it (an
+//! imported repository), is no such page: it changes as the person asks, from any chat.
 
+use std::io::Read;
 use std::path::{Component, Path};
 
-use serde_json::Value as JsonValue;
+use origin_http_server::workspace_fs::WorkspaceDir;
+use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
+/// The space's record of its pages, relative to its workspace. `instafy preview open` writes it
+/// (the CLI's `space-pages.ts`), and so does a wake ([`record_woken_page`]).
+pub(crate) const PAGES_RECORD: &str = ".instafy/pages/pages.json";
+const PAGES_RECORD_DIR: &str = ".instafy/pages";
+/// The record's folder holds nothing a save, a status or a person's own git should see.
+const PAGES_RECORD_IGNORE: &[u8] = b"*\n";
 /// At most this many pages are listed, the most recently opened first.
 const MAX_PAGES: usize = 12;
+/// At most this many pages are kept in the record.
+const MAX_RECORDED: usize = 100;
 /// The longest title the CLI records (its `MAX_TITLE_LENGTH`).
 const MAX_TITLE_CHARS: usize = 120;
 
 /// The lines a turn of `conversation_id` that may write files reads after the rule on whose page it
-/// changes: the space's pages, from the CLI's state file at `state_file`, each still a folder in
-/// the space's workspace (`workspace_dir`). Empty when there is no such file or it holds no page of
-/// the space in a folder of its own.
-pub(super) fn space_pages_lines(
-    state_file: Option<&Path>,
+/// changes: the space's pages made for the person, from the record in `workspace_dir`, each still a
+/// folder of it. `page_commands` are the commands installed skills provide, whose sites are pages
+/// too. Empty when there is no record or it holds no such page.
+pub(crate) fn space_pages_lines(
     workspace_dir: &Path,
-    project_id: &Uuid,
     conversation_id: Option<&Uuid>,
+    page_commands: &[String],
 ) -> String {
-    let Some(state) = state_file
-        .and_then(|file| std::fs::read_to_string(file).ok())
-        .and_then(|text| serde_json::from_str::<JsonValue>(&text).ok())
-    else {
+    let Some(record) = read_record(workspace_dir) else {
         return String::new();
     };
-    pages_lines(&state, project_id, conversation_id, |folder| {
+    pages_lines(&record, conversation_id, page_commands, |folder| {
         workspace_dir.join(folder).is_dir()
     })
 }
 
-/// The space's pages in the CLI's state (`state`) whose folder is still there (`exists`), each by
-/// its title and folder, made in this chat (`conversation_id`) or in another one; one with no chat
+/// The commands installed skills provide on this runtime: a site one of them serves is a page.
+pub(crate) fn installed_page_commands() -> Vec<String> {
+    let mut commands = Vec::new();
+    for pack in crate::skill_packs::installed_packs() {
+        commands.extend(pack.bin.iter().map(|bin| bin.name.clone()));
+        if let Some(name) = pack
+            .cli
+            .as_ref()
+            .and_then(|cli| Path::new(&cli.space_path).file_name())
+            .and_then(|name| name.to_str())
+        {
+            commands.push(name.to_string());
+        }
+    }
+    commands
+}
+
+/// Writes down the page in `folder` (`serve.cwd`) a wake started again, when the record does not
+/// hold it: with its title and server and no chat, as a page from before the record. A page the
+/// record holds keeps the chat it records.
+pub(crate) fn record_woken_page(
+    workspace_dir: &Path,
+    folder: &str,
+    title: &str,
+    argv: &[String],
+) -> std::io::Result<()> {
+    let Some(folder) = page_folder(folder) else {
+        return Ok(());
+    };
+    let record = read_record(workspace_dir).unwrap_or_else(|| json!({ "version": 1 }));
+    let mut pages = record
+        .get("pages")
+        .and_then(JsonValue::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if pages
+        .iter()
+        .any(|page| entry_folder(page).as_deref() == Some(folder.as_str()))
+    {
+        return Ok(());
+    }
+    pages.insert(
+        0,
+        json!({
+            "folder": folder,
+            "title": plain_title(title),
+            "server": server_of(argv),
+            "openedAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        }),
+    );
+    pages.truncate(MAX_RECORDED);
+    let workspace = WorkspaceDir::open(workspace_dir)?;
+    let dir = workspace.create_dir_all(PAGES_RECORD_DIR)?;
+    if dir.entry_kind(".gitignore").is_err() {
+        dir.replace_file(".gitignore", &mut &PAGES_RECORD_IGNORE[..], false)?;
+    }
+    let text = serde_json::to_string_pretty(&json!({ "version": 1, "pages": pages }))?;
+    dir.replace_file("pages.json", &mut text.as_bytes(), false)?;
+    Ok(())
+}
+
+/// The record in `workspace_dir`, read without following a link.
+fn read_record(workspace_dir: &Path) -> Option<JsonValue> {
+    let mut text = String::new();
+    WorkspaceDir::open(workspace_dir)
+        .ok()?
+        .open_file(PAGES_RECORD)
+        .ok()?
+        .read_to_string(&mut text)
+        .ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// How a site is served, as the record keeps it: its program's name and first argument
+/// (`["instafy", "bind"]`, `["uw", "host"]`, `["npm", "run"]`).
+fn server_of(argv: &[String]) -> Vec<String> {
+    let program = argv
+        .first()
+        .map(|program| {
+            Path::new(program)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(program)
+                .to_string()
+        })
+        .unwrap_or_default();
+    std::iter::once(program)
+        .chain(argv.get(1).cloned())
+        .collect()
+}
+
+/// A site Instafy's page server serves (`instafy bind serve`), or a command an installed skill
+/// provides: a page made for the person, not the person's own app.
+fn is_page_server(server: &[&str], page_commands: &[String]) -> bool {
+    match server {
+        ["instafy", "bind", ..] => true,
+        [program, ..] => !program.is_empty() && page_commands.iter().any(|name| name == program),
+        [] => false,
+    }
+}
+
+fn entry_folder(entry: &JsonValue) -> Option<String> {
+    entry
+        .get("folder")
+        .and_then(JsonValue::as_str)
+        .and_then(page_folder)
+}
+
+/// The record's pages made for the person whose folder is still there (`exists`), each by its
+/// title and folder, made in this chat (`conversation_id`) or in another one; one with no chat
 /// recorded counts as another chat's.
 fn pages_lines(
-    state: &JsonValue,
-    project_id: &Uuid,
+    record: &JsonValue,
     conversation_id: Option<&Uuid>,
+    page_commands: &[String],
     exists: impl Fn(&str) -> bool,
 ) -> String {
-    let Some(previews) = state.get("previews").and_then(JsonValue::as_array) else {
+    let Some(pages) = record.get("pages").and_then(JsonValue::as_array) else {
         return String::new();
     };
     let mut folders: Vec<String> = Vec::new();
     let mut lines = String::new();
-    for entry in previews {
-        let uuid_of = |key: &str| {
-            entry
-                .get(key)
+    for entry in pages {
+        let Some(folder) = entry_folder(entry) else {
+            continue;
+        };
+        let server: Vec<&str> = entry
+            .get("server")
+            .and_then(JsonValue::as_array)
+            .map(|words| words.iter().filter_map(JsonValue::as_str).collect())
+            .unwrap_or_default();
+        if folders.contains(&folder) || !is_page_server(&server, page_commands) || !exists(&folder)
+        {
+            continue;
+        }
+        let made_here = conversation_id.is_some()
+            && entry
+                .get("conversationId")
                 .and_then(JsonValue::as_str)
                 .and_then(|value| Uuid::parse_str(value.trim()).ok())
-        };
-        if uuid_of("projectId").as_ref() != Some(project_id) {
-            continue;
-        }
-        let Some(folder) = entry
-            .get("siteDir")
-            .and_then(JsonValue::as_str)
-            .and_then(page_folder)
-        else {
-            continue;
-        };
-        if folders.contains(&folder) || !exists(&folder) {
-            continue;
-        }
-        let made_here =
-            conversation_id.is_some() && uuid_of("conversationId").as_ref() == conversation_id;
+                .as_ref()
+                == conversation_id;
         let title = entry
             .get("title")
             .and_then(JsonValue::as_str)
@@ -141,47 +264,54 @@ fn plain_title(title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    fn entry(project: &Uuid, folder: &str, title: &str, chat: Option<&Uuid>) -> JsonValue {
-        let mut entry = json!({
-            "previewId": format!("preview-{}", folder.replace('/', "-")),
-            "projectId": project.to_string(),
+    const PAGE_SERVER: [&str; 2] = ["instafy", "bind"];
+
+    fn page(folder: &str, title: &str, chat: Option<&Uuid>, server: &[&str]) -> JsonValue {
+        let mut page = json!({
+            "folder": folder,
             "title": title,
-            "localPort": 20_000,
-            "path": "/",
-            "pid": 1,
-            "siteDir": folder,
+            "server": server,
+            "openedAt": "2026-11-08T00:00:00.000Z",
         });
         if let Some(chat) = chat {
-            entry["conversationId"] = json!(chat.to_string());
+            page["conversationId"] = json!(chat.to_string());
         }
-        entry
+        page
+    }
+
+    fn write_record(workspace: &Path, pages: Vec<JsonValue>) {
+        std::fs::create_dir_all(workspace.join(PAGES_RECORD_DIR)).unwrap();
+        std::fs::write(
+            workspace.join(PAGES_RECORD),
+            json!({ "version": 1, "pages": pages }).to_string(),
+        )
+        .unwrap();
     }
 
     /// Each page by its title and folder, made in this chat or in another: the chat recorded on the
-    /// page, newest first, each folder once. A page with no chat recorded is another chat's, and so is
-    /// every page for a turn of no chat.
+    /// page, newest first, each folder once. A page with no chat recorded is another chat's, and so
+    /// is every page for a turn of no chat.
     #[test]
     fn each_page_says_which_chat_made_it() {
-        let project = Uuid::new_v4();
         let (this, other) = (Uuid::new_v4(), Uuid::new_v4());
-        let state = json!({ "version": 1, "previews": [
-            entry(&project, "sites/framework-13-16", "Framework Laptop 13 vs 16", Some(&this)),
-            entry(&project, "sites/framework-laptops", "Framework laptops", Some(&other)),
-            // the same folder on another port, opened earlier: listed once
-            entry(&project, "./sites/framework-laptops/", "Framework laptops", Some(&this)),
+        let record = json!({ "version": 1, "pages": [
+            page("sites/framework-13-16", "Framework Laptop 13 vs 16", Some(&this), &PAGE_SERVER),
+            page("sites/framework-laptops", "Framework laptops", Some(&other), &PAGE_SERVER),
+            // the same folder again: listed once
+            page("./sites/framework-laptops/", "Framework laptops", Some(&this), &PAGE_SERVER),
             // from before chats were recorded
-            entry(&project, "seville-3-days", "Seville\tin 3\n days", None),
+            page("seville-3-days", "Seville\tin 3\n days", None, &["uw", "host"]),
         ]});
+        let commands = vec!["uw".to_string()];
         assert_eq!(
-            pages_lines(&state, &project, Some(&this), |_| true),
+            pages_lines(&record, Some(&this), &commands, |_| true),
             "- The space's pages:\n\
              \x20 - \"Framework Laptop 13 vs 16\", in `sites/framework-13-16/`: made in this chat.\n\
              \x20 - \"Framework laptops\", in `sites/framework-laptops/`: made in another chat.\n\
              \x20 - \"Seville in 3 days\", in `seville-3-days/`: made in another chat.\n"
         );
-        let other_chat = pages_lines(&state, &project, Some(&other), |_| true);
+        let other_chat = pages_lines(&record, Some(&other), &commands, |_| true);
         assert!(
             other_chat.contains(
                 "\"Framework Laptop 13 vs 16\", in `sites/framework-13-16/`: made in another chat."
@@ -190,7 +320,7 @@ mod tests {
             ),
             "{other_chat}"
         );
-        let no_chat = pages_lines(&state, &project, None, |_| true);
+        let no_chat = pages_lines(&record, None, &commands, |_| true);
         assert_eq!(
             no_chat.matches("made in another chat").count(),
             3,
@@ -199,79 +329,125 @@ mod tests {
         assert!(!no_chat.contains("made in this chat"), "{no_chat}");
     }
 
-    /// Another space's page, the space's own site (the workspace itself), a folder outside the
-    /// workspace and a preview with no folder are not listed; with none left there is no line at all.
+    /// Only pages made for the person: a site Instafy's page server or an installed skill's command
+    /// serves. The person's own app, in a folder of its own (an imported repository) or served from
+    /// the workspace itself, is not listed, nor is a folder outside the workspace or a page with no
+    /// server; with none left there is no line at all.
     #[test]
-    fn only_the_spaces_pages_in_folders_of_their_own_are_listed() {
-        let project = Uuid::new_v4();
+    fn only_pages_made_for_the_person_are_listed() {
         let chat = Uuid::new_v4();
-        let mut no_folder = entry(&project, "sites/x", "No folder", Some(&chat));
-        no_folder.as_object_mut().unwrap().remove("siteDir");
-        let state = json!({ "previews": [
-            entry(&Uuid::new_v4(), "sites/theirs", "Another space's page", Some(&chat)),
-            entry(&project, ".", "The space's own app", Some(&chat)),
-            entry(&project, "./", "The space's own app again", Some(&chat)),
-            entry(&project, "../elsewhere", "Outside", Some(&chat)),
-            entry(&project, "/tmp/site", "Absolute", Some(&chat)),
+        let mut no_folder = page("sites/x", "No folder", Some(&chat), &PAGE_SERVER);
+        no_folder.as_object_mut().unwrap().remove("folder");
+        let mut no_server = page("sites/y", "No server", Some(&chat), &PAGE_SERVER);
+        no_server.as_object_mut().unwrap().remove("server");
+        let record = json!({ "pages": [
+            page("repos/acme-shop", "Acme shop", Some(&chat), &["npm", "run"]),
+            page("web", "My app", Some(&chat), &["python3", "-m"]),
+            page(".", "The space's own app", Some(&chat), &PAGE_SERVER),
+            page("./", "The space's own app again", Some(&chat), &PAGE_SERVER),
+            page("../elsewhere", "Outside", Some(&chat), &PAGE_SERVER),
+            page("/tmp/site", "Absolute", Some(&chat), &PAGE_SERVER),
+            page("trip", "A map", Some(&chat), &["uw", "host"]),
             no_folder,
+            no_server,
         ]});
-        assert_eq!(pages_lines(&state, &project, Some(&chat), |_| true), "");
-        assert_eq!(pages_lines(&json!({}), &project, Some(&chat), |_| true), "");
-        let nowhere = Path::new("/nonexistent");
+        assert_eq!(pages_lines(&record, Some(&chat), &[], |_| true), "");
+        assert_eq!(pages_lines(&json!({}), Some(&chat), &[], |_| true), "");
+        // a map's host is a page server where the skill that provides it is installed
         assert_eq!(
-            space_pages_lines(
-                Some(&nowhere.join("cli-preview-state.json")),
-                nowhere,
-                &project,
-                Some(&chat)
-            ),
-            ""
+            pages_lines(&record, Some(&chat), &["uw".to_string()], |_| true),
+            "- The space's pages:\n  - \"A map\", in `trip/`: made in this chat.\n"
         );
-        assert_eq!(space_pages_lines(None, nowhere, &project, Some(&chat)), "");
+        let nowhere = Path::new("/nonexistent");
+        assert_eq!(space_pages_lines(nowhere, Some(&chat), &[]), "");
     }
 
-    /// A page whose folder is gone from the workspace is no page of the space: read from the state
-    /// file with the workspace's folders, only the one still there is listed.
+    /// The record is read from the space's own folder, so it is there on a new machine: a page
+    /// whose folder is gone from the workspace is no page of the space, and a link in place of the
+    /// record is not followed.
     #[test]
-    fn a_page_whose_folder_is_gone_is_not_listed() {
-        let project = Uuid::new_v4();
+    fn the_record_is_read_from_the_spaces_folder() {
         let chat = Uuid::new_v4();
         let workspace = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(workspace.path().join("sites/kept")).unwrap();
-        let home = tempfile::tempdir().unwrap();
-        let state_file = home.path().join("cli-preview-state.json");
-        std::fs::write(
-            &state_file,
-            json!({ "version": 1, "previews": [
-                entry(&project, "sites/gone", "Gone", Some(&chat)),
-                entry(&project, "sites/kept", "Kept", Some(&chat)),
-            ]})
-            .to_string(),
-        )
-        .unwrap();
+        write_record(
+            workspace.path(),
+            vec![
+                page("sites/gone", "Gone", Some(&chat), &PAGE_SERVER),
+                page("sites/kept", "Kept", Some(&chat), &PAGE_SERVER),
+            ],
+        );
         assert_eq!(
-            space_pages_lines(Some(&state_file), workspace.path(), &project, Some(&chat)),
+            space_pages_lines(workspace.path(), Some(&chat), &[]),
             "- The space's pages:\n  - \"Kept\", in `sites/kept/`: made in this chat.\n"
         );
+        let elsewhere = tempfile::tempdir().unwrap();
+        let target = elsewhere.path().join("pages.json");
+        std::fs::rename(workspace.path().join(PAGES_RECORD), &target).unwrap();
+        std::os::unix::fs::symlink(&target, workspace.path().join(PAGES_RECORD)).unwrap();
+        assert_eq!(space_pages_lines(workspace.path(), Some(&chat), &[]), "");
     }
 
     /// At most `MAX_PAGES` pages, and a title is one plain line of at most the CLI's length.
     #[test]
     fn a_few_pages_at_most_each_on_one_line() {
-        let project = Uuid::new_v4();
         let chat = Uuid::new_v4();
         let long = "A".repeat(300);
-        let previews: Vec<JsonValue> = (0..20)
-            .map(|n| entry(&project, &format!("sites/page-{n}"), &long, Some(&chat)))
+        let pages: Vec<JsonValue> = (0..20)
+            .map(|n| page(&format!("sites/page-{n}"), &long, Some(&chat), &PAGE_SERVER))
             .collect();
-        let lines = pages_lines(
-            &json!({ "previews": previews }),
-            &project,
-            Some(&chat),
-            |_| true,
-        );
+        let lines = pages_lines(&json!({ "pages": pages }), Some(&chat), &[], |_| true);
         assert_eq!(lines.lines().count(), 1 + MAX_PAGES, "{lines}");
         assert!(lines.contains(&format!("\"{}\"", "A".repeat(MAX_TITLE_CHARS))));
         assert!(!lines.contains(&"A".repeat(MAX_TITLE_CHARS + 1)));
+    }
+
+    /// A wake writes down a page the record does not hold, with no chat and its server, so it
+    /// reads as another chat's and no later open claims it; a page the record holds keeps its chat.
+    /// The record's folder keeps it out of every git status.
+    #[test]
+    fn a_wake_writes_down_a_page_with_no_chat_and_keeps_a_recorded_one() {
+        let (maker, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let workspace = tempfile::tempdir().unwrap();
+        for folder in ["sites/framework-laptops", "sites/porto"] {
+            std::fs::create_dir_all(workspace.path().join(folder)).unwrap();
+        }
+        write_record(
+            workspace.path(),
+            vec![page(
+                "sites/framework-laptops",
+                "Framework laptops",
+                Some(&maker),
+                &PAGE_SERVER,
+            )],
+        );
+        let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let bind = argv(&["/usr/local/bin/instafy", "bind", "serve", ".", "--port", "20001"]);
+        record_woken_page(workspace.path(), "sites/framework-laptops", "Renamed", &bind).unwrap();
+        record_woken_page(workspace.path(), "./sites/porto/", "Porto", &bind).unwrap();
+        record_woken_page(workspace.path(), ".", "The app", &bind).unwrap();
+        let lines = space_pages_lines(workspace.path(), Some(&maker), &[]);
+        assert_eq!(
+            lines,
+            "- The space's pages:\n\
+             \x20 - \"Porto\", in `sites/porto/`: made in another chat.\n\
+             \x20 - \"Framework laptops\", in `sites/framework-laptops/`: made in this chat.\n"
+        );
+        assert!(
+            space_pages_lines(workspace.path(), Some(&other), &[])
+                .contains("\"Framework laptops\", in `sites/framework-laptops/`: made in another chat.")
+        );
+        assert_eq!(
+            std::fs::read(workspace.path().join(PAGES_RECORD_DIR).join(".gitignore")).unwrap(),
+            PAGES_RECORD_IGNORE
+        );
+        // a wake with no record at all starts one
+        let fresh = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(fresh.path().join("sites/porto")).unwrap();
+        record_woken_page(fresh.path(), "sites/porto", "Porto", &bind).unwrap();
+        assert_eq!(
+            space_pages_lines(fresh.path(), Some(&maker), &[]),
+            "- The space's pages:\n  - \"Porto\", in `sites/porto/`: made in another chat.\n"
+        );
     }
 }
