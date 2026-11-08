@@ -8514,30 +8514,48 @@ impl JobProcessor {
         suppress_multi_agent_plan_actions_for_worker(job, &mut outcome);
         log_browser_requests_dropped_as_read(job, &output.final_json);
         suppress_browser_requests_where_unsupported(job, &mut outcome);
-        // A browser turn that carries on the person's own message, opened no
-        // page and asks Octo to make what the message asks hands the message
-        // to the building turn (`browser_hand_back`): it is not tried again in
-        // the browser, posts nothing of its answer, and ends with the note the
-        // controller hands the message back on.
-        let hands_the_message_to_the_building_turn = (shared_browser_execution_missing_after_attempt(
+        let shared_browser_opened_no_page = shared_browser_execution_missing_after_attempt(
             explicit_shared_browser_execution,
             &interim_messages,
             first_shared_browser_terminal_consent_failure,
             shared_browser_action_log_before,
             crate::shared_browser::action_log_len(),
-        )
+        );
+        // A browser turn that carries on the person's own message and opened no
+        // page hands the message to the building turn (`browser_hand_back`) when
+        // it asks Octo to make what the message asks, or, in Instafy's browser,
+        // when the message has its build after it anyway and the turn is not run
+        // again: it is not tried again in the browser, posts nothing of its
+        // answer, and ends with the note the controller hands the message back on.
+        let hands_the_message_to_the_building_turn = ((shared_browser_opened_no_page
             || (explicit_personal_browser_execution
                 && !has_successful_personal_browser_mcp_message(&interim_messages)))
-            && browser_hand_back::hands_the_message_to_the_building_turn(job, &output.final_json);
+            && browser_hand_back::hands_the_message_to_the_building_turn(job, &output.final_json))
+            || (shared_browser_no_page_ends_the_turn(
+                shared_browser_opened_no_page,
+                is_retryable_codex_upstream_summary(&outcome.summary),
+                &interim_messages,
+            ) && job
+                .payload
+                .get("metadata")
+                .is_some_and(browser_hand_back::builds_after_it));
         if hands_the_message_to_the_building_turn {
             outcome.actions.clear();
             tracing::info!(
                 job_id = %job_id,
-                "browser turn opened no page and asked for a build: the message goes to the building turn"
+                "browser turn opened no page: the message goes to the building turn"
             );
         }
         let mut codex_fallback_summary_kind =
             classify_internal_codex_fallback_summary(&outcome.summary);
+        if first_shared_browser_terminal_consent_failure.is_some() {
+            // The lines it keeps name no address the browser refused it and no step opened.
+            browser_hand_back::leave_out_addresses_never_opened(
+                &mut outcome.summary,
+                &output.browser_not_given,
+                &output.browser_pages,
+            );
+        }
         apply_terminal_shared_browser_summary(
             &mut outcome.summary,
             &mut codex_fallback_summary_kind,
@@ -8549,9 +8567,10 @@ impl JobProcessor {
             workspace_file_changes_still_required(expects_workspace_file_changes, &outcome);
         let mut final_messages = build_final_messages_from_outcome(&outcome, Some(&workspace_dir));
         if hands_the_message_to_the_building_turn {
-            final_messages.push(browser_hand_back::build_request_note());
+            final_messages.push(browser_hand_back::build_request_note(job));
         }
-        let final_messages = with_runtime_metadata_vec(final_messages, &registration.runtime_id);
+        let mut final_messages =
+            with_runtime_metadata_vec(final_messages, &registration.runtime_id);
         let reported_file_paths = outcome
             .files
             .iter()
@@ -8708,19 +8727,14 @@ impl JobProcessor {
         let personal_browser_execution_missing = explicit_personal_browser_execution
             && !has_successful_personal_browser_mcp_message(&interim_messages)
             && !hands_the_message_to_the_building_turn;
-        let shared_browser_execution_missing = !hands_the_message_to_the_building_turn
-            && shared_browser_execution_missing_after_attempt(
-                explicit_shared_browser_execution,
-                &interim_messages,
-                first_shared_browser_terminal_consent_failure,
-                shared_browser_action_log_before,
-                crate::shared_browser::action_log_len(),
-            );
+        let shared_browser_execution_missing =
+            !hands_the_message_to_the_building_turn && shared_browser_opened_no_page;
         // A Shared Browser turn that opened no page is not run again: told to open "the official
         // site of what the task is about", the retry of a routed task that named nothing opened
         // a site it guessed (a local test, Nov 6). It ends below, unless the browser or the
         // model's service failed it (a step that never reached the browser, or a passing
-        // upstream error), which runs it again with its own request.
+        // upstream error), which runs it again with its own request; one whose message has its
+        // build after it handed the message to that build above.
         let shared_browser_turn_ends_without_a_page = shared_browser_no_page_ends_the_turn(
             shared_browser_execution_missing,
             transient_upstream_summary_failure,
@@ -9373,6 +9387,14 @@ impl JobProcessor {
             let retry_shared_browser_terminal_consent_failure = explicit_shared_browser_execution
                 .then(|| shared_browser_terminal_consent_failure(&retry_messages))
                 .flatten();
+            if retry_shared_browser_terminal_consent_failure.is_some() {
+                // As after a first attempt: no line it keeps names an address never opened.
+                browser_hand_back::leave_out_addresses_never_opened(
+                    &mut retry_outcome.summary,
+                    &retry_output.browser_not_given,
+                    &retry_output.browser_pages,
+                );
+            }
             apply_terminal_shared_browser_summary(
                 &mut retry_outcome.summary,
                 &mut retry_codex_fallback_summary_kind,
@@ -9419,13 +9441,19 @@ impl JobProcessor {
                 retry_shared_browser_terminal_consent_failure.is_none()
                     && retry_own_files_len == 0
                     && is_retryable_codex_upstream_summary(&retry_outcome.summary);
+            // A part with its build after it whose first attempt opened a page used the browser,
+            // whatever its retry did: it ends with the pages of both, which go to its build.
             let retry_shared_browser_execution_missing =
-                shared_browser_execution_missing_after_attempt(
-                    explicit_shared_browser_execution,
-                    &retry_messages,
-                    retry_shared_browser_terminal_consent_failure,
-                    shared_browser_action_log_before_retry,
-                    crate::shared_browser::action_log_len(),
+                browser_hand_back::opened_no_page_after_a_retry(
+                    job.payload.get("metadata"),
+                    shared_browser_opened_no_page,
+                    shared_browser_execution_missing_after_attempt(
+                        explicit_shared_browser_execution,
+                        &retry_messages,
+                        retry_shared_browser_terminal_consent_failure,
+                        shared_browser_action_log_before_retry,
+                        crate::shared_browser::action_log_len(),
+                    ),
                 );
             // The retry of a browser turn that carries on the person's own
             // message, opened no page and asks Octo to make what the message
@@ -9434,18 +9462,25 @@ impl JobProcessor {
             // never opened. A Personal Browser turn's first attempt that said
             // so in words alone gets here, its retry asked to decide first
             // (`browser_hand_back::build_request_retry_line`).
+            // A Shared Browser retry whose message has its build after it hands the message to
+            // that build the same way, as nothing runs it again.
             let retry_hands_the_message_to_the_building_turn =
-                (retry_shared_browser_execution_missing
+                ((retry_shared_browser_execution_missing
                     || retry_personal_browser_execution_missing)
                     && browser_hand_back::hands_the_message_to_the_building_turn(
                         job,
                         &retry_output.final_json,
-                    );
+                    ))
+                    || (retry_shared_browser_execution_missing
+                        && job
+                            .payload
+                            .get("metadata")
+                            .is_some_and(browser_hand_back::builds_after_it));
             if retry_hands_the_message_to_the_building_turn {
                 retry_outcome.actions.clear();
                 tracing::info!(
                     job_id = %job_id,
-                    "browser retry opened no page and asked for a build: the message goes to the building turn"
+                    "browser retry opened no page: the message goes to the building turn"
                 );
             }
             let retry_shared_browser_execution_missing = retry_shared_browser_execution_missing
@@ -9718,7 +9753,7 @@ impl JobProcessor {
             let mut retry_final_messages =
                 build_final_messages_from_outcome(&retry_outcome, Some(&workspace_dir));
             if retry_hands_the_message_to_the_building_turn {
-                retry_final_messages.push(browser_hand_back::build_request_note());
+                retry_final_messages.push(browser_hand_back::build_request_note(job));
             }
             let retry_final_messages =
                 with_runtime_metadata_vec(retry_final_messages, &registration.runtime_id);
@@ -9890,7 +9925,7 @@ impl JobProcessor {
             // The retry's result is settled: its cards go out now, right
             // behind its answer, not after the workspace sync and the
             // turn-end save.
-            let retry_final_messages = stream_settled_cards(
+            let mut retry_final_messages = stream_settled_cards(
                 progress_sender.as_ref(),
                 streaming_active,
                 retry_final_messages,
@@ -10076,6 +10111,12 @@ impl JobProcessor {
                 .await;
                 retry_artifacts.extend(ended.artifacts);
                 retry_messages.extend(ended.messages);
+                if ended.hands_the_message_to_its_build {
+                    retry_final_messages.extend(with_runtime_metadata_vec(
+                        vec![browser_hand_back::build_request_note(job)],
+                        &registration.runtime_id,
+                    ));
+                }
                 // As after the turn's own run: steps a second pass could not stream are posted
                 // with the turn.
                 if let Some(progress) = progress_sender.as_ref() {
@@ -10145,6 +10186,12 @@ impl JobProcessor {
             .await;
             artifacts.extend(ended.artifacts);
             interim_messages.extend(ended.messages);
+            if ended.hands_the_message_to_its_build {
+                final_messages.extend(with_runtime_metadata_vec(
+                    vec![browser_hand_back::build_request_note(job)],
+                    &registration.runtime_id,
+                ));
+            }
             // As after the turn's own run: steps a second pass could not stream are posted with
             // the turn.
             if let Some(progress) = progress_sender.as_ref() {
@@ -14834,11 +14881,13 @@ fn turn_that_cannot_save(
 }
 
 /// What the person reads when a browser turn ended without having used the
-/// browser: plain words, shown inline on the failed turn (Studio keeps a
-/// reason that names the AI vendor or a tool behind Details). The artifact
-/// beside it keeps the machine-readable reason.
+/// browser: plain words, shown inline on the failed turn beside Try again
+/// (Studio keeps a reason that names the AI vendor or a tool behind Details),
+/// and what they can do. A message with its build after it never fails so: its
+/// build makes it (`browser_hand_back::builds_after_it`). The artifact beside it
+/// keeps the machine-readable reason.
 const SHARED_BROWSER_NO_PAGE_FAILURE: &str =
-    "Octo didn't open a page in the browser, so this turn stopped.";
+    "Octo didn't open a page in the browser. Say which site to look at, or try again.";
 const PERSONAL_BROWSER_NOT_USED_FAILURE: &str =
     "Octo couldn't use the browser on this device, so this turn stopped.";
 /// The status a retry leaves in Details: a Shared Browser turn whose step
@@ -15752,7 +15801,13 @@ fn last_reply_was_a_pause(job: &LeaseJob) -> bool {
 }
 
 /// `paused_already`: Octo's last reply in the chat was a pause for the
-/// person's input ([`last_reply_was_a_pause`]).
+/// person's input ([`last_reply_was_a_pause`]). The finding lines the turn
+/// wrote for the pages it read stay after those words: the person reads only
+/// the words, and the turn's Details note keeps the lines for later turns
+/// (`browser_hand_back::move_findings_into_details`); replaced with the rest,
+/// the pages a turn read before it stopped reached no later build. Its lines
+/// for pages that stopped it don't stay: the person's next step acts on the
+/// page it stopped at (`browser_hand_back::read_lines_of`).
 fn apply_terminal_shared_browser_summary(
     summary: &mut String,
     fallback_kind: &mut Option<CodexFallbackSummaryKind>,
@@ -15762,12 +15817,16 @@ fn apply_terminal_shared_browser_summary(
     let Some(code) = terminal_consent_failure else {
         return;
     };
+    let lines = browser_hand_back::read_lines_of(summary);
     *summary = match code {
         "human_input_required" if paused_already => HUMAN_INPUT_PAUSE_AGAIN_REPLY,
         "cookie_notice_required" if paused_already => COOKIE_NOTICE_PAUSE_AGAIN_REPLY,
         _ => terminal_shared_browser_summary(code),
     }
     .to_string();
+    if let Some(lines) = lines {
+        browser_hand_back::add_finding_lines(summary, &lines);
+    }
     *fallback_kind = None;
 }
 
@@ -15781,8 +15840,11 @@ fn terminal_shared_browser_summary(code: &str) -> &'static str {
     match code {
         "human_input_required" => HUMAN_INPUT_PAUSE_REPLY,
         "cookie_notice_required" => COOKIE_NOTICE_PAUSE_REPLY,
+        // The prompt is gone by now: the words never say Octo is still waiting (a local test,
+        // Nov 8: "I'm waiting for your OK" after each prompt had expired, with nothing on screen
+        // to answer).
         "approval_timeout" => {
-            "I'm waiting for your OK to continue in Instafy's browser. I haven't done that step yet. Send a message when you're ready and I'll ask again."
+            "Your OK didn't come in time, so I didn't do that step. Send a message when you're ready and I'll ask again."
         }
         "approval_denied" => {
             "You said no, so that step didn't happen, and nothing from it was sent."
@@ -16308,7 +16370,7 @@ fn finalization_codex_run_options(first_attempt: &CodexRunOptions) -> CodexRunOp
 }
 
 /// The options of the wrap-up pass that asks a browser turn for its finding lines
-/// ([`browser_hand_back::FINDING_LINES_PASS_PROMPT`]): the turn's own run, resumed on its own
+/// ([`browser_hand_back::finding_lines_pass_prompt`]): the turn's own run, resumed on its own
 /// thread, which holds the pages it read, at low effort, with no tool required first and no
 /// images sent again. Its browser stays as the turn had it, so the thread resumes with the same
 /// instructions and the browser's tools alone, its approvals and its Stop, and its cached start;
@@ -16381,16 +16443,25 @@ pub struct BrowserTurnAnswer<'a> {
 pub struct BrowserTurnEnd {
     pub artifacts: Vec<JsonValue>,
     pub messages: Vec<JobMessage>,
+    /// Whether the turn, with its build after it, hands the person's message to that build as one
+    /// that opened no page does (`browser_hand_back::builds_after_it`): it left the build nothing
+    /// to read, and its reply is cleared. The job ends it with the build request note
+    /// (`browser_hand_back::build_request_note`).
+    pub hands_the_message_to_its_build: bool,
 }
 
 /// Ends the reply `summary` of a browser turn that is not handed to the building turn
 /// (`browser_hand_back::hands_the_message_to_the_building_turn`). A turn whose findings go back
 /// to the building turn and that named pages it didn't open reads them first, in a second pass
 /// (`read_the_unread_pages`). A turn that used the browser and wrote no finding lines gets the
-/// runtime's wrap-up pass on its own thread, asked for those lines only; with still none, its
+/// runtime's wrap-up pass on its own thread, asked for those lines only and, when its findings go
+/// back to the building turn and no second pass ran, for its unread line too, whose pages the
+/// second pass then reads; with still none, its
 /// note holds its reply and the pages its own steps opened, so a later building turn reads which
 /// pages it opened, a hand-back still goes, and a turn whose findings go back to the building
-/// turn posts no words of its own (`browser_hand_back::move_findings_into_details`). A turn on
+/// turn posts no words of its own (`browser_hand_back::move_findings_into_details`). One with its
+/// build after it whose steps opened no page either hands that build the person's message, as
+/// one that opened no page does (`BrowserTurnEnd::hands_the_message_to_its_build`). A turn on
 /// the browser on the person's device keeps no thread, so it gets no pass: the pages it opened,
 /// by address. A build request that nothing then acts on is said in the reply, never dropped
 /// without a word (`browser_hand_back::BUILD_NOT_MADE_LINE`). A turn that stopped for the person
@@ -16422,6 +16493,7 @@ pub async fn end_browser_turn_answer(
     let mut ended = BrowserTurnEnd {
         artifacts: second.artifacts,
         messages: second.messages,
+        ..Default::default()
     };
     if answer.stopped_for_the_person || second.stopped_for_the_person {
         return ended;
@@ -16435,13 +16507,20 @@ pub async fn end_browser_turn_answer(
         && !canceled
         && browser_hand_back::needs_finding_lines(metadata, summary)
     {
+        // A turn whose findings go back to the building turn is asked for its unread line too,
+        // unless a second pass ran already: a second pass's own unread line starts no third.
+        let asks_for_unread = !second.ran && metadata.is_some_and(browser_hand_back::hands_back);
         let mut lines = None;
         if answer.thread.is_some() {
             let mut options = finding_lines_pass_options(answer.options, answer.thread.clone());
             options.usage_observer = Some(task_usage.call(UsagePhase::Finalization));
             let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
             let pass = codex
-                .execute_with_options(browser_hand_back::FINDING_LINES_PASS_PROMPT, None, options)
+                .execute_with_options(
+                    &browser_hand_back::finding_lines_pass_prompt(asks_for_unread),
+                    None,
+                    options,
+                )
                 .await;
             drop(codex_guard);
             match pass {
@@ -16462,18 +16541,27 @@ pub async fn end_browser_turn_answer(
                             "the browser turn's finding-lines wrap-up pass took a step: its answer is not used"
                         );
                     } else {
-                        // Its lines, without a refused address no step opened, as above.
-                        lines = output
+                        // Its lines, without a refused address no step opened, as above, and
+                        // the unread line it was asked for after them.
+                        let mut written = output
                             .final_json
                             .get("summary")
                             .and_then(JsonValue::as_str)
-                            .and_then(browser_hand_back::finding_lines_of)
-                            .and_then(|mut lines| {
-                                browser_hand_back::leave_out_addresses_never_opened(
-                                    &mut lines, &not_given, &opened,
-                                );
-                                browser_hand_back::finding_lines_of(&lines)
-                            });
+                            .unwrap_or_default()
+                            .to_string();
+                        browser_hand_back::leave_out_addresses_never_opened(
+                            &mut written,
+                            &not_given,
+                            &opened,
+                        );
+                        lines = browser_hand_back::finding_lines_of(&written).map(|lines| {
+                            match browser_hand_back::unread_line_of(&written)
+                                .filter(|_| asks_for_unread)
+                            {
+                                Some(unread) => format!("{lines}\n{unread}"),
+                                None => lines,
+                            }
+                        });
                     }
                 }
                 Err(error) => warn!(
@@ -16493,10 +16581,34 @@ pub async fn end_browser_turn_answer(
                     "a browser turn that hands back wrote no finding lines: they come from the wrap-up pass or the pages it opened"
                 );
             }
-            None => tracing::info!(
-                job_id = %job.id,
-                "a browser turn that hands back wrote no finding lines and opened no page: nothing goes back"
-            ),
+            None => {
+                tracing::info!(
+                    job_id = %job.id,
+                    "a browser turn that hands back wrote no finding lines and opened no page: nothing goes back"
+                );
+                // One with its build after it hands that build the person's message, as one that
+                // opened no page does: which look it took (one that left a step in the browser's
+                // log, or none) never decides whether the message is made.
+                if metadata.is_some_and(browser_hand_back::builds_after_it) {
+                    summary.clear();
+                    ended.hands_the_message_to_its_build = true;
+                    return ended;
+                }
+            }
+        }
+        if asks_for_unread && from_the_pass {
+            // The pages the wrap-up pass named unread, read now as any second pass reads them.
+            let read = read_the_unread_pages(codex, job, &answer, summary, task_usage).await;
+            browser_hand_back::leave_out_addresses_never_opened(
+                summary,
+                &[not_given.as_slice(), read.not_given.as_slice()].concat(),
+                &[opened.as_slice(), read.pages.as_slice()].concat(),
+            );
+            ended.artifacts.extend(read.artifacts);
+            ended.messages.extend(read.messages);
+            if read.stopped_for_the_person {
+                return ended;
+            }
         }
     }
     if browser_hand_back::say_a_build_request_nothing_acts_on(metadata, answer.final_json, summary)
@@ -16534,6 +16646,8 @@ fn unread_pages_pass_options(
 /// them (`CodexRunOutput::browser_pages`, `CodexRunOutput::browser_not_given`).
 #[derive(Default)]
 struct UnreadPagesRead {
+    /// Whether the second pass started.
+    ran: bool,
     artifacts: Vec<JsonValue>,
     messages: Vec<JobMessage>,
     stopped_for_the_person: bool,
@@ -16548,8 +16662,9 @@ struct UnreadPagesRead {
 /// third. Never after a Stop, nor when the turn stopped for the person (a sign-in or cookie
 /// pause, a step's approval that ended it, a secret) or the browser refused one of its steps as
 /// theirs: the page needs the person. Nor when its answer, as the turn wrote it, holds no finding
-/// line: the wrap-up pass asks for the lines of the pages it read ([`end_browser_turn_answer`]),
-/// and a second pass's lines would leave those pages out. A line for an address the browser
+/// line: the wrap-up pass asks for the lines of the pages it read first ([`end_browser_turn_answer`]),
+/// and a second pass's lines would leave those pages out; the unread line that pass writes after
+/// them is read here then. A line for an address the browser
 /// refused it because nothing gave it goes first, so that address stays among the pages the
 /// second pass reads. The unread line itself is taken out of `summary` in any case: no person
 /// reads it. Told to read every page the request needs, a comparison's
@@ -16599,6 +16714,7 @@ async fn read_the_unread_pages(
         pages = pages.len(),
         "a browser turn named pages it didn't read: it reads them once more before the build"
     );
+    read.ran = true;
     let mut options = unread_pages_pass_options(turn.options, thread);
     options.usage_observer = Some(task_usage.call(UsagePhase::Recovery));
     let prompt = browser_hand_back::unread_pages_prompt(&pages);
@@ -21045,11 +21161,6 @@ fn sanitize_codex_final_json(value: &JsonValue) -> JsonValue {
 fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
     let mut results = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    // Counts every message pushed so far. A Cell lets the stream.retry arm read it while the
-    // closure below holds the mutable borrows of `results` and `seen`.
-    let pushed = std::cell::Cell::new(0usize);
-    let mut retry_episode = 0usize;
-    let mut pushed_at_last_retry: Option<usize> = None;
 
     let mut push_message =
         |key: String, content: String, message_type: Option<&str>, metadata: JsonValue| {
@@ -21058,7 +21169,6 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                 return;
             }
             if seen.insert(key) {
-                pushed.set(pushed.get() + 1);
                 results.push(JobMessage {
                     content: trimmed.to_string(),
                     message_type: message_type.map(|value| value.to_string()),
@@ -21557,37 +21667,12 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                     push_message(key, content, Some("token_usage"), details);
                 }
             }
-            "stream.retry" => {
-                // Codex is sending a dropped stream again, and the turn may still recover. The
-                // status keeps the cause for the run's record but gives the turn's line no
-                // words: Codex sends nothing when the resent stream is back, so they would stay
-                // through the model's next pause. A failure that outlasts the retries still
-                // arrives as an error.
-                if let Some(reason) = map
-                    .get("message")
-                    .and_then(JsonValue::as_str)
-                    .map(str::trim)
-                    .filter(|reason| !reason.is_empty())
-                {
-                    // The Studio headline is the latest status or reasoning line. Repeated
-                    // attempts collapse into one line while it is still the latest message,
-                    // but once anything else has been shown, a later throttle in the same
-                    // turn needs a line of its own or the headline keeps the stale step.
-                    if pushed_at_last_retry.is_some_and(|count| count != pushed.get()) {
-                        retry_episode += 1;
-                    }
-                    push_message(
-                        format!("stream_retry::{retry_episode}::{reason}"),
-                        format!("Retrying: {reason}"),
-                        Some("status"),
-                        json!({
-                            "kind": "codex_stream_retry",
-                            "event": event.clone(),
-                        }),
-                    );
-                    pushed_at_last_retry = Some(pushed.get());
-                }
-            }
+            // Codex sending a dropped stream again by itself, which the turn usually gets past:
+            // no message of the turn's. The run log keeps the event and its cause, and a failure
+            // that outlasts the retries still arrives as an error. Stored as a status, it kept
+            // "Retrying: unexpected status 502 Bad Gateway: … url: http://proxy:8789/v1/responses"
+            // in the chat's messages, which nobody needs to read (a local test, Nov 8).
+            "stream.retry" => {}
             "error" => {
                 if let Some(message) = map
                     .get("message")
@@ -28289,13 +28374,15 @@ mod tests {
 
     /// A browser turn that ended without opening a page says Octo didn't open one: in a local test
     /// (Nov 6) its row read "Octo couldn't open a page in the browser" right under "Opened
-    /// Instafy's browser".
+    /// Instafy's browser". Then it says what the person can do, with no "this turn" (a local
+    /// test, Nov 8: four times "…, so this turn stopped.").
     #[test]
     fn a_browser_turn_that_opened_no_page_says_it_did_not() {
         assert_eq!(
             SHARED_BROWSER_NO_PAGE_FAILURE,
-            "Octo didn't open a page in the browser, so this turn stopped."
+            "Octo didn't open a page in the browser. Say which site to look at, or try again."
         );
+        assert!(!SHARED_BROWSER_NO_PAGE_FAILURE.contains("turn"));
     }
 
     /// A message sent straight to Instafy's browser ends its job with the routed card alone: its
@@ -30464,10 +30551,12 @@ mod tests {
                 "approval_stale" => {
                     "The page changed after you said yes, so I didn't do that step. Send a message and I'll ask again."
                 }
+                // The prompt expired: nothing is waiting for the person any more.
                 _ => {
-                    "I'm waiting for your OK to continue in Instafy's browser. I haven't done that step yet. Send a message when you're ready and I'll ask again."
+                    "Your OK didn't come in time, so I didn't do that step. Send a message when you're ready and I'll ask again."
                 }
             };
+            assert!(!expected.contains("waiting"), "{expected}");
             let mut summary = "internal no-final fallback".to_string();
             let mut fallback = Some(CodexFallbackSummaryKind::MissingFinalAssistantMessage);
             apply_terminal_shared_browser_summary(&mut summary, &mut fallback, terminal, false);
@@ -30512,6 +30601,144 @@ mod tests {
 
         assert!(should_retry_codex_once(None, true));
         assert!(!should_retry_codex_once(None, false));
+    }
+
+    /// A turn that paused for the person, or that a step's approval ended, keeps the finding
+    /// lines it wrote for the pages it read: the person reads only the runtime's words, and the
+    /// turn's Details note holds the lines a later building turn reads. Its lines for pages that
+    /// stopped it go no further: the person's next step acts on the page it stopped at, and every
+    /// such line of three turns that paused on a cookie notice was out of date or untrue by the
+    /// time the page's build read it (a local test, Nov 8). Its unread line is the runtime's
+    /// alone, and a line for an address the browser refused it, which no step opened, says no
+    /// page stopped it there.
+    #[test]
+    fn a_turn_that_paused_for_the_person_keeps_its_finding_lines_in_its_note() {
+        let covered = r#"{"url":"https://visit.example/en","stopped":"covered"}"#;
+        let read = r#"{"url":"https://visit.example/en/search","title":"Search","facts":["A search field."]}"#;
+        let refused = r#"{"url":"https://unnamed.example/","stopped":"no-page"}"#;
+        let unread = r#"{"unread":["the bookshop's own site"]}"#;
+        let answer = format!(
+            "A cookie notice is covering the page. Please answer it, then ask me to continue.\n{read}\n{covered}\n{refused}\n{unread}"
+        );
+        let mut summary = answer.clone();
+        browser_hand_back::leave_out_addresses_never_opened(
+            &mut summary,
+            &["https://unnamed.example/".to_string()],
+            &["https://visit.example/en".to_string()],
+        );
+        let mut fallback = None;
+        apply_terminal_shared_browser_summary(
+            &mut summary,
+            &mut fallback,
+            Some("cookie_notice_required"),
+            false,
+        );
+        assert_eq!(summary, format!("{COOKIE_NOTICE_PAUSE_REPLY}\n\n{read}"));
+
+        // The person reads the runtime's words; the note keeps the lines.
+        let paused = JobMessage {
+            content: "Tool call completed: instafy_shared_browser/click".to_string(),
+            message_type: Some("mcp_tool_call".to_string()),
+            metadata: Some(json!({
+                "server": "instafy_shared_browser",
+                "tool": "click",
+                "status": "failed",
+                "terminalConsent": {
+                    "state": "blocked",
+                    "terminal": true,
+                    "retryable": false,
+                    "code": "cookie_notice_required",
+                },
+            })),
+        };
+        let job = test_lease_job(
+            Some("feature"),
+            json!({
+                "browser_hand_back_reads_note": true,
+                "metadata": {
+                    "browserTransport": "shared",
+                    "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                    "browserHandsBack": true,
+                    "browserCardTurn": {
+                        "version": 1,
+                        "cardJobId": "00000000-0000-4000-8000-0000000000a1",
+                        "routed": true,
+                    },
+                },
+            }),
+        );
+        let mut execution = JobExecution {
+            summary,
+            suggested_replies: Vec::new(),
+            provider: "codex-embedded".to_string(),
+            artifacts: Vec::new(),
+            credit_snapshot: None,
+            provider_conversation_state: None,
+            messages: vec![paused],
+            messages_streamed: false,
+            final_messages: Vec::new(),
+        };
+        browser_hand_back::move_findings_into_details(&job, &mut execution);
+        assert_eq!(execution.summary, COOKIE_NOTICE_PAUSE_REPLY);
+        assert_eq!(
+            execution.final_messages.len(),
+            1,
+            "{:?}",
+            execution.final_messages
+        );
+        let note = &execution.final_messages[0];
+        assert_eq!(note.content, read);
+        assert_eq!(
+            note.metadata.as_ref().unwrap()["browserFindings"],
+            json!({ "pages": 1, "pagesRead": 1 })
+        );
+
+        // A pause whose only line is the page it paused on, as each of those three turns wrote,
+        // leaves the person's words alone and no note.
+        let mut summary = format!(
+            "A cookie notice is covering the Visit page. Please answer it in the browser, then ask me to continue.\n{covered}"
+        );
+        apply_terminal_shared_browser_summary(
+            &mut summary,
+            &mut None,
+            Some("cookie_notice_required"),
+            true,
+        );
+        assert_eq!(summary, COOKIE_NOTICE_PAUSE_AGAIN_REPLY);
+        let mut execution = JobExecution {
+            summary,
+            suggested_replies: Vec::new(),
+            provider: "codex-embedded".to_string(),
+            artifacts: Vec::new(),
+            credit_snapshot: None,
+            provider_conversation_state: None,
+            messages: Vec::new(),
+            messages_streamed: false,
+            final_messages: Vec::new(),
+        };
+        browser_hand_back::move_findings_into_details(&job, &mut execution);
+        assert_eq!(execution.summary, COOKIE_NOTICE_PAUSE_AGAIN_REPLY);
+        assert!(
+            execution.final_messages.is_empty(),
+            "{:?}",
+            execution.final_messages
+        );
+
+        // Every other way a step's approval ends the turn keeps them the same way, and a pause
+        // right after a pause too.
+        for (code, again) in [
+            ("approval_timeout", false),
+            ("approval_denied", false),
+            ("human_input_required", true),
+        ] {
+            let mut summary = format!("Waiting.\n{read}");
+            apply_terminal_shared_browser_summary(&mut summary, &mut None, Some(code), again);
+            assert!(
+                summary.ends_with(&format!("\n\n{read}")),
+                "{code}: {summary}"
+            );
+            assert!(!summary.starts_with("Waiting."), "{code}: {summary}");
+        }
     }
 
     /// A run whose browser went away (in a dogfood run the turn kept thinking
@@ -38727,17 +38954,24 @@ mod tests {
         assert_eq!(messages[0].message_type.as_deref(), Some("error"));
     }
 
+    /// Codex sends a dropped stream again by itself, and the turn gets past it: the turn keeps no
+    /// message of it. Stored as a status, it kept "Retrying: unexpected status 502 Bad Gateway:
+    /// The upstream request failed., url: http://proxy:8789/v1/responses" in the chat's messages
+    /// (a local test, Nov 8). The run log keeps the event and its cause, and a status the runtime
+    /// stops on at once is still an error.
     #[test]
-    fn recovered_stream_error_is_a_retry_status_and_not_an_error() {
+    fn a_recovered_stream_error_leaves_no_message() {
         use crate::codex::CodexEventStreamAdapter;
         use codex_protocol::protocol::{
-            AgentMessageEvent, CodexErrorInfo, Event, EventMsg, StreamErrorEvent,
+            AgentMessageEvent, AgentReasoningEvent, CodexErrorInfo, Event, EventMsg,
+            StreamErrorEvent,
         };
 
-        let reason = "stream disconnected before completion: 429 Too Many Requests: The upstream provider rate limit was reached.";
-        let stream_error = |http_status_code| {
+        let bad_gateway = "unexpected status 502 Bad Gateway: The upstream request failed., url: http://proxy:8789/v1/responses";
+        let throttled = "stream disconnected before completion: 429 Too Many Requests: The upstream provider rate limit was reached.";
+        let stream_error = |reason: &str, attempt: usize, http_status_code| {
             EventMsg::StreamError(StreamErrorEvent {
-                message: "Reconnecting... 1/5".to_string(),
+                message: format!("Reconnecting... {attempt}/5"),
                 codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
                     http_status_code,
                 }),
@@ -38746,7 +38980,7 @@ mod tests {
         };
         let collect = |messages: Vec<EventMsg>| {
             let mut adapter = CodexEventStreamAdapter::default();
-            let events = messages
+            messages
                 .into_iter()
                 .flat_map(|msg| {
                     adapter.collect(&Event {
@@ -38754,12 +38988,16 @@ mod tests {
                         msg,
                     })
                 })
-                .collect::<Vec<_>>();
-            extract_codex_messages(&events)
+                .collect::<Vec<_>>()
         };
 
-        let messages = collect(vec![
-            stream_error(None),
+        let events = collect(vec![
+            stream_error(bad_gateway, 1, None),
+            EventMsg::AgentReasoning(AgentReasoningEvent {
+                text: "**Opening the checkout page**".to_string(),
+            }),
+            stream_error(throttled, 1, None),
+            stream_error(throttled, 2, None),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "The page is updated.".to_string(),
                 phase: None,
@@ -38769,122 +39007,35 @@ mod tests {
             }),
         ]);
         assert!(
+            events
+                .iter()
+                .filter(|event| event["type"] == "stream.retry")
+                .count()
+                == 3,
+            "{events:?}"
+        );
+        let messages = extract_codex_messages(&events);
+        assert_eq!(
             messages
                 .iter()
-                .all(|message| message.message_type.as_deref() != Some("error")),
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["**Opening the checkout page**", "The page is updated."],
             "{messages:?}"
         );
-        let retry = messages
-            .iter()
-            .find(|message| message.content.starts_with("Retrying: "))
-            .expect("the recovered retry stays visible as progress");
-        assert_eq!(retry.content, format!("Retrying: {reason}"));
-        assert_eq!(retry.message_type.as_deref(), Some("status"));
-        assert_eq!(
-            retry
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("kind"))
-                .and_then(JsonValue::as_str),
-            Some("codex_stream_retry")
-        );
-        // It gives the turn's line no words. Codex sends nothing when the resent stream is back,
-        // so "Trying again…" stayed on the line through the model's next pause: 2 s over a 502
-        // the turn had already got past. The line keeps the turn's step instead.
-        assert_eq!(
-            retry
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("activity")),
-            None
-        );
+        // The run's record keeps each retry with its cause.
+        let log = build_codex_run_log_artifact(&events, None).to_string();
         assert!(
-            messages
-                .iter()
-                .any(|message| message.content == "The page is updated.")
+            log.contains("stream.retry") && log.contains("502 Bad Gateway"),
+            "{log}"
         );
 
         // A terminal status ends the turn at once, so it is still reported as an error.
-        let messages = collect(vec![stream_error(Some(401))]);
+        let messages =
+            extract_codex_messages(&collect(vec![stream_error(throttled, 1, Some(401))]));
         assert_eq!(messages.len(), 1, "{messages:?}");
-        assert_eq!(messages[0].content, reason);
+        assert_eq!(messages[0].content, throttled);
         assert_eq!(messages[0].message_type.as_deref(), Some("error"));
-    }
-
-    #[test]
-    fn a_later_throttle_in_the_same_turn_shows_a_new_retry_status() {
-        use crate::codex::CodexEventStreamAdapter;
-        use codex_protocol::protocol::{
-            AgentMessageEvent, AgentReasoningEvent, CodexErrorInfo, Event, EventMsg,
-            StreamErrorEvent,
-        };
-
-        let reason = "stream disconnected before completion: 429 Too Many Requests: The upstream provider rate limit was reached.";
-        let stream_error = |attempt: usize| {
-            EventMsg::StreamError(StreamErrorEvent {
-                message: format!("Reconnecting... {attempt}/5"),
-                codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
-                    http_status_code: None,
-                }),
-                additional_details: Some(reason.to_string()),
-            })
-        };
-        let mut adapter = CodexEventStreamAdapter::default();
-        let events = [
-            // Step 2 is throttled twice before it recovers.
-            stream_error(1),
-            stream_error(2),
-            EventMsg::AgentReasoning(AgentReasoningEvent {
-                text: "**Opening the checkout page**".to_string(),
-            }),
-            // Step 10 is throttled again with the same cause.
-            stream_error(1),
-            EventMsg::AgentMessage(AgentMessageEvent {
-                message: "The order form is filled in.".to_string(),
-                phase: None,
-                memory_citation: None,
-                delivery: None,
-                questions: None,
-            }),
-        ]
-        .into_iter()
-        .flat_map(|msg| {
-            adapter.collect(&Event {
-                id: "turn-1".to_string(),
-                msg,
-            })
-        })
-        .collect::<Vec<_>>();
-
-        let messages = extract_codex_messages(&events);
-        let contents = messages
-            .iter()
-            .map(|message| message.content.as_str())
-            .collect::<Vec<_>>();
-        let retry = format!("Retrying: {reason}");
-        assert_eq!(
-            contents,
-            vec![
-                retry.as_str(),
-                "**Opening the checkout page**",
-                retry.as_str(),
-                "The order form is filled in.",
-            ]
-        );
-
-        // Streaming sends only the messages past the ones it already sent, so a longer event
-        // list must never reorder or drop a message that a shorter one produced.
-        for end in 0..=events.len() {
-            let prefix = extract_codex_messages(&events[..end]);
-            assert_eq!(
-                prefix
-                    .iter()
-                    .map(|message| message.content.as_str())
-                    .collect::<Vec<_>>(),
-                contents[..prefix.len()],
-                "prefix of {end} events"
-            );
-        }
     }
 
     #[test]

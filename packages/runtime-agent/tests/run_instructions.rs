@@ -1660,6 +1660,7 @@ async fn run_browser_flows(harness: &mut Harness) {
     run_follow_ups_from_the_chat(harness).await;
     run_messages_the_browser_could_not_make(harness).await;
     run_a_fill_in_after_a_reply(harness).await;
+    run_parts_that_open_no_page(harness).await;
 }
 
 /// What a message typed in the chat right after a browser turn asks (chain N). A local test,
@@ -1839,6 +1840,10 @@ const SHARED_BROWSER_RETRY: &str = "IMPORTANT SHARED BROWSER RETRY REQUIREMENT";
 /// An answer that is the model's service failing, not the turn: a passing upstream error.
 const M_UPSTREAM_ERROR: &str = "unexpected status 502 Bad Gateway: upstream request failed";
 const M_NOTHING_OPENED: &str = "I couldn't find the bookshop's hours.";
+/// What the person reads of a browser turn with no build after it that opened no page: that Octo
+/// didn't open one, and what they can do (runtime-agent `SHARED_BROWSER_NO_PAGE_FAILURE`).
+const NO_PAGE_LINE: &str =
+    "Octo didn't open a page in the browser. Say which site to look at, or try again.";
 
 /// The metadata of the Shared Browser turn that carries on the routed card the turn `card` posted:
 /// Studio's continuation, and the controller's check that it asks the card's task, the person's own
@@ -1879,11 +1884,13 @@ const L_REPLY: &str = "I couldn't verify which three models are latest: the make
 const L_FILL_IN: &str = "Fill in what's still missing.";
 /// What the routing step said the fill-in asks, having read the whole chat.
 const L_SUMMARY: &str = "Continue the laptop comparison research in the browser, then build the comparison page from the findings.";
+/// What its browser part answered, having opened no page (a local test, Nov 8).
+const L_NOTHING_TO_OPEN: &str = "I don't have the comparison items or page to continue from. Send the page or its link and the comparison details you want researched.";
 
 /// L: the comparison's reply, then the fill-in, which the routing step sends to the browser with
 /// a build after it. L1's routed card carries the fill-in's words and the routing step's summary;
-/// L2 is its browser turn, which opens no page and fails, with no retry; L3 is Try again, which
-/// sends the card's task once more, on a chat whose browser lane now holds L2.
+/// L2 is its browser turn, which opens no page: it hands the message to its build, with no retry
+/// and no Try again, and L3 is that build, as the controller sends and stamps it.
 async fn run_a_fill_in_after_a_reply(harness: &mut Harness) {
     let cl = Uuid::new_v4();
     let mut history = vec![
@@ -1914,41 +1921,37 @@ async fn run_a_fill_in_after_a_reply(harness: &mut Harness) {
         "role": "user", "content": format!("[[L2]] {task}"), "runId": "run-l2", "lane": "browser",
         "createdAt": "2026-11-06T09:41:34.976Z", "metadata": {"prompt_metadata": metadata.clone()},
     }));
-    let r2 = harness
-        .run(
-            "L2",
-            Spec::new(cl, Lane::Shared("page-l"), state.clone())
-                .asking(task)
-                .with_metadata(metadata.clone())
-                .with_history(json!(history)),
-        )
-        .await;
-    history.push(json!({
-        "role": "assistant", "content": "I can't tell what's still missing.", "runId": "run-l2",
-        "lane": "browser", "createdAt": "2026-11-06T09:42:10.929Z",
-    }));
-    history.push(json!({
-        "role": "user", "content": format!("[[L3]] {task}"), "runId": "run-l3", "lane": "browser",
-        "createdAt": "2026-11-06T09:42:58.525Z", "metadata": {"prompt_metadata": metadata.clone()},
-    }));
+    let mut l2 = Spec::new(cl, Lane::Shared("page-l"), state.clone())
+        .asking(task)
+        .with_metadata(metadata)
+        .with_history(json!(history));
+    l2.script = vec![Step::Answer(answer_with(L_NOTHING_TO_OPEN, &[]))];
+    // It ends by itself: no thread to make up for it.
+    l2.emulate_success = false;
+    harness.run("L2", l2).await;
+    let browser = harness.turn("L2").job_id;
+    let mut record = checked_hand_back(browser, card, &format!("[[L2]] {task}"), &[]);
+    record["browserHandBack"]["buildRequest"] = json!(true);
+    // Its card has the build after the browser, which the controller says.
+    record["browserHandBack"]["continueBuilding"] = json!(true);
+    record["browserHandBack"]["personRequest"] = json!(format!("[[L1]] {L_FILL_IN}"));
     harness
         .run(
             "L3",
-            Spec::new(cl, Lane::Shared("page-l"), r2.or(state))
-                .asking(task)
-                .with_metadata(metadata)
-                .with_history(json!(history)),
+            Spec::new(cl, Lane::PlainWrite, state)
+                .asking(HAND_BACK)
+                .with_metadata(record),
         )
         .await;
 }
 
 /// (xiv) Chain L: the routing step is told to name in its summary the items, place or site the
 /// chat names and what to find, and the fill-in's card carries that summary after the person's
-/// words, as one quoted line, which every model request of its browser turn and of Try again
-/// reads with the words. A browser turn that opened no page ends at once: it is not run again in
-/// the browser, whose retry sent a task that named nothing to a site it guessed (a local test,
-/// Nov 6), and it says that it didn't open a page, not that it couldn't: Instafy's browser had
-/// opened.
+/// words, as one quoted line, which every model request of its browser turn reads with the words.
+/// A browser turn with a build after it that opened no page is not run again in the browser,
+/// whose retry sent a task that named nothing to a site it guessed (a local test, Nov 6), nor
+/// does it fail for a Try again (a local test, Nov 8: the fill-in failed twice): it hands the
+/// message to its build (`check_parts_that_open_no_page`).
 fn check_a_fill_in_after_a_reply(harness: &Harness) -> Result<()> {
     let r1 = harness.turn("L1");
     ensure!(r1.routed, "L1 was not sent straight to the browser");
@@ -1966,34 +1969,222 @@ fn check_a_fill_in_after_a_reply(harness: &Harness) -> Result<()> {
             && request["continueBuilding"] == true,
         "L1's card: {request}"
     );
-    for label in ["L2", "L3"] {
-        let turn = harness.turn(label);
-        let mut requests = 0;
-        for (index, request) in sampling_requests(turn) {
-            requests += 1;
-            let text = input_text(request);
-            ensure!(
-                text.contains(&format!("[[L1]] {L_FILL_IN}\n\n{line}")),
-                "{label}#{index} never read what the fill-in carries on"
-            );
-            ensure!(
-                !text.contains(SHARED_BROWSER_RETRY),
-                "{label}#{index} was tried again in the browser"
-            );
-        }
+    for (index, request) in sampling_requests(harness.turn("L2")) {
         ensure!(
-            requests == 1,
-            "{label} made {requests} model requests: it was tried again in the browser"
+            input_text(request).contains(&format!("[[L1]] {L_FILL_IN}\n\n{line}")),
+            "L2#{index} never read what the fill-in carries on"
+        );
+    }
+    check_a_part_that_opened_no_page(harness, "L2", L_NOTHING_TO_OPEN)?;
+    check_the_build_of_a_part_that_opened_no_page(
+        harness,
+        "L3",
+        &format!("[[L1]] {L_FILL_IN}"),
+        L_NOTHING_TO_OPEN,
+    )
+}
+
+/// What a person adds to a map in their own words, which the routing step sent to the browser
+/// with a build after it, and what its browser part answered, having opened no page (a local
+/// test, Nov 8: it failed, and its Try again read two sites nobody named).
+const V_NOTE: &str = "Add a note to the cathedral: book tickets ahead.";
+const V_NOTHING_TO_OPEN: &str = "I couldn't access the map from this page, so I haven't added the note. Please open the map and ask me again.";
+/// What Studio sends as the person's message when they press Continue after a Stop, which the
+/// routing step sent to the browser with a build after it (a local test, Nov 8: its browser part
+/// had nothing new to open and failed).
+const W_CONTINUE: &str = "Continue the stopped turn from its current state. Check what has already finished before proceeding; do not repeat completed actions.";
+
+/// V and W: messages the routing step sent to the browser with a build after them, whose browser
+/// parts open no page. V1 is a note on a map in the person's own words; V2, its browser part,
+/// hands the message to its build, V3, as the controller sends and stamps it. W1 is a Continue
+/// after a Stop, in a chat whose browser read pages before; W2, its browser part, answers with
+/// words alone and hands the message to its build too.
+async fn run_parts_that_open_no_page(harness: &mut Harness) {
+    let cv = Uuid::new_v4();
+    let history = json!([
+        {"role": "user", "content": "Plan 3 days in the old town for a first visit: where to stay, what to see each day, on a map.", "runId": "run-v0", "createdAt": "2026-11-08T07:44:37.427Z"},
+        {"role": "assistant", "content": "The map has a three-night plan, a hotel pick, and the sights for each day.", "runId": "run-v0", "createdAt": "2026-11-08T07:46:22.150Z"},
+        {"role": "user", "content": format!("[[V1]] {V_NOTE}"), "runId": "run-v1", "createdAt": "2026-11-08T07:50:39.559Z"},
+    ]);
+    let mut v1 = Spec::new(cv, Lane::Default, None)
+        .asking(V_NOTE)
+        .routed(true)
+        .with_history(history.clone());
+    let mut route = browser_route(true);
+    route["summary"] = json!("Add the note to the cathedral on the map.");
+    v1.script = vec![Step::Routing(route)];
+    let state = harness.run("V1", v1).await;
+    let card = harness.turn("V1").job_id;
+    let mut metadata = routed_card_turn(card);
+    metadata["browserHandsBack"] = json!(true);
+    let mut v2 = Spec::new(cv, Lane::Shared("page-v"), state.clone())
+        .asking(V_NOTE)
+        .with_metadata(metadata)
+        .with_history(history);
+    v2.script = vec![Step::Answer(answer_with(V_NOTHING_TO_OPEN, &[]))];
+    v2.emulate_success = false;
+    harness.run("V2", v2).await;
+    let browser = harness.turn("V2").job_id;
+    let mut record = checked_hand_back(browser, card, &format!("[[V2]] {V_NOTE}"), &[]);
+    record["browserHandBack"]["buildRequest"] = json!(true);
+    record["browserHandBack"]["continueBuilding"] = json!(true);
+    record["browserHandBack"]["personRequest"] = json!(format!("[[V1]] {V_NOTE}"));
+    harness
+        .run(
+            "V3",
+            Spec::new(cv, Lane::PlainWrite, state)
+                .asking(HAND_BACK)
+                .with_metadata(record),
+        )
+        .await;
+
+    let cw = Uuid::new_v4();
+    let history = json!([
+        {"role": "user", "content": "Add each laptop's warranty from its own page.", "runId": "run-w0", "createdAt": "2026-11-08T08:10:01.013Z"},
+        {"role": "assistant", "content": "Opened 3 pages on maker.example.", "runId": "run-w0", "lane": "browser", "createdAt": "2026-11-08T08:10:52.042Z"},
+        {"role": "assistant", "content": "Stopped", "runId": "run-w0", "createdAt": "2026-11-08T08:10:52.996Z", "metadata": {"source": "controller", "kind": "run_cancellation"}},
+        {"role": "user", "content": format!("[[W1]] {W_CONTINUE}"), "runId": "run-w1", "createdAt": "2026-11-08T08:13:21.411Z"},
+    ]);
+    let mut w1 = Spec::new(cw, Lane::Default, None)
+        .asking(W_CONTINUE)
+        .routed(true)
+        .with_history(history.clone());
+    let mut route = browser_route(true);
+    route["summary"] = json!("Continue adding each laptop's warranty from its own page.");
+    w1.script = vec![Step::Routing(route)];
+    let state = harness.run("W1", w1).await;
+    let card = harness.turn("W1").job_id;
+    let mut metadata = routed_card_turn(card);
+    metadata["browserHandsBack"] = json!(true);
+    let mut w2 = Spec::new(cw, Lane::Shared("page-w"), state)
+        .asking(W_CONTINUE)
+        .with_metadata(metadata)
+        .with_history(history);
+    w2.emulate_success = false;
+    harness.run("W2", w2).await;
+}
+
+/// What the note of a browser part with a build after it that opened no page says
+/// (runtime-agent `NO_PAGE_NOTE`).
+const NO_PAGE_NOTE: &str = "Octo opened no page in the browser: it makes this in the chat.";
+
+/// A browser part with a build after it that opened no page: one model request, never tried again
+/// in the browser and never offered the build request, it succeeds with no reply and ends with the
+/// note the controller hands the message to its build on, which says it opened no page and keeps
+/// nothing of its answer (`words`). No Try again is needed, and no site is guessed.
+fn check_a_part_that_opened_no_page(harness: &Harness, label: &str, words: &str) -> Result<()> {
+    let turn = harness.turn(label);
+    let requests: Vec<&Value> = sampling_requests(turn)
+        .map(|(_, request)| request)
+        .collect();
+    ensure!(
+        requests.len() == 1,
+        "{label} made {} model requests: it was tried again in the browser",
+        requests.len()
+    );
+    let prompt = input_text(requests[0]);
+    ensure!(
+        !prompt.contains(SHARED_BROWSER_RETRY),
+        "{label} read the browser retry"
+    );
+    ensure!(
+        !prompt.contains("answer with the action `{type: 'request_build'}` alone"),
+        "{label} was offered the build request, though its build comes after it"
+    );
+    ensure!(turn.outcome.is_ok(), "{label} failed: {:?}", turn.outcome);
+    ensure!(
+        turn.final_messages.len() == 1,
+        "{label} posted {} messages: {:?}",
+        turn.final_messages.len(),
+        turn.final_messages
+    );
+    let note = &turn.final_messages[0];
+    ensure!(note["summary"] == "", "{label} has a reply: {note}");
+    ensure!(note["messageType"] == "status", "{label}'s note: {note}");
+    ensure!(
+        note["metadata"]["browserBuildRequest"].is_object(),
+        "{label}'s note does not hand the message to its build: {note}"
+    );
+    ensure!(note["content"] == NO_PAGE_NOTE, "{label}'s note: {note}");
+    ensure!(
+        !note["metadata"].to_string().contains(words),
+        "{label}'s note carries its answer: {note}"
+    );
+    Ok(())
+}
+
+/// The build of a browser part that opened no page: one building turn that reads the person's
+/// words as its latest request (`request`), is told the browser opened no page, to make it from
+/// those words and what the chat found before, to read no site the request doesn't name and to
+/// say what it couldn't find, never to read any page it needs itself, and reads no page data and
+/// nothing of the browser part's answer (`answer`).
+fn check_the_build_of_a_part_that_opened_no_page(
+    harness: &Harness,
+    label: &str,
+    request: &str,
+    answer: &str,
+) -> Result<()> {
+    let turn = harness.turn(label);
+    ensure!(!turn.routed, "{label} went through the routing step");
+    let first = input_text(first_sampling_request(turn));
+    ensure!(
+        first.contains(&format!("\n\nLatest user request:\n{request}")),
+        "{label} did not read the person's message as its latest request"
+    );
+    ensure!(
+        first.contains(
+            "Instafy's browser opened no page for the latest request, so nothing new was read for it"
+        ),
+        "{label} was not told the browser opened no page"
+    );
+    ensure!(
+        first.contains(
+            "- Make what the latest request asks from the person's words and what this chat already found. Read no site the request doesn't name, and where it needs a fact nothing here gives, say plainly which you couldn't find."
+        ),
+        "{label} was not told to make it from what the chat found and to read no site nobody named"
+    );
+    for (_, sent) in sampling_requests(turn) {
+        let text = input_text(sent);
+        ensure!(
+            !text.contains(HAND_BACK),
+            "{label} read Studio's words for a hand-back"
         );
         ensure!(
-            turn.outcome.as_ref().is_err_and(|error| {
-                error.contains("Octo didn't open a page in the browser, so this turn stopped.")
-            }),
-            "{label}: {:?}",
-            turn.outcome
+            !text.contains(answer),
+            "{label} read its browser part's answer"
+        );
+        ensure!(
+            !text.contains("Read any public page it needs yourself."),
+            "{label} was told to read any page it needs itself"
+        );
+        ensure!(
+            PAGE_DATA_HEADINGS
+                .iter()
+                .all(|heading| !text.contains(heading)),
+            "{label} read page data"
+        );
+        ensure!(
+            !text.contains(SHARED_BROWSER_RETRY),
+            "{label} read the browser retry"
         );
     }
     Ok(())
+}
+
+/// (xvi) Chains V and W: a note on a map in the person's own words and a Continue after a Stop,
+/// each sent to the browser with a build after it, whose browser part opened no page, each reach
+/// their build with no Try again, and the note's build reads no page; a message the routing step
+/// sent to the browser alone that opened no page still fails with its line (chain M).
+fn check_parts_that_open_no_page(harness: &Harness) -> Result<()> {
+    check_a_part_that_opened_no_page(harness, "V2", V_NOTHING_TO_OPEN)?;
+    check_the_build_of_a_part_that_opened_no_page(
+        harness,
+        "V3",
+        &format!("[[V1]] {V_NOTE}"),
+        V_NOTHING_TO_OPEN,
+    )?;
+    // W2 answered with the stub's own words.
+    check_a_part_that_opened_no_page(harness, "W2", "Turn W2 completed.")
 }
 
 /// M: messages the routing step sent straight to the browser. M2 carries on M1's routed card,
@@ -2186,7 +2377,7 @@ fn check_messages_the_browser_could_not_make(harness: &Harness) -> Result<()> {
         ensure!(
             turn.outcome
                 .as_ref()
-                .is_err_and(|error| error.contains("Octo didn't open a page in the browser")),
+                .is_err_and(|error| error.contains(NO_PAGE_LINE)),
             "{label}: {:?}",
             turn.outcome
         );
@@ -2231,7 +2422,7 @@ fn check_messages_the_browser_could_not_make(harness: &Harness) -> Result<()> {
     ensure!(
         m8.outcome
             .as_ref()
-            .is_err_and(|error| error.contains("Octo didn't open a page in the browser")),
+            .is_err_and(|error| error.contains(NO_PAGE_LINE)),
         "M8: {:?}",
         m8.outcome
     );
@@ -2819,6 +3010,7 @@ fn check(harness: &Harness) -> Result<()> {
     // (xi) A message the browser turn asked Octo to make.
     check_messages_the_browser_could_not_make(harness)?;
     check_a_fill_in_after_a_reply(harness)?;
+    check_parts_that_open_no_page(harness)?;
     // (xii) What a browser turn is told it can do.
     check_browser_turns_are_told_only_what_they_can_use(harness)?;
     // (xiii) The tools a browser turn is given, by the names its run text gives them.

@@ -6,8 +6,9 @@
 //! local test, Nov 6). The runtime runs the turn once more on its own thread, told only those
 //! pages, before the build. That second pass's own unread line starts no third, a Stop between
 //! the passes ends the message there, and a turn that paused for the person, had a step refused
-//! or answers a question gets no second pass. Nor does a turn whose answer holds no finding line:
-//! the wrap-up pass asks for the lines of the pages it read. Each pass's lines are its own: a
+//! or answers a question gets no second pass. A turn whose answer holds no finding line gets the
+//! wrap-up pass first, which asks for the lines of the pages it read and its unread line, and the
+//! second pass then reads the pages that line names. Each pass's lines are its own: a
 //! second pass that wrote none keeps the pages it opened, and one that stopped for the person
 //! ends the turn with its words while the turn's note keeps the first pass's lines.
 //!
@@ -47,8 +48,14 @@ const READ_16: &str = r#"{"url": "https://maker.example/laptop-16", "title": "La
 const READ_12_REVIEW: &str = r#"{"url": "https://reviews.example/laptop-12", "title": "Laptop 12 review", "facts": ["Battery lasted 11 hours"]}"#;
 /// What the second pass names unread in its turn.
 const STILL_UNREAD: &str = "a second review of the Laptop 16";
-/// The opening of the wrap-up pass's request (runtime-agent `FINDING_LINES_PASS_PROMPT`).
+/// The opening of the wrap-up pass's request (runtime-agent `finding_lines_pass_prompt`).
 const PASS_OPENING: &str = "Your answer has no finding lines";
+/// What that request asks a turn whose findings go back to the building turn for after its
+/// lines (runtime-agent `UNREAD_LINE`).
+const PASS_ASKS_FOR_UNREAD: &str = "After them, one last line `{\"unread\": [";
+/// A turn's answer that says in words which pages it didn't read, with no finding line and no
+/// unread line, as a comparison's browser part answered (a local test, Nov 8).
+const FIRST_PROSE: &str = "Read 2 pages on maker.example. I didn't reach the Laptop 12's and Laptop 16's own pages or the Laptop 12's review.";
 /// What a second pass that paused for the person to sign in replies.
 const PAUSE_WORDS: &str =
     "Sign in on the review site's highlighted fields, then choose Let Octo continue.";
@@ -100,17 +107,20 @@ fn a_stop_between_the_passes_ends_the_message_via_proxy() -> Result<()> {
     run_on_a_large_stack(Case::StopBetween)
 }
 
-/// A turn whose answer names unread pages and no finding line gets no second pass: the wrap-up
-/// pass asks for the lines of the pages it read. Told those pages, a second pass's lines would
-/// have kept the wrap-up from asking, and the pages the turn read would reach no note and no
-/// build.
+/// A turn that answers in words, with no finding line and its unread pages named only in its
+/// words: the wrap-up pass asks for the lines of the pages it read and its unread line, and the
+/// second pass then reads the pages that line names, before the build. Asked for the lines alone,
+/// a comparison's browser part lost the list, no second pass ran, and its page was built with
+/// five of fifteen facts (a local test, Nov 8). The wrap-up comes first: told those pages first,
+/// a second pass's lines would have kept the wrap-up from asking, and the pages the turn read
+/// would reach no note and no build.
 #[test]
-fn a_turn_that_wrote_no_finding_line_gets_the_wrap_up_not_a_second_pass_via_proxy() -> Result<()> {
+fn a_turn_that_answers_in_words_reads_its_unread_pages_after_the_wrap_up_via_proxy() -> Result<()> {
     if std::env::var(CHILD).as_deref() != Ok("1") {
         return run_isolated_fixture(
             CHILD,
-            "browser_hand_back::unread_pages::a_turn_that_wrote_no_finding_line_gets_the_wrap_up_not_a_second_pass_via_proxy",
-            "browser-unread-pages-no-lines",
+            "browser_hand_back::unread_pages::a_turn_that_answers_in_words_reads_its_unread_pages_after_the_wrap_up_via_proxy",
+            "browser-unread-pages-in-words",
         );
     }
     run_on_a_large_stack(Case::FirstWritesNoLines)
@@ -199,7 +209,7 @@ enum Case {
     RefusedOnlyLine,
     /// The person presses Stop once the turn has answered.
     StopBetween,
-    /// The turn's answer names unread pages and holds no finding line.
+    /// The turn's answer says in words which pages it didn't read, with no finding line.
     FirstWritesNoLines,
     /// The second pass pauses for the person to sign in, on the device's browser.
     SecondPassPauses,
@@ -297,13 +307,16 @@ async fn provider_request(
     state.requests.lock().unwrap().push(body.clone());
     let turn = last_user_text(&body);
     if turn.contains(PASS_OPENING) {
-        return final_answer(&format!("{READ_HOME}\n{READ_13}"));
+        // The unread line, when the pass asks for it.
+        return final_answer(&if turn.contains(PASS_ASKS_FOR_UNREAD) {
+            format!("{READ_HOME}\n{READ_13}\n{}", unread_line(&UNREAD))
+        } else {
+            format!("{READ_HOME}\n{READ_13}")
+        });
     }
     if !turn.contains(SECOND_PASS_OPENING) {
         return match state.case {
-            Case::FirstWritesNoLines => {
-                final_answer(&format!("{FIRST_WORDS}\n{}", unread_line(&UNREAD)))
-            }
+            Case::FirstWritesNoLines => final_answer(FIRST_PROSE),
             Case::RefusedAddress | Case::RefusedOnlyLine if step_outputs(&body) == 0 => {
                 device_step("refused", "navigate", json!({ "url": REFUSED }))
             }
@@ -517,7 +530,9 @@ async fn run_case(case: Case) -> Result<()> {
             };
             assert_eq!(*browser.calls.lock().unwrap(), expected);
         }
-        Case::FirstWritesNoLines => no_lines_no_second_pass(&workspace, project_id, &state).await?,
+        Case::FirstWritesNoLines => {
+            words_then_the_wrap_up_then_a_second_pass(&workspace, project_id, &state).await?
+        }
         Case::SecondPassPauses | Case::SecondPassWritesNoLines => {
             let calls = second_pass_on_the_device(&workspace, project_id, &state, case).await?;
             let browser = &device.as_ref().context("the device's browser")?.0;
@@ -857,7 +872,7 @@ fn its_answer<'a>(
     })
 }
 
-async fn no_lines_no_second_pass(
+async fn words_then_the_wrap_up_then_a_second_pass(
     workspace: &Path,
     project_id: Uuid,
     state: &Provider,
@@ -874,8 +889,9 @@ async fn no_lines_no_second_pass(
         .as_str()
         .context("the turn's answer")?
         .to_string();
-    assert_eq!(summary, format!("{FIRST_WORDS}\n{}", unread_line(&UNREAD)));
+    assert_eq!(summary, FIRST_PROSE);
     let job = browser_job(project_id, true);
+    let task_usage = TaskUsage::default();
     let ended = tokio::time::timeout(
         Duration::from_secs(60),
         end_browser_turn_answer(
@@ -883,25 +899,101 @@ async fn no_lines_no_second_pass(
             &job,
             its_answer(&options, &turn)?,
             &mut summary,
-            &TaskUsage::default(),
+            &task_usage,
         ),
     )
     .await
     .context("the end of the turn timed out")?;
-    assert!(second_passes(state).is_empty(), "no second pass");
     let requests = state.requests.lock().unwrap().clone();
-    assert_eq!(requests.len(), 2, "the turn, then the wrap-up pass");
-    assert!(last_user_text(&requests[1]).contains(PASS_OPENING));
-    assert!(
-        ended
-            .artifacts
-            .iter()
-            .any(|artifact| artifact["metadata"]["purpose"] == "finding-lines-wrap-up"),
-        "{:?}",
-        ended.artifacts
+    assert_eq!(
+        requests.len(),
+        3,
+        "the turn, the wrap-up pass, then the second pass"
     );
-    // The pages the turn read reach its note, and its unread line is gone.
-    assert_eq!(summary, format!("{FIRST_WORDS}\n\n{READ_HOME}\n{READ_13}"));
+    // The wrap-up pass asks for the unread line after the finding lines.
+    let wrap_up = last_user_text(&requests[1]);
+    assert!(wrap_up.contains(PASS_OPENING), "{wrap_up}");
+    assert!(wrap_up.contains(PASS_ASKS_FOR_UNREAD), "{wrap_up}");
+    // The second pass reads only the pages that line named, on the turn's own thread.
+    let passes = second_passes(state);
+    assert_eq!(passes.len(), 1, "one second pass");
+    let asked = last_user_text(&passes[0]);
+    assert!(
+        asked.contains(&serde_json::to_string(&UNREAD).unwrap()),
+        "{asked}"
+    );
+    assert!(input_text(&passes[0]).contains(FIRST_PROSE));
+    for purpose in ["finding-lines-wrap-up", "unread-pages"] {
+        assert!(
+            ended
+                .artifacts
+                .iter()
+                .any(|artifact| artifact["kind"] == "codex/run-log"
+                    && artifact["metadata"]["purpose"] == purpose),
+            "{purpose}: {:?}",
+            ended.artifacts
+        );
+    }
+    // Neither pass is billed: one the wrap-up, one a recovery.
+    let receipt = task_usage.artifact().context("the passes' usage receipt")?;
+    let phases: Vec<&str> = receipt["calls"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|call| call["phase"].as_str())
+        .collect();
+    assert!(
+        phases.contains(&"finalization") && phases.contains(&"recovery"),
+        "{receipt}"
+    );
+    // The pages of both passes reach the turn's note, after the words of both, and no unread
+    // line is left: the second pass's own starts no third.
+    let lines = [READ_HOME, READ_13, READ_12, READ_16, READ_12_REVIEW].join("\n");
+    assert_eq!(
+        summary,
+        format!("{FIRST_PROSE}\n\n{SECOND_WORDS}\n\n{lines}")
+    );
+    assert!(!summary.contains(STILL_UNREAD), "{summary}");
+    let mut done = runtime_agent::jobs::JobExecution {
+        summary,
+        suggested_replies: Vec::new(),
+        provider: "codex-embedded".to_string(),
+        artifacts: Vec::new(),
+        credit_snapshot: None,
+        provider_conversation_state: None,
+        messages: ended.messages,
+        messages_streamed: false,
+        final_messages: Vec::new(),
+    };
+    move_findings_into_details(&job, &mut done);
+    assert_eq!(done.summary, "", "a hand-back follows: no reply bubble");
+    assert_eq!(
+        done.final_messages[0].metadata.as_ref().unwrap()["browserFindings"],
+        json!({ "pages": 5, "pagesRead": 5 })
+    );
+
+    // A question's turn hands nothing back: its wrap-up pass asks for no unread line, and no
+    // second pass follows.
+    let mut summary = FIRST_PROSE.to_string();
+    let question = browser_job(project_id, false);
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        end_browser_turn_answer(
+            &client,
+            &question,
+            its_answer(&options, &turn)?,
+            &mut summary,
+            &TaskUsage::default(),
+        ),
+    )
+    .await
+    .context("the question's wrap-up timed out")?;
+    let requests = state.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 4, "one more wrap-up pass, and nothing else");
+    let wrap_up = last_user_text(&requests[3]);
+    assert!(wrap_up.contains(PASS_OPENING), "{wrap_up}");
+    assert!(!wrap_up.contains(PASS_ASKS_FOR_UNREAD), "{wrap_up}");
+    assert_eq!(summary, format!("{FIRST_PROSE}\n\n{READ_HOME}\n{READ_13}"));
     Ok(())
 }
 

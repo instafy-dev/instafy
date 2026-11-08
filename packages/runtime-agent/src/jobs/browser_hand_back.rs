@@ -34,8 +34,10 @@
 //! later building turn nothing of them, and one whose findings go back to the
 //! building turn would hand nothing back: Studio and the controller hand back
 //! only on a note that names a page read. It gets the
-//! runtime's wrap-up pass on its own thread, asked for those lines only
-//! ([`FINDING_LINES_PASS_PROMPT`]); with still none, its note holds its reply
+//! runtime's wrap-up pass on its own thread, asked for those lines only, and,
+//! when its findings go back to the building turn, for its unread line too, so
+//! the second pass still reads the pages it names ([`finding_lines_pass_prompt`]);
+//! with still none, its note holds its reply
 //! and the pages its own steps opened ([`finding_lines_from_pages`]), so the
 //! hand-back still goes, and the turn posts no words of its own.
 //!
@@ -58,6 +60,11 @@
 //! it and stamps the record with `buildRequest` and the message's words, and
 //! the building turn makes what the message asks
 //! ([`format_browser_hand_back_section`]), with nothing of the browser turn.
+//! A browser turn of such a message that has its build after it anyway
+//! (`browser_then_build`, [`builds_after_it`]) and opened no page hands the
+//! message to that build the same way when it is not run again, whatever it
+//! answered: its note says it opened no page, and the build makes the change
+//! from the person's words and what the chat found before.
 //! A build request nothing acts on (from a turn that opened a page, with no
 //! hand-back after it) is never dropped without a word: the reply says the
 //! thing is not made yet ([`BUILD_NOT_MADE_LINE`]).
@@ -178,8 +185,18 @@ pub(super) const BUILD_REQUEST_NOTE_KEY: &str = "browserBuildRequest";
 /// chat reads it as that browser turn's reply.
 const BUILD_REQUEST_NOTE: &str = "This needs no website: Octo makes it in the chat.";
 
+/// What it says for a browser turn with a build after it anyway that opened no
+/// page ([`builds_after_it`]): that message did need the browser first.
+const NO_PAGE_NOTE: &str = "Octo opened no page in the browser: it makes this in the chat.";
+
 /// The key the controller stamps on a hand-back that carries such a message.
 const BUILD_REQUEST_RECORD_KEY: &str = "buildRequest";
+
+/// The key the controller stamps beside it when the message's card has its build after the
+/// browser (the card's `continueBuilding`, runtime-controller `browser_hand_back.rs`): the message
+/// did need a website, and its browser turn opened none, so its build is told to make it from the
+/// person's words and what the chat found before ([`format_browser_hand_back_section`]).
+const CONTINUE_BUILDING_RECORD_KEY: &str = "continueBuilding";
 
 /// What a browser turn that carries on the person's own message and hands
 /// nothing back is told, with its write-scope line
@@ -253,6 +270,33 @@ pub(super) fn offers_the_build_request(metadata: &JsonValue) -> bool {
     carries_on_a_routed_card(metadata) && !hands_back(metadata)
 }
 
+/// Whether a browser turn carries on the person's own message ([`carries_on_a_routed_card`])
+/// with its build after it anyway (`browser_then_build`, [`hands_back`]). One that opened no
+/// page and is not run again hands that message to its build, as a build request does
+/// ([`hands_the_message_to_the_building_turn`]), whatever it answered: the build makes the
+/// change from the person's words and what the chat found before, or says what it couldn't
+/// find, and nothing opens a site the message doesn't name. Failed in its place, a note on a
+/// map, a Continue after a Stop and a fill-in on a page each needed Try again, and the note's
+/// Try again opened two sites nobody named (a local test, Nov 8).
+pub(super) fn builds_after_it(metadata: &JsonValue) -> bool {
+    carries_on_a_routed_card(metadata) && hands_back(metadata)
+}
+
+/// Whether a Shared Browser turn opened no page once its retry ended (`retry_opened_no_page`).
+/// One with its build after it ([`builds_after_it`]) opened none only when its first attempt
+/// opened none either (`first_opened_no_page`): one whose first attempt read pages and then lost
+/// its answer to a passing upstream error used the browser, whatever its retry did, and ends with
+/// the pages of both, which go to its build. Judged by its retry alone, it would go to its build
+/// as a turn that opened no page, and the pages it read would reach nothing. Any other turn is
+/// judged by its retry.
+pub(super) fn opened_no_page_after_a_retry(
+    metadata: Option<&JsonValue>,
+    first_opened_no_page: bool,
+    retry_opened_no_page: bool,
+) -> bool {
+    retry_opened_no_page && (first_opened_no_page || !metadata.is_some_and(builds_after_it))
+}
+
 /// Whether a browser turn's answer asks Octo to make the person's request: the
 /// build request ([`BUILD_REQUEST_ACTION`]), or a team plan, which a browser
 /// turn cannot start either. Read from the answer as the model wrote it: a
@@ -273,8 +317,9 @@ fn answer_asks_for_a_build(final_json: &JsonValue) -> bool {
 /// Whether a browser turn that opened no page hands the person's message to
 /// the building turn, in place of failing: it carries on the person's own
 /// message ([`carries_on_a_routed_card`]) and its answer asks Octo to make it
-/// ([`answer_asks_for_a_build`]). Any other Shared Browser turn that opened no
-/// page ends there.
+/// ([`answer_asks_for_a_build`]). The job hands over one with its build after it
+/// anyway ([`builds_after_it`]) too, when nothing runs it again in Instafy's
+/// browser; any other Shared Browser turn that opened no page ends there.
 pub(super) fn hands_the_message_to_the_building_turn(
     job: &LeaseJob,
     final_json: &JsonValue,
@@ -301,12 +346,21 @@ pub(super) fn build_request_retry_line(job: &LeaseJob) -> &'static str {
     }
 }
 
-/// The Details note such a browser turn ends with, in place of its reply.
-pub(super) fn build_request_note() -> JobMessage {
+/// The Details note such a browser turn ends with, in place of its reply: nothing of its
+/// answer, which a later turn's history would read as Octo's own words. One with its build after
+/// it anyway ([`builds_after_it`]) says it opened no page ([`NO_PAGE_NOTE`]): its answer said what
+/// the build then does ("I couldn't access the map from this page, so I haven't added the note.
+/// Please open the map and ask me again.", a local test, Nov 8). The turn's run log keeps it.
+pub(super) fn build_request_note(job: &LeaseJob) -> JobMessage {
     let mut metadata = json!({ "kind": "agent_message" });
     metadata[BUILD_REQUEST_NOTE_KEY] = json!({ "version": 1 });
+    let content = if job.payload.get("metadata").is_some_and(builds_after_it) {
+        NO_PAGE_NOTE
+    } else {
+        BUILD_REQUEST_NOTE
+    };
     JobMessage {
-        content: BUILD_REQUEST_NOTE.to_string(),
+        content: content.to_string(),
         message_type: Some("status".to_string()),
         metadata: Some(metadata),
     }
@@ -615,11 +669,26 @@ pub fn move_findings_into_details(job: &LeaseJob, execution: &mut JobExecution) 
 /// which holds the pages it read, and asks for those lines only: a
 /// comparison's browser turn read seven pages and answered with a summary and
 /// no finding line, twice, so nothing was built (a local test, Nov 3).
-pub(super) const FINDING_LINES_PASS_PROMPT: &str = "Your answer has no finding lines, and Octo's later turns use what the pages showed only from them. \
+const FINDING_LINES_PASS_ASK: &str = "Your answer has no finding lines, and Octo's later turns use what the pages showed only from them. \
 Answer again with only your finding lines in `summary`, one JSON object per page you read in this turn, each on its own line: \
 `{\"url\": \"<address>\", \"title\": \"<page title>\", \"facts\": [\"<what the page showed>\"]}` for a page you read, \
 or `{\"url\": \"<address>\", \"stopped\": \"login|captcha|paywall|blocked|robots|download|secret|link-only|no-page|timed-out|covered\"}` for one that stopped you. \
-Report only what the pages showed, each fact under a page you read that states it. Use no tool, open no page and write no other words.";
+Report only what the pages showed, each fact under a page you read that states it.";
+const FINDING_LINES_PASS_END: &str = "Use no tool, open no page and write no other words.";
+
+/// The wrap-up pass's request ([`FINDING_LINES_PASS_ASK`]). With `asks_for_unread` (a turn whose
+/// findings go back to the building turn, before any second pass) it asks for the unread line
+/// after the finding lines too ([`UNREAD_LINE`]), so the second pass reads the pages it names
+/// (`jobs::read_the_unread_pages`): asked for the lines alone, a comparison's browser part that
+/// said in words that it hadn't reached two product pages and four reviews handed five of
+/// fifteen facts to its build, and no second pass ran (a local test, Nov 8).
+pub(super) fn finding_lines_pass_prompt(asks_for_unread: bool) -> String {
+    if asks_for_unread {
+        format!("{FINDING_LINES_PASS_ASK} {UNREAD_LINE} {FINDING_LINES_PASS_END}")
+    } else {
+        format!("{FINDING_LINES_PASS_ASK} {FINDING_LINES_PASS_END}")
+    }
+}
 
 /// Whether a browser turn's answer leaves it without findings: its reply holds
 /// no finding line. A later building turn reads a browser turn only by its
@@ -666,10 +735,34 @@ pub(super) fn stopped_for_the_person(messages: &[JobMessage], secret_screen: boo
         })
 }
 
-/// The finding lines of the wrap-up pass's answer ([`FINDING_LINES_PASS_PROMPT`]),
+/// The finding lines of the wrap-up pass's answer ([`finding_lines_pass_prompt`]),
 /// and nothing else of it; None when it wrote none.
 pub(super) fn finding_lines_of(answer: &str) -> Option<String> {
     split_findings(answer).map(|(_, lines)| lines.join("\n"))
+}
+
+/// The finding lines of an answer for the pages it read, without a line for a page that stopped
+/// it, and nothing else of it; None when it wrote none. What a turn that stopped for the person
+/// passes on: the page it stopped at is the one the person's next step acts on, and a later turn
+/// reads it then. Passed on, every such line of three turns that paused on a cookie notice was
+/// out of date or untrue by the time the page's build read it: two of the pages were read or left
+/// right after the person's step, and the notice on the third covered nothing (a local test,
+/// Nov 8).
+pub(super) fn read_lines_of(answer: &str) -> Option<String> {
+    let lines: Vec<String> = split_findings(answer)?
+        .1
+        .into_iter()
+        .filter(|line| finding_line(line) == Some(true))
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// The unread line of an answer ([`UNREAD_LINE`]), as it was written: the first one, or None.
+pub(super) fn unread_line_of(answer: &str) -> Option<String> {
+    answer
+        .lines()
+        .find(|line| unread_line(line).is_some())
+        .map(|line| line.trim().to_string())
 }
 
 /// The most pages an unread line names for the turn's second pass, and the longest name of one:
@@ -1112,16 +1205,33 @@ pub(super) fn format_browser_hand_back_section(metadata: Option<&JsonValue>) -> 
     let routed = person_request(metadata).is_some();
     // Such a message asked Octo to make something, and its browser turn
     // opened no page: the building turn makes it from the person's words,
-    // with nothing of the browser turn.
+    // with nothing of the browser turn. One whose build came after the browser
+    // anyway did need a website: told to read any page it needs itself, such a
+    // build could read the sites nobody named that its failed browser turn's
+    // Try again read (a local test, Nov 8), so it works from what the chat
+    // found before and says what it couldn't find.
     if record.get(BUILD_REQUEST_RECORD_KEY) == Some(&JsonValue::Bool(true)) {
+        let after_the_browser =
+            record.get(CONTINUE_BUILDING_RECORD_KEY) == Some(&JsonValue::Bool(true));
         return routed.then(|| {
-            "\n\nInstafy's browser opened no page for the latest request: it asks Octo to make or change \
-             something in this space, which this turn does.\n\
-             - Make what the latest request asks. Read any public page it needs yourself.\n\
-             - Anything that needs the person's approval (a purchase, a message, a sign-in, a submitted form, \
-             a destructive change) still needs it: ask them.\n\
-             - Say what you made or changed."
-                .to_string()
+            if after_the_browser {
+                "\n\nInstafy's browser opened no page for the latest request, so nothing new was read \
+                 for it: this turn makes it.\n\
+                 - Make what the latest request asks from the person's words and what this chat already \
+                 found. Read no site the request doesn't name, and where it needs a fact nothing here \
+                 gives, say plainly which you couldn't find.\n\
+                 - Anything that needs the person's approval (a purchase, a message, a sign-in, a submitted \
+                 form, a destructive change) still needs it: ask them.\n\
+                 - Say what you made or changed."
+            } else {
+                "\n\nInstafy's browser opened no page for the latest request: it asks Octo to make or change \
+                 something in this space, which this turn does.\n\
+                 - Make what the latest request asks. Read any public page it needs yourself.\n\
+                 - Anything that needs the person's approval (a purchase, a message, a sign-in, a submitted form, \
+                 a destructive change) still needs it: ask them.\n\
+                 - Say what you made or changed."
+            }
+            .to_string()
         });
     }
     let mut findings: Vec<JsonValue> = record
@@ -2391,7 +2501,9 @@ mod tests {
                 "{section}"
             );
         }
-        assert!(FINDING_LINES_PASS_PROMPT.contains("|timed-out|covered\"}`"));
+        for asks_for_unread in [false, true] {
+            assert!(finding_lines_pass_prompt(asks_for_unread).contains("|timed-out|covered\"}`"));
+        }
         let mut record = fixtures()["stampedRecord"].clone();
         record["findings"] = json!([
             {"url": "https://frame.work/at/en/laptop12", "title": "Framework Laptop 12", "facts": ["50Wh battery"]},
@@ -2633,6 +2745,35 @@ mod tests {
                 "routed": true,
             },
         })
+    }
+
+    /// A part with its build after it opened no page only when neither its first attempt nor its
+    /// retry opened one: one whose first attempt read pages and then lost its answer to a passing
+    /// upstream error ends with those pages for its build, whatever its retry did. Any other turn
+    /// is judged by its retry, as before.
+    #[test]
+    fn a_part_with_its_build_after_it_opened_no_page_only_when_neither_attempt_did() {
+        let part = routed_turn(true);
+        assert!(opened_no_page_after_a_retry(Some(&part), true, true));
+        assert!(!opened_no_page_after_a_retry(Some(&part), false, true));
+        assert!(!opened_no_page_after_a_retry(Some(&part), true, false));
+        assert!(!opened_no_page_after_a_retry(Some(&part), false, false));
+        let mut card = routed_turn(true);
+        card["browserCardTurn"]["routed"] = json!(false);
+        let mut building = routed_turn(true);
+        building.as_object_mut().unwrap().remove("browserTransport");
+        for other in [Some(routed_turn(false)), Some(card), Some(building), None] {
+            let other = other.as_ref();
+            assert!(
+                opened_no_page_after_a_retry(other, false, true),
+                "{other:?}"
+            );
+            assert!(opened_no_page_after_a_retry(other, true, true), "{other:?}");
+            assert!(
+                !opened_no_page_after_a_retry(other, true, false),
+                "{other:?}"
+            );
+        }
     }
 
     /// A comparison's browser turn read seven pages and answered with a summary, a build request
@@ -3011,6 +3152,7 @@ mod tests {
     /// answer are kept.
     #[test]
     fn the_wrap_up_pass_asks_for_the_finding_lines_alone() {
+        let prompt = finding_lines_pass_prompt(false);
         for words in [
             "Answer again with only your finding lines in `summary`",
             "one JSON object per page you read in this turn, each on its own line",
@@ -3018,8 +3160,9 @@ mod tests {
             "Report only what the pages showed, each fact under a page you read that states it.",
             "Use no tool, open no page and write no other words.",
         ] {
-            assert!(FINDING_LINES_PASS_PROMPT.contains(words), "{words}");
+            assert!(prompt.contains(words), "{words}");
         }
+        assert!(!prompt.contains("unread"), "{prompt}");
         // The stop reasons are the ones the controller keeps (browser_hand_back_fixtures.json).
         let reasons = fixtures()["stopReasons"]
             .as_array()
@@ -3029,8 +3172,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("|");
         assert!(
-            FINDING_LINES_PASS_PROMPT.contains(&format!(r#""stopped": "{reasons}""#)),
-            "{FINDING_LINES_PASS_PROMPT}"
+            prompt.contains(&format!(r#""stopped": "{reasons}""#)),
+            "{prompt}"
         );
 
         let read = r#"{"url": "https://maker.example/laptop-13", "title": "Laptop 13", "facts": ["Battery: 74 Wh"]}"#;
@@ -3041,6 +3184,38 @@ mod tests {
         );
         assert_eq!(finding_lines_of("I read three pages."), None);
         assert_eq!(finding_lines_of(""), None);
+    }
+
+    /// Asked for the finding lines alone, a comparison's browser part that said in words that it
+    /// hadn't reached two product pages and four reviews lost that list, and no second pass ran
+    /// (a local test, Nov 8). A turn whose findings go back to the building turn is asked for its
+    /// unread line too, after its lines and before the pass's last words, and that line is kept.
+    #[test]
+    fn the_wrap_up_pass_of_a_turn_that_hands_back_asks_for_its_unread_line_too() {
+        let prompt = finding_lines_pass_prompt(true);
+        let alone = finding_lines_pass_prompt(false);
+        assert_eq!(
+            prompt,
+            alone.replace(
+                FINDING_LINES_PASS_END,
+                &format!("{UNREAD_LINE} {FINDING_LINES_PASS_END}")
+            )
+        );
+        assert!(
+            prompt.ends_with("`{\"unread\": []}` when you opened every one. Use no tool, open no page and write no other words."),
+            "{prompt}"
+        );
+        let read = r#"{"url": "https://maker.example/laptop-13", "title": "Laptop 13", "facts": ["Battery: 74 Wh"]}"#;
+        let unread = r#"{"unread": ["Laptop 16's own page", "https://reviews.example/laptop-16"]}"#;
+        let answer = format!("{read}\n  {unread}\n");
+        assert_eq!(unread_line_of(&answer).as_deref(), Some(unread));
+        assert_eq!(finding_lines_of(&answer).as_deref(), Some(read));
+        assert_eq!(unread_line_of(read), None);
+        // A finding line is no unread line, whatever else it holds.
+        assert_eq!(
+            unread_line_of(r#"{"url": "https://maker.example/", "unread": ["x"]}"#),
+            None
+        );
     }
 
     /// With lines from the wrap-up pass, the turn ends as one that wrote them: its words and its
@@ -3287,9 +3462,33 @@ mod tests {
     /// controller hands the message back on.
     #[test]
     fn the_build_request_note_is_a_status_note_with_its_key() {
-        let note = build_request_note();
+        let note = build_request_note(&browser_job(routed_turn(false)));
         assert_eq!(note.message_type.as_deref(), Some("status"));
-        assert!(!note.content.trim().is_empty());
+        assert_eq!(note.content, BUILD_REQUEST_NOTE);
+        let metadata = note.metadata.expect("metadata");
+        assert_eq!(metadata["kind"], "agent_message");
+        assert!(metadata[BUILD_REQUEST_NOTE_KEY].is_object(), "{metadata}");
+    }
+
+    /// A browser turn with its build after it anyway that opened no page hands the message to
+    /// that build, as one that asked for the build does, and its note says it opened no page:
+    /// nothing of its answer, which a later turn's history reads as Octo's words and which said
+    /// what the build then does ("…, so I haven't added the note. Please open the map and ask me
+    /// again.", a local test, Nov 8). Only a card the routing step posted for the person's own
+    /// message has its build after it so: the controller hands such a message back alone.
+    #[test]
+    fn a_turn_with_its_build_after_it_says_it_opened_no_page() {
+        assert!(builds_after_it(&routed_turn(true)));
+        assert!(!builds_after_it(&routed_turn(false)));
+        let mut card = routed_turn(true);
+        card["browserCardTurn"]["routed"] = json!(false);
+        assert!(!builds_after_it(&card), "a card a building turn posted");
+        let mut building = routed_turn(true);
+        building.as_object_mut().unwrap().remove("browserTransport");
+        assert!(!builds_after_it(&building), "a turn outside the browser");
+        let note = build_request_note(&browser_job(routed_turn(true)));
+        assert_eq!(note.message_type.as_deref(), Some("status"));
+        assert_eq!(note.content, NO_PAGE_NOTE);
         let metadata = note.metadata.expect("metadata");
         assert_eq!(metadata["kind"], "agent_message");
         assert!(metadata[BUILD_REQUEST_NOTE_KEY].is_object(), "{metadata}");
@@ -3345,6 +3544,71 @@ mod tests {
             format_browser_hand_back_section(Some(&json!({ "browserHandBack": no_words }))),
             None
         );
+    }
+
+    /// The same hand-back of a message whose build came after the browser anyway (the
+    /// controller's `continueBuilding` beside it): that message did need a website, and its
+    /// browser turn opened none. Told to read any public page it needs itself, its build could
+    /// read the sites nobody named that the failed turn's Try again read, and add a sentence the
+    /// person didn't write (a local test, Nov 8). It makes the change from the person's words and
+    /// what the chat found before, reads no site the request doesn't name, and says plainly what
+    /// it couldn't find. Only the controller's plain true makes it so.
+    #[test]
+    fn the_build_after_a_browser_part_that_opened_no_page_reads_no_site_nobody_named() {
+        assert_eq!(
+            fixtures()["continueBuildingRecordKey"],
+            CONTINUE_BUILDING_RECORD_KEY
+        );
+        let words = "Add a note to the cathedral: book tickets ahead.";
+        let mut record = fixtures()["stampedRecord"].clone();
+        record["request"] = json!(words);
+        record["personRequest"] = json!(words);
+        record["reply"] = json!("");
+        record["findings"] = json!([]);
+        record[BUILD_REQUEST_RECORD_KEY] = json!(true);
+        record[CONTINUE_BUILDING_RECORD_KEY] = json!(true);
+        let section =
+            format_browser_hand_back_section(Some(&json!({ "browserHandBack": record.clone() })))
+                .expect("section");
+        assert!(!section.contains(words), "{section}");
+        assert!(
+            section.starts_with(
+                "\n\nInstafy's browser opened no page for the latest request, so nothing new was read for it: this turn makes it.\n"
+            ),
+            "{section}"
+        );
+        for said in [
+            "\n- Make what the latest request asks from the person's words and what this chat already found.",
+            "Read no site the request doesn't name",
+            "say plainly which you couldn't find.\n",
+            "still needs it: ask them.",
+            "\n- Say what you made or changed.",
+        ] {
+            assert!(section.contains(said), "{said}: {section}");
+        }
+        for gone in [
+            "Read any public page",
+            "```",
+            "Browser findings",
+            "page data",
+            "findings",
+        ] {
+            assert!(!section.contains(gone), "{gone}: {section}");
+        }
+        // Anything but the controller's plain true is a build request's.
+        for other in [json!("true"), json!(false), JsonValue::Null] {
+            let mut maybe = record.clone();
+            maybe[CONTINUE_BUILDING_RECORD_KEY] = other;
+            let section =
+                format_browser_hand_back_section(Some(&json!({ "browserHandBack": maybe })))
+                    .expect("section");
+            assert!(
+                section.contains(
+                    "\n- Make what the latest request asks. Read any public page it needs yourself.\n"
+                ),
+                "{section}"
+            );
+        }
     }
 
     fn turn_since(request: &str, reply: &str) -> JsonValue {
