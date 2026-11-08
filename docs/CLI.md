@@ -613,6 +613,15 @@ folder (`/tmp`, `/var/tmp`, `/dev/shm`, `/run`), or the command line carries wha
 JSON then has `"restartable": false` and a `restartNote` saying why, and the card works as before until
 the space sleeps. A `--serve-cmd` that carries what looks like a secret is refused before anything is opened. `restartable` is `true` only when the server recorded the command too.
 
+Which chat made each page: `open` also writes the page down in the space's own folder, `.instafy/pages/pages.json`
+(never saved, published or listed, so it outlasts the machine the space runs on), with its folder, its title, how it
+is served (the command's program and first argument) and the chat its card went to (a job's own chat, or
+`--conversation`). Opening the same folder again from another chat keeps the chat that made it, and the workspace
+itself is not written down. A wake that starts a page this record does not hold writes it down with no chat. Every
+Octo turn that may write files is told the space's pages from this record, each made in its own chat or in another;
+only a page Instafy's page server (`instafy bind serve`) or an installed skill's command serves is listed, never the
+person's own app.
+
 Exit codes:
 
 - `2`: nothing answers on `127.0.0.1` at the port, or the site answered with a server error (`5xx`).
