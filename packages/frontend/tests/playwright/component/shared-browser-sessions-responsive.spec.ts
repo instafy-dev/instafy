@@ -173,7 +173,7 @@ for (const layout of [
     await testInfo.attach("Production saved-browser status reached by scrolling", { path: bottomScreenshot, contentType: "image/png" });
 
     const lastRuntime = RUNTIME_IDS.at(-1)!;
-    await page.getByRole("button", { name: `Resume Shared session ${lastRuntime}`, exact: true }).tap();
+    await page.getByRole("button", { name: /^Session 10(?!\d)/ }).tap();
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await toggle.tap();
     // A fresh menu keeps Advanced collapsed, including after changing sessions.

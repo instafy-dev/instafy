@@ -60,6 +60,9 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
   useLayoutEffect(() => {
     if (open && advancedNeeded && detailsRef.current) detailsRef.current.open = true;
   }, [advancedNeeded, open]);
+  // Sessions read by name, never by the machine's id: "This space's
+  // machine", or a separate session by its place in the list.
+  const separateSessions = candidates.filter((candidate) => candidate.mode === "session");
   return <DialogTrigger isOpen={open} onOpenChange={onOpenChange}>
     <IconButton ref={triggerRef} size="sm" variant="ghost" aria-label="Browser options" title="Browser options"
       className="shrink-0" data-browser-session-safe-zone="true"
@@ -115,16 +118,15 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
               </div>
               {error ? <Text variant="caption" tone={selectionRequired ? "muted" : "danger"} className="px-2.5 py-1" role={selectionRequired ? "status" : "alert"}>{error}</Text> : null}
               {candidates.map((candidate) => <StudioMenuAction key={candidate.runtimeId} isDisabled={busy}
-                onPress={() => onChoose(candidate.runtimeId)} aria-label={`Resume Shared session ${candidate.runtimeId}`}>
+                onPress={() => onChoose(candidate.runtimeId)}>
                 <MenuItemContent end={candidate.runtimeId === runtimeId ? <Check aria-hidden="true" /> : null}
                   description={candidate.runtimeId === runtimeId ? "Current" : undefined}>
-                  {candidate.mode === "lazy" ? "This space's machine" : `Session ${candidate.runtimeId.slice(0, 8)}`}
+                  {candidate.mode === "lazy" ? "This space's machine" : `Session ${separateSessions.indexOf(candidate) + 1}`}
                 </MenuItemContent>
               </StudioMenuAction>)}
             </div>
             <div className="space-y-2 px-2.5 py-2">
               <Text variant="caption" tone="muted">Members of this space can use the resume link to join and request control.</Text>
-              {runtimeId ? <Text variant="caption" tone="muted" className="break-all" data-testid="shared-browser-current-runtime">Current session: {runtimeId}</Text> : null}
               {resumeUrl ? <Input size="xs" aria-label="Shared Browser resume link"
                 readOnly value={resumeUrl} onFocus={(event) => event.currentTarget.select()} /> : null}
               {children}
