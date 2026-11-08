@@ -3,8 +3,8 @@
 //! learned of the Stop runs; the Stop then reaches the turn (its cancel, as the
 //! job's heartbeat sets it) while the model is answering, and the turn ends on
 //! its lost lease. The executor that ran it then sends the one end report of
-//! what the turn changed, and the card of the site it changed gets a new
-//! picture.
+//! what the turn changed; the turn never saved, so the open views of the site
+//! it changed get one reload, and then its card a new picture.
 
 use super::*;
 use axum::extract::Path as AxumPath;
@@ -202,7 +202,11 @@ async fn run_case(edit: Edit) -> Result<()> {
     )?;
 
     // The open preview of the page's site, with a picture older than the
-    // edit, and a stand-in `instafy` whose check keeps a new one.
+    // edit, served by a binder, and a stand-in `instafy` whose check keeps a
+    // new one and whose `bind command`, like the binder, is taken for a folder
+    // a binder serves.
+    fs::create_dir_all(workspace.join("sites/porto/.bind"))?;
+    fs::write(workspace.join("sites/porto/.bind/server.json"), "{}")?;
     let home = PathBuf::from(std::env::var("HOME")?);
     fs::create_dir_all(home.join(".instafy"))?;
     let picture_before = std::time::SystemTime::now()
@@ -225,9 +229,17 @@ async fn run_case(edit: Edit) -> Result<()> {
     )?;
     let bin = home.join("bin");
     fs::create_dir_all(&bin)?;
+    let seen = home.join("seen");
     fs::write(
         bin.join("instafy"),
         r#"#!/bin/sh
+seen="$HOME/seen"
+if [ "$1" = bind ] && [ "$2" = command ]; then
+  echo "reload $3 $4 $5" >> "$seen"
+  [ -f "$3/.bind/server.json" ] && echo '{"ok":true,"viewers":2}' && exit 0
+  exit 1
+fi
+echo "check $*" >> "$seen"
 picture=
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -484,6 +496,23 @@ printf '{"previewId":"preview-1","description":"Livraria Lello","takenAt":%s}' "
     assert_eq!(
         controller.pictures.lock().unwrap().clone(),
         vec![(project_id.to_string(), "preview-1".to_string())]
+    );
+    // One reload, the Stop's, sent before the picture was taken.
+    sleep(Duration::from_millis(300)).await;
+    let lines: Vec<String> = fs::read_to_string(&seen)?
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let reloads: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.starts_with("reload "))
+        .collect();
+    assert_eq!(reloads, ["reload ./sites/porto reload {}"], "{lines:#?}");
+    let reload = lines.iter().position(|line| line.starts_with("reload "));
+    let check = lines.iter().position(|line| line.starts_with("check "));
+    assert!(
+        reload.is_some() && check.is_some() && reload < check,
+        "{lines:#?}"
     );
 
     provider.released.cancel();

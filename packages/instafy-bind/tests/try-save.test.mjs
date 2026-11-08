@@ -51,7 +51,9 @@ test("try --save stores the accepted records like a click, with provenance; a pl
     assert.equal(fs.existsSync(path.join(dir, "data", "records")), false, "without --save nothing is written");
     const saved = await tryIntent(dir, "read_offer", params, { save: true });
     assert.equal(saved.exit, 0, saved.lines.join("\n"));
-    assert.match(saved.lines.join("\n"), /^saved 1 record\(s\) to data\/records\/read_offer\.json \(version 1\)/m);
+    assert.match(saved.lines.join("\n"), /^saved 1 record\(s\) to data\/records\/read_offer\.json \(version 1\)$/m);
+    // In a space every open page shows them once the change is saved: nothing asks the turn for a reload of its own.
+    assert.doesNotMatch(saved.lines.join("\n"), /reload/);
     const file = JSON.parse(fs.readFileSync(path.join(dir, "data", "records", "read_offer.json"), "utf8"));
     assert.equal(file.records.length, 1);
     const [record] = file.records;

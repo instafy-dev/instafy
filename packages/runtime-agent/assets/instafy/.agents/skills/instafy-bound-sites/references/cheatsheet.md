@@ -275,6 +275,6 @@ Never a second parallel theme, a webfont, a gradient or pill buttons unless aske
 4. From `shoes/`, run `instafy preview open --title 'Running shoes' --serve-cmd "instafy bind serve . --port {port}
    --preview" --start --json` (step 7). When the user writes "show me the On", run
    `instafy bind command shoes select '{"ref":"shoes:on-cloudmonster-2"}'`.
-5. "Add the Guide 19 and drop anything over $160": edit `data.json` (and `app.js` if needed), then
-   `instafy bind command shoes reload '{}'` so every open viewer shows the new list, and reply.
+5. "Add the Guide 19 and drop anything over $160": edit `data.json` (and `app.js` if needed) and reply: every open
+   viewer shows the new list once your change is saved.
 

@@ -349,6 +349,9 @@ const LEGACY_BOUND_SITES_TEMPLATES: &[&str] = &[
     include_str!("legacy/bound-sites-v3.md"),
     // From before the card's command went into the site's folder (it said "from the site's folder").
     include_str!("legacy/bound-sites-v4.md"),
+    // From before every saved change reloaded the open views of the sites it changed, so a turn
+    // ran no `instafy bind command <dir> reload '{}'` of its own.
+    include_str!("legacy/bound-sites-v5.md"),
 ];
 const LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES: &[&str] = &[
     // From before each value cited its page and day, and a value never was a dash.
@@ -358,6 +361,9 @@ const LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES: &[&str] = &[
     // From before a value not found on a page read said where it was looked for ("price not found
     // on maker.com's page", "Not found · checked …"), not that the page lacks it.
     include_str!("legacy/bound-sites-cheatsheet-v3.md"),
+    // From before every saved change reloaded the open views of the sites it changed, so a turn
+    // ran no `instafy bind command <dir> reload '{}'` of its own.
+    include_str!("legacy/bound-sites-cheatsheet-v4.md"),
 ];
 /// The hub for pages people tap through: it picks the builder from the installed skills (a skill
 /// pack's own skill, bound sites, or a starter site) and shows the result as a preview card.
@@ -411,6 +417,9 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // with the space's pages and the chat that made each, a reply's `Assumed:` line was only for a
     // default the person didn't give, and a note on a page said where Octo looked, never its tools.
     include_str!("legacy/interactive-artifacts-v13.md"),
+    // From before every saved change reloaded the open views of the sites it changed, so a turn
+    // ran no `instafy bind command <dir> reload '{}'` of its own.
+    include_str!("legacy/interactive-artifacts-v14.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),
@@ -2844,6 +2853,63 @@ mod tests {
         fs::write(&path, &edited).unwrap();
         ensure_project_memory_scaffold(workspace.path());
         assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+    }
+
+    /// A local test, Nov 7: a map's note, made in a turn that read no map skill, never ran the
+    /// skill's own reload, and neither open view of the map showed the note, or its Undo, until it
+    /// was reloaded by hand. The runtime now sends every open view of a site its reload once a
+    /// change to the site is saved, so the skills that made each page tell a turn to send none of
+    /// its own. Unedited earlier copies are upgraded.
+    #[test]
+    fn a_turn_sends_no_reload_of_its_own_and_earlier_skills_are_upgraded() {
+        for (name, template) in [
+            ("hub", INTERACTIVE_ARTIFACTS_TEMPLATE),
+            ("bound sites", BOUND_SITES_TEMPLATE),
+            ("cheat sheet", BOUND_SITES_CHEATSHEET_TEMPLATE),
+        ] {
+            assert!(!template.contains("reload '{}'"), "{name}");
+            assert!(!template.contains("needs a reload"), "{name}");
+        }
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat(INTERACTIVE_ARTIFACTS_TEMPLATE).contains(
+            "once your change is saved, every open view of the page loads it again by itself"
+        ));
+        assert!(flat(BOUND_SITES_TEMPLATE).contains(
+            "every open viewer, on every device, reloads by itself once your change is saved: never ask people to reload by hand."
+        ));
+        assert!(
+            flat(BOUND_SITES_CHEATSHEET_TEMPLATE)
+                .contains("every open viewer shows the new list once your change is saved")
+        );
+        let workspace = tempdir().expect("workspace tempdir");
+        ensure_project_memory_scaffold(workspace.path());
+        for (relative, previous, list, template) in [
+            (
+                INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
+                include_str!("legacy/interactive-artifacts-v14.md"),
+                LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES,
+                INTERACTIVE_ARTIFACTS_TEMPLATE,
+            ),
+            (
+                BOUND_SITES_RELATIVE_PATH,
+                include_str!("legacy/bound-sites-v5.md"),
+                LEGACY_BOUND_SITES_TEMPLATES,
+                BOUND_SITES_TEMPLATE,
+            ),
+            (
+                BOUND_SITES_CHEATSHEET_RELATIVE_PATH,
+                include_str!("legacy/bound-sites-cheatsheet-v4.md"),
+                LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES,
+                BOUND_SITES_CHEATSHEET_TEMPLATE,
+            ),
+        ] {
+            assert!(previous.contains("reload '{}'"), "{relative}");
+            assert!(list.contains(&previous), "{relative}");
+            let path = workspace.path().join(relative);
+            fs::write(&path, previous).unwrap();
+            ensure_project_memory_scaffold(workspace.path());
+            assert_eq!(fs::read_to_string(&path).unwrap(), template, "{relative}");
+        }
     }
 
     #[test]

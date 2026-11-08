@@ -85,9 +85,8 @@ Not for: a one-off answer in chat, or a static page with nothing to check (use `
    undone or spends money outside Instafy, never on a read or a re-check.
 8. **Drive the view from chat:** `instafy bind command <dir> select '{"ref":"shoes:on-cloudmonster-2"}'`
    when the user says "show me B". Also `highlight {refs, ms}` and `toast {text}`. After you change the files
-   of a site that is being served (HTML, CSS, JS, `data/*.json`), run `instafy bind command <dir> reload '{}'`
-   before replying: every open viewer, on every device, reloads. Never ask people to reload by hand; if the
-   command fails, say the open page needs a reload.
+   of a site that is being served, every open viewer, on every device, reloads by itself once your change is
+   saved: never ask people to reload by hand.
 9. **Verify:** `instafy bind doctor <dir>` (bound.json, handlers, controller, and lint warnings: fix every one),
    then run each script intent as a click would, for every item with a readable store, with `--save` so the page
    opens with its values: `instafy bind try <dir> <intent> '<params json>' --save`. Each must end with a value or
