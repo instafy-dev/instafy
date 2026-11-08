@@ -6143,7 +6143,15 @@ fn a_call_that_could_not_reach_the_browser_is_marked_in_its_result() {
         b"",
     ));
     assert_eq!(answered.is_error, Some(true));
-    assert_eq!(answered.structured_content, None);
+    // Its own words, with no mark.
+    assert_eq!(
+        answered.structured_content,
+        Some(json!({
+            "error": {
+                "reason": "The site did not answer in time, so nothing was opened and the page is still blank.",
+            }
+        }))
+    );
 
     let undelivered = failed_call_result(&controller_failure(
         std::process::ExitStatus::from_raw(1 << 8),
