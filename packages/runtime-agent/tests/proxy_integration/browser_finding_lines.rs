@@ -771,6 +771,58 @@ async fn end_of_a_turn_with_its_thread(
         passes_so_far,
         "no pass for a turn that stopped for the person"
     );
+
+    // With still no line and no page its own steps opened (a look that took the browser's log a
+    // step, as a cookie notice it declined by itself does, but opened nothing), a part with its
+    // build after it hands that build the person's message, as one whose look left nothing does:
+    // which look it took never decides whether the message is made. It posts no reply, and the
+    // job ends it with the build request note. A routed turn with no build after it keeps its
+    // words.
+    if pass == Pass::WritesNone {
+        for (turn_job, builds_after_it) in [
+            (browser_job(project_id, "shared", true), true),
+            (browser_job(project_id, "shared", false), false),
+        ] {
+            let mut summary = PROMISED_BUILD.to_string();
+            let ended = end_browser_turn_answer(
+                &client,
+                &turn_job,
+                BrowserTurnAnswer {
+                    options: &options,
+                    thread: Some(thread.clone()),
+                    used_the_browser: true,
+                    stopped_for_the_person: false,
+                    refused_a_step: false,
+                    pages: Vec::new(),
+                    not_given: Vec::new(),
+                    final_json: &turn.final_json,
+                    progress: None,
+                    runtime_id: Uuid::nil(),
+                    paused_already: false,
+                },
+                &mut summary,
+                &TaskUsage::default(),
+            )
+            .await;
+            assert_eq!(
+                ended.hands_the_message_to_its_build, builds_after_it,
+                "{summary}"
+            );
+            assert!(
+                ended
+                    .artifacts
+                    .iter()
+                    .any(|artifact| artifact["metadata"]["purpose"] == "finding-lines-wrap-up"),
+                "the wrap-up pass ran first: {:?}",
+                ended.artifacts
+            );
+            if builds_after_it {
+                assert_eq!(summary, "", "no reply: its build answers");
+            } else {
+                assert!(summary.starts_with(PROMISED_BUILD), "{summary}");
+            }
+        }
+    }
     Ok(())
 }
 

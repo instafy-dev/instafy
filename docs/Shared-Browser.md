@@ -2996,8 +2996,11 @@ unless the policy is `"covered"`.
   they do next, so it stays in the chat as the turn wrote it, and Studio sends
   no hand-back for it. Where the runtime's own words replace that reply (a
   pause in Instafy's browser, or a step's approval that ended the turn), the
-  finding lines the turn wrote still go into its note, so a later building turn
-  reads the pages it read before it stopped. The
+  finding lines the turn wrote for the pages it read still go into its note, so
+  a later building turn reads the pages it read before it stopped. Its lines
+  for pages that stopped it don't: the person's next step acts on the page it
+  stopped at, and passed on, every such line of three turns that paused on a
+  cookie notice was out of date or untrue by the time a build read it. The
   fixtures in
   `packages/runtime-controller/src/browser_hand_back_fixtures.json` pin the
   three halves together.
@@ -3025,7 +3028,13 @@ unless the policy is `"covered"`.
   page and is not run again (no passing upstream error or unreachable browser
   ended it) hands the message to its build the same way, whatever it answered:
   its note says only that it opened no page, and the build makes the change
-  from the person's words and what the chat found before. Failed in
+  from the person's words and what the chat found before, reads no site the
+  message doesn't name, and says plainly what it couldn't find. So does one
+  whose look left a step in the browser's log (a cookie notice the browser
+  declined by itself) but whose steps opened no page and whose wrap-up pass
+  wrote no line: which look a turn took never decides whether the message is
+  made. One whose first attempt opened a page and that is run again ends with
+  the pages of both attempts, whatever the retry did. Failed in
   its place, a note on a map, a Continue after a Stop and a fill-in each needed
   Try again, and the note's Try again opened two sites nobody named. The person's
   message has no answer until the building turn gives one, so the controller
@@ -3039,11 +3048,15 @@ unless the policy is `"covered"`.
   dispatch and checks as Studio's, except that the card need not continue
   building and the browser turn need not have read a page or replied, and only
   for a card the routing step posted; it stamps `buildRequest` with the
-  message's own words as `personRequest`, an empty reply and no findings. The
+  message's own words as `personRequest`, an empty reply and no findings, and
+  `continueBuilding` when the card does continue building. The
   chat shows neither the card nor, once the hand-back is in it, the browser
   turn or the hand-back's prompt: the person reads their message and then the
   building turn. The building turn reads those words as the person's request
-  and makes what they ask, reading any public page it needs itself. A refusal
+  and makes what they ask, reading any public page it needs itself; with
+  `continueBuilding`, from what the chat found before instead, as above: told
+  to read any page it needs, such a build could read the sites nobody named
+  that the failed turn's Try again read. A refusal
   because the conversation moved on (someone wrote after the browser turn, or
   the building lane is busy) changes nothing; any other refusal (no prompts or
   credits left) leaves its plain reason as the browser turn's reply. Any other

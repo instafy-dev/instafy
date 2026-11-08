@@ -8568,7 +8568,8 @@ impl JobProcessor {
         if hands_the_message_to_the_building_turn {
             final_messages.push(browser_hand_back::build_request_note(job));
         }
-        let final_messages = with_runtime_metadata_vec(final_messages, &registration.runtime_id);
+        let mut final_messages =
+            with_runtime_metadata_vec(final_messages, &registration.runtime_id);
         let reported_file_paths = outcome
             .files
             .iter()
@@ -9439,13 +9440,19 @@ impl JobProcessor {
                 retry_shared_browser_terminal_consent_failure.is_none()
                     && retry_own_files_len == 0
                     && is_retryable_codex_upstream_summary(&retry_outcome.summary);
+            // A part with its build after it whose first attempt opened a page used the browser,
+            // whatever its retry did: it ends with the pages of both, which go to its build.
             let retry_shared_browser_execution_missing =
-                shared_browser_execution_missing_after_attempt(
-                    explicit_shared_browser_execution,
-                    &retry_messages,
-                    retry_shared_browser_terminal_consent_failure,
-                    shared_browser_action_log_before_retry,
-                    crate::shared_browser::action_log_len(),
+                browser_hand_back::opened_no_page_after_a_retry(
+                    job.payload.get("metadata"),
+                    shared_browser_opened_no_page,
+                    shared_browser_execution_missing_after_attempt(
+                        explicit_shared_browser_execution,
+                        &retry_messages,
+                        retry_shared_browser_terminal_consent_failure,
+                        shared_browser_action_log_before_retry,
+                        crate::shared_browser::action_log_len(),
+                    ),
                 );
             // The retry of a browser turn that carries on the person's own
             // message, opened no page and asks Octo to make what the message
@@ -9917,7 +9924,7 @@ impl JobProcessor {
             // The retry's result is settled: its cards go out now, right
             // behind its answer, not after the workspace sync and the
             // turn-end save.
-            let retry_final_messages = stream_settled_cards(
+            let mut retry_final_messages = stream_settled_cards(
                 progress_sender.as_ref(),
                 streaming_active,
                 retry_final_messages,
@@ -10103,6 +10110,12 @@ impl JobProcessor {
                 .await;
                 retry_artifacts.extend(ended.artifacts);
                 retry_messages.extend(ended.messages);
+                if ended.hands_the_message_to_its_build {
+                    retry_final_messages.extend(with_runtime_metadata_vec(
+                        vec![browser_hand_back::build_request_note(job)],
+                        &registration.runtime_id,
+                    ));
+                }
                 // As after the turn's own run: steps a second pass could not stream are posted
                 // with the turn.
                 if let Some(progress) = progress_sender.as_ref() {
@@ -10172,6 +10185,12 @@ impl JobProcessor {
             .await;
             artifacts.extend(ended.artifacts);
             interim_messages.extend(ended.messages);
+            if ended.hands_the_message_to_its_build {
+                final_messages.extend(with_runtime_metadata_vec(
+                    vec![browser_hand_back::build_request_note(job)],
+                    &registration.runtime_id,
+                ));
+            }
             // As after the turn's own run: steps a second pass could not stream are posted with
             // the turn.
             if let Some(progress) = progress_sender.as_ref() {
@@ -15782,12 +15801,12 @@ fn last_reply_was_a_pause(job: &LeaseJob) -> bool {
 
 /// `paused_already`: Octo's last reply in the chat was a pause for the
 /// person's input ([`last_reply_was_a_pause`]). The finding lines the turn
-/// wrote stay after those words: the person reads only the words, and the
-/// turn's Details note keeps the lines for later turns
-/// (`browser_hand_back::move_findings_into_details`). Replaced with the rest,
-/// three turns that paused on a cookie notice reached a later build with no
-/// findings, though each had written a line for the page it stopped on (a
-/// local test, Nov 8).
+/// wrote for the pages it read stay after those words: the person reads only
+/// the words, and the turn's Details note keeps the lines for later turns
+/// (`browser_hand_back::move_findings_into_details`); replaced with the rest,
+/// the pages a turn read before it stopped reached no later build. Its lines
+/// for pages that stopped it don't stay: the person's next step acts on the
+/// page it stopped at (`browser_hand_back::read_lines_of`).
 fn apply_terminal_shared_browser_summary(
     summary: &mut String,
     fallback_kind: &mut Option<CodexFallbackSummaryKind>,
@@ -15797,7 +15816,7 @@ fn apply_terminal_shared_browser_summary(
     let Some(code) = terminal_consent_failure else {
         return;
     };
-    let lines = browser_hand_back::finding_lines_of(summary);
+    let lines = browser_hand_back::read_lines_of(summary);
     *summary = match code {
         "human_input_required" if paused_already => HUMAN_INPUT_PAUSE_AGAIN_REPLY,
         "cookie_notice_required" if paused_already => COOKIE_NOTICE_PAUSE_AGAIN_REPLY,
@@ -16423,6 +16442,11 @@ pub struct BrowserTurnAnswer<'a> {
 pub struct BrowserTurnEnd {
     pub artifacts: Vec<JsonValue>,
     pub messages: Vec<JobMessage>,
+    /// Whether the turn, with its build after it, hands the person's message to that build as one
+    /// that opened no page does (`browser_hand_back::builds_after_it`): it left the build nothing
+    /// to read, and its reply is cleared. The job ends it with the build request note
+    /// (`browser_hand_back::build_request_note`).
+    pub hands_the_message_to_its_build: bool,
 }
 
 /// Ends the reply `summary` of a browser turn that is not handed to the building turn
@@ -16434,7 +16458,9 @@ pub struct BrowserTurnEnd {
 /// second pass then reads; with still none, its
 /// note holds its reply and the pages its own steps opened, so a later building turn reads which
 /// pages it opened, a hand-back still goes, and a turn whose findings go back to the building
-/// turn posts no words of its own (`browser_hand_back::move_findings_into_details`). A turn on
+/// turn posts no words of its own (`browser_hand_back::move_findings_into_details`). One with its
+/// build after it whose steps opened no page either hands that build the person's message, as
+/// one that opened no page does (`BrowserTurnEnd::hands_the_message_to_its_build`). A turn on
 /// the browser on the person's device keeps no thread, so it gets no pass: the pages it opened,
 /// by address. A build request that nothing then acts on is said in the reply, never dropped
 /// without a word (`browser_hand_back::BUILD_NOT_MADE_LINE`). A turn that stopped for the person
@@ -16466,6 +16492,7 @@ pub async fn end_browser_turn_answer(
     let mut ended = BrowserTurnEnd {
         artifacts: second.artifacts,
         messages: second.messages,
+        ..Default::default()
     };
     if answer.stopped_for_the_person || second.stopped_for_the_person {
         return ended;
@@ -16553,10 +16580,20 @@ pub async fn end_browser_turn_answer(
                     "a browser turn that hands back wrote no finding lines: they come from the wrap-up pass or the pages it opened"
                 );
             }
-            None => tracing::info!(
-                job_id = %job.id,
-                "a browser turn that hands back wrote no finding lines and opened no page: nothing goes back"
-            ),
+            None => {
+                tracing::info!(
+                    job_id = %job.id,
+                    "a browser turn that hands back wrote no finding lines and opened no page: nothing goes back"
+                );
+                // One with its build after it hands that build the person's message, as one that
+                // opened no page does: which look it took (one that left a step in the browser's
+                // log, or none) never decides whether the message is made.
+                if metadata.is_some_and(browser_hand_back::builds_after_it) {
+                    summary.clear();
+                    ended.hands_the_message_to_its_build = true;
+                    return ended;
+                }
+            }
         }
         if asks_for_unread && from_the_pass {
             // The pages the wrap-up pass named unread, read now as any second pass reads them.
@@ -30566,11 +30603,13 @@ mod tests {
     }
 
     /// A turn that paused for the person, or that a step's approval ended, keeps the finding
-    /// lines it wrote: the person reads only the runtime's words, and the turn's Details note
-    /// holds the lines a later building turn reads. Replaced with the rest of its answer, three
-    /// turns that paused on a cookie notice reached a later build as `{"findings":[]}` (a local
-    /// test, Nov 8). Its unread line is the runtime's alone, and a line for an address the
-    /// browser refused it, which no step opened, says no page stopped it there.
+    /// lines it wrote for the pages it read: the person reads only the runtime's words, and the
+    /// turn's Details note holds the lines a later building turn reads. Its lines for pages that
+    /// stopped it go no further: the person's next step acts on the page it stopped at, and every
+    /// such line of three turns that paused on a cookie notice was out of date or untrue by the
+    /// time the page's build read it (a local test, Nov 8). Its unread line is the runtime's
+    /// alone, and a line for an address the browser refused it, which no step opened, says no
+    /// page stopped it there.
     #[test]
     fn a_turn_that_paused_for_the_person_keeps_its_finding_lines_in_its_note() {
         let covered = r#"{"url":"https://visit.example/en","stopped":"covered"}"#;
@@ -30593,10 +30632,7 @@ mod tests {
             Some("cookie_notice_required"),
             false,
         );
-        assert_eq!(
-            summary,
-            format!("{COOKIE_NOTICE_PAUSE_REPLY}\n\n{read}\n{covered}")
-        );
+        assert_eq!(summary, format!("{COOKIE_NOTICE_PAUSE_REPLY}\n\n{read}"));
 
         // The person reads the runtime's words; the note keeps the lines.
         let paused = JobMessage {
@@ -30650,10 +30686,41 @@ mod tests {
             execution.final_messages
         );
         let note = &execution.final_messages[0];
-        assert_eq!(note.content, format!("{read}\n{covered}"));
+        assert_eq!(note.content, read);
         assert_eq!(
             note.metadata.as_ref().unwrap()["browserFindings"],
-            json!({ "pages": 2, "pagesRead": 1 })
+            json!({ "pages": 1, "pagesRead": 1 })
+        );
+
+        // A pause whose only line is the page it paused on, as each of those three turns wrote,
+        // leaves the person's words alone and no note.
+        let mut summary = format!(
+            "A cookie notice is covering the Visit page. Please answer it in the browser, then ask me to continue.\n{covered}"
+        );
+        apply_terminal_shared_browser_summary(
+            &mut summary,
+            &mut None,
+            Some("cookie_notice_required"),
+            true,
+        );
+        assert_eq!(summary, COOKIE_NOTICE_PAUSE_AGAIN_REPLY);
+        let mut execution = JobExecution {
+            summary,
+            suggested_replies: Vec::new(),
+            provider: "codex-embedded".to_string(),
+            artifacts: Vec::new(),
+            credit_snapshot: None,
+            provider_conversation_state: None,
+            messages: Vec::new(),
+            messages_streamed: false,
+            final_messages: Vec::new(),
+        };
+        browser_hand_back::move_findings_into_details(&job, &mut execution);
+        assert_eq!(execution.summary, COOKIE_NOTICE_PAUSE_AGAIN_REPLY);
+        assert!(
+            execution.final_messages.is_empty(),
+            "{:?}",
+            execution.final_messages
         );
 
         // Every other way a step's approval ends the turn keeps them the same way, and a pause

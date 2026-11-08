@@ -1931,6 +1931,8 @@ async fn run_a_fill_in_after_a_reply(harness: &mut Harness) {
     let browser = harness.turn("L2").job_id;
     let mut record = checked_hand_back(browser, card, &format!("[[L2]] {task}"), &[]);
     record["browserHandBack"]["buildRequest"] = json!(true);
+    // Its card has the build after the browser, which the controller says.
+    record["browserHandBack"]["continueBuilding"] = json!(true);
     record["browserHandBack"]["personRequest"] = json!(format!("[[L1]] {L_FILL_IN}"));
     harness
         .run(
@@ -2024,6 +2026,7 @@ async fn run_parts_that_open_no_page(harness: &mut Harness) {
     let browser = harness.turn("V2").job_id;
     let mut record = checked_hand_back(browser, card, &format!("[[V2]] {V_NOTE}"), &[]);
     record["browserHandBack"]["buildRequest"] = json!(true);
+    record["browserHandBack"]["continueBuilding"] = json!(true);
     record["browserHandBack"]["personRequest"] = json!(format!("[[V1]] {V_NOTE}"));
     harness
         .run(
@@ -2110,8 +2113,10 @@ fn check_a_part_that_opened_no_page(harness: &Harness, label: &str, words: &str)
 }
 
 /// The build of a browser part that opened no page: one building turn that reads the person's
-/// words as its latest request (`request`), is told the browser opened no page, and reads no page
-/// data and nothing of the browser part's answer (`answer`).
+/// words as its latest request (`request`), is told the browser opened no page, to make it from
+/// those words and what the chat found before, to read no site the request doesn't name and to
+/// say what it couldn't find, never to read any page it needs itself, and reads no page data and
+/// nothing of the browser part's answer (`answer`).
 fn check_the_build_of_a_part_that_opened_no_page(
     harness: &Harness,
     label: &str,
@@ -2126,8 +2131,16 @@ fn check_the_build_of_a_part_that_opened_no_page(
         "{label} did not read the person's message as its latest request"
     );
     ensure!(
-        first.contains("Instafy's browser opened no page for the latest request"),
+        first.contains(
+            "Instafy's browser opened no page for the latest request, so nothing new was read for it"
+        ),
         "{label} was not told the browser opened no page"
+    );
+    ensure!(
+        first.contains(
+            "- Make what the latest request asks from the person's words and what this chat already found. Read no site the request doesn't name, and where it needs a fact nothing here gives, say plainly which you couldn't find."
+        ),
+        "{label} was not told to make it from what the chat found and to read no site nobody named"
     );
     for (_, sent) in sampling_requests(turn) {
         let text = input_text(sent);
@@ -2138,6 +2151,10 @@ fn check_the_build_of_a_part_that_opened_no_page(
         ensure!(
             !text.contains(answer),
             "{label} read its browser part's answer"
+        );
+        ensure!(
+            !text.contains("Read any public page it needs yourself."),
+            "{label} was told to read any page it needs itself"
         );
         ensure!(
             PAGE_DATA_HEADINGS

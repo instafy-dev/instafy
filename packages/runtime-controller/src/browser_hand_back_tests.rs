@@ -11,10 +11,10 @@
 
 use super::*;
 use crate::browser_hand_back::{
-    BUILD_REQUEST_NOTE_KEY, BUILD_REQUEST_RECORD_KEY, HAND_BACK_CLAIM_KEY, HAND_BACK_KEY,
-    HAND_BACK_NOTHING_READ_CODE, HAND_BACK_NOT_BUILDING_CODE, HAND_BACK_PAUSED_CODE,
-    HAND_BACK_PROMPT, HAND_BACK_SECOND_HOP_CODE, HAND_BACK_SUPERSEDED_CODE, HAND_BACK_USED_CODE,
-    LET_OCTO_CONTINUE_LINE, LET_OCTO_CONTINUE_PROMPT,
+    BUILD_REQUEST_NOTE_KEY, BUILD_REQUEST_RECORD_KEY, CONTINUE_BUILDING_RECORD_KEY,
+    HAND_BACK_CLAIM_KEY, HAND_BACK_KEY, HAND_BACK_NOTHING_READ_CODE, HAND_BACK_NOT_BUILDING_CODE,
+    HAND_BACK_PAUSED_CODE, HAND_BACK_PROMPT, HAND_BACK_SECOND_HOP_CODE, HAND_BACK_SUPERSEDED_CODE,
+    HAND_BACK_USED_CODE, LET_OCTO_CONTINUE_LINE, LET_OCTO_CONTINUE_PROMPT,
 };
 
 fn fixtures() -> serde_json::Value {
@@ -1922,67 +1922,96 @@ async fn a_routed_message_ends_with_its_card_and_its_browser_turn_is_the_cards(
 /// had to send it after a reload, on another device or after the person
 /// looked at another chat sent nothing, and the message had no answer). The
 /// record takes the message's words to the building turn as the person's
-/// request, with nothing of the browser turn, though the card does not
-/// continue building and no page was read; it is a hand-back as any other for
-/// billing, and it goes once. The names are the ones the runtime and Studio
-/// use.
+/// request, with nothing of the browser turn, whether or not the card
+/// continues building, and though no page was read; it is a hand-back as any
+/// other for billing, and it goes once. A card that has the build after the
+/// browser says so on the record (`continueBuilding`): that message needed a
+/// website, so its build reads no site nobody named (runtime-agent
+/// `format_browser_hand_back_section`). The names are the ones the runtime and
+/// Studio use.
 #[tokio::test]
 async fn a_message_the_browser_turn_could_not_make_goes_to_the_building_turn() -> anyhow::Result<()>
 {
-    with_chain("routed-build-request", |chain| {
-        Box::pin(async move {
-            let fixtures = fixtures();
-            assert_eq!(fixtures["buildRequestNoteKey"], BUILD_REQUEST_NOTE_KEY);
-            assert_eq!(fixtures["buildRequestRecordKey"], BUILD_REQUEST_RECORD_KEY);
-            let words = "Plan three days in the old town for a first visit, on a map.";
-            let routed = chain.routed_message(words, false).await?;
-            let browser = chain.routed_browser_turn(&routed, words).await?;
-            chain.post_build_request(&browser).await?;
-            chain.finish(&browser, Some(""), "succeeded").await?;
-            let hand_backs = chain.hand_backs_of(&browser).await?;
-            assert_eq!(hand_backs.len(), 1, "{hand_backs:?}");
-            let hand_back = hand_backs[0];
-            let metadata = chain.payload_metadata(&hand_back).await?;
-            let record = &metadata[HAND_BACK_KEY];
-            assert_eq!(record["verified"], json!(true), "{record}");
-            assert_eq!(record[BUILD_REQUEST_RECORD_KEY], json!(true), "{record}");
-            assert_eq!(record["browserJobId"], json!(browser.to_string()));
-            assert_eq!(record["cardJobId"], json!(routed.to_string()));
-            assert_eq!(record["personRequest"], json!(words));
-            assert_eq!(record["reply"], json!(""));
-            assert_eq!(record["findings"], json!([]));
-            assert_eq!(
-                crate::system_turns::system_turn_of(&json!({ "metadata": metadata })),
-                Some(crate::system_turns::SystemTurn::BrowserHandBack)
-            );
-            // In the person's name, with Studio's words and none of theirs, to
-            // the agent that answered their message.
-            let (sender, prompt_text, agent): (Option<Uuid>, Option<String>, Option<String>) = {
-                let row = chain
-                    .pool
-                    .get()
-                    .await?
-                    .query_one(
-                        "select prompt.user_id, job.payload ->> 'prompt_text',
-                                job.payload #>> '{metadata,agent,handle}'
-                           from agent_jobs job join prompts prompt on prompt.id = job.prompt_id
-                          where job.id = $1",
-                        &[&hand_back],
-                    )
-                    .await?;
-                (row.get(0), row.get(1), row.get(2))
-            };
-            assert_eq!(sender, Some(chain.owner));
-            assert_eq!(prompt_text.as_deref(), Some(HAND_BACK_PROMPT));
-            assert_eq!(agent.as_deref(), Some("octo"));
-            // Once: a second send, Studio's or any page's, is refused.
-            let (status, body) = refused(chain.hand_back(&chain.owner, &browser, json!({})).await);
-            assert_eq!(status, StatusCode::CONFLICT, "{}", body.message);
-            assert_eq!(body.code.as_deref(), Some(HAND_BACK_USED_CODE));
-            Ok(())
+    for continue_building in [false, true] {
+        with_chain("routed-build-request", |chain| {
+            Box::pin(async move {
+                build_request_goes_to_the_building_turn(chain, continue_building).await
+            })
         })
-    })
-    .await
+        .await?;
+    }
+    Ok(())
+}
+
+async fn build_request_goes_to_the_building_turn(
+    chain: &Chain,
+    continue_building: bool,
+) -> anyhow::Result<()> {
+    let fixtures = fixtures();
+    assert_eq!(fixtures["buildRequestNoteKey"], BUILD_REQUEST_NOTE_KEY);
+    assert_eq!(fixtures["buildRequestRecordKey"], BUILD_REQUEST_RECORD_KEY);
+    assert_eq!(
+        fixtures["continueBuildingRecordKey"],
+        CONTINUE_BUILDING_RECORD_KEY
+    );
+    let words = "Plan three days in the old town for a first visit, on a map.";
+    let routed = chain.routed_message(words, continue_building).await?;
+    let browser = chain.routed_browser_turn(&routed, words).await?;
+    chain.post_build_request(&browser).await?;
+    chain.finish(&browser, Some(""), "succeeded").await?;
+    let hand_backs = chain.hand_backs_of(&browser).await?;
+    assert_eq!(hand_backs.len(), 1, "{hand_backs:?}");
+    let hand_back = hand_backs[0];
+    let metadata = chain.payload_metadata(&hand_back).await?;
+    let record = &metadata[HAND_BACK_KEY];
+    assert_eq!(record["verified"], json!(true), "{record}");
+    assert_eq!(record[BUILD_REQUEST_RECORD_KEY], json!(true), "{record}");
+    if continue_building {
+        assert_eq!(
+            record[CONTINUE_BUILDING_RECORD_KEY],
+            json!(true),
+            "{record}"
+        );
+    } else {
+        assert!(
+            record.get(CONTINUE_BUILDING_RECORD_KEY).is_none(),
+            "{record}"
+        );
+    }
+    assert_eq!(record["browserJobId"], json!(browser.to_string()));
+    assert_eq!(record["cardJobId"], json!(routed.to_string()));
+    assert_eq!(record["personRequest"], json!(words));
+    assert_eq!(record["reply"], json!(""));
+    assert_eq!(record["findings"], json!([]));
+    assert_eq!(
+        crate::system_turns::system_turn_of(&json!({ "metadata": metadata })),
+        Some(crate::system_turns::SystemTurn::BrowserHandBack)
+    );
+    // In the person's name, with Studio's words and none of theirs, to
+    // the agent that answered their message.
+    let (sender, prompt_text, agent): (Option<Uuid>, Option<String>, Option<String>) = {
+        let row = chain
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select prompt.user_id, job.payload ->> 'prompt_text',
+                        job.payload #>> '{metadata,agent,handle}'
+                   from agent_jobs job join prompts prompt on prompt.id = job.prompt_id
+                  where job.id = $1",
+                &[&hand_back],
+            )
+            .await?;
+        (row.get(0), row.get(1), row.get(2))
+    };
+    assert_eq!(sender, Some(chain.owner));
+    assert_eq!(prompt_text.as_deref(), Some(HAND_BACK_PROMPT));
+    assert_eq!(agent.as_deref(), Some("octo"));
+    // Once: a second send, Studio's or any page's, is refused.
+    let (status, body) = refused(chain.hand_back(&chain.owner, &browser, json!({})).await);
+    assert_eq!(status, StatusCode::CONFLICT, "{}", body.message);
+    assert_eq!(body.code.as_deref(), Some(HAND_BACK_USED_CODE));
+    Ok(())
 }
 
 /// A hand-back carries on work, whether the controller or a signed-in client
