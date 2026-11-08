@@ -67,7 +67,9 @@ Instafy's browser cannot show a space's own sites: its safety policy blocks the 
    it. The controller refuses an open whose title or folder differs from the open preview on that port with
    `409 port_in_use` ("Port 4173 already shows 'Lisbon in 3 days'."), unless the open says it replaces that site
    (`replace`, `--replace`): a preview is keyed by machine and port, so such an open would take the other site's
-   card over.
+   card over. The CLI opens this same site under a new title with its card's title instead (the card the 409 names,
+   `details.title`, is the one it opened for the same command and folder), and an open whose `ready` answers with the
+   card it already had says "Its card is already in the chat." and posts none.
 
 ```
 runtime   instafy preview open --port N --title T

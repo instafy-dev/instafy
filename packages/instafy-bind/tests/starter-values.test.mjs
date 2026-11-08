@@ -186,6 +186,10 @@ function rows(document) {
   return { within: refs(list).filter((ref) => !inApart.includes(ref)), apart: inApart, heading: apart ? apart.querySelector("h2").textContent : null };
 }
 const rowText = (document, ref) => document.getElementById("list").querySelectorAll("[data-ref]").find((el) => el.getAttribute("data-ref") === ref)?.textContent.replace(/\s+/g, " ") ?? null;
+/** The lines under the headline that name what the rows are still missing, on every screen. */
+const missingLines = (document) => (document.getElementById("missing")?.querySelectorAll("p.not-found") ?? []).map((p) => p.textContent);
+/** The line under the headline for one row. */
+const missingLine = (document, name) => document.getElementById("missing")?.querySelectorAll("p.not-found").find((p) => p.textContent.startsWith(`Still missing for ${name}:`)) ?? null;
 
 // Local test, Oct 31: after a comparison card's press Studio's "Opening …" went at the frame's load, and the pane
 // was empty for 2 s while the page fetched its data. A starter page tells Studio, through the client, that it draws
@@ -289,7 +293,7 @@ test("compare: when no row is known to fit, the page says so instead of an empty
 
 // The third 28 Oct drive: the maker's site never answered, so no value of the three models was read; the page dropped
 // them all and read "No options yet". A candidate nothing could be read for stays a row: a table of unknowns, and on a
-// phone a row that names what was not found, and why, once.
+// phone a row of what was found, with what was not, and why, named once under the headline.
 test("compare: candidates nothing could be read for are a table of unknowns, never \"No options yet\"", async () => {
   const data = compareData();
   data.items = ["Model One", "Model Two", "Model Three"].map((name, i) => item(`m${i + 1}`, name, { price: { note: "maker.example did not answer" } }));
@@ -304,9 +308,9 @@ test("compare: candidates nothing could be read for are a table of unknowns, nev
       assert.match(row, /(Price u|U)nknown · maker\.example did not answer/, row);
       assert.equal((row.match(/[Uu]nknown/g) || []).length, 3, `price, battery and suction each say so: ${row}`);
     } else {
-      assert.match(row, /Still missing: Price \(maker\.example did not answer\), Battery, Suction$/, row);
-      assert.doesNotMatch(row, /[Uu]nknown/, `no stack of unknowns: ${row}`);
+      assert.doesNotMatch(row, /[Uu]nknown|Still missing/, `no stack of unknowns, and nothing said twice: ${row}`);
     }
+    assert.deepEqual(missingLines(document), ["Still missing for Model One, Model Two and Model Three: Price (maker.example did not answer), Battery, Suction"], `${width}px`);
   }
 });
 
@@ -390,12 +394,11 @@ test("compare on a phone: a row shows the values found with their sources and na
     assert.equal(list.querySelectorAll("table").length, 0, `${width}px: a list, not a table`);
     const cards = list.querySelectorAll("li[data-ref]");
     assert.deepEqual(cards.map((li) => [li.id, li.getAttribute("data-ref")]), [["row-pro", "option:pro"], ["row-air", "option:air"], ["row-max", "option:max"]], `${width}px: ids and order`);
-    const missing = cards.map((li) => li.querySelectorAll("p.not-found").map((p) => p.textContent));
-    assert.deepEqual(missing, [
-      ["Still missing: Weight, Price, Two independent reviews"],
-      ["Still missing: Battery, Weight, Price, Two independent reviews"],
-      ["Still missing: Battery, Weight, Price, Two independent reviews"],
-    ], `${width}px: one line per row names what is missing`);
+    assert.deepEqual(missingLines(document), [
+      "Still missing for Maker Laptop Pro: Weight, Price, Two independent reviews",
+      "Still missing for Maker Laptop Air and Maker Laptop Max: Battery, Weight, Price, Two independent reviews",
+    ], `${width}px: under the headline, a line names what rows are missing, once for rows missing the same`);
+    assert.equal(list.querySelectorAll("p.not-found").length, 0, `${width}px: no row says it again`);
     assert.doesNotMatch(list.textContent, /Unknown/, `${width}px: no stack of unknowns`);
     // the values found, each with its source line, under its column's label
     const found = (li) => (li.querySelector("dl.facts")?.children ?? []).map((d) => `${d.querySelector("dt").textContent}: ${d.querySelector("dd").textContent}`);
@@ -416,7 +419,60 @@ test("compare on a phone: a row shows the values found with their sources and na
     "Unknown", "Unknown", "Unknown · Two independent reviews not checked", "Details",
   ]);
   assert.deepEqual(cells("option:air").slice(2), ["Unknown", "Unknown", "Unknown", "Unknown · Two independent reviews not checked", ""]);
-  assert.equal(document.querySelectorAll("p.not-found").length, 0, "no line of what was not found under the table");
+  // and the same lines under the headline: a wide screen says what is missing too, not only its cells
+  assert.deepEqual(missingLines(document), [
+    "Still missing for Maker Laptop Pro: Weight, Price, Two independent reviews",
+    "Still missing for Maker Laptop Air and Maker Laptop Max: Battery, Weight, Price, Two independent reviews",
+  ]);
+  assert.equal(document.getElementById("list").querySelectorAll("p.not-found").length, 0, "no line of what was not found under the table");
+});
+
+// A comparison's lede, written before the check changed a cell, said "Two independent reviews were found for the 13 Pro
+// and 16" over a 16 whose cell read "no independent review read"; and its sources line read "Review One / Maker ↗",
+// linking only the review's site. The page says what is missing itself, under the headline, on every screen, from the
+// cells; and each source is named by its page's site, in the footer and in a row's Details, once per site.
+test("compare: the page names what is missing under the headline on every screen, and each source by its site", async () => {
+  const day = DAY;
+  const at = (v, src, url) => ({ v, src, url, date: day });
+  const data = {
+    title: "Three laptops compared",
+    lede: "The Laptop 12 starts lowest and is lightest; the 16 has the largest battery.",
+    sort: [],
+    columns: [{ key: "cpu", label: "CPU", type: "text" }, { key: "battery", label: "Battery", type: "text" }, { key: "reviews", label: "Independent reviews", type: "text" }],
+    items: [
+      item("12", "Maker Laptop 12", { cpu: at("Chip 3", "Maker Laptop 12 specs", "https://maker.example/laptop12?tab=specs"),
+        battery: at("50 Wh", "Maker Laptop 12 specs and overview", "https://maker.example/laptop12?tab=overview"), reviews: { note: "no independent review read" } },
+      { sources: [{ url: "https://maker.example/laptop12?tab=specs" }, { name: "Maker Laptop 12 overview", url: "https://maker.example/laptop12?tab=overview" }] }),
+      item("13-pro", "Maker Laptop 13 Pro", { cpu: at("Chip 5", "Maker", "https://maker.example/laptop13pro"),
+        battery: at("74 Wh", "Review One / Maker", "https://review-one.example/13-pro"), reviews: at("Review One · Review Two", "Review One / Review Two reviews", "https://review-one.example/13-pro") },
+      { sources: [{ name: "Review One review", url: "https://review-one.example/13-pro" }, { name: "Review Two review", url: "https://www.review-two.example/13-pro" }, { url: "https://review-two.example/13-pro/page-2" }] }),
+      item("16", "Maker Laptop 16", { cpu: at("Chip 7", "Maker Laptop 16 specs", "https://maker.example/laptop16?tab=specs"),
+        battery: at("85 Wh", "Maker Laptop 16 specs", "https://maker.example/laptop16"), reviews: { note: "no independent review read" } }),
+    ],
+    unchecked: ["Independent reviews of the Laptop 12 and the Laptop 16"],
+  };
+  for (const width of [1280, 375]) {
+    const { document } = await draw("compare", data, { width, search: "?open=13-pro" });
+    assert.equal(document.getElementById("lede").textContent, data.lede, `${width}px: the lede is the verdict as written`);
+    assert.deepEqual(missingLines(document), ["Still missing for Maker Laptop 12 and Maker Laptop 16: Independent reviews (no independent review read)"], `${width}px`);
+    const box = document.getElementById("missing");
+    assert.equal(box.hidden, false, `${width}px`);
+    assert.equal(box.previousElementSibling, document.getElementById("lede"), `${width}px: right under the lede`);
+    assert.equal((document.body.textContent.match(/Still missing/g) || []).length, 1, `${width}px: said once, in that line`);
+    // every link names its page's site; none keeps a name of its own
+    const links = document.querySelectorAll("a").map((a) => [a.textContent.replace(/ ↗$/, ""), new URL(a.getAttribute("href")).hostname.replace(/^www\./, "")]);
+    assert.ok(links.length >= 6, JSON.stringify(links));
+    for (const [text, site] of links) assert.equal(text, site, `${width}px: ${JSON.stringify(links)}`);
+    // the footer: one link per site, named by it ("Maker Laptop 12 specs" stood for all of maker.example)
+    assert.match(document.getElementById("notes").textContent, /Sources: maker\.example ↗, review-one\.example ↗, review-two\.example ↗$/, `${width}px`);
+    const details = document.querySelector(".more").querySelectorAll("p.cap").map((p) => p.textContent).filter((t) => t.startsWith("Sources: "));
+    assert.deepEqual(details, ["Sources: review-one.example ↗, review-two.example ↗"], `${width}px: Details, once per site`);
+  }
+  // a page with nothing missing has no such line
+  data.items = data.items.slice(1, 2);
+  const { document } = await draw("compare", data, { width: 375 });
+  assert.deepEqual(missingLines(document), []);
+  assert.equal(document.getElementById("missing").hidden, true);
 });
 
 // A new chat asked for a comparison "from what you already know, without browsing", and every row said "checked 1 Mar
@@ -448,9 +504,9 @@ test("compare: a page from what Octo knows reads each value \"not checked\", cit
     for (const value of ["13.5 in", "about 1.3 kg", "from about $1,000"]) assert.ok(thirteen.includes(`${value}, not checked`), `${width}px: ${value}: ${thirteen}`);
     const sixteen = rowText(document, "option:16");
     assert.match(sixteen, /16 in, not checked.*about 2\.1 kg, not checked/, `${width}px: ${sixteen}`);
-    assert.doesNotMatch(sixteen, /Still missing/, `${width}px: nothing was looked for: ${sixteen}`);
-    if (width < 760) assert.match(sixteen, /Not known: Price \(today's price not known\)/, `${width}px: ${sixteen}`);
-    else assert.match(sixteen, /Unknown · today's price not known/, `${width}px: ${sixteen}`);
+    assert.doesNotMatch(sixteen, /Still missing|Not known/, `${width}px: nothing was looked for, and nothing is said twice: ${sixteen}`);
+    assert.deepEqual(missingLines(document), ["Not known for Maker Laptop 16: Price (today's price not known)"], `${width}px`);
+    if (width >= 760) assert.match(sixteen, /Unknown · today's price not known/, `${width}px: ${sixteen}`);
     const page = document.body.textContent.replace(/\s+/g, " ");
     assert.doesNotMatch(page, /checked \d|seen \d|maker\.example|Sources|search result|Mar 2025/, `${width}px: nothing cites a page or a day: ${page}`);
     assert.match(page, /4 expansion cards, not checked/, `${width}px: Details too`);
@@ -511,28 +567,28 @@ test("compare on a phone: a missing value that can still be checked or opened st
       weight: { src: "Maker", url: "https://maker.example/mini/specs", date: DAY }, reviews: { src: "Maker", url: "https://maker.example/mini", date: DAY, note: "looked in its press section" } }),
   ];
   const { document } = await draw("compare", data, { width: 375 });
-  const line = (ref) => rowText(document, ref).match(/Still missing: .*$/)?.[0] ?? "";
-  assert.equal(line("option:pro"), "Still missing: Battery and Weight (maker.example did not answer), Two independent reviews");
-  assert.equal(line("option:air"), "Still missing: Battery, Weight, Two independent reviews");
+  const line = (name) => missingLine(document, name)?.textContent ?? "";
+  assert.equal(line("Maker Laptop Pro"), "Still missing for Maker Laptop Pro: Battery and Weight (maker.example did not answer), Two independent reviews");
+  assert.equal(line("Maker Laptop Air"), "Still missing for Maker Laptop Air: Battery, Weight, Two independent reviews");
   assert.match(rowText(document, "option:air"), /Price unknown · not read yet · Open Shop ↗/, "the store link stays on the right");
   const max = rowText(document, "option:max");
   assert.match(max, /BatteryUnknown · where to check ↗/, `a value without its page keeps where to check: ${max}`);
-  assert.match(line("option:max"), /^Still missing: Weight \(checked 27 Oct( 2026)? on maker\.example ↗\), Price, Two independent reviews$/, max);
-  // a card names what is missing once: in its line of what is missing, never also on the row as "Not found"
+  assert.match(line("Maker Laptop Max"), /^Still missing for Maker Laptop Max: Weight \(checked 27 Oct( 2026)? on maker\.example ↗\), Price, Two independent reviews$/, max);
+  // what is missing is named once, under the headline: never also on the row, as "Still missing" or "Not found"
   for (const ref of ["option:pro", "option:air", "option:max", "option:mini"]) {
     const card = rowText(document, ref);
-    assert.equal((card.match(/Still missing/g) || []).length, 1, `${ref}: ${card}`);
-    assert.doesNotMatch(card, /Not found/, `${ref}: ${card}`);
+    assert.doesNotMatch(card, /Still missing|Not found/, `${ref}: ${card}`);
   }
-  const mini = document.getElementById("list").querySelectorAll("[data-ref]").find((el) => el.getAttribute("data-ref") === "option:mini");
-  assert.match(line("option:mini"), /^Still missing: Battery and Weight \(checked 27 Oct( 2026)? on maker\.example ↗\), Price, Two independent reviews \(looked in its press section · checked 27 Oct( 2026)? on maker\.example ↗\)$/, line("option:mini"));
+  assert.equal(missingLines(document).length, 4, missingLines(document).join(" | "));
+  assert.match(line("Maker Laptop Mini"), /^Still missing for Maker Laptop Mini: Battery and Weight \(checked 27 Oct( 2026)? on maker\.example ↗\), Price, Two independent reviews \(looked in its press section · checked 27 Oct( 2026)? on maker\.example ↗\)$/, line("Maker Laptop Mini"));
   // the page it was looked for on is a link to that page
-  const links = mini.querySelector("p.not-found").querySelectorAll("a").map((a) => a.getAttribute("href"));
+  const links = missingLine(document, "Maker Laptop Mini").querySelectorAll("a").map((a) => a.getAttribute("href"));
   assert.deepEqual(links, ["https://maker.example/mini/specs", "https://maker.example/mini"], links.join(" "));
-  // the wide table keeps a cell for each, saying where it was looked for
+  // the wide table keeps a cell for each, saying where it was looked for, under the same lines
   const { document: wide } = await draw("compare", data, { width: 1280 });
   assert.match(rowText(wide, "option:max"), /Not found · checked 27 Oct( 2026)? on maker\.example ↗/);
-  assert.equal(wide.querySelectorAll("p.not-found").length, 0);
+  assert.deepEqual(missingLines(wide), missingLines(document));
+  assert.equal(wide.getElementById("list").querySelectorAll("p.not-found").length, 0);
 });
 
 // A phone row folded a price into its line of what is missing until the binder answered, then moved it to the right of the
@@ -574,8 +630,8 @@ test("compare on a phone: a column without a label is named by its key", async (
   const data = laptopsData();
   data.columns = [{ key: "cpu", label: "CPU", type: "text" }, { key: "colour", type: "text" }];
   const { document } = await draw("compare", data, { width: 375 });
-  assert.match(rowText(document, "option:air"), /Still missing: colour$/);
-  assert.doesNotMatch(document.getElementById("list").textContent, /undefined/);
+  assert.deepEqual(missingLines(document), ["Still missing for Maker Laptop Pro, Maker Laptop Air and Maker Laptop Max: colour"]);
+  assert.doesNotMatch(document.body.textContent, /undefined/);
 });
 
 // Each redraw of a comparison (Details, Sort by, a live price, the binder's one-minute refresh) emptied the list and
@@ -616,7 +672,7 @@ test("compare: a sort by a column no row has a value for is left out", async () 
   const three = laptops([laptop("a", "10 h", "€900"), laptop("b", "14 h", "€1,100"), laptop("c", "12 h", "€1,000")], [weight]);
   let { document } = await draw("compare", three, { width: 390 });
   assert.deepEqual(shownOnTheRight(document), [], "nothing on the right of the rows");
-  assert.match(rowText(document, "option:a"), /Still missing: Weight \(not on the maker's page\)$/);
+  assert.deepEqual(missingLines(document), ["Still missing for Laptop A, Laptop B and Laptop C: Weight (not on the maker's page)"]);
   // a sort the rows have takes the right of each row instead
   ({ document } = await draw("compare", { ...three, sort: [weight, battery] }, { width: 390 }));
   assert.deepEqual(shownOnTheRight(document), ["10 h", "14 h", "12 h"]);
@@ -892,8 +948,8 @@ test("site.link takes the https address from either argument, so a page to share
 });
 
 // A comparison's review note was cut at 100 characters, mid-sentence: "…Tom's Hardware pages had no page at the
-// requested". A note longer than 100 characters ends at a whole word with "…": in the table's cell, in a phone's line
-// of what was not found, and the search result's site a row is named by.
+// requested". A note longer than 100 characters ends at a whole word with "…": in the table's cell, in the line of
+// what is missing, and the search result's site a row is named by.
 test("compare: a note longer than 100 characters ends at a whole word, with \"…\"", async () => {
   const note = "No independent review was read; the two review sites named in the request had no page at the requested addresses.";
   const result = `${"long-name-".repeat(12)}example.net`;
@@ -913,8 +969,8 @@ test("compare: a note longer than 100 characters ends at a whole word, with \"�
   const named = wide.getElementById("list").textContent.match(/Named in a search result on (.*?…)/)?.[1] ?? "";
   assert.ok(named.endsWith("…") && named.length <= 100 && result.startsWith(named.slice(0, -1)), `the result's site: ${named}`);
   const { document: phone } = await draw("compare", data, { width: 375 });
-  const line = phone.getElementById("list").querySelectorAll("li[data-ref]").find((li) => li.getAttribute("data-ref") === "option:pro").querySelector("p.not-found").textContent;
-  wholeWords(line.match(/Two independent reviews \((.*?…)\)/)?.[1] ?? "", note, "a phone's line");
+  const line = missingLine(phone, "Maker Laptop Pro").textContent;
+  wholeWords(line.match(/Two independent reviews \((.*?…)\)/)?.[1] ?? "", note, "the line of what is missing");
   // a note of 100 characters or fewer is shown whole
   data.items[0].facts.reviews = { note: note.slice(0, 98) };
   const { document: short } = await draw("compare", data, { width: 1280 });
@@ -924,9 +980,9 @@ test("compare: a note longer than 100 characters ends at a whole word, with \"�
 
 // A phone named the values of an item whose own page wasn't opened under "Not checked", and every other missing value
 // under "Not found yet", also values nobody looked for, whose note said why in other words ("Laptop 12 product page
-// and reviews not checked"): two headings, and the one a value got hung on how its note was worded. A phone names
+// and reviews not checked"): two headings, and the one a value got hung on how its note was worded. The page names
 // every missing value once, under "Still missing", with its note. The wide table's cells still say why.
-test("compare on a phone: every missing value is named once, under \"Still missing\", with its note", async () => {
+test("compare: every missing value is named once, under \"Still missing\", with its note", async () => {
   const data = laptopsData();
   const unopened = { note: "its own page wasn't opened" };
   const notRead = (model) => ({ note: `${model} product page and reviews not checked` });
@@ -940,11 +996,11 @@ test("compare on a phone: every missing value is named once, under \"Still missi
       reviews: { note: "Two independent reviews not checked" } }),
   ];
   const { document } = await draw("compare", data, { width: 375 });
-  const line = (ref) => document.getElementById("list").querySelectorAll("li[data-ref]").find((li) => li.getAttribute("data-ref") === ref).querySelector("p.not-found").textContent;
-  assert.equal(line("option:12"), "Still missing: CPU, Battery, Weight and Price (Laptop 12 product page and reviews not checked), Independent reviews (Two independent reviews not checked)");
-  assert.equal(line("option:air"), "Still missing: CPU, Battery, Weight, Price and Independent reviews (its own page wasn't opened)");
-  assert.match(line("option:pro"), /^Still missing: Weight \(checked 27 Oct( 2026)? on maker\.example ↗\), Price, Independent reviews \(Its own page wasn’t opened\)$/, line("option:pro"));
-  assert.doesNotMatch(document.getElementById("list").textContent, /Not found yet|Not checked:|not checked:/);
+  const line = (name) => missingLine(document, name)?.textContent ?? "";
+  assert.equal(line("Maker Laptop 12"), "Still missing for Maker Laptop 12: CPU, Battery, Weight and Price (Laptop 12 product page and reviews not checked), Independent reviews (Two independent reviews not checked)");
+  assert.equal(line("Maker Laptop Air"), "Still missing for Maker Laptop Air: CPU, Battery, Weight, Price and Independent reviews (its own page wasn't opened)");
+  assert.match(line("Maker Laptop Pro"), /^Still missing for Maker Laptop Pro: Weight \(checked 27 Oct( 2026)? on maker\.example ↗\), Price, Independent reviews \(Its own page wasn’t opened\)$/, line("Maker Laptop Pro"));
+  assert.doesNotMatch(document.body.textContent, /Not found yet|Not checked:|not checked:/);
   const { document: wide } = await draw("compare", data, { width: 1280 });
   assert.match(rowText(wide, "option:air"), /Unknown · its own page wasn't opened/);
 });

@@ -10,9 +10,13 @@
 // - other: every other string it holds (a variable's value, a function's argument, the HTML it gives innerHTML…): words
 //   the page may show that the check cannot place.
 // - loads: whether it fetches text from another site while the page runs.
+// - trust: the source lines it draws by hand, each site.h element with the class "trust": its words, and whether a link
+//   is in it (an "a" with an href, site.link, or site.cite or site.trust, which link the page a fact was read on).
 // SPDX-License-Identifier: AGPL-3.0-only
 
 const HELPERS = new Set(["h", "head", "link", "notice", "empty", "notes"]);
+// The helpers that draw a fact's page as a link, inside a line drawn by hand.
+const LINKING = new Set(["cite", "trust"]);
 // What a script may call the global `site` through.
 const GLOBALS = new Set(["window", "globalThis", "self"]);
 // Keys whose values are never text on the page (an address, a class, an attribute map, an event).
@@ -268,6 +272,8 @@ function propsLike(toks, [s, e]) {
  *  line of its own. */
 function collect(toks, [s, e], ctx, words) {
   for (let k = s; k < e; k += 1) {
+    const after = siteAt(toks, k);
+    if (after >= 0 && is(toks[after], ".") && isId(toks[after + 1]) && LINKING.has(toks[after + 1].v) && is(toks[after + 2], "(")) ctx.linked = true;
     const call = helperCall(toks, k, ctx.names);
     if (call) {
       ctx.consumed.add(k);
@@ -290,6 +296,13 @@ function drop(toks, [s, e], ctx) {
   for (let k = s; k < e; k += 1) if (helperCall(toks, k, ctx.names)) ctx.consumed.add(k);
 }
 
+/** The class names a props entry gives ("trust is-old"): the words of the strings in its value. */
+function classWords(toks, entry) {
+  const words = [];
+  for (let k = entry.s; k < entry.e; k += 1) if (toks[k].t === "str") words.push(...toks[k].v.split(/\s+/).filter(Boolean));
+  return words;
+}
+
 /** An element's tag, when the call names it with a string ("p"); else "". */
 function tagOf(toks, range) {
   return range && range[1] - range[0] === 1 && toks[range[0]].t === "str" ? toks[range[0]].v.trim().toLowerCase() : "";
@@ -309,16 +322,26 @@ function readCall(toks, { name, open }, ctx, nested = false) {
   };
   const entries = (range) => (range && objectEntries(toks, range)) || [];
   if (name === "h" || name === "link") {
+    const props = name === "h" && list[1] && propsLike(toks, list[1]) ? entries(list[1]) : [];
+    // a link anywhere in an element is in every element around it too
+    const outer = ctx.linked;
+    ctx.linked = false;
     if (name === "link") take(list[1]);
     else {
       // h(tag, props, ...children): a second argument that is not props is its first child, from site.js 1.7.0 on
       if (list[1] && propsLike(toks, list[1])) {
-        for (const entry of entries(list[1])) if (entry.key === "text") take([entry.s, entry.e]);
+        for (const entry of props) if (entry.key === "text") take([entry.s, entry.e]);
       } else if (list[1] && ctx.childArg) take(list[1]);
       else if (list[1]) drop(toks, list[1], ctx);
       list.slice(2).forEach(take);
     }
     const tag = name === "link" ? "a" : tagOf(toks, list[0]);
+    const href = (entry) => entry.key === "href" || (entry.key === "attrs" && entries([entry.s, entry.e]).some((attr) => attr.key === "href"));
+    if (name === "link" || (tag === "a" && props.some(href))) ctx.linked = true;
+    if (props.some((entry) => (entry.key === "class" || entry.key === "className") && classWords(toks, entry).includes("trust"))) {
+      ctx.trust.push({ line: words.join(" ").split(BREAK).join(" ").replace(/\s+/g, " ").trim(), linked: ctx.linked });
+    }
+    ctx.linked = outer || ctx.linked;
     if (tag === "br") return { end, text: nested ? BREAK : "" };
     if (nested && !BLOCK.has(tag)) return { end, text: words.join(" ") };
     line(words);
@@ -402,12 +425,12 @@ function loadsElsewhere(toks) {
   return false;
 }
 
-/** What a script shows: { lines, data, other, loads } (the top of this file). `childArg`: site.h takes a second
+/** What a script shows: { lines, data, other, loads, trust } (the top of this file). `childArg`: site.h takes a second
  *  argument that is not its props as its first child (site.js 1.7.0 and later; an older copy draws nothing for it).
  *  `lists`: the keys and names whose values list what the page could not show. */
 export function readScript(source, { childArg = true, lists = new Set() } = {}) {
   const toks = tokens(String(source ?? ""));
-  const ctx = { names: helperNames(toks), childArg, lines: [], consumed: new Set() };
+  const ctx = { names: helperNames(toks), childArg, lines: [], consumed: new Set(), trust: [], linked: false };
   // the calls read on their own (not as another element's child), outermost first: what the rest of the script is
   const skip = new Map();
   let outer = 0;
@@ -421,5 +444,5 @@ export function readScript(source, { childArg = true, lists = new Set() } = {}) 
       outer = end;
     }
   }
-  return { lines: ctx.lines, ...readRest(toks, skip, lists), loads: loadsElsewhere(toks) };
+  return { lines: ctx.lines, ...readRest(toks, skip, lists), loads: loadsElsewhere(toks), trust: ctx.trust };
 }

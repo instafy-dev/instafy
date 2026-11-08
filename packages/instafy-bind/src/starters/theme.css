@@ -305,7 +305,7 @@ html[data-host-title="shown"] .title {
 @media (min-width: 360px) { .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 /* one column when a value or its source line would wrap in two (site.js measures the drawn lines) */
 .facts.is-one { grid-template-columns: minmax(0, 1fr); }
-/* a phone row's one line of what was not found ("Not found yet: Weight, Price") wraps inside the row */
+/* a line of what is still missing ("Still missing for Option B: Weight, Price") wraps inside the page */
 .not-found { overflow-wrap: anywhere; }
 .facts > div { min-width: 0; }
 .facts dt { font-size: 12px; line-height: 16px; color: var(--if-muted); }
