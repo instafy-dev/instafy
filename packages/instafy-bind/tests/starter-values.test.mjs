@@ -304,7 +304,7 @@ test("compare: candidates nothing could be read for are a table of unknowns, nev
       assert.match(row, /(Price u|U)nknown · maker\.example did not answer/, row);
       assert.equal((row.match(/[Uu]nknown/g) || []).length, 3, `price, battery and suction each say so: ${row}`);
     } else {
-      assert.match(row, /Not found yet: Price \(maker\.example did not answer\), Battery, Suction$/, row);
+      assert.match(row, /Still missing: Price \(maker\.example did not answer\), Battery, Suction$/, row);
       assert.doesNotMatch(row, /[Uu]nknown/, `no stack of unknowns: ${row}`);
     }
   }
@@ -392,10 +392,10 @@ test("compare on a phone: a row shows the values found with their sources and na
     assert.deepEqual(cards.map((li) => [li.id, li.getAttribute("data-ref")]), [["row-pro", "option:pro"], ["row-air", "option:air"], ["row-max", "option:max"]], `${width}px: ids and order`);
     const missing = cards.map((li) => li.querySelectorAll("p.not-found").map((p) => p.textContent));
     assert.deepEqual(missing, [
-      ["Not found yet: Weight, Price, Two independent reviews"],
-      ["Not found yet: Battery, Weight, Price, Two independent reviews"],
-      ["Not found yet: Battery, Weight, Price, Two independent reviews"],
-    ], `${width}px: one line per row names what was not found`);
+      ["Still missing: Weight, Price, Two independent reviews"],
+      ["Still missing: Battery, Weight, Price, Two independent reviews"],
+      ["Still missing: Battery, Weight, Price, Two independent reviews"],
+    ], `${width}px: one line per row names what is missing`);
     assert.doesNotMatch(list.textContent, /Unknown/, `${width}px: no stack of unknowns`);
     // the values found, each with its source line, under its column's label
     const found = (li) => (li.querySelector("dl.facts")?.children ?? []).map((d) => `${d.querySelector("dt").textContent}: ${d.querySelector("dd").textContent}`);
@@ -448,7 +448,7 @@ test("compare: a page from what Octo knows reads each value \"not checked\", cit
     for (const value of ["13.5 in", "about 1.3 kg", "from about $1,000"]) assert.ok(thirteen.includes(`${value}, not checked`), `${width}px: ${value}: ${thirteen}`);
     const sixteen = rowText(document, "option:16");
     assert.match(sixteen, /16 in, not checked.*about 2\.1 kg, not checked/, `${width}px: ${sixteen}`);
-    assert.doesNotMatch(sixteen, /Not found yet/, `${width}px: nothing was looked for: ${sixteen}`);
+    assert.doesNotMatch(sixteen, /Still missing/, `${width}px: nothing was looked for: ${sixteen}`);
     if (width < 760) assert.match(sixteen, /Not known: Price \(today's price not known\)/, `${width}px: ${sixteen}`);
     else assert.match(sixteen, /Unknown · today's price not known/, `${width}px: ${sixteen}`);
     const page = document.body.textContent.replace(/\s+/g, " ");
@@ -489,9 +489,9 @@ test("compare: a page from what Octo knows offers no price check, draws none, an
   }
 });
 
-// A value looked for on a page and not found there said "Not found · checked … ↗" on its row, above a "Not found yet"
-// line that left it out: one card used the words for two things. It is named in that line with the page it was looked
-// for on; the desktop table keeps its cell.
+// A value looked for on a page and not found there said "Not found · checked … ↗" on its row, above a line of what was
+// missing that left it out: one card used the words for two things. It is named in that line with the page it was
+// looked for on; the desktop table keeps its cell.
 test("compare on a phone: a missing value that can still be checked or opened stays on its row, and one looked for is named with its page", async () => {
   const data = laptopsData();
   data.columns[3] = { key: "price", label: "Price", type: "price" };
@@ -511,20 +511,21 @@ test("compare on a phone: a missing value that can still be checked or opened st
       weight: { src: "Maker", url: "https://maker.example/mini/specs", date: DAY }, reviews: { src: "Maker", url: "https://maker.example/mini", date: DAY, note: "looked in its press section" } }),
   ];
   const { document } = await draw("compare", data, { width: 375 });
-  const line = (ref) => rowText(document, ref).match(/Not found yet: .*$/)?.[0] ?? "";
-  assert.equal(line("option:pro"), "Not found yet: Battery and Weight (maker.example did not answer), Two independent reviews");
-  assert.equal(line("option:air"), "Not found yet: Battery, Weight, Two independent reviews");
+  const line = (ref) => rowText(document, ref).match(/Still missing: .*$/)?.[0] ?? "";
+  assert.equal(line("option:pro"), "Still missing: Battery and Weight (maker.example did not answer), Two independent reviews");
+  assert.equal(line("option:air"), "Still missing: Battery, Weight, Two independent reviews");
   assert.match(rowText(document, "option:air"), /Price unknown · not read yet · Open Shop ↗/, "the store link stays on the right");
   const max = rowText(document, "option:max");
   assert.match(max, /BatteryUnknown · where to check ↗/, `a value without its page keeps where to check: ${max}`);
-  assert.match(line("option:max"), /^Not found yet: Weight \(checked 27 Oct( 2026)? on maker\.example ↗\), Price, Two independent reviews$/, max);
-  // "Not found" says one thing on a card: the line of what was not found
+  assert.match(line("option:max"), /^Still missing: Weight \(checked 27 Oct( 2026)? on maker\.example ↗\), Price, Two independent reviews$/, max);
+  // a card names what is missing once: in its line of what is missing, never also on the row as "Not found"
   for (const ref of ["option:pro", "option:air", "option:max", "option:mini"]) {
     const card = rowText(document, ref);
-    assert.equal((card.match(/Not found/g) || []).length, 1, `${ref}: ${card}`);
+    assert.equal((card.match(/Still missing/g) || []).length, 1, `${ref}: ${card}`);
+    assert.doesNotMatch(card, /Not found/, `${ref}: ${card}`);
   }
   const mini = document.getElementById("list").querySelectorAll("[data-ref]").find((el) => el.getAttribute("data-ref") === "option:mini");
-  assert.match(line("option:mini"), /^Not found yet: Battery and Weight \(checked 27 Oct( 2026)? on maker\.example ↗\), Price, Two independent reviews \(looked in its press section · checked 27 Oct( 2026)? on maker\.example ↗\)$/, line("option:mini"));
+  assert.match(line("option:mini"), /^Still missing: Battery and Weight \(checked 27 Oct( 2026)? on maker\.example ↗\), Price, Two independent reviews \(looked in its press section · checked 27 Oct( 2026)? on maker\.example ↗\)$/, line("option:mini"));
   // the page it was looked for on is a link to that page
   const links = mini.querySelector("p.not-found").querySelectorAll("a").map((a) => a.getAttribute("href"));
   assert.deepEqual(links, ["https://maker.example/mini/specs", "https://maker.example/mini"], links.join(" "));
@@ -534,7 +535,7 @@ test("compare on a phone: a missing value that can still be checked or opened st
   assert.equal(wide.querySelectorAll("p.not-found").length, 0);
 });
 
-// A phone row folded a price into "Not found yet: Price" until the binder answered, then moved it to the right of the
+// A phone row folded a price into its line of what is missing until the binder answered, then moved it to the right of the
 // row with its store link: the row changed shape under the reader. A price whose store can be opened or checked stays
 // on the row from the first view, and the link joins it there.
 test("compare on a phone: a price whose store can be opened keeps its place while the binder answers", async () => {
@@ -544,15 +545,15 @@ test("compare on a phone: a price whose store can be opened keeps its place whil
   const page = await draw("compare", compareData(), { width: 375, search: "?show=all", bind: client });
   const right = () => rowText(page.document, "option:blocked");
   assert.match(right(), /Price unknown · shop-two\.example blocks automated price checks/, `on the right of the row: ${right()}`);
-  assert.doesNotMatch(right(), /Not found yet:.*Price/, right());
+  assert.doesNotMatch(right(), /Still missing:.*Price/, right());
   answer({ connected: true, names: [] });
   assert.ok(await until(() => /Open Shop Two ↗/.test(right()), 1000), `the store link joins it: ${right()}`);
   assert.match(right(), /Price unknown · shop-two\.example blocks automated price checks · Open Shop Two ↗/);
-  assert.doesNotMatch(right(), /Not found yet:.*Price/, right());
+  assert.doesNotMatch(right(), /Still missing:.*Price/, right());
 });
 
 // A check that could not read one row's store ("the store asks for a login") said why in the wide table, but a phone
-// row whose store link is not https folded the price into "Not found yet: Price" and lost the reason.
+// row whose store link is not https folded the price into its line of what is missing and lost the reason.
 test("compare on a phone: a store a check could not read keeps its reason on the row", async () => {
   const data = compareData();
   data.items = [data.items[0], item("login", "Login Model", {}, { store: { name: "Shop Three", url: "http://shop-three.example/login", readable: true } })];
@@ -564,7 +565,7 @@ test("compare on a phone: a store a check could not read keeps its reason on the
     const { document } = await draw("compare", data, { width, search: "?show=all", bind: client });
     const row = rowText(document, "option:login");
     assert.match(row, /(Price u|U)nknown · the store asks for a login/, `${width}px: ${row}`);
-    assert.doesNotMatch(row, /Not found yet:.*Price/, `${width}px: ${row}`);
+    assert.doesNotMatch(row, /Still missing:.*Price/, `${width}px: ${row}`);
   }
 });
 
@@ -573,7 +574,7 @@ test("compare on a phone: a column without a label is named by its key", async (
   const data = laptopsData();
   data.columns = [{ key: "cpu", label: "CPU", type: "text" }, { key: "colour", type: "text" }];
   const { document } = await draw("compare", data, { width: 375 });
-  assert.match(rowText(document, "option:air"), /Not found yet: colour$/);
+  assert.match(rowText(document, "option:air"), /Still missing: colour$/);
   assert.doesNotMatch(document.getElementById("list").textContent, /undefined/);
 });
 
@@ -615,7 +616,7 @@ test("compare: a sort by a column no row has a value for is left out", async () 
   const three = laptops([laptop("a", "10 h", "€900"), laptop("b", "14 h", "€1,100"), laptop("c", "12 h", "€1,000")], [weight]);
   let { document } = await draw("compare", three, { width: 390 });
   assert.deepEqual(shownOnTheRight(document), [], "nothing on the right of the rows");
-  assert.match(rowText(document, "option:a"), /Not found yet: Weight \(not on the maker's page\)$/);
+  assert.match(rowText(document, "option:a"), /Still missing: Weight \(not on the maker's page\)$/);
   // a sort the rows have takes the right of each row instead
   ({ document } = await draw("compare", { ...three, sort: [weight, battery] }, { width: 390 }));
   assert.deepEqual(shownOnTheRight(document), ["10 h", "14 h", "12 h"]);
@@ -921,23 +922,29 @@ test("compare: a note longer than 100 characters ends at a whole word, with \"�
   assert.doesNotMatch(rowText(short, "option:pro"), /…/);
 });
 
-// An item whose own page wasn't opened (the hub gives each of its missing values {"note": "its own page wasn't
-// opened"}) read "Not found yet: Battery, Weight (its own page wasn't opened)" on a phone, as if its page had been
-// looked at. Nobody looked: a phone names those values under "Not checked", apart from what was looked for and not
-// found. The wide table's cells still say why.
-test("compare on a phone: the values of an item whose own page wasn't opened read \"Not checked\"", async () => {
+// A phone named the values of an item whose own page wasn't opened under "Not checked", and every other missing value
+// under "Not found yet", also values nobody looked for, whose note said why in other words ("Laptop 12 product page
+// and reviews not checked"): two headings, and the one a value got hung on how its note was worded. A phone names
+// every missing value once, under "Still missing", with its note. The wide table's cells still say why.
+test("compare on a phone: every missing value is named once, under \"Still missing\", with its note", async () => {
   const data = laptopsData();
   const unopened = { note: "its own page wasn't opened" };
+  const notRead = (model) => ({ note: `${model} product page and reviews not checked` });
+  data.columns = [{ key: "cpu", label: "CPU", type: "text" }, { key: "battery", label: "Battery", type: "text" }, { key: "weight", label: "Weight", type: "text" },
+    { key: "price", label: "Price", type: "text" }, { key: "reviews", label: "Independent reviews", type: "text" }];
   data.items = [
     item("pro", "Maker Laptop Pro", { cpu: MAKER("Chip Ultra Series 3", "pro"), battery: MAKER("Up to 20 hours (the maker's claim)", "pro/battery"),
       weight: { src: "Maker", url: "https://maker.example/pro/specs", date: DAY }, price: { note: "Not checked" }, reviews: { note: "Its own page wasn’t opened." } }),
     item("air", "Maker Laptop Air", { cpu: unopened, battery: unopened, weight: unopened, price: unopened, reviews: unopened }),
+    item("12", "Maker Laptop 12", { cpu: notRead("Laptop 12"), battery: notRead("Laptop 12"), weight: notRead("Laptop 12"), price: notRead("Laptop 12"),
+      reviews: { note: "Two independent reviews not checked" } }),
   ];
   const { document } = await draw("compare", data, { width: 375 });
   const line = (ref) => document.getElementById("list").querySelectorAll("li[data-ref]").find((li) => li.getAttribute("data-ref") === ref).querySelector("p.not-found").textContent;
-  assert.equal(line("option:air"), "Not checked: CPU, Battery, Weight, Price and Two independent reviews");
-  assert.match(line("option:pro"), /^Not found yet: Weight \(checked 27 Oct( 2026)? on maker\.example ↗\), Price; not checked: Two independent reviews$/, line("option:pro"));
-  assert.doesNotMatch(document.getElementById("list").textContent, /its own page wasn/i);
+  assert.equal(line("option:12"), "Still missing: CPU, Battery, Weight and Price (Laptop 12 product page and reviews not checked), Independent reviews (Two independent reviews not checked)");
+  assert.equal(line("option:air"), "Still missing: CPU, Battery, Weight, Price and Independent reviews (its own page wasn't opened)");
+  assert.match(line("option:pro"), /^Still missing: Weight \(checked 27 Oct( 2026)? on maker\.example ↗\), Price, Independent reviews \(Its own page wasn’t opened\)$/, line("option:pro"));
+  assert.doesNotMatch(document.getElementById("list").textContent, /Not found yet|Not checked:|not checked:/);
   const { document: wide } = await draw("compare", data, { width: 1280 });
   assert.match(rowText(wide, "option:air"), /Unknown · its own page wasn't opened/);
 });

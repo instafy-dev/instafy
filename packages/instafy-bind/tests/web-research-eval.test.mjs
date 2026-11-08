@@ -283,7 +283,7 @@ test("research and browser policy checks match the current skills", () => {
   for (const [id, needles] of Object.entries(finding)) for (const needle of needles) assert.ok(browser.includes(needle), `${id}: ${needle}`);
   assert.ok(skill.includes('"Finding a page" not loaded? Print it:'));
   // "Not checked" is the replies guide's, which every turn reads, a browser turn its "Replies".
-  assert.ok(flat(AGENTS_DOC).includes('A fact no page you read this turn states says "not checked", or stays out.'), "unchecked_said");
+  assert.ok(flat(AGENTS_DOC).includes('A fact or tip no page you read this turn gives says "not checked", in the reply and on any page you make or change, or stays out.'), "unchecked_said");
   // A browser turn writes its finding lines as its prompt's findings section says (`{url, title, facts}` or
   // `{url, stopped}`), and Instafy adds when and in which browser each page was read: the fields the eval grades
   // are the ones citing names (`findings_labelled` above). The browser skill states no second format.

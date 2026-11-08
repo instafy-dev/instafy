@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { UNAVAILABLE_KEYS, checkSite, checkValues, htmlLines, htmlText, jsonStrings, names, parseExpect, uncitedRows } from "../src/check.mjs";
+import { UNAVAILABLE_KEYS, checkSite, checkValues, htmlLines, htmlText, jsonStrings, leavesFolder, names, parseExpect, uncitedRows } from "../src/check.mjs";
 import { readScript } from "../src/script-text.mjs";
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "instafy-bind.mjs");
@@ -675,4 +675,52 @@ test("a filter without a label fails the check: the page would have nothing to c
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// A page is served from its own folder, as its card serves it. A new chat's page loaded another chat's page's files
+// ("../framework-laptops/site.js"): served on its own it could not load them, and it changed whenever that page did.
+// The check fails a page that loads a file from outside its folder (an element's src, srcset or a <link>'s href, a
+// style's url() or @import, a path a script names) and names the command that gives it its own. A link to another
+// page is no load, and addresses of other sites and paths that stay inside are the page's own.
+test("check fails a page that loads a file from outside its folder, and names the command that gives it its own", () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "bind-check-outside-"));
+  try {
+    const dir = path.join(parent, "page");
+    fs.mkdirSync(path.join(dir, "js"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "index.html"), `<!doctype html><title>Trip</title>
+<link rel="stylesheet" href="theme.css"><link rel="icon" href="/icon.png">
+<h1>Porto in a day</h1>
+<a href="../other/index.html">the other plan</a>
+<img src="https://cdn.example/a.png" srcset="img/a.png 1x, ../other/b.png 2x" alt="">
+<script src="__bind/client.js"></script><script src="../other/site.js"></script><script src="js/app.js"></script>
+<script>fetch("../other/data.json").then(() => {});</script>
+<!-- <script src="../old/app.js"></script> -->`);
+    fs.writeFileSync(path.join(dir, "theme.css"), "@import '../other/theme.css'; body { background: url(img/bg.png) } .x { background: url(data:image/png;base64,AAAA) }");
+    // a script reads a path from the page, or imports it from its own folder: this one stays inside either way
+    fs.writeFileSync(path.join(dir, "js", "app.js"), 'fetch("../data.json"); import("./util.js");');
+    assert.deepEqual(checkSite(dir, ["Porto in a day"]).outside, [
+      { file: "index.html", loads: ["../other/data.json", "../other/b.png", "../other/site.js"] },
+      { file: "theme.css", loads: ["../other/theme.css"] },
+    ]);
+    const out = run("check", dir, "--expect", "Porto in a day");
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    const lines = out.stdout.trim().split("\n");
+    assert.equal(lines[0], `OUTSIDE: index.html loads ../other/data.json, ../other/b.png and ../other/site.js; theme.css loads ../other/theme.css, from outside ${dir}. A page is served from its own folder, so there it can't load them, and it would change whenever that other folder does.`);
+    assert.equal(lines[1], `Give it its own files: \`instafy bind init ${dir} --starter blank\` adds the starter's files it lacks and keeps yours. Copy ../other/data.json and ../other/b.png into its folder too. Load each from the page's own folder (data.json, not ../other/data.json), then check again.`);
+    assert.match(out.stdout, /^1 of 1 expected item\(s\) shown: Porto in a day\.$/m);
+    // with nothing else to check, it still fails
+    assert.equal(run("check", dir).status, 1);
+    assert.deepEqual(JSON.parse(run("check", dir, "--expect", "Porto in a day", "--json").stdout).init, `instafy bind init ${dir} --starter blank`);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a path climbs out of a site's folder only above its top", () => {
+  for (const [ref, from, out] of [
+    ["../other/site.js", "", true], ["./../other/site.js", "", true], ["a/../../x.js", "", true], ["..\\other\\x.js", "", true],
+    ["../../x.js", "sub", true], ["../theme.css", "sub", false], ["a/../x.js", "", false], ["theme.css?v=2", "", false],
+    ["/theme.css", "", false], ["//cdn.example/x.js", "", false], ["https://cdn.example/x.js", "", false],
+    ["data:image/png;base64,AAAA", "", false], ["#top", "", false], ["", "", false],
+  ]) assert.equal(leavesFolder(ref, from), out, `${ref} from "${from}"`);
 });

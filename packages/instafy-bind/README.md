@@ -215,7 +215,11 @@ pass without one, the compare starter shows each value as "<value>, not checked"
 In a space's workspace, until the CLI has recorded a preview of that
 space opened from the site's folder, `init`'s next step names the command that serves the page and posts its card in
 Studio (`instafy preview open … --serve-cmd 'instafy bind serve . --port {port} --preview' --start`, run in the site's
-folder) before the check, and every check ends with it: a failing check never holds the card back.
+folder) before the check. A check that passes runs that command itself, titled from the page (`data.json`'s title,
+else the page's own), and says what it answered; any other check ends with it: a failing check never holds the card
+back. A page is served from its own folder, so a page that loads a file from outside it (`../another-page/site.js`, in
+an element, a style or a script) fails the check, which names the `instafy bind init <dir> --starter <name>` that gives
+it its own files; its card waits for the check that passes.
 
 On timeout the binder sends SIGTERM, then SIGKILL after 3 s, and reports `error timeout`.
 

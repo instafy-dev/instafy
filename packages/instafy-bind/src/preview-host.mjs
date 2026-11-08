@@ -28,9 +28,10 @@
 //
 // The card. A page someone asked for ends with its card: run in the site's folder, `instafy preview open --start`
 // serves the site with `serve --preview`, keeps it serving after the turn and posts the card. So in a space `init`
-// names that command as its next step and a check that passes ends with it, until a preview of the space shows the
-// site. The command serves a site only from inside the space's workspace (the CLI's resolveWorkspaceRoot:
-// WORKSPACE_PROJECT_DIR, else WORKSPACE_DIR/<space>); anywhere else the binder runs on its own and names no card.
+// names that command as its next step, and until a preview of the space shows the site a check that passes runs it
+// itself (titled from the page) and any other check ends with it. The command serves a site only from inside the
+// space's workspace (the CLI's resolveWorkspaceRoot: WORKSPACE_PROJECT_DIR, else WORKSPACE_DIR/<space>); anywhere
+// else the binder runs on its own and names no card.
 // Whether a preview shows a folder is read from the same state file: `instafy preview open` records with each preview
 // its space and the folder its site is served from (`siteDir`, relative to the space's workspace), which the runtime
 // also reads to take a card's picture again after a turn changes that folder. That folder is the one the CLI runs in
@@ -124,8 +125,6 @@ export function previewTunnelReader(file = defaultPreviewStateFile()) {
   };
 }
 
-const OPEN_CARD = "instafy preview open --title '<short title>' --serve-cmd 'instafy bind serve . --port {port} --preview' --start --json";
-
 const clean = (value) => (typeof value === "string" && value.trim() ? value.trim() : null);
 
 /** The folder's real path, or the path itself when it cannot be resolved. */
@@ -150,9 +149,15 @@ export function inFolder(dir, command) {
   return path.resolve(where) === path.resolve(".") ? command : `(cd ${shellWord(where)} && ${command})`;
 }
 
-/** The card's command for the site in `dir`, said from where `init` or `check` ran. The turn writes the title. */
-export function cardCommand(dir) {
-  return inFolder(dir, OPEN_CARD);
+/** The card's command as the arguments of `instafy`, run in the site's folder: it serves the folder and posts its card. */
+export function cardArgs(title) {
+  return ["preview", "open", "--title", title, "--serve-cmd", "instafy bind serve . --port {port} --preview", "--start", "--json"];
+}
+
+/** The card's command for the site in `dir`, said from where `init` or `check` ran. The turn writes the title, unless
+ *  it is given. */
+export function cardCommand(dir, title = "<short title>") {
+  return inFolder(dir, `instafy ${cardArgs(title).map(shellWord).join(" ")}`);
 }
 
 /** Whether `dir` is in the space's workspace, where the card's command serves a site from. */

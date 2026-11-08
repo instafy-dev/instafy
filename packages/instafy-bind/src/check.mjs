@@ -9,11 +9,15 @@
 // they could not add, and that line must not pass the check. An item is missing only when no file of the site names
 // it: one whose words a script holds where the check cannot place them, or that a script fetches from another site, is
 // one it cannot tell about, never one it reports missing. On a page of options it also checks the values and where each
-// row comes from (below). Pure helpers are exported for the tests.
+// row comes from (below). A page is served from its own folder, so the check also fails a page that loads a file from
+// outside it ("../another-page/site.js"), and names the command that gives the page its own files. Pure helpers are
+// exported for the tests.
 // SPDX-License-Identifier: AGPL-3.0-only
 import fs from "node:fs";
 import path from "node:path";
 import { readScript } from "./script-text.mjs";
+import { STARTER_HTML, STARTERS, STARTERS_DIR } from "./init.mjs";
+import { shellWord } from "./preview-host.mjs";
 
 const SKIP_DIRS = new Set([".bind", "node_modules", "handlers", ".git", ".uwcache", "test", "tests"]);
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
@@ -71,7 +75,7 @@ export function htmlText(html) {
 }
 
 /** A line or string that only says an item is unavailable (the eval grader reads pages the same way). */
-export const UNAVAILABLE_RE = /^\s*(not found( yet)?|missing|not on the (map|page)( yet)?|could ?n[o']t (find|add|place)|unavailable|not available)\b/i;
+export const UNAVAILABLE_RE = /^\s*(not found( yet)?|(still )?missing|not on the (map|page)( yet)?|could ?n[o']t (find|add|place)|unavailable|not available)\b/i;
 /** Data keys that list what the page could not show ("missing": [...] in the map pack's data); in a script, the keys
  *  and names of its lists of that. */
 export const UNAVAILABLE_KEYS = new Set(["expect", "missing", "notfound", "not_found", "unavailable", "unplaced"]);
@@ -116,7 +120,7 @@ function siteFiles(root) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith(".") && depth < 4) walk(full, depth + 1);
-      } else if (entry.isFile() && (/\.(html?|json|geojson|m?js)$/i.test(entry.name) || SOURCE.test(entry.name)) && entry.name !== "bound.json" && entry.name !== "package.json") {
+      } else if (entry.isFile() && (/\.(html?|json|geojson|m?js|css)$/i.test(entry.name) || SOURCE.test(entry.name)) && entry.name !== "bound.json" && entry.name !== "package.json") {
         files.push(full);
       }
     }
@@ -138,6 +142,96 @@ const INLINE_SCRIPTS = /<script\b(?![^>]*\bsrc\s*=)([^>]*)>([\s\S]*?)<\/script\s
 const SCRIPT_TYPE = /(?:^|\s)type\s*=\s*["']?\s*([^"'\s>]*)/i;
 const JS_TYPE = /^(?:module|(?:text|application)\/(?:java|ecma)script)?$/i;
 
+// ---------- what a page loads from outside its folder ----------
+// A page is served from its own folder (its card serves the folder it runs in), so a file it loads from another folder
+// ("../other-page/site.js") is not there when it is served, and the page would change whenever that folder does.
+
+/** Whether `ref`, given in a file in `from` (its folder in the site, "" at the top), climbs above the site's folder. An
+ *  address of another site, a data: URL, a path from the site's root ("/theme.css") and a fragment stay inside. */
+export function leavesFolder(ref, from = "") {
+  const file = String(ref).trim().split(/[?#]/)[0].replace(/\\/g, "/");
+  if (!file || file.startsWith("/") || /^[a-z][a-z\d+.-]*:/i.test(file)) return false;
+  let depth = from ? from.split("/").filter(Boolean).length : 0;
+  for (const part of file.split("/")) {
+    if (part === "..") {
+      if (--depth < 0) return true;
+    } else if (part && part !== ".") depth += 1;
+  }
+  return false;
+}
+
+const LOAD_TAG = /<([a-z][\w-]*)\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi;
+const TAG_ATTR = /([^\s=/>"']+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+))/g;
+const CSS_LOAD = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"'\s]+))\s*\)|@import\s+(?:"([^"]*)"|'([^']*)')/gi;
+/** A string in a script that names a file above its own folder ("../other/data.json": fetched, imported, a data path),
+ *  not a folder or a bare "../" that code compares with. */
+const SCRIPT_PATH = /(["'`])((?:\.\/)*\.\.\/[^"'`\s$]*[\w-])\1/g;
+const cssLoads = (css) => [...String(css).matchAll(CSS_LOAD)].map((m) => m.slice(1).find((v) => v != null) ?? "");
+const scriptPaths = (source) => [...String(source).matchAll(SCRIPT_PATH)].map((m) => m[2]);
+
+/** What an HTML page loads, as [ref, from]: what an element loads (src, srcset, poster, an <object>'s data, a <link>'s
+ *  href), what its styles load, and the paths its scripts name. */
+function htmlLoads(html, from) {
+  const out = [];
+  const text = String(html).replace(/<!--[\s\S]*?-->/g, " ").replace(/<(script|style)\b([^>]*)>([\s\S]*?)<\/\1\s*>/gi, (all, tag, attrs, body) => {
+    // a script the page carries reads its paths from the page
+    for (const ref of tag.toLowerCase() === "style" ? cssLoads(body) : scriptPaths(body)) out.push([ref, from]);
+    return `<${tag}${attrs}>`;
+  });
+  for (const [, tag, attrs] of text.matchAll(LOAD_TAG)) {
+    for (const [, name, ...values] of attrs.matchAll(TAG_ATTR)) {
+      const key = name.toLowerCase();
+      const value = values.find((v) => v != null) ?? "";
+      if (key === "srcset") for (const each of value.split(",")) out.push([each.trim().split(/\s+/)[0], from]);
+      else if (key === "src" || key === "poster" || (key === "data" && tag.toLowerCase() === "object") || (key === "href" && tag.toLowerCase() === "link")) out.push([value, from]);
+      else if (key === "style") for (const ref of cssLoads(value)) out.push([ref, from]);
+    }
+  }
+  return out;
+}
+
+/** The files a site's pages, styles and scripts load from outside its folder: [{ file, loads: [ref, …] }]. A script's
+ *  path counts only when it climbs out from the script's folder and from the top of the site alike (fetch reads it from
+ *  the page, an import from the script). */
+function outsideLoads(files) {
+  const out = [];
+  for (const { file, rel, raw } of files) {
+    const from = path.posix.dirname(rel) === "." ? "" : path.posix.dirname(rel);
+    let loads = [];
+    if (/\.html?$/i.test(file)) loads = htmlLoads(raw, from);
+    else if (/\.css$/i.test(file)) loads = cssLoads(raw).map((ref) => [ref, from]);
+    else if (/\.m?js$/i.test(file)) loads = scriptPaths(raw).filter((ref) => leavesFolder(ref, "")).map((ref) => [ref, from]);
+    const refs = [...new Set(loads.filter(([ref, base]) => leavesFolder(ref, base)).map(([ref]) => ref.trim()))];
+    if (refs.length) out.push({ file: rel, loads: refs });
+  }
+  return out;
+}
+
+/** The starter whose files a page loads from another folder, from the first line of a starter's script ("/* Compare
+ *  starter: …"), else blank: every starter brings theme.css and site.js, and blank nothing else a page would load. */
+function borrowedStarter(root, outside) {
+  for (const { file, loads } of outside) {
+    for (const ref of loads) {
+      if (!/\.m?js$/i.test(ref.split(/[?#]/)[0])) continue;
+      let head = "";
+      try {
+        const fd = fs.openSync(path.resolve(root, path.dirname(file), ref.split(/[?#]/)[0]), "r");
+        try {
+          const buffer = Buffer.alloc(200);
+          head = buffer.toString("utf8", 0, fs.readSync(fd, buffer, 0, 200, 0));
+        } finally {
+          fs.closeSync(fd);
+        }
+      } catch {
+        continue;
+      }
+      const name = /^\s*\/\*\s*([A-Za-z]+) starter\b/.exec(head)?.[1]?.toLowerCase();
+      if (name && Object.hasOwn(STARTERS, name)) return name;
+    }
+  }
+  return "blank";
+}
+
 /** site.js's version, [major, minor, patch], or null. */
 function siteVersion(source) {
   const m = /\bversion\s*:\s*["'](\d+)\.(\d+)(?:\.(\d+))?["']/.exec(source);
@@ -146,9 +240,9 @@ function siteVersion(source) {
 const before = (version, [major, minor]) => !!version && (version[0] < major || (version[0] === major && version[1] < minor));
 
 /** What the site can show: [{ file, kind, text }] for its HTML pages, data files and scripts ("html", "data",
- *  "script"), the "expect" list of data.json, and its own scripts ([{ file, other, loads }]: a script file, or the
+ *  "script"), the "expect" list of data.json, its own scripts ([{ file, other, loads }]: a script file, or the
  *  scripts an HTML page carries; `other`, the words they hold where the check cannot place them, and `loads`, whether
- *  they fetch text from another site). */
+ *  they fetch text from another site), and what it loads from outside its folder (`outside`). */
 export function readSite(dir) {
   const root = path.resolve(dir);
   if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) throw new Error(`no site folder at ${dir}`);
@@ -170,6 +264,7 @@ export function readSite(dir) {
   const shownText = (script) => [...script.lines, ...script.data].filter((text) => !UNAVAILABLE_RE.test(text));
   const otherText = (script) => script.other.filter((text) => !UNAVAILABLE_RE.test(text));
   for (const { file, rel, raw } of files) {
+    if (/\.css$/i.test(file)) continue;
     if (/\.(geo)?json$/i.test(file)) {
       let value;
       try {
@@ -194,12 +289,13 @@ export function readSite(dir) {
       if (inline.length) scripts.push({ file: rel, other: inline.flatMap(otherText).join("\n"), loads: inline.some((s) => s.loads) });
     }
   }
-  return { root, parts, declared, scripts };
+  return { root, parts, declared, scripts, outside: outsideLoads(files) };
 }
 
 /** Which expected items the site shows, and where; which it leaves out; and which it cannot tell about (`unknown`):
  *  their words are in a script where the check cannot place them, or a script fetches text from another site, so the
- *  page may show them all the same (`unread`: those scripts). An item no file of the site names is missing. */
+ *  page may show them all the same (`unread`: those scripts). An item no file of the site names is missing. `outside`:
+ *  the files its pages, styles and scripts load from outside its folder. */
 export function checkSite(dir, expect = []) {
   const site = readSite(dir);
   const items = parseExpect([...site.declared, ...parseExpect(expect)]);
@@ -222,7 +318,7 @@ export function checkSite(dir, expect = []) {
       for (const file of held) unread.add(file);
     }
   }
-  return { items, shown, missing, unknown, unread: [...unread], files: site.parts.map((p) => p.file) };
+  return { items, shown, missing, unknown, unread: [...unread], files: site.parts.map((p) => p.file), outside: site.outside };
 }
 
 // ---------- the values of a page of options (the compare and ranked starters' data.json) ----------
@@ -479,24 +575,78 @@ export function checkValues(dir) {
   return { checked: true, problems, notes };
 }
 
-/** The CLI's lines and exit code: 0 every item shown and every value fine, 1 an item missing or a value to fix, 2
- *  nothing to check, or items the check cannot tell about because the page draws its text in a way it cannot read.
- *  `card`: the command that serves the site and posts its card, while no preview shows it: every answer ends with it,
- *  since a check never holds the card back. */
-export function checkReport(dir, expect, { json = false, card = null } = {}) {
+/** The page's title for its card: data.json's "title", else the title its script gives site.head, else its HTML's
+ *  <title> unless a starter wrote it ("Compare"), else its folder's name. */
+export function cardTitle(dir) {
+  const read = (file) => {
+    try {
+      return fs.readFileSync(path.join(dir, file), "utf8");
+    } catch {
+      return "";
+    }
+  };
+  let data = null;
+  try {
+    data = JSON.parse(read("data.json"));
+  } catch {
+    /* no data.json */
+  }
+  const words = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
+  const titleOf = (html) => words(htmlText(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(html)?.[1] ?? ""));
+  const head = /\bsite\.head\(\s*\{[\s\S]{0,400}?\btitle\s*:\s*(["'`])((?:\\.|(?!\1)[^\\\n])+)\1/.exec(read("app.js"))?.[2]?.replace(/\\(.)/g, "$1");
+  const starters = new Set([STARTER_HTML, ...Object.values(STARTERS).map((files) => fs.readFileSync(path.join(STARTERS_DIR, files["index.html"]), "utf8"))].map(titleOf));
+  const html = titleOf(read("index.html"));
+  const title = [typeof data?.title === "string" ? data.title : "", head, starters.has(html) ? "" : html].map(words).find(Boolean);
+  return (title || words(path.basename(path.resolve(dir)).replace(/[-_]+/g, " "))).slice(0, 120);
+}
+
+const listed = (texts) => (texts.length > 1 ? `${texts.slice(0, -1).join(", ")} and ${texts.at(-1)}` : texts[0] ?? "");
+
+/** The lines for files a page loads from outside its folder, and the command that gives it its own. */
+function outsideLines(dir, root, outside) {
+  const starter = borrowedStarter(root, outside);
+  const own = new Set(Object.keys(STARTERS[starter]));
+  const refs = outside.flatMap((o) => o.loads);
+  const other = [...new Set(refs.filter((ref) => !own.has(path.posix.basename(ref.split(/[?#]/)[0]))))];
+  const first = refs[0];
+  const init = `instafy bind init ${shellWord(dir)} --starter ${starter}`;
+  return {
+    init,
+    lines: [
+      `OUTSIDE: ${outside.map((o) => `${o.file} loads ${listed(o.loads)}`).join("; ")}, from outside ${dir}. A page is served from its own folder, so there it can't load ${refs.length > 1 ? "them" : "it"}, and it would change whenever that other folder does.`,
+      `Give it its own files: \`${init}\` adds the starter's files it lacks and keeps yours.${other.length ? ` Copy ${listed(other)} into its folder too.` : ""} Load each from the page's own folder (${path.posix.basename(first.split(/[?#]/)[0])}, not ${first}), then check again.`,
+    ],
+  };
+}
+
+/** The CLI's lines and exit code: 0 every item shown and every value fine, 1 an item missing, a value to fix or a file
+ *  loaded from outside the site's folder, 2 nothing to check, or items the check cannot tell about because the page
+ *  draws its text in a way it cannot read. `card`: the command that serves the site and posts its card, while no
+ *  preview shows it. A check that passes takes that step itself with `post` (which runs the command and says what it
+ *  answered); any other answer ends with the command, since a failing check never holds the card back, except for a
+ *  page that loads files from outside its folder: served on its own it can't load them, so its card waits for the
+ *  check that passes. */
+export function checkReport(dir, expect, { json = false, card = null, post = null } = {}) {
   const result = checkSite(dir, expect);
   const values = checkValues(dir);
-  const next = card ? `post its card: ${card}` : null;
+  const { missing, unknown, outside } = result;
+  const fix = outside.length ? outsideLines(dir, path.resolve(dir), outside) : null;
+  const next = card && !fix ? `post its card: ${card}` : null;
   const nextLines = next ? [`next: ${next}`] : [];
   if (!result.items.length && !values.problems.length) {
     const message = 'nothing to check: pass --expect "<item>,<item>" (each item the request named) or put "expect": [...] in data.json';
-    if (json) return { exit: 2, lines: [JSON.stringify({ ok: false, error: message, values, ...(next ? { next } : {}) })] };
-    return { exit: 2, lines: [message, ...values.notes.map((n) => `NOTE: ${n}`), ...nextLines] };
+    const exit = fix ? 1 : 2;
+    if (json) return { exit, lines: [JSON.stringify({ ok: false, error: message, values, ...(fix ? { outside, init: fix.init } : {}), ...(next ? { next } : {}) })] };
+    return { exit, lines: [...(fix ? fix.lines : []), message, ...values.notes.map((n) => `NOTE: ${n}`), ...nextLines] };
   }
-  const { missing, unknown } = result;
-  const exit = missing.length || values.problems.length ? 1 : unknown.length ? 2 : 0;
-  if (json) return { exit, lines: [JSON.stringify({ ok: exit === 0, ...result, values, ...(next ? { next } : {}) })] };
-  const lines = [];
+  const exit = missing.length || values.problems.length || fix ? 1 : unknown.length ? 2 : 0;
+  // the check that passes posts the card itself, while no preview shows the site
+  const posted = exit === 0 && card && post ? post() : null;
+  if (json) {
+    const step = posted ? { card: { posted: posted.ok, command: posted.command, ...(posted.ok ? { answer: answerOf(posted.output) } : { error: posted.error }) }, ...(posted.ok ? {} : { next: `post its card: ${posted.command}` }) } : next ? { next } : {};
+    return { exit, lines: [JSON.stringify({ ok: exit === 0, ...result, values, ...(fix ? { init: fix.init } : {}), ...step })] };
+  }
+  const lines = [...(fix ? fix.lines : [])];
   if (missing.length) {
     lines.push(`MISSING: the request named ${missing.length} item(s) the site does not show: ${missing.join(", ")}.`);
     lines.push("Add each one to the page, or say plainly in the reply which are missing and why.");
@@ -516,5 +666,16 @@ export function checkReport(dir, expect, { json = false, card = null } = {}) {
   } else {
     lines.push('No items to check: pass --expect "<item>,<item>" (each item the request named) or put "expect": [...] in data.json.');
   }
-  return { exit, lines: [...lines, ...nextLines] };
+  if (posted?.ok) lines.push(`Posted its card: ran ${posted.command}, which answered:`, ...(posted.output ? posted.output.split("\n") : []));
+  else if (posted) lines.push(`The card was not posted: ${posted.error}.`, `next: post its card: ${posted.command}`);
+  return { exit, lines: [...lines, ...(posted ? [] : nextLines)] };
+}
+
+/** What the card's command answered: its JSON, or its words. */
+function answerOf(output) {
+  try {
+    return JSON.parse(output);
+  } catch {
+    return output;
+  }
 }
