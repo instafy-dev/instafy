@@ -54,16 +54,19 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    no call log, and a cover that goes within a moment is waited for.
 // 9. A cookie notice the browser could not decline (an accept and a settings
 //    link, no reject) is the person's step, like a sign-in: a click under it
-//    and a press of its accept are refused in the same words, which say to
-//    pause on it, and the Personal Browser's policy gives them too. A pause
-//    on its buttons highlights all of them for the person, a pause on its
-//    accept alone too, and nothing outside it, says it is a cookie notice,
-//    and hands over no page text; the browser presses none of them.
-//    A button, field, sign-in or commit the page dresses up in a notice
-//    beside its accept, or one outside any notice, gets no pause; a notice
-//    that speaks only of privacy, and one whose accept allows ("Allow all"),
-//    take it. Once the person has answered it and lets Octo continue, the
-//    next step works on the page under it.
+//    is refused in words that say to pause on it. A press of its accept is
+//    refused in words of its own, which the Personal Browser's policy gives
+//    too: Octo never accepts cookies, so carry on under it. A pause on its
+//    buttons highlights all of them for the person, a pause on its accept
+//    alone too, and nothing outside it, says it is a cookie notice, and hands
+//    over no page text; the browser presses none of them. A pause that would
+//    hand over nothing but an accept (a bar whose only button accepts) is
+//    refused in the accept's words, and under such a bar, which covers
+//    nothing, the planner's own button works. A button, field, sign-in or
+//    commit the page dresses up in a notice beside its accept, or one outside
+//    any notice, gets no pause; a notice that speaks only of privacy, and one
+//    whose accept allows ("Allow all"), take it. Once the person has answered
+//    it and lets Octo continue, the next step works on the page under it.
 // Every site is a loopback fixture; Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
@@ -93,9 +96,12 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // The action policy both browsers judge steps by: the Personal Browser's
 // refusals are its words.
 const actionPolicyModule = createRequire(import.meta.url)(path.join(repositoryRoot, "packages/browser-action-policy/actionPolicy.js"));
-// What a cookie notice the browser could not decline tells Octo, whether a
-// click under it was kept from its control or Octo tried to accept it.
+// What a cookie notice the browser could not decline tells Octo when a click
+// under it was kept from its control.
 const NOTICE_WORDS = "A cookie notice covers this page, and the browser could not decline it. If the task needs this page, pause on the notice's buttons with request_human_input in the chat's own tab: the person answers it there and chooses Let Octo continue. Otherwise open a link under it by its address, or the official site of the place or service the task is about.";
+// What a press of a notice's accept tells Octo, and a pause on a notice that
+// offers nothing but accepting: the Personal Browser's policy gives the same.
+const ACCEPT_WORDS = "Octo never accepts cookies, so nothing was pressed. Carry on under the notice from a fresh snapshot. If it covers what you need, open that link by its address, or another official source.";
 // The reading's text cap (MAX_VISIBLE_TEXT_CHARS in the controller).
 const TEXT_CAP = 12_000;
 // Values fields hold, which no reading may carry. Assembled at run time so the
@@ -343,6 +349,17 @@ const ALLOW_NOTICE = `<h1>Museum</h1><p><a href="/reading/visit">Tickets</a></p>
 <p>We use cookies to run this site.</p>
 <a href="/reading/cookie-settings">Cookie settings</a> <button type="button" onclick="window.consentAnswer = 'necessary'">Accept only necessary</button> <button type="button" onclick="window.consentAnswer = 'accepted'">Allow all</button>
 </div>`;
+// A transport operator's journey planner under a bar whose only button
+// accepts cookies, which covers nothing of the planner: its fields and its
+// button stay in reach, and the button shows the route.
+const ACCEPT_ONLY_BAR = `<h1>Journey planner</h1>
+<form onsubmit="return false"><label>From <input name="from" value="São Bento"></label> <label>To <input name="to" value="Trindade"></label>
+<button type="button" onclick="document.getElementById('route').textContent = 'Route: Line D towards Hospital São João, 2 stops'">Plan journey</button></form>
+<p id="route"></p>
+<div class="cookie-bar" style="position:fixed;left:0;right:0;bottom:0;padding:16px;background:#fff">
+<p>This site uses cookies to improve your experience on this website.</p>
+<button type="button" onclick="window.consentAnswer = 'accepted'; this.parentElement.remove()">aceitar e continuar</button>
+</div>`;
 const DRESSED_SIGN_IN = `<h1>Your account</h1>
 <div class="cookie-bar" style="position:fixed;left:0;right:0;bottom:0;padding:16px;background:#fff">
 <p>We use cookies.</p>
@@ -414,6 +431,7 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/wrapped-notice": page("Metro", WRAPPED_NOTICE),
       "site.test /reading/unnamed-notice": page("Journey planner", UNNAMED_NOTICE),
       "site.test /reading/dressed-sign-in": page("Your account", DRESSED_SIGN_IN),
+      "site.test /reading/accept-only": page("Journey planner", ACCEPT_ONLY_BAR),
       "site.test /reading/covered": page("Timetable", COVERED),
       "site.test /reading/visit": page("Visit", "<h1>Plan your visit</h1>"),
       "frame.test /banner": page("Cookies", BANNER("frame_consent")),
@@ -876,10 +894,12 @@ export async function runSharedBrowserPageReadingFixture() {
     assert.equal(new URL(afterCover.url).pathname, "/reading/visit", "the click under a cover that went was not done");
 
     // 9. A cookie notice the browser could not decline is the person's step.
-    // a. The browser leaves it up, and a click under it and a press of its
-    // accept are refused in the same words, which the Personal Browser's
-    // policy gives too: pause on it, or go elsewhere. Nothing is pressed.
-    assert.equal(actionPolicyModule.refusalFor("consent").message, NOTICE_WORDS);
+    // a. The browser leaves it up. A click under it is refused in words that
+    // say the notice covers the page: pause on it, or go elsewhere. A press
+    // of its accept is refused in words of its own, which the Personal
+    // Browser's policy gives too: Octo never accepts cookies, and the page
+    // under the notice is still there. Nothing is pressed.
+    assert.equal(actionPolicyModule.refusalFor("consent").message, ACCEPT_WORDS);
     reading = await read("/reading/cookie-notice");
     assert.equal(await consentAnswer(), null, "a notice with no reject button was answered");
     assert.equal(reading.activity.declined, undefined);
@@ -888,7 +908,8 @@ export async function runSharedBrowserPageReadingFixture() {
     assert.ok(covered.stderr.includes(NOTICE_WORDS), covered.stderr);
     const accepted = await runTool("POST", "/v1/click", { index: control(reading, "Accept all cookies").index, snapshotId: reading.snapshotId });
     assert.equal(accepted.code, 1, accepted.stdout);
-    assert.ok(accepted.stderr.includes(`${NOTICE_WORDS} [step_refused_consent]`), accepted.stderr);
+    assert.ok(accepted.stderr.includes(`${ACCEPT_WORDS} [step_refused_consent]`), accepted.stderr);
+    assert.doesNotMatch(accepted.stderr, /covers this page|pause on/u);
     assert.equal(await consentAnswer(), null, "the browser pressed the notice's accept");
     // b. A pause on its buttons highlights them, in the chat's own tab, and
     // says it is a cookie notice, with no page text; nothing is pressed.
@@ -914,12 +935,10 @@ export async function runSharedBrowserPageReadingFixture() {
     // notice, its settings beside its accept, and nothing outside it: a turn
     // went for a notice's accept twice, and a pause on it alone would have
     // shown the person the accept outlined by itself. A notice with an accept
-    // limited to the necessary cookies shows that one and its settings too;
-    // and a button a page dresses up beside its accept is never outlined.
+    // limited to the necessary cookies shows that one and its settings too.
     for (const [address, named, outlined, notice] of [
       ["/reading/cookie-notice", "Accept all cookies", ["solid", "solid"], "#consent-backdrop a, #consent-backdrop button"],
       ["/reading/allow-notice", "Allow all", ["solid", "solid", "solid"], ".cookie-banner a, .cookie-banner button"],
-      ["/reading/dressed-notice", "Accept all cookies", ["", "solid"], ".cookie-bar button"],
     ]) {
       reading = await read(address);
       const actionsBeforeAccept = fs.readFileSync(actionsPath, "utf8").length;
@@ -951,13 +970,13 @@ export async function runSharedBrowserPageReadingFixture() {
     // b''. On a small page held in one wrapper, whose text speaks of cookies
     // all over, a pause on the accept still outlines nothing outside the
     // notice: a notice named after cookies gets its own buttons too, never the
-    // menu or the footer, and one named nowhere only the button Octo named.
-    for (const [address, outlinedNames] of [
-      ["/reading/wrapped-notice", ["Customize cookies", "Accept all cookies"]],
-      ["/reading/unnamed-notice", ["Accept all cookies"]],
+    // menu or the footer, and one named nowhere only the buttons Octo named.
+    for (const [address, named, outlinedNames] of [
+      ["/reading/wrapped-notice", ["Accept all cookies"], ["Customize cookies", "Accept all cookies"]],
+      ["/reading/unnamed-notice", ["Cookie settings", "Accept all cookies"], ["Cookie settings", "Accept all cookies"]],
     ]) {
       reading = await read(address);
-      const wrappedPause = await runTool("POST", "/v1/request-human-input", { indices: [control(reading, "Accept all cookies").index], snapshotId: reading.snapshotId });
+      const wrappedPause = await runTool("POST", "/v1/request-human-input", { indices: named.map((label) => control(reading, label).index), snapshotId: reading.snapshotId });
       assert.equal(wrappedPause.code, 1, wrappedPause.stdout);
       assert.match(wrappedPause.stderr, /\[cookie_notice_required_non_retryable\]/u, `${address}: ${wrappedPause.stderr}`);
       assert.deepEqual(
@@ -969,6 +988,52 @@ export async function runSharedBrowserPageReadingFixture() {
       );
       assert.equal(await consentAnswer(), null, `${address}: the pause pressed the notice`);
     }
+    // b'''. A pause that would hand the person nothing but a notice's accept is
+    // refused, in the words a press of the accept gets, and outlines nothing:
+    // Octo never asks anyone to accept cookies. Two turns paused on a bar
+    // whose only button was its accept. So is a pause on the accept of a
+    // notice whose other buttons the pause cannot tell are the notice's (one
+    // named nowhere, one a page dressed up beside its accept).
+    for (const address of ["/reading/accept-only", "/reading/unnamed-notice", "/reading/dressed-notice"]) {
+      reading = await read(address);
+      const acceptButton = reading.interactiveElements.find((entry) => /^(?:aceitar e continuar|Accept all cookies)$/u.test(entry.label));
+      assert.ok(acceptButton, `${address}: the accept is listed`);
+      const actionsBeforeRefusal = fs.readFileSync(actionsPath, "utf8").length;
+      const acceptOnly = await runTool("POST", "/v1/request-human-input", { indices: [acceptButton.index], snapshotId: reading.snapshotId });
+      assert.equal(acceptOnly.code, 1, acceptOnly.stdout);
+      assert.ok(acceptOnly.stderr.includes(`${ACCEPT_WORDS} [step_refused_consent]`), `${address}: ${acceptOnly.stderr}`);
+      assert.doesNotMatch(acceptOnly.stderr, /cookie_notice_required/u, address);
+      assert.deepEqual(
+        fs.readFileSync(actionsPath, "utf8").slice(actionsBeforeRefusal).trim().split("\n").filter(Boolean)
+          .map((line) => JSON.parse(line)).filter((event) => event.type === "human_input"),
+        [],
+        `${address}: a pause was published`,
+      );
+      assert.deepEqual(
+        await runPage.evaluate(() => Array.from(document.querySelectorAll("a, button, input")).filter((element) => element.style.outlineStyle).length),
+        0,
+        `${address}: something was outlined`,
+      );
+      assert.equal(await consentAnswer(), null, `${address}: the notice was answered`);
+    }
+    // b''''. Under that bar, which covers nothing of the planner, a press of
+    // its accept is refused in the same words and nothing is pressed, and the
+    // turn carries on under it: the planner's own button works, with no
+    // prompt and no pause, and the bar is never answered.
+    reading = await read("/reading/accept-only");
+    const barAccept = await runTool("POST", "/v1/click", { index: control(reading, "aceitar e continuar").index, snapshotId: reading.snapshotId });
+    assert.equal(barAccept.code, 1, barAccept.stdout);
+    assert.ok(barAccept.stderr.includes(`${ACCEPT_WORDS} [step_refused_consent]`), barAccept.stderr);
+    assert.doesNotMatch(barAccept.stderr, /covers this page|pause on/u);
+    assert.equal(JSON.parse(barAccept.stdout).activity.refused, "consent");
+    assert.equal(await consentAnswer(), null, "the bar's accept was pressed");
+    const promptsBeforePlanner = prompts.length;
+    reading = await ok("GET", "/v1/snapshot");
+    const planned = await ok("POST", "/v1/click", { index: control(reading, "Plan journey").index, snapshotId: reading.snapshotId });
+    assert.match(planned.visibleText, /Route: Line D towards Hospital São João, 2 stops/u, "the planner under the bar did not answer");
+    assert.equal(prompts.length, promptsBeforePlanner, "the planner's button asked");
+    assert.ok(planned.interactiveElements.some((entry) => entry.label === "aceitar e continuar"), "the bar went away");
+    assert.equal(await consentAnswer(), null, "the bar was answered");
     reading = await read("/reading/cookie-notice");
     // c. A button outside any notice, and one a page dresses up beside a
     // notice's accept, get no pause.
@@ -1023,7 +1088,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "password, card and code fields in a frame or a shadow root carry no value into the reading, a frame's fields are never listed, a key in a shadow root's read-only field or in a control's name the list leaves out still makes a secret screen, and a code in boxes of its own is masked",
         "a section marked open is no control, and a click whose middle lands on a form's button or a frame inside the control is refused, sending and asking nothing",
         "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, and a cover that goes within a moment is waited for",
-        "a cookie notice the browser could not decline is the person's step: a click under it and a press of its accept are refused in the words the Personal Browser's policy gives too, a pause highlights its buttons as a cookie notice with no page text and presses none of them, a pause on its accept alone outlines every button of the notice and nothing outside it, never a button dressed up beside the accept nor, on a small page held in one wrapper, its menu or footer, a button outside a notice, or a button, field, sign-in or commit dressed up beside its accept, gets no pause, a notice that speaks only of privacy or whose accept allows takes it, and once the person answered it the next step works",
+        "a cookie notice the browser could not decline is the person's step: a click under it is refused in words that say it covers the page, a press of its accept in words of its own that the Personal Browser's policy gives too (Octo never accepts cookies; carry on under it), a pause highlights its buttons as a cookie notice with no page text and presses none of them, a pause on its accept alone outlines every button of the notice and nothing outside it, never, on a small page held in one wrapper, its menu or footer, a pause that would hand over nothing but an accept is refused in the accept's words and outlines nothing, under a bar whose only button accepts the planner's own button works with no prompt, a button outside a notice, or a button, field, sign-in or commit dressed up beside its accept, gets no pause, a notice that speaks only of privacy or whose accept allows takes it, and once the person answered it the next step works",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",

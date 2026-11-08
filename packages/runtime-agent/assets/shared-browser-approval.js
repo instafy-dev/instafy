@@ -67,6 +67,13 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
   const UNANSWERED_FILE = "unanswered.json";
   const UNANSWERED_MAX_BYTES = 8 * 1024;
   const MAX_UNANSWERED_ADDRESSES = 32;
+  // The same record keeps, under `openedLate`, the addresses a navigate or
+  // open_tab of this run opened only as its step's time ran out: a page that
+  // answered and was read, but slowly. navigate and open_tab refuse them for
+  // the rest of the run only (runtime-agent carries only `addresses` into the
+  // chat's next runs), so the turn goes on to the place's own site instead of
+  // opening the same slow page again. Fingerprints as `addresses` keeps them.
+  const MAX_OPENED_LATE_ADDRESSES = 16;
   // The addresses a message or a page gave the chat's browser turns: the ones
   // the person's messages and the turn's task name and the pages the chat's
   // browser turns read (runtime-agent writes them when the run starts, with
@@ -111,7 +118,8 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     "chat-tabs.json",
     // The addresses that did not answer in the chat's browser turns, bound to
     // this run: runtime-agent seeds it with the chat's earlier ones, and this
-    // script adds this run's.
+    // script adds this run's, and the pages this run opened only as a step's
+    // time ran out, which no later run gets.
     UNANSWERED_FILE,
     // The addresses a message or a page gave the chat's browser turns, bound
     // to this run: runtime-agent seeds it, and this script adds what this
@@ -1192,16 +1200,20 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       return fields;
     }
 
-    // The addresses that did not answer in the chat's browser turns in the
-    // last UNANSWERED_ADDRESS_MS, as this run's record holds them: entries of
-    // `{address, atMs}`, newest last. The record only ever refuses an address,
-    // so one that cannot be read, or belongs to another run, names none.
-    function unansweredAddresses(authority) {
+    // This run's record of the addresses navigate and open_tab refuse: those
+    // that did not answer in the chat's browser turns in the last
+    // UNANSWERED_ADDRESS_MS (`addresses`, entries of `{address, atMs}`, newest
+    // last), and those this run opened only as a step's time ran out
+    // (`openedLate`, fingerprints, newest last). The record only ever refuses
+    // an address, so one that cannot be read, or belongs to another run,
+    // names none.
+    function unansweredRecord(authority) {
+      const none = { addresses: [], openedLate: [] };
       let raw;
       try {
         raw = readJson(path.join(approvalDir, UNANSWERED_FILE), UNANSWERED_MAX_BYTES, false);
       } catch (_) {
-        return [];
+        return none;
       }
       if (
         raw === null ||
@@ -1211,21 +1223,44 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
         Object.keys(authority).some((key) => raw[key] !== authority[key]) ||
         !Array.isArray(raw.addresses)
       ) {
-        return [];
+        return none;
       }
       const now = Date.now();
-      return raw.addresses
-        .filter(
-          (entry) =>
-            entry &&
-            typeof entry.address === "string" &&
-            HEX_64_PATTERN.test(entry.address) &&
-            Number.isSafeInteger(entry.atMs) &&
-            entry.atMs <= now + CLOCK_SKEW_MS &&
-            now - entry.atMs < UNANSWERED_ADDRESS_MS,
-        )
-        .map(({ address, atMs }) => ({ address, atMs }))
-        .slice(-MAX_UNANSWERED_ADDRESSES);
+      return {
+        addresses: raw.addresses
+          .filter(
+            (entry) =>
+              entry &&
+              typeof entry.address === "string" &&
+              HEX_64_PATTERN.test(entry.address) &&
+              Number.isSafeInteger(entry.atMs) &&
+              entry.atMs <= now + CLOCK_SKEW_MS &&
+              now - entry.atMs < UNANSWERED_ADDRESS_MS,
+          )
+          .map(({ address, atMs }) => ({ address, atMs }))
+          .slice(-MAX_UNANSWERED_ADDRESSES),
+        openedLate: (Array.isArray(raw.openedLate) ? raw.openedLate : [])
+          .filter((address) => typeof address === "string" && HEX_64_PATTERN.test(address))
+          .slice(-MAX_OPENED_LATE_ADDRESSES),
+      };
+    }
+
+    function unansweredAddresses(authority) {
+      return unansweredRecord(authority).addresses;
+    }
+
+    // Writes the run's record of refused addresses, bound to the run.
+    function writeUnansweredRecord(authority, { addresses, openedLate }) {
+      atomicWriteJson(
+        path.join(approvalDir, UNANSWERED_FILE),
+        {
+          version: 1,
+          ...authority,
+          addresses: addresses.slice(-MAX_UNANSWERED_ADDRESSES),
+          ...(openedLate.length ? { openedLate: openedLate.slice(-MAX_OPENED_LATE_ADDRESSES) } : {}),
+        },
+        UNANSWERED_MAX_BYTES,
+      );
     }
 
     // Whether `rawUrl` did not answer in the chat's browser turns in the last
@@ -1255,18 +1290,51 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       try {
         const authority = readAuthority(initialAuthority);
         const atMs = Date.now();
-        const kept = unansweredAddresses(authority).filter((entry) => !addresses.includes(entry.address));
-        atomicWriteJson(
-          path.join(approvalDir, UNANSWERED_FILE),
-          {
-            version: 1,
-            ...authority,
-            addresses: [...kept, ...addresses.map((address) => ({ address, atMs }))].slice(-MAX_UNANSWERED_ADDRESSES),
-          },
-          UNANSWERED_MAX_BYTES,
-        );
+        const record = unansweredRecord(authority);
+        const kept = record.addresses.filter((entry) => !addresses.includes(entry.address));
+        writeUnansweredRecord(authority, {
+          addresses: [...kept, ...addresses.map((address) => ({ address, atMs }))],
+          openedLate: record.openedLate,
+        });
       } catch (_) {
         // Nothing is refused later; the address is tried again then.
+      }
+    }
+
+    // Whether a navigate or open_tab of this run opened `rawUrl` only as its
+    // step's time ran out (rememberOpenedLate).
+    function openedLateThisRun(rawUrl) {
+      const address = unansweredAddressFingerprint(rawUrl);
+      if (!address) {
+        return false;
+      }
+      let authority;
+      try {
+        authority = readAuthority(initialAuthority);
+      } catch (_) {
+        // The step's own authority check says why it cannot go on.
+        return false;
+      }
+      return unansweredRecord(authority).openedLate.includes(address);
+    }
+
+    // Keeps, for this run only, the addresses of a page a navigate or
+    // open_tab opened only as its step's time ran out. Best effort: the step
+    // already answered with the page and its words.
+    function rememberOpenedLate(rawUrls) {
+      const addresses = [...new Set(rawUrls.map(unansweredAddressFingerprint).filter(Boolean))];
+      if (!addresses.length) {
+        return;
+      }
+      try {
+        const authority = readAuthority(initialAuthority);
+        const record = unansweredRecord(authority);
+        writeUnansweredRecord(authority, {
+          addresses: record.addresses,
+          openedLate: [...record.openedLate.filter((address) => !addresses.includes(address)), ...addresses],
+        });
+      } catch (_) {
+        // Nothing is refused later; the page may be opened again then.
       }
     }
 
@@ -1417,6 +1485,8 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       observedControls,
       didNotAnswerRecently,
       rememberUnanswered,
+      openedLateThisRun,
+      rememberOpenedLate,
       addressNotGiven,
       rememberGiven,
       chatTabUsed,

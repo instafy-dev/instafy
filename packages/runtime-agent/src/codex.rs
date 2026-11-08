@@ -144,7 +144,7 @@ macro_rules! shared_browser_developer_instructions {
             $approval_start,
             "\n",
             r#"- Snapshots, status, results and errors mask values that look like keys, tokens or codes as `[redacted secret]` or `REDACTED`. Never try to recover a masked value. When a snapshot has `secretScreen: true`, the page text is withheld until a new page loads: stop, do not click anything on that page to reveal or copy the value, and tell the user in words which control on that page shows it, using the control names the snapshot still lists.
-- An error ending in `[step_refused_secret]`, `[step_refused_sign_in]`, `[step_refused_upload]` or `[step_refused_consent]` is final in every approval mode: revealing or copying a credential, signing in, choosing files and accepting cookies are the user's steps. Do not retry or look for another control that does the same; tell the user which step is theirs, and for a sign-in or a cookie notice use `request_human_input` on its fields or the notice's buttons.
+- An error ending in `[step_refused_secret]`, `[step_refused_sign_in]`, `[step_refused_upload]` or `[step_refused_consent]` is final in every approval mode: do not retry it or look for another control that does the same. Revealing or copying a credential, signing in and choosing files are the user's steps: tell the user which step is theirs, and for a sign-in use `request_human_input` on its fields.
 - Downloads are blocked in this browser. Do not try to download or export files through it.
 - A denial, an approval that ran out of time, or a replayed approval is final for that attempted action. Do not retry it automatically; say in plain words which step did not go through and wait for a new user instruction. A step that ran out of its own time (`stepTimedOut: true`) is not one of these: it answered with the page as it is, so take a snapshot to see what it did and go on from there.
 - A page the network did not deliver fails with a plain reason, such as "Instafy's browser couldn't reach that site", and the browser's code only in `error.details`. It ends that page, not the task: go on to the next source in this turn. When nothing is left to try, tell the person that reason in your own words; the code is for diagnosis, never for your reply.
@@ -7141,13 +7141,17 @@ mod tests {
         }
         // Only the Shared Browser's page describer finds a cookie banner, so
         // only it refuses an accept there, and a click a notice it could not
-        // decline covers. Both refusals say to pause on the notice, so its
-        // run text never says to read on under one: it says one thing, that
-        // answering a notice is the person's step, as a sign-in is. It also
-        // presses a banner's own reject button itself, so only the Personal
-        // Browser's turn is told to, and, with nothing in its browser that
-        // refuses an accept and a pause that takes only fields, to read on
-        // (the page's text) and stay out of a banner's settings unless asked.
+        // decline covers. Each refusal says what to do in its own words: a
+        // press of an accept to carry on under the notice, a covered click to
+        // pause on the notice or go elsewhere. So its run text says only that
+        // a refusal is final, and never that accepting cookies is the person's
+        // step, nor to pause on a notice after a refused accept: told so, a
+        // turn asked the person to accept a notice and paused on one whose
+        // only button was its accept. It also presses a banner's own reject
+        // button itself, so only the Personal Browser's turn is told to, and,
+        // with nothing in its browser that refuses an accept and a pause that
+        // takes only fields, to read on (the page's text) and stay out of a
+        // banner's settings unless asked.
         let reject_line =
             "press it before your next step, and nothing else on the banner; never accept.";
         assert!(PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS.contains(
@@ -7158,8 +7162,10 @@ mod tests {
             SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS,
         ] {
             assert!(instructions.contains(
-                "for a sign-in or a cookie notice use `request_human_input` on its fields or the notice's buttons."
+                "or `[step_refused_consent]` is final in every approval mode: do not retry it or look for another control that does the same. Revealing or copying a credential, signing in and choosing files are the user's steps: tell the user which step is theirs, and for a sign-in use `request_human_input` on its fields."
             ));
+            assert!(!instructions.contains("accepting cookies"), "{instructions}");
+            assert!(!instructions.contains("the notice's buttons"), "{instructions}");
             assert!(!instructions.contains("read on under"), "{instructions}");
             assert!(!instructions.contains(reject_line));
         }

@@ -151,6 +151,8 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     // From before a reply named none of its turn's tabs, checks ("validation passed") or limits ("I
     // can't use a browser here"), and said what is missing and what the person can ask for instead.
     include_str!("legacy/agents-doc-v14.md"),
+    // From before a reply never asked the person to accept cookies or tracking.
+    include_str!("legacy/agents-doc-v15.md"),
 ];
 /// Whether `text` is a copy of `AGENTS.md` Instafy ships, the current one or an earlier one. A
 /// copy a space edited, or a team's own, is not: its rules are the space's.
@@ -2330,6 +2332,32 @@ mod tests {
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
         }
+    }
+
+    /// A browser turn whose press of a cookie notice's accept was refused replied "Please choose
+    /// “aceitar e continuar” on the page": it asked the person to accept cookies, which Octo never
+    /// does and never asks anyone to do. "Replies", which every web and browser turn carries, says
+    /// so in one line. The copy from before is upgraded.
+    #[test]
+    fn a_reply_never_asks_the_person_to_accept_cookies() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let doc = flat(AGENTS_DOC_TEMPLATE);
+        let replies = doc
+            .split("## Replies")
+            .nth(1)
+            .and_then(|rest| rest.split("## ").next())
+            .expect("Replies section");
+        let rule = "- Never ask the person to accept cookies or tracking.";
+        assert!(replies.contains(rule), "{replies}");
+        assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+
+        let previous = include_str!("legacy/agents-doc-v15.md");
+        assert!(!flat(previous).contains(rule));
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join(AGENTS_DOC_FILENAME);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
     }
 
     /// A reply named its turn's check ("JSON validation passed."), its browser's own tab ("I couldn't

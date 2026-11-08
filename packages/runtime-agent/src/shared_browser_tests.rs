@@ -3396,9 +3396,9 @@ async fn a_failed_step_with_facts_still_tells_the_model_what_failed() {
     use std::os::unix::process::ExitStatusExt;
     for (stderr, stdout, words) in [
         (
-            "Shared Browser command failed: A cookie notice covers this page, and the browser could not decline it. If the task needs this page, pause on the notice's buttons with request_human_input in the chat's own tab: the person answers it there and chooses Let Octo continue. Otherwise open a link under it by its address, or the official site of the place or service the task is about. [step_refused_consent]",
+            "Shared Browser command failed: Octo never accepts cookies, so nothing was pressed. Carry on under the notice from a fresh snapshot. If it covers what you need, open that link by its address, or another official source. [step_refused_consent]",
             r#"{"ok":false,"activity":{"refused":"consent"}}"#,
-            "pause on the notice's buttons with request_human_input in the chat's own tab",
+            "Carry on under the notice from a fresh snapshot.",
         ),
         (
             "Shared Browser command failed: Shared Browser refuses to type authentication, payment, or identity secrets; let the user enter this value directly",
@@ -3489,11 +3489,11 @@ async fn no_failed_step_reads_as_undefined() {
         ),
         (
             failed(
-                "A cookie notice covers this page, and the browser could not decline it. [step_refused_consent]",
+                "Octo never accepts cookies, so nothing was pressed. [step_refused_consent]",
                 r#"{"ok":false,"activity":{"refused":"consent"}}"#,
                 1,
             ),
-            "A cookie notice covers this page, and the browser could not decline it. [step_refused_consent]",
+            "Octo never accepts cookies, so nothing was pressed. [step_refused_consent]",
         ),
         (
             failed(
@@ -5017,6 +5017,17 @@ fn a_type_step_names_the_field_and_how_many_characters_went_in_never_the_text() 
             "Belém Tower",
             true,
             "Typed 11 characters into \"Search places\" and pressed Enter.".to_string(),
+        ),
+        // The same site search without submit searched nothing yet: Enter in it goes without
+        // a prompt, so the step says to press it. A turn typed into a site's search, never
+        // sent it, and read the list the page still showed as no result.
+        (
+            "site-search",
+            "Belém Tower",
+            false,
+            format!(
+                "Typed 11 characters into \"Search places\", and the field holds them.{after} Nothing was searched yet: press Enter to search (no prompt needed)."
+            ),
         ),
     ] {
         let fixture = EmbeddedControllerFixture::new();
