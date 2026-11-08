@@ -48,7 +48,8 @@ load `redaction.js` first.
   refusal's button ("Reject all") is free with `consentRejection: true`, and a
   control or link whose words accept, agree or consent, or only allow
   ("Allow all cookies"), is refused
-  (`step_refused_consent`): accepting is the person's step. An accept limited
+  (`step_refused_consent`): Octo never accepts cookies, and its words say so
+  and to carry on under the banner. An accept limited
   to the necessary cookies or to a selection ("Accept only necessary",
   "Accept selection") saves a refusal, so it asks with `commit: true` instead.
   `unnamedControlName(hints)` names a control the page left unnamed from its
