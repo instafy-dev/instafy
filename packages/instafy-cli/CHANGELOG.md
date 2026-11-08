@@ -1,5 +1,14 @@
 # @instafy/cli
 
+## 0.5.8
+
+### Patch Changes
+
+- c6cb188: A comparison page asked for from what Octo already knows, with nothing looked up, now says so instead of claiming checks that never happened: with `"from": "memory"` in its `data.json`, the compare starter shows each value as "<value>, not checked", with no source, date or link, and adds "From what Octo knows; nothing checked." to the page's opening line. `instafy bind check` passes such a page's rows without pages, and fails any source, address, date, store or filter on it; the page offers no price check. Pages made before keep their own copy of `app.js`.
+- 5e6e6e8: `instafy preview open` now writes down which chat made each page, in the space's own folder (`.instafy/pages/pages.json`), so the record outlasts the machine: the chat its card goes to (a job's own chat, or `--conversation`) and how the page is served. Opening the same folder again from another chat keeps the chat that made it, a page written down without a chat stays without one, and the workspace itself is not written down. The starters' `site.link` takes the web address from either argument, so a link written name first is still a link, and a note longer than 100 characters ends at a whole word with "…". On a phone, the compare starter names the values of an item whose own page wasn't opened under "Not checked", apart from what was looked for and not found. Pages made before keep their own copies of `site.js` and `app.js`.
+- 6a9615d: `instafy bind command <dir> …` now reaches only the binder that serves `<dir>`: the folder of one of its sites, or the binder's own folder when it serves one site. Before, a folder below a binder of one site that was none of its sites (a page something else serves) sent the command to that binder's page instead. `instafy bind try --save` no longer says an open page needs a reload command: in a space, every open page shows the saved records once the change is saved.
+- 34a5349: Remove built-in website exclusions while preserving optional workspace site policies and network, permission, and content-safety checks. Retire unchanged old default policy copies and recheck policy-derived read stops after a policy change.
+
 ## 0.5.7
 
 ### Patch Changes
