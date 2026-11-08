@@ -35,6 +35,9 @@ const secondId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const entry = (runtimeId: string) => ({ runtimeId, status: "ready", provider: "instafy-cloud", displayName: "Browser session", health: "idle", lastSeenAt: null,
   origin: { originId: `origin-${runtimeId}`, endpoint: "https://origin.test", protocols: ["http"] } });
 const noop = () => {};
+/** A session's row in Browser options, by the name it reads ("Session 2"), current or not. */
+const sessionRow = (name: string) => Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"][aria-label="Browser options"] button'))
+  .find((button) => (button.textContent ?? "").replace(/Current$/, "") === name)!;
 
 // Real routing + persisted browser state + production Modal, with only the
 // controller network boundary substituted. Closing unmounts the Modal as ChatPanel does.
@@ -91,12 +94,12 @@ describe("production Shared modal resume selection", () => {
   it("keeps session details and reset in options, dismisses with Escape and restores keyboard focus", async () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });
     await render(firstId, true, true);
-    expect(document.querySelector('[data-testid="shared-browser-current-runtime"]')).toBeNull();
+    expect(document.querySelector('[role="dialog"][aria-label="Browser options"] details')).toBeNull();
     expect(document.querySelector('[data-testid="shared-browser-clear-data"]')).toBeNull();
     const trigger = document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!;
     await act(async () => { trigger.focus(); trigger.click(); });
     expect(document.querySelector('[role="dialog"][aria-label="Browser options"]')).not.toBeNull();
-    expect(document.querySelector('[data-testid="shared-browser-current-runtime"]')?.closest("details")?.open).toBe(false);
+    expect(document.querySelector<HTMLDetailsElement>('[role="dialog"][aria-label="Browser options"] details')?.open).toBe(false);
     expect(document.querySelector('[data-testid="shared-browser-clear-data"]')?.textContent).toContain("Clear shared browser data");
     await act(async () => document.querySelector<HTMLElement>('[aria-label="Close browser options"]')!.focus());
     await act(async () => {
@@ -163,13 +166,19 @@ describe("production Shared modal resume selection", () => {
     expect(advanced[0]!.querySelector("summary")?.textContent).toBe("Advanced");
     const outside = (label: string) => Array.from(options.querySelectorAll<HTMLElement>("button, summary"))
       .filter((control) => (control.getAttribute("aria-label") ?? control.textContent) === label && !advanced[0]!.contains(control));
-    for (const label of ["Copy resume link", "Refresh sessions", `Resume Shared session ${firstId}`]) {
+    for (const label of ["Copy resume link", "Refresh sessions"]) {
       expect(outside(label), label).toEqual([]);
       expect(Array.from(advanced[0]!.querySelectorAll("button")).some((button) =>
         (button.getAttribute("aria-label") ?? button.textContent) === label), label).toBe(true);
     }
+    expect(advanced[0]!.contains(sessionRow("Session 1"))).toBe(true);
     expect(options.textContent).not.toContain("Session details");
-    expect(advanced[0]!.querySelector('[data-testid="shared-browser-current-runtime"]')).not.toBeNull();
+    // A local test, Nov 8: Advanced still named the session by its machine's
+    // id ("Resume Shared session 893a092d-…", "Current session: …"). It reads
+    // by name, and its tick says which one is in use.
+    const named = [advanced[0]!.textContent ?? "", ...Array.from(advanced[0]!.querySelectorAll("[aria-label]"))
+      .map((element) => element.getAttribute("aria-label") ?? "")];
+    expect(named.filter((words) => words.includes(firstId.slice(0, 8)))).toEqual([]);
     // Reset stays in sight.
     expect(advanced[0]!.contains(options.querySelector('[data-testid="shared-browser-clear-data"]'))).toBe(false);
   });
@@ -212,7 +221,8 @@ describe("production Shared modal resume selection", () => {
     expect(mocks.ensure).not.toHaveBeenCalled();
     expect(document.querySelector('[data-testid="shared-browser-session-control"]')).toBeNull();
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!.click());
-    expect(document.body.textContent).toContain(secondId);
+    expect(sessionRow("Session 2").textContent).toContain("Current");
+    expect(sessionRow("Session 1").textContent).not.toContain("Current");
   });
   it.each([false, true])("distinguishes a failed capability lookup from an incompatible response (%s)", async (unsupported) => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });
@@ -244,7 +254,7 @@ describe("production Shared modal resume selection", () => {
     expect(options()).toBeNull();
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-session-error-retry"]')!.click());
     expect(options()).not.toBeNull();
-    await act(async () => document.querySelector<HTMLButtonElement>(`[aria-label="Resume Shared session ${firstId}"]`)!.click());
+    await act(async () => sessionRow("Session 1").click());
     expect(onResolved).toHaveBeenCalledWith(firstId); expect(mocks.ensure).not.toHaveBeenCalled();
   });
   it("announces compact opening progress and lets the participant expand the browser", async () => {
@@ -300,7 +310,7 @@ describe("production Shared modal resume selection", () => {
     expect(document.querySelector('[data-testid="browser-session-state-card"]')).toBeNull();
     expect(document.querySelector('[data-testid="browser-session-error-notice"]')).toBeNull();
     expect(document.querySelector('[role="alert"]')).toBeNull();
-    await act(async () => document.querySelector<HTMLButtonElement>(`[aria-label="Resume Shared session ${secondId}"]`)!.click());
+    await act(async () => sessionRow("Session 2").click());
     expect(onResolved).toHaveBeenCalledWith(secondId);
   });
   it("permits a view-only participant to resume but not create a browser", async () => {
@@ -383,7 +393,7 @@ describe("production Shared modal resume selection", () => {
     expect(onResolved).toHaveBeenLastCalledWith(firstId);
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!.click());
     if (action === "chooser") {
-      await act(async () => document.querySelector<HTMLButtonElement>(`[aria-label="Resume Shared session ${secondId}"]`)!.click());
+      await act(async () => sessionRow("Session 2").click());
     } else {
       await act(async () => Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "Start new session")!.click());
       expect(mocks.ensure).toHaveBeenCalledTimes(1);

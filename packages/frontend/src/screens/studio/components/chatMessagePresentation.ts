@@ -528,6 +528,9 @@ export function synthesizeAgentJobThreadMessages(
   // A hand-back's run that ended before its job showed anything (a Stop in the gap after the
   // browser turn, say): the row is that run's, so a Stop of it reads "Stopped".
   const endedHandBackRunByRowJobId = new Map<string, string>();
+  // Every job and run of a row's turns, by the row: a Stop of any of them is
+  // that row's (foldStopNotices).
+  const turnIdsByRowId = new Map<string, Set<string>>();
   for (const [browserJobId, handBacks] of routedFold.handBacksByBrowserJobId) {
     if (!threadStartMessageIdByJobId.has(browserJobId) || rowJobIdByJoinedJobId.has(browserJobId)) continue;
     const turnJobIds = [browserJobId];
@@ -540,6 +543,7 @@ export function synthesizeAgentJobThreadMessages(
       threadStartMessageIdByJobId.delete(handBack.jobId);
     }
     turnJobIdsByRowJobId.set(browserJobId, turnJobIds);
+    turnIdsByRowId.set(`agent-job-thread:${browserJobId}`, new Set([...turnJobIds, ...handBackRunIds]));
     for (const message of collapsedAll) {
       const runId = extractRunId(message);
       if (runId && handBackRunIds.has(runId) && isFailureWithoutJob(message) && !foldedFailureIds.has(message.id)) {
@@ -705,18 +709,23 @@ export function synthesizeAgentJobThreadMessages(
     });
   });
 
-  return foldStopNotices(output);
+  return foldStopNotices(output, turnIdsByRowId);
 }
 
 /**
  * A Stop's notice joins the row of the turn it stopped, so a stopped turn is
  * one row: "Stopped · opened 5 pages on frame.work ›  Continue". It goes to the
  * newest row whose turn it names: the row's newest job, the hand-back that
- * ended before its job showed anything, or the resend of a failed turn that
- * has shown nothing yet (the row's "Trying again…"). A notice no row stands
- * for (a turn stopped before it showed anything) keeps a row of its own.
+ * ended before its job showed anything, the resend of a failed turn that
+ * has shown nothing yet (the row's "Trying again…"), or any other turn of
+ * the row (`turnIdsByRowId`). That last is a build Continue sent again,
+ * which joined the row after the stopped one: the row goes on, and its Stop
+ * says nothing more unless the row's newest turn was stopped too. As a row
+ * of its own, it stood as "Stopped" under the reply that came. A notice no
+ * row stands for (a turn stopped before it showed anything) keeps a row of
+ * its own.
  */
-function foldStopNotices(rows: ChatMessage[]): ChatMessage[] {
+function foldStopNotices(rows: ChatMessage[], turnIdsByRowId: ReadonlyMap<string, ReadonlySet<string>>): ChatMessage[] {
   const folded = new Set<string>();
   const next = [...rows];
   for (const notice of rows) {
@@ -728,10 +737,12 @@ function foldStopNotices(rows: ChatMessage[]): ChatMessage[] {
       const jobId = extractAgentJobId(row);
       const handBackRunId = readHandBackRunId(row);
       const retry = readPendingRetry(row);
+      const turnIds = turnIdsByRowId.get(row.id);
       const named = Boolean(jobId && stopped.jobIds.includes(jobId)) ||
         Boolean(handBackRunId && stopped.runIds.includes(handBackRunId)) ||
         Boolean(retry?.jobId && stopped.jobIds.includes(retry.jobId)) ||
-        Boolean(retry?.runId && stopped.runIds.includes(retry.runId));
+        Boolean(retry?.runId && stopped.runIds.includes(retry.runId)) ||
+        [...stopped.jobIds, ...stopped.runIds].some((id) => turnIds?.has(id) === true);
       if (!named) continue;
       next[index] = { ...row, metadata: { ...(row.metadata ?? {}), [STOP_NOTICE_METADATA_KEY]: notice } };
       folded.add(notice.id);

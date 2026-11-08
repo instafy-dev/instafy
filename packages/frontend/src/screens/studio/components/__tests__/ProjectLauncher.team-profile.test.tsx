@@ -4,12 +4,15 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProjectLauncher } from "../ProjectLauncher";
 import { Button } from "../../../../components/Button";
-import { chooseSelectValue, readSelectValue } from "../../../../test-utils/select";
+import { chooseSelectValue, isSelectDisabled, readSelectOptions, readSelectValue } from "../../../../test-utils/select";
 
 const mocks = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn(), upload: vi.fn(), update: vi.fn(), showStatus: vi.fn(), reset: vi.fn() }));
 vi.mock("../../../../sdk/instafy", () => ({ controllerClient: { organizations: { list: mocks.list, create: mocks.create } } }));
 vi.mock("../../../../lib/supabaseStorage", () => ({ uploadOrgAvatar: mocks.upload }));
-vi.mock("../../../../services/runtimeController/projects", () => ({ updateControllerOrganization: mocks.update }));
+vi.mock("../../../../services/runtimeController/projects", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../../services/runtimeController/projects")>(),
+  updateControllerOrganization: mocks.update,
+}));
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: mocks.showStatus }) }));
 vi.mock("../device-auth/useDeviceAuthFlow", () => ({ useDeviceAuthFlow: () => ({ reset: mocks.reset }) }));
 vi.mock("../../../../components/aria/StudioModal", () => ({ StudioDialogModal: ({ children }: { children: ReactNode }) => <div role="dialog">{children}</div> }));
@@ -72,6 +75,32 @@ describe("space launcher team creation", () => {
     await act(async () => root.render(launcher("build-team")));
     await act(async () => {});
     expect(readSelectValue(select())).toBe("build-team");
+  });
+
+  // A local test, Nov 8: the New space dialog opened on a disabled "Choose
+  // team" that turned into "Personal (owner)" once the teams had loaded. A
+  // space with no team chosen goes to the person's own team all along.
+  it("reads Personal from the moment it opens, and lists the person's own team once", async () => {
+    let teamsLoaded: (teams: unknown[]) => void = () => undefined;
+    mocks.list.mockReturnValue(new Promise((resolve) => { teamsLoaded = resolve; }));
+    const onCreateBlank = vi.fn();
+    await act(async () => root.render(
+      <ProjectLauncher open currentUserId="person-1" onClose={vi.fn()} onCreateBlank={onCreateBlank} onCreateFromGithub={vi.fn()} />,
+    ));
+    const select = () => container.querySelector('[data-testid="project-launcher-org-select"]');
+    // While the teams load.
+    expect(isSelectDisabled(select())).toBe(false);
+    expect(select()?.textContent).toContain("Personal");
+    expect(container.textContent).not.toContain("Choose team");
+    await act(async () => teamsLoaded([
+      { id: "own-team", name: "Personal team", slug: "user-person-1", role: "owner" },
+      { id: "photo-team", name: "Photo team", slug: "photo", role: "builder" },
+    ]));
+    expect(select()?.textContent).toContain("Personal");
+    expect(await readSelectOptions(select())).toEqual(["Personal", "Photo team (builder)", "+ Create new team"]);
+    await input("project-launcher-name-input", "Lisbon trip");
+    await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(onCreateBlank).toHaveBeenCalledExactlyOnceWith("Lisbon trip", { orgId: "own-team" });
   });
 
   it("gives Create a new space and New team the same Cancel as Studio's other dialogs", async () => {

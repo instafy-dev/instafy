@@ -2196,6 +2196,7 @@ function StudioLayoutInner() {
       <ProjectLauncher
         open={isProjectLauncherOpen}
         preferredOrgId={projectLauncherPreferredOrgId}
+        currentUserId={currentUserId}
         onClose={() => {
           setIsProjectLauncherOpen(false);
           setProjectLauncherPreferredOrgId(null);

@@ -13,14 +13,17 @@ import { PROJECT_ACCESS_REFRESH_EVENT, readDeletedOrgId } from "../../../project
 import { controllerClient } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
 import { openExternalUrl } from "../../../utils/openExternalUrl";
-import { getOrgDisambiguator, getOrgDisplayName } from "../../../org/orgNaming";
+import { getOrgDisambiguator, getOrgDisplayName, PERSONAL_ORG_DISPLAY_NAME } from "../../../org/orgNaming";
 import { type ControllerOrgSummary } from "../../../sdk/instafy";
+import { pickDefaultSpaceOrg } from "../../../services/runtimeController/projects";
 import { useDeviceAuthFlow } from "./device-auth/useDeviceAuthFlow";
 import { NewTeamDialog } from "./NewTeamDialog";
 
 export interface ProjectLauncherProps {
   open: boolean;
   preferredOrgId?: string | null;
+  /** Who creates the space: their own team is the dialog's "Personal". */
+  currentUserId?: string | null;
   onClose: () => void;
   onCreateBlank: (
     projectName: string,
@@ -41,6 +44,7 @@ function canAddSpaces(role: string | null | undefined): boolean {
 export function ProjectLauncher({
   open,
   preferredOrgId = null,
+  currentUserId = null,
   onClose,
   onCreateBlank,
   onCreateFromGithub
@@ -58,7 +62,6 @@ export function ProjectLauncher({
   // why was to open the network panel.
   const [createError, setCreateError] = useState<string | null>(null);
   const [orgs, setOrgs] = useState<ControllerOrgSummary[]>([]);
-  const [orgLoading, setOrgLoading] = useState(false);
   const [orgError, setOrgError] = useState<string | null>(null);
   const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
   const [newTeamOpen, setNewTeamOpen] = useState(false);
@@ -80,8 +83,12 @@ export function ProjectLauncher({
   const clearGithubDeviceAuthError = githubDeviceAuth.clearError;
   const resetGithubDeviceAuth = githubDeviceAuth.reset;
 
+  // A space with no team chosen goes to the person's own team (the
+  // controller pins it to them): that is "Personal", from the moment the
+  // dialog opens, so their own team is not listed a second time.
+  const personalTeamId = pickDefaultSpaceOrg(orgs, currentUserId)?.id ?? null;
   const orgSelectOptions = useMemo(() => {
-    const base = orgs.map((org) => {
+    const base = orgs.filter((org) => org.id !== personalTeamId).map((org) => {
       const roleSuffix = org.role ? ` (${org.role})` : "";
       const baseLabel = `${getOrgDisplayName(org.name)}${roleSuffix}`;
       return { ...org, baseLabel };
@@ -97,7 +104,7 @@ export function ProjectLauncher({
       const suffix = getOrgDisambiguator(org.slug, org.id);
       return { ...org, label: `${org.baseLabel} • ${suffix}` };
     });
-  }, [orgs]);
+  }, [orgs, personalTeamId]);
 
   useEffect(() => {
     if (open) {
@@ -113,27 +120,27 @@ export function ProjectLauncher({
       setOrgError(null);
       setNewTeamOpen(false);
       setSelectedOrgId(null);
-      setOrgLoading(true);
       controllerClient.organizations.list()
         .then((list) => {
           setOrgs(list);
           // Suggest the team on screen only where this person can add
-          // spaces; a viewer picks a team of their own instead.
-          if (preferredOrgId && list.some((org) => org.id === preferredOrgId && canAddSpaces(org.role))) {
-            setSelectedOrgId(preferredOrgId);
-          } else if (list.length === 1) {
-            setSelectedOrgId(list[0].id);
-          }
+          // spaces; a viewer picks a team of their own instead. Else their
+          // own team, "Personal", unless another team is all they have. A
+          // team they made while the teams loaded stays chosen.
+          const personal = pickDefaultSpaceOrg(list, currentUserId)?.id ?? null;
+          const suggested = preferredOrgId && list.some((org) => org.id === preferredOrgId && canAddSpaces(org.role))
+            ? preferredOrgId
+            : !personal && list.length === 1 ? list[0].id : null;
+          setSelectedOrgId((current) => current ?? (suggested === personal ? null : suggested));
         })
         .catch((error) => {
           const message =
             error instanceof Error ? error.message : "Unable to load teams.";
           setOrgError(message);
           console.warn("[ProjectLauncher] org list error", message);
-        })
-        .finally(() => setOrgLoading(false));
+        });
     }
-  }, [open, preferredOrgId, resetGithubDeviceAuth]);
+  }, [currentUserId, open, preferredOrgId, resetGithubDeviceAuth]);
 
   useEffect(() => {
     if (!open) {
@@ -220,7 +227,8 @@ export function ProjectLauncher({
       setCreateError("Give the space a name first.");
       return;
     }
-    const orgPayload = selectedOrgId ? { orgId: selectedOrgId } : {};
+    const orgId = selectedOrgId ?? personalTeamId;
+    const orgPayload = orgId ? { orgId } : {};
     setIsProcessing(true);
     try {
       if (mode === "github") {
@@ -342,7 +350,7 @@ export function ProjectLauncher({
             <div className="space-y-1.5">
               <Select
                 id="project-launcher-org-select"
-                disabled={orgLoading || isProcessing}
+                disabled={isProcessing}
                 value={selectedOrgId ?? ""}
                 onChange={(event) => {
                   const value = event.target.value;
@@ -351,7 +359,7 @@ export function ProjectLauncher({
                 }}
                 data-testid="project-launcher-org-select"
               >
-                <option value="">Choose team</option>
+                <option value="">{PERSONAL_ORG_DISPLAY_NAME}</option>
                 {orgSelectOptions.map((org) => (
                   <option key={org.id} value={org.id}>
                     {org.label}

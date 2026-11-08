@@ -406,13 +406,18 @@ export function useAgentJobThreadPreviewState({
   const isThreadRunInFlight = useMemo(() => {
     const pendingRunIds = owningConversation?.pendingRunIds ?? [];
     const pendingRunSubmittedAt = owningConversation?.pendingRunSubmittedAt ?? {};
+    // A hand-back on its way is the row's turn at work until it shows
+    // something or ends (its run's failure or Stop ends it): never a turn gone
+    // quiet. Read by its run, it read "Status unavailable" for a build
+    // Continue sent again, until this page knew that run.
+    if (handBackPending) {
+      return true;
+    }
     if (!jobId) {
       return false;
     }
     return isThreadPreviewRunInFlight({
-      // A hand-back on its way is in flight by its run: any of the chat's
-      // until the chat has its stored prompt, which names its run.
-      jobId: handBackPending ? pendingHandBackRunId : jobId,
+      jobId,
       pendingRunIds,
       awaitingLeaseRunIds: owningConversation?.awaitingLeaseRunIds ?? [],
       pendingRunSubmittedAt,
@@ -427,7 +432,6 @@ export function useAgentJobThreadPreviewState({
     owningConversation?.controllerId,
     owningConversation?.pendingRunIds,
     owningConversation?.pendingRunSubmittedAt,
-    pendingHandBackRunId,
     runs,
   ]);
 
@@ -494,7 +498,8 @@ export function useAgentJobThreadPreviewState({
   // the browser turn before it finished: its run's record or the notice says
   // so. Read as the browser turn's, the row said only what that turn did (a
   // local test, Nov 5). So did a failed turn's resend stopped before it
-  // showed anything.
+  // showed anything. A hand-back on its way stands for its own run: a Stop of
+  // a turn before it is one Continue carried on, by sending that hand-back.
   const isStoppedRun = useMemo(() => {
     if (retryStopped) {
       return true;
@@ -503,11 +508,25 @@ export function useAgentJobThreadPreviewState({
     if (endedHandBackRunId && stoppedByAnyone({ runId: endedHandBackRunId, jobId: null }, runs, conversations)) {
       return true;
     }
+    if (handBackPending) {
+      return Boolean(pendingHandBackRunId) &&
+        stoppedByAnyone({ runId: pendingHandBackRunId, jobId: null }, runs, conversations);
+    }
     if (!jobId || runStatus.phase === "completed") {
       return false;
     }
     return stoppedByAnyone({ runId: null, jobId }, runs, conversations);
-  }, [activeConversation, endedHandBackRunId, jobId, retryStopped, runStatus.phase, runs, threadConversation]);
+  }, [
+    activeConversation,
+    endedHandBackRunId,
+    handBackPending,
+    jobId,
+    pendingHandBackRunId,
+    retryStopped,
+    runStatus.phase,
+    runs,
+    threadConversation,
+  ]);
   const isStaleRunningStatus = runStatus.phase === "running" && !isThreadRunInFlight && !hasRecentThreadActivity;
   const isCompleted =
     runStatus.phase === "completed" || isPlanOnlyThread || terminalProxyErrorMessage !== null || isStoppedRun;
@@ -650,10 +669,14 @@ export function useAgentJobThreadPreviewState({
     [intermediateUpdates],
   );
 
+  // The row holds a Stop and its hand-back is on its way: Continue sent the
+  // stopped build again. Until that build shows something, the row is its
+  // turn starting, as a message just sent is, whatever the turns before it did.
+  const startsAgain = handBackPending && readRowStopNotice(message) !== null;
   const activityPhase: TurnActivityPhase = shouldShowStaleThreadStatus
     ? "stale"
     : isThreadUnresolved
-      ? hasModelWork
+      ? hasModelWork && !startsAgain
         ? "running"
         : "starting"
       : isCompleted &&
