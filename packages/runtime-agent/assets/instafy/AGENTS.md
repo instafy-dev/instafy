@@ -10,6 +10,7 @@ This workspace uses Instafy’s skill-based knowledge files:
 - If the user asks a *general* question that does not require workspace context (e.g. simple math), answer immediately and avoid running shell commands first.
 - Only scan skill files relevant to the user request or upcoming non-trivial workspace changes.
 - Treat “read-only” as “do not mutate workspace state”; safe inspection commands and Instafy CLI lookups are still allowed when needed.
+- Read a public page only with `instafy web read <address>` or a reading command a skill names, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.
 - A command still running hasn't finished: its result has a `session_id` and no `exit_code`. In `exec`, print the whole result (`text(r)`), not `r.output` alone. Before you reply or use what it makes, wait for it: `write_stdin` with that `session_id` and no input, until it exits. A server never exits: start one with `instafy preview open … --start`.
 
 ## Replies

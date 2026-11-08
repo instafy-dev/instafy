@@ -111,14 +111,26 @@ const READS_NOTE_KEY: &str = "browser_hand_back_reads_note";
 /// page as where it looked: told only to list a fact under a page that states it, a comparison's
 /// browser turn wrote that a spec page "does not state an absolute runtime", of a page it had
 /// printed in slices, and the build put "no absolute runtime" on the page people share (a local
-/// test, Nov 5).
+/// test, Nov 5). It goes there only after the turn searched the whole text the step returned
+/// and opened the page's own tab or link for the value: told only to say where it looked, a
+/// warranty's browser turn printed the last 1,100 and 700 characters of three product pages,
+/// each ending in a footer "Warranty" link it never opened, wrote "Warranty terms not found on
+/// this product page." under each with nothing unread, and the build replied that the product
+/// pages "did not show warranty terms" (a local test, Nov 8). A turn whose findings go back to
+/// the building turn names such a link it didn't open in its unread line ([`UNREAD_LINE`]). And
+/// a fact carries what it doesn't confirm, since later turns read only these lines: a planner's
+/// finding gave a route to a stop the turn chose, and only its reply said the route ended short
+/// of the shop, so the page people share showed that route as the way to the shop (a local
+/// test, Nov 8).
 const FINDING_LINES: &str = "End your reply with one finding per page, each one JSON object on its own line: \
 `{\"url\": \"<address>\", \"title\": \"<page title>\", \"facts\": [\"<what the page showed>\"]}` for a page you read, \
 or `{\"url\": \"<address>\", \"stopped\": \"login|captcha|paywall|blocked|robots|download|secret|link-only|no-page|timed-out|covered\"}` for one that ended at a sign-in, \
 a bot check, a paywall, a block or HTTP 401/403/429, robots.txt, a download, a page showing secrets or a link-only site \
 (never retry such a page another way), at an address with no page or no answer in time, or under a cookie notice or dialog the browser couldn't close. \
 Report only what the pages showed, never a secret, each fact under a page you read that states it, not one that only quotes it, and copy no long listing text; Instafy adds when and in which browser each page was read. \
-A value you looked for on a page and didn't find goes under that page as where you looked (\"runtime not found on this page\"), never that the page lacks it or doesn't state it.";
+Octo's later turns read only these lines, never your reply's words, so a fact carries what it doesn't confirm: which of its values you chose, not the page, and what it leaves out. \
+A value you looked for on a page and didn't find goes under that page as where you looked (\"runtime not found on this page\"), never that the page lacks it or doesn't state it. \
+Before a value goes under a page as not found, search the whole text the step returned (never a slice), and open that page's own tab or link named for it (Specs, Warranty, Support, FAQ).";
 
 /// What a browser turn says in words of a page that stopped it: the person reads it.
 const FIRST_LINE_STOP: &str = "If a page stopped you (a manual step, a refused or challenge page), say so in your first line.";
@@ -134,10 +146,8 @@ const SAY_WHAT_YOU_READ: &str =
     "Say what you read (\"Read 6 pages on <site>\"), never \"I couldn't finish\".";
 
 /// The heading of any other browser turn's findings: its reply answers the person, and a later
-/// building turn reads only its lines.
+/// building turn reads only its lines, as [`FINDING_LINES`] tells every browser turn.
 const LATER_TURNS_FINDINGS: &str = "\n\nFindings for Octo's later turns:\n";
-const LATER_TURNS_READ_ONLY_THEM: &str =
-    "Octo's later turns read only these lines, never your reply's words.";
 
 /// The last line of a browser turn whose findings go back to the building turn: the pages its
 /// request needs that it didn't open ([`take_unread_pages`]). When it names any, the runtime
@@ -146,7 +156,15 @@ const LATER_TURNS_READ_ONLY_THEM: &str =
 /// browser turn read the maker's home page, one model's page and one review, said it hadn't read
 /// the other two models' pages, and ended: the page was built with four of its fifteen facts,
 /// and only the person's "Fill in what's still missing." filled fourteen (a local test, Nov 6).
-const UNREAD_LINE: &str = "After them, one last line `{\"unread\": [\"<a page this request needs that you didn't open>\"]}`, each by its address or what it is (\"<item>'s own page\"), or `{\"unread\": []}` when you opened every one.";
+/// A page's own tab or link for a value the turn didn't find there is one of them until it is
+/// opened, so a value written as not found beside a "Warranty" link nobody opened is read in
+/// that pass ([`FINDING_LINES`]). The wrap-up pass, which opens nothing, is told the same. A tab
+/// is named with its page, never by the page's address: one with no address of its own has its
+/// page's, which a finding line lists, and a page the turn's lines list is none to read again
+/// ([`take_unread_pages`]), so no second pass would open the tab.
+const UNREAD_LINE: &str = "After them, one last line `{\"unread\": [\"<a page this request needs that you didn't open>\"]}`, each by its address or what it is (\"<item>'s own page\"), or `{\"unread\": []}` when you opened every one. \
+A page's own tab or link named for a value you didn't find there is one of them until you open it. \
+Name a tab with its page (\"<item>'s Specs tab\"), never by the page's address.";
 
 /// What a browser turn whose findings go back to the building turn ([`hands_back`]) reads last,
 /// after its finding lines' section and right before the request: its part of the request, in plain
@@ -380,9 +398,7 @@ pub(super) fn format_browser_findings_contract_section(
             "{HAND_BACK_FINDINGS}{FINDING_LINES} {UNREAD_LINE} {SAY_WHAT_YOU_READ} {FIRST_LINE_STOP}{READING_PART}"
         )
     } else {
-        format!(
-            "{LATER_TURNS_FINDINGS}{FINDING_LINES} {LATER_TURNS_READ_ONLY_THEM} {FIRST_LINE_STOP}"
-        )
+        format!("{LATER_TURNS_FINDINGS}{FINDING_LINES} {FIRST_LINE_STOP}")
     })
 }
 
@@ -792,7 +808,8 @@ fn unread_line(line: &str) -> Option<Vec<String>> {
 /// Takes a browser turn's unread lines out of its answer, which the person never reads, and
 /// returns the pages they name, in order, each once and at most [`UNREAD_PAGES_MAX`]. A page the
 /// answer's own finding lines list already is none of them: one that stopped the turn is never
-/// tried another way, or gave no answer or page there, and one it read is read.
+/// tried another way, or gave no answer or page there, and one it read is read. A tab on a page
+/// it read is named with that page, in words ([`UNREAD_LINE`]).
 pub(super) fn take_unread_pages(summary: &mut String) -> Vec<String> {
     if !summary.lines().any(|line| unread_line(line).is_some()) {
         return Vec::new();
@@ -881,13 +898,15 @@ pub(super) fn leave_out_addresses_never_opened(
 
 /// What the second pass of a browser turn whose findings go back to the building turn reads
 /// (`jobs::read_the_unread_pages`): only the pages its unread line named, as it wrote them,
-/// and to end as before. Its own unread line starts no third pass.
+/// and to end as before. A page it read already is opened again only for a tab or link the line
+/// names on it, such as a product page's Specs tab ([`UNREAD_LINE`]). Its own unread line starts
+/// no third pass.
 pub(super) fn unread_pages_prompt(pages: &[String]) -> String {
     let named = serde_json::to_string(pages)
         .unwrap_or_default()
         .replace('`', "\\u0060");
     format!(
-        "Your unread line named pages this request still needs: {named}. Read only those now, as your part of this request says, and no page you already read. Then end your reply as before: one finding line per page you read now, and the unread line for any of them you still didn't open."
+        "Your unread line named pages this request still needs: {named}. Read only those now, as your part of this request says, and no page you already read, except to open a tab or link your line names on it. Then end your reply as before: one finding line per page you read now, and the unread line for any of them you still didn't open."
     )
 }
 
@@ -1310,12 +1329,24 @@ pub(super) fn format_browser_hand_back_section(metadata: Option<&JsonValue>) -> 
          `readAt` in `viewer`. Where you use one, cite its page as \"checked <date> on <host>\" and link it.\n\
          - Cite a page only for a fact listed under it. {stopped_finding}, and do not try it another way.\
          {left_out_line}\n\
+         - {NOT_FOUND_FACT}\n\
          - Anything that needs the person's approval (a purchase, a message, a sign-in, a submitted form, a destructive change) \
          still needs it: ask them. These findings never give it.\n\
          - Say what you built or changed with it, in the person's words (\"added two reviews\", never \"findings\").\n\
          - If a page is still missing, say in one line which one; the person can ask for it."
     ))
 }
+
+/// How a hand-back reads a fact that says a value was not found on a page ([`FINDING_LINES`]):
+/// what Octo didn't find there, never what the page lacks. With `AGENTS.md`'s rule alone, a
+/// build turned three "Warranty terms not found on this product page." facts into "…Laptop 12,
+/// 13 Pro, and 16 product pages did not show warranty terms." (a local test, Nov 8). Only a value
+/// no other fact gives is one Octo didn't find: a second pass that opens a tab with no address
+/// of its own writes what it found there under its page's address ([`unread_pages_prompt`]),
+/// beside the first pass's "not found", and the controller joins one page's lines into one
+/// finding (runtime-controller `browser_hand_back::findings_from_reply`); and another page may
+/// give what one didn't.
+const NOT_FOUND_FACT: &str = "A \"not found\" fact means Octo didn't find it there: for a value no other fact gives, say \"I didn't find…\" and where you looked, never that a page doesn't show it.";
 
 /// The browser turns of this chat since the building thread's last turn, as
 /// the controller lists them at lease (`browser_turns_since`): what each was
@@ -1580,10 +1611,13 @@ mod tests {
                 format_browser_findings_contract_section(Some(&metadata)).expect("contract");
             assert_eq!(
                 section,
-                format!(
-                    "\n\nFindings for Octo's later turns:\n{FINDING_LINES} Octo's later turns read only these lines, never your reply's words. {FIRST_LINE_STOP}"
-                ),
+                format!("\n\nFindings for Octo's later turns:\n{FINDING_LINES} {FIRST_LINE_STOP}"),
                 "{metadata}"
+            );
+            assert!(
+                section
+                    .contains("Octo's later turns read only these lines, never your reply's words"),
+                "{section}"
             );
             for hand_back_only in ["unread", "Your part of this request", "Say what you read"] {
                 assert!(!section.contains(hand_back_only), "{hand_back_only}");
@@ -1623,6 +1657,89 @@ mod tests {
             ),
             "{section}"
         );
+    }
+
+    /// Later turns read a browser turn only by its finding lines, so a fact carries what it
+    /// doesn't confirm: which of its values the turn chose, not the page, and what it leaves out.
+    /// A planner's finding gave a route to a stop the turn chose, and only its reply said the
+    /// route ended short of the shop: the page people share showed that route as the way to the
+    /// shop (a local test, Nov 8). Every browser turn is told so, once.
+    #[test]
+    fn a_finding_carries_what_it_does_not_confirm() {
+        let limits = "Octo's later turns read only these lines, never your reply's words, so a \
+                      fact carries what it doesn't confirm: which of its values you chose, not \
+                      the page, and what it leaves out.";
+        for metadata in [
+            json!({
+                "browserTransport": "shared",
+                "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                "browserHandsBack": true,
+            }),
+            json!({
+                "browserTransport": "shared",
+                "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+            }),
+            json!({ "browserTransport": "desktop-personal" }),
+        ] {
+            let section =
+                format_browser_findings_contract_section(Some(&metadata)).expect("contract");
+            assert!(section.contains(limits), "{section}");
+            assert_eq!(
+                section.matches("read only these lines").count(),
+                1,
+                "{section}"
+            );
+        }
+    }
+
+    /// A value goes under a page as not found only after the turn searched the whole text its
+    /// step returned and opened that page's own tab or link named for it. Told only to say where
+    /// it looked, a warranty's browser turn printed the last 1,100 and 700 characters of three
+    /// product pages, each ending in a footer "Warranty" link it never opened, wrote "Warranty
+    /// terms not found on this product page." under each with nothing unread, and the build
+    /// replied that the product pages "did not show warranty terms" (a local test, Nov 8). A turn
+    /// whose findings go back to the building turn names such a link it didn't open in its
+    /// unread line, which its second pass reads, and so does its wrap-up pass, which opens
+    /// nothing. A turn that hands nothing back has no unread line and is told of none.
+    #[test]
+    fn a_value_is_not_found_only_after_the_whole_page_and_its_own_link_for_it() {
+        let not_found = "A value you looked for on a page and didn't find goes under that page as \
+                         where you looked (\"runtime not found on this page\"), never that the \
+                         page lacks it or doesn't state it. Before a value goes under a page as \
+                         not found, search the whole text the step returned (never a slice), and \
+                         open that page's own tab or link named for it (Specs, Warranty, Support, \
+                         FAQ).";
+        let unread_link = "or `{\"unread\": []}` when you opened every one. A page's own tab or \
+                           link named for a value you didn't find there is one of them until you \
+                           open it.";
+        let hands_back = json!({
+            "browserTransport": "shared",
+            "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+            "browserHandsBack": true,
+        });
+        let section =
+            format_browser_findings_contract_section(Some(&hands_back)).expect("contract");
+        assert!(
+            section.contains(&format!(
+                "{not_found} After them, one last line `{{\"unread\": ["
+            )),
+            "{section}"
+        );
+        assert!(section.contains(unread_link), "{section}");
+        for metadata in [
+            json!({
+                "browserTransport": "shared",
+                "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+            }),
+            json!({ "browserTransport": "desktop-personal" }),
+        ] {
+            let section =
+                format_browser_findings_contract_section(Some(&metadata)).expect("contract");
+            assert!(section.contains(not_found), "{section}");
+            assert!(!section.contains("unread"), "{section}");
+        }
+        assert!(finding_lines_pass_prompt(true).contains(unread_link));
+        assert!(!finding_lines_pass_prompt(false).contains("tab or link"));
     }
 
     /// The browser turn reads what the request needs: the building turn after it is a hand-back,
@@ -1792,6 +1909,17 @@ mod tests {
         ));
         assert!(!section.contains("already read the browser turn's reply"));
         assert!(!section.contains("request_browser"));
+        // A "not found" fact is what Octo didn't find there, never what a page lacks: a build
+        // turned three of them into "…product pages did not show warranty terms." (a local test,
+        // Nov 8).
+        assert!(
+            section.contains(
+                "\n- A \"not found\" fact means Octo didn't find it there: for a value no other \
+                 fact gives, say \"I didn't find…\" and where you looked, never that a page \
+                 doesn't show it.\n"
+            ),
+            "{section}"
+        );
         // A page still missing is named in one line, for the person to ask for. Nothing says
         // the turn cannot open the browser: a hand-back has no browser card to post, so the
         // line guarded nothing, and a later turn on the same thread told the person "This turn
@@ -1813,6 +1941,35 @@ mod tests {
         assert!(!section.contains("findingsLeftOut"), "{section}");
         // No job ids: nothing the turn needs.
         assert!(!section.contains("00000000-0000-4000-8000-0000000000b2"));
+    }
+
+    /// A value another fact gives is no value Octo didn't find. A second pass that opens a tab
+    /// with no address of its own writes what it found there under its page's address, beside
+    /// the first pass's "not found", and the controller joins one page's lines into one finding
+    /// (runtime-controller `browser_hand_back::findings_from_reply`); another page may give what
+    /// one didn't. Told to say "I didn't find…" of every "not found" fact, the build would say it
+    /// of a value the same finding gives.
+    #[test]
+    fn a_value_another_fact_gives_is_not_one_octo_did_not_find() {
+        let mut record = fixtures()["stampedRecord"].clone();
+        let facts = json!(["Warranty not found on this page.", "Warranty: 2 years"]);
+        record["findings"] = json!([{
+            "url": "https://maker.example/laptop-12",
+            "title": "Laptop 12",
+            "facts": facts,
+            "readAt": "2026-10-26T09:30:00Z",
+            "viewer": "Instafy's browser in the workspace",
+        }]);
+        let section = format_browser_hand_back_section(Some(&json!({ "browserHandBack": record })))
+            .expect("section");
+        assert_eq!(fenced_data(&section)["findings"][0]["facts"], facts);
+        assert!(
+            section.contains(
+                "\n- A \"not found\" fact means Octo didn't find it there: for a value no other \
+                 fact gives, say \"I didn't find…\""
+            ),
+            "{section}"
+        );
     }
 
     /// A record as the controller stamps it from a browser turn that read sixteen pages: each
@@ -2894,6 +3051,14 @@ mod tests {
             "{prompt}"
         );
         assert!(!prompt.contains('`'), "{prompt}");
+        // A page it read already is opened again only for a tab or link the line names on it: a
+        // value written as not found beside a product page's own tab for it is read there.
+        assert!(
+            prompt.contains(
+                "and no page you already read, except to open a tab or link your line names on it."
+            ),
+            "{prompt}"
+        );
         let metadata = routed_turn(true);
         let mut turn = execution(&format!("Read 1 page.\n{read}\n{{\"unread\": [\"x\"]}}"));
         move_findings_into_details(&reading_the_note(browser_job(metadata)), &mut turn);
@@ -2902,6 +3067,36 @@ mod tests {
             turn.final_messages[0].content,
             format!("Read 1 page.\n\n{read}")
         );
+    }
+
+    /// A page's own tab for a value the turn didn't find there is unread until it is opened, and
+    /// one with no address of its own has its page's: named by that address, it is taken for the
+    /// page the turn read and left out, so no second pass opens it. Every turn that writes the
+    /// unread line, and its wrap-up pass, is told to name a tab with its page.
+    #[test]
+    fn an_unread_tab_is_named_with_its_page() {
+        let not_found = r#"{"url": "https://maker.example/laptop-12", "title": "Laptop 12", "facts": ["Warranty not found on this page."]}"#;
+        let mut summary = format!("{not_found}\n{{\"unread\": [\"Laptop 12's Specs tab\"]}}");
+        assert_eq!(take_unread_pages(&mut summary), ["Laptop 12's Specs tab"]);
+        let mut summary =
+            format!("{not_found}\n{{\"unread\": [\"https://maker.example/laptop-12/\"]}}");
+        assert!(take_unread_pages(&mut summary).is_empty());
+
+        let tab = "Name a tab with its page (\"<item>'s Specs tab\"), never by the page's address.";
+        let section =
+            format_browser_findings_contract_section(Some(&routed_turn(true))).expect("contract");
+        assert_eq!(section.matches(tab).count(), 1, "{section}");
+        assert!(finding_lines_pass_prompt(true).contains(tab));
+        // A turn that hands nothing back writes no unread line.
+        assert!(!finding_lines_pass_prompt(false).contains(tab));
+        for metadata in [
+            routed_turn(false),
+            json!({ "browserTransport": "desktop-personal" }),
+        ] {
+            let section =
+                format_browser_findings_contract_section(Some(&metadata)).expect("contract");
+            assert!(!section.contains(tab), "{section}");
+        }
     }
 
     /// The second pass's findings join the turn's, after the words of both passes, first then
@@ -3202,7 +3397,7 @@ mod tests {
             )
         );
         assert!(
-            prompt.ends_with("`{\"unread\": []}` when you opened every one. Use no tool, open no page and write no other words."),
+            prompt.ends_with("`{\"unread\": []}` when you opened every one. A page's own tab or link named for a value you didn't find there is one of them until you open it. Name a tab with its page (\"<item>'s Specs tab\"), never by the page's address. Use no tool, open no page and write no other words."),
             "{prompt}"
         );
         let read = r#"{"url": "https://maker.example/laptop-13", "title": "Laptop 13", "facts": ["Battery: 74 Wh"]}"#;

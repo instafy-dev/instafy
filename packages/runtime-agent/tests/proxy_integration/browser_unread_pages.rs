@@ -61,6 +61,16 @@ const PAUSE_WORDS: &str =
     "Sign in on the review site's highlighted fields, then choose Let Octo continue.";
 /// What a second pass that read the device's page replies, with no finding line.
 const SECOND_PROSE: &str = "I read the Laptop 12's own page.";
+/// A turn that read a product page and didn't find the value it looked for there, beside the
+/// page's own link for it, which it didn't open, and answered in words.
+const NOT_FOUND_WORDS: &str = "Read the Laptop 12's own page. Its text didn't give the warranty.";
+const NOT_FOUND_12: &str = r#"{"url": "https://maker.example/laptop-12", "title": "Laptop 12", "facts": ["Warranty not found on this page."]}"#;
+/// The product page's own link for the warranty.
+const WARRANTY_LINK: &str = "https://maker.example/warranty";
+const WARRANTY_WORDS: &str = "Read the maker's warranty page.";
+const READ_WARRANTY: &str = r#"{"url": "https://maker.example/warranty", "title": "Warranty", "facts": ["Laptops: 2 years"]}"#;
+/// What the wrap-up pass is told of such a link (runtime-agent `UNREAD_LINE`).
+const UNREAD_LINK: &str = "A page's own tab or link named for a value you didn't find there is one of them until you open it.";
 
 fn unread_line(pages: &[&str]) -> String {
     json!({ "unread": pages }).to_string()
@@ -124,6 +134,26 @@ fn a_turn_that_answers_in_words_reads_its_unread_pages_after_the_wrap_up_via_pro
         );
     }
     run_on_a_large_stack(Case::FirstWritesNoLines)
+}
+
+/// A turn that read a product page and didn't find the value it looked for there, beside the
+/// page's own link for it that it didn't open, and answered in words: its wrap-up pass, which
+/// opens nothing, names that link in its unread line, and the second pass reads it before the
+/// build. Told only to say where it looked, a warranty's browser part wrote the warranty as not
+/// found under three product pages, each ending in a "Warranty" link it never opened, with
+/// nothing unread, and the build replied that the pages did not show warranty terms (a local
+/// test, Nov 8). The provider stands in for the model: its wrap-up names the link only when the
+/// runtime tells it that such a link is unread until opened.
+#[test]
+fn a_pages_own_link_for_a_value_not_found_is_read_in_the_second_pass_via_proxy() -> Result<()> {
+    if std::env::var(CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(
+            CHILD,
+            "browser_hand_back::unread_pages::a_pages_own_link_for_a_value_not_found_is_read_in_the_second_pass_via_proxy",
+            "browser-unread-pages-not-found-link",
+        );
+    }
+    run_on_a_large_stack(Case::NotFoundLink)
 }
 
 /// A second pass that pauses for the person: they read what they do next, and the turn's note
@@ -211,6 +241,9 @@ enum Case {
     StopBetween,
     /// The turn's answer says in words which pages it didn't read, with no finding line.
     FirstWritesNoLines,
+    /// The turn's answer says in words that it didn't find a value on the page it read, beside
+    /// that page's own link for it, which it didn't open.
+    NotFoundLink,
     /// The second pass pauses for the person to sign in, on the device's browser.
     SecondPassPauses,
     /// The second pass opens a page on the device's browser and writes no finding line.
@@ -306,6 +339,22 @@ async fn provider_request(
     );
     state.requests.lock().unwrap().push(body.clone());
     let turn = last_user_text(&body);
+    if state.case == Case::NotFoundLink {
+        // The wrap-up names the page's own link for the value unread only when it is told that
+        // such a link is unread until opened, as the model left it out before.
+        return final_answer(&if turn.contains(PASS_OPENING) {
+            let unread: &[&str] = if turn.contains(UNREAD_LINK) {
+                &[WARRANTY_LINK]
+            } else {
+                &[]
+            };
+            format!("{NOT_FOUND_12}\n{}", unread_line(unread))
+        } else if turn.contains(SECOND_PASS_OPENING) {
+            format!("{WARRANTY_WORDS}\n{READ_WARRANTY}\n{}", unread_line(&[]))
+        } else {
+            NOT_FOUND_WORDS.to_string()
+        });
+    }
     if turn.contains(PASS_OPENING) {
         // The unread line, when the pass asks for it.
         return final_answer(&if turn.contains(PASS_ASKS_FOR_UNREAD) {
@@ -532,6 +581,9 @@ async fn run_case(case: Case) -> Result<()> {
         }
         Case::FirstWritesNoLines => {
             words_then_the_wrap_up_then_a_second_pass(&workspace, project_id, &state).await?
+        }
+        Case::NotFoundLink => {
+            the_link_for_a_value_not_found_is_read(&workspace, project_id, &state).await?
         }
         Case::SecondPassPauses | Case::SecondPassWritesNoLines => {
             let calls = second_pass_on_the_device(&workspace, project_id, &state, case).await?;
@@ -994,6 +1046,65 @@ async fn words_then_the_wrap_up_then_a_second_pass(
     assert!(wrap_up.contains(PASS_OPENING), "{wrap_up}");
     assert!(!wrap_up.contains(PASS_ASKS_FOR_UNREAD), "{wrap_up}");
     assert_eq!(summary, format!("{FIRST_PROSE}\n\n{READ_HOME}\n{READ_13}"));
+    Ok(())
+}
+
+/// The turn answered in words that it didn't find the warranty on the product page it read. The
+/// wrap-up pass is told that the page's own link for it is unread until opened, names it, and
+/// the second pass reads it before the build: the turn ends with the value not found on the
+/// product page and the warranty page's own fact.
+async fn the_link_for_a_value_not_found_is_read(
+    workspace: &Path,
+    project_id: Uuid,
+    state: &Provider,
+) -> Result<()> {
+    let client = CodexClient::new(CodexConfig {
+        workspace_dir: workspace.to_path_buf(),
+    });
+    let options = CodexRunOptions {
+        persist_conversation_thread: true,
+        ..Default::default()
+    };
+    let turn = the_turn(&client, &options).await?;
+    let mut summary = turn.final_json["summary"]
+        .as_str()
+        .context("the turn's answer")?
+        .to_string();
+    assert_eq!(summary, NOT_FOUND_WORDS);
+    let job = browser_job(project_id, true);
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        end_browser_turn_answer(
+            &client,
+            &job,
+            its_answer(&options, &turn)?,
+            &mut summary,
+            &TaskUsage::default(),
+        ),
+    )
+    .await
+    .context("the end of the turn timed out")?;
+    // The second pass reads the link, on the turn's own thread, before the build.
+    let passes = second_passes(state);
+    assert_eq!(passes.len(), 1, "one second pass");
+    let asked = last_user_text(&passes[0]);
+    assert!(
+        asked.contains(&serde_json::to_string(&[WARRANTY_LINK]).unwrap()),
+        "{asked}"
+    );
+    let requests = state.requests.lock().unwrap().clone();
+    assert_eq!(
+        requests.len(),
+        3,
+        "the turn, the wrap-up pass, then the second pass"
+    );
+    let wrap_up = last_user_text(&requests[1]);
+    assert!(wrap_up.contains(PASS_OPENING), "{wrap_up}");
+    assert!(wrap_up.contains(UNREAD_LINK), "{wrap_up}");
+    assert_eq!(
+        summary,
+        format!("{NOT_FOUND_WORDS}\n\n{WARRANTY_WORDS}\n\n{NOT_FOUND_12}\n{READ_WARRANTY}")
+    );
     Ok(())
 }
 
