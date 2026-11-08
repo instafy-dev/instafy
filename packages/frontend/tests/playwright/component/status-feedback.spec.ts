@@ -133,6 +133,47 @@ test("Undo keeps its absolute offer deadline while focused or waiting behind rec
   expect(errors).toEqual([]);
 });
 
+// A local test, Nov 7: a press in the middle of a waiting prompt's two-line
+// toast landed in the 3 px between its lines, on the message's box rather
+// than on a word, and did nothing.
+test("a toast whose message opens its chat opens it from anywhere in the message's box", async ({ page }) => {
+  const errors = await mount(page, "behavior");
+  const toast = page.getByTestId("status-toast");
+  for (const where of ["between its two lines", "beside its last word"] as const) {
+    await page.evaluate(() => (window as ReviewWindow).__review.opensOnPress());
+    const message = toast.getByTestId("status-toast-message");
+    await message.hover();
+    const point = await message.evaluate((element, spot) => {
+      // The message's box, and its lines as the words lay out.
+      const box = element.parentElement!.getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      const lines: DOMRect[] = [];
+      for (const rect of range.getClientRects()) {
+        if (rect.width === 0 || rect.height === 0) continue;
+        const line = lines.find((other) => Math.abs(other.top - rect.top) < 1);
+        if (line) continue;
+        lines.push(rect);
+      }
+      lines.sort((a, b) => a.top - b.top);
+      if (lines.length < 2) return null;
+      const [first, second] = lines;
+      const last = lines.at(-1)!;
+      return spot === "between its two lines"
+        ? { x: first.left + Math.min(first.width, second.width) / 2, y: (first.bottom + second.top) / 2, room: second.top - first.bottom }
+        : { x: (last.right + box.right) / 2, y: last.top + last.height / 2, room: box.right - last.right };
+    }, where);
+    expect(point, `the message wraps onto two lines (${where})`).not.toBeNull();
+    // A press there misses every word.
+    expect(point!.room, where).toBeGreaterThan(1);
+    const before = await page.evaluate(() => (window as ReviewWindow).__review.counters.view);
+    await page.mouse.click(point!.x, point!.y);
+    await expect.poll(() => page.evaluate(() => (window as ReviewWindow).__review.counters.view), where).toBe(before + 1);
+    await expect(toast).toHaveCount(0);
+  }
+  expect(errors).toEqual([]);
+});
+
 test("informational time pauses while a short viewport clips the notice", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 100 });
   const errors = await mount(page, "behavior");

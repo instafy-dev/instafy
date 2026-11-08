@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RunRecord } from "../../../../types";
-import { chatRunStopNeedsConfirmation, groupChatRunStopTargets, resolveChatRunStopTargets } from "../chatRunStopTargets";
+import { chatRunStopNeedsConfirmation, groupChatRunStopTargets, resolveChatRunStopTargets, runsCanceledByStop } from "../chatRunStopTargets";
 
 const JOB = "aaaaaaaa-0000-4000-8000-000000000001";
 const JOB_2 = "aaaaaaaa-0000-4000-8000-000000000002";
@@ -37,5 +37,12 @@ describe("chat run stop targets", () => {
     const targets = resolveChatRunStopTargets([run("r1", { jobId: JOB, userId: "viewer", details: { initiatingUserId: "viewer" } })], []);
     expect(targets[0].initiatingUserId).toBeNull();
     expect(chatRunStopNeedsConfirmation(targets, "viewer")).toBe(true);
+  });
+  it("reads canceled only the runs a committed Stop's answer names and the chat holds", () => {
+    const runs = { r1: run("r1", { jobId: JOB }), r2: run("r2", { jobId: JOB_2 }), r3: run("r3", null, "canceled") };
+    const stopped = runsCanceledByStop({ ok: true, canceledRunIds: ["r1", "r1", "r3", "unknown"] }, runs);
+    expect(stopped).toEqual([{ ...runs.r1, status: "canceled" }]);
+    expect(runsCanceledByStop({ ok: false, canceledRunIds: ["r1"] }, runs)).toEqual([]);
+    expect(runsCanceledByStop({ ok: true, canceledRunIds: ["r1"] }, null)).toEqual([]);
   });
 });

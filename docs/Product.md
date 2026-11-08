@@ -76,9 +76,12 @@ Escape stops the current set only when no dialog, menu, preview, or other interf
 Stopping a turn owned by someone else, or whose owner is unknown, asks for confirmation. Read-only
 viewers and historical/lingering previews have no Stop action.
 
-Stop targets the captured job IDs, never the whole conversation as a fallback. It immediately
-shows a pending indicator, then a disabled Stop icon until updated job state arrives; accessible
-labels distinguish **Stopping…** and **Stop requested**. Controller acceptance
+Stop targets the captured job IDs, never the whole conversation as a fallback. Its request goes
+out before the chat redraws for it, which then shows a pending indicator, then a disabled Stop icon
+until updated job state arrives; accessible labels distinguish **Stopping…** and **Stop requested**.
+The controller's answer, sent once the Stop is committed, is such state: the runs it names as
+canceled read canceled at once, so the turn's row says Stopped without waiting for their own
+records. Controller acceptance
 is not a physical executor shutdown acknowledgment; failures and timeouts remain visible with a
 retry for the same jobs. Separately queued messages are preserved and remain eligible for normal
 delivery; Stop does not pause the chat's queue. It suppresses the selected plan's follow-up when

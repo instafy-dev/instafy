@@ -5,6 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ControllerConversationStopResult } from "../../../../services/runtimeController/conversationStop";
 
 vi.mock("../../../../services/runtimeController/conversationStop", () => ({ stopConversationJobs: vi.fn() }));
+import { applyReplyDraft, clearReplyDrafts, conversationReplyDrafts } from "../../../../conversations/replyDrafts";
+import { RuntimeStateProvider, useRuntimeState } from "../../../../runtime/RuntimeStateProvider";
+import type { RunRecord } from "../../../../types";
 import { CHAT_RUN_STOP_TIMEOUT_MS, useChatRunStop, type ChatRunStopController, type ChatRunStopOptions, type ChatRunStopTarget } from "../useChatRunStop";
 
 const octo: ChatRunStopTarget = { jobId: "octo-1", runId: "r1", agentHandle: "octo", agentDisplayName: "Octo", initiatingUserId: "viewer" };
@@ -124,5 +127,58 @@ describe("useChatRunStop", () => {
     await act(async () => { document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); await vi.runAllTicks(); });
     expect(cancel).toHaveBeenLastCalledWith("chat", ["replacement"]);
     expect(cancel).toHaveBeenCalledTimes(2);
+  });
+
+  // A local test, Nov 7: the controller committed a Stop 42 ms after the
+  // press and answered, and the turn's row said "Stopped" 495 ms after that,
+  // once the run's own record arrived on its stream. The answer already names
+  // the runs it canceled: the chat's records say so as it lands.
+  describe("the chat's run records", () => {
+    let records: ReturnType<typeof useRuntimeState>;
+    function Records() { records = useRuntimeState(); return null; }
+    const run = (id: string, status: RunRecord["status"] = "in_progress"): RunRecord => ({
+      id, projectId: "space", sessionId: null, conversationId: "chat", promptId: null, runType: "prompt", status,
+      progress: 0, progressStage: null, previewUrl: null, lastMessage: null, metadata: { jobId: id === "r1" ? "octo-1" : "scribe-1" },
+      createdAt: "2026-11-07T21:38:08.686Z", updatedAt: "2026-11-07T21:38:39.000Z",
+    });
+    async function mount(next: Partial<ChatRunStopOptions> = {}) {
+      props = { ...props, ...next };
+      await act(async () => { root.render(<RuntimeStateProvider><Records /><Harness /></RuntimeStateProvider>); });
+      await act(async () => { records.upsertRun(run("r1")); records.upsertRun(run("r2")); });
+    }
+    afterEach(() => clearReplyDrafts());
+
+    it("say canceled, with no reply draft, for the runs the answer canceled, before their stream says so", async () => {
+      await mount({ targets: [octo, scribe] });
+      applyReplyDraft({ conversationId: "chat", jobId: "octo-1", runId: "r1", attempt: 1, segment: 0, seq: 1, text: "Added a one-line tip", startedAt: 1, updatedAt: 1 });
+      cancel.mockResolvedValue({ ok: true, canceledJobIds: ["octo-1"], canceledRunIds: ["r1"], alreadyFinishedJobIds: ["scribe-1"] });
+      await act(async () => controller!.requestStop());
+      expect(records.runs.r1?.status).toBe("canceled");
+      expect(conversationReplyDrafts("chat")).toEqual([]);
+      // A run the answer calls finished keeps its own record.
+      expect(records.runs.r2?.status).toBe("in_progress");
+      // The run's own record, when it comes, keeps it canceled; a late progress
+      // tick never brings it back.
+      await act(async () => { records.upsertRun({ ...run("r1"), updatedAt: "2026-11-07T21:38:41.000Z" }); });
+      expect(records.runs.r1?.status).toBe("canceled");
+    });
+
+    it.each([
+      ["refused", () => cancel.mockResolvedValue({ ok: false, canceledJobIds: ["octo-1"], canceledRunIds: ["r1"], alreadyFinishedJobIds: [] })],
+      ["failed", () => cancel.mockRejectedValue(new Error("Simulated connection failure."))],
+      ["already finished", () => cancel.mockResolvedValue({ ok: true, canceledJobIds: [], canceledRunIds: [], alreadyFinishedJobIds: ["octo-1"] })],
+    ])("never say canceled for a Stop the controller %s", async (_, answer) => {
+      await mount(); answer();
+      await act(async () => controller!.requestStop());
+      expect(records.runs.r1?.status).toBe("in_progress");
+    });
+
+    it("never say canceled for a Stop that has not answered yet", async () => {
+      cancel.mockReturnValue(new Promise(() => undefined)); await mount();
+      await act(async () => controller!.requestStop());
+      await act(async () => vi.advanceTimersByTimeAsync(CHAT_RUN_STOP_TIMEOUT_MS));
+      expect(controller!.phase).toBe("error");
+      expect(records.runs.r1?.status).toBe("in_progress");
+    });
   });
 });

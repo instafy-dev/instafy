@@ -128,11 +128,13 @@ function StatusToastItem({ toast, queue }: { toast: UNSTABLE_ToastQueue<StatusTo
                     <Xmark className="h-4 w-4" aria-hidden="true" />
                   </IconButton>}
                 >{content.actionOnPress && content.actionLabel && content.onAction ? (
-                  // Its words open what its action opens, for a pointer; the
-                  // action's button stays the control a keyboard reaches.
-                  <span className="cursor-pointer" data-testid="status-toast-message" onClick={handleAction}>
+                  // Its whole message box opens what its action opens, for a
+                  // pointer: a press between its lines, or beside its last
+                  // word, too, not only one on a word. The action's button
+                  // stays the control a keyboard reaches.
+                  <div className="cursor-pointer" data-testid="status-toast-message" onClick={handleAction}>
                     {content.message}
-                  </span>
+                  </div>
                 ) : content.message}</FeedbackNotice>
               </UNSTABLE_ToastContent>
             </UNSTABLE_Toast>;

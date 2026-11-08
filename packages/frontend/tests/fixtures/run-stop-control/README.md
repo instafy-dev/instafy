@@ -16,7 +16,10 @@ cancels a real run. Credential/provider modules, storage and the closed browser/
 with inert boundaries. This is component verification, not backend integration proof.
 
 Try the thinking, steps, command, two-agent, other-person, read-only, failure,
-timeout, already-finished and delayed-live-status cases. Restart resets the selected
+timeout, already-finished, delayed-live-status and long-chat cases. In the long
+chat every row takes a moment to redraw, and the page records when the Stop was
+pressed, when its request went out and when the chat had redrawn
+(`window.__stopTiming`). Restart resets the selected
 case; Simulate completion also exercises the hidden typing-status spacer. A successful
 stop shows the production attributed notice; Continue submits one synthetic instruction
 and starts a fresh job/run identity through the production continuation hook. Light/dark
