@@ -335,9 +335,14 @@ fn a_pages_card_comes_from_its_check_and_never_waits_for_one_that_fails() {
         ),
         "{team}"
     );
+    assert!(
+        flat(hub)
+            .contains("A failing check never holds the card back: it names the card's command."),
+        "{hub}"
+    );
     for skill in [hub, team] {
         assert!(
-            flat(skill).contains("A failing check never holds the card back."),
+            flat(skill).contains("A failing check never holds the card back"),
             "{skill}"
         );
         assert!(!skill.contains("before the card"), "{skill}");
