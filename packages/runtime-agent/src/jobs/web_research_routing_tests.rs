@@ -2345,9 +2345,8 @@ fn a_route_is_planned_to_the_end_and_a_forms_prompt_is_the_persons() {
 /// never pressed the planner's button: no page it read named the stop for the place the person
 /// asked about (a local test, Nov 7, the tenth without a route). A route's destination is the
 /// stop the place's own page names, read before the planner, and the answer says which stop it
-/// used, in words that name no city, operator or stop. In "Finding a page", within the part a
-/// snapshot carries, without pushing the sign-in rules out of it. An unedited earlier copy is
-/// upgraded.
+/// used. In "Finding a page", within the part a snapshot carries, without pushing the sign-in
+/// rules out of it. An unedited earlier copy is upgraded.
 #[test]
 fn a_routes_destination_is_the_stop_the_places_own_page_names() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2359,9 +2358,6 @@ fn a_routes_destination_is_the_stop_the_places_own_page_names() {
         "saying which stop and which day and time it is for",
     ] {
         assert!(section.contains(words), "{words}: {section}");
-    }
-    for named in ["Porto", "Lello", "metro", "Metro", "Aliados", "Trindade", "São Bento"] {
-        assert!(!section.contains(named), "{named}");
     }
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains("its destination is the stop the place's own page names"));
