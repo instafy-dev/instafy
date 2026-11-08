@@ -36,7 +36,8 @@
  *   Each value cites its page and day ("checked 17 Oct on maker.com ↗"), and no cell is blank: a source you read
  *   without finding the value on it is the fact without "v" ({"src", "url", "date"}): "Not found · checked 17 Oct on
  *   maker.com ↗"; any other missing value reads "Unknown", with {"note": "the store blocks price checks"} saying why.
- *   Never a dash. A value cites only a page that gives it: a count of what you found ("1 of 2 reviews found") cites a
+ *   A value of an item whose own page wasn't opened is {"note": "its own page wasn't opened"}: nobody looked for it, so
+ *   a phone names it under "Not checked", apart from what was looked for and not found. Never a dash. A value cites only a page that gives it: a count of what you found ("1 of 2 reviews found") cites a
  *   page it counts, and with none found it is {"note": "no review of this model read"}, citing no page.
  * When one page gives most of a column on one date, the cells show just the value and one line under the list cites
  * that page; so does a row whose own values come from one other page ("Option C (Support and Ride): checked 16 Oct on
@@ -148,7 +149,7 @@
   }
   function hasMore(item) { return !!(item.note || found(item) || (item.more && item.more.length) || (item.sources && item.sources.length)); }
   /** The site of the search result that alone names this row ("found"), or "". */
-  function found(item) { return typeof item.found === "string" ? item.found.trim().slice(0, 100) : ""; }
+  function found(item) { return typeof item.found === "string" ? site.clip(item.found) : ""; }
   /** On a page from what Octo knows, a fact's value ("" for none). */
   function remembered(f) { return memory ? site.valueText(f) : ""; }
   /** "1.3 kg, not checked": no source line, date or link. */
@@ -414,7 +415,7 @@
         var el = cell(item, c, shared, c === sortCol ? c.label : undefined);
         var looked = lookedFor(item, c);
         if (!looked && !isGap(item, c, el)) return el;
-        gaps.push({ label: String(c.label || c.key), note: gapNote(valueOf(item, c), c), page: looked });
+        gaps.push({ label: String(c.label || c.key), note: gapNote(valueOf(item, c), c), page: looked, unchecked: !looked && notOpened(valueOf(item, c)) });
         return null;
       });
       var top = sortCol ? drawn[cols.indexOf(sortCol)] : null;
@@ -459,24 +460,33 @@
     var rest = note.toLowerCase();
     var label = String(col.label || "").toLowerCase();
     if (label && rest.indexOf(label) === 0) rest = rest.slice(label.length).trim();
-    return !rest || /^(unknown|to confirm|((is|are|was|were) )?not (yet )?(checked|verified|found|known|listed|read)( yet)?)$/.test(rest) ? "" : note.slice(0, 100);
+    return !rest || /^(unknown|to confirm|((is|are|was|were) )?not (yet )?(checked|verified|found|known|listed|read)( yet)?)$/.test(rest) ? "" : site.clip(note);
+  }
+  /** A value nobody looked for: the note an item whose own page wasn't opened gives each value it lacks. */
+  function notOpened(f) {
+    var note = String((f && f.note) || "").replace(/\s+/g, " ").trim();
+    return !site.shown(f) && /^its own page (wasn['\u2019]t|was not) opened\.?$/i.test(note);
   }
   /** "Not found yet: Weight, Price, Reviews"; values missing for one reason share it, and values looked for on one page
    * share that page: "Not found yet: Price and Battery (maker.example did not answer), Weight (checked 17 Oct on
-   * maker.com ↗), Suction". On a page from what Octo knows nothing was looked for: "Not known: Price". */
+   * maker.com ↗), Suction". Values nobody looked for, an item's whose own page wasn't opened, are named apart: "Not
+   * checked: Price, Reviews". On a page from what Octo knows nothing was looked for: "Not known: Price". */
   function notFound(gaps) {
     var parts = [];
+    var unchecked = memory ? [] : gaps.filter(function (g) { return g.unchecked; });
     gaps.forEach(function (g) {
+      if (unchecked.indexOf(g) >= 0) return;
       var key = g.page || g.note ? (g.page ? citeKey(g.page) : "") + "|" + g.note : "";
       var same = key ? parts.filter(function (p) { return p.key === key; })[0] : null;
       if (same) same.labels.push(g.label); else parts.push({ key: key, note: g.note, page: g.page, labels: [g.label] });
     });
-    var out = [memory ? "Not known: " : "Not found yet: "];
+    var out = parts.length ? [memory ? "Not known: " : "Not found yet: "] : [];
     parts.forEach(function (p, i) {
       out.push((i ? ", " : "") + and(p.labels));
       if (p.page) out.push(" (" + (p.note ? p.note + " · " : ""), site.cite(p.page), ")");
       else if (p.note) out.push(" (" + p.note + ")");
     });
+    if (unchecked.length) out.push((parts.length ? "; not checked: " : "Not checked: ") + and(unchecked.map(function (g) { return g.label; })));
     return out;
   }
 })();

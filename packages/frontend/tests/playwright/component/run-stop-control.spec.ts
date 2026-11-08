@@ -51,6 +51,22 @@ for (const scenario of ["thinking", "rail", "command"]) {
   });
 }
 
+// A local test, Nov 7: the Stop's request reached the controller 37 and 93 ms
+// after the press, once the chat had redrawn itself for "Stopping…".
+test("a Stop's request goes out before a long chat redraws for it", async ({ page }) => {
+  const errors = await openFixture(page, "long");
+  await page.getByTestId("chat-run-stop-button").click();
+  type Timing = { pressedAt?: number; sentAt?: number; drawnAt?: number };
+  const timing = () => page.evaluate(() => ({ ...(window as Window & { __stopTiming?: Timing }).__stopTiming }));
+  await expect.poll(async () => (await timing()).drawnAt !== undefined && (await timing()).sentAt !== undefined).toBe(true);
+  const { pressedAt, sentAt, drawnAt } = await timing();
+  // The chat's redraw is long, and the request did not wait for it.
+  expect(drawnAt! - pressedAt!).toBeGreaterThan(100);
+  expect(sentAt!).toBeLessThan(drawnAt!);
+  await expectRequestCount(page, 1);
+  expect(errors).toEqual([]);
+});
+
 test("drafts keep their text and Send action while Stop remains a separate composer control", async ({ page }) => {
   const errors = await openFixture(page, "rail");
   const editor = page.getByRole("textbox", { name: "Ask Octo" });

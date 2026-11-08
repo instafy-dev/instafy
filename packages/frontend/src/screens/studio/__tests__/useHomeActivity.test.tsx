@@ -66,6 +66,27 @@ describe("useHomeActivity", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
+  // A local test, Nov 6: a run stopped between a message's two parts, then
+  // 49 rows of the space's later turns came before Home was opened. Home read
+  // 48 rows first, so the Stop's row, the chat's newest, never reached it, and
+  // Home listed that chat with no "Stopped".
+  it("reaches a chat's Stop that 49 later rows came after in its first page", async () => {
+    const stopped = item("150", { kind: "run.stopped", conversation: { id: "warranty-chat", title: "Compare", visibility: null, threadKind: null }, run: { id: "run-stopped", status: "canceled", promptId: null } });
+    const ledger = [
+      ...Array.from({ length: 49 }, (_, index) => item(String(199 - index), { conversation: { id: `later-${index % 6}`, title: "Later", visibility: null, threadKind: null } })),
+      stopped,
+      ...Array.from({ length: 30 }, (_, index) => item(String(149 - index), { conversation: { id: "warranty-chat", title: "Compare", visibility: null, threadKind: null } })),
+    ];
+    list.mockImplementation(async ({ before, limit }: { before?: string; limit: number }) => {
+      const rows = ledger.filter((entry) => before === undefined || Number(entry.id) < Number(before)).slice(0, limit);
+      const more = ledger.length > ledger.indexOf(rows.at(-1)!) + 1;
+      return { success: true, items: rows, hasMore: more, nextBefore: more ? rows.at(-1)!.id : null };
+    });
+    await render();
+    expect(current.activityPages).toBe(1);
+    expect(current.activityItems.find((entry) => entry.conversation?.id === "warranty-chat")?.kind).toBe("run.stopped");
+  });
+
   it("keeps older history reachable even when loaded rows belong to another team", async () => {
     list.mockResolvedValueOnce(page(["12", "11"], { hasMore: true, nextBefore: "11" }));
     list.mockResolvedValueOnce(page(["10"], { items: [item("10", { org: { id: "other-team", name: "Other" } })] }));
@@ -83,7 +104,7 @@ describe("useHomeActivity", () => {
     list.mockResolvedValueOnce(page(["18"], { hasMore: true, nextBefore: "18" }));
     list.mockResolvedValueOnce(page(["16"]));
     await render("user-a", true, 3);
-    expect(list.mock.calls.map(([params]) => params)).toEqual([{ limit: 4 }, { before: "20", limit: 2 }, { before: "18", limit: 2 }]);
+    expect(list.mock.calls.map(([params]) => params)).toEqual([{ limit: 200 }, { before: "20", limit: 2 }, { before: "18", limit: 2 }]);
     expect(current.activityPages).toBe(3);
     expect(current.activityItems.map(entry => entry.id)).toEqual(["20", "18", "16"]);
     list.mockResolvedValueOnce(page(["9"]));
@@ -196,7 +217,7 @@ describe("useHomeActivity", () => {
     expect(current.activityLoading).toBe(false);
     expect(current.activityError).toBe("Network interrupted");
     await act(async () => { expect(await current.retryActivity()).toBe(true); });
-    expect(list).toHaveBeenLastCalledWith({ limit: 4 });
+    expect(list).toHaveBeenLastCalledWith({ limit: 200 });
     expect(current.activityHasMore).toBe(true);
     expect(current.serverLastSeenEventId).toBe("4");
     expect(current.activityError).toBeNull();
@@ -309,7 +330,7 @@ describe("useHomeActivity", () => {
     expect(current.activityError).toBe("Refresh interrupted");
     await act(async () => { expect(await current.retryActivity()).toBe(true); });
     expect(list.mock.calls.map(([params]) => params)).toEqual([
-      { limit: 4 }, { before: "11", limit: 2 },
+      { limit: 200 }, { before: "11", limit: 2 },
       { since: "12", limit: 200 }, { since: "12", limit: 200 },
     ]);
     expect(current.activityItems.map((entry) => entry.id)).toEqual(["13", "12", "11", "10"]);

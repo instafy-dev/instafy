@@ -136,7 +136,7 @@ describe("TeamPanel authorized work and navigation", () => {
     expect(button("Work 6", section("People"))).toBeDefined();
     expect(section("Team spaces").textContent).not.toContain("Space B");
     expect(section("Team spaces").textContent).not.toContain("Personal space");
-    expect(mocks.activity).toHaveBeenCalledExactlyOnceWith({ limit: 100 });
+    expect(mocks.activity).toHaveBeenCalledExactlyOnceWith({ limit: 200 });
     expect(mocks.markSeen).not.toHaveBeenCalled();
   });
 

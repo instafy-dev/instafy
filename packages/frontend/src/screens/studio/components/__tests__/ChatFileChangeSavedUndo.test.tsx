@@ -77,9 +77,11 @@ import { ChatLaterChangesContext, conversationLaterChanges } from "../chatLaterC
 import { ChatSiteContext } from "../chatSiteContext";
 import type { ChatMessage, ChatMessageFileChange } from "../../types";
 
-const APP = "sites/livraria-lello/app.js";
+// Files outside a page's folder, so each shows its own chip in a chat with no
+// card (a page's files read as the page: ChatFileChangeSite.test.tsx).
+const APP = "livraria-lello/app.js";
 // A secret file the turn's save left out: no saved version holds it.
-const SECRET = "sites/livraria-lello/.env.local";
+const SECRET = "livraria-lello/.env.local";
 const BASE = "a".repeat(40);
 // The version the turn's save published.
 const HEAD = "b".repeat(40);

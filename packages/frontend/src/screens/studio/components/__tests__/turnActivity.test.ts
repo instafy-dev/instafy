@@ -439,6 +439,29 @@ describe("summarizeTurnActivity", () => {
       const running = summarize([command(stepOf(before(CITE, 2), entryOf(ADD_POINT)), { status: "in_progress" })], "running");
       expect(running.live).toBe("Reading a source…");
     });
+
+    // A page's build ran `instafy web read a …;` and then `instafy web read
+    // b …; instafy web read c …`. A web read that read nothing exits 2, and
+    // the step's exit status is only its last read's, so whether the read
+    // before it read its page is not known: the step read pages, with no
+    // number, as two cites do, never "Read 2 pages" over a page nobody read.
+    it("never counts the pages of a web read whose own result is not known (`a; b`)", () => {
+      const read = (count: number) => ({ ...WEB_READ, count });
+      const chained = stepOf(before(read(1)), entryOf(read(1)));
+      const edit = step(
+        "file_change",
+        { v: 1, key: "builtin/edit", role: "content", live: "Editing files", done: { one: "edited a file", other: "edited {n} files", some: "edited files" }, count: 1, also: [] },
+        { paths: ["sites/visit/app.js", "sites/visit/index.html"] },
+      );
+      const page = summarize([command(read(1)), command(chained), edit]);
+      expect(rows(page).slice(0, 2)).toEqual([["done", "Read a page"], ["done", "Read pages"]]);
+      expect(page.summary).toBe("Edited 2 files, read pages");
+      // Reads the step's result is about count their pages: one read of
+      // three addresses, as the runtime counts `a && b c` too.
+      expect(summarize([command(read(1)), command(read(3)), edit]).summary).toBe("Edited 2 files, read 4 pages");
+      // A step whose last read failed counts none of them.
+      expect(summarize([command(chained, { exitCode: 2 })]).summary).toBe("Tried reading pages");
+    });
   });
 
   // A local test: a map turn read "Opened a preview, planned the days,

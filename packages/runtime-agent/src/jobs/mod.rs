@@ -95,6 +95,7 @@ mod skill_routing;
 #[cfg(test)]
 mod skill_routing_eval_tests;
 mod skills;
+pub(crate) mod space_pages;
 pub(crate) mod stopped_turn;
 mod turn_baseline;
 mod turn_continuation;
@@ -4164,11 +4165,15 @@ const WORKSPACE_IS_CURRENT_RULE: &str = "\
 
 /// Whose page a turn changes. In a new chat, "Make a simple comparison page of … from what you
 /// already know" found another chat's researched comparison, read it and wrote its own over it,
-/// so that chat's page and card showed the new one. A page made for the person stays the page of
-/// the chat that made it, as the interactive artifacts skill also says; the person's own app or
-/// site is changed as asked, from any chat. Every turn that may write files reads this, whatever
-/// skill it reads and whichever form its answer takes.
-const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A follow-up changes the page this chat made; a page made for the person in another chat (a map, a comparison, a page to share) changes only when the person names it, else start a new folder.\n";
+/// so that chat's page and card showed the new one, twice: the rule it read left it to judge
+/// whether the person named that page, and nothing told it which chat made the folder. Every turn
+/// that may write files reads this, whatever skill it reads and whichever form its answer takes,
+/// with the space's pages after it, each made in this chat or in another
+/// ([`space_pages::space_pages_lines`]): a fact in place of the judgement. It is said here only.
+/// It speaks of a page made for the person (a map, a comparison, a page to share), and the list
+/// holds only those: the person's own app or site, from the workspace or a folder of it (an
+/// imported repository), is changed as asked from any chat ("Make the buttons rounder.").
+const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A request for a new page starts a new folder, even on the same subject. A page made for the person in another chat (a map, a comparison, a page to share) changes only when the person points at that page (\"the laptop comparison\", \"that page\").\n";
 
 /// True when a person in this conversation opened a skill setup with
 /// `/skills import ... --start` or `/skills start <name>` and the setup began.
@@ -10533,6 +10538,22 @@ impl JobProcessor {
         let runtime_expectations = runtime_job_expectations(&job.payload);
         // A browser turn's only tools are its browser's: what it is told is what it can use.
         let browser_turn = is_browser_turn(job);
+        // Whose page a turn that may write files changes: the rule, then the space's pages, each
+        // made in this chat or in another. A browser turn or a read-only one never reads the
+        // space's record of its pages.
+        let page_rule = [
+            PAGE_OF_ITS_OWN_CHAT_RULE,
+            &if browser_turn || metadata_requests_read_only_workspace(job.payload.get("metadata")) {
+                String::new()
+            } else {
+                space_pages::space_pages_lines(
+                    workspace_dir,
+                    job.conversation_id.as_ref(),
+                    &space_pages::installed_page_commands(),
+                )
+            },
+        ]
+        .concat();
         let cross_chat_context_lookup = !lead_continuation_checkpoint
             && !multi_agent_worker
             && !multi_agent_planning_turn
@@ -11077,7 +11098,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 &[
                     "\nDirect workspace-change invariants:\n\
                 - Use workspace-relative paths only. Never write outside the active workspace.\n",
-                    PAGE_OF_ITS_OWN_CHAT_RULE,
+                    page_rule.as_str(),
                     "- Do not create submodules or gitlinks unless the user explicitly asked for one.\n\
                 - Imported or nested repositories are ordinary directories unless the user explicitly asks to preserve nested Git metadata.\n\
                 - Keep the final summary short: what changed and important caveats.\n",
@@ -11160,7 +11181,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                         if metadata_requests_read_only_workspace(job.payload.get("metadata")) {
                             ""
                         } else {
-                            PAGE_OF_ITS_OWN_CHAT_RULE
+                            page_rule.as_str()
                         },
                         "- Compact agent context cards are soft hints/cache for prior context, current work focus, and coordination direction. Use the relevant cards included in this prompt when present; otherwise query them with `instafy agents context list --json --query \"<topic>\"` when the latest request asks for prior project, coordination, audit, host, or hardware context.\n\
                 - Agent-to-agent conversations are first-class conversations. For unknown-focus follow-ups, lookup first, answer directly when evidence is sufficient, ask one clear prior thread when durable context matters, and do not poll all agents to discover soft focus.\n\
@@ -11385,7 +11406,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             if metadata_requests_read_only_workspace(job.payload.get("metadata")) {
                 ""
             } else {
-                PAGE_OF_ITS_OWN_CHAT_RULE
+                page_rule.as_str()
             },
             "- If the user asks you to create/edit/delete files, you MUST actually perform the filesystem changes in the workspace (prefer the `apply_patch` tool). Do not claim a file was changed unless it truly exists in the workspace.\n\
             - If you cannot apply file changes via tools, you MUST include the full post-change contents inline in the JSON `files` array using either `content` (UTF-8 text) or `contentBase64` (base64-encoded bytes). The runtime will write the files for you; this does not require `exec_command` or `shell`. Do not treat missing command tools as a blocker for file-only create/edit/delete requests when you can return inline `files[]` content.\n\

@@ -1,4 +1,5 @@
 import { getBuiltInAssistantDisplayName } from "../../../assistants/localBuiltInAssistantCatalog";
+import type { ControllerConversationStopResult } from "../../../services/runtimeController/conversationStop";
 import type { RunRecord } from "../../../types";
 import type { ChatMessage } from "../types";
 import { extractAgentIdentityFromMetadata } from "./chatAssistantIdentity";
@@ -56,4 +57,22 @@ export function groupChatRunStopTargets(targets: readonly ChatRunStopTarget[]) {
 
 export function chatRunStopNeedsConfirmation(targets: readonly ChatRunStopTarget[], viewerUserId: string | null): boolean {
   return !viewerUserId || targets.some((target) => !target.initiatingUserId || target.initiatingUserId !== viewerUserId);
+}
+
+/**
+ * The records of the runs a Stop's answer says the controller canceled, now
+ * canceled. The answer comes once the Stop is committed, as the same record
+ * on the run's stream does, so the turn's row can say "Stopped" when the
+ * answer lands. Never a run the answer calls finished, a run it does not
+ * name, or one the chat holds no record of (its stream brings that).
+ */
+export function runsCanceledByStop(
+  result: Pick<ControllerConversationStopResult, "ok" | "canceledRunIds">,
+  runs: Readonly<Record<string, RunRecord>> | null | undefined,
+): RunRecord[] {
+  if (!result.ok) return [];
+  return [...new Set(result.canceledRunIds)].flatMap((runId) => {
+    const run = runs?.[runId];
+    return run && run.status !== "canceled" ? [{ ...run, status: "canceled" as const }] : [];
+  });
 }
