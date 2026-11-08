@@ -9,7 +9,7 @@ use serde_json::{Map as JsonMap, Value, json};
 use uuid::Uuid;
 
 use crate::auth::{Credentials, response_indicates_chatgpt_token_expired};
-use crate::context_controls::{ScopedResponseContext, share_opening_items};
+use crate::context_controls::ScopedResponseContext;
 use crate::model_transport::{ModelTransportConfig, ResponseBodyLimit};
 use crate::upstream_error::{self, ToolControlRejection, UpstreamFailure};
 use crate::usage::apply_chat_to_responses_usage;
@@ -86,9 +86,6 @@ pub struct CodexClient {
     send_hook: Option<SendHook>,
     user_agent: String,
     context_controls: Option<ScopedResponseContext>,
-    /// Whether upstream refused the opening items of a request that shares its start as every
-    /// thread that shares it sends them, so they went again as they came.
-    shared_opening_refused: bool,
     /// Whether the request in flight asks the upstream for a stream it passes on as it arrives.
     stream_upstream: bool,
     usage_diagnostics: Option<UsageDiagnostics>,
@@ -224,7 +221,6 @@ impl CodexClient {
             send_hook: None,
             user_agent: format!("openai-proxy-server/{}", env!("CARGO_PKG_VERSION")),
             context_controls: None,
-            shared_opening_refused: false,
             stream_upstream: false,
             usage_diagnostics: None,
         })
@@ -302,17 +298,6 @@ impl CodexClient {
     /// set, so it sent the request again without it.
     pub(crate) fn required_tool_call_refused(&self) -> bool {
         self.required_tool_call_refused
-    }
-
-    /// Whether a request's opening items go upstream without what names its thread
-    /// ([`share_opening_items`]): the request carries the cache key of a start many threads
-    /// share, and upstream has not refused them so.
-    fn shares_opening_items(&self) -> bool {
-        !self.shared_opening_refused
-            && self
-                .context_controls
-                .as_ref()
-                .is_some_and(ScopedResponseContext::shares_start)
     }
 
     /// Runs `filter` over the tools of every request this client sends, after
@@ -513,39 +498,20 @@ impl CodexClient {
                 } else {
                     None
                 };
-                let fallback = if let Some(rejection) = rejection {
-                    let (fallback, _) = self.upstream_payload(
-                        input_items,
-                        conversation_id_for_request.as_deref(),
-                        upstream_wire_api,
-                        false,
-                    )?;
-                    self.required_tool_call = false;
-                    self.required_tool_call_refused = true;
-                    if let Some(hook) = self.required_tool_call_fallback.take() {
-                        hook(&rejection);
-                    }
-                    fallback
-                } else if self.shares_opening_items() && upstream_error::bad_request(&error) {
-                    // Opening items as every thread that shares this start sends them are new
-                    // to an upstream; one that refuses them gets them as they came, once.
-                    self.shared_opening_refused = true;
-                    let (as_sent, _) = self.upstream_payload(
-                        input_items,
-                        conversation_id_for_request.as_deref(),
-                        upstream_wire_api,
-                        self.required_tool_call,
-                    )?;
-                    if as_sent == payload {
-                        return Err(error);
-                    }
-                    eprintln!(
-                        "[proxy] upstream refused a shared start's opening items; they went again as they came"
-                    );
-                    as_sent
-                } else {
+                let Some(rejection) = rejection else {
                     return Err(error);
                 };
+                let (fallback, _) = self.upstream_payload(
+                    input_items,
+                    conversation_id_for_request.as_deref(),
+                    upstream_wire_api,
+                    false,
+                )?;
+                self.required_tool_call = false;
+                self.required_tool_call_refused = true;
+                if let Some(hook) = self.required_tool_call_fallback.take() {
+                    hook(&rejection);
+                }
                 debug_http_request(self.credentials.endpoint(), &headers, &fallback);
                 // A second failure goes back as any failure does.
                 self.send_upstream_request_with_retry(request_url.as_str(), &headers, &fallback)
@@ -711,11 +677,6 @@ impl CodexClient {
         if upstream_wire_api == UpstreamWireApi::Responses {
             if let Some(controls) = &self.context_controls {
                 controls.apply_payload(&mut payload, self.credentials.is_chatgpt());
-            }
-            if self.shares_opening_items()
-                && let Some(input) = payload.get_mut("input")
-            {
-                share_opening_items(input);
             }
         }
         if let Some(filter) = self.tool_filter.as_deref() {

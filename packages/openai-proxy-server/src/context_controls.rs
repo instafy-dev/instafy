@@ -315,34 +315,46 @@ fn fingerprint(value: &Value) -> String {
         .collect()
 }
 
-/// Takes out of the items that open `input` (every item ahead of the first one the model wrote
-/// or a tool returned) what names the thread that sent them: an item's own `id`, and the
-/// `turn_id` and `create_time` of its turn. Codex gives every item of a thread these, so two
-/// threads whose requests open with the same text still differ from their first item with an
-/// id on; without them, two threads that share a start send the same items up to where their
-/// prompts differ. Nothing later in such a request names them: a tool call and its output name
-/// each other by `call_id`. Returns whether it took any out.
-pub(crate) fn share_opening_items(input: &mut Value) -> bool {
+/// Makes the items that open `input` (every item ahead of the first one the model wrote or a
+/// tool returned) the same in every thread under `key`, the scoped key of a start many threads
+/// share. Codex gives every item of a thread its own `id`, and every message the `turn_id` and
+/// `create_time` of its turn, so two threads whose requests open with the same text still
+/// differ from their first item with an id on. A message goes without the three: the proxy's
+/// own first message has none of them, and Codex sends a standard model its base instructions
+/// without a turn or a time. The tool list keeps an id of the form Codex always gives it, `at_`
+/// and a UUID, made from `key` and what the list holds where Codex uses its thread. What each
+/// item holds, and what its passthrough says it is and where it came from, go as they came.
+/// Nothing later in such a request names what changed: a tool call and its output name each
+/// other by `call_id`.
+fn share_opening_items(input: &mut Value, key: &str) {
     let Some(items) = input.as_array_mut() else {
-        return false;
+        return;
     };
-    let mut taken = false;
-    for item in items.iter_mut().take_while(|item| opens_request(item)) {
+    for (index, item) in items
+        .iter_mut()
+        .enumerate()
+        .take_while(|(_, item)| opens_request(item))
+    {
         let Some(item) = item.as_object_mut() else {
             continue;
         };
-        taken |= item.remove("id").is_some();
+        if item.get("type").and_then(Value::as_str) == Some("additional_tools") {
+            if item.remove("id").is_some() {
+                let id = format!("at_{}", scoped_uuid(&json!([key, index, item])));
+                item.insert("id".to_owned(), json!(id));
+            }
+            continue;
+        }
+        item.remove("id");
         let Some(Value::Object(metadata)) = item.get_mut(ITEM_METADATA) else {
             continue;
         };
-        for field in ["turn_id", "create_time"] {
-            taken |= metadata.remove(field).is_some();
-        }
+        metadata.remove("turn_id");
+        metadata.remove("create_time");
         if metadata.is_empty() {
             item.remove(ITEM_METADATA);
         }
     }
-    taken
 }
 
 /// Whether `item` is part of what a request opens with, ahead of anything the model wrote or a
@@ -377,12 +389,6 @@ impl ScopedResponseContext {
             .scoped(self.claims.as_ref(), credentials, model, &self.codec)
     }
 
-    /// Whether the request opens as every thread that shares its start does, so its opening
-    /// items can go upstream as those threads send them ([`share_opening_items`]).
-    pub(crate) fn shares_start(&self) -> bool {
-        self.controls.shares_start()
-    }
-
     pub(crate) fn apply_payload(&self, payload: &mut Value, subscription: bool) {
         if let Some(key) = self.cache_key.as_ref() {
             payload["prompt_cache_key"] = json!(key);
@@ -405,6 +411,12 @@ impl ScopedResponseContext {
         }
         if self.controls.encrypted_reasoning {
             payload["include"] = json!(["reasoning.encrypted_content"]);
+        }
+        if self.controls.shares_start()
+            && let Some(key) = self.cache_key.as_deref()
+            && let Some(input) = payload.get_mut("input")
+        {
+            share_opening_items(input, key);
         }
     }
 
@@ -851,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_shared_starts_key_shares_the_opening_items_and_only_theirs_go_without_a_thread() {
+    fn only_a_shared_starts_key_sends_its_opening_items_alike_from_every_thread() {
         let shares = |key: &str| {
             ResponseContext::parse(&json!({"prompt_cache_key": key}), &HeaderMap::new())
                 .unwrap()
@@ -867,24 +879,34 @@ mod tests {
                 .shares_start()
         );
 
-        let mut input = json!([
-            {"type":"additional_tools","id":"at_1","role":"developer","tools":[]},
-            {"type":"message","id":"msg_2","role":"user","content":[],
-             "internal_chat_message_metadata_passthrough":{"turn_id":"t","create_time":1.5,"content_item_kinds":["user.text"]}},
-            {"type":"message","id":"msg_3","role":"user","content":[],
-             "internal_chat_message_metadata_passthrough":{"turn_id":"t","create_time":2.5}},
-            {"type":"reasoning","id":"rs_4","summary":[],
-             "internal_chat_message_metadata_passthrough":{"turn_id":"t"}},
-            {"type":"message","id":"msg_5","role":"user","content":[],
-             "internal_chat_message_metadata_passthrough":{"turn_id":"t","create_time":3.5}}
-        ]);
-        let later = input.as_array().unwrap()[3..].to_vec();
-        assert!(share_opening_items(&mut input));
+        // Two threads' requests that open alike but for what names each thread.
+        let opening = |thread: &str| {
+            json!([
+                {"type":"additional_tools","id":format!("at_{thread}1"),"role":"developer","tools":[]},
+                {"type":"message","id":format!("msg_{thread}2"),"role":"user","content":[],
+                 "internal_chat_message_metadata_passthrough":{"turn_id":thread,"create_time":1.5,"content_item_kinds":["user.text"]}},
+                {"type":"message","id":format!("msg_{thread}3"),"role":"user","content":[],
+                 "internal_chat_message_metadata_passthrough":{"turn_id":thread,"create_time":2.5}},
+                {"type":"reasoning","id":format!("rs_{thread}4"),"summary":[],
+                 "internal_chat_message_metadata_passthrough":{"turn_id":thread}},
+                {"type":"message","id":format!("msg_{thread}5"),"role":"user","content":[],
+                 "internal_chat_message_metadata_passthrough":{"turn_id":thread,"create_time":3.5}}
+            ])
+        };
+        let shared = |thread: &str, key: &str| {
+            let mut input = opening(thread);
+            share_opening_items(&mut input, key);
+            input
+        };
+        let input = shared("a", "space-key");
         let items = input.as_array().unwrap();
+        let tools_id = items[0]["id"].as_str().unwrap();
+        assert!(tools_id.starts_with("at_") && Uuid::parse_str(&tools_id[3..]).is_ok());
         assert_eq!(
             items[..3],
             [
-                json!({"type":"additional_tools","role":"developer","tools":[]}),
+                // The tool list keeps an id of Codex's form, made from the key and the list.
+                json!({"type":"additional_tools","id":tools_id,"role":"developer","tools":[]}),
                 // What an item holds keeps its kind; a passthrough left empty goes, as Codex
                 // leaves it off when it has nothing to say.
                 json!({"type":"message","role":"user","content":[],
@@ -893,7 +915,20 @@ mod tests {
             ]
         );
         // From the first item the model wrote on, nothing changes, a later message included.
-        assert_eq!(items[3..], later[..]);
-        assert!(!share_opening_items(&mut input));
+        assert_eq!(items[3..], opening("a").as_array().unwrap()[3..]);
+        // Another thread under the same key opens byte for byte alike; under another key, its
+        // tool list's id differs, so each space's starts stay apart.
+        let other = shared("b", "space-key");
+        let other = other.as_array().unwrap();
+        assert_eq!(items[..3], other[..3]);
+        assert_ne!(items[3..], other[3..]);
+        assert_ne!(shared("a", "other-space-key")[0]["id"], input[0]["id"]);
+        // A tool list Codex sent without an id goes without one.
+        let mut bare = json!([{"type":"additional_tools","role":"developer","tools":[]}]);
+        share_opening_items(&mut bare, "space-key");
+        assert_eq!(
+            bare,
+            json!([{"type":"additional_tools","role":"developer","tools":[]}])
+        );
     }
 }
