@@ -27,6 +27,7 @@ import { useChatRunStopContinuation } from "../useChatRunStopContinuation";
 import { browserHandBackRetry } from "../useBrowserHandBack";
 import type { SubmitMessageFn } from "../useChatSubmitFlow";
 import { collapseLifecycleMessages, shouldDisplayChatMessage, synthesizeAgentJobThreadMessages } from "../chatMessagePresentation";
+import { formatConversationTranscript } from "../chatTranscriptCopy";
 import { ConversationMessageRows } from "../ConversationMessageRows";
 import { routedBrowserWaitingKeys } from "../routedBrowserFold";
 import { resolveJobThreadTypingCoverage, resolveTranscriptTailKey } from "../typingIndicatorState";
@@ -758,6 +759,49 @@ describe("a message Octo answers in its browser and then builds from what it fou
       const done = await seen(chat, at("17:56:53.544"));
       expect(done).toMatchObject({ octoRows: 1, typingRow: false, stopRows: 0 });
       expect(done.lines.some((line) => line.startsWith("Stopped"))).toBe(false);
+    });
+
+    // On its way, the build reads as starting, also while this page doesn't
+    // know its run yet. Its run gone quiet as this page knows it (queued over
+    // five minutes, or at work with no word for half an hour) still reads so.
+    it("still reads gone quiet once the run it waits on has", async () => {
+      const known = at("17:56:42.684");
+      const chat = chatOf(rows).filter((message) => message.timestamp <= known);
+      const run = runsAt(chatOf(rows), known).find((candidate) => candidate.id === again.runId)!;
+      const views: Record<string, string[]> = {};
+      for (const [status, minutes] of [["queued", 4], ["queued", 6], ["in_progress", 29], ["in_progress", 31]] as const) {
+        await act(async () => root.unmount());
+        root = createRoot(container);
+        mocks.activeConversation = { controllerId: CONVERSATION, messages: chat };
+        const since = new Date(known).toISOString();
+        const view = await show(chat, known + minutes * 60_000, [], { runs: [{ ...run, status, createdAt: since, updatedAt: since }] },
+          { submit: vi.fn<SubmitMessageFn>().mockResolvedValue(true) });
+        expect(view).toMatchObject({ octoRows: 1, typingRow: false });
+        views[`${status} ${minutes} min`] = view.lines;
+      }
+      expect(views).toEqual({
+        "queued 4 min": ["Starting…"],
+        "queued 6 min": ["Status unavailable"],
+        "in_progress 29 min": ["Starting…"],
+        "in_progress 31 min": ["Status unavailable"],
+      });
+    });
+
+    // Copy conversation says what the chat reads: "Stopped" while the turn is
+    // stopped, and only its reply once Continue's build answered. It added the
+    // Stop after that reply, as if the build had been stopped.
+    it("copies as it reads: stopped until Continue, then the reply alone", () => {
+      const copied = (chat: ChatMessage[], now: number) => {
+        const collapsed = collapseLifecycleMessages(chat.filter((message) => message.timestamp <= now));
+        return formatConversationTranscript(synthesizeAgentJobThreadMessages(collapsed, collapsed.filter(shouldDisplayChatMessage)));
+      };
+      for (const chat of [chatOf(rows), withStepBeforeTheStop()]) {
+        expect(copied(chat, PRESSED_AT)).toMatch(/\n\nAssistant: Stopped this run\.$/);
+        const done = copied(chat, at("17:56:53.544"));
+        expect(done).not.toContain("Stopped this run.");
+        expect(done).toMatch(/^User: Add each laptop's warranty from its own page\.\n\nAssistant: Framework’s Laptop 12/);
+        expect(done).toMatch(/still missing\.$/);
+      }
     });
   });
 

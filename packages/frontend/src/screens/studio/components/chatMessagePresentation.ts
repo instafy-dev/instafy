@@ -766,6 +766,23 @@ export function readRowStopNotice(message: Pick<ChatMessage, "metadata">): ChatM
 }
 
 /**
+ * Whether a row went on from the Stop it holds: Continue sent the stopped
+ * build again, and that build (on its way, or at work) is the row's turn now,
+ * which the Stop doesn't name. The row reads that build, not "Stopped".
+ */
+export function rowWentOnFromStop(message: ChatMessage): boolean {
+  const notice = readRowStopNotice(message);
+  if (!notice) return false;
+  const stopped = readChatRunStopNotice(notice);
+  const pending = readPendingHandBack(message);
+  const retry = readPendingRetry(message);
+  const runIds = pending ? [pending.runId] : [readHandBackRunId(message), retry?.runId];
+  const jobIds = pending ? [] : [extractAgentJobId(message), retry?.jobId];
+  return !runIds.some((runId) => runId && stopped.runIds.includes(runId)) &&
+    !jobIds.some((jobId) => jobId && stopped.jobIds.includes(jobId));
+}
+
+/**
  * Metadata on a turn's row (`agent_job_thread`) that shows more than one turn:
  * a browser turn and the hand-back that went on from it, oldest first. The
  * row's `jobId` is the newest of them.

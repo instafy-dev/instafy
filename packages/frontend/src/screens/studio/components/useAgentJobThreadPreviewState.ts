@@ -41,6 +41,7 @@ import {
   hasFailedRunMetadata,
   resolveRunFailurePresentation,
 } from "../../../conversations/runFailurePresentation";
+import { isInProgressRunStale, isQueuedRunStale } from "../../../conversations/runLiveness";
 import { readTurnReplyDraft } from "../../../conversations/replyDrafts";
 
 const CHAT_SPINE_GUTTER_PX = 26;
@@ -407,11 +408,12 @@ export function useAgentJobThreadPreviewState({
     const pendingRunIds = owningConversation?.pendingRunIds ?? [];
     const pendingRunSubmittedAt = owningConversation?.pendingRunSubmittedAt ?? {};
     // A hand-back on its way is the row's turn at work until it shows
-    // something or ends (its run's failure or Stop ends it): never a turn gone
-    // quiet. Read by its run, it read "Status unavailable" for a build
-    // Continue sent again, until this page knew that run.
+    // something or ends (its run's failure or Stop ends it), also before this
+    // page knows its run: read by that run alone, it read "Status unavailable"
+    // for a build Continue sent again. It goes quiet only as its run does.
     if (handBackPending) {
-      return true;
+      const run = pendingHandBackRunId ? runs?.[pendingHandBackRunId] : undefined;
+      return !run || !(isQueuedRunStale(run) || isInProgressRunStale(run));
     }
     if (!jobId) {
       return false;
@@ -432,6 +434,7 @@ export function useAgentJobThreadPreviewState({
     owningConversation?.controllerId,
     owningConversation?.pendingRunIds,
     owningConversation?.pendingRunSubmittedAt,
+    pendingHandBackRunId,
     runs,
   ]);
 

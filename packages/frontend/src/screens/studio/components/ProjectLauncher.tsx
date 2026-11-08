@@ -22,6 +22,8 @@ import { NewTeamDialog } from "./NewTeamDialog";
 export interface ProjectLauncherProps {
   open: boolean;
   preferredOrgId?: string | null;
+  /** The name Studio already shows for that team: the dialog reads it from the moment it opens. */
+  preferredOrgName?: string | null;
   /** Who creates the space: their own team is the dialog's "Personal". */
   currentUserId?: string | null;
   onClose: () => void;
@@ -44,6 +46,7 @@ function canAddSpaces(role: string | null | undefined): boolean {
 export function ProjectLauncher({
   open,
   preferredOrgId = null,
+  preferredOrgName = null,
   currentUserId = null,
   onClose,
   onCreateBlank,
@@ -85,8 +88,10 @@ export function ProjectLauncher({
 
   // A space with no team chosen goes to the person's own team (the
   // controller pins it to them): that is "Personal", from the moment the
-  // dialog opens, so their own team is not listed a second time.
-  const personalTeamId = pickDefaultSpaceOrg(orgs, currentUserId)?.id ?? null;
+  // dialog opens, so their own team is not listed a second time. Once the
+  // teams load, it reads by the name they gave it, as Home does.
+  const personalTeam = pickDefaultSpaceOrg(orgs, currentUserId);
+  const personalTeamId = personalTeam?.id ?? null;
   const orgSelectOptions = useMemo(() => {
     const base = orgs.filter((org) => org.id !== personalTeamId).map((org) => {
       const roleSuffix = org.role ? ` (${org.role})` : "";
@@ -119,19 +124,34 @@ export function ProjectLauncher({
       setProcessingElapsedSeconds(0);
       setOrgError(null);
       setNewTeamOpen(false);
-      setSelectedOrgId(null);
+      // Until the teams load, the dialog offers only what it knows holds:
+      // "Personal", and the team on screen by the name Studio shows for it
+      // (their own team is "Personal" already). Nothing from the last time
+      // it opened, which the list may no longer have.
+      const onScreen: ControllerOrgSummary | null =
+        preferredOrgId && preferredOrgName && getOrgDisplayName(preferredOrgName) !== PERSONAL_ORG_DISPLAY_NAME
+          ? { id: preferredOrgId, name: preferredOrgName, slug: "" }
+          : null;
+      setOrgs(onScreen ? [onScreen] : []);
+      setSelectedOrgId(onScreen?.id ?? null);
       controllerClient.organizations.list()
         .then((list) => {
-          setOrgs(list);
+          // This open's teams, and a team the person made while they loaded.
+          setOrgs((current) => [
+            ...list,
+            ...current.filter((org) => org.id !== onScreen?.id && !list.some((listed) => listed.id === org.id)),
+          ]);
           // Suggest the team on screen only where this person can add
           // spaces; a viewer picks a team of their own instead. Else their
           // own team, "Personal", unless another team is all they have. A
-          // team they made while the teams loaded stays chosen.
+          // team the person chose while the teams loaded stays chosen.
           const personal = pickDefaultSpaceOrg(list, currentUserId)?.id ?? null;
           const suggested = preferredOrgId && list.some((org) => org.id === preferredOrgId && canAddSpaces(org.role))
             ? preferredOrgId
             : !personal && list.length === 1 ? list[0].id : null;
-          setSelectedOrgId((current) => current ?? (suggested === personal ? null : suggested));
+          const suggestion = suggested === personal ? null : suggested;
+          setSelectedOrgId((current) =>
+            onScreen && current === onScreen.id ? suggestion : current ?? (onScreen ? null : suggestion));
         })
         .catch((error) => {
           const message =
@@ -140,7 +160,7 @@ export function ProjectLauncher({
           console.warn("[ProjectLauncher] org list error", message);
         });
     }
-  }, [currentUserId, open, preferredOrgId, resetGithubDeviceAuth]);
+  }, [currentUserId, open, preferredOrgId, preferredOrgName, resetGithubDeviceAuth]);
 
   useEffect(() => {
     if (!open) {
@@ -359,7 +379,7 @@ export function ProjectLauncher({
                 }}
                 data-testid="project-launcher-org-select"
               >
-                <option value="">{PERSONAL_ORG_DISPLAY_NAME}</option>
+                <option value="">{personalTeam ? getOrgDisplayName(personalTeam.name) : PERSONAL_ORG_DISPLAY_NAME}</option>
                 {orgSelectOptions.map((org) => (
                   <option key={org.id} value={org.id}>
                     {org.label}
