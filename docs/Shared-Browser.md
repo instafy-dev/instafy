@@ -981,13 +981,18 @@ browser thread holds only its browser turns: each starts from what it is asked
 given the chat's earlier browser turns and, of the building turns, only the
 person's own messages that still stand, in their words: never Octo's replies
 there, files, command output or the lines that describe what the person
-attached, nor Studio's words for a Continue or a message whose change the
-person undid. A chat's first browser part once read only "Fill in what's still
+attached, nor Studio's words for a Continue, a site's Ask Octo (whose words the
+page chose), an answer to Octo's question (written from its header) or a
+message the person stopped or whose change they undid. A restored one is given
+the person's messages since its own last turn after its restore note, the
+newest 8. A chat's first browser part once read only "Fill in what's still
 missing.", with a summary that named no laptop, though the person's first
 message there named both (a local test, Nov 8). After them it is given which
 of the requests the browser turns were asked the person stopped, or undid the
 change of, since the first of those turns; a
-restored one is given those since its own last turn
+restored one is given those since its own last turn, and one that read a
+message of the person's they then stopped, or whose change they undid, starts
+again from the replay, which leaves it out
 ([Chat activity](Chat-Activity.md#a-stopped-turns-changes)). Codex withdraws the space's `AGENTS.md` from a
 turn without the workspace, so it is given that file's "Replies" too (how a reply
 reads: plain words, no error codes, file paths or inside words, "not checked" on
