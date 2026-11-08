@@ -1479,7 +1479,7 @@ fn the_research_skill_compares_items_and_the_page_lists_unknown_prices_apart() {
         "Options side by side: each value names the page it was read on and the day; one nobody found reads `Unknown` and why",
         "never a blank or a dash",
         "an item whose value is unknown is listed apart (\"Price unknown\"), never as within it, on the page, in the lede and in the reply",
-        "it also lists blank values, values without their page or date, and a filter applied without `site.byFilter`",
+        "it also lists blank values, values without their page or date, a source line with no link, and a filter applied without `site.byFilter`",
     ] {
         assert!(hub.contains(needle), "{needle}");
     }
