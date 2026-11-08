@@ -289,10 +289,11 @@ turn's save never took, one the space's history leaves out), the line names the 
 line is kept out of the transcript: no bubble, no notification, never unread and never a chat's
 preview on Home, and no turn, so no credit and no daily message. Only the controller writes it: a
 message a member records never keeps that `kind`, and Studio and the runtime read a line only with
-the controller's `source`. The routing step and every later turn read it with the history, and the
-first turn on a restored thread of either lane after the Undo, whose thread never saw it, reads it
-after its restore note; so "keep going" carries on what is still open, never the change the person
-took back. The files the line names read as undone in their row, which then offers no Undo for them and
+the controller's `source`. Every later turn reads it with the history, and the first turn on a
+restored thread of either lane after the Undo, whose thread never saw it, reads it after its restore
+note; so "keep going" carries on what is still open, never the change the person took back. When the
+line names the run that made the change, the routing step reads neither the line nor that run's
+request and turns: it only picks a route, and an undone change is never one to carry on. The files the line names read as undone in their row, which then offers no Undo for them and
 no stop's Continue, after a reload or a switch of chats too; a file it does not name keeps its state
 (Not saved, say). A row whose files are all undone reads `Undone ›`, its files folded behind it,
 whatever the row read before (`Changed the site`, a file's name); one with some of them undone counts

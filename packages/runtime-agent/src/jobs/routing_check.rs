@@ -1016,7 +1016,7 @@ mod tests {
         for (case, line, included, ignored) in [
             (
                 &page,
-                "So is a page made only from what this chat already found and confirmed.",
+                "So is a page or change made only from what this chat already found and confirmed.",
                 5,
                 2,
             ),
@@ -1074,8 +1074,9 @@ mod tests {
         let input = routing_input(&warranty, workspace.path()).unwrap();
         assert!(input.browser_routes_offered);
         for line in [
-            "the building turn reads first and answers, opening the browser itself if a page needs it. A change that needs what a web page says is `browser_then_build`.",
+            "it carries that on. So is a change that needs what a web page says. A map",
             "the building turn reads it and answers with a card naming it, and a change here is built after it,",
+            "the building turn reads first and answers, opening the browser itself if a page needs it.",
         ] {
             assert!(input.prompt.contains(line), "{line}: {}", input.prompt);
         }
@@ -1132,7 +1133,7 @@ mod tests {
         assert!(input.browser_routes_offered);
         assert!(
             input.prompt.contains(
-                "So is a page made only from what this chat already found and confirmed."
+                "So is a page or change made only from what this chat already found and confirmed."
             ),
             "{}",
             input.prompt

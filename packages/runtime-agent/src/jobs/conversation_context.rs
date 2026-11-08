@@ -1112,13 +1112,24 @@ fn push_taken_back(section_text: &mut String, note: &str, lines: &[String]) {
     }
 }
 
-/// The runs of the requests the person took back: each one they stopped and have not asked for
-/// again ([`stopped_requests`]), and each whose change they undid: the run its Undo line names
-/// (`undoneRunId`) and every other run of that request ([`persons_request_at`]), such as a
-/// message's own run, the browser turn of its card and the hand-back of what that turn found.
+/// The runs of the requests the person took back: each one they stopped, have not asked for
+/// again ([`stopped_requests`]) and sent another message after, before the newest, and each whose
+/// change they undid: the run its Undo line names (`undoneRunId`) and every other run of that
+/// request ([`persons_request_at`]), such as a message's own run, the browser turn of its card
+/// and the hand-back of what that turn found. The newest message, which ends the history, is the
+/// one the routing step reads the chat for, and one typed right after a Stop often says what to
+/// do instead ("Try the bookshop's own site instead."): it means nothing without the request it
+/// stopped.
 fn taken_back_runs(entries: &[JsonValue]) -> HashSet<&str> {
+    let newest = entries.len() - usize::from(entries.last().is_some_and(is_person_message));
+    let moved_on = |notice: usize| {
+        entries
+            .get(notice + 1..newest)
+            .is_some_and(|between| between.iter().any(is_person_message))
+    };
     let mut runs: HashSet<&str> = stopped_requests(entries)
         .into_iter()
+        .filter(|stopped| moved_on(stopped.notice))
         .flat_map(|stopped| stopped.runs)
         .collect();
     let undone: Vec<&str> = entries.iter().filter_map(undone_run_of).collect();
@@ -1191,15 +1202,17 @@ fn findings_note_line(entry: &JsonValue) -> String {
 /// ([`is_hand_back_prompt`]). A browser turn's findings note reads as one line the runtime writes,
 /// how many pages it read ([`findings_note_line`]): its own lines quote page text with no fence.
 ///
-/// A request the person stopped and has not asked for again, or whose change they undid, is left
-/// out, with every entry of its runs, its Stop's notice and its Undo line ([`taken_back_runs`]):
-/// the routing step only picks a route, and a stopped or undone request is never one to carry on.
-/// After a page whose metro route was not confirmed, a section the person stopped and a tip they
-/// stopped and undid, "keep going" read both as "the unfinished page work" and stayed with Octo,
-/// whose reply offered nothing (a local test, Nov 7). A building turn still reads each Stop and
-/// Undo line ([`build_prompt_conversation_context`]). An Undo line that names no run stays, as it
-/// is the only sign of the Undo, and so does the notice of a Stop whose request a Continue asked
-/// for again.
+/// A request the person stopped and has not asked for again, once they sent another message
+/// after it, or whose change they undid, is left out, with every entry of its runs, its Stop's
+/// notice and its Undo line ([`taken_back_runs`]): the routing step only picks a route, and a
+/// stopped or undone request is never one to carry on. After a page whose metro route was not
+/// confirmed, a section the person stopped and a tip they stopped and undid, "keep going" read
+/// both as "the unfinished page work" and stayed with Octo, whose reply offered nothing (a local
+/// test, Nov 7). A building turn still reads each Stop and Undo line
+/// ([`build_prompt_conversation_context`]). A request stopped right before the newest message
+/// stays, with its notice, as the chat showed it: that message may say what to do instead. So
+/// does an Undo line that names no run, the only sign of the Undo, and the notice of a Stop whose
+/// request a Continue asked for again.
 pub(super) fn build_routing_conversation_context(
     history_value: Option<&JsonValue>,
 ) -> PromptConversationContext {
@@ -2185,10 +2198,10 @@ mod tests {
     }
 
     /// In a chat with earlier turns, a routed card's task ends with what the routing step said
-    /// the message carries on (`browser_request::routed_task`). A building thread still reads the
-    /// person's message once, a new browser thread reads the whole task as that turn's request,
-    /// and a Stop of that turn names only the person's words: the line is the routing step's,
-    /// never theirs. Routing, which leaves out what the person stopped, reads neither.
+    /// the message carries on (`browser_request::routed_task`). Routing and a building thread
+    /// still read the person's message once, a new browser thread reads the whole task as that
+    /// turn's request, and a Stop of that turn names only the person's words: the line is the
+    /// routing step's, never theirs.
     #[test]
     fn a_routed_request_with_what_it_carries_on_reads_once_and_stops_in_the_persons_words() {
         let words = "Fill in what's still missing.";
@@ -2210,21 +2223,10 @@ mod tests {
         let building =
             build_prompt_conversation_context(Some(&json!(history)), None, ThreadLane::Building)
                 .section_text;
-        for (text, times) in [(&routing, 0), (&building, 1)] {
-            assert_eq!(text.matches(words).count(), times, "{text}");
+        for text in [&routing, &building] {
+            assert_eq!(text.matches(words).count(), 1, "{text}");
             assert!(!text.contains("What this carries on"), "{text}");
         }
-        let before_the_stop =
-            build_routing_conversation_context(Some(&json!(history[..3].to_vec()))).section_text;
-        assert_eq!(
-            before_the_stop.matches(words).count(),
-            1,
-            "{before_the_stop}"
-        );
-        assert!(
-            !before_the_stop.contains("What this carries on"),
-            "{before_the_stop}"
-        );
         // Before its Stop, which leaves a stopped turn's request out of the lane's replay.
         let browser = build_prompt_conversation_context(
             Some(&json!(history[..3].to_vec())),
@@ -2908,6 +2910,50 @@ mod tests {
                 "User: {TIP}\nAssistant: Added the tip.\nAssistant: The person undid the change from \u{201c}{TIP}\u{201d}"
             )),
             "{routing}"
+        );
+    }
+
+    /// A message typed right after a Stop often says what to do instead, and means nothing
+    /// without the request it stopped: while it is the person's first message since the Stop, the
+    /// routing step reads that request and its notice as the chat showed them. Left out, "Try the
+    /// bookshop's own site instead." reached the routing step alone, which then wrote the summary
+    /// its browser part reads. The building turn reads the request as its Stop's line, as before,
+    /// and once the person sent another message after the Stop, routing leaves it out.
+    #[test]
+    fn a_message_right_after_a_stop_reads_the_request_it_stopped() {
+        let hours =
+            "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.";
+        let instead = "Try the bookshop's own site instead.";
+        let stopped = vec![
+            json!({"role": "user", "content": hours, "runId": "run-1", "createdAt": "2026-11-07T21:25:00Z"}),
+            routed(hours, "run-2", "card-1", "2026-11-07T21:25:05Z"),
+            stop_notice("run-2", "2026-11-07T21:25:40Z"),
+        ];
+        let mut history = stopped.clone();
+        history.push(json!({"role": "user", "content": instead, "runId": "run-3", "createdAt": "2026-11-07T21:25:50Z"}));
+        let routing = build_routing_conversation_context(Some(&json!(history))).section_text;
+        assert_eq!(
+            routing,
+            format!("User: {hours}\nAssistant: Stopped this run.\nUser: {instead}")
+        );
+        let building =
+            build_prompt_conversation_context(Some(&json!(history)), None, ThreadLane::Building)
+                .section_text;
+        assert!(building.contains(&stop_line(hours, &[])), "{building}");
+        assert!(!building.contains("Stopped this run."), "{building}");
+
+        let mut later = stopped;
+        later.push(json!({"role": "user", "content": "What's the weather in Porto tomorrow?", "runId": "run-3"}));
+        later.push(
+            json!({"role": "assistant", "content": "Mild and dry, about 19 °C.", "runId": "run-3"}),
+        );
+        later.push(json!({"role": "user", "content": instead, "runId": "run-4"}));
+        let routing = build_routing_conversation_context(Some(&json!(later))).section_text;
+        assert_eq!(
+            routing,
+            format!(
+                "User: What's the weather in Porto tomorrow?\nAssistant: Mild and dry, about 19 °C.\nUser: {instead}"
+            )
         );
     }
 

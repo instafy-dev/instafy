@@ -400,17 +400,18 @@ async fn responses(
             );
         }
         // The routing preflight reads the request as a required change that
-        // needs a fresh observation. The agent answers without a command and
-        // says why it changed nothing; a recovery pass would run `pwd` and give
-        // the same blocker.
-        "chat_write_blocked" => {
+        // needs a fresh observation, or (`_lookup`) a lookup of earlier chats.
+        // The agent answers without a command and says why it changed nothing;
+        // a recovery pass runs `pwd`, no lookup, and gives the same blocker.
+        "chat_write_blocked" | "chat_write_blocked_lookup" => {
+            let lookup = state.scenario == "chat_write_blocked_lookup";
             return match ordinal {
                 1 => answer(
                     &json!({
                         "summary":"The user asks to verify a site and build a page.",
                         "route":"direct", "reason":"Verify the site, then build the page.",
                         "selectedSkills":[], "confidence":0.97,
-                        "requiresContextLookup":false, "requiresCommandExecution":true,
+                        "requiresContextLookup":lookup, "requiresCommandExecution":!lookup,
                         "requiresWorkspaceFileChanges":true, "observationCommands":[]
                     })
                     .to_string(),
@@ -1368,6 +1369,14 @@ scenario_test!(
     "chat_write_blocked",
     2
 );
+// A lookup of earlier chats stays required: the same reply, from a turn that was also to make
+// one and made none, gets its one recovery pass, which asks for the lookup, and the turn fails
+// when that pass makes none either.
+scenario_test!(
+    blocked_write_turn_that_skipped_a_lookup_still_gets_its_recovery_pass,
+    "chat_write_blocked_lookup",
+    4
+);
 // A required change answered with a team plan, which puts the change off: the
 // plan card carries the reply's words without the runtime's no-change line,
 // which the turn's prompt asked for.
@@ -1497,6 +1506,7 @@ async fn isolated_retry_child() -> Result<()> {
             | "skill_setup_write_guess"
             | "chat_write_guess"
             | "chat_write_blocked"
+            | "chat_write_blocked_lookup"
             | "chat_write_claimed_files"
             | "chat_write_plan"
             | "chat_write_unmade_change"
@@ -1959,7 +1969,7 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
         });
     }
     let request = match scenario {
-        "chat_write_blocked" => Some(BLOCKED_REQUEST),
+        "chat_write_blocked" | "chat_write_blocked_lookup" => Some(BLOCKED_REQUEST),
         "chat_write_claimed_files" => Some("Write the plan to notes/plan.md."),
         "chat_write_plan" => Some(PLAN_REQUEST),
         "chat_write_unmade_change" => Some("Build the comparison page."),
@@ -2004,6 +2014,7 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
         // attempt: no recovery pass.
         "retry_usage"
         | "failed_recovery_usage"
+        | "chat_write_blocked_lookup"
         | "chat_write_claimed_files"
         | "chat_write_unmade_change" => {
             vec![Some("routing"), Some("main"), Some("recovery")]
@@ -2078,6 +2089,24 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
                     && artifact["requiresWorkspaceFileChanges"] == true
             }),
             "the routing preflight artifact must record its write reading"
+        );
+        return Ok(());
+    }
+    // The lookup the turn was to make is still missing after its recovery pass.
+    if scenario == "chat_write_blocked_lookup" {
+        let error = match result {
+            Ok(execution) => bail!(
+                "{scenario}: the turn must fail without its lookup, but its reply stood: {}",
+                execution.summary
+            ),
+            Err(error) => error,
+        };
+        let message = runtime_agent::jobs::extract_job_failure_message(&error)
+            .map(str::to_owned)
+            .unwrap_or_else(|| error.to_string());
+        assert!(
+            message.contains("the accepted execution evidence required by runtime routing"),
+            "{scenario}: {message}"
         );
         return Ok(());
     }
