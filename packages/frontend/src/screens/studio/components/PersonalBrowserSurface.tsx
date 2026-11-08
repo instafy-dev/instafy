@@ -23,6 +23,8 @@ import {
 } from "iconoir-react";
 import { normalizeBrowserAddress, personalBrowserAddressInput } from "./browserAddress";
 import { BrowserAddressField } from "./BrowserAddressField";
+import { useBrowserAddressDraft } from "./useBrowserAddressDraft";
+import { browserSessionPageIsPlaceholder } from "./browserSessionPages";
 import { Checkbox } from "../../../components/Checkbox";
 import { Select } from "../../../components/Select";
 import { Button, IconButton } from "../../../components/Button";
@@ -290,7 +292,11 @@ export function PersonalBrowserSurface({
     height: 1,
   });
   const addressInputRef = useRef<HTMLInputElement | null>(null);
-  const [address, setAddress] = useState("");
+  const { value: address, setValue: setAddress } = useBrowserAddressDraft({
+    pageIdentity: JSON.stringify([model.ownerId, model.status?.activeTabId ?? null]),
+    pageAddress: model.status && !browserSessionPageIsPlaceholder(model.status) ? model.status.url : "",
+    inputRef: addressInputRef,
+  });
   const [overlayPreview, setOverlayPreview] = useState<{ identity: string; url: string } | null>(null);
   const boundsRequestRef = useRef(0);
   const [overlayCount, setOverlayCount] = useState(0);
@@ -340,12 +346,6 @@ export function PersonalBrowserSurface({
       setDismissedClearDataFeedbackKey(null);
     }
   }, [model.clearDataState]);
-
-  useEffect(() => {
-    if (document.activeElement !== addressInputRef.current) {
-      setAddress(model.status?.url ?? "");
-    }
-  }, [model.status?.url]);
 
   useLayoutEffect(() => {
     const bridge = typeof window === "undefined" ? undefined : window.instafyDesktop;
@@ -457,7 +457,7 @@ export function PersonalBrowserSurface({
       if (!active || !ready || humanInputLocked) {
         return false;
       }
-      setAddress(nextAddress);
+      setAddress(browserSessionPageIsPlaceholder({ url: nextAddress }) ? "" : nextAddress);
       model.clearNavigationError();
       void model.navigate(nextAddress);
       // Words that are not an address search with the chosen engine, when the Desktop can.
@@ -468,7 +468,7 @@ export function PersonalBrowserSurface({
       addressInputRef.current?.blur();
       return true;
     },
-    [active, ready, humanInputLocked, model],
+    [active, ready, humanInputLocked, model, setAddress],
   );
   const handleClearData = useCallback(() => {
     if (!window.confirm(

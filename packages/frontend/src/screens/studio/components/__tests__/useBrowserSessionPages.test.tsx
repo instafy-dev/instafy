@@ -158,6 +158,27 @@ describe("useBrowserSessionPages", () => {
     expect(opened).toBeNull();
   });
 
+  it("keeps a delayed command error with its originating tab", async () => {
+    let activeId = "page-1";
+    fetchPagesMock.mockImplementation(async () => ["page-1", "page-2"].map((id) => ({
+      id, url: `https://${id}.example/`, host: `${id}.example`, label: id, title: id, isActive: id === activeId,
+    })));
+    await renderHook();
+    let rejectCommand!: (reason: Error) => void;
+    commandPageMock.mockReturnValueOnce(new Promise((_resolve, reject) => { rejectCommand = reject; }));
+    let commandPromise!: Promise<boolean>;
+    await act(async () => { commandPromise = latestResult!.navigatePage("page-1", "https://next.example/"); });
+    // Another viewer can change the browser's tab while this request is pending.
+    activeId = "page-2";
+    await act(async () => { await latestResult!.refresh(); });
+    await act(async () => { rejectCommand(new Error("Navigation failed in the first tab")); await commandPromise; });
+    expect(latestResult?.commandPending).toBeNull();
+    expect(latestResult?.commandError).toBeNull();
+    activeId = "page-1";
+    await act(async () => { await latestResult!.refresh(); });
+    expect(latestResult?.commandError).toBe("Navigation failed in the first tab");
+  });
+
   it("tracks a command, reports errors, and refreshes pages immediately", async () => {
     await renderHook();
     fetchPagesMock.mockClear();

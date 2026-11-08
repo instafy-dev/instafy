@@ -67,6 +67,7 @@ import { SharedBrowserParticipantPointers } from "./SharedBrowserParticipantPoin
 import { collaborationSelfOwnsControl, collaborationSelfParticipant } from "./sharedBrowserCollaboration";
 import { useSharedBrowserCollaboration } from "./useSharedBrowserCollaboration";
 import { useSustainedFlag } from "./useSustainedFlag";
+import type { ChatBrowserTabOpening } from "./useChatBrowserView";
 import { BrowserIdentityBadge } from "./BrowserIdentityBadge";
 import { BrowserSessionArrival, BrowserSessionRecovery, BrowserSessionReconnecting } from "./BrowserSessionRecovery";
 import { browserArrivalNote, type BrowserTurnArrival } from "./browserTurnArrival";
@@ -497,6 +498,7 @@ export function BrowserSessionModal({
   runApproval = null,
   conversationId = null,
   chatPageIds = null,
+  chatTabOpening = null,
   anotherChatTurn = false,
   agentArrival = null,
   spaceHasTeammates = false,
@@ -606,6 +608,8 @@ export function BrowserSessionModal({
    * front.
    */
   chatPageIds?: readonly string[] | null;
+  /** Opening this chat's own tab, including an explicit retry when that fails. */
+  chatTabOpening?: ChatBrowserTabOpening | null;
   /**
    * A browser turn of another chat holds the browser: the view shows none of
    * it, not even its prompts, only that Octo is working in another chat.
@@ -3423,8 +3427,9 @@ export function BrowserSessionModal({
   // Around a live page the stage follows the theme like the chrome above it
   // and the composer below: black under a page in light mode read as dark
   // chrome on a phone, where the page leaves bands above and below it.
+  // Without this chat's page, use the same neutral surface as other recovery states.
   const viewportSurfaceClass =
-    viewLive && !agentWhereabouts
+    viewLive && stageShowsPage && !agentWhereabouts
       ? BROWSER_LIVE_STAGE_CLASS
       : "bg-slate-100 dark:bg-slate-950";
   // The row of pages Octo reads, with its one Take over, above the stage.
@@ -3884,6 +3889,18 @@ export function BrowserSessionModal({
             >
               <Text variant="body" tone="muted">No page open</Text>
             </div>
+          ) : null}
+          {!shouldCollapseDocked && viewLive && !stageShowsPage && !anotherChatTurn &&
+            !agentArrivalNote && !agentWhereabouts && chatTabOpening ? (
+            <BrowserSessionRecovery
+              viewState={{
+                kind: chatTabOpening.pending ? "opening" : "failed",
+                sentence: chatTabOpening.pending ? "Opening this chat’s tab…" : chatTabOpening.error,
+                action: chatTabOpening.pending ? null : "Try again",
+              }}
+              reason={chatTabOpening.error}
+              onRetry={chatTabOpening.onRetry}
+            />
           ) : null}
           {reconnectingNoteShown ? <BrowserSessionReconnecting /> : null}
           {/* Where Octo is going, or that it is on a site, already says what the stage waits for. */}
