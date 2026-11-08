@@ -8,8 +8,7 @@ routing_keywords: interactive, map, maps, tap through, as a page, on a page, int
 
 # Interactive artifacts
 
-The page holds the detail; chat holds a short reply. One site per request. A follow-up changes the site this chat
-made; a site another chat made changes only when the person names it, else start a new folder.
+The page holds the detail; chat holds a short reply. One site per request.
 Never stop to ask before building: a vague ask gets sensible defaults, stated in the reply.
 
 ## 1. Pick the builder
@@ -42,7 +41,8 @@ own kind of page.
   `€549 at Shop · seen 17 Oct`, `checked 4 min ago`, `Estimate`, `Unknown`. A tip no page gave is plain text, never
   styled like a source line.
 - Options side by side: each value names the page it was read on and the day; one nobody found reads `Unknown` and
-  why ("price not found on maker.com's page"), never a blank or a dash. A value cites only a page that gives it: a count of
+  why ("price not found on maker.com's page"), never a blank or a dash. A note on the page says where you looked, never
+  the tools, searches or services you used. A value cites only a page that gives it: a count of
   what you found cites only what it counts, so none found cites no page. A filter from a stated limit ("under €600")
   counts known values only: an item whose value is unknown is listed apart ("Price unknown"), never as within it, on
   the page, in the lede and in the reply. The starters do this with `site.byFilter`; a page you write uses it too. A
@@ -81,8 +81,8 @@ own kind of page.
 
 ## 4. Reply
 
-2-5 lines in the user's terms: the verdict, what the page lets them do, what is unverified, and ONE `Assumed:` line
-for the defaults you chose. A page they want to share says in one line who can open it (people in this space) and
-how to get a link anyone can open (ask for a public link), not as an assumption. The card speaks for itself: never
-point them to it or say it opened. No file paths, commands, "validation passed", "the provided read" or "updated for
-viewers".
+2-5 lines in the user's terms: the verdict, what the page lets them do and what is unverified. An `Assumed:` line only
+for a default you chose that the person didn't give (dates, a currency, which models), and none when there is none. A
+page they want to share says in one line who can open it (people in this space) and how to get a link anyone can open
+(ask for a public link), not as an assumption. The card speaks for itself: never point them to it or say it opened. No
+file paths, commands, "validation passed", "the provided read" or "updated for viewers".

@@ -943,6 +943,17 @@ fn start_tunnel_client(
         &state_path,
         &serde_json::to_string_pretty(&json!({ "version": 1, "previews": next }))?,
     )?;
+    // The space's record of its pages outlasts this machine and keeps the chat that made each one.
+    // A page it does not hold is written down with no chat: a page from before the record, which
+    // a writing turn then reads as another chat's and no later open claims.
+    if let Err(error) = crate::jobs::space_pages::record_woken_page(
+        &environment.workspace_dir,
+        &restart.serve.cwd,
+        &restart.title,
+        &restart.serve.argv,
+    ) {
+        warn!(preview_id = %restart.preview_id, error = %error, "could not write down the woken page");
+    }
     Ok(())
 }
 
@@ -1262,6 +1273,100 @@ mod tests {
         ] {
             assert_eq!(entry[key], earlier[key], "{key}");
         }
+        Ok(())
+    }
+
+    /// A site that answers every request with 200, on a port of its own.
+    async fn answering_site() -> Result<(u16, tokio::task::JoinHandle<()>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buffer = [0u8; 1024];
+                let _ = socket.read(&mut buffer).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                    )
+                    .await;
+            }
+        });
+        Ok((port, server))
+    }
+
+    /// A stopped space's next machine starts with a new home folder, so the CLI's record of its
+    /// previews is gone when a member's view wakes a page. The space's record of its pages is kept
+    /// with its files: a woken page it holds keeps the chat that made it, and a woken page it does
+    /// not hold (from before the record) is written down with no chat, so a writing turn reads it
+    /// as another chat's.
+    #[tokio::test]
+    async fn a_wake_on_a_new_machine_keeps_the_chat_that_made_the_page() -> Result<()> {
+        let sandbox = Sandbox::new();
+        let maker = Uuid::new_v4();
+        for folder in ["sites/framework-laptops", "sites/porto"] {
+            std::fs::create_dir_all(sandbox.workspace.join(folder))?;
+        }
+        std::fs::create_dir_all(sandbox.workspace.join(".instafy/pages"))?;
+        std::fs::write(
+            sandbox
+                .workspace
+                .join(crate::jobs::space_pages::PAGES_RECORD),
+            json!({ "version": 1, "pages": [{
+                "folder": "sites/framework-laptops",
+                "title": "Framework laptops",
+                "conversationId": maker.to_string(),
+                "server": ["instafy", "bind"],
+                "openedAt": "2026-11-08T00:00:00.000Z",
+            }]})
+            .to_string(),
+        )?;
+        assert!(
+            !sandbox
+                .home
+                .join(".instafy/cli-preview-state.json")
+                .exists()
+        );
+        let mut servers = Vec::new();
+        let mut outcomes = Vec::new();
+        for (id, folder, title) in [
+            ("laptops", "sites/framework-laptops", "Framework laptops"),
+            ("porto", "sites/porto", "Porto"),
+        ] {
+            let (port, server) = answering_site().await?;
+            servers.push(server);
+            let restart = PreviewRestart {
+                wake_id: Uuid::new_v4(),
+                preview_id: id.to_string(),
+                title: title.to_string(),
+                port,
+                path: "/".to_string(),
+                serve: PreviewServe {
+                    argv: ["instafy", "bind", "serve", ".", "--port", &port.to_string()]
+                        .map(str::to_string)
+                        .to_vec(),
+                    cwd: folder.to_string(),
+                },
+                credentials: Some(credentials(id)),
+            };
+            outcomes.push(run_preview_restart(&sandbox.environment(), &restart).await);
+        }
+        kill_recorded(&sandbox);
+        for server in servers {
+            server.abort();
+        }
+        for outcome in outcomes {
+            outcome?;
+        }
+        assert_eq!(
+            crate::jobs::space_pages::space_pages_lines(&sandbox.workspace, Some(&maker), &[]),
+            "- The space's pages:\n\
+             \x20 - \"Porto\", in `sites/porto/`: made in another chat.\n\
+             \x20 - \"Framework laptops\", in `sites/framework-laptops/`: made in this chat.\n"
+        );
         Ok(())
     }
 
