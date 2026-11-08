@@ -11,7 +11,10 @@
 // one it cannot tell about, never one it reports missing. On a page of options it also checks the values and where each
 // row comes from (below). A source line drawn by hand (an element with the class "trust") links the page its fact was
 // read on, unless it says it is not checked: written as plain text, a page to share once gave its sources as two lines
-// nobody could open, where site.trust(fact) would have linked each. A page is served from its own folder, so the check
+// nobody could open, where site.trust(fact) would have linked each. So does a fact site.trust draws: one with its source
+// and no page draws a line that links nothing. The check names only a line it can tell links nothing: one with
+// something in it the check cannot read (a name, a function of the page's own) may link its page, and one that only
+// says a value is unknown names no source. A page is served from its own folder, so the check
 // also fails a page that loads a file from outside it ("../another-page/site.js"), and names the command that gives the
 // page its own files. Pure helpers are exported for the tests.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -127,8 +130,9 @@ export function htmlSourceLines(html) {
   return out;
 }
 
-/** A source line that needs no link: it says nothing on it was checked ("…, not checked", "From what Octo knows"). */
-export const SAYS_UNCHECKED = /\bnot checked\b|\bfrom what octo knows\b/i;
+/** A source line that needs no link: it says nothing on it was checked ("…, not checked", "From what Octo knows"), or
+ *  only that a value is unknown, in site.js's words ("Unknown", "Price unknown · why", "To confirm"). */
+export const SAYS_UNCHECKED = /\bnot checked\b|\bfrom what octo knows\b|^(?:[\p{L} ]+ )?(?:unknown|to confirm)(?: · .*)?$/iu;
 
 /** Every string value in a JSON value (keys are not shown, values are), except the "expect" list, lists of what is
  *  unavailable, and strings that only say an item is. */
@@ -487,8 +491,9 @@ export function readSite(dir) {
  *  their words are in a script where the check cannot place them, or a script fetches text from another site, so the
  *  page may show them all the same (`unread`: those scripts). An item no file of the site names is missing. `outside`:
  *  the files its pages, styles and scripts load from outside its folder, and its links to another folder's files, with
- *  the starter whose files those are (`starter`). `unlinked`: the source lines drawn by hand that link no page, except
- *  one that says it is not checked ([{ file, line }]); a line drawn by site.trust links the page its fact was read on. */
+ *  the starter whose files those are (`starter`). `unlinked`: the source lines that link no page ([{ file, line }]):
+ *  each drawn by hand with nothing in it that links (or that the check cannot read), and each fact site.trust would
+ *  draw with its source and no page; never one that says it is not checked, or only that a value is unknown. */
 export function checkSite(dir, expect = []) {
   const site = readSite(dir);
   const items = parseExpect([...site.declared, ...parseExpect(expect)]);
@@ -511,7 +516,7 @@ export function checkSite(dir, expect = []) {
       for (const file of held) unread.add(file);
     }
   }
-  const unlinked = site.trust.filter((t) => t.line && !t.linked && !SAYS_UNCHECKED.test(t.line)).map(({ file, line }) => ({ file, line }));
+  const unlinked = site.trust.filter((t) => t.line && !t.linked && !t.unread && !SAYS_UNCHECKED.test(t.line)).map(({ file, line }) => ({ file, line }));
   return { items, shown, missing, unknown, unread: [...unread], unlinked, files: site.parts.map((p) => p.file), outside: site.outside, starter: site.starter };
 }
 
@@ -694,7 +699,7 @@ export function uncitedRows(data) {
     const label = name || "a row";
     out.push({
       item: label,
-      problem: `${label}: nothing says where this row comes from. Cite the page you read that names it (a value's "src" and "url", or "sources": [{"url"}]). When only a search result names it, put that result's site in "found" ("found": "example.com"): the page then says it is not checked. Naming it in --expect or "expect" does not count. A row nothing named (a guess, "Model 1") does not belong on the page.`,
+      problem: `${label}: nothing says where this row comes from. Cite the page you read that names it (a value's "src" and "url", or "sources": [{"name", "url"}]). When only a search result names it, put that result's site in "found" ("found": "example.com"): the page then says it is not checked. Naming it in --expect or "expect" does not count. A row nothing named (a guess, "Model 1") does not belong on the page.`,
     });
   }
   return out;

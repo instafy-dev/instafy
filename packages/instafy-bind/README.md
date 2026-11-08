@@ -213,8 +213,11 @@ person asked for from what Octo knows, with nothing looked up (`"from": "memory"
 pass without one, the compare starter shows each value as "<value>, not checked" and says so in the lede, and any
 `src`, `url`, `date`, `asof`, store or filter on it fails the check, as does the mark on a page of another starter.
 On any page, a source line drawn by hand (an element with the class `trust`) fails the check, which names it, unless
-it links a page or says "not checked" or "From what Octo knows": `site.trust(fact)` draws one that links the page its
-fact was read on. In a space's workspace, `init`'s next step for a starter is the check; for a folder with no starter
+it links a page or says "not checked" or "From what Octo knows" (or only that a value is unknown: "Unknown", "To
+confirm"): `site.trust(fact)` draws one that links the page its fact was read on, and a fact with its `src` and no
+https `url` (not an estimate) fails the same way, since that line links nothing. A line with something in it the check
+cannot read (a name, a function of the page's own) may link its page, so the check never names it. In a space's
+workspace, `init`'s next step for a starter is the check; for a folder with no starter
 content, until the CLI has recorded a preview of that space opened from the folder, it is the command that serves the
 page and posts its card in Studio (`instafy preview open … --serve-cmd 'instafy bind serve . --port {port} --preview'
 --start`, run in the site's folder). A check that passes on a new page, one the space's record of its pages

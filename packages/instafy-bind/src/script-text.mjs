@@ -10,8 +10,11 @@
 // - other: every other string it holds (a variable's value, a function's argument, the HTML it gives innerHTML…): words
 //   the page may show that the check cannot place.
 // - loads: whether it fetches text from another site while the page runs.
-// - trust: the source lines it draws by hand, each site.h element with the class "trust": its words, and whether a link
-//   is in it (an "a" with an href, site.link, or site.cite or site.trust, which link the page a fact was read on).
+// - trust: the source lines it draws by hand, each site.h element with the class "trust": its words, whether a link is
+//   in it (an "a" with an href, site.link, or site.cite or site.trust, which link the page a fact was read on, through
+//   any name the script gives them), and whether something in it is one the check cannot read (a name, a property, a
+//   function of the page's own: it may hold a link); and each fact that names its source and no page to link
+//   ({"v", "src"} without an https "url", not an estimate), which site.trust draws as a source line that links nothing.
 // SPDX-License-Identifier: AGPL-3.0-only
 
 const HELPERS = new Set(["h", "head", "link", "notice", "empty", "notes"]);
@@ -171,14 +174,15 @@ function siteFrom(toks, k) {
   return isId(toks[k], "site") ? k + 1 : -1;
 }
 
-/** The names a script gives the helpers: `h = site.h` (var, let, const or an assignment) and `{ h, head: top } = site`. */
-function helperNames(toks) {
+/** The names a script gives the helpers (`helpers`, by default those that draw text): `h = site.h` (var, let, const or
+ *  an assignment) and `{ h, head: top } = site`. */
+function helperNames(toks, helpers = HELPERS) {
   const names = new Map();
   for (let i = 0; i < toks.length; i += 1) {
     if (!is(toks[i], "=")) continue;
     const after = siteFrom(toks, i + 1);
     if (after < 0) continue;
-    if (isId(toks[i - 1]) && !is(toks[i - 2], ".") && is(toks[after], ".") && isId(toks[after + 1]) && HELPERS.has(toks[after + 1].v)
+    if (isId(toks[i - 1]) && !is(toks[i - 2], ".") && is(toks[after], ".") && isId(toks[after + 1]) && helpers.has(toks[after + 1].v)
       && !["(", ".", "["].some((p) => is(toks[after + 2], p))) {
       names.set(toks[i - 1].v, toks[after + 1].v);
     } else if (is(toks[i - 1], "}") && !["(", ".", "["].some((p) => is(toks[after], p))) {
@@ -191,7 +195,7 @@ function helperNames(toks) {
         }
       }
       for (let j = open + 1; open >= 0 && j < i - 1; j += 1) {
-        if (isId(toks[j]) && HELPERS.has(toks[j].v) && (is(toks[j - 1], "{") || is(toks[j - 1], ","))) {
+        if (isId(toks[j]) && helpers.has(toks[j].v) && (is(toks[j - 1], "{") || is(toks[j - 1], ","))) {
           names.set(is(toks[j + 1], ":") && isId(toks[j + 2]) ? toks[j + 2].v : toks[j].v, toks[j].v);
         }
       }
@@ -208,6 +212,19 @@ function helperCall(toks, i, names) {
   }
   if (isId(toks[i]) && names.has(toks[i].v) && is(toks[i + 1], "(") && !is(toks[i - 1], ".") && !isId(toks[i - 1], "function")) {
     return { name: names.get(toks[i].v), open: i + 1 };
+  }
+  return null;
+}
+
+/** A call at toks[i] of site.cite or site.trust (or a name the script gives them, `linkers`), which draw a fact's page
+ *  as a link: {open}, the index of its "(", or null. */
+function linkingCall(toks, i, linkers) {
+  const after = siteAt(toks, i);
+  if (after >= 0 && is(toks[after], ".") && isId(toks[after + 1]) && LINKING.has(toks[after + 1].v) && is(toks[after + 2], "(")) {
+    return { open: after + 2 };
+  }
+  if (isId(toks[i]) && linkers.has(toks[i].v) && is(toks[i + 1], "(") && !is(toks[i - 1], ".") && !isId(toks[i - 1], "function")) {
+    return { open: i + 1 };
   }
   return null;
 }
@@ -272,8 +289,7 @@ function propsLike(toks, [s, e]) {
  *  line of its own. */
 function collect(toks, [s, e], ctx, words) {
   for (let k = s; k < e; k += 1) {
-    const after = siteAt(toks, k);
-    if (after >= 0 && is(toks[after], ".") && isId(toks[after + 1]) && LINKING.has(toks[after + 1].v) && is(toks[after + 2], "(")) ctx.linked = true;
+    if (linkingCall(toks, k, ctx.linkers)) ctx.linked = true;
     const call = helperCall(toks, k, ctx.names);
     if (call) {
       ctx.consumed.add(k);
@@ -294,6 +310,52 @@ function collect(toks, [s, e], ctx, words) {
 /** The helper calls in [s, e) of an argument that draws nothing: never read as the page's text. */
 function drop(toks, [s, e], ctx) {
   for (let k = s; k < e; k += 1) if (helperCall(toks, k, ctx.names)) ctx.consumed.add(k);
+}
+
+// What a name alone can be that is never an element.
+const NO_ELEMENT = new Set(["null", "undefined", "true", "false"]);
+
+/** Whether an element's child [s, e) is one the check reads whole: text (a string, a template, or a sum, which is text
+ *  whatever it adds), a number, null or a truth value, a call of a helper or of site.cite or site.trust, or a list of
+ *  these. Anything else (a name, a property, a function of the page's own) may be an element with a link in it. */
+function readChild(toks, [s, e], ctx) {
+  if (e <= s) return true;
+  for (let k = s, depth = 0; k < e; k += 1) {
+    const t = toks[k];
+    if (t.t !== "p") continue;
+    if (t.v === "(" || t.v === "[" || t.v === "{") depth += 1;
+    else if (t.v === ")" || t.v === "]" || t.v === "}") depth -= 1;
+    else if (t.v === "+" && depth === 0) return true;
+  }
+  if (e - s === 1) return toks[s].t === "str" || toks[s].t === "num" || (isId(toks[s]) && NO_ELEMENT.has(toks[s].v));
+  if (is(toks[s], "[") && closing(toks, s) === e - 1) return callArgs(toks, s).list.every((range) => readChild(toks, range, ctx));
+  const at = isId(toks[s]) && GLOBALS.has(toks[s].v) && is(toks[s + 1], ".") ? s + 2 : s;
+  const call = helperCall(toks, at, ctx.names) ?? linkingCall(toks, at, ctx.linkers);
+  return !!call && closing(toks, call.open) === e - 1;
+}
+
+/** The facts a script holds that name their source and no page to link: {"v", "src"} without an https "url", and not an
+ *  estimate ("est": true, which says so). site.trust draws each as a source line that links nothing: [{ line, linked }],
+ *  each named by its value and source. */
+function unlinkedFacts(toks) {
+  const out = [];
+  const single = (entry) => (entry && entry.e - entry.s === 1 ? toks[entry.s] : null);
+  for (let k = 0; k < toks.length; k += 1) {
+    if (!is(toks[k], "{") || !startsObject(toks[k - 1])) continue;
+    const entries = objectEntries(toks, [k, closing(toks, k) + 1]);
+    if (!entries) continue;
+    const key = (name) => entries.find((entry) => entry.key === name);
+    const v = key("v");
+    const src = single(key("src"));
+    const url = single(key("url"));
+    const est = single(key("est"));
+    if (!v || !src || src.t !== "str" || !src.v.trim() || (est && isId(est, "true"))) continue;
+    // an address the script works out may well be a page's; one written out links a page only when it is https
+    if (key("url") && (url?.t !== "str" || /^\s*https:\/\//i.test(url.v))) continue;
+    const value = single(v)?.t === "str" ? single(v).v.trim() : "";
+    out.push({ line: [value, src.v.trim()].filter(Boolean).join(" · "), linked: false });
+  }
+  return out;
 }
 
 /** The class names a props entry gives ("trust is-old"): the words of the strings in its value. */
@@ -323,9 +385,11 @@ function readCall(toks, { name, open }, ctx, nested = false) {
   const entries = (range) => (range && objectEntries(toks, range)) || [];
   if (name === "h" || name === "link") {
     const props = name === "h" && list[1] && propsLike(toks, list[1]) ? entries(list[1]) : [];
-    // a link anywhere in an element is in every element around it too
+    // a link anywhere in an element is in every element around it too, and so is a child the check cannot read
     const outer = ctx.linked;
+    const outerUnread = ctx.unread;
     ctx.linked = false;
+    ctx.unread = false;
     if (name === "link") take(list[1]);
     else {
       // h(tag, props, ...children): a second argument that is not props is its first child, from site.js 1.7.0 on
@@ -334,14 +398,18 @@ function readCall(toks, { name, open }, ctx, nested = false) {
       } else if (list[1] && ctx.childArg) take(list[1]);
       else if (list[1]) drop(toks, list[1], ctx);
       list.slice(2).forEach(take);
+      // its "text" is text; a child is read whole, or may hold a link the check cannot see
+      const children = [...(list[1] && !propsLike(toks, list[1]) && ctx.childArg ? [list[1]] : []), ...list.slice(2)];
+      if (children.some((range) => !readChild(toks, range, ctx))) ctx.unread = true;
     }
     const tag = name === "link" ? "a" : tagOf(toks, list[0]);
     const href = (entry) => entry.key === "href" || (entry.key === "attrs" && entries([entry.s, entry.e]).some((attr) => attr.key === "href"));
     if (name === "link" || (tag === "a" && props.some(href))) ctx.linked = true;
     if (props.some((entry) => (entry.key === "class" || entry.key === "className") && classWords(toks, entry).includes("trust"))) {
-      ctx.trust.push({ line: words.join(" ").split(BREAK).join(" ").replace(/\s+/g, " ").trim(), linked: ctx.linked });
+      ctx.trust.push({ line: words.join(" ").split(BREAK).join(" ").replace(/\s+/g, " ").trim(), linked: ctx.linked, ...(ctx.unread ? { unread: true } : {}) });
     }
     ctx.linked = outer || ctx.linked;
+    ctx.unread = outerUnread || ctx.unread;
     if (tag === "br") return { end, text: nested ? BREAK : "" };
     if (nested && !BLOCK.has(tag)) return { end, text: words.join(" ") };
     line(words);
@@ -430,7 +498,7 @@ function loadsElsewhere(toks) {
  *  `lists`: the keys and names whose values list what the page could not show. */
 export function readScript(source, { childArg = true, lists = new Set() } = {}) {
   const toks = tokens(String(source ?? ""));
-  const ctx = { names: helperNames(toks), childArg, lines: [], consumed: new Set(), trust: [], linked: false };
+  const ctx = { names: helperNames(toks), linkers: helperNames(toks, LINKING), childArg, lines: [], consumed: new Set(), trust: [], linked: false, unread: false };
   // the calls read on their own (not as another element's child), outermost first: what the rest of the script is
   const skip = new Map();
   let outer = 0;
@@ -444,5 +512,5 @@ export function readScript(source, { childArg = true, lists = new Set() } = {}) 
       outer = end;
     }
   }
-  return { lines: ctx.lines, ...readRest(toks, skip, lists), loads: loadsElsewhere(toks), trust: ctx.trust };
+  return { lines: ctx.lines, ...readRest(toks, skip, lists), loads: loadsElsewhere(toks), trust: [...ctx.trust, ...unlinkedFacts(toks)] };
 }
