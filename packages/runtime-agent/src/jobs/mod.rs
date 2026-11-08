@@ -607,11 +607,12 @@ fn split_shared_thread_state(state: Option<JsonValue>) -> (Option<JsonValue>, bo
     (Some(JsonValue::Object(map)), retired)
 }
 
-/// A thread that may hold a turn of a request the person stopped is not resumed
+/// A thread that may hold a turn of a request the person stopped, or a browser thread the words
+/// of a message of theirs they stopped or undid, is not resumed
 /// (`conversation_context::stop_to_leave_lane_thread_for`): the lane's keys go, so Codex
 /// starts a new thread, and the turn's prompt replays the chat as its lane reads it, with the
 /// stopped request left out and its Stop line kept, as for a new or lost thread. The state names
-/// the Stop the new thread is started after, and the run saves its new thread as a merge of this
+/// the Stop or Undo the new thread is started after, and the run saves its new thread as a merge of this
 /// state, so the other lane's thread rides along and the lane's next turn resumes the new one. A
 /// turn that fails saves no thread, so the turn after it starts anew too. A team plan's turns
 /// leave the chat out of their prompts, so they keep their thread. The second value says whether
@@ -7834,7 +7835,7 @@ impl JobProcessor {
             tracing::info!(
                 job_id = %job.id,
                 lane = thread_lane.name(),
-                "the lane's thread holds a turn of a request the person stopped; this turn starts a new thread from the chat's replay"
+                "the lane's thread holds a request or message the person stopped or undid; this turn starts a new thread from the chat's replay"
             );
         }
         let final_output_mode = final_output_mode_for_runtime_job(

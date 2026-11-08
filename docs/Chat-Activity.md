@@ -340,9 +340,13 @@ doesn't say whether it had begun. A thread the request never reached (the buildi
 Stop of a request only the browser ran) is resumed, and reads the line after its restore note. A
 change the turn's save kept stays until the person undoes it: a building turn's line names its
 files, from the stopped turn's report, and the next turn reads them as they are. A browser thread reads a Stop's or an Undo's line only for a request one of the chat's browser
-turns was asked: it reads nothing else of the chat, so the words of a message that stayed with Octo
-never reach a turn a page can ask to type them. One that is new, or lost, replays only the chat's
-browser turns, and reads those lines since the first of them after its replay. A Continue under the
+turns was asked, in the person's words without the routing step's summary after them. Of the other
+messages it reads only the person's own that still stand: one that is new, or lost, replays them
+with the chat's browser turns, and a restored one reads those since its last turn after its restore
+note. A browser thread that read a message the person then stopped, or whose change they undid,
+starts again from the replay, which leaves it out, so the words of a message that stayed with Octo
+and that the person took back never reach a turn a page can ask to type them. One that is new, or
+lost, reads those lines since the chat's first browser turn after its replay. A Continue under the
 Stop asks for the request again: no turn after it reads that line, and its turn resumes the thread
 that holds the stopped turn. "Send now" on a queued message, which interrupts the reply it waited
 behind, is no Stop.
