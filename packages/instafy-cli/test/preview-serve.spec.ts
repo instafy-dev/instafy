@@ -680,13 +680,14 @@ describe("instafy preview open --start picks the site's port, and close stops th
         }
       }
     };
-    const open = (params: { serveCmd: string; title?: string; port?: number; replace?: boolean }) =>
+    const open = (params: { serveCmd: string; title?: string; port?: number; replace?: boolean; path?: string }) =>
       withEnv(async () => {
         const result = await previewOpen({
           project: ws.projectId,
           controllerUrl,
           controllerToken: "test-token",
           ...(params.port ? { port: params.port } : {}),
+          ...(params.path ? { path: params.path } : {}),
           title: params.title ?? "Site preview",
           ratholeBin: rathole,
           serveCmd: params.serveCmd,
@@ -865,6 +866,48 @@ describe("instafy preview open --start picks the site's port, and close stops th
     expect(other.port).not.toBe(first.port);
     expect(s.cards()).toEqual(["card-1", "card-2"]);
   }, 60000);
+
+  // Another page of the same server (`--path`, or one site of a folder of sites) is not this card: opened under the
+  // first page's title, it would move that card, in every chat that shows it, to the other page. It is refused, as it
+  // was before an open kept its card's title.
+  it("refuses another page of the same server under the first page's title, and moves no card", async () => {
+    const s = await space({ titles: true });
+    const serveCmd = `${node} site.mjs {port} trip`;
+    const first = await s.open({ serveCmd, title: "Trip overview" });
+    const refused = await failure(s.open({ serveCmd, title: "Packing list", path: "/packing.html" }));
+    expect(refused.exitCode).toBe(3);
+    expect(refused.message).toMatch(/^Port \d+ already shows 'Trip overview'\./);
+    expect(s.bodies.map((body) => [body["title"], body["path"]])).toEqual([
+      ["Trip overview", "/"],
+      ["Packing list", "/packing.html"],
+    ]);
+    expect(s.cards()).toEqual(["card-1"]);
+    expect(s.state().previews.find((entry) => entry["previewId"] === first.previewId)).toMatchObject({ title: "Trip overview", path: "/" });
+  }, 60000);
+
+  // The card already in the chat is the answer, but never in place of what the site still needs: a site that doesn't
+  // answer, answers with an error, or can't be started again by Open.
+  it("says a card is already in the chat and still says the site doesn't answer", () => {
+    const print = (result: Record<string, unknown>) => {
+      const lines: string[] = [];
+      const log = console.log;
+      console.log = (line: unknown) => void lines.push(String(line).replace(/\u001b\[[0-9;]*m/g, ""));
+      try {
+        printPreviewOpen({ previewId: "preview-1", title: "Laptops", port: 24129, path: "/", messageId: "card-1", viewerHostSuffix: null, ...result } as never, false);
+      } finally {
+        console.log = log;
+      }
+      return lines;
+    };
+    const quiet = { note: "Its card is already in the chat.", status: "live", httpStatus: 200, restartable: true };
+    expect(print(quiet)).toEqual(["Its card is already in the chat."]);
+    expect(print({ ...quiet, status: "not_responding", httpStatus: 500, restartable: false, restartNote: "the server did not record a start command" })).toEqual([
+      "Its card is already in the chat.",
+      "Not responding yet: Laptops (port 24129).",
+      "The site answered HTTP 500 through the preview.",
+      "When the process that started it exits, or the space sleeps, Open cannot start the site by itself: the server did not record a start command.",
+    ]);
+  });
 
   it("says what the server says when another site's preview holds the port, and stops the site it started for it", async () => {
     const s = await space();

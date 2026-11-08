@@ -1251,20 +1251,23 @@ function siteRecordFor(
 
 /**
  * The title of this same site's card, when the card the server says holds `port` (`heldBy`) is one this machine opened
- * for it: the same space, port and title, and the same site (the same start command, with `--start`; else the same
- * folder the process on the port runs from). Else null: another site's card, or one this machine can't place.
+ * for it: the same space, port, page (`sitePath`) and title, and the same site (the same start command, with `--start`;
+ * else the same folder the process on the port runs from). Else null: another site's card, another page of the same
+ * server (opened under this card's title, it would move the card to that page), or one this machine can't place.
  */
 function cardOfThisSite(params: {
   heldBy: string | null;
   port: number;
+  sitePath: string;
   projectId: string;
   site: SiteStart | null;
   serve: PreviewServe | null;
 }): string | null {
-  const { heldBy, port, projectId, site, serve } = params;
+  const { heldBy, port, sitePath, projectId, site, serve } = params;
   if (!heldBy) return null;
   const entry = readStateFile().previews.find(
-    (preview) => preview.projectId === projectId && preview.localPort === port && preview.title === heldBy,
+    (preview) =>
+      preview.projectId === projectId && preview.localPort === port && preview.path === sitePath && preview.title === heldBy,
   );
   if (!entry) return null;
   const same = site ? sameStart(entry.start, site.start) : !!serve && entry.siteDir === serve.cwd;
@@ -1581,7 +1584,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
         // the page wasn't opened.
         const kept =
           error instanceof PortHeldError && !opts.replace
-            ? cardOfThisSite({ heldBy: error.heldBy, port, projectId, site, serve })
+            ? cardOfThisSite({ heldBy: error.heldBy, port, sitePath, projectId, site, serve })
             : null;
         if (kept === null) throw error;
         created = await create(kept);
@@ -1910,17 +1913,24 @@ export function printPreviewOpen(result: PreviewOpenResult, json: boolean) {
     console.log(JSON.stringify(result, null, 2));
     return;
   }
-  // Nothing new to show: the card the chat already has is the whole answer.
-  if (result.note) {
-    console.log(result.note);
-    return;
-  }
   const label =
     result.status === "live"
       ? kleur.green("Ready to preview")
       : result.status === "not_responding"
         ? kleur.yellow("Not responding yet")
         : kleur.yellow("Preview opened (the server did not report whether the site answers)");
+  const httpWarning =
+    result.httpStatus !== null && result.httpStatus >= 400 ? `The site answered HTTP ${result.httpStatus} through the preview.` : null;
+  const restartWarning = `When the process that started it exits, or the space sleeps, Open cannot start the site by itself: ${result.restartNote}.`;
+  // The card the chat already has is the answer, with only what the site still needs: one that doesn't answer, answers
+  // with an error, or can't be started again.
+  if (result.note) {
+    console.log(result.note);
+    if (result.status !== "live") console.log(`${label}: ${result.title} (port ${result.port}).`);
+    if (httpWarning) console.log(kleur.yellow(httpWarning));
+    if (!result.restartable) console.log(kleur.yellow(restartWarning));
+    return;
+  }
   console.log(`${label}: ${result.title} (port ${result.port}). Its card is in the conversation.`);
   if (result.thumbnail === "uploaded") {
     console.log(kleur.gray("The card shows a picture of the site; `instafy preview check` takes a new one after a change."));
@@ -1935,16 +1945,10 @@ export function printPreviewOpen(result: PreviewOpenResult, json: boolean) {
   if (result.restartable) {
     console.log(kleur.gray("Open starts the site again when the process that started it exits, or the space sleeps."));
   } else {
-    console.log(
-      kleur.yellow(
-        `When the process that started it exits, or the space sleeps, Open cannot start the site by itself: ${result.restartNote}.`,
-      ),
-    );
+    console.log(kleur.yellow(restartWarning));
   }
   console.log(kleur.gray(`previewId=${result.previewId}`));
-  if (result.httpStatus !== null && result.httpStatus >= 400) {
-    console.log(kleur.yellow(`The site answered HTTP ${result.httpStatus} through the preview.`));
-  }
+  if (httpWarning) console.log(kleur.yellow(httpWarning));
   if (result.viewerHostSuffix) {
     console.log(kleur.gray(`viewerHostSuffix=${result.viewerHostSuffix}`));
   }
