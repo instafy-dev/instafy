@@ -161,6 +161,7 @@ import {
   ChatMessageMenuOverlay,
 } from "./ChatPanelOverlays";
 import { ConversationMessageRows } from "./ConversationMessageRows";
+import { chatHistoryIn } from "./chatSiteContext";
 import { MultiAgentRunsContext } from "./MultiAgentPlanEntry";
 import { ViewerAgentsContext } from "./viewerAgents";
 import { RunTraceRerunNotice } from "./PlanRerunNotice";
@@ -6506,7 +6507,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   key="conversation-message-rows"
                   messages={transcriptMessages}
                   allConversationMessages={collapsedConversationMessages}
-                  historyReady={messageTargetActive || Boolean(jobThread) || hasResolvedRecentHistory}
+                  historyReady={messageTargetActive || Boolean(jobThread) || chatHistoryIn({
+                    newestPage: hasResolvedRecentHistory,
+                    // Older pages load by themselves while the window isn't
+                    // full; the button is offered once they won't.
+                    olderPageOnItsWay: hasMoreRecentHistory && !showHistoryLoadButton,
+                  })}
                   timedSyntheticRows={timedSyntheticRows}
                   currentUserId={currentUserId}
                   chatClientSessionId={chatClientSessionId}

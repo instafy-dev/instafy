@@ -298,11 +298,12 @@ function turnAgentMetadata(
 /**
  * A status the turn's save writes on its way, after the one that names it
  * ("Applying changes to workspace…"): the save still runs, so the line keeps
- * saying so until the save's own outcome arrives.
+ * saying so until the save's own outcome arrives. The runtime's words for it
+ * arrive under `details`, as the controller relays every runtime status.
  */
 function isSaveUnderWay(message: ChatMessage, jobId: string | readonly string[] | null): boolean {
-  const metadata = turnAgentMetadata(message, jobId);
-  return metadata?.kind === "workspace_commit" && metadata.status === "applying";
+  const save = extractMessageDetails(turnAgentMetadata(message, jobId));
+  return save?.kind === "workspace_commit" && save.status === "applying";
 }
 
 export type StepKind = "command" | "tool" | "search" | "edit";

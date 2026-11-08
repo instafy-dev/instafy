@@ -128,8 +128,9 @@ export function arrangeHomeSections({
 
   const activity: HomeFeedDay[] = [];
   const liveByChat = new Map<string, HomeFeedEvent>();
-  // Listed chats whose newest dated row has been seen.
-  const datedSeen = new Set<string>();
+  // Listed chats whose newest dated row has been seen. A chat under Unread
+  // has its newest there: its own row says its state.
+  const datedSeen = new Set(feed.needs.map(chatKey).filter((key): key is string => key !== null));
   for (const day of feed.activity) {
     const events: HomeFeedEvent[] = [];
     // The chats the last row stands for. A row standing for several says so

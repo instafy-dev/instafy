@@ -215,9 +215,9 @@ export function ConversationMessageRows({
   messages: ChatMessage[];
   allConversationMessages?: ChatMessage[] | null;
   /**
-   * The chat's history has come in. Until then a card may yet arrive, so a
-   * turn's files row, which names its page or site by the chat's cards, waits
-   * (useKnownChatSite) rather than read one way, then another.
+   * The chat's history has come in (chatHistoryIn). Until then a card may yet
+   * arrive, so a turn's files row, which names its page or site by the chat's
+   * cards, waits (useKnownChatSite) rather than read one way, then another.
    */
   historyReady?: boolean;
   timedSyntheticRows?: Array<{ key: string; timestamp: number; element: JSX.Element }>;

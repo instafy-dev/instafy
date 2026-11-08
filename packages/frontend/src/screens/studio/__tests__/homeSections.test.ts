@@ -178,6 +178,18 @@ describe("arrangeHomeSections", () => {
     expect(running.liveByChat.get(CHAT_A)?.key).toBe("activity:80");
   });
 
+  it("never gives a chat under Unread an older Stop: its unread row says its state", () => {
+    // The person had read the Stop, then went on in the chat, whose newest
+    // row ("Run finished") is unread.
+    const finished = activityEvent(90, CHAT_A, { lane: "needs", kind: "run_finished" });
+    const sections = arrangeHomeSections({
+      feed: { needs: [finished], hasCut: false, activity: [day("today", [activityEvent(60, CHAT_A, { kind: "run_stopped" })])] },
+      conversations: [], resumeChatKey: null, recentChats: [],
+    });
+    expect(sections.needs.map((event) => event.key)).toEqual(["activity:90"]);
+    expect(sections.liveByChat.size).toBe(0);
+  });
+
   it("puts the chat Continue working gave way to first under Unread, where a phone still shows it", () => {
     const resumed = activityEvent(10, CHAT_A, { lane: "needs" });
     const newer = [1, 2, 3, 4, 5].map((n) => activityEvent(50 + n, `9999999${n}-9999-4999-8999-999999999999`, { lane: "needs" }));

@@ -18,6 +18,7 @@ import {
   resolveRunFailureRetrySource,
 } from "../../../conversations/runFailurePresentation";
 import type { ChatMessage } from "../types";
+import { browserRequestFromContinuationPrompt, readBrowserRequestOf } from "./browserRequest";
 import { getMessageType } from "./chatMessageMetadata";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -111,11 +112,7 @@ export function resolveAutomaticRetryFold(messages: readonly ChatMessage[]): Aut
   for (const { prompt, failureId, index } of resends) {
     const failure = failures.get(failureId);
     const retryRunId = runIdOf(prompt);
-    // A stored resend that names no run (a browser task sent again, after a
-    // reload) is answered by the first job that writes after it.
-    const retryJobId = retryRunId
-      ? jobByRunId.get(retryRunId)
-      : failure ? firstJobAfter(messages, index, jobIdOf(failure)) : undefined;
+    const retryJobId = retryRunId ? jobByRunId.get(retryRunId) : undefined;
     if (
       !failure ||
       !repeatsFailedPrompt(messages, prompt, failure) ||
@@ -135,23 +132,6 @@ export function resolveAutomaticRetryFold(messages: readonly ChatMessage[]): Aut
     }
   }
   return { hiddenPromptIds, earlierAttemptByJobId, pendingJobIds, pendingRetryRunIdByJobId };
-}
-
-/**
- * The job that first wrote after `resendIndex`, and never before it, unless
- * someone's prompt comes first: the turn that answered the resend.
- */
-function firstJobAfter(messages: readonly ChatMessage[], resendIndex: number, failedJobId: string): string | undefined {
-  for (const message of messages.slice(resendIndex + 1)) {
-    if (message.role === "user") {
-      return undefined;
-    }
-    const jobId = jobIdOf(message);
-    if (jobId !== "" && jobId !== failedJobId) {
-      return messages.slice(0, resendIndex).some((earlier) => jobIdOf(earlier) === jobId) ? undefined : jobId;
-    }
-  }
-  return undefined;
 }
 
 /**
@@ -182,9 +162,21 @@ function repeatsFailedPrompt(messages: readonly ChatMessage[], prompt: ChatMessa
   return (
     source !== null &&
     source.id !== prompt.id &&
-    source.content.trim() === prompt.content.trim() &&
+    sentWords(source) === sentWords(prompt) &&
     (source.authorId ?? null) === (prompt.authorId ?? null)
   );
+}
+
+/**
+ * What a prompt sent. A browser task's row shows a notice in its place, which
+ * names who opened the browser ("Octo opened Instafy's browser" when Studio
+ * opened it by itself, "Opened Instafy's browser" after a press, such as Try
+ * again), so its words are its card and the task it sent.
+ */
+function sentWords(prompt: ChatMessage): string {
+  const card = readBrowserRequestOf(prompt);
+  const task = card === null ? null : browserRequestFromContinuationPrompt(prompt)?.task ?? null;
+  return card !== null && task !== null ? `${card}\n${task}` : prompt.content.trim();
 }
 
 /** The earlier attempts a turn carries in its Details, oldest first. */

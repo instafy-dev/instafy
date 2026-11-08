@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { mapControllerMessageToChat } from "../../../../conversations/conversationMessageUtils";
+import type { ControllerConversationMessage } from "../../../../services/runtimeController/conversations";
 import type { ChatMessage } from "../../types";
 import {
   checkActivity,
@@ -13,6 +15,7 @@ import {
   summarizeTurnActivity,
   type TurnActivityPhase,
 } from "../turnActivity";
+import storedChats from "./fixtures/browserHandBackChats.json";
 
 // Studio's copy of the label rules. The fixture list is runtime-contracts' own
 // file, so a rule changed on one side and not the other fails here and in the
@@ -179,11 +182,23 @@ function note(content: string, type = "status", activity?: unknown): ChatMessage
 
 const SAVE_LABEL = { v: 1, key: "runtime/save", role: "quiet", live: "Saving your changes", count: 1, also: [] };
 
-/** One of the statuses the turn's save writes, as the runtime writes them (`workspace_commit`). */
+/**
+ * One of the statuses the turn's save writes, as Studio receives them: the
+ * controller relays the runtime's `workspace_commit` under `details`, with
+ * only the step's label lifted to the top.
+ */
 function saveStatus(stage: "started" | "applying" | "completed"): ChatMessage {
   const content = { started: "Syncing workspace changes…", applying: "Applying changes to workspace…", completed: "Workspace sync complete." }[stage];
   const message = note(content, "status", stage === "started" ? SAVE_LABEL : undefined);
-  return { ...message, metadata: { ...(message.metadata as Record<string, unknown>), kind: "workspace_commit", status: stage } };
+  return {
+    ...message,
+    metadata: {
+      ...(message.metadata as Record<string, unknown>),
+      kind: "update",
+      outcome: "in_progress",
+      details: { kind: "workspace_commit", status: stage },
+    },
+  };
 }
 
 /** A step's activity as an entry of another step's `also`. */
@@ -803,6 +818,19 @@ describe("a step its turn ended before", () => {
     expect(summarize([...turn, saveStatus("completed")], "running").live).toBe("Thinking…");
     // A status of another kind, with no label, still ends it.
     expect(summarize([...turn, note("Retrying: stream disconnected")], "running").live).toBe("Thinking…");
+  });
+
+  it("keeps saying Saving your changes through a stored save's own statuses", () => {
+    // A map's build turn as the chat stored it, mapped as Studio maps it.
+    const rows = (storedChats as unknown as Record<string, Array<Omit<ControllerConversationMessage, "conversationId" | "projectId" | "sessionId" | "promptId">>>).seville
+      .map((row) => mapControllerMessageToChat({ ...row, conversationId: "conversation-1", projectId: "project-1", sessionId: null, promptId: null }));
+    const saving = rows.findIndex((row) => row.content === "Syncing workspace changes…");
+    const applying = rows.findIndex((row) => row.content === "Applying changes to workspace…");
+    const saved = rows.findIndex((row) => row.content === "Workspace sync complete.");
+    expect([saving + 1, saving + 2]).toEqual([applying, saved]);
+    const jobId = (rows[saving]!.metadata as { jobId: string }).jobId;
+    const live = (end: number) => summarizeTurnActivity(rows.slice(0, end + 1), { jobId, phase: "running", viewerCanAnswer: false }).live;
+    expect([live(saving), live(applying), live(saved)]).toEqual(["Saving your changes…", "Saving your changes…", "Thinking…"]);
   });
 
   // A retry in the middle of a turn is not its end: a lookup still running

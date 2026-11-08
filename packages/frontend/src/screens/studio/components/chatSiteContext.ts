@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
 import type { ChatMessage } from "../types";
 import { getMessageType } from "./chatMessageMetadata";
 import { extractAgentJobId } from "./chatMessagePresentation";
@@ -46,18 +46,36 @@ export function useChatSite(): ChatSite | null | undefined {
 export const CHAT_HISTORY_WAIT_MS = 3_000;
 
 /**
+ * Whether a chat's history is in for its rows, which name pages by its cards:
+ * its newest page has come, and no older page is on its way by itself to fill
+ * the window, as one may hold the card that names a row's page. An older page
+ * the person scrolls up for never holds the rows back.
+ */
+export function chatHistoryIn({ newestPage, olderPageOnItsWay }: { newestPage: boolean; olderPageOnItsWay: boolean }): boolean {
+  return newestPage && !olderPageOnItsWay;
+}
+
+/**
  * The chat's site to give its rows: undefined until the chat's history has
- * come in, at most {@link CHAT_HISTORY_WAIT_MS} for each chat.
+ * come in ({@link chatHistoryIn}), at most {@link CHAT_HISTORY_WAIT_MS} for
+ * each chat. Once its rows have shown, they never wait again.
  */
 export function useKnownChatSite(site: ChatSite | null, historyReady: boolean, chatKey: string | null): ChatSite | null | undefined {
+  // The chat whose rows have shown with its history in: kept without a render
+  // of its own, which would draw every row again.
+  const shownFor = useRef<{ chatKey: string | null } | null>(null);
   // The chat whose history the rows stopped waiting for.
   const [waitedOut, setWaitedOut] = useState<{ chatKey: string | null } | null>(null);
   useEffect(() => {
-    if (historyReady) return;
+    if (historyReady) shownFor.current = { chatKey };
+  }, [chatKey, historyReady]);
+  const settled = shownFor.current?.chatKey === chatKey || waitedOut?.chatKey === chatKey;
+  useEffect(() => {
+    if (historyReady || settled) return;
     const timer = window.setTimeout(() => setWaitedOut({ chatKey }), CHAT_HISTORY_WAIT_MS);
     return () => window.clearTimeout(timer);
-  }, [chatKey, historyReady]);
-  return historyReady || (waitedOut !== null && waitedOut.chatKey === chatKey) ? site : undefined;
+  }, [chatKey, historyReady, settled]);
+  return historyReady || settled ? site : undefined;
 }
 
 /** The page a file is in, by its folder's name, when it is in one (`sites/<name>/…`, where the space's pages are made). */

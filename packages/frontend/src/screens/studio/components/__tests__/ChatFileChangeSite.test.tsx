@@ -3,9 +3,9 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChatMessageFileChange } from "../../types";
+import type { ChatMessage, ChatMessageFileChange } from "../../types";
 import { ChatFileChangeList } from "../ChatFileChangeList";
-import { CHAT_HISTORY_WAIT_MS, ChatSiteContext, conversationSite, useKnownChatSite, type ChatSite } from "../chatSiteContext";
+import { CHAT_HISTORY_WAIT_MS, ChatSiteContext, chatHistoryIn, conversationSite, useKnownChatSite, type ChatSite } from "../chatSiteContext";
 
 // Every file reads as 100 added lines. Nothing here may hit the network.
 const fetchDiff = vi.hoisted(() =>
@@ -220,6 +220,51 @@ describe("the files a site turn created", () => {
     expect(toggle()?.textContent).toBe("Changed Three days in Seville");
   });
 
+  // A local test, Nov 8: on a switch back to a map's chat, its newest page of
+  // history held the map turn's files and the note's, and not the map's card
+  // (58th from newest): the rows read "Changed seville-3-days" until Studio
+  // loaded the next page by itself to fill the window, 0.2 s later.
+  it("waits while an older page of the chat comes by itself, then names the page by its card", async () => {
+    const card: ChatMessage = { id: "card", role: "assistant", content: "", timestamp: 900, messageType: "action_request",
+      metadata: { jobId: "map-job", messageType: "action_request",
+        details: { title: "Three days in Seville", preview: { previewId: "11111111-1111-4111-8111-111111111111", port: 4173 } } } };
+    const mapFiles = ["sites/seville-3-days/index.html", "sites/seville-3-days/map.config.json"].map(created);
+    const noteFiles = [changed("sites/seville-3-days/map.config.json")];
+    const newestPage: ChatMessage[] = [
+      { id: "map-files", role: "assistant", content: "", timestamp: 1_000, metadata: { jobId: "map-job" }, files: mapFiles },
+      { id: "note-files", role: "assistant", content: "", timestamp: 5_000, metadata: { jobId: "note-job" }, files: noteFiles },
+    ];
+    function Chat({ messages, history }: { messages: ChatMessage[]; history: Parameters<typeof chatHistoryIn>[0] }) {
+      const site = useKnownChatSite(conversationSite(messages), chatHistoryIn(history), "chat-1");
+      return (
+        <ChatSiteContext.Provider value={site}>
+          <ChatFileChangeList files={mapFiles} projectId="project-1" messageTimestamp={1_000} />
+          <ChatFileChangeList files={noteFiles} projectId="project-1" messageTimestamp={5_000} />
+        </ChatSiteContext.Provider>
+      );
+    }
+    const labels = () => [...container.querySelectorAll('[data-testid="chat-file-change-toggle-files"]')].map((chip) => chip.textContent);
+    const seen: string[] = [];
+    const render = async (messages: ChatMessage[], history: Parameters<typeof chatHistoryIn>[0]) => {
+      await act(async () => root.render(<Chat messages={messages} history={history} />));
+      seen.push(container.textContent ?? "");
+    };
+    await render([], { newestPage: false, olderPageOnItsWay: false });
+    await render(newestPage, { newestPage: true, olderPageOnItsWay: true });
+    expect(seen).toEqual(["", ""]);
+    await render([card, ...newestPage], { newestPage: true, olderPageOnItsWay: false });
+    expect(labels()).toEqual(["Created Three days in Seville", "Changed Three days in Seville"]);
+    expect(seen.some((text) => text.includes("seville-3-days"))).toBe(false);
+
+    // In a window the newest page fills, no older page comes by itself: the
+    // rows show at once, naming the page by its folder until the person
+    // scrolls up to its card.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render(newestPage, { newestPage: true, olderPageOnItsWay: false });
+    expect(labels()).toEqual(["Changed seville-3-days", "Changed seville-3-days"]);
+  });
+
   it("folds files shown before the chat had a site behind the site's line once it has one", async () => {
     const files = ["map/index.html", "map/data.json"].map(created);
     const render = async (hasSite: boolean) => {
@@ -280,6 +325,14 @@ describe("the chat's site for its rows", () => {
     // Waiting for one chat never stands for another.
     await act(async () => root.render(<Rows ready={false} chatKey="chat-c" />));
     expect(latest).toBeUndefined();
+  });
+
+  it("never hides a chat's rows again once they have shown", async () => {
+    await act(async () => root.render(<Rows ready chatKey="chat-a" />));
+    expect(latest).toBe(site);
+    // The window grew taller, and an older page comes by itself to fill it.
+    await act(async () => root.render(<Rows ready={false} chatKey="chat-a" />));
+    expect(latest).toBe(site);
   });
 });
 
