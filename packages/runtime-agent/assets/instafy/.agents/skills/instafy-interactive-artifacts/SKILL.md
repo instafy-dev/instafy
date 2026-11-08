@@ -36,8 +36,8 @@ own kind of page.
   `:root[data-theme="dark"]` (Studio's theme, which `instafy bind serve` puts on `<html>`). Never
   `color-scheme: light` alone; one look only when asked.
 - One primary button per page; no search, filter or sort nobody asked for, and no sort by a value no row has. The
-  lede: the verdict plus the biggest unknown, saying only what a page you read says: how many a page lists, or that
-  these are all of them or the latest, only when it says so. Facts carry their trust: `checked 17 Oct on maker.com`,
+  lede: the verdict, saying only what a page you read says: how many a page lists, or that these are all of them or
+  the latest, only when it says so. Facts carry their trust: `checked 17 Oct on maker.com`,
   `€549 at Shop · seen 17 Oct`, `checked 4 min ago`, `Estimate`, `Unknown`. A tip no page gave is plain text, never
   styled like a source line.
 - Options side by side: each value names the page it was read on and the day; one nobody found reads `Unknown` and
@@ -69,10 +69,11 @@ own kind of page.
 
 ## 3. Serve it and show it
 
-1. One command, run inside the site's folder, starts it so it outlives your turn and posts its card:
+1. A page `instafy bind check` checks gets its card from that check (above), whose answer gives its port. Any other
+   site: one command, run inside the site's folder, starts it so it outlives your turn and posts its card:
    `(cd sites/<slug> && instafy preview open --title '<short title>' --serve-cmd "<serve command>" --start --json)`,
-   with `{port}` where the serve command takes its port. The serve command is the builder skill's; a bound or plain
-   site's is `instafy bind serve . --port {port} --preview`. It picks the port: never choose one.
+   with `{port}` where the serve command takes its port. The serve command is the builder skill's. It picks the port:
+   never choose one.
 2. `instafy preview check --port <port>` (the JSON's) loads it as Studio does: fix every error it lists and look at
    the phone screenshot.
 3. Never post preview, tunnel or localhost URLs. A public link only when the user asks for one:

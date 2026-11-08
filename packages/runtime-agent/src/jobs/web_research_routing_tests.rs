@@ -1534,7 +1534,7 @@ fn a_page_of_options_cites_only_pages_that_give_a_value_and_its_lede_only_what_t
         (
             hub_skill,
             previous_hub,
-            "The lede: the verdict plus the biggest unknown, saying only what a page you read says: how many a page lists, or that these are all of them or the latest, only when it says so.",
+            "The lede: the verdict, saying only what a page you read says: how many a page lists, or that these are all of them or the latest, only when it says so.",
         ),
         (
             hub_skill,

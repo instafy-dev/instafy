@@ -267,20 +267,23 @@ fn a_page_written_by_hand_follows_light_and_dark() {
 /// "from the site's folder", a comparison's turn ran it from the space's folder with the site's
 /// path in the serve command (`instafy bind serve sites/<slug>`), so the card's site was the whole
 /// space and another chat's build took a new picture of it. The card step's command goes into the
-/// site's folder itself and serves `.`, as the map skill's does. An unedited earlier copy of the
-/// hub is upgraded; an edited one is kept.
+/// site's folder itself and serves `.`, as the map skill's does; a page `instafy bind check` checks
+/// gets that command from the check, which runs it when it passes (named in the hub as well, the
+/// card was asked for twice). An unedited earlier copy of the hub is upgraded; an edited one is
+/// kept.
 #[test]
 fn a_pages_card_starts_inside_the_sites_own_folder() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let hub =
         include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
     let previous = include_str!("legacy/interactive-artifacts-v7.md");
-    let step = r#"1. One command, run inside the site's folder, starts it so it outlives your turn and posts
-        its card: `(cd sites/<slug> && instafy preview open --title '<short title>' --serve-cmd
-        "<serve command>" --start --json)`, with `{port}` where the serve command takes its port. The
-        serve command is the builder skill's; a bound or plain site's is `instafy bind serve . --port
-        {port} --preview`."#;
+    let step = r#"1. A page `instafy bind check` checks gets its card from that check (above), whose answer
+        gives its port. Any other site: one command, run inside the site's folder, starts it so it
+        outlives your turn and posts its card: `(cd sites/<slug> && instafy preview open --title
+        '<short title>' --serve-cmd "<serve command>" --start --json)`, with `{port}` where the serve
+        command takes its port. The serve command is the builder skill's."#;
     assert!(flat(hub).contains(&flat(step)), "{hub}");
+    assert!(!hub.contains("a bound or plain site's is"), "{hub}");
     assert!(!hub.contains("from the site's folder"), "{hub}");
     assert!(flat(previous).contains("1. One command, from the site's folder, starts it"));
     assert!(
