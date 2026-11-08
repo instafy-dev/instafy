@@ -1483,12 +1483,16 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     }
 
     // Keeps the addresses a page gave (its own, its links and those its text
-    // spells out), and the sites of the pages read (`siteUrls`: the page's own
-    // address), in the run's record. Best effort: one that is not kept is refused later, and found
-    // again from the site's root.
+    // spells out), and the sites of the pages read past their site's root
+    // (`siteUrls`: the page's own address), in the run's record. A site's root
+    // opens without anyone giving it, so reading one gives nothing of its
+    // site: a search engine's home page a turn opened by itself would come
+    // back as the way on after a refusal there. Best effort: one that is not
+    // kept is refused later, and found again from the site's root.
     function rememberGiven(rawUrls, siteUrls = []) {
+      const sites = siteUrls.filter((rawUrl) => givenAddressSitePath(rawUrl)?.path !== "/");
       const keys = [
-        ...new Set([...rawUrls.map(givenAddressKey), ...siteUrls.map(givenSiteKey)].filter(Boolean)),
+        ...new Set([...rawUrls.map(givenAddressKey), ...sites.map(givenSiteKey)].filter(Boolean)),
       ];
       if (!keys.length) {
         return;

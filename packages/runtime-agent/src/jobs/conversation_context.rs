@@ -264,9 +264,10 @@ fn persons_messages_for_the_browser(entries: &[JsonValue]) -> BTreeMap<usize, &s
 /// The person's own words in a chat's history, in their words ([`persons_words`]): each message
 /// they wrote that reads as theirs ([`reads_as_persons_own`]) and still stands, the one a browser
 /// turn carries on included, and none they stopped ([`stopped_requests`]) or whose change they
-/// undid ([`taken_back_runs`]), nor a hidden one. What a browser run is told the person typed
-/// (`shared_browser::typed_addresses_in`): never Octo's replies or cards, a card's or the routing
-/// step's task, a page's Ask Octo or a tool's output.
+/// undid ([`taken_back_runs`]), nor a hidden one: never Octo's replies or cards, a card's or the
+/// routing step's task, a page's Ask Octo or a tool's output. A browser run that carries on the
+/// routing step's card for one of them is told the addresses in it were typed
+/// (`jobs::persons_typed_addresses`).
 pub(super) fn persons_own_words(entries: &[JsonValue]) -> Vec<&str> {
     let stopped: HashSet<&str> = stopped_requests(entries)
         .into_iter()

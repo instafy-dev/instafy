@@ -5555,7 +5555,8 @@ function refuseUnansweredAddress(url) {
 // for nothing. The site's root, and an address on no public site (left to the
 // browser's own network rules), always go on. The refusal says where to go
 // instead: that site's root, links and search when the chat was given the
-// site (siteGiven), else the official site of what the task names. Sent to the
+// site (siteGiven: a message or the task named it, or a page read there past
+// its root), else the official site of what the task names. Sent to the
 // root of any site it refused, a route question opened a search engine nobody
 // named and asked the person to let it send a search, which they refused (a
 // local test, Nov 8). A refused address was never opened, so the turn writes
@@ -5588,9 +5589,9 @@ function addressWordsAsk(url) {
 }
 
 // Keeps the addresses a page gives, for refuseUngivenAddress: its own, its
-// links' and the addresses its text spells out, and the page's own site. A
-// page that may show a secret gives them too: only their fingerprints are
-// kept.
+// links' and the addresses its text spells out, and the page's own site when
+// it is past the site's root (rememberGiven). A page that may show a secret
+// gives them too: only their fingerprints are kept.
 function rememberGivenAddresses(rawUrl, interactive, text) {
   const links = interactive.map(({ description }) => {
     try {

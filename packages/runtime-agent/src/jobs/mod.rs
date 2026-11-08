@@ -17581,26 +17581,35 @@ fn browser_routing_snapshot_for_job(
         .flatten()
 }
 
-/// The addresses the person's own messages name, which a browser run opens without the word
-/// check (`shared_browser::typed_addresses_in`): each of their messages in the chat's history that
-/// still stands ([`conversation_context::persons_own_words`]), and the run's request itself when
-/// it carries on a card the routing step posted for their message, whose words are theirs, as
-/// the controller checked on its send ([`browser_hand_back::carries_on_a_routed_card`]), less the
-/// routing step's summary line after them. A card a turn wrote, a page or a tool names none.
+/// The addresses the person typed, which a browser run opens without the word check
+/// (`shared_browser::typed_addresses_in`): those of the run's request when it carries on the card
+/// the routing step posted for the sender's own message, as the controller checked on its send
+/// ([`browser_hand_back::carries_on_a_routed_card`]), less the routing step's summary line after
+/// them, and only when the chat's history holds those words as a message of theirs that still
+/// stands ([`conversation_context::persons_own_words`]): never a site's Ask Octo routed to the
+/// browser, whose words the page chose. No other message of the history gives one: it doesn't
+/// say who wrote each, and in a shared chat a teammate's address is not the person's OK. A card
+/// a turn wrote, a page or a tool names none.
 pub(crate) fn persons_typed_addresses(payload: &JsonValue) -> Vec<String> {
+    let routed = payload
+        .get("metadata")
+        .is_some_and(browser_hand_back::carries_on_a_routed_card);
+    let Some(request) = payload
+        .get("prompt_text")
+        .and_then(JsonValue::as_str)
+        .filter(|_| routed)
+    else {
+        return Vec::new();
+    };
+    let words = browser_request::routed_task_words(request).trim();
     let entries = payload
         .get("conversation_history")
         .and_then(JsonValue::as_array)
         .map_or(&[][..], Vec::as_slice);
-    let mut words = conversation_context::persons_own_words(entries);
-    if payload
-        .get("metadata")
-        .is_some_and(browser_hand_back::carries_on_a_routed_card)
-        && let Some(request) = payload.get("prompt_text").and_then(JsonValue::as_str)
-    {
-        words.push(browser_request::routed_task_words(request));
+    if !conversation_context::persons_own_words(entries).contains(&words) {
+        return Vec::new();
     }
-    crate::shared_browser::typed_addresses_in(&words)
+    crate::shared_browser::typed_addresses_in(&[words])
 }
 
 /// The task of the card for a message the routing step sent straight to Instafy's browser: the

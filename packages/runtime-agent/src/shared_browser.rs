@@ -1255,7 +1255,7 @@ pub fn typed_addresses_in(words: &[&str]) -> Vec<String> {
 
 /// The fingerprints of the pages a browser turn's finding lines say it read
 /// (`{"url": …, "title": …, "facts": […]}`, one JSON object a line), never one
-/// that stopped it, and of their sites.
+/// that stopped it, and of their sites past a site's root ([`read_page_site_key`]).
 fn pages_read_in(text: &str) -> Vec<String> {
     let mut end = text.len().min(MAX_TASK_TEXT_BYTES);
     while !text.is_char_boundary(end) {
@@ -1271,9 +1271,19 @@ fn pages_read_in(text: &str) -> Vec<String> {
                 .and_then(JsonValue::as_str)
                 .and_then(|url| reqwest::Url::parse(url).ok())
         })
-        .flat_map(|url| [given_address_key(&url), given_site_key(&url)])
+        .flat_map(|url| [given_address_key(&url), read_page_site_key(&url)])
         .flatten()
         .collect()
+}
+
+/// The site a page read gives ([`given_site_key`]): none for a site's root, which opens without
+/// anyone giving it, so reading one proves nothing: a search engine's home page a turn opened by
+/// itself would come back as the way on after a refusal there. The approval script's
+/// `rememberGiven` holds the same rule for the pages a run reads.
+fn read_page_site_key(url: &reqwest::Url) -> Option<String> {
+    given_site_and_path(url)
+        .filter(|(_, path)| path != "/")
+        .map(|(site, _)| given_fingerprint(&site))
 }
 
 /// The fingerprints of the addresses `text` names: each `http(s)://` address,
@@ -3380,7 +3390,8 @@ fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
         ),
         // The person said no: the words a turn repeats in its note, and why it tries nothing
         // else. Told the run's consent was blocked and to start a fresh run, a browser part
-        // repeated those words in its Details note (a local test, Nov 8).
+        // repeated those words in its Details note (a local test, Nov 8). A later call reads
+        // [`terminal_consent_later_call_result`].
         "approval_denied" => (
             "The person said no, so this step didn't happen. Don't try it another way.".to_string(),
             true,
@@ -3404,6 +3415,21 @@ fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
     result
 }
 
+/// The result of a call after the one that ended the run: the same as that call's
+/// ([`terminal_consent_call_result`]), except after a no, which was to an earlier step the
+/// person saw, not to this one, and ends the browser for the turn.
+fn terminal_consent_later_call_result(code: &'static str) -> CallToolResult {
+    if code != "approval_denied" {
+        return terminal_consent_call_result(code);
+    }
+    let message = "The person said no to an earlier step, so the browser is done for this turn. End this turn now.";
+    let mut result = CallToolResult::error(vec![ContentBlock::text(message)]);
+    let mut structured = terminal_consent_signal(code);
+    structured["message"] = JsonValue::String(message.to_string());
+    result.structured_content = Some(structured);
+    result
+}
+
 #[derive(Debug)]
 enum SharedBrowserMcpExecutionFailure {
     TerminalConsent(&'static str),
@@ -3418,6 +3444,9 @@ struct SharedBrowserMcpServer {
     /// The step kind of the call that latched the terminal failure, for its
     /// own result only.
     terminal_step: Arc<AsyncMutex<Option<&'static str>>>,
+    /// Whether a call's result already said the run ended: every later call's
+    /// says so as a later call's ([`terminal_consent_later_call_result`]).
+    terminal_answered: Arc<AtomicBool>,
     /// Tool calls in a row that found the browser unavailable.
     browser_unavailable_streak: Arc<AtomicU32>,
     /// Steps in this run whose yes was not used because their control
@@ -3450,6 +3479,7 @@ impl SharedBrowserMcpServer {
             action_lock: Arc::new(AsyncMutex::new(())),
             terminal_consent_failure: Arc::new(AsyncMutex::new(None)),
             terminal_step: Arc::new(AsyncMutex::new(None)),
+            terminal_answered: Arc::new(AtomicBool::new(false)),
             browser_unavailable_streak: Arc::new(AtomicU32::new(0)),
             changed_after_yes: Arc::new(AtomicU32::new(0)),
             page_changed_streak: Arc::new(AtomicU32::new(0)),
@@ -3624,7 +3654,13 @@ impl ServerHandler for SharedBrowserMcpServer {
             Ok(payload) => Ok(successful_tool_result(&tool, payload).into()),
             Err(SharedBrowserMcpExecutionFailure::TerminalConsent(code)) => {
                 let step = self.terminal_step.lock().await.take();
-                Ok(terminal_consent_call_result_with_step(code, step).into())
+                // The first such answer is the call that ended the run's.
+                Ok(if self.terminal_answered.swap(true, Ordering::SeqCst) {
+                    terminal_consent_later_call_result(code)
+                } else {
+                    terminal_consent_call_result_with_step(code, step)
+                }
+                .into())
             }
             Err(SharedBrowserMcpExecutionFailure::Other(error)) => {
                 Ok(failed_call_result(&error).into())

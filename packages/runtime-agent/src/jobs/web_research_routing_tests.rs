@@ -624,7 +624,7 @@ fn a_route_comes_from_the_operators_journey_planner() {
     let start = BROWSER_SKILL.find("## Finding a page").expect("section");
     let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
     let section = flat(&BROWSER_SKILL[start..end]);
-    let line = "- A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: its destination is the stop the place's own page names, so read that page first; choose the stations and the day and time the person travels (a daytime hour when they gave none), press its button and read the route off the page it shows), not a listing or a kiosk page: those only lead to it. A route's finding, like your reply, names its end stop, whose pick it is (\"<stop>, Octo's pick: the place's page names no stop\"), what it leaves out (\"the walk to the place isn't in it\") and when its legs run, not the page header's time.";
+    let line = "- A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: its destination is the stop the place's own page names, so read that page first; choose the stations and the day and time the person travels (a daytime hour when they gave none), press its button and read the route off the page it shows), not a listing or a kiosk page: those only lead to it. A route's finding, like your reply, names its end stop, whose pick it is (\"<stop>, Octo's pick: the place's page names no stop\"), what it leaves out (\"the walk to the place isn't in it\") and the day and time its legs run, not the page header's.";
     assert!(section.contains(line), "{section}");
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(line));
@@ -1114,7 +1114,7 @@ fn a_route_is_planned_for_the_day_and_time_the_person_travels() {
     let start = BROWSER_SKILL.find("## Finding a page").expect("section");
     let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
     let section = flat(&BROWSER_SKILL[start..end]);
-    let line = "- A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: its destination is the stop the place's own page names, so read that page first; choose the stations and the day and time the person travels (a daytime hour when they gave none), press its button and read the route off the page it shows), not a listing or a kiosk page: those only lead to it. A route's finding, like your reply, names its end stop, whose pick it is (\"<stop>, Octo's pick: the place's page names no stop\"), what it leaves out (\"the walk to the place isn't in it\") and when its legs run, not the page header's time.";
+    let line = "- A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: its destination is the stop the place's own page names, so read that page first; choose the stations and the day and time the person travels (a daytime hour when they gave none), press its button and read the route off the page it shows), not a listing or a kiosk page: those only lead to it. A route's finding, like your reply, names its end stop, whose pick it is (\"<stop>, Octo's pick: the place's page names no stop\"), what it leaves out (\"the walk to the place isn't in it\") and the day and time its legs run, not the page header's.";
     assert!(section.contains(line), "{section}");
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(line));
@@ -2346,8 +2346,10 @@ fn a_route_is_planned_to_the_end_and_a_forms_prompt_is_the_persons() {
 /// place, under the place's name and with the planner page's header time, while only the reply
 /// said where it ended (a local test, Nov 8). A page is found at the official site of what the
 /// task names first, with its own links and search, and a search engine only when the person
-/// named one or no official site is known, since its search needs their OK: a route question
-/// went to a search engine whose search the person then refused. No site is blocked or listed.
+/// named one or no official site is known: a route question went to a search engine whose search
+/// the person then refused. Nothing says a search engine's search needs their OK: a page's own
+/// one-field search goes without asking under routine browsing, and the Personal Browser searches
+/// without asking. No site is blocked or listed.
 /// Within the part a snapshot carries, without pushing the sign-in rules out of it. An unedited
 /// earlier copy is upgraded.
 #[test]
@@ -2358,12 +2360,13 @@ fn a_routes_finding_names_its_limits_and_a_search_engine_comes_last() {
     let section = flat(&BROWSER_SKILL[start..end]);
     for words in [
         "Open an address the person or a skill gave or a link on a page you read (print a page's links with its text), else the official site of what the task names (for reviews, a reviewer's own site) and its links and search.",
-        "Use a search engine only if the person named one or no official site is known: its search needs their OK.",
-        "A route's finding, like your reply, names its end stop, whose pick it is (\"<stop>, Octo's pick: the place's page names no stop\"), what it leaves out (\"the walk to the place isn't in it\") and when its legs run, not the page header's time.",
+        "Use a search engine only if the person named one or no official site is known.",
+        "A route's finding, like your reply, names its end stop, whose pick it is (\"<stop>, Octo's pick: the place's page names no stop\"), what it leaves out (\"the walk to the place isn't in it\") and the day and time its legs run, not the page header's.",
     ] {
         assert!(section.contains(words), "{words}: {section}");
     }
     assert!(!flat(BROWSER_SKILL).contains("Search engines are not categorically blocked"));
+    assert!(!flat(BROWSER_SKILL).contains("needs their OK"));
     assert!(BROWSER_SKILL.contains("Instafy has no curated website denylist"));
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(&section));
@@ -2394,6 +2397,7 @@ fn a_routes_destination_is_the_stop_the_places_own_page_names() {
     for words in [
         "its destination is the stop the place's own page names, so read that page first;",
         "A route's finding, like your reply, names its end stop, whose pick it is",
+        "and the day and time its legs run, not the page header's.",
     ] {
         assert!(section.contains(words), "{words}: {section}");
     }

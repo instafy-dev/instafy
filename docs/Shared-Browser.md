@@ -1626,10 +1626,11 @@ not opened and gets no finding line: Octo opens only addresses it was given."
 and where to go instead: "Open <the site> and follow its links to the page, or
 use the site's own search." only on a site the chat was given (the person's
 messages or the task named an address on it, or the site's name alone, or the
-chat's browser turns read a page on it; a page's link or text gives its
-address, never its site), and otherwise "Open the official site of what the
-task names (the venue's, operator's, shop's or reviewer's; for a route, the
-operator's journey planner), and follow its links or use its own search."
+chat's browser turns read a page on it past its root, which opens without
+anyone giving it; a page's link or text gives its address, never its site),
+and otherwise "Open the official site of what the task names (the venue's,
+operator's, shop's or reviewer's; for a route, the operator's journey
+planner), and follow its links or use its own search."
 Sent to the root of whatever site it refused, a route question opened a search
 engine nobody named and asked the person to let it send a search, which they
 refused. runtime-agent reads the
@@ -1651,9 +1652,10 @@ fingerprints (`given.json`, the first 32 hex digits of the SHA-256 of each
 site and path, and of each site given alone, at most 4,000, newest last):
 runtime-agent starts it with the addresses and sites the task and the history
 name and those the chat's earlier runs on this browser were given, the
-controller script adds each page the run reads and its site, and runtime-agent
-carries them, in memory, into the chat's next runs and into no other chat's. A
-run without the record (one runtime-agent did not start) refuses nothing.
+controller script adds each page the run reads and, past its root, its site,
+and runtime-agent carries them, in memory, into the chat's next runs and into
+no other chat's. A run without the record (one runtime-agent did not start)
+refuses nothing.
 
 Whether the site answered is judged by the load's own request,
 never by the tab's address, which a page's script may change while the load
@@ -1686,11 +1688,14 @@ not-found page would come later than a step's time (see below).
 
 **An address the person typed opens without the word check.** `navigate` asks
 for an address with an action word in it ("post", "delete", "send", …), and
-`open_tab` refuses one, even under routine browsing, unless the person's own
-messages gave that exact address (its query and fragment included): their
-messages in the chat's history that still stand, and a routed card's request,
-whose words are theirs, never Octo's replies, a card a turn wrote, the routing
-step's summary, a page or a tool's output. runtime-agent writes those
+`open_tab` refuses one, even under routine browsing, unless the person typed
+that exact address (its query and fragment included) in the message the run
+carries on: the run carries on the card the routing step posted for the
+sender's own message, and the chat's history holds those words as a message of
+theirs that still stands. Never another message of the chat (the history
+doesn't say who wrote each, and in a shared chat a teammate's address is not
+the person's OK), a site's Ask Octo, Octo's replies, a card a turn wrote, the
+routing step's summary, a page or a tool's output. runtime-agent writes those
 addresses into the same record, apart (`typed`, the first 32 hex digits of the
 SHA-256 of each address's site, path, query and fragment, at most 256), and
 the controller script never adds one. The address check of risky addresses
@@ -1767,9 +1772,10 @@ step. Send a message when you're ready and I'll ask again.", never that Octo is
 still waiting, a denial reads "You said no, so that step didn't
 happen, and nothing from it was sent. Tell Octo what to try instead.", and the
 step tells the turn "The person said no, so this step didn't happen. Don't try
-it another way.", `approval_stale` (the page changed
-after the yes) reads "The page changed after you said yes, so I didn't do that
-step. Send a message and I'll ask again.", and every other terminal code reads one plain
+it another way." and each later call of the run "The person said no to an
+earlier step, so the browser is done for this turn. End this turn now.",
+`approval_stale` (the page changed after the yes) reads "The page changed
+after you said yes, so I didn't do that step. Send a message and I'll ask again.", and every other terminal code reads one plain
 message. Each speaks
 only about the step that asked, because earlier steps of the same turn may
 already have opened pages or changed something. The code stays in the run's
