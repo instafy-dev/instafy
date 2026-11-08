@@ -9,8 +9,8 @@ const pageCapture = globalThis.__instafyBrowserPageCapture;
 // The form submission a step makes, computed in the page the way the browser
 // does; the Desktop Personal Browser runs the same rules.
 const formSubmission = globalThis.__instafyBrowserFormSubmission;
-// The web-research skill's link-only list, embedded by the runtime agent ahead
-// of this script, plus what the space's own copy adds. Octo never opens, reads
+// Optional workspace site restrictions. Instafy embeds an empty default ahead
+// of this script; the space may explicitly add rules. Octo never opens, reads
 // or acts on a "no-agents" site on it, nor on a translator's, cache's or
 // archive's copy of one, in any tab: its own tabs and the page the person
 // chose alike. A "no-reuse" site (its terms bar copying, not reading) is not
@@ -282,7 +282,10 @@ function readSpaceLinkOnlyCopy(file) {
   try {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size > 256 * 1024) return ignored("is not a file of at most 256 KiB");
-    return { data: JSON.parse(fs.readFileSync(fd, "utf8")) };
+    const text = fs.readFileSync(fd, "utf8");
+    const retired = globalThis.__instafyLinkOnlySites?.retiredDefaultSha256;
+    if (Array.isArray(retired) && retired.includes(crypto.createHash("sha256").update(text.trim()).digest("hex"))) return {};
+    return { data: JSON.parse(text) };
   } catch (_) {
     return ignored("is not valid JSON");
   } finally {

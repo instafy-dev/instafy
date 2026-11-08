@@ -249,7 +249,7 @@ async fn proxy_token_renewal_preserves_identity_and_rejects_inactive_leases() ->
 
             let initial = super::issue_proxy_envelope(
                 &config, &project_id, &runtime_id, Some(&run_id), Some(&credential_id),
-                Some(crate::auth::ProxyJobBinding { job_id, lease_attempt: 1 }),
+                Some(crate::auth::ProxyJobBinding { job_id, lease_attempt: 1, native_web_search: false, }),
                 Some("renewal-test"), Some("Renewal Test"), Some("Inspect only the active project."),
             ).expect("initial lease proxy envelope");
             let mut initial_claims = proxy_claims(&initial)?;
@@ -288,6 +288,32 @@ async fn proxy_token_renewal_preserves_identity_and_rejects_inactive_leases() ->
                 "select to_jsonb(j) from agent_jobs j where id = $1", &[&job_id],
             ).await?.get(0);
             anyhow::ensure!(after_row == before_row, "proxy renewal mutated the job lease");
+
+            // Only the live credential kind grants search. Metadata cannot spoof
+            // the capability, and revocation removes it on renewal.
+            for (kind, revoked, expected) in [
+                ("openai_api_key", false, false),
+                ("codex_auth_json", false, true),
+                ("codex_auth_json", true, false),
+            ] {
+                pool.get().await?.execute(
+                    "update user_credentials set kind = $2, revoked_at = case when $3 then now() else null end,
+                     metadata = '{\"native_web_search\":true,\"provider\":\"chatgpt\"}'::jsonb where id = $1",
+                    &[&credential_id, &kind, &revoked],
+                ).await?;
+                let (status, response) = renew(&app, &job_id.to_string(), Some(&token), None).await?;
+                anyhow::ensure!(status == StatusCode::OK);
+                let envelope: ProxyEnvelopePayload = serde_json::from_value(response)?;
+                anyhow::ensure!(proxy_claims(&envelope)?["native_web_search"] == json!(expected));
+            }
+            pool.get().await?.execute(
+                "update user_credentials set kind = 'openai_api_key', revoked_at = null where id = $1",
+                &[&credential_id],
+            ).await?;
+            let (status, _) = renew(&app, &job_id.to_string(), Some(&token), Some(json!({
+                "lease_attempt": 1, "native_web_search": true,
+            }))).await?;
+            anyhow::ensure!(status == StatusCode::UNPROCESSABLE_ENTITY);
 
             for (case, owner, expiry, job_status, runtime_status, expected) in [
                 ("unowned", None, Some(lease_expiry), "leased", "ready", StatusCode::CONFLICT),

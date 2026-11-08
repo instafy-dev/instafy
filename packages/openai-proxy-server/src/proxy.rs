@@ -40,6 +40,9 @@ use crate::upstream_error::{self, ToolControlRejection, UpstreamFailure};
 use crate::usage::responses_to_chat_usage;
 use crate::usage_diagnostics::UsageDiagnostics;
 
+#[path = "native_search.rs"]
+mod native_search;
+
 const MAX_PROXY_REQUEST_BYTES: usize = 25 * 1024 * 1024;
 const PUBLIC_PROXY_LANE_HEADER: &str = "x-instafy-proxy-lane";
 const PUBLIC_PERSONAL_BROWSER_LANE: &str = "public-personal-browser";
@@ -103,7 +106,7 @@ impl StaticCredentials {
                 .is_ok()
         {
             eprintln!(
-                "[proxy] static proxy credentials are serving a managed run but the managed model is not pinned: managed runs keep the model they ask for and every client tool, hosted ones such as web search included, and speech and transcription stay available, on these credentials. Set PROXY_PINNED_MODEL to MANAGED_AI_MODEL_ID to pin them."
+                "[proxy] static proxy credentials are serving a managed run but the managed model is not pinned: managed runs keep the model they ask for and client tools including other hosted tools (web search remains disabled), and speech and transcription stay available, on these credentials. Set PROXY_PINNED_MODEL to MANAGED_AI_MODEL_ID to pin them."
             );
         }
         LeasedCredentials {
@@ -387,26 +390,20 @@ const PINNED_LEASE_TOOL_TYPES: [&str; 4] = ["function", "custom", "namespace", "
 
 /// Codex tool types that OpenAI runs on its side, billed per call on top of
 /// tokens. A pinned lease drops them on purpose: credits price tokens only.
-/// Web search, the only one codex sends, is also off on every other lease
-/// ([`is_hosted_web_search`]).
+/// Web search needs a separate controller-granted ChatGPT capability.
 const PINNED_LEASE_DROPPED_TOOL_TYPES: [&str; 1] = ["web_search"];
 
-/// OpenAI's hosted web search, under any of its tool types (`web_search`,
-/// `web_search_preview` and their dated forms). No lease forwards it, pinned
-/// or not, so it is off for Lite, own keys and ChatGPT logins alike: Octo
-/// searches the web only through Instafy's own command, which keeps the
-/// web-research skill's link-only sites link-only and caps searches per turn,
-/// and OpenAI's search can do neither. The runtime sets Codex's web search to
-/// disabled on every lane; this is the proxy's half of the same rule.
+/// OpenAI's hosted search tool names, including preview and dated variants.
+/// These require the controller's job capability and resolved BYOC ChatGPT
+/// material; a static login, API key, or unpinned managed lease does not qualify.
 fn is_hosted_web_search(tool_type: &str) -> bool {
     tool_type == "web_search" || tool_type.starts_with("web_search_")
 }
 
-/// Why any lease, pinned or not, drops a client tool: hosted web search, on
-/// its own or inside a namespace.
-fn any_lease_tool_rejection(tool: &Value) -> Option<&'static str> {
+/// A disallowed hosted search also rejects the namespace that contains it.
+fn any_lease_tool_rejection(tool: &Value, native_web_search: bool) -> Option<&'static str> {
     let tool_type = tool.get("type").and_then(Value::as_str).unwrap_or_default();
-    if is_hosted_web_search(tool_type) {
+    if !native_web_search && is_hosted_web_search(tool_type) {
         return Some("hosted");
     }
     if tool
@@ -415,7 +412,7 @@ fn any_lease_tool_rejection(tool: &Value) -> Option<&'static str> {
         .is_some_and(|members| {
             members
                 .iter()
-                .any(|member| any_lease_tool_rejection(member).is_some())
+                .any(|member| any_lease_tool_rejection(member, native_web_search).is_some())
         })
     {
         return Some("member");
@@ -425,12 +422,17 @@ fn any_lease_tool_rejection(tool: &Value) -> Option<&'static str> {
 
 /// Why a lease drops a client tool, or `None` to forward it: a pinned lease
 /// forwards only codex's client tools ([`pinned_lease_tool_rejection`]), and
-/// every lease drops hosted web search ([`any_lease_tool_rejection`]).
-fn lease_tool_rejection(tool: &Value, pinned: bool) -> Option<&'static str> {
+/// other leases forward search only with verified capability.
+fn lease_tool_rejection(
+    tool: &Value,
+    pinned: bool,
+    native_web_search: bool,
+) -> Option<&'static str> {
     if pinned {
-        pinned_lease_tool_rejection(tool).or_else(|| any_lease_tool_rejection(tool))
+        pinned_lease_tool_rejection(tool)
+            .or_else(|| any_lease_tool_rejection(tool, native_web_search))
     } else {
-        any_lease_tool_rejection(tool)
+        any_lease_tool_rejection(tool, native_web_search)
     }
 }
 
@@ -487,7 +489,7 @@ fn tools_for_pinned_lease(
     tools: &[Value],
     carrier: &'static str,
 ) -> (Vec<Value>, Vec<DroppedTool>) {
-    tools_for_lease(tools, carrier, true)
+    tools_for_lease(tools, carrier, true, false)
 }
 
 /// The client tools a lease forwards, plus each one it drops.
@@ -495,11 +497,12 @@ fn tools_for_lease(
     tools: &[Value],
     carrier: &'static str,
     pinned: bool,
+    native_web_search: bool,
 ) -> (Vec<Value>, Vec<DroppedTool>) {
     let mut kept = Vec::with_capacity(tools.len());
     let mut dropped = Vec::new();
     for tool in tools {
-        match lease_tool_rejection(tool, pinned) {
+        match lease_tool_rejection(tool, pinned, native_web_search) {
             None => kept.push(tool.clone()),
             Some(reason) => dropped.push(DroppedTool {
                 carrier,
@@ -570,7 +573,7 @@ const TOOL_CARRYING_INPUT_TYPES: [&str; 2] = ["additional_tools", "tool_search_o
 /// dropped.
 #[cfg(test)]
 fn input_items_for_pinned_lease(input_items: &[Value]) -> (Cow<'_, [Value]>, Vec<DroppedTool>) {
-    input_items_for_lease(input_items, true)
+    input_items_for_lease(input_items, true, false)
 }
 
 /// The input a lease forwards, its tool-carrying items filtered like the
@@ -578,6 +581,7 @@ fn input_items_for_pinned_lease(input_items: &[Value]) -> (Cow<'_, [Value]>, Vec
 fn input_items_for_lease(
     input_items: &[Value],
     pinned: bool,
+    native_web_search: bool,
 ) -> (Cow<'_, [Value]>, Vec<DroppedTool>) {
     let mut filtered: Option<Vec<Value>> = None;
     let mut dropped = Vec::new();
@@ -596,7 +600,7 @@ fn input_items_for_lease(
         let Some(tools) = item.get("tools").and_then(Value::as_array) else {
             continue;
         };
-        let (kept, item_dropped) = tools_for_lease(tools, carrier, pinned);
+        let (kept, item_dropped) = tools_for_lease(tools, carrier, pinned, native_web_search);
         if item_dropped.is_empty() {
             continue;
         }
@@ -1174,6 +1178,7 @@ where
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/v1/responses", post(create_response))
+        .route("/v1/alpha/search", post(native_search::search))
         .route("/v1/chat/completions", post(create_chat_completion))
         .route("/v1/audio/speech", post(create_speech))
         .route("/v1/audio/transcriptions", post(create_transcription))
@@ -1606,6 +1611,22 @@ fn required_tool_call_fallback_hook(
     })
 }
 
+fn native_web_search_claims_allowed(claims: Option<&ProxyClaims>) -> bool {
+    claims.is_some_and(|claims| {
+        claims.native_web_search
+            && claims.job_id.is_some()
+            && claims.lease_attempt.is_some_and(|attempt| attempt > 0)
+            && credential_id_from_claims(Some(claims))
+                .is_some_and(|id| !is_reserved_credential_id(id))
+    })
+}
+
+fn native_web_search_allowed(leased: &LeasedCredentials, claims: Option<&ProxyClaims>) -> bool {
+    leased.pinned_model().is_none()
+        && leased.credentials.is_chatgpt()
+        && native_web_search_claims_allowed(claims)
+}
+
 /// Also returns the input items to send, which a pinned lease may filter.
 /// `log_lease_policy` is false when a lease renewal rebuilds the client for a
 /// request that already logged what its pinned lease changed, and
@@ -1622,6 +1643,7 @@ fn build_remote_completion_client<'i>(
     let upstream_model = resolve_model_for_lease(options.requested_model, &leased);
     let requested_model = options.requested_model.trim();
     let pinned = leased.pinned_model().is_some();
+    let native_web_search = native_web_search_allowed(&leased, options.claims);
     if log_lease_policy
         && pinned
         && !requested_model.is_empty()
@@ -1638,8 +1660,8 @@ fn build_remote_completion_client<'i>(
     }
     // Only the pinned model may run on a pinned lease, so a client tool that
     // brings its own model or hosted work does not go upstream, whether the
-    // request lists it in `tools` or in a tool-carrying input item. No lease
-    // forwards hosted web search. The client sends input items as given, so
+    // request lists it in `tools` or in a tool-carrying input item. Hosted
+    // search additionally requires a verified ChatGPT grant. The client sends input as given, so
     // the filtered ones below are the ones the provider sees.
     let mut dropped_tools = Vec::new();
     let requested_tools = options
@@ -1647,11 +1669,11 @@ fn build_remote_completion_client<'i>(
         .as_ref()
         .and_then(|controls| controls.requested_tools)
         .map(|tools| {
-            let (kept, dropped) = tools_for_lease(tools, "tools", pinned);
+            let (kept, dropped) = tools_for_lease(tools, "tools", pinned, native_web_search);
             dropped_tools.extend(dropped);
             kept
         });
-    let (input_items, dropped) = input_items_for_lease(input_items, pinned);
+    let (input_items, dropped) = input_items_for_lease(input_items, pinned, native_web_search);
     dropped_tools.extend(dropped);
     let run_id = run_id_from_claims(options.claims);
     if log_lease_policy && !dropped_tools.is_empty() {
@@ -1702,7 +1724,7 @@ fn build_remote_completion_client<'i>(
     // tools it already kept pass unchanged.
     let run_id_for_filter = run_id.map(str::to_string);
     client = client.with_tool_filter(move |tools| {
-        let (kept, dropped) = tools_for_lease(tools, "tools", pinned);
+        let (kept, dropped) = tools_for_lease(tools, "tools", pinned, native_web_search);
         if log_lease_policy && !dropped.is_empty() {
             log_dropped_tools(&dropped, run_id_for_filter.as_deref());
         }
@@ -5449,6 +5471,7 @@ mod tests {
     /// claims and nothing else set.
     fn controller_claims(run_id: Option<&str>, credential_id: Option<&str>) -> ProxyClaims {
         ProxyClaims {
+            native_web_search: false,
             _aud: None,
             _iss: None,
             project_id: "project".to_string(),

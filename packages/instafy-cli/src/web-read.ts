@@ -206,7 +206,7 @@ export type PageResult = {
    */
   find?: { terms: string[]; passages: number; matchedLines: number; whole?: true; text?: string };
   links?: Array<{ index: number; text: string; href: string; linkOnly?: true; noReuse?: true }>;
-  /** the page is on a site whose terms bar reusing its content (not reading it); `tell` says how it may be used */
+  /** the page is on a site whose configured policy restricts reusing its content (not reading it); `tell` says how it may be used */
   noReuse?: { site: string; reason: string; via?: string[] };
   structured?: StructuredItem[];
   /** structured items left out to keep the page's structured data within its bound */
@@ -275,7 +275,7 @@ export type WebReadOptions = {
 
 export class WebReadUsageError extends Error {}
 
-type StopRecord = SharedStopRecord<StopCode>;
+type StopRecord = SharedStopRecord<StopCode> & { policyHash?: string };
 
 /** Stops the site itself answered with; they also cover the same path with any other query. */
 const SITE_ANSWER_STOPS = new Set<StopCode>(["login", "forbidden", "rate_limited", "captcha", "paywall", "download", "secret_screen"]);
@@ -597,7 +597,7 @@ const TELL: Record<StopCode | SkipCode | FailCode | "robots_site" | "needs_brows
   needs_browser:
     "This page builds its text with JavaScript, so a plain read sees almost nothing. Use another source, or ask for a visible browser turn for this page.",
   no_reuse:
-    "This site's terms bar reusing its content. Summarize it in your own words, cite \"seen <date> on <host>\" and link back; " +
+    "The configured site policy restricts reusing this site's content. Summarize it in your own words, cite \"seen <date> on <host>\" and link back; " +
     "never copy its reviews, photos or price lists, and keep its content out of anything published or shared by public link (links only there).",
 };
 
@@ -751,8 +751,11 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
 
   // Every address the chain reached, so a stop is remembered for each of them (under hashed keys).
   const hopUrls: URL[] = [];
+  const policyHash = sha256(JSON.stringify(ctx.guard.list));
+  const currentStop = (record: StopRecord | null | undefined): record is StopRecord =>
+    Boolean(record && (record.code !== "link_only" || record.policyHash === policyHash));
   const stop = async (code: StopCode, message: string, host: string, extra: Partial<PageResult> = {}, wholeSite = false): Promise<PageResult> => {
-    const record: StopRecord = { code, message, at: ctx.now(), ...(wholeSite ? { wholeSite: true as const } : {}) };
+    const record: StopRecord = { code, message, at: ctx.now(), ...(code === "link_only" ? { policyHash } : {}), ...(wholeSite ? { wholeSite: true as const } : {}) };
     const keys = [requestedUrl, ...hopUrls].flatMap((url) => {
       const { exact, path: pathKey } = stopKeys(url);
       return SITE_ANSWER_STOPS.has(code) ? [exact, pathKey] : [exact];
@@ -796,16 +799,19 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
   const firstSite = siteKey(firstHost);
   const firstKeys = stopKeys(requestedUrl);
   const earlier = await ctx.turn.update((state) => ({
-    stop: state.stops[firstKeys.exact] ?? state.stops[firstKeys.path] ?? state.hostStops[firstSite] ?? null,
+    stop: [state.stops[firstKeys.exact], state.stops[firstKeys.path], state.hostStops[firstSite]].find(currentStop),
     loads: state.loads,
     hostLoads: state.hosts[firstSite]?.loads ?? 0,
     siblingUnanswered: sibling ? Boolean(state.unanswered?.[unansweredKey(sibling)]) : false,
   }));
   if (earlier.siblingUnanswered) sibling = null;
-  const remembered =
-    earlier.stop ??
-    ctx.cache.get<StopRecord>("stops", firstKeys.exact, LIMITS.stopTtlMs, ctx.now()) ??
-    ctx.cache.get<StopRecord>("stops", firstKeys.path, LIMITS.stopTtlMs, ctx.now());
+  // Site policy may change; only its derived stops expire with that policy.
+  // Login, robots, rate-limit and other observed site refusals retain their lifetime.
+  const remembered = [
+    earlier.stop,
+    ctx.cache.get<StopRecord>("stops", firstKeys.exact, LIMITS.stopTtlMs, ctx.now()),
+    ctx.cache.get<StopRecord>("stops", firstKeys.path, LIMITS.stopTtlMs, ctx.now()),
+  ].find(currentStop);
   if (remembered) {
     return { ...page, status: "stopped", code: remembered.code, message: remembered.message, tell: stopTell(remembered), previouslyStopped: true };
   }
@@ -856,7 +862,7 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     if (listed) return stop("link_only", `${via}${linkOnlyMessage(listed)}`, host, hopExtra);
     if (hop) {
       const siteStop = await ctx.turn.update((state) => state.hostStops[site] ?? null);
-      if (siteStop) return { ...page, ...hopExtra, status: "stopped", code: siteStop.code, message: via + siteStop.message, tell: stopTell(siteStop), previouslyStopped: true };
+      if (currentStop(siteStop)) return { ...page, ...hopExtra, status: "stopped", code: siteStop.code, message: via + siteStop.message, tell: stopTell(siteStop), previouslyStopped: true };
     }
     // Checked before robots.txt is read, so not even robots.txt is fetched from a refused address. Every fetch below
     // checks again and dials only the addresses it checked.

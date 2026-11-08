@@ -260,7 +260,7 @@ test("the Shared Browser's agent snapshots and the sent page share one secret ch
 // Send page to Octo keeps the page's links: a results page arrives with them.
 const linkOnlySource = fs.readFileSync(path.join(policyRoot, "linkOnly.js"), "utf8");
 const linkOnlySites = fs.readFileSync(
-  path.resolve(policyRoot, "../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"),
+  path.resolve(policyRoot, "test/link-only-policy.json"),
   "utf8",
 );
 const RESULTS_PAGE = fs.readFileSync(

@@ -472,14 +472,14 @@
 
   /**
    * The list a reader enforces: the bundled copy and what each space copy
-   * adds. Without a bundled copy that names at least one site there is no
-   * list (null), and a reader then reads nothing. A space copy that is not a
+   * adds. A valid empty bundled copy adds no restrictions. Missing or malformed
+   * data gives no list (null), and a reader then reads nothing. A space copy that is not a
    * list is left out with a warning; the bundled list still applies.
    */
   function linkOnlyListFrom(bundled, additions) {
     const base = compileLinkOnlyList(bundled, { source: "bundled list" });
     const warnings = [...base.warnings];
-    if (!base.list || base.list.sites.length === 0) {
+    if (!base.list || (bundled.sites.length > 0 && base.list.sites.length === 0)) {
       return { list: null, warnings: base.list ? [...warnings, "bundled list: names no site"] : warnings, sources: [] };
     }
     const sites = [...base.list.sites];
@@ -723,7 +723,7 @@
    * checks for the list first.
    */
   function linkOnlyMatch(list, address) {
-    if (!list || !Array.isArray(list.sites)) return null;
+    if (!list || !Array.isArray(list.sites) || list.sites.length === 0) return null;
     let url = parseAddress(address);
     for (let inner = 0; url && !WEB_PROTOCOLS.has(url.protocol); inner += 1) {
       url = inner < MAX_INNER_ADDRESSES ? innerAddress(url) : null;

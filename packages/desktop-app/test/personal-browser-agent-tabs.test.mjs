@@ -27,6 +27,7 @@ const NO_SECRET_SIGNALS = { credentialContext: false, secretField: false, secret
 // Host names resolve here, never through the network.
 const DNS = {
   "example.test": ["93.184.216.34"],
+  "www.booking.com": ["93.184.216.34"],
   "docs.example.test": ["93.184.216.35"],
   "news.example.test": ["93.184.216.36"],
   "shop.example.test": ["93.184.216.37"],
@@ -115,7 +116,9 @@ class FakeContents {
 
 const linkOnlyModule = require(path.join(packageRoot, "dist/personalBrowserLinkOnly.js"));
 
-function fixture({ choose = async () => ({ response: 1 }), linkOnlyData } = {}) {
+const TEST_POLICY = JSON.parse(fs.readFileSync(path.join(packageRoot, "../browser-action-policy/test/link-only-policy.json"), "utf8"));
+
+function fixture({ choose = async () => ({ response: 1 }), linkOnlyData = TEST_POLICY } = {}) {
   const dialogs = [];
   const views = [];
   const shield = { attached: [], syncs: [] };
@@ -1222,4 +1225,12 @@ test("a stopped page load is reported to the next step as its previous step's, s
     return true;
   });
   await host.handleControlOperation("snapshot", {});
+});
+
+test("default policy allows formerly listed sites while private-address protection stays active", async () => {
+  const { host, views } = fixture({ linkOnlyData: linkOnlyModule.BUNDLED_LINK_ONLY_SITES });
+  await resume(host, "routine");
+  await host.handleControlOperation("open_tab", { url: "https://www.booking.com/" });
+  assert.deepEqual(views[1].webContents.loads, ["https://www.booking.com/"]);
+  await rejectsWith(host.handleControlOperation("navigate", { url: "http://10.1.2.3/admin" }), "private_address_blocked");
 });
