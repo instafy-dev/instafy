@@ -417,8 +417,14 @@ impl ServerHandler for LocalBrowserMcpServer {
                 None,
             ));
         }
-        let parsed = parse_observe_request(request.arguments)
-            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+        // An observation whose arguments it refused failed as any other does, with why in its
+        // structured content too ([`observation_result`]).
+        let parsed = match parse_observe_request(request.arguments) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return Ok(observation_result(Err(anyhow!("{error}"))).into());
+            }
+        };
         let _guard = self.execution_lock.lock().await;
         Ok(
             observation_result(execute_observation(&self.config, &self.workspace, parsed).await)
@@ -428,10 +434,12 @@ impl ServerHandler for LocalBrowserMcpServer {
 }
 
 /// An observation's tool result: its payload as the structured content, with one line that
-/// says what it did as the text, or why the observation failed. Codex hands a call made outside
-/// a code cell the structured content alone, and a cell's `text(r)` prints the whole result, so
-/// either way the model reads the observation once, as it did twice when the text was the
-/// payload too.
+/// says what it did as the text, or why the observation failed, as the text and as the
+/// structured content's `error.reason`. Codex hands a call made outside a code cell the
+/// structured content alone, and a cell's `text(r)` prints the whole result, so either way the
+/// model reads the observation once, as it did twice when the text was the payload too; and a
+/// cell that prints `r.structuredContent`, as the text of a success tells it to, reads why one
+/// failed, never "undefined" (the Shared Browser's `failed_tool_result`).
 fn observation_result(outcome: Result<JsonValue>) -> CallToolResult {
     match outcome {
         Ok(payload) => {
@@ -441,9 +449,12 @@ fn observation_result(outcome: Result<JsonValue>) -> CallToolResult {
             result.structured_content = Some(payload);
             result
         }
-        Err(error) => CallToolResult::error(vec![ContentBlock::text(format!(
-            "Owner-local browser observation failed: {error:#}"
-        ))]),
+        Err(error) => {
+            let reason = format!("Owner-local browser observation failed: {error:#}");
+            let mut result = CallToolResult::error(vec![ContentBlock::text(reason.clone())]);
+            result.structured_content = Some(json!({ "error": { "reason": reason } }));
+            result
+        }
     }
 }
 
@@ -1299,22 +1310,29 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(listed["result"], tools, "{listed:#}");
-        for (name, arguments, message) in [
-            ("navigate", json!({}), "unknown owner-local browser tool"),
-            (
-                "observe",
-                json!({ "observations": [] }),
-                "observe requires a URL string",
-            ),
-        ] {
-            let answer = wire.call(name, arguments).await;
-            assert_eq!(
-                answer["error"],
-                json!({ "code": -32602, "message": message }),
-                "{answer}"
-            );
-            assert!(answer.get("result").is_none(), "{answer}");
-        }
+        // A tool the browser doesn't offer is no observation.
+        let answer = wire.call("navigate", json!({})).await;
+        assert_eq!(
+            answer["error"],
+            json!({ "code": -32602, "message": "unknown owner-local browser tool" }),
+            "{answer}"
+        );
+        assert!(answer.get("result").is_none(), "{answer}");
+        // An observation whose arguments it refused failed as any other does, with why in its
+        // text and its structured content: a protocol error reaches a code cell with none, and a
+        // cell that prints `r.structuredContent` reads "undefined".
+        let answer = wire.call("observe", json!({ "observations": [] })).await;
+        assert!(answer.get("error").is_none(), "{answer}");
+        let reason = "Owner-local browser observation failed: observe requires a URL string";
+        assert_eq!(
+            answer["result"],
+            json!({
+                "content": [{ "type": "text", "text": reason }],
+                "structuredContent": { "error": { "reason": reason } },
+                "isError": true,
+            }),
+            "{answer}"
+        );
     }
 
     #[tokio::test]
@@ -1330,13 +1348,12 @@ mod tests {
                 }),
             )
             .await;
+        let reason = "Owner-local browser observation failed: failed to launch the browser egress proxy: No such file or directory (os error 2)";
         assert_eq!(
             failed["result"],
             json!({
-                "content": [{
-                    "type": "text",
-                    "text": "Owner-local browser observation failed: failed to launch the browser egress proxy: No such file or directory (os error 2)",
-                }],
+                "content": [{ "type": "text", "text": reason }],
+                "structuredContent": { "error": { "reason": reason } },
                 "isError": true,
             }),
             "{failed}"

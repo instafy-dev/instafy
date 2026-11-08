@@ -17,7 +17,8 @@
 //! (`finding_lines`), which its run is given as the turn's own run is.
 
 use super::finding_lines::{
-    DEVICE_PAGE, DEVICE_TOKEN, DeviceBrowser, device_browser, device_step, step_outputs,
+    DEVICE_PAGE, DEVICE_REFUSED, DEVICE_TOKEN, DeviceBrowser, device_browser, device_step,
+    step_outputs,
 };
 use super::*;
 use runtime_agent::codex::CodexConfig;
@@ -144,10 +145,58 @@ fn a_second_pass_with_no_finding_line_keeps_the_page_it_opened_via_proxy() -> Re
     run_on_a_large_stack(Case::SecondPassWritesNoLines)
 }
 
+/// A page the turn's unread line names, whose address the browser refused the turn's step because
+/// no message or page gave it, and which the turn also wrote as a page with no page there: it is
+/// no finding, and stays among the pages the second pass reads. That pass finds the site by its
+/// own links, is refused nothing itself and still writes the address so: still no finding, as
+/// the browser never opened it. Told only "undefined" of such a refusal, a comparison's browser
+/// part wrote the address as `no-page`, which also took it out of its unread line, and its page
+/// said Tom's Hardware "had no page at the address checked" (a local test, Nov 7). The refusal
+/// comes from the run, as its job reads it (`CodexRunOutput::browser_not_given`).
+#[test]
+fn an_address_refused_as_not_given_stays_unread_and_is_no_finding_via_proxy() -> Result<()> {
+    if std::env::var(CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(
+            CHILD,
+            "browser_hand_back::unread_pages::an_address_refused_as_not_given_stays_unread_and_is_no_finding_via_proxy",
+            "browser-unread-pages-not-given",
+        );
+    }
+    run_on_a_large_stack(Case::RefusedAddress)
+}
+
+/// The same when that address's line was the only one the turn wrote: the turn still answered in
+/// finding lines, so its second pass reads the pages its unread line named, that address among
+/// them, and no wrap-up pass asks it again for lines it wrote.
+#[test]
+fn a_turn_whose_only_line_was_a_refused_address_still_reads_its_unread_pages_via_proxy()
+-> Result<()> {
+    if std::env::var(CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(
+            CHILD,
+            "browser_hand_back::unread_pages::a_turn_whose_only_line_was_a_refused_address_still_reads_its_unread_pages_via_proxy",
+            "browser-unread-pages-not-given-only",
+        );
+    }
+    run_on_a_large_stack(Case::RefusedOnlyLine)
+}
+
+/// The address the browser refused for the turn's step, and the line the turn wrote for it.
+const REFUSED: &str = DEVICE_REFUSED;
+const REFUSED_AS_NO_PAGE: &str =
+    r#"{"url": "https://reviews.example/laptop-12", "stopped": "no-page"}"#;
+/// What a turn whose only line was the refused address replies before it.
+const REFUSED_FIRST_WORDS: &str = "Looked for the Laptop 12's review.";
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Case {
     /// The turn names three unread pages, and nothing stops the second pass.
     Reads,
+    /// The turn's step is refused an address nothing gave, which it also writes as a page with no
+    /// page there; its second pass opens the site and writes it so again.
+    RefusedAddress,
+    /// The same, with that address's line the only one the turn writes.
+    RefusedOnlyLine,
     /// The person presses Stop once the turn has answered.
     StopBetween,
     /// The turn's answer names unread pages and holds no finding line.
@@ -161,7 +210,13 @@ enum Case {
 impl Case {
     /// Whether its second pass takes a step in the browser on the person's device.
     fn on_the_device(self) -> bool {
-        matches!(self, Case::SecondPassPauses | Case::SecondPassWritesNoLines)
+        matches!(
+            self,
+            Case::SecondPassPauses
+                | Case::SecondPassWritesNoLines
+                | Case::RefusedAddress
+                | Case::RefusedOnlyLine
+        )
     }
 }
 
@@ -249,10 +304,30 @@ async fn provider_request(
             Case::FirstWritesNoLines => {
                 final_answer(&format!("{FIRST_WORDS}\n{}", unread_line(&UNREAD)))
             }
+            Case::RefusedAddress | Case::RefusedOnlyLine if step_outputs(&body) == 0 => {
+                device_step("refused", "navigate", json!({ "url": REFUSED }))
+            }
+            Case::RefusedAddress => final_answer(&format!(
+                "{FIRST_WORDS}\n{READ_HOME}\n{READ_13}\n{REFUSED_AS_NO_PAGE}\n{}",
+                unread_line(&UNREAD)
+            )),
+            Case::RefusedOnlyLine => final_answer(&format!(
+                "{REFUSED_FIRST_WORDS}\n{REFUSED_AS_NO_PAGE}\n{}",
+                unread_line(&UNREAD)
+            )),
             _ => final_answer(&first_answer()),
         };
     }
     match (state.case, step_outputs(&body)) {
+        (Case::RefusedAddress, 0) => device_step(
+            "root",
+            "navigate",
+            json!({ "url": "https://reviews.example/" }),
+        ),
+        (Case::RefusedAddress, _) => final_answer(&format!(
+            "{SECOND_WORDS}\n{READ_12}\n{READ_16}\n{REFUSED_AS_NO_PAGE}\n{}",
+            unread_line(&[STILL_UNREAD])
+        )),
         (Case::SecondPassPauses, 0) => {
             device_step("pause", "request_human_input", json!({ "indices": [0] }))
         }
@@ -431,6 +506,17 @@ async fn run_case(case: Case) -> Result<()> {
 
     match case {
         Case::Reads | Case::StopBetween => two_passes(&workspace, project_id, &state, case).await?,
+        Case::RefusedAddress | Case::RefusedOnlyLine => {
+            refused_address(&workspace, project_id, &state, case).await?;
+            let browser = &device.as_ref().context("the device's browser")?.0;
+            // The turn's refused step, and the second pass's step on the site.
+            let expected: &[&str] = if case == Case::RefusedAddress {
+                &["navigate", "navigate"]
+            } else {
+                &["navigate"]
+            };
+            assert_eq!(*browser.calls.lock().unwrap(), expected);
+        }
         Case::FirstWritesNoLines => no_lines_no_second_pass(&workspace, project_id, &state).await?,
         Case::SecondPassPauses | Case::SecondPassWritesNoLines => {
             let calls = second_pass_on_the_device(&workspace, project_id, &state, case).await?;
@@ -505,6 +591,7 @@ async fn two_passes(
         stopped_for_the_person,
         refused_a_step,
         pages: Vec::new(),
+        not_given: Vec::new(),
         final_json: &turn.final_json,
         progress: None,
         runtime_id: Uuid::nil(),
@@ -641,6 +728,97 @@ async fn two_passes(
     Ok(())
 }
 
+/// The turn's step was refused an address no message or page gave, and the turn wrote it as a page
+/// with no page there. The run reports the refusal and the pages its steps opened, and its job
+/// ends the turn with them: the second pass is told to read that address with the other unread
+/// pages, no pass's line for it stays, and no wrap-up pass runs.
+async fn refused_address(
+    workspace: &Path,
+    project_id: Uuid,
+    state: &Provider,
+    case: Case,
+) -> Result<()> {
+    let client = CodexClient::new(CodexConfig {
+        workspace_dir: workspace.to_path_buf(),
+    });
+    let options = CodexRunOptions {
+        persist_conversation_thread: true,
+        personal_browser: true,
+        project_id: Some(project_id),
+        reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
+        ..Default::default()
+    };
+    let turn = the_turn(&client, &options).await?;
+    // The run names the address the browser refused, and no page for it.
+    assert_eq!(turn.browser_not_given, [REFUSED.to_string()]);
+    assert!(turn.browser_pages.is_empty(), "{:?}", turn.browser_pages);
+    let mut summary = turn.final_json["summary"]
+        .as_str()
+        .context("the turn's answer")?
+        .to_string();
+    assert!(summary.contains(REFUSED_AS_NO_PAGE), "{summary}");
+    let answer = BrowserTurnAnswer {
+        options: &options,
+        thread: Some(
+            turn.provider_conversation_state
+                .clone()
+                .context("the browser turn's thread")?,
+        ),
+        used_the_browser: true,
+        stopped_for_the_person: false,
+        refused_a_step: false,
+        pages: turn.browser_pages.clone(),
+        not_given: turn.browser_not_given.clone(),
+        final_json: &turn.final_json,
+        progress: None,
+        runtime_id: Uuid::nil(),
+        paused_already: false,
+    };
+    let task_usage = TaskUsage::default();
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        end_browser_turn_answer(
+            &client,
+            &browser_job(project_id, true),
+            answer,
+            &mut summary,
+            &task_usage,
+        ),
+    )
+    .await
+    .context("the second pass timed out")?;
+    let passes = second_passes(state);
+    let requests = if case == Case::RefusedAddress {
+        // Its step on the site, then its answer.
+        2
+    } else {
+        1
+    };
+    assert_eq!(passes.len(), requests, "one second pass");
+    let asked = last_user_text(&passes[0]);
+    assert!(
+        asked.contains(&serde_json::to_string(&UNREAD).unwrap()),
+        "{asked}"
+    );
+    assert!(
+        state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| !last_user_text(request).contains(PASS_OPENING)),
+        "no wrap-up pass"
+    );
+    let expected = if case == Case::RefusedAddress {
+        format!("{FIRST_WORDS}\n\n{SECOND_WORDS}\n\n{READ_HOME}\n{READ_13}\n{READ_12}\n{READ_16}")
+    } else {
+        format!("{REFUSED_FIRST_WORDS}\n\n{SECOND_WORDS}\n\n{READ_12}\n{READ_16}\n{READ_12_REVIEW}")
+    };
+    assert_eq!(summary, expected);
+    assert!(!summary.contains("no-page"), "{summary}");
+    Ok(())
+}
+
 /// The browser turn's run, on a thread of its own that a pass resumes, and its answer as the end
 /// of the turn reads it.
 async fn the_turn(
@@ -671,6 +849,7 @@ fn its_answer<'a>(
         stopped_for_the_person: false,
         refused_a_step: false,
         pages: vec!["https://maker.example/".to_string()],
+        not_given: Vec::new(),
         final_json: &turn.final_json,
         progress: None,
         runtime_id: Uuid::nil(),

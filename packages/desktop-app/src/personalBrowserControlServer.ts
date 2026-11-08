@@ -242,6 +242,25 @@ function personalBrowserStepLine(
   return `${said ?? PERSONAL_BROWSER_STEP_LINES[tool]} Its result is in structuredContent.`;
 }
 
+/**
+ * A step that failed, or whose arguments the browser refused: why, as its text and as its
+ * structured content's `error.reason`, beside the browser's code for it when it has one. A code
+ * cell that prints a step's `r.structuredContent`, as a successful step's text tells it to, then
+ * reads why: a protocol error reaches the agent with no structured content, which read
+ * "undefined".
+ */
+function failedStep(id: unknown, message: string, code?: string) {
+  return {
+    jsonrpc: "2.0",
+    id: id ?? null,
+    result: {
+      content: [{ type: "text", text: message }],
+      structuredContent: { error: code === undefined ? { reason: message } : { reason: message, code } },
+      isError: true,
+    },
+  };
+}
+
 function mcpError(id: unknown, code: number, message: string, data?: unknown) {
   return {
     jsonrpc: "2.0",
@@ -581,7 +600,7 @@ export class PersonalBrowserControlServer {
       rejectUnknownMcpToolArguments(tool.name, args);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Invalid tool arguments.";
-      return mcpError(id, -32602, message);
+      return failedStep(id, message);
     }
 
     try {
@@ -609,7 +628,7 @@ export class PersonalBrowserControlServer {
           message: error instanceof Error ? error.message : String(error),
         });
       }
-      return mcpError(id, -32000, message, { code });
+      return failedStep(id, message, code);
     }
   }
 

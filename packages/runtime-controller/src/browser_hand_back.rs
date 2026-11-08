@@ -222,10 +222,12 @@ pub(crate) struct Finding {
 
 /// The reasons a browser turn may give for a page it did not read, as the
 /// runtime asks for them (runtime-agent `jobs/browser_hand_back.rs`,
-/// `FINDING_LINES`): `no-page` for an address with no page and `timed-out`
-/// for one that gave no answer in time, so a page that never loaded is never
-/// called blocked. Any other reason a finding gives is still a stop: `blocked`.
-pub(crate) const STOP_REASONS: [&str; 10] = [
+/// `FINDING_LINES`): `no-page` for an address with no page, `timed-out`
+/// for one that gave no answer in time and `covered` for a page under a
+/// cookie notice or dialog the browser couldn't close, so a page that never
+/// loaded or was never seen is never called blocked. Any other reason a
+/// finding gives is still a stop: `blocked`.
+pub(crate) const STOP_REASONS: [&str; 11] = [
     "login",
     "captcha",
     "paywall",
@@ -236,6 +238,7 @@ pub(crate) const STOP_REASONS: [&str; 10] = [
     "link-only",
     "no-page",
     "timed-out",
+    "covered",
 ];
 const STOP_REASON_OTHER: &str = "blocked";
 
@@ -3095,6 +3098,35 @@ https://three.example.com\n\
         assert_eq!(
             stops,
             [&JsonValue::Null, &json!("timed-out"), &json!("no-page")],
+            "{record}"
+        );
+    }
+
+    /// A comparison's browser part met a review site's search under a cookie
+    /// notice the browser couldn't close and, with no word for it, wrote the
+    /// page as `blocked`: the page and the reply said "Notebookcheck was
+    /// blocked" (a local test, Nov 7). It keeps its own word, which the
+    /// building turn reads in plain words.
+    #[test]
+    fn a_page_a_cookie_notice_covered_is_not_called_blocked() {
+        let reply = [
+            "Notebookcheck's search was covered by a cookie notice the browser couldn't close.",
+            r#"{"url":"https://www.notebookcheck.net/","stopped":"covered"}"#,
+        ]
+        .join("\n");
+        let job = Uuid::new_v4();
+        let record = hand_back_record(
+            &job,
+            &job,
+            VIEWER_WORKSPACE,
+            Utc::now(),
+            "Fill in what's still missing.",
+            Some("Fill in what's still missing."),
+            &reply,
+        );
+        assert_eq!(
+            record["findings"][0]["stopped"],
+            json!("covered"),
             "{record}"
         );
     }
