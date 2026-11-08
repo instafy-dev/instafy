@@ -393,7 +393,8 @@ charged for. There are three:
 
 - a browser hand-back, which takes what a browser turn read back to the turn that is building a
   page or a map, or takes the person's message there when the browser turn the routing step sent
-  it to opened no page and asked Octo to make it; the controller sends that one itself, in the
+  it to opened no page and asked Octo to make it, or opened no page with a build after it anyway;
+  the controller sends that one itself, in the
   person's name, as that browser turn ends ("Hand-back" in [Shared Browser](Shared-Browser.md));
 - an automatic retry, which Studio sends once when a turn fails for a passing reason, a dropped
   reply or a short rate limit ([Chat activity](Chat-Activity.md));

@@ -28,7 +28,7 @@ const PROVIDER_KEY: &str = "inert-finding-lines-provider-key";
 const REQUEST: &str = "Compare the three latest laptops from maker.example: processor, battery, weight and price, with two independent reviews each, as a comparison page.";
 /// The browser turn's answer, which promises a build and names no page.
 const PROMISED_BUILD: &str = "Read the maker's pages and two reviews. I'm passing the findings to the comparison-page build.";
-/// The opening of the wrap-up pass's request (runtime-agent `FINDING_LINES_PASS_PROMPT`).
+/// The opening of the wrap-up pass's request (runtime-agent `finding_lines_pass_prompt`).
 const PASS_OPENING: &str = "Your answer has no finding lines, and Octo's later turns use what the pages showed only from them.";
 const READ_13: &str = r#"{"url": "https://maker.example/laptop-13", "title": "Laptop 13", "facts": ["Battery: 74 Wh"]}"#;
 const READ_REVIEW: &str = r#"{"url": "https://reviews.example/laptop-13", "title": "Laptop 13 review", "facts": ["Battery lasted 20 hours"]}"#;
