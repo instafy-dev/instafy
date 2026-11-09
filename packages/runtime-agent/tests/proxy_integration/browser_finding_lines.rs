@@ -305,6 +305,24 @@ fn input_text(request: &Value) -> String {
 
 /// The last line of a device turn's answer: a page it didn't open (runtime-agent `UNREAD_LINE`).
 const DEVICE_UNREAD: &str = r#"{"unread": ["Laptop 16's own page"]}"#;
+/// The line before it: a value it looked for and didn't find, by name (runtime-agent
+/// `MISSING_LINE`).
+const DEVICE_MISSING: &str = r#"{"missing": ["warranty"]}"#;
+/// What that line becomes in the turn's note, where the controller reads it for the hand-back.
+const NOTE_MISSING: &str = r#"{"missing":["warranty"]}"#;
+/// What every browser turn is told of a value it looked for and didn't find, right after its
+/// finding lines (runtime-agent `NOT_FOUND_SEARCH`): no fact of any page, and not found only
+/// after the whole text and the page's own link.
+const NOT_FOUND_SEARCH: &str = "A value you looked for and didn't find is no fact of any page, and counts as not found only once you searched the whole text a step returned for it in the script that ran that step, never by printing the text (a long printed result is cut in its middle), and opened that page's own Specs, Warranty, Support or FAQ tab or link for it.";
+/// How a turn whose findings go back to the building turn is told to name what it didn't find
+/// (runtime-agent `MISSING_LINE`).
+const ASKS_FOR_MISSING: &str = "After your finding lines, one line `{\"missing\": [\"<a value this request needs that you looked for and didn't find>\"]}`, each by its name alone (\"warranty\"), or `{\"missing\": []}`.";
+/// What every browser turn was told of a value it didn't find before: under its page, as where
+/// it looked.
+const OLD_NOT_FOUND: [&str; 2] = [
+    "A value you looked for on a page and didn't find goes under that page as where you looked",
+    "Before a value goes under a page as not found",
+];
 /// The opening of a second pass's request (runtime-agent `unread_pages_prompt`).
 const SECOND_PASS_OPENING: &str = "Your unread line named pages this request still needs:";
 
@@ -367,7 +385,7 @@ async fn provider_request(
                 (Device::Pauses, _, _) => final_answer(PAUSE_WORDS, json!([])),
                 (Device::MeetsASecret, _, _) => final_answer(SECRET_WORDS, json!([])),
                 (Device::Reads | Device::ReadsOnRetry, _, _) => final_answer(
-                    &format!("{PROMISED_BUILD}\n{DEVICE_UNREAD}"),
+                    &format!("{PROMISED_BUILD}\n{DEVICE_MISSING}\n{DEVICE_UNREAD}"),
                     json!([{ "type": "request_build", "continueBuilding": true, "task": "Build the comparison page." }]),
                 ),
             }
@@ -1093,11 +1111,27 @@ async fn a_whole_device_turn(
         .collect();
     match device {
         Device::Reads | Device::ReadsOnRetry => {
+            // Its prompt asks for the missing line, and for no value under a page as not found.
+            let prompt = last_user_text(&requests[0]);
+            assert!(
+                prompt.contains(&format!("{NOT_FOUND_SEARCH} {ASKS_FOR_MISSING}")),
+                "{prompt}"
+            );
+            for old in OLD_NOT_FOUND {
+                assert!(!prompt.contains(old), "{old}: {prompt}");
+            }
+            // Its missing line never reaches the person: its note keeps it after its lines.
             let line = format!("{{\"url\":\"{DEVICE_PAGE}\"}}");
-            assert_eq!(summary, format!("{PROMISED_BUILD}\n\n{line}"));
+            assert_eq!(
+                summary,
+                format!("{PROMISED_BUILD}\n{DEVICE_MISSING}\n\n{line}")
+            );
             assert_eq!(ended.summary, "", "no reply bubble");
             assert_eq!(notes.len(), 1, "{:?}", ended.final_messages);
-            assert_eq!(notes[0].content, format!("{PROMISED_BUILD}\n\n{line}"));
+            assert_eq!(
+                notes[0].content,
+                format!("{PROMISED_BUILD}\n\n{line}\n{NOTE_MISSING}")
+            );
             assert_eq!(
                 notes[0].metadata.as_ref().unwrap()["browserFindings"],
                 json!({ "pages": 1, "pagesRead": 1 })
@@ -1157,11 +1191,19 @@ async fn a_whole_device_turn(
             );
         }
         assert!(passes(state).is_empty(), "no pass on the person's device");
-        // Its note keeps the page it opened, which a later building turn reads.
+        // Its note keeps the page it opened, which a later building turn reads. It was told of
+        // no missing line, and the one it wrote anyway never reaches the person; it was told how
+        // a value it didn't find is not found, as every browser turn is.
+        let prompt = last_user_text(&offered[0]);
+        assert!(!prompt.contains("{\"missing\""), "{prompt}");
+        assert_eq!(prompt.matches(NOT_FOUND_SEARCH).count(), 1, "{prompt}");
+        for old in OLD_NOT_FOUND {
+            assert!(!prompt.contains(old), "{old}: {prompt}");
+        }
         let line = format!("{{\"url\":\"{DEVICE_PAGE}\"}}");
         assert_eq!(
             answered.summary,
-            format!("{PROMISED_BUILD}\n\n{line}\n\n{NOT_MADE}")
+            format!("{PROMISED_BUILD}\n{DEVICE_MISSING}\n\n{line}\n\n{NOT_MADE}")
         );
         move_findings_into_details(&routed, &mut answered);
         assert_eq!(
@@ -1173,7 +1215,7 @@ async fn a_whole_device_turn(
             answered
                 .final_messages
                 .iter()
-                .any(|message| message.content == line),
+                .any(|message| message.content == format!("{line}\n{NOTE_MISSING}")),
             "{:?}",
             answered.final_messages
         );
