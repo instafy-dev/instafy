@@ -76,6 +76,7 @@ mod learn;
 /// Where a space keeps its copy of the web-research skill's link-only list.
 pub(crate) use learn::WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH;
 mod mcp;
+mod page_cards;
 pub(crate) mod preview_pictures;
 #[cfg(test)]
 mod preview_routing_tests;
@@ -10074,6 +10075,18 @@ impl JobProcessor {
                 cancel_signal.clone(),
                 self.picture_sender(),
             );
+            // A page the turn left without its card gets it now, before the reply.
+            page_cards::post_missing_cards(
+                &workspace_dir,
+                &project_id,
+                read_only_workspace,
+                retry_picture_files
+                    .as_deref()
+                    .unwrap_or(&retry_outcome.files),
+                &[&output.events, &retry_output.events],
+                cancel_signal.as_ref(),
+            )
+            .await;
 
             if read_only_workspace
                 && (retry_reported_files_len > 0 || !retry_read_only_changed_paths.is_empty())
@@ -10410,6 +10423,16 @@ impl JobProcessor {
             cancel_signal.clone(),
             self.picture_sender(),
         );
+        // A page the turn left without its card gets it now, before the reply.
+        page_cards::post_missing_cards(
+            &workspace_dir,
+            &project_id,
+            read_only_workspace,
+            picture_files.as_deref().unwrap_or(&outcome.files),
+            &[&output.events],
+            cancel_signal.as_ref(),
+        )
+        .await;
 
         if read_only_workspace && (reported_files_len > 0 || !read_only_changed_paths.is_empty()) {
             artifacts.push(build_read_only_write_blocked_artifact(

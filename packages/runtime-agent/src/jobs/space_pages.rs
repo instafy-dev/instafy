@@ -165,6 +165,21 @@ fn read_record(workspace_dir: &Path) -> Option<JsonValue> {
     serde_json::from_str(&text).ok()
 }
 
+/// Every page folder the record in `workspace_dir` holds, whichever chat made it: a page whose card
+/// was opened before (`jobs::page_cards` posts a card only for a page with none).
+pub(crate) fn recorded_page_folders(workspace_dir: &Path) -> Vec<String> {
+    let Some(record) = read_record(workspace_dir) else {
+        return Vec::new();
+    };
+    record
+        .get("pages")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(entry_folder)
+        .collect()
+}
+
 /// How a site is served, as the record keeps it: its program's name and first argument
 /// (`["instafy", "bind"]`, `["uw", "host"]`, `["npm", "run"]`).
 fn server_of(argv: &[String]) -> Vec<String> {
