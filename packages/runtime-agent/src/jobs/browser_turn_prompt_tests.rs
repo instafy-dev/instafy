@@ -947,17 +947,18 @@ fn a_browser_turn_that_hands_back_reads_its_part_right_before_the_request() {
     }
 }
 
-/// A browser turn writes a value as not found on a page only after it searched the whole text its
-/// step returned and opened that page's own tab or link named for it, and a turn whose findings go
-/// back to the building turn names such a link it didn't open in its unread line, which its second
-/// pass reads. Told only to say where it looked, a warranty's browser part printed the last 1,100
-/// and 700 characters of three product pages, each ending in a "Warranty" link it never opened,
-/// wrote the warranty as not found with nothing unread, and the build replied that the pages did
-/// not show it (a local test, Nov 8). Each fact carries what it doesn't confirm, since later turns
-/// read only these lines. A turn that hands nothing back is told the same of a value it didn't
-/// find, and nothing of an unread line.
+/// A browser turn whose findings go back to the building turn names a value it looked for and
+/// didn't find in its missing line, after its finding lines and before its unread line, never as
+/// a fact under a page, and only after it searched the whole text a step returned in the script
+/// that ran the step and opened that page's own tab or link for it, which until then is unread.
+/// Told to write it under the page as where it looked, comparison turns wrote that no review "was
+/// visible in the portion read" and that a Specs page "did not show an estimated runtime",
+/// and the builds said the pages "didn't identify reviews" and "don't give runtime estimates" (a
+/// local test, Nov 9). Each fact carries what it doesn't confirm, since later turns read only
+/// these lines. A turn that hands nothing back is told nothing of a value it didn't find, of a
+/// missing line or of an unread line.
 #[test]
-fn a_browser_turn_reads_the_whole_page_and_its_own_link_before_a_value_is_not_found() {
+fn a_browser_turn_names_a_value_it_did_not_find_in_its_missing_line_never_under_a_page() {
     let tmp = space();
     let routed = |hands_back: bool| {
         json!({
@@ -976,31 +977,43 @@ fn a_browser_turn_reads_the_whole_page_and_its_own_link_before_a_value_is_not_fo
     let limits = "Octo's later turns read only these lines, never your reply's words, so a fact \
                   carries what it doesn't confirm: which of its values you chose, not the page, \
                   and what it leaves out.";
-    let search = "Before a value goes under a page as not found, search the whole text the step \
-                  returned (never a slice), and open that page's own tab or link named for it \
-                  (Specs, Warranty, Support, FAQ).";
+    let missing = "After them, one line `{\"missing\": [\"<a value this request needs that you \
+                   looked for and didn't find>\"]}`, each by its name alone (\"warranty\"), or \
+                   `{\"missing\": []}`, never as a fact under a page.";
+    let search = "A value goes there only after you searched the whole text a step returned for \
+                  it in the script that ran that step, never by printing the text (a long printed \
+                  result is cut in its middle), and opened that page's own Specs, Warranty, \
+                  Support or FAQ tab or link for it.";
     let unread = "A page's own tab or link named for a value you didn't find there is one of them \
                   until you open it.";
     // A tab with no address of its own has its page's, which a finding line lists: named by it,
     // the runtime takes it for that page, read already, and no second pass opens the tab.
     let tab = "Name a tab with its page (\"<item>'s Specs tab\"), never by the page's address.";
+    let old = [
+        "goes under that page as where you looked",
+        "runtime not found on this page",
+        "Before a value goes under a page as not found",
+    ];
 
     let (hand_back, _) = prompt_for_request(tmp.path(), request, routed(true), None);
-    for line in [limits, search, unread, tab] {
+    for line in [limits, missing, search, unread, tab] {
         assert_eq!(hand_back.matches(line).count(), 1, "{line}\n{hand_back}");
     }
     let at = |line: &str| hand_back.find(line).unwrap_or_else(|| panic!("{line}"));
-    assert!(at(limits) < at(search), "{hand_back}");
+    assert!(at(limits) < at(missing), "{hand_back}");
+    assert!(at(missing) < at(search), "{hand_back}");
     assert!(at(search) < at(unread), "{hand_back}");
     assert!(at(unread) < at(tab), "{hand_back}");
     assert!(at(tab) < at("\n\nLatest user request:\n"), "{hand_back}");
+    for old in old {
+        assert!(!hand_back.contains(old), "{old}\n{hand_back}");
+    }
 
     let (other, _) = prompt_for_request(tmp.path(), request, routed(false), None);
-    for line in [limits, search] {
-        assert_eq!(other.matches(line).count(), 1, "{line}\n{other}");
+    assert_eq!(other.matches(limits).count(), 1, "{other}");
+    for line in [missing, search, unread, tab].into_iter().chain(old) {
+        assert!(!other.contains(line), "{line}\n{other}");
     }
-    assert!(!other.contains(unread), "{other}");
-    assert!(!other.contains(tab), "{other}");
 }
 
 /// A browser turn whose findings go back to the building turn ends its reply with a finding line

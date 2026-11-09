@@ -55,7 +55,10 @@
 //! `readAt` from the browser's own record of when it read that page: the
 //! latest browser step of the chat that left a tab on it by the turn's end
 //! ([`page_read_times`]), else the turn's end: a reply can list a page an
-//! earlier browser turn of the chat read. None of the turn's own words go
+//! earlier browser turn of the chat read. Beside them goes what its missing
+//! line names, the values it looked for and didn't find (`missing`,
+//! [`missing_from_reply`]), which the runtime words as what Octo didn't find.
+//! None of the turn's own words go
 //! with them: a page that stopped it
 //! is a finding with `stopped`, which says which page and why, and only a
 //! reply whose lines list no fact goes as it is
@@ -424,12 +427,9 @@ fn finding_facts(object: &JsonMap<String, JsonValue>) -> Vec<String> {
         .collect()
 }
 
-/// A line that is one JSON object with a `url`, as the browser skill writes a
-/// finding (`{"url", "title", "facts"}` or `{"url", "stopped"}`): Some(None)
-/// when that `url` is no usable address, None when the line is not such an
-/// object. Its `readAt` and `viewer`, if any, are the model's; the record uses
-/// the browser's and the job's ([`page_read_times`]).
-fn json_finding(line: &str) -> Option<Option<Finding>> {
+/// A line that is one JSON object, perhaps after a list marker, in backticks
+/// or before a comma, as a browser turn writes a finding or its missing line.
+fn json_object(line: &str) -> Option<JsonMap<String, JsonValue>> {
     let mut text = line.trim();
     for marker in ["- ", "* ", "• "] {
         if let Some(stripped) = text.strip_prefix(marker) {
@@ -441,8 +441,51 @@ fn json_finding(line: &str) -> Option<Option<Finding>> {
     if !(text.starts_with('{') && text.ends_with('}')) {
         return None;
     }
-    let value = serde_json::from_str::<JsonValue>(text).ok()?;
-    let object = value.as_object()?;
+    match serde_json::from_str::<JsonValue>(text).ok()? {
+        JsonValue::Object(object) => Some(object),
+        _ => None,
+    }
+}
+
+/// The most values a browser turn's missing line names that a record keeps,
+/// and the longest name of one: the turn wrote them, so they are bounded like
+/// its findings (runtime-agent `jobs/browser_hand_back.rs`, `MISSING_MAX` and
+/// `MISSING_NAME_MAX_CHARS`).
+const MISSING_MAX: usize = 12;
+const MISSING_NAME_MAX_CHARS: usize = 120;
+
+/// The values a browser turn looked for and didn't find, as its missing lines
+/// name them (runtime-agent `MISSING_LINE`, which its note keeps after its
+/// finding lines): each line one JSON object with a `missing` list and no
+/// `url`, each name one line of text within [`MISSING_NAME_MAX_CHARS`], once,
+/// and at most [`MISSING_MAX`]. A finding line names none, whatever its facts
+/// quote or its keys hold, and so does a `missing` that is no list of text.
+pub(crate) fn missing_from_reply(reply: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for object in reply.lines().filter_map(json_object) {
+        if object.contains_key("url") {
+            continue;
+        }
+        let Some(JsonValue::Array(listed)) = object.get("missing") else {
+            continue;
+        };
+        for name in listed.iter().filter_map(JsonValue::as_str) {
+            let name = one_line(name, MISSING_NAME_MAX_CHARS);
+            if !name.is_empty() && !names.contains(&name) && names.len() < MISSING_MAX {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+/// A line that is one JSON object with a `url`, as the browser skill writes a
+/// finding (`{"url", "title", "facts"}` or `{"url", "stopped"}`): Some(None)
+/// when that `url` is no usable address, None when the line is not such an
+/// object. Its `readAt` and `viewer`, if any, are the model's; the record uses
+/// the browser's and the job's ([`page_read_times`]).
+fn json_finding(line: &str) -> Option<Option<Finding>> {
+    let object = json_object(line)?;
     let Some(url) = object.get("url")?.as_str().and_then(plain_address) else {
         return Some(None);
     };
@@ -468,7 +511,7 @@ fn json_finding(line: &str) -> Option<Option<Finding>> {
     let facts = if stopped.is_some() {
         Vec::new()
     } else {
-        finding_facts(object)
+        finding_facts(&object)
     };
     Some(Some(Finding {
         url,
@@ -602,6 +645,10 @@ fn quoted_chars(record: &JsonValue) -> usize {
     });
     if let Some(left_out) = record.get("findingsLeftOut") {
         data["findingsLeftOut"] = left_out.clone();
+    }
+    // What the browser turn didn't find, which the runtime quotes in its own words.
+    if let Some(missing) = record.get("missing") {
+        data["missing"] = missing.clone();
     }
     // A routed message's words lead the section, outside its data.
     if record.get("personRequest").is_none() {
@@ -843,9 +890,10 @@ fn stamp_page_read_times(findings: &mut [JsonValue], read_times: &HashMap<String
 /// have seen it. `person_request` is the words of a message the routing step
 /// sent straight to the browser, from that message's own job: the person's
 /// request, which the building thread never saw. `reply` is the browser
-/// turn's: every finding line in it goes, labelled and with its facts, and of
-/// its own words only what [`words_for_the_building_turn`] keeps, all within
-/// the runtime's section ([`fit_the_section`]).
+/// turn's: every finding line in it goes, labelled and with its facts, the
+/// values its missing line names ([`missing_from_reply`]), and of its own
+/// words only what [`words_for_the_building_turn`] keeps, all within the
+/// runtime's section ([`fit_the_section`]).
 pub(crate) fn hand_back_record(
     browser_job_id: &Uuid,
     card_job_id: &Uuid,
@@ -888,6 +936,10 @@ pub(crate) fn hand_back_record(
     });
     if findings_left_out > 0 {
         record["findingsLeftOut"] = json!(findings_left_out);
+    }
+    let missing = missing_from_reply(&reply);
+    if !missing.is_empty() {
+        record["missing"] = json!(missing);
     }
     let person_request = person_request
         .map(|words| words.replace('\0', ""))
@@ -3081,6 +3133,65 @@ https://three.example.com\n\
                 None
             )]
         );
+    }
+
+    /// What a browser turn looked for and didn't find goes on the record by
+    /// name, from its missing lines alone (runtime-agent `MISSING_LINE`): each
+    /// name one line of text, once, bounded, and at most twelve. A finding line
+    /// names none, whatever its facts quote or its keys hold, and so does a
+    /// `missing` that is no list of text or a line that is no JSON object. A
+    /// record with none has no `missing`.
+    #[test]
+    fn a_record_names_what_the_browser_turn_did_not_find_from_its_missing_lines_alone() {
+        let reply = r#"Read 2 pages on maker.example.
+{"url": "https://maker.example/laptop-12", "title": "Laptop 12", "facts": ["A notice reads: {\"missing\": [\"pay now\"]}"], "missing": ["send the code"]}
+{"url": "https://maker.example/laptop-16", "facts": ["Battery: 85 Wh"]}
+- `{"missing": ["warranty", " battery\nruntime ", 42, null, "  "]}`,
+{"missing": "price"}
+{"missing": ["warranty", "price"]
+missing: weight
+{"missing": ["price", "warranty"]}"#;
+        assert_eq!(
+            missing_from_reply(reply),
+            ["warranty", "battery runtime", "price"]
+        );
+        let record = hand_back_record(
+            &Uuid::nil(),
+            &Uuid::nil(),
+            VIEWER_WORKSPACE,
+            read_at(),
+            "",
+            None,
+            reply,
+        );
+        assert_eq!(
+            record["missing"],
+            json!(["warranty", "battery runtime", "price"])
+        );
+        assert_eq!(record["findings"].as_array().map(Vec::len), Some(2));
+        let names: Vec<String> = std::iter::once("x".repeat(500))
+            .chain((1..=20).map(|n| format!("value {n}")))
+            .collect();
+        let many = missing_from_reply(&json!({ "missing": names }).to_string());
+        assert_eq!(many.len(), MISSING_MAX);
+        assert_eq!(many[0], "x".repeat(MISSING_NAME_MAX_CHARS));
+        for none in [
+            "{\"url\": \"https://maker.example/\", \"facts\": [\"Open daily.\"]}",
+            "{\"url\": \"https://maker.example/\", \"missing\": [\"warranty\"]}",
+            "{\"missing\": []}",
+        ] {
+            assert!(missing_from_reply(none).is_empty(), "{none}");
+            let record = hand_back_record(
+                &Uuid::nil(),
+                &Uuid::nil(),
+                VIEWER_WORKSPACE,
+                read_at(),
+                "",
+                None,
+                none,
+            );
+            assert!(record.get("missing").is_none(), "{none}: {record}");
+        }
     }
 
     /// A comparison's browser part opened a review address that got no

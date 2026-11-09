@@ -50,10 +50,19 @@ const BUILT_BY_HAND: &str =
     "Built a responsive comparison page at `sites/laptops/index.html` with the maker's figures.";
 /// How a hand-back cites what the browser found (runtime-agent `jobs/browser_hand_back.rs`).
 const CITE_LINE: &str = "\n- Cite a page only for a fact listed under it. A finding with `stopped` was not read: say which page and why in plain words, never the stop's own word (`login`: the page asked to sign in; `captcha`: the page showed a check that a person is browsing; `paywall`: the page is behind a paywall; `blocked`: the page couldn't be read; `robots`: the page asks automated browsers not to read it; `download`: the page was a file to download; `secret`: the page showed private details, so Octo stopped there; `link-only`: the page is on a site Octo only links to; `no-page`: the page wasn't at the address Octo tried; `timed-out`: the page didn't answer in time; `covered`: the page was covered by a cookie notice or dialog the browser couldn't close; any other: the page couldn't be read), and do not try it another way.\n";
-/// How a hand-back reads a fact that says a value was not found on a page (runtime-agent
-/// `jobs/browser_hand_back.rs`): a build once said a maker's product pages "did not show warranty
-/// terms" from three such facts.
-const NOT_FOUND_LINE: &str = "\n- A \"not found\" fact means Octo didn't find it there: for a value no other fact gives, say \"I didn't find…\" and where you looked, never that a page doesn't show it.\n";
+/// How a hand-back reads what the browser turn looked for and didn't find (runtime-agent
+/// `jobs/browser_hand_back.rs`): in the runtime's words, to use as they are. Told to say "I
+/// didn't find…" of a fact that said a value was not found, a build replied that a maker's specs
+/// pages "don't give runtime estimates".
+const NOT_FOUND_LINE: &str = "\n- `notFound` says what Octo looked for and didn't find, in the words to say it: wherever such a value would go, use them as they are, unless a finding gives it.\n";
+/// Those words for the value the record names, on the one site every page read is on.
+const NOT_FOUND: &str = "\"notFound\": [\n    \"I didn't find warranty on maker.example\"\n  ]";
+/// What a hand-back read before of a fact that said a value was not found on a page.
+const OLD_NOT_FOUND_LINE: &str = "A \"not found\" fact means Octo didn't find it there";
+/// What a hand-back says of a route a finding gives (runtime-agent `jobs/browser_hand_back.rs`):
+/// a page people share showed a route to a stop Octo chose without saying so, or that the walk
+/// from it to the shop wasn't checked.
+const ROUTE_LINE: &str = "\n- A route ends at the stop its finding names. Unless a finding says the place's own page names that stop, say on the page that it's Octo's pick and that the walk from it to the place isn't checked.\n";
 /// How a turn that may change files reads a public page (`AGENTS.md`'s "Responsiveness", given
 /// with the lane to a turn that runs without that file): a build once read a shop's site with
 /// python's `urllib`.
@@ -328,6 +337,8 @@ fn hand_back_record() -> Value {
                 "viewer": viewer,
             }))
             .collect::<Vec<_>>(),
+        // What the browser turn's missing line named: a value it looked for and didn't find.
+        "missing": ["warranty"],
         // The controller hands back none of the browser turn's words with findings that list
         // what their pages showed.
         "reply": "",
@@ -627,10 +638,13 @@ async fn on_the_cards_thread(space: &Space<'_>) -> Result<()> {
     );
     assert!(prompt.contains("Battery: 74 Wh"), "{prompt}");
     assert!(prompt.contains("Price: from 619 euros"), "{prompt}");
-    // A page is cited only for a fact listed under it, and a value not found is what Octo didn't
-    // find there.
+    // A page is cited only for a fact listed under it, what Octo didn't find comes in the
+    // runtime's words, and a route says whose pick its end stop is.
     assert!(prompt.contains(CITE_LINE), "{prompt}");
     assert!(prompt.contains(NOT_FOUND_LINE), "{prompt}");
+    assert!(prompt.contains(NOT_FOUND), "{prompt}");
+    assert!(!prompt.contains(OLD_NOT_FOUND_LINE), "{prompt}");
+    assert!(prompt.contains(ROUTE_LINE), "{prompt}");
     // On the chat's own thread, which runs without the space's `AGENTS.md`, it still reads how to
     // read a public page, once.
     assert_eq!(prompt.matches(READ_A_PUBLIC_PAGE).count(), 1, "{prompt}");
@@ -755,6 +769,9 @@ async fn as_the_chats_first_building_turn(space: &Space<'_>) -> Result<()> {
     assert!(!prompt.contains("cannot open the browser"), "{prompt}");
     assert!(prompt.contains(CITE_LINE), "{prompt}");
     assert!(prompt.contains(NOT_FOUND_LINE), "{prompt}");
+    assert!(prompt.contains(NOT_FOUND), "{prompt}");
+    assert!(!prompt.contains(OLD_NOT_FOUND_LINE), "{prompt}");
+    assert!(prompt.contains(ROUTE_LINE), "{prompt}");
     assert!(prompt.contains(WRITE_LANE), "{prompt}");
     assert!(prompt.contains(NO_ACTIONS), "{prompt}");
     // How it reads a public page, once: a new thread's snapshot holds the space's `AGENTS.md`.
