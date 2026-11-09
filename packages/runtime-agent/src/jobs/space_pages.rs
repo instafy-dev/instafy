@@ -381,7 +381,8 @@ pub(crate) fn write_down_the_turns_folders(
 
 /// The real folders in `workspace`, at most [`TURN_FOLDERS_DEPTH`] names deep, sorted, and whether
 /// that is all of them: a folder that could not be listed, or more than [`MAX_TURN_FOLDERS`], and
-/// the list is not whole. A link is no folder, and is never followed.
+/// the list is not whole. A link is no folder, and is never followed. Hidden folders and
+/// `node_modules` are left out, and the CLI reads a page folder under one as there before.
 fn folders_in(workspace: &WorkspaceDir) -> (Vec<String>, bool) {
     let mut folders = BTreeSet::new();
     let mut complete = true;
@@ -394,14 +395,13 @@ fn folders_in(workspace: &WorkspaceDir) -> (Vec<String>, bool) {
             } else {
                 workspace.open_dir(parent)
             };
-            let Ok(names) = dir.and_then(|dir| {
+            let Ok((dir, names)) = dir.and_then(|dir| {
                 let names = dir.list_names(MAX_NAMES_IN_A_FOLDER)?;
                 Ok((dir, names))
             }) else {
                 complete = false;
                 continue;
             };
-            let (dir, names) = names;
             for name in names {
                 let Some(name) = name.to_str() else {
                     complete = false;

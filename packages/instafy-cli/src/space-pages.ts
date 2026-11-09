@@ -78,7 +78,8 @@ export function pageFolder(raw: string): string | null {
  * Whether the page folder `folder` (relative to the space's workspace `root`) was made in the turn that opens it
  * (`new`) or was there before that turn began (`existing`), from the folders the runtime wrote down as the turn began.
  * A folder deeper than that list goes is read by its first two names. Without that list (no turn wrote one, or it is
- * not whole), nothing says the folder is new: it reads as `existing`, and its open claims it for no chat.
+ * not whole), or under a folder the list leaves out (a hidden one, `node_modules`), nothing says the folder is new: it
+ * reads as `existing`, and its open claims it for no chat.
  */
 export function pageFolderAge(root: string, folder: string): PageFolderAge {
   let listed: unknown;
@@ -90,6 +91,8 @@ export function pageFolderAge(root: string, folder: string): PageFolderAge {
   const { folders, complete } = (listed ?? {}) as { folders?: unknown; complete?: unknown };
   if (complete !== true || !Array.isArray(folders)) return "existing";
   const names = folder.split("/");
+  // The list leaves out hidden folders and `node_modules`: nothing says a folder under one is new.
+  if (names.slice(0, TURN_FOLDERS_DEPTH).some((name) => name.startsWith(".") || name === "node_modules")) return "existing";
   // Any part of the path that was there: a folder made inside one that was there counts as made in this turn only
   // when the list goes that deep.
   for (let depth = 1; depth <= Math.min(names.length, TURN_FOLDERS_DEPTH); depth += 1) {
