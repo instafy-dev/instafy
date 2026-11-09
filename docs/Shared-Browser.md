@@ -2998,22 +2998,24 @@ unless the policy is `"covered"`.
   than one that only quotes it, and carrying what it doesn't confirm (which of
   its values the turn chose rather than the page, and what it leaves out),
   since later turns read only these lines; and a page that stopped it as a
-  stop with its word (`no-page`, `timed-out` and `covered` among them). A turn
-  whose reply answers the person drafts it as it writes, up to its first
+  stop with its word (`no-page`, `timed-out` and `covered` among them). A
+  value it looked for and didn't find is no fact of any page, and is not
+  found until the turn searched the whole text a step returned for it in the
+  script that ran the step, never by printing the text (a printed result over
+  about 10,000 tokens is cut in its middle), and opened that page's own Specs,
+  Warranty, Support or FAQ tab or link for it. Every browser turn is told so,
+  a question's turn too: later turns read its findings. Told to write such a
+  value under its page as where it looked, never that the page lacks it,
+  browser turns wrote that no review "was visible in the portion read" and
+  that a Specs page "did not show an estimated runtime", and the builds said
+  the pages "didn't identify reviews" and "don't give runtime estimates". A
+  turn whose reply answers the person drafts it as it writes, up to its first
   finding line. A browser turn that continues a building card also ends with
   one line naming, by name alone, the values its request needs that it looked
-  for and didn't find (`{"missing": [...]}`), never as a fact under a page, and
-  then one line naming the pages its request needs that it didn't open
-  (`{"unread": [...]}`), as its wrap-up pass below is told too. A value goes
-  in the missing line only after the turn searched the whole text a step
-  returned for it in the script that ran the step, never by printing the text
-  (a printed result over about 10,000 tokens is cut in its middle), and opened
-  that page's own Specs, Warranty, Support or FAQ tab or link for it, which is
-  one of the unread pages until then. Told to write such a value under its
-  page as where it looked, never that the page lacks it, browser turns wrote
-  that no review "was visible in the portion read" and that a Specs page "did
-  not show an estimated runtime", and the builds said the pages "didn't
-  identify reviews" and "don't give runtime estimates". A tab is named with
+  for and didn't find (`{"missing": [...]}`), and then one line naming the
+  pages its request needs that it didn't open (`{"unread": [...]}`), as its
+  wrap-up pass below is told too; a page's own tab or link for a value it
+  didn't find there is one of the unread pages until it opens it. A tab is named with
   its page ("Laptop 12's Specs tab"), never by the page's address: a page a
   finding line lists is none to read again. Told only to say where it looked,
   a warranty's browser turn read only the last 700 to 1,100 characters of
@@ -3091,17 +3093,21 @@ unless the policy is `"covered"`.
   the browser turn's own words. Told plain words for two stops, a build wrote
   "Notebookcheck was blocked" for a search a cookie notice covered. Its
   hand-back quotes, with the findings, what the browser turn didn't find in the
-  runtime's own words (`notFound`: "I didn't find <name>", and "on <site>"
-  when every page it read is on that one site, the one case where the runtime
-  knows where it looked), and the build uses those words as they are wherever
-  such a value would go, unless a finding gives it: told to say "I didn't
-  find…" and where it looked of a "not found" fact, a build still wrote that a
-  maker's specs pages "don't give runtime estimates". The hand-back also says
-  that a route ends at the stop its finding names, and, unless a finding says
-  the place's own page names that stop, that the page says it's Octo's pick and
-  that the walk from it to the place isn't checked: builds read only the
-  findings, and a planner's finding that left both out left the page people
-  share without them. A browser
+  runtime's own words (`notFound`: "I didn't find <name>", never where: the
+  record says which pages the turn read, not where it looked for a value, and
+  an address the browser refused leaves no finding), and the build uses those
+  words as they are wherever such a value would go, unless a finding gives it:
+  told to say "I didn't find…" and where it looked of a "not found" fact, a
+  build still wrote that a maker's specs pages "don't give runtime estimates".
+  Wherever a building turn reads findings (its hand-back, the browser turns
+  since its last turn and its replay of the chat), it is also told that a
+  route ends at the stop its finding names, and, unless the person named that
+  stop or a finding says the place's own page names it, that the page says
+  it's Octo's pick and that the walk from it to the place isn't checked:
+  builds read only the findings, and a planner's finding that left both out
+  left the page people share without them. A stop the person named is never
+  called Octo's pick, and the page made to share a route was first built from
+  the chat's replay, after a browser part that opened no page. A browser
   turn that used the browser and wrote no
   finding line would leave a later building turn nothing of the pages it read,
   and one that continues a building card would hand nothing back: it gets the

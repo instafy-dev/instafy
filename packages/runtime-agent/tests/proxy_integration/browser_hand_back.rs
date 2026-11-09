@@ -55,14 +55,15 @@ const CITE_LINE: &str = "\n- Cite a page only for a fact listed under it. A find
 /// didn't find…" of a fact that said a value was not found, a build replied that a maker's specs
 /// pages "don't give runtime estimates".
 const NOT_FOUND_LINE: &str = "\n- `notFound` says what Octo looked for and didn't find, in the words to say it: wherever such a value would go, use them as they are, unless a finding gives it.\n";
-/// Those words for the value the record names, on the one site every page read is on.
-const NOT_FOUND: &str = "\"notFound\": [\n    \"I didn't find warranty on maker.example\"\n  ]";
+/// Those words for the value the record names, and never where: the record says which pages
+/// the turn read, not where it looked for the value.
+const NOT_FOUND: &str = "\"notFound\": [\n    \"I didn't find warranty\"\n  ]";
 /// What a hand-back read before of a fact that said a value was not found on a page.
 const OLD_NOT_FOUND_LINE: &str = "A \"not found\" fact means Octo didn't find it there";
 /// What a hand-back says of a route a finding gives (runtime-agent `jobs/browser_hand_back.rs`):
 /// a page people share showed a route to a stop Octo chose without saying so, or that the walk
-/// from it to the shop wasn't checked.
-const ROUTE_LINE: &str = "\n- A route ends at the stop its finding names. Unless a finding says the place's own page names that stop, say on the page that it's Octo's pick and that the walk from it to the place isn't checked.\n";
+/// from it to the shop wasn't checked. A stop the person named is no pick of Octo's.
+const ROUTE_LINE: &str = "\n- A route ends at the stop its finding names. Unless the person named that stop or a finding says the place's own page names it, say on the page that it's Octo's pick and that the walk from it to the place isn't checked.\n";
 /// How a turn that may change files reads a public page (`AGENTS.md`'s "Responsiveness", given
 /// with the lane to a turn that runs without that file): a build once read a shop's site with
 /// python's `urllib`.

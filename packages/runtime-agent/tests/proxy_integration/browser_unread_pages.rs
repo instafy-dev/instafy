@@ -55,7 +55,7 @@ const PASS_OPENING: &str = "Your answer has no finding lines";
 const PASS_ASKS_FOR_UNREAD: &str = "Then one last line `{\"unread\": [";
 /// What it asks such a turn for before that line: the values it looked for and didn't find, by
 /// name (runtime-agent `MISSING_LINE`).
-const PASS_ASKS_FOR_MISSING: &str = "After them, one line `{\"missing\": [";
+const PASS_ASKS_FOR_MISSING: &str = "After your finding lines, one line `{\"missing\": [";
 /// The missing line the turn ends its answer with, and its second pass's: the values each looked
 /// for and didn't find. The turn's note keeps their names once, in one line.
 const MISSING_FIRST: &str = r#"{"missing": ["warranty"]}"#;
