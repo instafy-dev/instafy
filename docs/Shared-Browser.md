@@ -1035,8 +1035,8 @@ browser. So a turn's first `open_tab`, while the run has no tab of its own and
 no step of it has acted in the chat's own tab (a `navigate`, click, typing,
 choice, key or scroll there; a reading does not count), opens its page in the
 chat's own tab as `navigate` does, and its result says so: a turn opened a
-journey planner in a tab of its own three times running, where neither a
-cookie notice's pause nor the planner's prompt can happen. A page an earlier
+journey planner in a tab of its own three times running, where the
+planner's prompt can't happen. A page an earlier
 turn left there is replaced, as `navigate` replaces it, unless it is one to
 keep: a page holding what someone typed or chose in its fields (a form the
 person was handed and filled in before Let Octo continue, notes they wrote),
