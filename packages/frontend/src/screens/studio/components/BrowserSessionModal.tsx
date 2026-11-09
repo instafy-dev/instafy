@@ -381,10 +381,13 @@ function BrowserSessionStatusPill({
   status,
   view,
   compact = false,
+  waitingForYou = false,
 }: {
   status: BrowserSessionStatus;
   view: HostedBrowserViewState;
   compact?: boolean;
+  /** A pause waits for this person, who holds the browser, to let Octo continue. */
+  waitingForYou?: boolean;
 }) {
   if (status === "selecting") {
     return <BrowserStateBadge compact={compact}
@@ -392,8 +395,8 @@ function BrowserSessionStatusPill({
   }
   // A neutral label; the card says why in its one sentence.
   const state: BrowserChromeState =
-    view.kind === "live" ? "ready" : view.kind === "opening" ? "starting" : "off";
-  const detail = view.kind === "live" ? "Instafy's browser is open." : view.sentence;
+    view.kind === "live" ? (waitingForYou ? "waiting" : "ready") : view.kind === "opening" ? "starting" : "off";
+  const detail = state === "waiting" ? null : view.kind === "live" ? "Instafy's browser is open." : view.sentence;
   return (
     <BrowserStatusPill
       compact={compact}
@@ -1293,6 +1296,18 @@ export function BrowserSessionModal({
     onContinue: async (message: string) => onContinueAfterHumanInput ? onContinueAfterHumanInput(message) : false,
   };
   const browserHumanInputState = useBrowserHumanInput(browserHumanInputOptions);
+  // A pause that asked this person for something (a sign-in, a code, a cookie
+  // notice): a take-over they chose asks them for nothing. It outlasts its
+  // request, as its row does (a sign-in may go to another site, and the
+  // request runs out), and is over once the row is, or once Octo drives
+  // again because they wrote to it instead.
+  const pauseAskedRef = useRef<string | null>(null);
+  if (browserHumanInputState.request) {
+    pauseAskedRef.current = browserHumanInputOptions.identityKey;
+  } else if (!browserHumanInputState.active || effectiveAgentControlOwner !== null) {
+    pauseAskedRef.current = null;
+  }
+  const pauseAsked = pauseAskedRef.current === browserHumanInputOptions.identityKey;
   // A sign-in in this browser stays in the space's one browser profile.
   const signInNote = sharedBrowserSignInNote(spaceHasTeammates);
   // The pages the agent is reading while it holds this browser: its own tabs
@@ -3578,6 +3593,9 @@ export function BrowserSessionModal({
   const humanInputRowShown = !shouldCollapseDocked && Boolean(humanInputIdentityKey) &&
     browserHumanInputState.active && effectiveAgentControlOwner === null;
   const humanInputCanContinue = canLetOctoContinue({ ...browserHumanInputOptions, state: browserHumanInputState });
+  // Through a pause this person can end, the toolbar says who it waits for,
+  // in the reading row's words for a prompt, until they let Octo continue.
+  const pauseWaitsForYou = humanInputRowShown && humanInputCanContinue && pauseAsked;
   const humanInputControls = !shouldCollapseDocked && humanInputIdentityKey
     ? <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} continueInRow={humanInputRowShown} /> : null;
   const panelContent = renderCollapsedConnectedIntoShelf ? (
@@ -3615,7 +3633,7 @@ export function BrowserSessionModal({
             {effectiveAgentControlOwner ? (
               <SharedBrowserControlOwnerPill controlOwner={effectiveAgentControlOwner} />
             ) : quietReattach ? null : (
-              <BrowserSessionStatusPill status={displayStatus} view={viewState} />
+              <BrowserSessionStatusPill status={displayStatus} view={viewState} waitingForYou={pauseWaitsForYou} />
             )}
             {toolbarLeading || locationOptions ? null : (
               <BrowserIdentityBadge className={fillContainer ? "inline-flex" : "hidden sm:inline-flex"} />
@@ -3678,7 +3696,7 @@ export function BrowserSessionModal({
           toolbarLeading={toolbarLeading}
           toolbarStatus={quietReattach ? null : (
             <span className={sharedBrowserChrome.compact ? "sr-only" : undefined}>
-              <BrowserSessionStatusPill status={displayStatus} view={viewState} />
+              <BrowserSessionStatusPill status={displayStatus} view={viewState} waitingForYou={pauseWaitsForYou} />
             </span>
           )}
         />

@@ -1,11 +1,14 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useLayoutEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage, ChatMessageFileChange } from "../../types";
 import { ChatFileChangeList } from "../ChatFileChangeList";
-import { CHAT_HISTORY_WAIT_MS, ChatSiteContext, chatHistoryIn, conversationSite, useKnownChatSite, type ChatSite } from "../chatSiteContext";
+import {
+  CHAT_HISTORY_SETTLE_MS, CHAT_HISTORY_WAIT_MS, ChatSiteContext, ChatSiteSettledProvider, chatHistoryIn, conversationSite,
+  useKnownChatSite, type ChatSite,
+} from "../chatSiteContext";
 
 // Every file reads as 100 added lines. Nothing here may hit the network.
 const fetchDiff = vi.hoisted(() =>
@@ -217,7 +220,9 @@ describe("the files a site turn created", () => {
     // The history is still coming in: the card that names the page may yet arrive.
     await render(undefined);
     await render({ firstChangeAt: 1_000, pageTitles: new Map([["seville-3-days", "Three days in Seville"]]) });
-    expect(seen[0]).toBe("");
+    // The page's row keeps its place meanwhile, without words.
+    expect(seen[0]).toMatch(/^Loading…/u);
+    expect(seen[0]).not.toMatch(/Changed|Created|a page/u);
     expect(seen.some((text) => text.includes("seville-3-days"))).toBe(false);
     expect(toggle()?.textContent).toBe("Changed Three days in Seville");
   });
@@ -253,7 +258,7 @@ describe("the files a site turn created", () => {
     };
     await render([], { newestPage: false, olderPageOnItsWay: false });
     await render(newestPage, { newestPage: true, olderPageOnItsWay: true });
-    expect(seen).toEqual(["", ""]);
+    expect(seen.map((text) => /Changed|Created|a page/u.test(text))).toEqual([false, false]);
     await render([card, ...newestPage], { newestPage: true, olderPageOnItsWay: false });
     expect(labels()).toEqual(["Created Three days in Seville", "Changed Three days in Seville"]);
     expect(seen.some((text) => text.includes("seville-3-days"))).toBe(false);
@@ -308,6 +313,171 @@ describe("the files a site turn created", () => {
     await render(true);
     expect(toggle()?.textContent).toBe("Created the site");
     expect(chips()).toHaveLength(0);
+  });
+});
+
+// A local test, Nov 9: on a fresh load of a chat its three page rows read
+// "Changed a page" for 0.61 s, then by their page's title, one of them
+// "Created". The newest page of history read as all of it until Studio had
+// drawn it, measured the window and asked for the older page with the card.
+describe("a page's row until its words are known", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  /** What the rows read at each draw. */
+  let seen: string[] = [];
+
+  const card: ChatMessage = { id: "card", role: "assistant", content: "", timestamp: 900, messageType: "action_request",
+    metadata: { jobId: "map-job", messageType: "action_request",
+      details: { title: "Three days in Seville", preview: { previewId: "11111111-1111-4111-8111-111111111111", port: 4173 } } } };
+  const newestPage: ChatMessage[] = [
+    { id: "map-files", role: "assistant", content: "", timestamp: 1_000, metadata: { jobId: "map-job" },
+      files: ["sites/seville-3-days/index.html", "sites/seville-3-days/map.config.json"].map(created) },
+    { id: "note-files", role: "assistant", content: "", timestamp: 5_000, metadata: { jobId: "note-job" },
+      files: [changed("sites/seville-3-days/map.config.json")] },
+  ];
+  const olderWithoutCard: ChatMessage = { id: "hello", role: "user", content: "Hello", timestamp: 100 };
+
+  const rows = () => [...container.querySelectorAll('[data-testid="chat-file-change-toggle-files"]')];
+  const labels = () => rows().map((row) => row.textContent);
+  const wordless = () => rows().map((row) => row.getAttribute("aria-busy") === "true");
+
+  /** What each row read at each draw. */
+  let seenLabels: (string | null)[][] = [];
+  const record = () => { seen.push(container.textContent ?? ""); seenLabels.push(labels()); };
+
+  function Probe() {
+    useLayoutEffect(record);
+    return null;
+  }
+
+  /**
+   * The chat as Studio draws it: the window is measured only once the newest
+   * page is drawn, so an older page is on its way one draw after the history
+   * first reads as in.
+   */
+  function Chat({ messages, newestPageIn, fillsWindow }: { messages: ChatMessage[]; newestPageIn: boolean; fillsWindow: boolean }) {
+    const [olderPageOnItsWay, setOlderPageOnItsWay] = useState(false);
+    useLayoutEffect(() => { setOlderPageOnItsWay(newestPageIn && !fillsWindow); }, [newestPageIn, fillsWindow]);
+    const ready = chatHistoryIn({ newestPage: newestPageIn, olderPageOnItsWay });
+    const site = useKnownChatSite(conversationSite(messages), ready, "chat-1");
+    return (
+      <ChatSiteContext.Provider value={site}>
+        <ChatSiteSettledProvider historyReady={ready} chatKey="chat-1">
+          {messages.map((message) => message.files
+            ? <ChatFileChangeList key={message.id} files={message.files} projectId="project-1" messageTimestamp={message.timestamp}
+              // As Studio's row for a turn does: the turn's own card is in.
+              madeSite={messages.some((other) => other.messageType === "action_request" && other.metadata?.jobId === message.metadata?.jobId)} />
+            : null)}
+        </ChatSiteSettledProvider>
+        <Probe />
+      </ChatSiteContext.Provider>
+    );
+  }
+
+  const draw = async (messages: ChatMessage[], history: { newestPageIn: boolean; fillsWindow: boolean }) => {
+    await act(async () => root.render(<Chat messages={messages} {...history} />));
+    record();
+  };
+  const wait = async (ms: number) => {
+    await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+    record();
+  };
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.useFakeTimers();
+    seen = [];
+    seenLabels = [];
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.useRealTimers();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("shows no words on a fresh load until its page's card is in, then its title, in the same place", async () => {
+    await draw([], { newestPageIn: false, fillsWindow: false });
+    await draw(newestPage, { newestPageIn: true, fillsWindow: false });
+    // Two quiet rows, named for a screen reader.
+    expect(labels()).toEqual(["Loading…", "Loading…"]);
+    expect(wordless()).toEqual([true, true]);
+    const [first] = rows();
+    await wait(610);
+    expect(wordless()).toEqual([true, true]);
+    await draw([card, ...newestPage], { newestPageIn: true, fillsWindow: true });
+    expect(labels()).toEqual(["Created Three days in Seville", "Changed Three days in Seville"]);
+    expect(wordless()).toEqual([false, false]);
+    // The words arrive in the row that waited: nothing is drawn anew around it.
+    expect(rows()[0]).toBe(first);
+    // No draw called the page "a page".
+    expect(seen.filter((text) => text.includes("a page"))).toEqual([]);
+    expect(seen.filter((text) => text.includes("seville-3-days"))).toEqual([]);
+  });
+
+  it("ends in a page for a page no card in the chat names, once the chat's history has settled", async () => {
+    await draw([], { newestPageIn: false, fillsWindow: false });
+    await draw(newestPage, { newestPageIn: true, fillsWindow: false });
+    await wait(610);
+    // The older page has no card for it: the page is another chat's, or gone.
+    await draw([olderWithoutCard, ...newestPage], { newestPageIn: true, fillsWindow: true });
+    await wait(CHAT_HISTORY_SETTLE_MS - 1);
+    expect(wordless()).toEqual([true, true]);
+    await wait(1);
+    expect(labels()).toEqual(["Changed a page", "Changed a page"]);
+    expect(wordless()).toEqual([false, false]);
+  });
+
+  it("ends in a page when the chat's history never comes", async () => {
+    await draw(newestPage, { newestPageIn: false, fillsWindow: false });
+    expect(wordless()).toEqual([true, true]);
+    await wait(CHAT_HISTORY_WAIT_MS + 1);
+    expect(labels()).toEqual(["Changed a page", "Changed a page"]);
+    expect(wordless()).toEqual([false, false]);
+  });
+
+  it("shows a page its card names at once, with no wait", async () => {
+    await draw([card, ...newestPage], { newestPageIn: true, fillsWindow: true });
+    expect(labels()).toEqual(["Created Three days in Seville", "Changed Three days in Seville"]);
+    expect(seen.filter((text) => text.includes("Loading"))).toEqual([]);
+  });
+
+  // The newest page of history holds a turn that made every one of its
+  // files, and a later turn's card names their page: the first reads as the
+  // chat's first change only until the older page brings an earlier one.
+  const laterCard: ChatMessage = { ...card, id: "later-card", timestamp: 4_900, metadata: { ...card.metadata, jobId: "note-job" } };
+  const newestWithLaterCard: ChatMessage[] = [
+    { id: "list-files", role: "assistant", content: "", timestamp: 1_000, metadata: { jobId: "list-job" },
+      files: [created("sites/seville-3-days/list.json")] },
+    laterCard,
+    newestPage[1]!,
+  ];
+  const olderChange: ChatMessage = { id: "first-files", role: "assistant", content: "", timestamp: 500, metadata: { jobId: "first-job" },
+    files: [created("sites/seville-3-days/index.html")] };
+
+  it("never says Created of a page and then Changed, when an older page of history holds an earlier change", async () => {
+    await draw([], { newestPageIn: false, fillsWindow: false });
+    await draw(newestWithLaterCard, { newestPageIn: true, fillsWindow: false });
+    // Its page has a name, but whether the turn made it is not known yet;
+    // "Changed" cannot turn into "Created", so that row shows at once.
+    expect(labels()).toEqual(["Loading…", "Changed Three days in Seville"]);
+    await wait(300);
+    await draw([olderChange, ...newestWithLaterCard], { newestPageIn: true, fillsWindow: true });
+    await wait(CHAT_HISTORY_SETTLE_MS);
+    expect(labels()).toEqual(["Created Three days in Seville", "Changed Three days in Seville", "Changed Three days in Seville"]);
+    // The row that waited, the last but one, read "Created" at no draw.
+    expect(seenLabels.filter((drawn) => drawn.at(-2)?.startsWith("Created"))).toEqual([]);
+  });
+
+  it("says Created of the chat's first change once its history has settled with none before it", async () => {
+    await draw(newestWithLaterCard, { newestPageIn: true, fillsWindow: true });
+    expect(labels()).toEqual(["Loading…", "Changed Three days in Seville"]);
+    await wait(CHAT_HISTORY_SETTLE_MS);
+    expect(labels()).toEqual(["Created Three days in Seville", "Changed Three days in Seville"]);
   });
 });
 

@@ -8,7 +8,7 @@ import { DARK_DIVIDER_BORDER_CLASS, DARK_PANEL_SOFT_BG_CLASS } from "../../../th
 import { BrowserStateBadge } from "./BrowserStateBadge";
 
 /** `off` is neutral: Instafy's browser is not running. `unavailable` is for the Personal Browser and the site preview. */
-export type BrowserChromeState = "ready" | "starting" | "paused" | "off" | "unavailable";
+export type BrowserChromeState = "ready" | "starting" | "waiting" | "paused" | "off" | "unavailable";
 
 export const BrowserAddressMenuAnchorContext = createContext<{
   ref: RefObject<HTMLDivElement | null>;
@@ -18,6 +18,8 @@ export const BrowserAddressMenuAnchorContext = createContext<{
 export const BROWSER_CHROME_STATE_LABELS: Record<BrowserChromeState, string> = {
   ready: "Ready",
   starting: "Starting…",
+  // A pause waits for the person viewing, as the reading row says of a prompt.
+  waiting: "Waiting for you",
   paused: "Paused",
   off: "Off",
   unavailable: "Unavailable",

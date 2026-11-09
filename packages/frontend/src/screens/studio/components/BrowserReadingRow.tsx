@@ -2,6 +2,7 @@ import { useId } from "react";
 import { Button } from "../../../components/Button";
 import { InlineNotice } from "../../../components/InlineNotice";
 import { DARK_DIVIDER_BORDER_CLASS } from "../../../theme/darkSurfaces";
+import { BROWSER_CHROME_STATE_LABELS } from "./BrowserChromeShell";
 import type { BrowserSessionPage } from "./browserSessionPages";
 import {
   BROWSER_AGENT_DEFAULT_NAME,
@@ -89,7 +90,7 @@ export function BrowserReadingRow({
       ) : (
         <>
           <span id={labelId} className="flex-none font-medium text-slate-600 dark:text-slate-300">
-            {waitingForYou ? "Waiting for you" : <>{agentName} is reading<span className="sr-only"> {count}</span></>}
+            {waitingForYou ? BROWSER_CHROME_STATE_LABELS.waiting : <>{agentName} is reading<span className="sr-only"> {count}</span></>}
           </span>
           <ul
             aria-labelledby={labelId}
