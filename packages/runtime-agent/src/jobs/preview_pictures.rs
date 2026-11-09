@@ -1248,7 +1248,7 @@ impl Drop for CheckGroup {
 
 /// Reaps, briefly, what a stopped group left to this process (it inherits
 /// orphans when it runs as a container's first process).
-async fn reap_group(pgid: i32) {
+pub(super) async fn reap_group(pgid: i32) {
     let until = Instant::now() + Duration::from_secs(1);
     while group::exists(pgid) && Instant::now() < until {
         group::reap(pgid);

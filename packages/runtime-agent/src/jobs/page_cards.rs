@@ -43,7 +43,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::CodexFileDescriptor;
-use super::preview_pictures::{PREVIEW_STATE_RELATIVE_PATH, changed_paths};
+use super::preview_pictures::{PREVIEW_STATE_RELATIVE_PATH, changed_paths, reap_group};
 use super::space_pages;
 use crate::browser_host::process::group;
 use crate::job_cancel::JobCancelSignal;
@@ -391,11 +391,15 @@ async fn post_card(
             }
             () = stopped => {
                 info!(folder, "the turn was stopped while the card of its page was posted");
-                if let Some(pgid) = leader.take().filter(|pgid| *pgid > 0) {
+                let pgid = leader.take().filter(|pgid| *pgid > 0);
+                if let Some(pgid) = pgid {
                     group::kill(pgid);
                 }
                 let _ = child.start_kill();
                 let _ = child.wait().await;
+                if let Some(pgid) = pgid {
+                    reap_group(pgid).await;
+                }
                 return Posted::Stopped;
             }
         }
@@ -405,7 +409,7 @@ async fn post_card(
         group::kill(pgid);
         let _ = child.start_kill();
         let _ = child.wait().await;
-        group::reap(pgid);
+        reap_group(pgid).await;
     }
     let Some((status, printed)) = ended else {
         return Posted::No;
@@ -616,6 +620,21 @@ mod tests {
         assert!(!names_folder("sites/seville-2", "sites/seville"));
     }
 
+    /// Whether a process is gone within two seconds: a zombie counts as gone.
+    #[cfg(unix)]
+    fn gone(pid: &str) -> bool {
+        (0..100).any(|_| {
+            std::thread::sleep(Duration::from_millis(20));
+            let state = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", pid])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&state.stdout);
+            let state = state.trim();
+            state.is_empty() || state.starts_with('Z')
+        })
+    }
+
     /// A stand-in `instafy`: it notes what ran it, where, and which of the settings and credentials
     /// it was given; `bind card` for `sites/fails` fails, for `sites/hangs` starts a helper in its
     /// group and hangs, for `sites/none` answers that there is no card to post, and for any other
@@ -798,13 +817,8 @@ echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer"
         let lines = seen();
         assert_eq!(lines.len(), 5, "{lines:#?}");
         assert_eq!(lines[3], expected("hangs"));
-        let helper: i32 = lines[4].trim_start_matches("helper=").parse().unwrap();
-        let gone = (0..100).any(|_| {
-            std::thread::sleep(Duration::from_millis(20));
-            // SAFETY: signal 0 only checks that the process exists.
-            unsafe { libc::kill(helper, 0) != 0 }
-        });
-        assert!(gone, "the hung command's helper {helper} is gone");
+        let helper = lines[4].trim_start_matches("helper=");
+        assert!(gone(helper), "the hung command's helper {helper} is gone");
 
         // A Stop while a card is posted ends the step at once, with what the command started.
         let stop = JobCancelSignal::new();
@@ -828,12 +842,10 @@ echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer"
         let lines = seen();
         assert_eq!(lines.len(), 7, "{lines:#?}");
         assert_eq!(lines[5], expected("hangs"));
-        let helper: i32 = lines[6].trim_start_matches("helper=").parse().unwrap();
-        let gone = (0..100).any(|_| {
-            std::thread::sleep(Duration::from_millis(20));
-            // SAFETY: signal 0 only checks that the process exists.
-            unsafe { libc::kill(helper, 0) != 0 }
-        });
-        assert!(gone, "the stopped command's helper {helper} is gone");
+        let helper = lines[6].trim_start_matches("helper=");
+        assert!(
+            gone(helper),
+            "the stopped command's helper {helper} is gone"
+        );
     }
 }
