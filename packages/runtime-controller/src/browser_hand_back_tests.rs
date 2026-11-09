@@ -1018,9 +1018,10 @@ async fn a_question_or_a_turn_that_read_nothing_hands_nothing_back() -> anyhow::
 }
 
 /// The runtime posts the reply without its finding lines and keeps them in a
-/// Details note: the hand-back reads them back, so the building turn gets every
-/// finding with its facts, the page that stopped the turn among them, and none
-/// of the reply the person read.
+/// Details note, with the turn's missing line after them: the hand-back reads
+/// them back, so the building turn gets every finding with its facts, the page
+/// that stopped the turn among them, what the turn looked for and didn't find,
+/// and none of the reply the person read.
 #[tokio::test]
 async fn finding_lines_in_the_details_note_reach_the_building_turn() -> anyhow::Result<()> {
     with_chain("browser-hand-back-details-note", |chain| {
@@ -1034,11 +1035,12 @@ async fn finding_lines_in_the_details_note_reach_the_building_turn() -> anyhow::
                 .map(|line| line.as_str().unwrap())
                 .collect::<Vec<_>>()
                 .join("\n");
+            let note = format!("{lines}\n{}", fixtures["missingLine"].as_str().unwrap());
             let (_, browser_job) = chain.card_and_running_browser_turn().await?;
             chain
                 .post(
                     &browser_job,
-                    &lines,
+                    &note,
                     "status",
                     json!({
                         "kind": "agent_message",
@@ -1072,6 +1074,10 @@ async fn finding_lines_in_the_details_note_reach_the_building_turn() -> anyhow::
             let hand_back_job = chain.job_of(&response).await?;
             let record = &chain.payload_metadata(&hand_back_job).await?[HAND_BACK_KEY];
             assert_eq!(record["reply"], "", "{record}");
+            assert_eq!(
+                record["missing"], fixtures["stampedRecord"]["missing"],
+                "{record}"
+            );
             assert_eq!(
                 record["findings"],
                 fixtures["stampedRecord"]["findings"]

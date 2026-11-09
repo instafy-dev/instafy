@@ -217,8 +217,10 @@ describe("a request_browser card", () => {
   });
 
   // A message Octo sent straight to the browser: while Studio opens its card
-  // by itself, the turn's one line says so, and no card shows. One Studio
-  // could not open by itself shows as any card does, with its reason.
+  // by itself, and until a turn that carries the message on shows something,
+  // the turn's one line reads "Thinking…", and no card shows. Nothing has
+  // opened a page yet, and that turn may open none. One Studio could not open
+  // by itself shows as any card does, with its reason.
   describe("sent straight to the browser", () => {
     const routed = { task: "Open https://forms.example/order in your browser and fill in a test order.", location: "auto", routed: true };
 
@@ -230,7 +232,7 @@ describe("a request_browser card", () => {
         { ...web, continuedKeys: new Set(["job:job-1"]), routedWaitingKeys: new Set(["job:job-1"]) },
       ]) {
         const card = await render(routed, host);
-        expect(card.line).toBe("Opening Instafy's browser…");
+        expect(card.line).toBe("Thinking…");
         expect(card.card).toBeNull();
         expect(card.button).toBeNull();
       }
@@ -271,7 +273,7 @@ describe("a request_browser card", () => {
     // other card's continuation leaves its own one line in the chat.
     it("keeps the line until the browser turn shows something only for a card the routing step sent", async () => {
       const waiting = { ...web, continuedKeys: new Set(["job:job-1"]), routedWaitingKeys: new Set(["job:job-1"]) };
-      expect((await render(routed, waiting)).line).toBe("Opening Instafy's browser…");
+      expect((await render(routed, waiting)).line).toBe("Thinking…");
       expect((await render({ task: routed.task, location: "auto" }, waiting)).shown).toBe("");
       const opening = await render({ task: routed.task, location: "auto" }, { ...web, cardStates: new Map([["job:job-1", { kind: "opening", note: null } as const]]) });
       expect(opening.line).toBe("Opening Instafy's browser…");

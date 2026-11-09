@@ -75,21 +75,6 @@ function formatFileChangeSummary(files: ChatMessageFileChange[] | null | undefin
   return `Files changed: ${labels.join(", ")}.`;
 }
 
-function contentReferencesFileSummary(content: string, files: ChatMessageFileChange[] | null | undefined): boolean {
-  if (!Array.isArray(files) || files.length === 0) {
-    return false;
-  }
-  const normalizedContent = content.toLowerCase();
-  return files.every((file) => {
-    const candidates = [
-      file.label?.trim(),
-      file.path?.trim(),
-      file.workspacePath?.trim(),
-    ].filter((candidate): candidate is string => Boolean(candidate));
-    return candidates.some((candidate) => normalizedContent.includes(candidate.toLowerCase()));
-  });
-}
-
 function shouldTreatStatusAsSummary(message: ChatMessage): boolean {
   if (normalizeMessageType(message) !== "status") {
     return true;
@@ -120,6 +105,11 @@ function shouldTreatStatusAsSummary(message: ChatMessage): boolean {
   return true;
 }
 
+/**
+ * A turn's row as Copy conversation has it: its reply's words and nothing
+ * after them, never the names of the files it changed. Only a turn with no
+ * words copies what it changed.
+ */
 function resolveThreadSummary(threadMessages: ChatMessage[]): string {
   let latestFileSummary = "";
 
@@ -138,9 +128,6 @@ function resolveThreadSummary(threadMessages: ChatMessage[]): string {
     }
     if (!shouldTreatStatusAsSummary(candidate)) {
       continue;
-    }
-    if (latestFileSummary && !contentReferencesFileSummary(content, candidate.files)) {
-      return `${content}\n\n${latestFileSummary}`;
     }
     return content;
   }

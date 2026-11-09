@@ -16520,8 +16520,8 @@ pub struct BrowserTurnEnd {
 /// to the building turn and that named pages it didn't open reads them first, in a second pass
 /// (`read_the_unread_pages`). A turn that used the browser and wrote no finding lines gets the
 /// runtime's wrap-up pass on its own thread, asked for those lines only and, when its findings go
-/// back to the building turn and no second pass ran, for its unread line too, whose pages the
-/// second pass then reads; with still none, its
+/// back to the building turn and no second pass ran, for its missing and unread lines too, whose
+/// pages the second pass then reads; with still none, its
 /// note holds its reply and the pages its own steps opened, so a later building turn reads which
 /// pages it opened, a hand-back still goes, and a turn whose findings go back to the building
 /// turn posts no words of its own (`browser_hand_back::move_findings_into_details`). One with its
@@ -16572,8 +16572,9 @@ pub async fn end_browser_turn_answer(
         && !canceled
         && browser_hand_back::needs_finding_lines(metadata, summary)
     {
-        // A turn whose findings go back to the building turn is asked for its unread line too,
-        // unless a second pass ran already: a second pass's own unread line starts no third.
+        // A turn whose findings go back to the building turn is asked for its missing and unread
+        // lines too, unless a second pass ran already: a second pass's own unread line starts no
+        // third.
         let asks_for_unread = !second.ran && metadata.is_some_and(browser_hand_back::hands_back);
         let mut lines = None;
         if answer.thread.is_some() {
@@ -16607,7 +16608,7 @@ pub async fn end_browser_turn_answer(
                         );
                     } else {
                         // Its lines, without a refused address no step opened, as above, and
-                        // the unread line it was asked for after them.
+                        // the missing and unread lines it was asked for after them.
                         let mut written = output
                             .final_json
                             .get("summary")
@@ -16620,11 +16621,11 @@ pub async fn end_browser_turn_answer(
                             &opened,
                         );
                         lines = browser_hand_back::finding_lines_of(&written).map(|lines| {
-                            match browser_hand_back::unread_line_of(&written)
-                                .filter(|_| asks_for_unread)
-                            {
-                                Some(unread) => format!("{lines}\n{unread}"),
-                                None => lines,
+                            let closing = browser_hand_back::closing_lines_of(&written);
+                            if asks_for_unread && !closing.is_empty() {
+                                format!("{lines}\n{}", closing.join("\n"))
+                            } else {
+                                lines
                             }
                         });
                     }

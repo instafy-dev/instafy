@@ -110,15 +110,46 @@ for (const layout of [
     const scroller = panel.locator("[data-studio-popover-content]");
     await expect(panel).toBeVisible();
     const link = page.getByRole("textbox", { name: "Shared Browser resume link", exact: true });
-    await expect(link).not.toBeVisible();
+    const copy = page.getByRole("button", { name: "Copy resume link", exact: true });
+    const copied = () => page.evaluate(() => (window as Window & { __copiedResumeLink?: string }).__copiedResumeLink ?? "");
+    await expect(copy).not.toBeVisible();
     await page.getByText("Advanced", { exact: true }).tap();
-    await expect(link).toBeVisible();
-    const value = await link.inputValue();
+    // Advanced offers the link to copy, and shows no address.
+    await expect(copy).toBeVisible();
+    await expect(link).toHaveCount(0);
+    await copy.tap();
+    await expect(panel.getByRole("status").filter({ hasText: "Resume link copied." })).toBeVisible();
+    const value = await copied();
     const locator = new URL(value);
     expect(locator.pathname).toBe("/studio");
     expect([...locator.searchParams.keys()].sort()).toEqual(["browserRuntimeId", "panel", "projectId"]);
     expect(locator.searchParams.get("projectId")).toBe(PROJECT_ID);
     expect(locator.searchParams.get("browserRuntimeId")).toBe(RUNTIME_IDS[0]);
+    await expect(link).toHaveCount(0);
+
+    // Copying failed: the link shows under the words that say so, chosen, to copy by hand.
+    await page.evaluate(() => {
+      const clipboard = navigator.clipboard as { writeText: (value: string) => Promise<void> };
+      const writeText = clipboard.writeText;
+      const execCommand = document.execCommand.bind(document);
+      clipboard.writeText = async () => { throw new Error("Clipboard refused in the rendering fixture"); };
+      document.execCommand = () => false;
+      (window as Window & { __restoreClipboard?: () => void }).__restoreClipboard = () => {
+        clipboard.writeText = writeText;
+        document.execCommand = execCommand;
+      };
+    });
+    await copy.tap();
+    await expect(panel.getByRole("status").filter({ hasText: "Could not copy. Select and copy the link below." })).toBeVisible();
+    await expect(link).toBeVisible();
+    await expect(link).toHaveValue(value);
+    await expect(link).toBeFocused();
+    expect(await link.evaluate((element) => {
+      const input = element as HTMLInputElement;
+      return { start: input.selectionStart, end: input.selectionEnd, length: input.value.length };
+    }))
+      .toEqual({ start: 0, end: value.length, length: value.length });
+    await page.evaluate(() => (window as Window & { __restoreClipboard?: () => void }).__restoreClipboard?.());
 
     // Check the emulated input capability again after the modal transition;
     // a lost coarse-pointer emulation must not look like a product sizing bug.
@@ -128,20 +159,11 @@ for (const layout of [
       return { name: control.getAttribute("aria-label") ?? control.textContent, width: rect.width, height: rect.height,
         minHeight: getComputedStyle(control).minHeight };
     }));
+    expect(controlSizes.some((control) => control.name === "Shared Browser resume link")).toBe(true);
     for (const control of controlSizes) {
       expect(control.height, `${control.name} touch target height (computed min-height ${control.minHeight})`).toBeGreaterThanOrEqual(44);
       expect(control.width, `${control.name} touch target width`).toBeGreaterThanOrEqual(44);
     }
-    await link.tap();
-    await expect(link).toBeFocused();
-    expect(await link.evaluate((element) => {
-      const input = element as HTMLInputElement;
-      return { start: input.selectionStart, end: input.selectionEnd, length: input.value.length };
-    }))
-      .toEqual({ start: 0, end: value.length, length: value.length });
-    await page.getByRole("button", { name: "Copy resume link", exact: true }).tap();
-    await expect(panel.getByRole("status").filter({ hasText: "Resume link copied." })).toBeVisible();
-    expect(await page.evaluate(() => (window as Window & { __copiedResumeLink?: string }).__copiedResumeLink)).toBe(value);
 
     const assertContained = async () => {
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(layout.width);
@@ -172,17 +194,33 @@ for (const layout of [
     await page.screenshot({ path: bottomScreenshot, animations: "disabled" });
     await testInfo.attach("Production saved-browser status reached by scrolling", { path: bottomScreenshot, contentType: "image/png" });
 
+    // Closed and opened again, the menu starts as any other: Advanced
+    // collapsed, and no address or focus left from the failed copy.
+    await page.keyboard.press("Escape");
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await toggle.tap();
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await expect(copy).not.toBeVisible();
+    await expect(link).toHaveCount(0);
+    await expect(panel.getByRole("status").filter({ hasText: "Could not copy." })).toHaveCount(0);
+    await page.getByText("Advanced", { exact: true }).tap();
+    await expect(copy).toBeVisible();
+    await expect(link).toHaveCount(0);
+
     const lastRuntime = RUNTIME_IDS.at(-1)!;
     await page.getByRole("button", { name: /^Session 10(?!\d)/ }).tap();
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await toggle.tap();
     // A fresh menu keeps Advanced collapsed, including after changing sessions.
-    await expect(link).not.toBeVisible();
+    await expect(copy).not.toBeVisible();
     await page.getByText("Advanced", { exact: true }).tap();
-    await expect(link).toHaveValue(new RegExp(lastRuntime));
+    await expect(link).toHaveCount(0);
+    await copy.tap();
+    expect(await copied()).toMatch(new RegExp(lastRuntime));
     await expect(profile).toContainText("Not confirmed as a save from this session.");
     await page.getByRole("button", { name: "Refresh sessions", exact: true }).tap();
-    await expect(link).toHaveValue(new RegExp(lastRuntime));
+    await copy.tap();
+    expect(await copied()).toMatch(new RegExp(lastRuntime));
     await assertContained();
     expect(errors).toEqual([]);
   });
