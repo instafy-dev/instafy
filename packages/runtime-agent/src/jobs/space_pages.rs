@@ -8,13 +8,34 @@
 //! made it or another one did: a fact in place of that judgement.
 //!
 //! The fact is the space's record of its pages, [`PAGES_RECORD`] in the space's own folder:
-//! `instafy preview open` writes each page there with the chat its card went to, the first time
-//! that folder's card is opened, and keeps that chat when another one opens the same folder again.
-//! It is kept with the space's files, under `.instafy/` (never saved, published, listed or copied
-//! into a scoped worker's copy), so it outlasts the machine: a stopped space's next machine starts
-//! with a new home folder, where the CLI's own record of the previews it opened is gone. It is read
-//! from the record, not from the chat's history, so a long chat whose own page has left its
-//! history still sees that page as its own.
+//! `instafy preview open` writes each page there with the chat that made it, the first time that
+//! folder's card is opened, and keeps that chat when another one opens the same folder again. It
+//! is read from the record, not from the chat's history, so a long chat whose own page has left
+//! its history still sees that page as its own.
+//!
+//! The record is kept with the space's files, under `.instafy/` (never saved, published, listed
+//! or copied into a scoped worker's copy), so a stopped space's next machine finds it where the
+//! folder itself is kept, though the CLI's own record of its previews, in the home folder, is
+//! gone. It does not outlast the folder: no save holds it, so a hosted space starts without it
+//! after every release (the node that held the folder is replaced) and whenever an idle checkout
+//! is cloned again. The first chat to open a page's card then became its maker, a check that
+//! passes in any chat posts that card, and the chat that really made the page had its edits put
+//! back under a line that said another chat had made it. So:
+//!
+//! - The controller keeps which chat made each page, written when the page's card is posted, and
+//!   gives a leased turn the space's pages (`space_pages` in the job's payload). They are taken
+//!   over the record here before the turn reads it ([`take_the_controllers_pages`]): the record
+//!   in the folder is this machine's copy, and the controller's is the one that decides.
+//! - A page reads with no chat when its chat is gone for the person the turn runs for (it no
+//!   longer exists, they moved it to Trash, or it is a thread nobody asks in): the controller
+//!   leaves that chat out, so such a page is not read-only in every chat for good.
+//! - An open gives a folder the record does not hold to its own chat only when the turn that
+//!   opens it made the folder: as a turn that may write files begins, the folders that are in
+//!   the workspace are written down ([`write_down_the_turns_folders`]), and the CLI reads a
+//!   folder among them as there before the turn, whose open claims it for no chat.
+//!
+//! A controller from before it kept the record sends no pages, and the record here stands as it
+//! is, with the last rule alone.
 //!
 //! A page another chat made is read-only here, and the runtime holds it to that ([`HeldPages`]).
 //! Told so in words, a new chat's turn still deleted another chat's comparison data and typed it
@@ -23,7 +44,9 @@
 //! it was when the turn began once the turn's model is done, a file the turn returns there is never
 //! written, and the reply says which page it didn't change. The person changes that page in the
 //! chat that made it, as an artifact belongs to its conversation in other chat apps. An
-//! automation's run has no chat to ask in: nothing holds a page for it.
+//! automation's run has no chat to ask in: nothing holds a page for it. Holding can be switched
+//! off on a runtime ([`HOLD_PAGES_ENV`]): a turn is then told the same, and nothing is put back
+//! or kept from being written.
 //!
 //! A page whose chat is not recorded is a page from before the record: a wake that starts its site
 //! again ([`record_woken_page`]) writes it down with no chat, so no later open claims it. Nothing
@@ -58,6 +81,36 @@ const MAX_PAGES: usize = 12;
 const MAX_RECORDED: usize = 100;
 /// The longest title the CLI records (its `MAX_TITLE_LENGTH`).
 const MAX_TITLE_CHARS: usize = 120;
+/// The job payload's key for the space's pages as the controller holds them (its
+/// `previews/pages.rs`): `{"pages": [{"folder", "title", "server", "openedAt", "conversationId"?}]}`.
+const CONTROLLERS_PAGES_KEY: &str = "space_pages";
+/// The folders that were in the workspace as the turn began, next to the record: the CLI reads a
+/// page folder among them as there before the turn (its `space-pages.ts`).
+const TURN_FOLDERS_FILE: &str = "turn-folders.json";
+/// How many names deep the turn's folders are written down (`sites/porto`), and how many at most:
+/// past that the list says it is not whole, and the CLI reads every folder as there before.
+const TURN_FOLDERS_DEPTH: usize = 2;
+const MAX_TURN_FOLDERS: usize = 5000;
+/// The most names read in one folder while looking for the folders in it: a folder of many files
+/// is still read whole.
+const MAX_NAMES_IN_A_FOLDER: usize = 50_000;
+/// The runtime's switch for holding another chat's page: on unless this is `0`, `false`, `off` or
+/// `no`. Off, [`HeldPages`] holds nothing: no change is put back and no returned file is left
+/// unwritten, so a problem with holding needs no rollback. A turn is still told which chat made
+/// each page and that another chat's page is read-only.
+pub(crate) const HOLD_PAGES_ENV: &str = "INSTAFY_HOLD_PAGES";
+
+/// Whether this runtime holds another chat's pages ([`HOLD_PAGES_ENV`]).
+pub(crate) fn holding_is_on() -> bool {
+    holding_reads_on(std::env::var(HOLD_PAGES_ENV).ok().as_deref())
+}
+
+fn holding_reads_on(raw: Option<&str>) -> bool {
+    !matches!(
+        raw.map(|raw| raw.trim().to_ascii_lowercase()).as_deref(),
+        Some("0" | "false" | "off" | "no")
+    )
+}
 
 /// The lines a turn of `conversation_id` that may write files reads after the rule on whose page it
 /// changes: the space's pages made for the person, from the record in `workspace_dir`, each still a
@@ -165,6 +218,219 @@ pub(crate) fn record_woken_page(
     let text = serde_json::to_string_pretty(&json!({ "version": 1, "pages": pages }))?;
     dir.replace_file("pages.json", &mut text.as_bytes(), false)?;
     Ok(())
+}
+
+/// Takes the space's pages as the controller holds them (a leased job's `payload`) over the
+/// record in `workspace_dir`, before the turn reads it:
+///
+/// - A page the record holds gets the chat the controller holds for its folder, or none when the
+///   controller holds none for it: a chat that is gone for the person the turn runs for, a page
+///   nobody's, or a folder the controller never wrote down (an entry from before it kept the
+///   record, which nothing vouches for).
+/// - A page the record lacks, whose folder is in the workspace, is written down as the controller
+///   holds it: on a machine that began without the record, each page is its maker's again.
+///
+/// Nothing is taken from a payload with no such pages (a controller from before it kept the
+/// record). The record is written only when it is still the one read.
+pub(crate) fn take_the_controllers_pages(workspace_dir: &Path, payload: &JsonValue) {
+    let Some(theirs) = payload
+        .get(CONTROLLERS_PAGES_KEY)
+        .and_then(|pages| pages.get("pages"))
+        .and_then(JsonValue::as_array)
+    else {
+        return;
+    };
+    let chat_of = |page: &JsonValue| {
+        page.get("conversationId")
+            .and_then(JsonValue::as_str)
+            .and_then(|chat| Uuid::parse_str(chat.trim()).ok())
+    };
+    let mut held: HashMap<String, &JsonValue> = HashMap::new();
+    for page in theirs {
+        if let Some(folder) = entry_folder(page) {
+            held.entry(folder).or_insert(page);
+        }
+    }
+    let record = read_record(workspace_dir);
+    let ours = record
+        .as_ref()
+        .and_then(|record| record.get("pages"))
+        .and_then(JsonValue::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut next = Vec::with_capacity(ours.len());
+    let mut written: HashSet<String> = HashSet::new();
+    for mut entry in ours.iter().cloned() {
+        if let Some(folder) = entry_folder(&entry) {
+            written.insert(folder.clone());
+            if let Some(entry) = entry.as_object_mut() {
+                match held.get(&folder).and_then(|page| chat_of(page)) {
+                    Some(chat) => {
+                        entry.insert("conversationId".to_string(), json!(chat.to_string()));
+                    }
+                    None => {
+                        entry.remove("conversationId");
+                    }
+                }
+            }
+        }
+        next.push(entry);
+    }
+    for page in theirs {
+        let Some(folder) = entry_folder(page) else {
+            continue;
+        };
+        if written.contains(&folder) || !workspace_dir.join(&folder).is_dir() {
+            continue;
+        }
+        let server: Vec<&str> = page
+            .get("server")
+            .and_then(JsonValue::as_array)
+            .map(|words| words.iter().filter_map(JsonValue::as_str).take(2).collect())
+            .unwrap_or_default();
+        let mut entry = json!({
+            "folder": folder,
+            "title": plain_title(page.get("title").and_then(JsonValue::as_str).unwrap_or_default()),
+            "server": server,
+            "openedAt": page.get("openedAt").and_then(JsonValue::as_str).unwrap_or_default(),
+        });
+        if let Some(chat) = chat_of(page) {
+            entry["conversationId"] = json!(chat.to_string());
+        }
+        written.insert(folder);
+        next.push(entry);
+    }
+    next.truncate(MAX_RECORDED);
+    if next == ours {
+        return;
+    }
+    let Ok(text) = serde_json::to_string_pretty(&json!({ "version": 1, "pages": next })) else {
+        return;
+    };
+    let written = (|| -> std::io::Result<()> {
+        let dir = WorkspaceDir::open(workspace_dir)?.create_dir_all(PAGES_RECORD_DIR)?;
+        if dir.entry_kind(".gitignore").is_err() {
+            dir.replace_file(".gitignore", &mut &PAGES_RECORD_IGNORE[..], false)?;
+        }
+        if read_record(workspace_dir) == record {
+            dir.replace_file("pages.json", &mut text.as_bytes(), false)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = written {
+        warn!(%error, "could not take the controller's pages over the space's record");
+    }
+}
+
+/// Writes down the folders that are in `workspace_dir` as the turn of `job_id` begins
+/// ([`TURN_FOLDERS_FILE`]), at most [`TURN_FOLDERS_DEPTH`] names deep, leaving out hidden ones
+/// and `node_modules`: `{"version": 1, "job", "folders", "complete"}`. The CLI gives a page whose
+/// folder the record does not hold to the chat that opens it only when the folder is not among
+/// them, so only a page this turn made.
+///
+/// A turn that takes up an earlier attempt's work keeps that attempt's list, so a page the
+/// earlier attempt made and this one opens is still this turn's: the same job leased again after
+/// a stop, or the job this one carries on (`continues`).
+pub(crate) fn write_down_the_turns_folders(
+    workspace_dir: &Path,
+    job_id: &Uuid,
+    continues: Option<&Uuid>,
+) {
+    let written = (|| -> std::io::Result<()> {
+        let workspace = WorkspaceDir::open(workspace_dir)?;
+        let dir = workspace.create_dir_all(PAGES_RECORD_DIR)?;
+        if dir.entry_kind(".gitignore").is_err() {
+            dir.replace_file(".gitignore", &mut &PAGES_RECORD_IGNORE[..], false)?;
+        }
+        let earlier = dir.open_file(TURN_FOLDERS_FILE).ok().and_then(|mut file| {
+            let mut text = String::new();
+            file.read_to_string(&mut text).ok()?;
+            serde_json::from_str::<JsonValue>(&text).ok()
+        });
+        let earlier_job = earlier
+            .as_ref()
+            .and_then(|list| list.get("job"))
+            .and_then(JsonValue::as_str)
+            .and_then(|job| Uuid::parse_str(job).ok());
+        if earlier_job.as_ref() == Some(job_id) {
+            return Ok(());
+        }
+        let list = match earlier {
+            Some(mut list) if earlier_job.is_some() && earlier_job.as_ref() == continues => {
+                list["job"] = json!(job_id.to_string());
+                list
+            }
+            _ => {
+                let (folders, complete) = folders_in(&workspace);
+                json!({
+                    "version": 1,
+                    "job": job_id.to_string(),
+                    "folders": folders,
+                    "complete": complete,
+                })
+            }
+        };
+        let text = serde_json::to_string(&list)?;
+        dir.replace_file(TURN_FOLDERS_FILE, &mut text.as_bytes(), false)?;
+        Ok(())
+    })();
+    if let Err(error) = written {
+        warn!(%error, "could not write down the folders the turn began with");
+    }
+}
+
+/// The real folders in `workspace`, at most [`TURN_FOLDERS_DEPTH`] names deep, sorted, and whether
+/// that is all of them: a folder that could not be listed, or more than [`MAX_TURN_FOLDERS`], and
+/// the list is not whole. A link is no folder, and is never followed.
+fn folders_in(workspace: &WorkspaceDir) -> (Vec<String>, bool) {
+    let mut folders = BTreeSet::new();
+    let mut complete = true;
+    let mut level = vec![String::new()];
+    for _ in 0..TURN_FOLDERS_DEPTH {
+        let mut below = Vec::new();
+        for parent in &level {
+            let dir = if parent.is_empty() {
+                Ok(workspace.clone())
+            } else {
+                workspace.open_dir(parent)
+            };
+            let Ok(names) = dir.and_then(|dir| {
+                let names = dir.list_names(MAX_NAMES_IN_A_FOLDER)?;
+                Ok((dir, names))
+            }) else {
+                complete = false;
+                continue;
+            };
+            let (dir, names) = names;
+            for name in names {
+                let Some(name) = name.to_str() else {
+                    complete = false;
+                    continue;
+                };
+                if name.starts_with('.') || name == "node_modules" {
+                    continue;
+                }
+                if !matches!(
+                    dir.entry_kind(name),
+                    Ok(origin_http_server::workspace_fs::WorkspaceEntryKind::Directory)
+                ) {
+                    continue;
+                }
+                if folders.len() >= MAX_TURN_FOLDERS {
+                    return (folders.into_iter().collect(), false);
+                }
+                let folder = if parent.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{parent}/{name}")
+                };
+                folders.insert(folder.clone());
+                below.push(folder);
+            }
+        }
+        level = below;
+    }
+    (folders.into_iter().collect(), complete)
 }
 
 /// The record in `workspace_dir`, read without following a link.
@@ -513,6 +779,27 @@ impl HeldPages {
         page_commands: &[String],
         start: Option<&HashMap<String, GitStatusEntry>>,
     ) -> Self {
+        Self::of_turn_when(
+            holding_is_on(),
+            workspace_dir,
+            conversation_id,
+            page_commands,
+            start,
+        )
+    }
+
+    /// [`Self::of_turn`] on a runtime that holds pages (`holding`), and nothing held on one that
+    /// has holding switched off ([`HOLD_PAGES_ENV`]).
+    fn of_turn_when(
+        holding: bool,
+        workspace_dir: &Path,
+        conversation_id: Option<&Uuid>,
+        page_commands: &[String],
+        start: Option<&HashMap<String, GitStatusEntry>>,
+    ) -> Self {
+        if !holding {
+            return Self::default();
+        }
         let pages = read_record(workspace_dir)
             .map(|record| {
                 recorded_pages(&record, page_commands, |folder| {
@@ -1171,6 +1458,290 @@ mod tests {
             space_pages_lines(fresh.path(), Some(&maker), &[]),
             "- The space's pages:\n  - \"Porto\", in `sites/porto/`: which chat made it isn't known.\n"
         );
+    }
+
+    /// A leased job's payload with the space's pages as the controller holds them.
+    fn leased_with(pages: Vec<JsonValue>) -> JsonValue {
+        json!({ "prompt_text": "hi", "space_pages": { "pages": pages } })
+    }
+
+    fn record_folders(workspace: &Path) -> Vec<(String, Option<String>)> {
+        read_record(workspace).unwrap()["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|page| {
+                (
+                    page["folder"].as_str().unwrap().to_string(),
+                    page["conversationId"].as_str().map(str::to_string),
+                )
+            })
+            .collect()
+    }
+
+    /// A release replaced the machine and the workspace was cloned again: the record in the
+    /// folder is gone. The controller's pages are taken over it before the turn reads it, so the
+    /// page another chat made is still that chat's, read-only to this chat's turn and held, and
+    /// its own chat still changes it. A page the controller holds for no chat is nobody's, and one
+    /// whose folder is not in the workspace is not written down.
+    #[test]
+    fn a_lost_record_is_filled_in_from_the_controllers_pages() {
+        let (maker, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path();
+        for folder in ["sites/framework-laptops", "sites/porto"] {
+            std::fs::create_dir_all(ws.join(folder)).unwrap();
+        }
+        let leased = leased_with(vec![
+            page("sites/porto", "Porto", None, &PAGE_SERVER),
+            page(
+                "sites/framework-laptops",
+                "Framework laptops",
+                Some(&maker),
+                &["instafy", "bind", "serve"],
+            ),
+            page("sites/gone", "Gone", Some(&maker), &PAGE_SERVER),
+            page("../outside", "Outside", Some(&maker), &PAGE_SERVER),
+        ]);
+        assert_eq!(space_pages_lines(ws, Some(&other), &[]), "");
+        take_the_controllers_pages(ws, &leased);
+        assert_eq!(
+            record_folders(ws),
+            [
+                ("sites/porto".to_string(), None),
+                (
+                    "sites/framework-laptops".to_string(),
+                    Some(maker.to_string())
+                ),
+            ]
+        );
+        assert_eq!(
+            space_pages_lines(ws, Some(&other), &[]),
+            "- The space's pages:\n\
+             \x20 - \"Porto\", in `sites/porto/`: which chat made it isn't known.\n\
+             \x20 - \"Framework laptops\", in `sites/framework-laptops/`: made in another chat, read-only here.\n"
+        );
+        assert!(
+            HeldPages::of_turn_when(true, ws, Some(&other), &[], None)
+                .holds("sites/framework-laptops/data.json")
+        );
+        assert!(
+            !HeldPages::of_turn_when(true, ws, Some(&maker), &[], None)
+                .holds("sites/framework-laptops/data.json")
+        );
+        assert_eq!(
+            std::fs::read(ws.join(PAGES_RECORD_DIR).join(".gitignore")).unwrap(),
+            PAGES_RECORD_IGNORE
+        );
+        // taken again, nothing changes
+        let before = std::fs::read(ws.join(PAGES_RECORD)).unwrap();
+        take_the_controllers_pages(ws, &leased);
+        assert_eq!(std::fs::read(ws.join(PAGES_RECORD)).unwrap(), before);
+    }
+
+    /// The record names a chat that is gone for the person the turn runs for: it no longer
+    /// exists, they moved it to Trash, or nobody asks in it. The controller leaves that chat out
+    /// of the page it gives the turn, so the page reads with no chat and nothing holds it: it is
+    /// not read-only in every chat for good. So does a page the controller holds no row for. The
+    /// controller's chat for a page replaces the record's, and a controller that sends no pages
+    /// leaves the record as it is.
+    #[test]
+    fn a_page_whose_chat_is_gone_reads_as_made_in_no_chat() {
+        let (gone, kept, this) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path();
+        for folder in [
+            "sites/trashed",
+            "sites/kept",
+            "sites/unlisted",
+            "sites/moved",
+        ] {
+            std::fs::create_dir_all(ws.join(folder)).unwrap();
+        }
+        let recorded = vec![
+            page("sites/trashed", "Trashed", Some(&gone), &PAGE_SERVER),
+            page("sites/kept", "Kept", Some(&kept), &PAGE_SERVER),
+            page("sites/unlisted", "Unlisted", Some(&gone), &PAGE_SERVER),
+            page("sites/moved", "Moved", Some(&gone), &PAGE_SERVER),
+        ];
+        write_record(ws, recorded.clone());
+        let held = |ws: &Path| HeldPages::of_turn_when(true, ws, Some(&this), &[], None);
+        assert!(held(ws).holds("sites/trashed/data.json"));
+
+        // a controller from before it kept the record: nothing is taken
+        take_the_controllers_pages(ws, &json!({ "prompt_text": "hi" }));
+        take_the_controllers_pages(ws, &json!({ "space_pages": null }));
+        assert_eq!(read_record(ws).unwrap()["pages"], json!(recorded));
+
+        take_the_controllers_pages(
+            ws,
+            &leased_with(vec![
+                page("sites/trashed", "Trashed", None, &PAGE_SERVER),
+                page("sites/kept", "Kept", Some(&kept), &PAGE_SERVER),
+                page("sites/moved", "Moved", Some(&this), &PAGE_SERVER),
+            ]),
+        );
+        assert_eq!(
+            record_folders(ws),
+            [
+                ("sites/trashed".to_string(), None),
+                ("sites/kept".to_string(), Some(kept.to_string())),
+                ("sites/unlisted".to_string(), None),
+                ("sites/moved".to_string(), Some(this.to_string())),
+            ]
+        );
+        let lines = space_pages_lines(ws, Some(&this), &[]);
+        assert_eq!(
+            lines,
+            "- The space's pages:\n\
+             \x20 - \"Trashed\", in `sites/trashed/`: which chat made it isn't known.\n\
+             \x20 - \"Kept\", in `sites/kept/`: made in another chat, read-only here.\n\
+             \x20 - \"Unlisted\", in `sites/unlisted/`: which chat made it isn't known.\n\
+             \x20 - \"Moved\", in `sites/moved/`: made in this chat.\n"
+        );
+        let held = held(ws);
+        assert!(!held.holds("sites/trashed/data.json"));
+        assert!(!held.holds("sites/unlisted/data.json"));
+        assert!(!held.holds("sites/moved/data.json"));
+        assert!(held.holds("sites/kept/data.json"));
+    }
+
+    /// As a turn that may write files begins, the folders that are in the workspace are written
+    /// down, two names deep: real folders only, no hidden one and no `node_modules`. The CLI
+    /// gives a page to the chat that opens it only when its folder is not among them. A turn that
+    /// takes up an earlier attempt keeps that attempt's list: the same job leased again, or the
+    /// job it carries on.
+    #[test]
+    fn the_folders_a_turn_began_with_are_written_down() {
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path();
+        for folder in [
+            "sites/porto/data",
+            "trip",
+            ".hidden/inside",
+            "node_modules/pkg",
+            "sites/.bind",
+        ] {
+            std::fs::create_dir_all(ws.join(folder)).unwrap();
+        }
+        std::fs::write(ws.join("notes.md"), "notes\n").unwrap();
+        std::os::unix::fs::symlink(ws.join("trip"), ws.join("sites/link")).unwrap();
+        let list = |ws: &Path| -> JsonValue {
+            serde_json::from_str(
+                &std::fs::read_to_string(ws.join(PAGES_RECORD_DIR).join(TURN_FOLDERS_FILE))
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let (first, carried_on, later) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        write_down_the_turns_folders(ws, &first, None);
+        assert_eq!(
+            list(ws),
+            json!({
+                "version": 1,
+                "job": first.to_string(),
+                "folders": ["sites", "sites/porto", "trip"],
+                "complete": true,
+            })
+        );
+        assert_eq!(
+            std::fs::read(ws.join(PAGES_RECORD_DIR).join(".gitignore")).unwrap(),
+            PAGES_RECORD_IGNORE
+        );
+        // the turn makes a page; leased again after a stop, its list is the one it began with
+        std::fs::create_dir_all(ws.join("sites/framework-laptops")).unwrap();
+        write_down_the_turns_folders(ws, &first, None);
+        assert_eq!(list(ws)["folders"], json!(["sites", "sites/porto", "trip"]));
+        // so is the list of a job that carries that one on, under its own name
+        write_down_the_turns_folders(ws, &carried_on, Some(&first));
+        assert_eq!(
+            list(ws),
+            json!({
+                "version": 1,
+                "job": carried_on.to_string(),
+                "folders": ["sites", "sites/porto", "trip"],
+                "complete": true,
+            })
+        );
+        // another turn begins with the page there
+        write_down_the_turns_folders(ws, &later, Some(&first));
+        assert_eq!(
+            list(ws),
+            json!({
+                "version": 1,
+                "job": later.to_string(),
+                "folders": ["sites", "sites/framework-laptops", "sites/porto", "trip"],
+                "complete": true,
+            })
+        );
+    }
+
+    /// Holding is on unless the runtime's setting switches it off. Off, a turn holds nothing: a
+    /// change to another chat's page stays, a file returned for it is written, and the reply is
+    /// the model's. The turn is still told which chat made each page.
+    #[tokio::test]
+    async fn with_holding_switched_off_nothing_is_held_or_put_back() {
+        for on in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("true"),
+            Some("on"),
+            Some("anything"),
+        ] {
+            assert!(holding_reads_on(on), "{on:?}");
+        }
+        for off in ["0", "false", "off", "no", " OFF ", "False"] {
+            assert!(!holding_reads_on(Some(off)), "{off}");
+        }
+        let (this, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let workspace = space_with_two_pages(&this, &other);
+        let ws = workspace.path();
+        let start = super::super::collect_git_status_porcelain(ws)
+            .await
+            .unwrap();
+        let their_data = ws.join("sites/framework-laptops/data.json");
+
+        let mut off = HeldPages::of_turn_when(false, ws, Some(&this), &[], Some(&start));
+        assert!(!off.holds("sites/framework-laptops/data.json"));
+        std::fs::write(&their_data, "{\"items\":[]}\n").unwrap();
+        off.put_back(
+            ws,
+            Some(&start),
+            TurnSteps::of_events(ws, &[edit_step("sites/framework-laptops/data.json")]),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(&their_data).unwrap(),
+            "{\"items\":[]}\n"
+        );
+        let mut files = vec![returned_file(
+            "sites/framework-laptops/data.json",
+            Some("{}\n"),
+        )];
+        off.leave_out_returned(ws, &mut files);
+        off.leave_out_held(&mut files);
+        assert_eq!(files.len(), 1);
+        assert!(!off.put_a_change_back());
+        assert_eq!(off.reply_line(), None);
+        assert_eq!(off.artifact(), None);
+        let mut reply = "I emptied the comparison.".to_string();
+        off.reply(&mut reply, &files);
+        assert_eq!(reply, "I emptied the comparison.");
+        assert!(space_pages_lines(ws, Some(&this), &[]).contains(
+            "\"Framework Laptop 12, 13 and 16\", in `sites/framework-laptops/`: made in another chat, read-only here."
+        ));
+
+        // switched on, the same change goes back
+        let mut on = HeldPages::of_turn_when(true, ws, Some(&this), &[], Some(&start));
+        on.put_back(
+            ws,
+            Some(&start),
+            TurnSteps::of_events(ws, &[edit_step("sites/framework-laptops/data.json")]),
+        )
+        .await;
+        assert_eq!(std::fs::read_to_string(&their_data).unwrap(), THEIRS);
+        assert_eq!(on.reply_line().as_deref(), Some(NOT_CHANGED));
     }
 
     fn returned_file(path: &str, content: Option<&str>) -> CodexFileDescriptor {

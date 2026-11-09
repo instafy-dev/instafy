@@ -59,6 +59,9 @@ use crate::{
 mod follow;
 #[cfg(test)]
 mod follow_tests;
+mod pages;
+#[cfg(test)]
+mod pages_tests;
 mod serve;
 mod sessions;
 #[cfg(test)]
@@ -71,6 +74,7 @@ mod thumbnail_tests;
 mod wake;
 
 pub(crate) use follow::{FollowBusMessage, FollowEnvelope, FollowHub};
+pub(crate) use pages::{add_space_pages, LeasedPages};
 use serve::PreviewServe;
 use sessions::PreviewOrigin;
 pub(crate) use sessions::{
@@ -277,6 +281,11 @@ struct CreatePreviewBody {
     /// open is refused (`409 port_in_use`): see [`ensure_port_shows_this_site`].
     #[serde(default)]
     replace: bool,
+    /// What the opener says of the folder the site is served from: `new` when its turn made the
+    /// folder, `existing` when the folder was there before that turn began. Only a `new` folder's
+    /// page is given to the chat its card goes to (see `pages`). An older CLI says neither.
+    #[serde(default, alias = "page_folder")]
+    page_folder: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -304,6 +313,11 @@ struct CreatePreviewResponse {
 struct PreviewReadyResponse {
     message_id: Uuid,
     health: Option<TunnelProbe>,
+    /// The page this card shows, as the space's record of its pages holds it: its folder and the
+    /// chat that made it, when the record says. Absent for a preview that records no folder (the
+    /// person's own site, or no start command) and when the record could not be written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page: Option<pages::OpenedPage>,
 }
 
 #[derive(Debug, Serialize)]
@@ -933,6 +947,7 @@ async fn post_preview(
         .map(PreviewServe::from_json)
         .transpose()
         .map_err(bad_request)?;
+    let page_folder = pages::PageFolder::parse(body.page_folder.as_deref()).map_err(bad_request)?;
     let requested_runtime_id = optional_uuid(body.runtime_id.as_ref(), "runtimeId")?;
     let requested_lease_id = optional_uuid(body.runtime_lease_id.as_ref(), "runtimeLeaseId")?;
     let conversation_id = optional_uuid(body.conversation_id.as_ref(), "conversationId")?;
@@ -1047,6 +1062,14 @@ async fn post_preview(
     let restartable = serve.is_some();
     if let Some(serve) = serve {
         preview.insert("serve".to_string(), serve.to_json());
+        // What the opener said of that folder, for the card's row in the space's record of its
+        // pages. Controller-owned too: the card is posted by another call.
+        if let Some(page_folder) = page_folder {
+            preview.insert(
+                pages::PAGE_FOLDER_KEY.to_string(),
+                json!(page_folder.as_str()),
+            );
+        }
     }
     let mut metadata = JsonMap::new();
     metadata.insert("localPort".to_string(), json!(port));
@@ -1300,12 +1323,12 @@ async fn post_preview_ready(
         .get()
         .await
         .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
-    let transaction = connection
+    let mut transaction = connection
         .transaction()
         .await
         .map_err(|error| internal_error(format!("failed to start preview card: {error}")))?;
 
-    let target = match &caller {
+    let (target, conversation) = match &caller {
         PreviewCaller::Job { context, .. } => {
             let active_job = authorize_active_job_if_scoped(
                 &transaction,
@@ -1340,7 +1363,7 @@ async fn post_preview_ready(
                     .and_then(JsonValue::as_str)
                     .and_then(|value| Uuid::parse_str(value.trim()).ok())
             };
-            PreviewCardTarget {
+            let target = PreviewCardTarget {
                 conversation_id: active_job.conversation_id,
                 session_id: row
                     .get::<_, Option<Uuid>>("session_id")
@@ -1350,7 +1373,8 @@ async fn post_preview_ready(
                     .or_else(|| payload_uuid("prompt_id")),
                 run_id: row.get("run_id"),
                 job_id: Some(active_job.job_id),
-            }
+            };
+            (target, conversation)
         }
         PreviewCaller::Machine { .. } | PreviewCaller::Human(_) => {
             let conversation_id = grant
@@ -1365,15 +1389,22 @@ async fn post_preview_ready(
                 caller.conversation_context().as_ref(),
             )
             .await?;
-            PreviewCardTarget {
+            let target = PreviewCardTarget {
                 conversation_id,
                 session_id: conversation.session_id,
                 prompt_id: None,
                 run_id: None,
                 job_id: None,
-            }
+            };
+            (target, conversation)
         }
     };
+    // The page this card shows, for the space's record of its pages: the folder its site is
+    // served from, and what the opener said of that folder.
+    let page_serve = grant.serve();
+    let page_folder = pages::PageFolder::parse(grant.preview_str(pages::PAGE_FOLDER_KEY))
+        .ok()
+        .flatten();
 
     // One card per (preview, run): the row lock serializes concurrent calls.
     let locked = transaction
@@ -1396,11 +1427,16 @@ async fn post_preview_ready(
         .and_then(JsonValue::as_str)
         .and_then(|value| Uuid::parse_str(value).ok());
     if let Some(message_id) = existing {
+        let page = pages::opened_page(&mut transaction, &project_id, page_serve.as_ref()).await;
         transaction
             .commit()
             .await
             .map_err(|error| internal_error(format!("failed to finish preview card: {error}")))?;
-        return Ok(Json(PreviewReadyResponse { message_id, health }));
+        return Ok(Json(PreviewReadyResponse {
+            message_id,
+            health,
+            page,
+        }));
     }
 
     let title = grant.title();
@@ -1446,6 +1482,16 @@ async fn post_preview_ready(
         )
         .await
         .map_err(|error| internal_error(format!("failed to record preview card: {error}")))?;
+    // The chat this card went to made the page, unless the record holds the folder already.
+    let page = pages::record_opened_page(
+        &mut transaction,
+        &project_id,
+        page_serve.as_ref(),
+        &title,
+        &conversation,
+        page_folder,
+    )
+    .await;
     transaction
         .commit()
         .await
@@ -1455,6 +1501,7 @@ async fn post_preview_ready(
     Ok(Json(PreviewReadyResponse {
         message_id: message.id,
         health,
+        page,
     }))
 }
 

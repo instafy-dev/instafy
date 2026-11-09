@@ -943,9 +943,9 @@ fn start_tunnel_client(
         &state_path,
         &serde_json::to_string_pretty(&json!({ "version": 1, "previews": next }))?,
     )?;
-    // The space's record of its pages outlasts this machine and keeps the chat that made each one.
-    // A page it does not hold is written down with no chat: a page from before the record, which
-    // a writing turn then reads as another chat's and no later open claims.
+    // The space's record of its pages keeps the chat that made each one. A page it does not hold
+    // is written down with no chat, which no later open claims; the controller's row for the
+    // page, when it has one, is taken over this before the next turn reads it.
     if let Err(error) = crate::jobs::space_pages::record_woken_page(
         &environment.workspace_dir,
         &restart.serve.cwd,

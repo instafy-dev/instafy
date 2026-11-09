@@ -6164,6 +6164,9 @@ impl JobProcessor {
         .limit;
         let project_id = self.project_id_for_job(job)?;
         let workspace_dir = self.prepare_workspace(&project_id)?;
+        // Which chat made each of the space's pages is the controller's to say, for a worker's
+        // files too: its pages are taken over the record in the folder before it is read.
+        space_pages::take_the_controllers_pages(&workspace_dir, &job.payload);
         let prompt_text = job
             .payload
             .get("prompt_text")
@@ -7390,6 +7393,11 @@ impl JobProcessor {
             None
         };
         learn::ensure_project_memory_scaffold_in(&workspace_dir, self.scaffold_scope());
+        // Which chat made each of the space's pages is the controller's to say: its pages are
+        // taken over the record in the folder before anything reads that record.
+        if !granted_execution {
+            space_pages::take_the_controllers_pages(&workspace_dir, &job.payload);
+        }
         let explicit_personal_browser_execution =
             crate::personal_browser::payload_requests_personal_browser(&job.payload);
         let explicit_shared_browser_execution =
@@ -8275,6 +8283,15 @@ impl JobProcessor {
                 .or(git_status_before.as_ref())
         {
             turn_start.record(&workspace_dir, status);
+        }
+        // A card this turn opens gives its page to this chat only for a folder the turn made: the
+        // folders that are here now were here before it.
+        if !read_only_workspace && !is_browser_turn(job) {
+            space_pages::write_down_the_turns_folders(
+                &workspace_dir,
+                &job.id,
+                turn_continuation::continued_job_id(&job.payload).as_ref(),
+            );
         }
         // A page another chat made is read-only here, and held: what the model's own steps change
         // there goes back as it was when this attempt began, once the model is done. An

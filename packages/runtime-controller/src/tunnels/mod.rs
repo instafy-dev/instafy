@@ -41,8 +41,8 @@ use crate::{
 pub(crate) const ACTIVE_JOB_TUNNEL_METADATA_KEY: &str = "_instafyActiveJob";
 pub(crate) const ACTIVE_JOB_TUNNEL_SOURCE: &str = "instafy-cli";
 /// Grant metadata the previews module owns: `{ visibility, path, title,
-/// conversationId, tunnelKey, messageIds, messageId }`. A grant is a preview
-/// when it has this object.
+/// conversationId, tunnelKey, messageIds, messageId, serve, pageFolder }`. A
+/// grant is a preview when it has this object.
 pub(crate) const PREVIEW_TUNNEL_METADATA_KEY: &str = "_instafyPreview";
 /// Grant metadata keys only the controller writes. Clients and the broker
 /// can neither set nor drop them through the generic tunnel routes: the

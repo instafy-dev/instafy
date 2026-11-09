@@ -28,7 +28,7 @@ import {
   type ThumbnailAttempt,
 } from "./preview-thumbnail.js";
 import { resolveRuntimeControllerCredential } from "./runtime-controller-binding.js";
-import { recordPage } from "./space-pages.js";
+import { pageFolder, pageFolderAge, recordPage, type PageFolderAge } from "./space-pages.js";
 import {
   buildRatholeConfig,
   cleanUrl,
@@ -1346,11 +1346,19 @@ async function createAndStartClient(params: {
   previewId: string;
   entry: PreviewStateEntry;
   current: PreviewStateEntry | null;
+  // The page this open shows, for the space's record of its pages: the workspace it is in, and whether its folder was
+  // made in this turn. Null for the person's own site and for a site with no folder recorded.
+  page: OpenedPageFolder | null;
 }> {
   // The server is asked first, so a server without previews exits 5 before a client is
   // downloaded or started here.
   const { opts, port, title, sitePath, projectId, retryCommand, auth, controllerUrl, serverUrl, log, serve, site, portPicked } = params;
   const conversationId = opts.conversationId?.trim() || undefined;
+  // Read before the server is asked: the server writes the page down when its card is posted, and gives a folder it
+  // does not hold yet to this chat only when the folder was made in this turn.
+  const root = serve ? resolveWorkspaceRoot(process.env, projectId) : null;
+  const folder = serve ? pageFolder(serve.cwd) : null;
+  const page: OpenedPageFolder | null = root && folder ? { root, folder, age: pageFolderAge(root, folder) } : null;
   const created = await controllerRequest({
     controllerUrl,
     auth,
@@ -1366,6 +1374,7 @@ async function createAndStartClient(params: {
       ...(opts.summary ? { summary: opts.summary } : {}),
       metadata: { source: "instafy-cli" },
       ...(serve ? { serve } : {}),
+      ...(page ? { pageFolder: page.age } : {}),
       ...(opts.replace ? { replace: true } : {}),
     },
     retryCommand,
@@ -1468,18 +1477,19 @@ async function createAndStartClient(params: {
     ...(opts.thumbnail === false ? { noThumbnail: true } : {}),
   };
   upsertPreviewState(entry);
-  // The chat that made the page, in the space's record of its pages: kept with the space's files, so it outlasts this
-  // machine, and an open of the same folder from another chat keeps it. A turn that may write files is told the space's
-  // pages from it, each made in its own chat or in another.
-  const root = serve ? resolveWorkspaceRoot(process.env, projectId) : null;
-  if (serve && root) {
-    try {
-      recordPage(root, { folder: serve.cwd, title, argv: serve.argv, opening: cardConversation(auth, conversationId) });
-    } catch (error) {
-      log(`Could not write the page down in the space's record: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  return { grant, previewId, entry, current };
+  return { grant, previewId, entry, current, page };
+}
+
+/** A page's folder in its space's workspace, and whether the turn that opens it made the folder. */
+type OpenedPageFolder = { root: string; folder: string; age: PageFolderAge };
+
+/** The page the server wrote down for a card it posted (`page` of the ready answer): the chat it holds for the page's
+ *  folder, or null for a page nobody's. Undefined when the server says nothing of it (an older one). */
+function heldPage(readyBody: Record<string, unknown>): { conversationId: string | null } | undefined {
+  const page = readyBody["page"];
+  if (!page || typeof page !== "object" || Array.isArray(page)) return undefined;
+  const chat = (page as Record<string, unknown>)["conversationId"];
+  return { conversationId: typeof chat === "string" && chat.trim() ? chat.trim() : null };
 }
 
 export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpenResult> {
@@ -1519,7 +1529,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
 
   // From choosing the port to the state write, one `instafy preview` command at a time on this machine: two commands
   // never pick the same port, start the same site twice or start two clients for one preview.
-  const { grant, previewId, entry, current, port, site, serve, restartNote } = await withStateLock(async () => {
+  const { grant, previewId, entry, current, page, port, site, serve, restartNote } = await withStateLock(async () => {
     const site = start
       ? await startOrFindSite({
           explicitPort,
@@ -1619,6 +1629,26 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
     throw error;
   }
   const readyBody = (ready.body && !Array.isArray(ready.body) ? ready.body : {}) as Record<string, unknown>;
+  // The card is posted: the page goes in the space's record of its pages on this machine, with the chat that made it.
+  // The server says which chat that is; without its word (an older server), the record's own chat for the folder
+  // stays, and a folder it does not hold goes to this card's chat only when this turn made the folder. A turn that may
+  // write files is told the space's pages from the record, each made in its own chat or in another.
+  if (page && serve) {
+    try {
+      await withStateLock(async () => {
+        recordPage(page.root, {
+          folder: page.folder,
+          title: entry.title,
+          argv: serve.argv,
+          opening: cardConversation(auth, opts.conversationId?.trim() || undefined),
+          age: page.age,
+          held: heldPage(readyBody),
+        });
+      });
+    } catch (error) {
+      log(`Could not write the page down in the space's record: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   // The server keeps one card per preview and turn: the card this machine got for it before, answered again, means
   // this open posted none.
   const messageId = stringField(readyBody, "messageId");

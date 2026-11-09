@@ -621,16 +621,31 @@ folder (`/tmp`, `/var/tmp`, `/dev/shm`, `/run`), or the command line carries wha
 JSON then has `"restartable": false` and a `restartNote` saying why, and the card works as before until
 the space sleeps. A `--serve-cmd` that carries what looks like a secret is refused before anything is opened. `restartable` is `true` only when the server recorded the command too.
 
-Which chat made each page: `open` also writes the page down in the space's own folder, `.instafy/pages/pages.json`
-(never saved, published or listed, so it outlasts the machine the space runs on), with its folder, its title, how it
-is served (the command's program and first argument) and the chat its card went to (a job's own chat, or
-`--conversation`). Opening the same folder again from another chat keeps the chat that made it, and the workspace
-itself is not written down. A wake that starts a page this record does not hold writes it down with no chat. Every
-Octo turn that may write files is told the space's pages from this record, each made in its own chat, or in another
-and read-only there, or with no chat recorded; only a page Instafy's page server (`instafy bind serve`) or an installed
-skill's command serves is listed, never the person's own app. What a turn's own steps change in a page another chat
-made goes back as it was when the turn began, and the reply says which page it didn't change: that page changes in the
-chat that made it. A scheduled run has no chat to ask in, so nothing holds a page for it.
+Which chat made each page: the server keeps it, one row per space and page folder, written when a page's card is
+posted with the chat the card went to (a job's own chat, or `--conversation`). `open` writes the same down in the
+space's own folder, `.instafy/pages/pages.json`, with the page's folder, its title and how it is served (the command's
+program and first argument). That file is this machine's copy. It is never saved, published or listed, so it does not
+outlast the folder it is in: a hosted space starts without it after a release, or once its idle checkout is cloned
+again, and the runtime fills it in again from the server's rows before each turn. Opening the same folder again from
+another chat keeps the chat that made it, and the workspace itself is not written down.
+
+A folder neither holds yet goes to the chat that opens its card only when that chat's turn made the folder. As a turn
+that may write files begins, the runtime writes down the folders that are in the workspace
+(`.instafy/pages/turn-folders.json`, two names deep), and `open` tells the server which it is (`pageFolder`: `new` or
+`existing`). A folder that was there before the turn is written down with no chat, as a wake writes down a page this
+record does not hold: with the record gone, the first chat to open another chat's page used to become its maker, and
+the chat that made the page could no longer change it. Without that list (a card opened outside a turn, an older
+runtime) every folder reads as there before. A server from before it kept the rows answers nothing about the page, and
+`open` then keeps the chat its own file holds for the folder.
+
+Every Octo turn that may write files is told the space's pages from this record, each made in its own chat, or in
+another and read-only there, or with no chat recorded; only a page Instafy's page server (`instafy bind serve`) or an
+installed skill's command serves is listed, never the person's own app. What a turn's own steps change in a page another
+chat made goes back as it was when the turn began, and the reply says which page it didn't change: that page changes in
+the chat that made it. A page reads with no chat, and is held from nobody, when its chat is gone for the person the
+turn runs for: the chat no longer exists, they moved it to Trash, or it is a thread nobody asks in (an automation's, a
+bound site's). A scheduled run has no chat to ask in, so nothing holds a page for it. A runtime started with
+`INSTAFY_HOLD_PAGES=0` holds no page at all: its turns are told the same, and nothing is put back.
 
 Exit codes:
 
