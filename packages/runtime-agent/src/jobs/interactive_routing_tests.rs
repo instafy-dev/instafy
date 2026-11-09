@@ -949,7 +949,8 @@ fn a_page_from_what_octo_knows_says_so_and_its_rows_say_what_was_not_checked() {
 #[test]
 fn a_comparisons_headline_comes_from_its_cells_and_no_skill_asks_for_one() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let hub = include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
+    let hub =
+        include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
     let sheet = include_str!(
         "../../assets/instafy/.agents/skills/instafy-bound-sites/references/cheatsheet.md"
     );
