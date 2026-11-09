@@ -1991,9 +1991,12 @@ const DESCRIBE_ALL_IN_PAGE = new Function(
 // small one close by whose text speaks of cookies. `cover` names what is
 // there: the tag, role and label of the nearest element around the point that
 // has a role, a label or is a control (a picker's dialog, not one of its days;
-// a carousel's link), else of the element there. Its label is only what the
-// page gives it as one (aria-label, aria-labelledby, title, alt), never its
-// text: that can hold what no reading shows (a style sheet, a hidden part).
+// a carousel's link), else of the element there. Its label is what the page
+// gives it as one (aria-label, aria-labelledby, title, alt). One with no role
+// (or one that says it has none: "presentation", "none") and no label is
+// named by its first words a person sees instead (a bare `<ol>` read as no
+// name at all): never text in a style sheet, a script or a part hidden from
+// people, which no reading shows either.
 function clickLandingInPage(element, request) {
   const view = element.ownerDocument.defaultView;
   let point = null;
@@ -2060,21 +2063,42 @@ function clickLandingInPage(element, request) {
     .slice(0, 8)
     .map((id) => (doc.getElementById(id) && doc.getElementById(id).textContent) || "")
     .join(" ");
-  const coverName = roots.includes(cover)
-    ? ""
-    : [
-      cover.getAttribute("aria-label"),
-      labelledText,
-      cover.getAttribute("title"),
-      cover.getAttribute("alt"),
-    ].map(squeeze).find(Boolean) || "";
+  const coverRole = squeeze(cover.getAttribute("role")).split(" ")[0];
+  const coverLabel = [
+    cover.getAttribute("aria-label"),
+    labelledText,
+    cover.getAttribute("title"),
+    cover.getAttribute("alt"),
+  ].map(squeeze).find(Boolean) || "";
+  const FIRST_WORDS = 8;
+  const unseenTags = ["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "TEXTAREA"];
+  const seen = (parent) => {
+    for (let node = parent, depth = 0; node && node.nodeType === 1 && depth < 512; node = up(node), depth += 1) {
+      if (unseenTags.includes(String(node.tagName).toUpperCase()) ||
+        String(node.getAttribute("aria-hidden") || "").trim().toLowerCase() === "true" || node.hasAttribute("inert")) {
+        return false;
+      }
+    }
+    return typeof parent.checkVisibility !== "function" ||
+      parent.checkVisibility({ checkOpacity: true, opacityProperty: true, checkVisibilityCSS: true, visibilityProperty: true });
+  };
+  const firstWords = () => {
+    const words = [];
+    const walker = doc.createTreeWalker(cover, 4);
+    for (let node = walker.nextNode(), count = 0; node && words.length <= FIRST_WORDS && count < 400; node = walker.nextNode(), count += 1) {
+      if (node.parentElement && seen(node.parentElement)) words.push(...String(node.nodeValue || "").split(/\s+/).filter(Boolean));
+    }
+    return words.length > FIRST_WORDS ? `${words.slice(0, FIRST_WORDS).join(" ")}\u2026` : words.join(" ");
+  };
+  const roleless = !coverRole || coverRole === "presentation" || coverRole === "none";
+  const coverName = roots.includes(cover) ? "" : coverLabel || (roleless ? squeeze(firstWords()) : "");
   return {
     other: false,
     covered: true,
     consent,
     cover: {
       tag: String(cover.tagName || "").toLowerCase(),
-      role: squeeze(cover.getAttribute("role")).split(" ")[0],
+      role: coverRole,
       name: coverName,
     },
   };
@@ -2333,10 +2357,12 @@ function quotedControlLabel(description) {
 // What a step that fills a field did, in its result's `done`. A page's
 // reading never shows what is typed into a field, so the reading after such a
 // step matches the one before it, and a turn that could not tell the text went
-// in gave up a form after its first field. The line names the field, and how
-// many characters went in and whether the field holds them, never the text: it
-// may be private. A select needs none: its reading names the option it holds
-// (`chosen`), as a box's names whether it is `checked`.
+// in gave up a form after its first field. The line names the field, how many
+// characters went in and what the field holds when that differs, never the
+// text: it may be private. One not sent says so: a turn read the list a page
+// still showed after an unsent search as no result. A select needs none: its
+// reading names the option it holds (`chosen`), as a box's names whether it
+// is `checked`.
 const FIELD_READ_MS = 1_000;
 
 function characterCount(count) {
@@ -2350,25 +2376,27 @@ async function heldText(locator) {
   return await within(FIELD_READ_MS, locator.inputValue().catch(() => null), null);
 }
 
-// What a type step without submit adds when Enter in the box it typed into
-// is a site search that goes without a prompt (freeSiteSearch).
+// What a type step without submit says it did not do: into a search field,
+// "Nothing was searched yet.", and into any other field, "Nothing was sent
+// yet.". Where Enter in the box, as it holds the text now, is a site search
+// that goes without a prompt (freeSiteSearch), it says to press it.
 const SEARCH_NOT_SENT = "Nothing was searched yet: press Enter to search (no prompt needed).";
+const NOT_SEARCHED = "Nothing was searched yet.";
+const NOT_SENT = "Nothing was sent yet.";
 
-function typedLine(description, text, held, submitted) {
+function typedLine(description, text, held, submitted, unsent = NOT_SENT) {
   const field = quotedControlLabel(description);
   const count = Array.from(text).length;
   if (submitted) {
     return `Typed ${characterCount(count)} into ${field} and pressed Enter.`;
   }
   const did = count === 0 ? `Cleared ${field}` : `Typed ${characterCount(count)} into ${field}`;
-  const holds = typeof held !== "string"
+  const holds = typeof held !== "string" || held === text
     ? ""
-    : held === text
-      ? (count === 0 ? ", and it is empty now" : ", and the field holds them")
-      : held === ""
-        ? ", and the field is empty now"
-        : `, and the field holds ${characterCount(Array.from(held).length)} now`;
-  return `${did}${holds}. A page's reading never shows typed text.`;
+    : held === ""
+      ? ", and the field is empty now"
+      : `, and the field holds ${characterCount(Array.from(held).length)} now`;
+  return `${did}${holds}. A page's reading never shows typed text. ${unsent}`;
 }
 
 function isCheckableDescription(description) {
@@ -2480,8 +2508,12 @@ function choicePromptLabel(description, option) {
 // result). `hiddenNames` collects a name for each control a person cannot
 // see, and `leftNames` one for each control shown but left out, or past the
 // controls judged (empty): neither is in the list, both count for the
-// secret-screen check and in `omittedControls`.
-async function collectInteractiveElements(page, hiddenNames = null, leftNames = null) {
+// secret-screen check and in `omittedControls`. A cookie notice's accept is
+// left out too, so no step can target it: Octo never accepts cookies, and a
+// turn that saw one listed pressed it, was refused, and stopped there.
+// `accepts` collects them, for the browser's own decline of the notice
+// (declineCookieBanner), which looks for its refusal beside them.
+async function collectInteractiveElements(page, hiddenNames = null, leftNames = null, accepts = null) {
   const matches = await page.locator(INTERACTIVE_SELECTOR).elementHandles();
   const handles = matches.slice(0, MAX_JUDGED_CONTROLS);
   if (leftNames) {
@@ -2513,9 +2545,27 @@ async function collectInteractiveElements(page, hiddenNames = null, leftNames = 
     if (!description) {
       continue;
     }
+    if (isConsentAccept(description, page.url())) {
+      if (leftNames) leftNames.push(name || description.label);
+      if (accepts) accepts.push({ locator, description });
+      continue;
+    }
     elements.push({ locator, description });
   }
   return elements;
+}
+
+// A button, link or toggle the action policy refuses as a cookie or consent
+// notice's accept (`step_refused_consent`): only one the describer found in a
+// notice, never a field or a list.
+function isConsentAccept(description, pageUrl) {
+  if (description.policy?.consentContext !== true) return false;
+  const tag = String(description.tag || "").toLowerCase();
+  const type = String(description.inputType || "").toLowerCase();
+  if (tag === "select" || tag === "textarea" ||
+    (tag === "input" && !["button", "submit", "image", "reset", "checkbox", "radio"].includes(type))) return false;
+  const step = classifyStep("click", description, { pageUrl });
+  return step.verdict === "refuse" && step.category === "consent";
 }
 
 function snapshotFingerprint(url, interactive) {
@@ -2618,14 +2668,13 @@ function fieldFingerprint(url, description) {
 }
 
 // Records the editable fields a snapshot of the page the person chose shows,
-// and the controls of a consent banner on it, for request_human_input
-// (approvalProtocol.recordObservedFields). Octo's own tabs are for reading
-// and never ask the person to fill a field or answer a notice. Without the
+// for request_human_input (approvalProtocol.recordObservedFields). Octo's own
+// tabs are for reading and never ask the person to fill a field. Without the
 // record, a pause checks the whole page, as before.
 function recordObservedFields(snapshotId, url, interactive) {
   if (inAgentTab()) return;
   const fields = interactive
-    .filter(({ description }) => EDITABLE_FIELD_TAGS.has(description.tag) || description.policy?.consentContext === true)
+    .filter(({ description }) => EDITABLE_FIELD_TAGS.has(description.tag))
     .slice(0, approvalProtocol.maxObservedFields)
     .map(({ description }) => ({ index: description.index, field: fieldFingerprint(url, description) }));
   if (!fields.length) return;
@@ -2951,9 +3000,6 @@ const DECLINE_CLICK_TIMEOUT_MS = 2_000;
 // around it, up to its dialog. A dialog that speaks only of privacy or
 // consent (a policy to accept, a consent form) is no cookie banner, though
 // its buttons are judged as a banner's (the describer's consent context).
-// With `request.anyConsent` such a dialog counts too: a pause hands the
-// person a notice the browser never presses, and both refusals send the turn
-// to pause on any notice the describer found consent around.
 function cookieBannerInPage(element, request) {
   const doc = element.ownerDocument;
   const roots = [doc.body, doc.documentElement];
@@ -2973,7 +3019,6 @@ function cookieBannerInPage(element, request) {
     }
   }
   if (!banner || typeof banner.textContent !== "string" || banner.textContent.length > 4_000) return false;
-  if (request && request.anyConsent === true) return true;
   const cookieName = /cookie/i;
   const cookieText = /\bcookies?\b/i;
   const labelledText = (node) => String(node.getAttribute("aria-labelledby") || "")
@@ -3009,58 +3054,6 @@ function cookieBannerInPage(element, request) {
     }
   }
   return false;
-}
-
-// Runs inside the page through Playwright, so it must not use anything from
-// this file's scope. Whether `element` sits in the notice of one of
-// `request.others`: the nearest container around that control, below the
-// page's body, that is a dialog or is named after cookies or consent
-// (`request.consent` in its id, class, label or test id, or in the title it is
-// labelled by), as the describer names a banner, when it is a small part of
-// the page. A notice that is neither has no bounds a page's text could not
-// stretch: on a small page in one wrapper, the wrapper speaks of cookies and
-// holds the menu too.
-function inCookieNoticeInPage(element, request) {
-  const doc = element.ownerDocument;
-  const roots = [doc.body, doc.documentElement];
-  const up = (node) => node.assignedSlot || node.parentElement || (node.parentNode && node.parentNode.host) || null;
-  const holds = (container, node) => {
-    for (let current = node, depth = 0; current && depth < 512; current = up(current), depth += 1) {
-      if (current === container) return true;
-    }
-    return false;
-  };
-  const consent = new RegExp(String(request && request.consent), "i");
-  const labelledText = (node) => String(node.getAttribute("aria-labelledby") || "")
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 8)
-    .map((id) => {
-      const root = typeof node.getRootNode === "function" ? node.getRootNode() : doc;
-      const labelled = (root && typeof root.getElementById === "function" ? root.getElementById(id) : null) || doc.getElementById(id);
-      return (labelled && labelled.textContent) || "";
-    })
-    .join(" ")
-    .slice(0, 400);
-  const noticeOf = (control) => {
-    for (let node = up(control), depth = 0; node && node.nodeType === 1 && !roots.includes(node) && depth < 16; node = up(node), depth += 1) {
-      const named = [
-        ...["id", "class", "aria-label", "data-testid"].map((name) => node.getAttribute(name) || ""),
-        labelledText(node),
-      ].join(" ").slice(0, 800);
-      const dialog = typeof node.matches === "function" &&
-        node.matches("dialog, [role=dialog], [role=alertdialog], [aria-modal=true]");
-      if (dialog || consent.test(named)) {
-        return typeof node.textContent === "string" && node.textContent.length <= 4_000 ? node : null;
-      }
-    }
-    return null;
-  };
-  const others = Array.isArray(request && request.others) ? request.others : [];
-  return others.some((other) => {
-    const notice = other ? noticeOf(other) : null;
-    return notice !== null && notice !== element && holds(notice, element);
-  });
 }
 
 // Words that name a field whose value is a payment detail, a password or a
@@ -3141,8 +3134,9 @@ function holdsPersonalFields(interactive) {
 // nobody in any mode, as Octo's own press of it never did, and no form may
 // leave the tab while it runs. The step says the banner was declined only
 // once its refusal is gone. True when it pressed one, so the page is read
-// again; a banner it could not press stays up.
-async function declineCookieBanner(page, interactive) {
+// again; a banner it could not press stays up. `leftOut`: the accepts the
+// reading leaves out of its list (collectInteractiveElements).
+async function declineCookieBanner(page, interactive, leftOut = []) {
   const pageUrl = page.url();
   // Only a control the describer found in a consent banner can be its
   // refusal or its accept.
@@ -3152,9 +3146,12 @@ async function declineCookieBanner(page, interactive) {
       entry,
       step: classifyStep("click", entry.description, { pageUrl }),
     }));
-  const accepts = judged
-    .filter(({ step }) => step.verdict === "refuse" && step.category === "consent")
-    .map(({ entry }) => entry.locator);
+  const accepts = [
+    ...leftOut.map(({ locator }) => locator),
+    ...judged
+      .filter(({ step }) => step.verdict === "refuse" && step.category === "consent")
+      .map(({ entry }) => entry.locator),
+  ];
   if (!accepts.length) return false;
   const refusals = judged.filter(({ entry, step }) =>
     step.verdict === "allow" &&
@@ -3212,111 +3209,6 @@ async function declineCookieBanner(page, interactive) {
   return false;
 }
 
-// Whether a pause may hand these controls to the person as a cookie notice
-// the browser could not decline (request_human_input). Each one is a button
-// or link the describer found in a consent banner, as both refusals judge a
-// notice (its consent context), turned on, in one small part of the page
-// with a button of that banner that accepts (cookieBannerInPage). And it is
-// the notice's own answer (its accept, a limited accept or a refusal) that
-// on its own asks only as an accept or allow word does, or a step the
-// browser takes by itself while it reads (its settings link, "Learn more").
-// So a page can't dress a field, a payment, a sign-in, a deletion or a
-// commit ("Book now") up as a notice's button to get a pause. A notice in a
-// frame is never listed, so never handed over. The pause outlines every such
-// button of the notice, the ones Octo named first, up to the pause's eight,
-// and nothing outside it: only a button inside the container around one Octo
-// named that is a dialog or is named after cookies or consent
-// (inCookieNoticeInPage) joins them. Octo went for a notice's accept twice,
-// and a pause on it alone would have shown the person the accept outlined by
-// itself. A notice none of whose outlined buttons is a way out of it
-// (noticeWayOut) gets no pause: Octo never asks anyone to accept cookies, and
-// two turns paused on a bar whose one button was its accept, which covered
-// nothing the task needed. It is refused in the words a press of its accept
-// gets, so the turn carries on under it. Null when the controls Octo named
-// are not a notice's buttons.
-async function cookieNoticeButtons(page, interactive, selected) {
-  const pageUrl = page.url();
-  const accepts = interactive
-    .filter(({ description }) => {
-      if (description.policy?.consentContext !== true) return false;
-      const step = classifyStep("click", description, { pageUrl });
-      return step.verdict === "refuse" && step.category === "consent";
-    })
-    .map(({ locator }) => locator);
-  if (!accepts.length) return null;
-  const beside = async (entry, others) => (await entry.locator
-    .evaluate(cookieBannerInPage, { kind: "cookie-banner", others, anyConsent: true })
-    .catch(() => false)) === true;
-  const noticeButton = async (entry) => cookieNoticeAnswerOrLink(entry, pageUrl) && (await beside(entry, accepts));
-  for (const entry of selected) {
-    if (!(await noticeButton(entry))) return null;
-  }
-  const named = selected.map(({ locator }) => locator);
-  const inNotice = async (entry) => (await entry.locator
-    .evaluate(inCookieNoticeInPage, { kind: "cookie-notice", others: named, consent: CONSENT_NAMES_SOURCE })
-    .catch(() => false)) === true;
-  const notice = [...selected];
-  for (const entry of interactive) {
-    if (notice.length >= MAX_HUMAN_INPUT_TARGETS) break;
-    if (!notice.includes(entry) && (await noticeButton(entry)) && (await inNotice(entry))) notice.push(entry);
-  }
-  if (!notice.some((entry) => noticeWayOut(entry, pageUrl, accepts))) {
-    throw new Error(`${CONSENT_ACCEPT_MESSAGE} [step_refused_consent]`);
-  }
-  return notice;
-}
-
-// The most controls one pause outlines.
-const MAX_HUMAN_INPUT_TARGETS = 8;
-
-// Words that name a notice's settings or choices, in the languages the action
-// policy's consent words cover: "Cookie settings", "Manage preferences",
-// "Configure your consents", "Personalizar cookies", "Paramètres",
-// "Einstellungen", "Impostazioni", "Instellingen".
-const CONSENT_SETTINGS = /(?<![\p{L}\p{N}])(?:settings?|preferences?|customi[sz]e|personali[sz]e|manage|configure|options|choices|einstellungen|anpassen|verwalten|konfigurieren|optionen|pr[äa]ferenzen|param[èe]tres|param[ée]trer|personnaliser|g[ée]rer|pr[ée]f[ée]rences|choix|configuraci[óo]n|configurar|personalizar|gestionar|preferencias|opciones|impostazioni|personalizza(?:re)?|gestisci|preferenze|opzioni|defini[çc][õo]es|configura[çc][õo]es|gerir|gerenciar|prefer[êe]ncias|op[çc][õo]es|instellingen|aanpassen|beheren|voorkeuren|opties)(?![\p{L}\p{N}])/iu;
-
-// Whether one of a notice's buttons lets the person answer it without
-// accepting: a refusal, an accept limited to the necessary cookies or a
-// selection, a control that acts on the notice itself and is no accept (its
-// settings panel, a refusal in words no list knows, a close), or a link whose
-// words name its settings. Any other link goes to another page (its cookie
-// policy, "Learn more"): a pause on one beside the accept asked the person to
-// answer a notice whose only answer was accepting.
-function noticeWayOut(entry, pageUrl, accepts) {
-  if (accepts.includes(entry.locator)) return false;
-  const step = classifyStep("click", entry.description, { pageUrl });
-  if (step.consentRejection === true || step.consentLimited === true) return true;
-  const destination = resolvedTargetDestination(entry.description, pageUrl);
-  let elsewhere = destination !== null;
-  try {
-    elsewhere = elsewhere && new URL(destination).href.split("#")[0] !== new URL(pageUrl).href.split("#")[0];
-  } catch (_) {
-    // An address that cannot be read goes elsewhere.
-  }
-  if (!elsewhere) return true;
-  const { label, text, ariaLabel, titleAttribute } = entry.description;
-  return CONSENT_SETTINGS.test([label, text, ariaLabel, titleAttribute].filter(Boolean).join(" "));
-}
-
-// Whether a control may be one of a cookie notice's buttons in a pause, by
-// itself (cookieNoticeButtons says where it must sit): turned on, in a
-// consent banner as the describer found it, and the notice's own answer that
-// alone asks only as an accept or allow word does, or a step the browser takes
-// by itself while it reads.
-function cookieNoticeAnswerOrLink(entry, pageUrl) {
-  if (!entry || EDITABLE_FIELD_TAGS.has(entry.description.tag) ||
-      entry.description.policy?.consentContext !== true || entry.description.disabled === true) return false;
-  const { description } = entry;
-  const inNotice = classifyStep("click", description, { pageUrl });
-  const alone = classifyStep("click", { ...description, policy: { ...description.policy, consentContext: false } }, { pageUrl });
-  const answer = (inNotice.verdict === "refuse" && inNotice.category === "consent") ||
-    inNotice.consentLimited === true || inNotice.consentRejection === true;
-  if (alone.verdict === "refuse") return false;
-  return answer
-    ? alone.category === "permission" || !ROUTINE_CONFIRMED_CATEGORIES.has(alone.category)
-    : routineCovers(alone, description) && !isFormSubmissionControl(description);
-}
-
 // The model-facing view of the page: what a person can see of it. Text,
 // title, address, control names and link targets are masked on every site and
 // in every approval mode; a secret screen withholds the text and stays
@@ -3330,7 +3222,8 @@ async function snapshot(page, { withhold = false, decline = false } = {}) {
   refuseLinkOnlyPage(page);
   const hiddenNames = [];
   const leftNames = [];
-  const interactive = await collectInteractiveElements(page, hiddenNames, leftNames);
+  const accepts = [];
+  const interactive = await collectInteractiveElements(page, hiddenNames, leftNames, accepts);
   const rawUrl = page.url();
   const renderedText = await page
     .locator("body")
@@ -3391,7 +3284,7 @@ async function snapshot(page, { withhold = false, decline = false } = {}) {
     !view.secretScreen &&
     !(withhold || carried || marked || checkFailed) &&
     !holdsPersonalFields(interactive) &&
-    (await declineCookieBanner(page, interactive))
+    (await declineCookieBanner(page, interactive, accepts))
   ) {
     // The page after the press is read as any page a step left: one that
     // moved to a site the run may not read says nothing of it.
@@ -3457,8 +3350,9 @@ async function snapshot(page, { withhold = false, decline = false } = {}) {
         selected: description.selected === true && !view.secretScreen,
       }),
     ),
-    // How many controls were left out, because a person cannot see them yet
-    // or the list is full, so a cut list does not read as the whole page.
+    // How many controls were left out, because a person cannot see them yet,
+    // the list is full or one is a cookie notice's accept, so a cut list does
+    // not read as the whole page.
     ...(hiddenNames.length + leftNames.length ? { omittedControls: hiddenNames.length + leftNames.length } : {}),
     ...(signInHint ? { signIn: signInHint } : {}),
   };
@@ -3786,13 +3680,9 @@ const COVER_LOOK_MS = 100;
 // decline: one with no reject button, one on a page it presses nothing on,
 // or one that came after the page was read, which the next look declines
 // when it can. Only a notice that really covers the control says it covers
-// the page: a press of a notice's accept has words of its own
-// (CONSENT_ACCEPT_MESSAGE), as the page under it is still there to use.
-const CONSENT_COVER_MESSAGE = "A cookie notice covers this page, and the browser could not decline it. If the task needs this page, pause on the notice's buttons with request_human_input in the chat's own tab: the person answers it there and chooses Let Octo continue. Otherwise open a link under it by its address, or the official site of the place or service the task is about.";
-// What a press of a notice's accept answers (`step_refused_consent`, the
-// action policy's words), and a pause on a notice that offers nothing but
-// accepting: Octo never accepts cookies and never asks anyone to.
-const CONSENT_ACCEPT_MESSAGE = actionPolicy.refusalFor("consent").message;
+// the page. A notice is never the person's step: nobody is asked to answer
+// one, and its accept is never pressed or listed (collectInteractiveElements).
+const CONSENT_COVER_MESSAGE = "A cookie notice covers this page, and the browser could not decline it. Open a link under it by its address, or the official site of the place or service the task is about.";
 
 async function clickLanding(target) {
   const landing = await target.locator
@@ -3814,10 +3704,15 @@ async function clickLanding(target) {
 // cannot land, and again here, as the page may have changed while they
 // answered: a person waited 45 seconds to allow a search button a cookie
 // notice covered, which was then refused, and the turn's line still said they
-// allowed a click.
+// allowed a click. Answers with the page as it was right before the click
+// (readingBefore), with the pointer over the control and the focus on it
+// (pointAtControl), for the step's settle.
 async function clickControlItself(page, target) {
   await refuseUnlandableClick(page, target);
+  await pointAtControl(target);
+  const before = await readingBefore(page);
   await target.locator.click();
+  return before;
 }
 
 // Refuses a click that would not land on its control (clickControlItself).
@@ -3892,9 +3787,10 @@ async function coveredBefore(page, target) {
 
 // What covers a control, for a covered click's words: the tag, role and label
 // the page gives it ("<div role=\"dialog\"> named \"Choose a time\"", a page's
-// own date picker), so the next try can close it or wait for it to go. The
-// label is the page's words: it is left out on a page that may show a secret,
-// as a list's options are.
+// own date picker), or the first words it shows when it has neither
+// ("<ol> named \"Lines Timetables Fares\""), so the next try can close it or
+// wait for it to go. Either is the page's words: left out on a page that may
+// show a secret, as a list's options are.
 async function coverWords(page, cover) {
   const tag = typeof cover?.tag === "string" && /^[a-z][a-z0-9-]{0,40}$/.test(cover.tag) ? cover.tag : "";
   if (!tag) return "";
@@ -4610,13 +4506,210 @@ async function openAddress(page, url) {
   await page.waitForLoadState("domcontentloaded", { timeout: Math.max(deadline - Date.now(), 1) });
 }
 
-async function settleAfterAction(page) {
-  await page.waitForLoadState("domcontentloaded", { timeout: 8_000 }).catch(() => {});
-  await page.waitForTimeout(250).catch(() => {});
-  // A menu or drawer that opens with a transition is observed where it lands.
-  await page
-    .evaluate(animationsSettledInPage, { kind: "animations-settled", timeoutMs: 1_000 })
+// Runs inside the page (PAGE_READING_IN_PAGE). What a step's reading is
+// compared with before and after the step, as one short digest the page works
+// out itself: nothing of the page leaves it. It is what the reading shows: the
+// text a person can see, read by the reading's own rule (shownTextInPage), so
+// a part a step shows in place (a section that slides open, a drawer, a menu
+// that fades in) counts, as the body's whole text would not; what the fields
+// a person can see hold, which no text shows (a field typed into, an option
+// chosen, a box checked), never one nobody sees (a hidden field a page fills
+// as it works, which kept a step from waiting for its result); the states a
+// reading gives its controls (checked, pressed, selected, open); and where the
+// page is scrolled to. Never whether a control is turned off: a button that
+// turns itself off while its result loads would read as that result.
+function pageReadingInPage(rule, shownText, request) {
+  const doc = document;
+  const body = doc.body;
+  if (!body) return "";
+  const shown = shownText(rule, { limit: request.limit, window: request.window });
+  const states = [];
+  const ARIA_STATES = ["aria-checked", "aria-pressed", "aria-selected", "aria-expanded"];
+  const MAX_JUDGED = 2_000;
+  let visited = 0;
+  let judged = 0;
+  const seen = (element) => {
+    if (judged >= MAX_JUDGED) return true;
+    judged += 1;
+    try {
+      return rule.elementShown(element);
+    } catch (_) {
+      return true;
+    }
+  };
+  const visit = (root) => {
+    const walker = doc.createTreeWalker(root, 1);
+    for (let node = walker.nextNode(); node && visited < 50_000; node = walker.nextNode()) {
+      visited += 1;
+      const tag = String(node.tagName).toUpperCase();
+      let state = null;
+      if (tag === "INPUT") {
+        const type = String(node.type).toLowerCase();
+        state = type === "checkbox" || type === "radio"
+          ? String(node.checked)
+          : type === "password" ? String(node.value.length) : type === "hidden" ? null : node.value;
+      } else if (tag === "TEXTAREA") {
+        state = node.value;
+      } else if (tag === "SELECT") {
+        state = Array.from(node.selectedOptions || [], (option) => option.index).join(",");
+      }
+      const aria = ARIA_STATES.map((name) => node.getAttribute(name));
+      if (aria.some((value) => value !== null)) state = `${state === null ? "" : state}\u0002${aria.join(",")}`;
+      if (state !== null && seen(node)) states.push(state);
+      if (node.shadowRoot) visit(node.shadowRoot);
+    }
+  };
+  visit(body);
+  const all = [
+    `${Math.round(window.scrollX)},${Math.round(window.scrollY)}`,
+    doc.title,
+    shown.text,
+    JSON.stringify([shown.start, shown.end, shown.above, shown.below, shown.more, shown.markers]),
+    states.join("\u0001"),
+  ].join("\u0000");
+  let first = 0x811c9dc5;
+  let second = 5381;
+  for (let index = 0; index < all.length; index += 1) {
+    const code = all.charCodeAt(index);
+    first = Math.imul(first ^ code, 0x01000193) >>> 0;
+    second = (Math.imul(second, 33) + code) >>> 0;
+  }
+  return `${all.length}.${first.toString(16)}.${second.toString(16)}`;
+}
+const PAGE_READING_IN_PAGE = new Function(
+  "...args",
+  `return (${pageReadingInPage})((${shownRuleInPage})(), (${shownTextInPage}), ...args);`,
+);
+
+// Runs inside the page. Moves focus as a press of `element` is about to: to
+// the control, or out of the field that holds it when the control takes none.
+// The field that holds it is looked for inside open shadow roots too, where
+// the document names only their host.
+function focusLikeAPressInPage(element) {
+  const doc = element.ownerDocument;
+  const focused = () => {
+    let node = doc.activeElement;
+    for (let depth = 0; node && node.shadowRoot && node.shadowRoot.activeElement && depth < 64; depth += 1) {
+      node = node.shadowRoot.activeElement;
+    }
+    return node;
+  };
+  const inside = (node) => {
+    for (let current = node, depth = 0; current && depth < 512; current = current.parentNode || current.host, depth += 1) {
+      if (current === element) return true;
+    }
+    return false;
+  };
+  const before = focused();
+  if (typeof element.focus === "function") element.focus({ preventScroll: true });
+  const now = focused();
+  if (now && now === before && now !== doc.body && now !== doc.documentElement && !inside(now) &&
+    typeof now.blur === "function") {
+    now.blur();
+  }
+  return true;
+}
+
+// How long a step whose page still reads as it did before it reads the page
+// again, and how often.
+const UNCHANGED_LOOK_MS = 3_000;
+const UNCHANGED_EVERY_MS = 250;
+// What a step's result says when its page still reads as it did before it.
+const PAGE_UNCHANGED = "The page reads as it did before this step. What it loads may still be coming: take a snapshot before saying nothing appeared.";
+
+// The page's reading as a step finds it (pageReadingInPage), or null when the
+// page cannot say in time.
+async function readingOf(page) {
+  const reading = await within(
+    FIELD_READ_MS,
+    page.evaluate(PAGE_READING_IN_PAGE, {
+      kind: "page-reading",
+      limit: MAX_VISIBLE_TEXT_CHARS * 5,
+      window: TEXT_WINDOW_CHARS,
+    }).catch(() => null),
+    null,
+  );
+  return typeof reading === "string" ? reading : null;
+}
+// The page as a step finds it right before it acts: its address, its document
+// and its reading, or null when the page cannot say in time.
+async function readingBefore(page) {
+  const [reading, documentId] = await Promise.all([readingOf(page), documentOf(page)]);
+  return reading === null ? null : { url: page.url(), documentId, reading };
+}
+// The page's document (documentIdentity), or null when the browser cannot
+// say in time.
+async function documentOf(page) {
+  return await within(FIELD_READ_MS, documentIdentity(page), null);
+}
+
+// Brings what a press of the control changes by itself into the page before
+// the step reads it (readingBefore): the pointer over it and the focus on it.
+// Read before them, a tip shown on hover, or a field's suggestions closed as
+// it lost focus, read as the page answering the press, and the step returned
+// before its result was drawn.
+async function pointAtControl(target, { hover = true } = {}) {
+  if (hover && typeof target.locator.hover === "function") {
+    await Promise.resolve()
+      .then(() => target.locator.hover({ timeout: POINT_AT_CONTROL_MS }))
+      .catch(() => {});
+  }
+  await Promise.resolve()
+    .then(() => target.locator.evaluate(focusLikeAPressInPage, { kind: "press-focus" }))
     .catch(() => {});
+}
+const POINT_AT_CONTROL_MS = 1_000;
+
+// Waits for what a step loads. A step that opens a new document is read once
+// it has loaded and settled. A result a page draws in place (a planner's
+// route, a search's list) loads no new document, and was read before it was
+// drawn: a click's reading matched the one before it, and the turn said the
+// planner showed no route while the route was on the page. So a step given
+// its page as it was before it (`before`) that left it on the same document,
+// reading as it did, reads it again for up to UNCHANGED_LOOK_MS: at the same
+// address, or at one the page put in its address bar itself (a search that
+// writes its words there and draws its list after). True when the page still
+// reads as it did then, which the step's result says (PAGE_UNCHANGED). Its
+// fields count with its text, so a step that only changed a field (an option
+// chosen, a box checked) does not wait.
+async function settleAfterAction(page, before = null) {
+  const settle = async () => {
+    await page.waitForLoadState("domcontentloaded", { timeout: 8_000 }).catch(() => {});
+    await page.waitForTimeout(250).catch(() => {});
+    // A menu or drawer that opens with a transition is observed where it lands.
+    await page
+      .evaluate(animationsSettledInPage, { kind: "animations-settled", timeoutMs: 1_000 })
+      .catch(() => {});
+  };
+  await settle();
+  if (!before) return false;
+  // Whether the page holds another document than the step began on, or, when
+  // the browser does not say, `unknown`: one that reads as the last (a link to
+  // the page it is on) loaded what the step asked for too.
+  const newDocument = async (unknown) => {
+    const current = before.documentId === null ? null : await documentOf(page);
+    return current === null ? unknown : current !== before.documentId;
+  };
+  const until = Date.now() + UNCHANGED_LOOK_MS;
+  for (let looks = 0; ; looks += 1) {
+    // Another address is another page, unless the browser says the document
+    // is the one the step began on.
+    if (page.url() !== before.url && (await newDocument(true))) {
+      // A document that came while the step looked loads and settles first.
+      if (looks > 0) await settle();
+      else await page.waitForLoadState("domcontentloaded", { timeout: 8_000 }).catch(() => {});
+      return false;
+    }
+    const now = await readingOf(page);
+    const last = Date.now() >= until || stepClock.isUp();
+    if (now !== before.reading || ((looks === 0 || last) && (await newDocument(false)))) {
+      // What came while the step looked is read once it has settled too.
+      if (looks > 0) await settle();
+      return false;
+    }
+    if (last) return true;
+    await page.waitForTimeout(UNCHANGED_EVERY_MS).catch(() => {});
+  }
 }
 
 function resolvedTargetDestination(description, currentUrl) {
@@ -6066,19 +6159,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
 
   if (method === "POST" && requestPath === "/v1/request-human-input") {
     if (inAgentTab()) {
-      // A notice that offers only accepting gets no pause in any tab
-      // (cookieNoticeButtons), so the turn is never sent to move the person's
-      // page for one. A page that changed, or anything else, gets the words
-      // below.
-      const seen = await collectInteractiveElements(page).catch(() => null);
-      if (seen && humanInputFieldsAsObserved(page.url(), seen, body)) {
-        const named = body.indices.map((index) => seen[index]);
-        if (!named.every((entry) => entry && EDITABLE_FIELD_TAGS.has(entry.description.tag))) {
-          await cookieNoticeButtons(page, seen, named);
-        }
-      }
       throw new Error(
-        "Octo's own tabs are for reading, so nothing was highlighted. Stop at a sign-in or form and tell the person. When the task needs a page a cookie notice covers, open it in the chat's own tab, the page the person chose (select_tab, then navigate to this address), take a snapshot there and pause on the notice with request_human_input.",
+        "Octo's own tabs are for reading, so nothing was highlighted. Stop at a sign-in or form and tell the person.",
       );
     }
     const sourceOrigin = await ensureSiteApproved(page.url(), "Allow the assistant to identify fields for your input");
@@ -6091,15 +6173,12 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       pageChangedUnderStep = true;
       throw new Error("The page changed; take a fresh snapshot before requesting human input");
     }
-    // Editable fields (a sign-in, a form), or the buttons of a cookie notice
-    // the browser could not decline, all of them, never a notice that offers
-    // only accepting (cookieNoticeButtons). The browser itself presses
-    // neither: the person answers the notice on the page.
-    const named = body.indices.map((index) => interactive[index]);
-    const fields = named.every((entry) => entry && EDITABLE_FIELD_TAGS.has(entry.description.tag));
-    const selected = fields ? named : await cookieNoticeButtons(page, interactive, named);
-    if (!selected) {
-      throw new Error("Human input targets must be observed editable fields, or the buttons of a cookie notice");
+    // Editable fields only (a sign-in, a form). A cookie notice is never the
+    // person's step: the browser declines one itself where it can, and Octo
+    // carries on under one it could not.
+    const selected = body.indices.map((index) => interactive[index]);
+    if (!selected.every((entry) => entry && EDITABLE_FIELD_TAGS.has(entry.description.tag))) {
+      throw new Error("Human input targets must be observed editable fields");
     }
     for (const entry of selected) assertControlOn(entry.description);
     await clearHumanInputHighlights(page);
@@ -6135,18 +6214,16 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
         version: 1, handoffId: crypto.randomUUID(), runId: authority.runId,
         initiatorUserId: authority.initiatorUserId, browserPageId: EXPECTED_BROWSER_PAGE_ID,
         origin: sourceOrigin, createdAtMs, expiresAtMs: createdAtMs + 600_000,
-        // A pause on a cookie notice says so (`kind`), so Studio asks the
-        // person to answer it. Fixed labels: nothing of the page goes along.
-        ...(fields ? {} : { kind: "cookies" }),
-        fields: selected.map((_, index) => ({ label: `Highlighted ${fields ? "field" : "button"} ${index + 1}` })),
+        // Fixed labels: nothing of the page goes along.
+        fields: selected.map((_, index) => ({ label: `Highlighted field ${index + 1}` })),
       },
     });
     // The MCP latch blocks all further observation/mutation for this turn.
     // The existing guard, not this helper, restores human authority only after
     // confirmed shutdown. Never remove the agent marker to lend control.
-    throw new Error(fields
-      ? "User input is needed. End this turn; the user will explicitly continue after filling the highlighted fields. [human_input_required_non_retryable]"
-      : "The person answers the cookie notice on the page. End this turn; they will explicitly continue after answering it. [cookie_notice_required_non_retryable]");
+    throw new Error(
+      "User input is needed. End this turn; the user will explicitly continue after filling the highlighted fields. [human_input_required_non_retryable]",
+    );
   }
 
   if (method === "POST" && requestPath === "/v1/navigate") {
@@ -6297,8 +6374,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       ...size,
     });
     const beforeUrl = page.url();
-    await clickControlItself(page, target);
-    await settleAfterAction(page);
+    const before = await clickControlItself(page, target);
+    const unchanged = await settleAfterAction(page, before);
     page = await resolveExpectedPage(browser);
     await page.bringToFront();
     const moved = page.url() !== beforeUrl;
@@ -6309,8 +6386,11 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // A click that checks or unchecks a box, a radio button or a switch on the
     // page it was on chooses an option: Details name it with the form's typing.
     const chose = !moved && isCheckableDescription(target.description);
+    const done = unchanged
+      ? `${checked || `Clicked ${quotedControlLabel(target.description)}.`} ${PAGE_UNCHANGED}`
+      : checked;
     return withActivity(
-      { ...await snapshotAfterStep(page, withholding), ...(checked ? { done: checked } : {}) },
+      { ...await snapshotAfterStep(page, withholding), ...(done ? { done } : {}) },
       freeSearch ? stepActivity(page, "search", "free") : stepActivity(page, chose ? "choose" : "click", stepApproval()),
     );
   }
@@ -6433,10 +6513,12 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // step's own test) does the step say to press it.
     const searchNotSent = !submitting && held === body.text && held !== "" && documents !== null &&
       (await within(FIELD_READ_MS, freeSiteSearch(page, target, null).catch(() => false), false));
+    let unchanged = false;
     if (submitting) {
       assertStepOnTime();
+      const before = await readingBefore(page);
       await target.locator.press("Enter");
-      await settleAfterAction(page);
+      unchanged = await settleAfterAction(page, before);
       page = await resolveExpectedPage(browser);
       await emitNavigationResult(page);
     }
@@ -6444,11 +6526,17 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // Typing with submit into a search field is a search, whoever allowed it;
     // into any other field it sends a form.
     const typeKind = submitting ? (step.category === "search" ? "search" : "submit") : "type";
-    const typed = typedLine(target.description, body.text, held, submitting);
+    const typed = typedLine(
+      target.description,
+      body.text,
+      held,
+      submitting,
+      searchNotSent ? SEARCH_NOT_SENT : typingStep.category === "search" ? NOT_SEARCHED : NOT_SENT,
+    );
     return withActivity(
       {
         ...await snapshotAfterStep(page, withholding),
-        done: searchNotSent ? `${typed} ${SEARCH_NOT_SENT}` : typed,
+        done: unchanged ? `${typed} ${PAGE_UNCHANGED}` : typed,
       },
       stepActivity(page, typeKind, freeSearch ? "free" : stepApproval()),
     );
@@ -6525,6 +6613,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       ...size,
     });
     const beforeUrl = page.url();
+    const before = await readingBefore(page);
     // The option the step was judged on is set by its label and its place
     // together, in one pass inside the page. A list that moved, turned off or
     // dropped it meanwhile chooses nothing.
@@ -6533,13 +6622,16 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       .catch((error) => {
         throw error && error.name === "TimeoutError" ? controlChanged() : error;
       });
-    await settleAfterAction(page);
+    const unchanged = await settleAfterAction(page, before);
     page = await resolveExpectedPage(browser);
     await page.bringToFront();
     if (page.url() !== beforeUrl) {
       await emitNavigationResult(page);
     }
-    return withActivity(await snapshotAfterStep(page, withholding), stepActivity(page, "choose", stepApproval()));
+    return withActivity(
+      { ...await snapshotAfterStep(page, withholding), ...(unchanged ? { done: `Chose the option. ${PAGE_UNCHANGED}` } : {}) },
+      stepActivity(page, "choose", stepApproval()),
+    );
   }
 
   if (method === "POST" && requestPath === "/v1/press") {
@@ -6641,13 +6733,15 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       label: `Press ${pressKey}`,
       url: page.url(),
     });
+    await pointAtControl(target, { hover: false });
+    const before = await readingBefore(page);
     await target.locator.press(pressKey);
-    await settleAfterAction(page);
+    const unchanged = await settleAfterAction(page, before);
     page = await resolveExpectedPage(browser);
     // Enter in a search field is a search, whoever allowed it.
     const pressKind = pressKey === "Enter" && step.category === "search" ? "search" : "press";
     return withActivity(
-      await snapshotAfterStep(page, withholding),
+      { ...await snapshotAfterStep(page, withholding), ...(unchanged ? { done: `Pressed ${pressKey}. ${PAGE_UNCHANGED}` } : {}) },
       stepActivity(page, pressKind, freeSearch ? "free" : stepApproval()),
     );
   }

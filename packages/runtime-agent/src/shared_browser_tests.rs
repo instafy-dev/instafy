@@ -5316,19 +5316,20 @@ fn ordinary_type_and_every_non_activation_press_use_exact_one_shot_consent() {
     }
 }
 
-// A type step's result says what it did: the field, how many characters went in and whether
-// the field holds them, never the text. A page's reading never shows typed text, so the
-// reading after typing matches the one before, and a turn that could not tell its text went
-// in gave up a form after its first field.
+// A type step's result says what it did: the field, how many characters went in and what the
+// field holds when that differs, never the text. A page's reading never shows typed text, so
+// the reading after typing matches the one before, and a turn that could not tell its text went
+// in gave up a form after its first field. One not sent says nothing was searched yet: a turn
+// typed into a site's search, never sent it, and wrote that the page returned no results.
 #[test]
 fn a_type_step_names_the_field_and_how_many_characters_went_in_never_the_text() {
-    let after = " A page's reading never shows typed text.";
+    let after = " A page's reading never shows typed text. Nothing was searched yet.";
     for (mode, text, submit, done) in [
         (
             "form-input",
             "Alex Example",
             false,
-            format!("Typed 12 characters into \"Search\", and the field holds them.{after}"),
+            format!("Typed 12 characters into \"Search\".{after}"),
         ),
         // A phone field that formats the digits typed.
         (
@@ -5356,7 +5357,14 @@ fn a_type_step_names_the_field_and_how_many_characters_went_in_never_the_text() 
             "form-input",
             "",
             false,
-            format!("Cleared \"Search\", and it is empty now.{after}"),
+            format!("Cleared \"Search\".{after}"),
+        ),
+        // A field that is no search (its form posts): nothing was sent yet.
+        (
+            "field-inside-submit-button",
+            "Forty two",
+            false,
+            "Typed 9 characters into \"Shoe size\". A page's reading never shows typed text. Nothing was sent yet.".to_string(),
         ),
         (
             "site-search",
@@ -5371,9 +5379,7 @@ fn a_type_step_names_the_field_and_how_many_characters_went_in_never_the_text() 
             "site-search",
             "Belém Tower",
             false,
-            format!(
-                "Typed 11 characters into \"Search places\", and the field holds them.{after} Nothing was searched yet: press Enter to search (no prompt needed)."
-            ),
+            "Typed 11 characters into \"Search places\". A page's reading never shows typed text. Nothing was searched yet: press Enter to search (no prompt needed).".to_string(),
         ),
     ] {
         let fixture = EmbeddedControllerFixture::new();
@@ -7302,7 +7308,7 @@ async fn every_way_a_model_reads_a_step_holds_its_page_once() {
         page
     };
     let timed_out = "This step was still running after 20 seconds, so it stopped where it was. This is the page as it is now: check what the step did before you act again.";
-    let typed = "Typed 12 characters into \"Customer name:\", and the field holds them. A page's reading never shows typed text.";
+    let typed = "Typed 12 characters into \"Customer name:\". A page's reading never shows typed text. Nothing was sent yet.";
     for (tool, payload, did) in [
         ("navigate", page(json!({})), "Opened the page."),
         ("snapshot", page(json!({})), "Read the page."),
@@ -10822,12 +10828,11 @@ fn octos_tabs_are_for_reading_and_refuse_every_other_step_before_any_prompt() {
         Some(&json!({ "indices": [0], "snapshotId": snapshot_id }).to_string()),
     ));
     assert!(human_input.contains("for reading"), "{human_input}");
-    // It says where the person can answer a cookie notice instead: the chat's
-    // own tab. A sign-in or form found while reading still stops there.
-    assert!(
-        human_input.contains("When the task needs a page a cookie notice covers, open it in the chat's own tab, the page the person chose (select_tab, then navigate to this address), take a snapshot there and pause on the notice with request_human_input"),
-        "{human_input}"
-    );
+    // A sign-in or form found while reading stops there. A cookie notice is
+    // never the person's step, so the turn is never sent to move the person's
+    // page to pause on one.
+    assert!(!human_input.contains("cookie notice"), "{human_input}");
+    assert!(!human_input.contains("select_tab"), "{human_input}");
     assert!(
         human_input.contains("Stop at a sign-in or form and tell the person."),
         "{human_input}"
@@ -13582,45 +13587,42 @@ fn a_cookie_banners_refusal_never_asks_while_the_same_words_elsewhere_still_do()
     }
 }
 
-/// Accepting a cookie banner is the person's step: its "Accept all" button,
-/// its "aceitar e continuar" link and a "Consent" button are refused before
-/// any prompt, in Ask, under routine browsing and on a run that starts in it,
-/// and nothing is clicked. Before, the link went through as plain navigation,
-/// the "Accept all" button asked, and "Consent" was clicked under routine
-/// browsing without a prompt. The failed step says, in its own word, that it
-/// was a consent refused, so the turn's Details names it for what it was.
+/// A cookie notice's accept is never offered: its "Accept all" button, its "aceitar e continuar"
+/// link and a "Consent" button are left out of a reading's list and counted among the controls it
+/// leaves out, so no step can target one. A turn that saw a bar's accept listed pressed it, was
+/// refused, and stopped there, saying the notice blocked its result (a local test, Nov 9). A click
+/// at the place the accept had before clicks nothing and asks nobody, in Ask, under routine
+/// browsing and on a run that starts in it. The action policy still refuses an accept a step
+/// reaches, before any prompt.
 #[test]
-fn a_cookie_banners_accept_is_refused_without_a_prompt_even_as_a_link() {
+fn a_cookie_notices_accept_is_never_listed_so_no_step_can_press_it() {
+    let stale = json!({ "index": 0, "snapshotId": SNAPSHOT_ID }).to_string();
     for mode in ["cookie-accept", "cookie-accept-link", "cookie-consent"] {
         // Ask mode, with the site approved.
         let fixture = EmbeddedControllerFixture::new();
-        let snapshot_id = fixture.snapshot_id(mode);
-        let body = json!({ "index": 0, "snapshotId": snapshot_id }).to_string();
-        let (output, requests) = fixture.run_with_decisions(
-            mode,
-            "page-target",
-            "POST",
-            "/v1/click",
-            Some(&body),
-            &["https://example.test"],
-            &["allow_once"],
-        );
-        assert!(!output.status.success(), "{mode} ask mode");
-        assert!(
-            requests.is_empty(),
-            "{mode} prompted in ask mode: {requests:?}"
-        );
-        assert!(
-            failure_of(&output).contains("[step_refused_consent]"),
-            "{mode}: {}",
-            failure_of(&output)
-        );
-        assert_eq!(
-            failed_step(&output.stdout).and_then(|failed| failed.refused),
-            Some("consent"),
-            "{mode}: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
+        let reading = payload_of(&fixture.run(mode, "GET", "/v1/snapshot", None));
+        assert_eq!(reading["interactiveElements"], json!([]), "{mode}");
+        assert_eq!(reading["omittedControls"], 1, "{mode}");
+        let snapshot_id = reading["snapshotId"].as_str().expect("snapshot id");
+        for body in [
+            json!({ "index": 0, "snapshotId": snapshot_id }).to_string(),
+            stale.clone(),
+        ] {
+            let (output, requests) = fixture.run_with_decisions(
+                mode,
+                "page-target",
+                "POST",
+                "/v1/click",
+                Some(&body),
+                &["https://example.test"],
+                &["allow_once"],
+            );
+            assert!(!output.status.success(), "{mode} ask mode");
+            assert!(
+                requests.is_empty(),
+                "{mode} prompted in ask mode: {requests:?}"
+            );
+        }
         assert!(
             !fixture.action_log().contains("\"type\":\"click\""),
             "{mode}"
@@ -13629,21 +13631,14 @@ fn a_cookie_banners_accept_is_refused_without_a_prompt_even_as_a_link() {
         // Routine browsing.
         let fixture = EmbeddedControllerFixture::new();
         let snapshot = fixture.routine_snapshot(mode);
+        assert_eq!(snapshot["interactiveElements"], json!([]), "{mode} routine");
+        assert_eq!(snapshot["omittedControls"], 1, "{mode} routine");
         let body = json!({ "index": 0, "snapshotId": snapshot["snapshotId"] }).to_string();
         let output = fixture
             .command_for(mode, "page-target", "POST", "/v1/click", Some(&body))
             .output()
             .expect("refused routine step");
         assert!(!output.status.success(), "{mode} routine");
-        assert!(
-            failure_of(&output).contains("[step_refused_consent]"),
-            "{mode} routine"
-        );
-        assert_eq!(
-            failed_step(&output.stdout).and_then(|failed| failed.refused),
-            Some("consent"),
-            "{mode} routine"
-        );
         assert!(
             !fixture.approval_dir.join("request.json").exists(),
             "{mode} routine"
@@ -13665,7 +13660,7 @@ fn a_cookie_banners_accept_is_refused_without_a_prompt_even_as_a_link() {
         assert!(!output.status.success(), "{mode} routine start");
         assert!(requests.is_empty(), "{mode} prompted on a routine start");
         assert!(
-            failure_of(&output).contains("[step_refused_consent]"),
+            !fixture.action_log().contains("\"type\":\"click\""),
             "{mode} routine start"
         );
     }
@@ -13766,7 +13761,7 @@ fn a_covered_click_is_refused_at_once_in_words() {
     for (mode, words) in [
         (
             "click-covered-by-notice",
-            "A cookie notice covers this page, and the browser could not decline it. If the task needs this page, pause on the notice's buttons with request_human_input in the chat's own tab: the person answers it there and chooses Let Octo continue. Otherwise open a link under it by its address, or the official site of the place or service the task is about.",
+            "A cookie notice covers this page, and the browser could not decline it. Open a link under it by its address, or the official site of the place or service the task is about.",
         ),
         (
             "click-covered",
@@ -13788,6 +13783,9 @@ fn a_covered_click_is_refused_at_once_in_words() {
         assert!(started.elapsed() < Duration::from_secs(5), "{mode} waited");
         let stderr = failure_of(&output);
         assert!(stderr.contains(words), "{mode}: {stderr}");
+        // A cookie notice is never the person's step: no cover's words send
+        // the turn to pause on it.
+        assert!(!stderr.contains("request_human_input"), "{stderr}");
         assert!(!stderr.contains("Call log"), "{stderr}");
         assert!(!stderr.contains("Timeout"), "{stderr}");
         assert_eq!(

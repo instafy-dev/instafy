@@ -784,7 +784,7 @@ fn reviews_are_never_guessed_addresses() {
 #[test]
 fn the_browser_skills_sign_in_and_secret_rules_end_inside_the_carried_bytes() {
     for rule in [
-        "- Treat sign-in, one-time codes, consent, payment and every secret (a password, payment detail, government identifier or recovery code) as the person's steps: never type them;",
+        "- Treat sign-in, one-time codes, payment and every secret (a password, payment detail, government identifier or recovery code) as the person's steps: never type them;",
         "- Opening, reading and navigating a signed-in site needs no extra confirmation in chat,",
         "- Never use a sign-in that belongs to someone else in this space; the person signs in to their own account themselves.",
     ] {
@@ -1844,7 +1844,7 @@ fn a_sign_in_the_person_asked_for_is_opened_and_paused_on() {
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     for needle in [
         "\"Finding a page\" says what comes next. Never retry that page another way. A sign-in the person asked for isn't one of these: open its sign-in page and pause (Core rules).",
-        "Treat sign-in, one-time codes, consent, payment and every secret (a password, payment detail, government identifier or recovery code) as the person's steps: never type them; pause on them with `request_human_input`, and continue when they choose Let Octo continue.",
+        "Treat sign-in, one-time codes, payment and every secret (a password, payment detail, government identifier or recovery code) as the person's steps: never type them; pause on them with `request_human_input`, and continue when they choose Let Octo continue.",
         "Never use a sign-in that belongs to someone else in this space; the person signs in to their own account themselves.",
     ] {
         assert!(carried.contains(needle), "{needle}");
@@ -2413,6 +2413,36 @@ fn a_routes_destination_is_the_stop_the_places_own_page_names() {
     fs::write(&skill, previous).unwrap();
     learn::ensure_project_memory_scaffold(tmp.path());
     assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
+}
+
+/// A cookie notice is never the person's step: the skill's line of the person's steps named consent beside sign-in and
+/// one-time codes, both browser turns of a local test (Nov 9) read it, and one paused on a notice's "Accept all" while
+/// another pressed a bar's accept and stopped. Consent leaves that line; sign-in, one-time codes, payment and secrets stay
+/// as they were, and no line of the skill asks to pause on a notice. An unedited earlier copy is upgraded.
+#[test]
+fn a_cookie_notice_is_never_one_of_the_persons_steps() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let skill = flat(BROWSER_SKILL);
+    assert!(skill.contains(
+        "- Treat sign-in, one-time codes, payment and every secret (a password, payment detail, government identifier or recovery code) as the person's steps: never type them; pause on them with `request_human_input`, and continue when they choose Let Octo continue."
+    ));
+    for line in BROWSER_SKILL
+        .lines()
+        .filter(|line| line.contains("request_human_input") || line.contains("person's steps"))
+    {
+        assert!(!line.contains("consent"), "{line}");
+        assert!(!line.contains("cookie"), "{line}");
+        assert!(!line.contains("notice"), "{line}");
+    }
+    let previous = include_str!("legacy/browser-automation-v40.md");
+    assert!(
+        previous.contains("- Treat sign-in, one-time codes, consent, payment and every secret")
+    );
+    let tmp = scaffolded_space();
+    let path = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&path, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&path).unwrap(), BROWSER_SKILL);
 }
 
 /// A banner's reject button was in the page's reading, and no turn pressed it: "Reject all" on a bookshop's page and
