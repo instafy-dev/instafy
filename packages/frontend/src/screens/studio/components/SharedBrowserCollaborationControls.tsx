@@ -5,6 +5,8 @@ import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { AiTag } from "../../../components/AiTag";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
+import { DARK_DIVIDER_BORDER_CLASS } from "../../../theme/darkSurfaces";
+import { BrowserStateBadge } from "./BrowserStateBadge";
 import type { SharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import {
   collaborationSelfOwnsControl,
@@ -253,20 +255,14 @@ export function SharedBrowserCollaborationControls({
       {statusLabel}
     </Text>
   ) : (
-    <span
-      className={`inline-flex h-7 min-w-0 items-center rounded-full border px-2 text-xxs font-medium ${
-        selfOwnsControl
-          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-          : agentDisplayName
-            ? "border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300"
-            : "border-slate-300/80 bg-slate-100/80 text-slate-600 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300"
-      }`}
+    <BrowserStateBadge
+      tone={selfOwnsControl ? "success" : agentDisplayName ? "agent" : "neutral"}
       data-testid="shared-browser-collaboration-control-state"
       role="status"
       title={statusLabel}
     >
       <span className="max-w-28 truncate">{statusLabel}</span>
-    </span>
+    </BrowserStateBadge>
   );
   const controlAction = action ? (
     <Button
@@ -384,7 +380,7 @@ export function SharedBrowserCollaborationControls({
                 </div>
               ) : null}
               {footerAction || children ? (
-                <div className={`space-y-2 ${participants.length || agentDisplayName ? "mt-3 border-t border-slate-200 pt-3 dark:border-slate-700" : "mt-2"}`}>
+                <div className={`space-y-2 ${participants.length || agentDisplayName ? `mt-3 border-t border-slate-200 pt-3 ${DARK_DIVIDER_BORDER_CLASS}` : "mt-2"}`}>
                   <div className="flex flex-wrap justify-end gap-2">
                     {footerAction}
                     {children}

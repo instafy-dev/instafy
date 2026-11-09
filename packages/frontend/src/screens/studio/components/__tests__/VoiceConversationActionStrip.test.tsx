@@ -65,8 +65,7 @@ describe("VoiceConversationActionStrip", () => {
           disabled={false}
           onVoicePressStart={onVoicePressStart}
           onVoicePressEnd={onVoicePressEnd}
-          primaryActionClassName="primary"
-          ghostActionClassName="ghost"
+          actionClassName="action"
           actionIconClassName="icon"
         />,
       );
@@ -124,8 +123,7 @@ describe("VoiceConversationActionStrip", () => {
           onVoicePressStart={onVoicePressStart}
           onVoicePressEnd={onVoicePressEnd}
           onVoiceTap={vi.fn()}
-          primaryActionClassName="primary"
-          ghostActionClassName="ghost"
+          actionClassName="action"
           actionIconClassName="icon"
         />,
       );
@@ -171,8 +169,7 @@ describe("VoiceConversationActionStrip", () => {
           onVoicePressStart={onVoicePressStart}
           onVoicePressEnd={onVoicePressEnd}
           onVoiceTap={vi.fn()}
-          primaryActionClassName="primary"
-          ghostActionClassName="ghost"
+          actionClassName="action"
           actionIconClassName="icon"
         />,
       );
@@ -215,8 +212,7 @@ describe("VoiceConversationActionStrip", () => {
           onVoicePressStart={onVoicePressStart}
           onVoicePressEnd={onVoicePressEnd}
           onVoiceTap={onVoiceTap}
-          primaryActionClassName="primary"
-          ghostActionClassName="ghost"
+          actionClassName="action"
           actionIconClassName="icon"
         />,
       );
@@ -261,8 +257,7 @@ describe("VoiceConversationActionStrip", () => {
           onVoicePressStart={onVoicePressStart}
           onVoicePressEnd={onVoicePressEnd}
           onVoiceTap={onVoiceTap}
-          primaryActionClassName="primary"
-          ghostActionClassName="ghost"
+          actionClassName="action"
           actionIconClassName="icon"
         />,
       );
@@ -305,8 +300,7 @@ describe("VoiceConversationActionStrip", () => {
           onVoicePressStart={() => {}}
           onVoicePressEnd={() => {}}
           onVoiceTap={onVoiceTap}
-          primaryActionClassName="primary"
-          ghostActionClassName="ghost"
+          actionClassName="action"
           actionIconClassName="icon"
         />,
       );

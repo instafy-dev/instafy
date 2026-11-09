@@ -138,7 +138,6 @@ function createProps({
     showComposerNavigationButton: false,
     onOpenNavigation: () => undefined,
     homeAttentionCount: 0,
-    homeAttentionBadge: "",
     composerActionMenuProps: {
       pendingNewBrowser: false,
       onOpenBrowser: () => undefined,
@@ -167,8 +166,6 @@ function createProps({
     sendButtonDisabled: affordances.sendButtonDisabled,
     sendButtonVariant: affordances.sendButtonVariant,
     onSendButtonPress: () => undefined,
-    composerGhostActionClass: affordances.composerGhostActionClass,
-    composerPrimaryActionClass: affordances.composerPrimaryActionClass,
     composerActionIconClass: affordances.composerActionIconClass,
     inviteModalProps: {} as never,
   };
@@ -239,7 +236,7 @@ describe("ChatComposerSurface compact controls", () => {
   }
 
   it.each([false, true])("keeps quiet controls in the shared ghost style (compact=%s)", async (compactBrowserViewport) => {
-    const props = await renderRow("", compactBrowserViewport);
+    await renderRow("", compactBrowserViewport);
     const ghost = await probeIconButton();
     expect(control("send")).toBeNull();
     expect(container.querySelector('[data-testid="chat-image-upload-button"]')).toBeNull();
@@ -247,7 +244,8 @@ describe("ChatComposerSurface compact controls", () => {
       const button = control(name);
       expect(button).not.toBeNull();
       expect(surfaceTokens(button)).toEqual(ghost.surface);
-      for (const token of props.composerGhostActionClass.split(/\s+/)) expect(classTokens(button).has(token)).toBe(true);
+      expect(classTokens(button).has("chat-composer-action")).toBe(true);
+      expect(button?.getAttribute("class")).not.toContain("[&_svg]:text-");
       expect(button?.getAttribute("class")).not.toMatch(/#[0-9a-f]{3,8}\b/i);
     }
     const wrapper = container.querySelector('[data-testid="chat-input"]')?.parentElement;
@@ -271,7 +269,7 @@ describe("ChatComposerSurface compact controls", () => {
     expect(micSize.some((token) => token.startsWith("pointer-coarse:min-h-"))).toBe(true);
     expect(micSize.some((token) => token.startsWith("pointer-coarse:min-w-"))).toBe(true);
 
-    const props = await renderRow("A message", compactBrowserViewport);
+    await renderRow("A message", compactBrowserViewport);
     const send = control("send");
     expect(control("mic")).toBeNull();
     expect(control("plus")).toBe(plus);
@@ -281,7 +279,8 @@ describe("ChatComposerSurface compact controls", () => {
     expect(targetSizeTokens(send)).toEqual(micSize);
     expect(glyphSizeTokens(send?.querySelector("svg") ?? null)).toEqual(glyphSize);
     expect(send?.querySelector("svg")?.getAttribute("stroke-width")).toBe(stroke);
-    for (const token of props.composerPrimaryActionClass.split(/\s+/)) expect(classTokens(send).has(token)).toBe(true);
+    expect(classTokens(send).has("chat-composer-action")).toBe(true);
+    expect([...classTokens(send)].some((token) => /(^|:)shadow-/.test(token))).toBe(false);
 
     await renderRow("", compactBrowserViewport);
     expect(control("send")).toBeNull();

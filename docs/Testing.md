@@ -1230,6 +1230,19 @@ Missing browser binaries fail explicitly. See the fixture README for interactive
 states, safe-area and text-size simulations. These checks do not replace native
 keyboard or Electron WebContentsView verification; report those separately.
 
+## Composer and browser shared-style review
+
+The [composer/browser feedback fixture](../packages/frontend/tests/fixtures/composer-browser-feedback/README.md)
+mounts the production composer actions, goal and recording panels, browser status
+marks and attached feedback with inert data boundaries. Its focused browser checks
+cover 320/390px touch and 768/1280px desktop in light and dark themes, plus keyboard
+activation, disabled actions, enlarged text and short landscape. Start its Vite
+server, then run the documented fixture configuration. The same fixture supports
+pre-change source loading for before/after comparisons without duplicating the UI.
+
+This is presentation and local-interaction evidence. It does not exercise audio
+capture, native keyboards, browser transport or controller persistence.
+
 ## Support workflow simulation
 
 The support component browser suite exercises the production profile menu, report composer,

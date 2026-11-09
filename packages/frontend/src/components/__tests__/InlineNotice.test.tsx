@@ -3,7 +3,7 @@ import { act, type FormEvent } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InlineNotice } from "../InlineNotice";
-import { Button } from "../Button";
+import { Button, IconButton } from "../Button";
 
 describe("InlineNotice", () => {
   let container: HTMLDivElement;
@@ -65,6 +65,28 @@ describe("InlineNotice", () => {
     expect(action.getAttribute("aria-describedby")).toBe(notice.id);
     await act(async () => action.click());
     expect(retry).toHaveBeenCalledOnce();
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("keeps attached feedback addressable and dismissal independent from recovery and form submission", async () => {
+    const retry = vi.fn();
+    const dismiss = vi.fn();
+    const submit = vi.fn((event: FormEvent) => event.preventDefault());
+    await act(async () => root.render(
+      <form onSubmit={submit}>
+        <InlineNotice appearance="bar" tone="danger" role="alert" id="browser-feedback"
+          actions={<Button preset="inline" onPress={retry}>Retry</Button>}
+          dismiss={<IconButton aria-label="Dismiss message" onPress={dismiss}>×</IconButton>}>
+          Unable to open this page. Your address draft is still available.
+        </InlineNotice>
+      </form>,
+    ));
+    const notice = container.querySelector('#browser-feedback')!;
+    expect(notice.getAttribute("role")).toBe("alert");
+    expect(notice.textContent).toContain("Your address draft is still available.");
+    await act(async () => notice.querySelector<HTMLButtonElement>('[aria-label="Dismiss message"]')!.click());
+    expect(dismiss).toHaveBeenCalledOnce();
+    expect(retry).not.toHaveBeenCalled();
     expect(submit).not.toHaveBeenCalled();
   });
 });

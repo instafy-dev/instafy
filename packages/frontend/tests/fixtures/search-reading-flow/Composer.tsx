@@ -44,7 +44,7 @@ export function Composer({ controller, aboveComposer, scrollbarInset }: {
           onKeyDown: event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); } } }}
         imageInputRef={image} onImageInputChange={noop} imageAttachments={imageAttachments} onOpenImage={noop} onRemoveImageAttachment={noop}
         showVoiceStatus={false} voiceStatusMessage="" providerTriggerNoticeProps={null}
-        showComposerNavigationButton={false} composerNavigationDestination="chats" onOpenNavigation={noop} homeAttentionCount={0} homeAttentionBadge=""
+        showComposerNavigationButton={false} composerNavigationDestination="chats" onOpenNavigation={noop} homeAttentionCount={0}
         composerActionMenuProps={{ pendingNewBrowser: false, onOpenBrowser: noop, onOpenNewBrowser: noop,
           onOpenInvite: noop, onImportGithubRepo: noop, onInsertCommand: value => { setDraft(value); setEditorState(null); },
           showBrowserAction: false, showNewBrowserAction: false, showInviteAction: false }}
@@ -56,8 +56,7 @@ export function Composer({ controller, aboveComposer, scrollbarInset }: {
           voiceRoute: "fixture", voiceCapture: "fixture", onVoicePressStart: noop, onVoicePressEnd: noop,
           onVoiceTap: noop, voiceInteractionMode: "tap" }}
         sendButtonDisabled={false} sendButtonVariant={draft.trim() ? "primary" : "ghost"}
-        onSendButtonPress={send} composerGhostActionClass="[&_svg]:text-slate-600 dark:[&_svg]:text-slate-300"
-        composerPrimaryActionClass="shadow-none" composerActionIconClass="h-[22px] w-[22px]"
+        onSendButtonPress={send} composerActionIconClass="h-[22px] w-[22px]"
         inviteModalProps={inviteModalProps}
         mutationDisabled={false} composerRunStopController={controller}
       />

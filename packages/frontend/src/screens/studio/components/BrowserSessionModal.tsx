@@ -69,6 +69,7 @@ import { useSharedBrowserCollaboration } from "./useSharedBrowserCollaboration";
 import { useSustainedFlag } from "./useSustainedFlag";
 import type { ChatBrowserTabOpening } from "./useChatBrowserView";
 import { BrowserIdentityBadge } from "./BrowserIdentityBadge";
+import { BrowserStateBadge } from "./BrowserStateBadge";
 import { BrowserSessionArrival, BrowserSessionRecovery, BrowserSessionReconnecting } from "./BrowserSessionRecovery";
 import { browserArrivalNote, type BrowserTurnArrival } from "./browserTurnArrival";
 import {
@@ -386,8 +387,8 @@ function BrowserSessionStatusPill({
   compact?: boolean;
 }) {
   if (status === "selecting") {
-    return <span className={`inline-flex h-7 shrink-0 items-center rounded-full border border-slate-300/80 bg-slate-100/80 text-xxs font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 ${compact ? "px-1.5" : "px-2"}`}
-      data-testid="browser-session-status" role="status" aria-live="polite">Choose session</span>;
+    return <BrowserStateBadge compact={compact}
+      data-testid="browser-session-status" role="status" aria-live="polite">Choose session</BrowserStateBadge>;
   }
   // A neutral label; the card says why in its one sentence.
   const state: BrowserChromeState =
@@ -412,15 +413,15 @@ function SharedBrowserControlOwnerPill({
 }) {
   const label = `${controlOwner.displayName} has control`;
   return (
-    <span
+    <BrowserStateBadge tone="agent"
       aria-live="polite"
-      className="inline-flex h-7 max-w-40 shrink-0 items-center rounded-full border border-violet-500/30 bg-violet-500/10 px-2 text-xxs font-medium text-violet-700 dark:text-violet-300"
+      className="max-w-40"
       data-testid="shared-browser-control-owner"
       role="status"
       title={label}
     >
       <span className="truncate">{label}</span>
-    </span>
+    </BrowserStateBadge>
   );
 }
 

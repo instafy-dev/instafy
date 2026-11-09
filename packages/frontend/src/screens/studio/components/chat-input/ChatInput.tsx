@@ -8,7 +8,7 @@ import { OnChangePlugin } from "@lexical/react/LexicalOnChangePlugin";
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
 import type { EditorState, LexicalEditor } from "lexical";
 import { $getRoot, $getSelection, $isRangeSelection } from "lexical";
-import { Microphone } from "iconoir-react";
+import { RecordingIndicator } from "../RecordingIndicator";
 import { AgentMentionNode } from "./AgentMentionNode";
 import { AssistantMentionNode } from "./AssistantMentionNode";
 import { $applyChatInputText } from "./chatInputState";
@@ -300,14 +300,12 @@ function ChatInputEditor(
           {value.length > 0 ? (
             <span className="whitespace-pre-wrap break-words text-transparent">{value}</span>
           ) : null}
-          <span
-            data-testid="chat-input-recording-indicator"
+          <RecordingIndicator
+            presentation="inline"
+            testId="chat-input-recording-indicator"
             title={recordingIndicatorLabel ?? "Recording"}
-            className="relative ml-0.5 inline-flex h-5 w-5 translate-y-[1px] items-center justify-center rounded-full border border-primary-300/70 bg-primary-500/10 align-baseline text-primary-600 shadow-[0_0_0_6px_rgba(59,130,246,0.08)] dark:border-primary-400/50 dark:bg-primary-400/10 dark:text-primary-200 dark:shadow-[0_0_0_6px_rgba(96,165,250,0.06)]"
-          >
-            <span className="absolute inset-0 rounded-full bg-primary-500/20 animate-ping dark:bg-primary-400/20" />
-            <Microphone className="relative h-3.5 w-3.5" />
-          </span>
+            className="ml-0.5 translate-y-[1px] align-baseline"
+          />
         </div>
       ) : null}
       <PlainTextPlugin
