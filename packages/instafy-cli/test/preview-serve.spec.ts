@@ -680,7 +680,7 @@ describe("instafy preview open --start picks the site's port, and close stops th
         }
       }
     };
-    const open = (params: { serveCmd: string; title?: string; port?: number; replace?: boolean; path?: string }) =>
+    const open = (params: { serveCmd?: string; cwd?: string; title?: string; port?: number; replace?: boolean; path?: string }) =>
       withEnv(async () => {
         const result = await previewOpen({
           project: ws.projectId,
@@ -690,8 +690,8 @@ describe("instafy preview open --start picks the site's port, and close stops th
           ...(params.path ? { path: params.path } : {}),
           title: params.title ?? "Site preview",
           ratholeBin: rathole,
-          serveCmd: params.serveCmd,
-          cwd: path.join(ws.root, "site"),
+          ...(params.serveCmd === undefined ? {} : { serveCmd: params.serveCmd }),
+          cwd: params.cwd ?? path.join(ws.root, "site"),
           start: true,
           startTimeoutMs: 15_000,
           thumbnail: false,
@@ -815,8 +815,142 @@ describe("instafy preview open --start picks the site's port, and close stops th
     const s = await space();
     const { message } = await failure(s.open({ serveCmd: `${node} site.mjs 4173 fixed` }));
     expect(message).toMatch(/--serve-cmd needs \{port\} where the site's port goes/);
+    expect(message).not.toMatch(/python/);
     expect(s.requests).toEqual([]);
   }, 30000);
+
+  /**
+   * An `instafy` on PATH that stands in for Instafy's page server: it writes down the arguments and the folder it was
+   * started with (`calls`), and answers on the port after `--port`.
+   */
+  function fakeInstafy() {
+    const dir = tempDir("instafy-fake-bin-");
+    const calls = path.join(dir, "calls");
+    fs.writeFileSync(
+      path.join(dir, "server.mjs"),
+      [
+        'import fs from "node:fs";',
+        'import http from "node:http";',
+        "const args = process.argv.slice(2);",
+        `fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ args, cwd: process.cwd() }) + "\\n");`,
+        'http.createServer((_req, res) => res.end("page")).listen(Number(args[args.indexOf("--port") + 1]), "127.0.0.1");',
+      ].join("\n"),
+    );
+    fs.writeFileSync(path.join(dir, "instafy"), `#!/bin/sh\nexec '${process.execPath}' '${path.join(dir, "server.mjs")}' "$@"\n`, { mode: 0o755 });
+    const saved = process.env.PATH;
+    process.env.PATH = `${dir}${path.delimiter}${saved ?? ""}`;
+    cleanups.push(() => {
+      process.env.PATH = saved;
+    });
+    return () =>
+      (fs.existsSync(calls) ? fs.readFileSync(calls, "utf8") : "")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { args: string[]; cwd: string });
+  }
+
+  /** A folder of the space's workspace holding `files`. */
+  function folderWith(root: string, folder: string, files: string[]): string {
+    const dir = path.join(root, folder);
+    fs.mkdirSync(dir, { recursive: true });
+    for (const file of files) fs.writeFileSync(path.join(dir, file), file === "site.mjs" ? SITE : "<h1>Hours</h1>");
+    return dir;
+  }
+
+  it("starts Instafy's page server for a page's folder with no toolchain when --serve-cmd is left out", async () => {
+    const s = await space();
+    const calls = fakeInstafy();
+    const page = folderWith(s.ws.root, "sites/hours", ["index.html"]);
+    const opened = await s.open({ cwd: page, title: "Bookshop hours" });
+    expect(opened.startedPid).toEqual(expect.any(Number));
+    // The binder's own serve command, from the page's folder, as `instafy bind card` runs it.
+    expect(calls()).toEqual([{ args: ["bind", "serve", ".", "--port", String(opened.port), "--preview"], cwd: page }]);
+    expect(s.bodies[0]!["serve"]).toEqual({
+      argv: ["instafy", "bind", "serve", ".", "--port", String(opened.port), "--preview"],
+      cwd: "sites/hours",
+    });
+    // The space's record of its pages names Instafy's page server, which is what lists the page in later turns.
+    const record = JSON.parse(fs.readFileSync(path.join(s.ws.root, ".instafy", "pages", "pages.json"), "utf8")) as {
+      pages: Array<Record<string, unknown>>;
+    };
+    expect(record.pages).toEqual([expect.objectContaining({ folder: "sites/hours", title: "Bookshop hours", server: ["instafy", "bind"] })]);
+  }, 60000);
+
+  it("still needs --serve-cmd anywhere that is not a page's folder with no toolchain", async () => {
+    const s = await space();
+    const calls = fakeInstafy();
+    for (const cwd of [
+      folderWith(s.ws.root, "sites/app", ["index.html", "package.json"]),
+      folderWith(s.ws.root, "sites/empty", ["notes.txt"]),
+      folderWith(s.ws.root, "sites/gallery/first", ["index.html"]),
+      folderWith(s.ws.root, "site", ["index.html"]),
+      folderWith(s.ws.root, ".", ["index.html"]),
+    ]) {
+      const refused = await failure(s.open({ cwd }));
+      expect(refused.exitCode, cwd).toBe(2);
+      expect(refused.message, cwd).toBe('--start needs --serve-cmd "<command>" to start the site.');
+    }
+    expect(calls()).toEqual([]);
+    expect(s.requests).toEqual([]);
+  }, 30000);
+
+  it("still needs --serve-cmd in a page's folder another command serves, and starts no second server there", async () => {
+    const s = await space();
+    const calls = fakeInstafy();
+    const record = path.join(s.ws.root, ".instafy", "pages", "pages.json");
+    const refusedIn = async (cwd: string) => {
+      const requests = s.requests.length;
+      const refused = await failure(s.open({ cwd, title: "Trip" }));
+      expect(refused.exitCode).toBe(2);
+      expect(refused.message).toBe('--start needs --serve-cmd "<command>" to start the site.');
+      expect(calls()).toEqual([]);
+      expect(s.requests.length).toBe(requests);
+    };
+
+    // A preview of this space started in the folder with the site's own command: the site runs, and its row in the
+    // space's record of its pages is gone (a new disk, say).
+    const running = folderWith(s.ws.root, "sites/trip", ["index.html", "site.mjs"]);
+    const first = await s.open({ cwd: running, serveCmd: `${node} site.mjs {port} own`, title: "Trip" });
+    fs.rmSync(record);
+    await refusedIn(running);
+    expect(await (await fetch(`http://127.0.0.1:${first.port}/`)).text()).toBe("own");
+    expect(s.state().previews).toHaveLength(1);
+    expect(fs.existsSync(record)).toBe(false);
+
+    // The record names the command that serves the folder: its site has stopped and no preview shows it.
+    const stopped = folderWith(s.ws.root, "sites/walk", ["index.html", "site.mjs"]);
+    const second = await s.open({ cwd: stopped, serveCmd: `${node} site.mjs {port} own`, title: "Walk" });
+    await s.close(second.previewId);
+    await until("the site to stop", () => !isAlive(second.startedPid!));
+    const before = fs.readFileSync(record, "utf8");
+    expect(JSON.parse(before).pages).toEqual([expect.objectContaining({ folder: "sites/walk", server: [path.basename(process.execPath), "site.mjs"] })]);
+    await refusedIn(stopped);
+    expect(fs.readFileSync(record, "utf8")).toBe(before);
+    expect(await answers(second.port)).toBe(false);
+  }, 60000);
+
+  it("uses the page server already running in a page's folder, however its card was first opened", async () => {
+    const s = await space();
+    const calls = fakeInstafy();
+    const page = folderWith(s.ws.root, "sites/hours", ["index.html"]);
+    // As `instafy bind card` opens it.
+    const first = await s.open({ cwd: page, serveCmd: "instafy bind serve . --port {port} --preview", title: "Bookshop hours" });
+    const again = await s.open({ cwd: page, title: "Bookshop hours" });
+    expect(again.port).toBe(first.port);
+    expect(again.previewId).toBe(first.previewId);
+    expect(again.startedPid).toBeNull();
+    expect(calls()).toHaveLength(1);
+  }, 60000);
+
+  it("runs a --serve-cmd as given in a page's folder too", async () => {
+    const s = await space();
+    const calls = fakeInstafy();
+    const page = folderWith(s.ws.root, "sites/hours", ["index.html", "site.mjs"]);
+    const opened = await s.open({ cwd: page, serveCmd: `${node} site.mjs {port} own` });
+    expect(await (await fetch(`http://127.0.0.1:${opened.port}/`)).text()).toBe("own");
+    expect(s.bodies[0]!["serve"]).toEqual({ argv: [process.execPath, "site.mjs", String(opened.port), "own"], cwd: "sites/hours" });
+    expect(calls()).toEqual([]);
+  }, 60000);
 
   it("asks the server to show the site in place of another one only with --replace", async () => {
     const s = await space();

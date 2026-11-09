@@ -2297,7 +2297,7 @@ previewOpenCommand
   )
   .option(
     "--start",
-    "Start --serve-cmd in the background, in its own session, without Instafy credentials, logging to .instafy/agent/logs, and wait for the port. Without --port it picks a free port (this same site's earlier one, when it has one) and puts it in {port}. A port where this same site already runs is used as it is; one where another site runs is refused",
+    "Start --serve-cmd in the background, in its own session, without Instafy credentials, logging to .instafy/agent/logs, and wait for the port. Without --serve-cmd, in a page's folder that no other command serves (sites/<name>, with an index.html and no package.json), it starts Instafy's page server there (instafy bind serve). Without --port it picks a free port (this same site's earlier one, when it has one) and puts it in {port}. A port where this same site already runs is used as it is; one where another site runs is refused",
   )
   .option(
     "--replace",
