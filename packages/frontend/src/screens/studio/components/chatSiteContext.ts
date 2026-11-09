@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, createElement, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import type { ChatMessage } from "../types";
 import { getMessageType } from "./chatMessageMetadata";
 import { extractAgentJobId } from "./chatMessagePresentation";
@@ -76,6 +76,49 @@ export function useKnownChatSite(site: ChatSite | null, historyReady: boolean, c
     return () => window.clearTimeout(timer);
   }, [chatKey, historyReady, settled]);
   return historyReady || settled ? site : undefined;
+}
+
+/**
+ * How long the chat's history must have stayed in before a page with no card
+ * in it is called "a page". History reads as in for a moment before Studio
+ * measures the window and asks for an older page by itself, and the page's
+ * card may be in that one.
+ */
+export const CHAT_HISTORY_SETTLE_MS = 500;
+
+/**
+ * Whether the chat's cards are all here, so a page none of them names has no
+ * title to wait for: until then its row shows no words rather than "a page"
+ * and then its title. True outside a chat.
+ */
+export const ChatSiteSettledContext = createContext(true);
+
+export function useChatSiteSettled(): boolean {
+  return useContext(ChatSiteSettledContext);
+}
+
+/**
+ * Settles once the chat's history has stayed in for CHAT_HISTORY_SETTLE_MS,
+ * or has not come for CHAT_HISTORY_WAIT_MS (a failed load must not leave a
+ * row without words), and from then on for that chat. Its own component, so
+ * settling draws the rows that wait again and no other.
+ */
+export function ChatSiteSettledProvider({ historyReady, chatKey, children }: {
+  historyReady: boolean;
+  chatKey: string | null;
+  children: ReactNode;
+}) {
+  const [settledFor, setSettledFor] = useState<{ chatKey: string | null } | null>(null);
+  const settled = settledFor?.chatKey === chatKey;
+  useEffect(() => {
+    if (settled) return;
+    const timer = window.setTimeout(
+      () => setSettledFor({ chatKey }),
+      historyReady ? CHAT_HISTORY_SETTLE_MS : CHAT_HISTORY_WAIT_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [chatKey, historyReady, settled]);
+  return createElement(ChatSiteSettledContext.Provider, { value: settled }, children);
 }
 
 /** The page a file is in, by its folder's name, when it is in one (`sites/<name>/…`, where the space's pages are made). */

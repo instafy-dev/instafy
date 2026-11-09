@@ -43,7 +43,7 @@ import {
   unsavedWorkPlacementFor,
 } from "./versioningCopy";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
-import { pageFolderOf, useChatSite, type ChatSite } from "./chatSiteContext";
+import { pageFolderOf, useChatSite, useChatSiteSettled, type ChatSite } from "./chatSiteContext";
 import { normalizeUndonePath, useChatLaterChanges } from "./chatLaterChanges";
 import { isFolderRevertablePath, runtimeFolderOriginId, undoFolderRuntimeId } from "./unsavedChangeRevert";
 
@@ -421,6 +421,7 @@ export function ChatFileChangeList({
   // it (below), so it never names its page one way, then another.
   const chatSiteOrPending = useChatSite();
   const chatSite = chatSiteOrPending ?? null;
+  const chatSiteSettled = useChatSiteSettled();
   // The turn that made the site: the one that opened its card, or the chat's
   // first change. A later turn whose files are all new (a page added, a list
   // written) changed the site.
@@ -568,6 +569,13 @@ export function ChatFileChangeList({
 
   const siteLabel = revertedCount === 0 ? siteChangeLabel(chatSite, madeSite, madeTheSite, files) : null;
   const siteSummary = siteLabel !== null;
+  // A page's row says nothing until its words are known: its title and
+  // "Created" or "Changed" come from the page's card, which the chat's history
+  // may still be bringing. Once the cards are all here, a page none of them
+  // names (deleted, or another chat's) reads "a page".
+  const pageOfTheFiles = siteSummary ? pageOfFiles(resolvedFiles) : null;
+  const pageWordsPending = pageOfTheFiles !== null &&
+    (chatSiteOrPending === undefined || (!chatSiteSettled && !chatSite?.pageTitles.has(pageOfTheFiles)));
   // The chat's site can show up after these files did (a later turn opened its
   // card): its files then fold behind the site's line, unless the person opened them.
   // So do the files of a change that is undone, behind "Undone", before the row
@@ -1564,7 +1572,8 @@ export function ChatFileChangeList({
   // The chat's history is still coming in, and a card in it may name these
   // files' page or site: the row waits for it rather than read one way, then
   // another.
-  if (chatSiteOrPending === undefined) {
+  // A page's row keeps its place meanwhile, without words (below).
+  if (chatSiteOrPending === undefined && !pageWordsPending) {
     return null;
   }
 
@@ -1586,8 +1595,19 @@ export function ChatFileChangeList({
               aria-controls={`${cardIdBase}-files`}
               title={railExpanded ? "Hide files" : "Show files"}
               data-testid="chat-file-change-toggle-files"
+              aria-busy={pageWordsPending || undefined}
             >
-              <span className="truncate">{compactSummaryLabel}</span>
+              {pageWordsPending ? (
+                <>
+                  <span className="sr-only">Loading…</span>
+                  <span
+                    className="h-2 w-28 shrink-0 animate-pulse rounded-full bg-slate-200 dark:bg-white/[0.10]"
+                    aria-hidden="true"
+                  />
+                </>
+              ) : (
+                <span className="truncate">{compactSummaryLabel}</span>
+              )}
               {siteSummary ? null : totals && (pendingCount > 1 || !railExpanded) ? (
                 <LineDelta added={totals.added} removed={totals.removed} />
               ) : !railExpanded && statsLoading ? (

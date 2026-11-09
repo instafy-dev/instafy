@@ -381,10 +381,13 @@ function BrowserSessionStatusPill({
   status,
   view,
   compact = false,
+  waitingForYou = false,
 }: {
   status: BrowserSessionStatus;
   view: HostedBrowserViewState;
   compact?: boolean;
+  /** A pause waits for this person, who holds the browser, to let Octo continue. */
+  waitingForYou?: boolean;
 }) {
   if (status === "selecting") {
     return <BrowserStateBadge compact={compact}
@@ -392,8 +395,8 @@ function BrowserSessionStatusPill({
   }
   // A neutral label; the card says why in its one sentence.
   const state: BrowserChromeState =
-    view.kind === "live" ? "ready" : view.kind === "opening" ? "starting" : "off";
-  const detail = view.kind === "live" ? "Instafy's browser is open." : view.sentence;
+    view.kind === "live" ? (waitingForYou ? "waiting" : "ready") : view.kind === "opening" ? "starting" : "off";
+  const detail = state === "waiting" ? null : view.kind === "live" ? "Instafy's browser is open." : view.sentence;
   return (
     <BrowserStatusPill
       compact={compact}
@@ -3578,6 +3581,9 @@ export function BrowserSessionModal({
   const humanInputRowShown = !shouldCollapseDocked && Boolean(humanInputIdentityKey) &&
     browserHumanInputState.active && effectiveAgentControlOwner === null;
   const humanInputCanContinue = canLetOctoContinue({ ...browserHumanInputOptions, state: browserHumanInputState });
+  // Through a pause this person can end, the toolbar says who it waits for,
+  // in the reading row's words for a prompt, until they let Octo continue.
+  const pauseWaitsForYou = humanInputRowShown && humanInputCanContinue && Boolean(browserHumanInputState.request);
   const humanInputControls = !shouldCollapseDocked && humanInputIdentityKey
     ? <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} continueInRow={humanInputRowShown} /> : null;
   const panelContent = renderCollapsedConnectedIntoShelf ? (
@@ -3615,7 +3621,7 @@ export function BrowserSessionModal({
             {effectiveAgentControlOwner ? (
               <SharedBrowserControlOwnerPill controlOwner={effectiveAgentControlOwner} />
             ) : quietReattach ? null : (
-              <BrowserSessionStatusPill status={displayStatus} view={viewState} />
+              <BrowserSessionStatusPill status={displayStatus} view={viewState} waitingForYou={pauseWaitsForYou} />
             )}
             {toolbarLeading || locationOptions ? null : (
               <BrowserIdentityBadge className={fillContainer ? "inline-flex" : "hidden sm:inline-flex"} />
@@ -3678,7 +3684,7 @@ export function BrowserSessionModal({
           toolbarLeading={toolbarLeading}
           toolbarStatus={quietReattach ? null : (
             <span className={sharedBrowserChrome.compact ? "sr-only" : undefined}>
-              <BrowserSessionStatusPill status={displayStatus} view={viewState} />
+              <BrowserSessionStatusPill status={displayStatus} view={viewState} waitingForYou={pauseWaitsForYou} />
             </span>
           )}
         />

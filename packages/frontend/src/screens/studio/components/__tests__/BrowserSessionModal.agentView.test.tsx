@@ -161,12 +161,14 @@ type HostProps = {
   pageTitle?: string | null;
   /** Whether the browser says the page is still on its way. */
   pageLoading?: boolean;
+  /** Another space, whose browser this view has not shown before. */
+  project?: string;
 };
 
 /** Studio's part: tabs are read only while the view is opening or live. */
 function Host({ agentHolds, viewOnly = false, conversationId = "chat-a", pageUrl = "https://www.visitlisboa.com/",
   agentPageIds, hidden = false, compact = false, pausedRunId, earlierRunIds = [], teammates = false, onContinue,
-  pageTitle, pageLoading }: HostProps) {
+  pageTitle, pageLoading, project = projectId }: HostProps) {
   const [kind, setKind] = useState<HostedBrowserViewKind | null>(null);
   const pagesActive = hostedBrowserPagesActive(kind);
   const [ready, setReady] = useState(false);
@@ -183,7 +185,7 @@ function Host({ agentHolds, viewOnly = false, conversationId = "chat-a", pageUrl
     ? [{ id: "PAGE1", label: host, title: pageTitle === undefined ? host : pageTitle, lastReferencedAt: 0, host,
       url: pageUrl, isActive: true, ...(pageLoading === undefined ? {} : { loading: pageLoading }) }]
     : [];
-  return <BrowserSessionModal isOpen onOpenChange={noop} projectId={projectId} currentUserId="user-1"
+  return <BrowserSessionModal isOpen onOpenChange={noop} projectId={project} currentUserId="user-1"
     browserSessionId="browser-session-1" preferRuntimeId={null} resumeRuntimeId={runtimeId}
     presentation="docked" fillContainer canControlBrowser canClearBrowserData transportActive={!hidden}
     controlOwner={agentHolds ? { kind: "agent", displayName: "Octo" } : { kind: "human" }}
@@ -573,6 +575,47 @@ describe("Shared Browser view while Octo drives", () => {
     expect(onContinue).toHaveBeenCalledExactlyOnceWith(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);
     expect(server.sent).not.toContain("takeControl");
     expect(pauseRow()).toBeNull();
+  });
+
+  // The toolbar said "Ready" through a pause: the browser was, the turn was not.
+  const toolbarStatus = () => document.querySelector('[data-testid="browser-chrome-context-row"] [data-testid="browser-session-status"]');
+  /** The browser comes up: its lane connects and paints a frame. */
+  async function browserComesUp() {
+    const lane = mocks.rfb.at(-1)!;
+    await act(async () => { lane.listeners.connect?.(); lane.frame(); });
+    await advance(100);
+  }
+
+  it("says Waiting for you on the toolbar through a pause, once the browser is up, until the person lets Octo continue", async () => {
+    const onContinue = vi.fn(async () => true);
+    mocks.actions = pauseAfterCard();
+    // A space whose browser has not been up before: a real start.
+    await act(async () => root.render(<Host agentHolds={false} project="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+      pausedRunId={PAUSE_RUN} earlierRunIds={[CARD_RUN]} onContinue={onContinue} />));
+    await advance(1_000);
+    // Starting is still starting, pause or not: the view says so, the toolbar tells a screen reader.
+    expect(toolbarStatus()?.textContent).toBe("Starting…");
+    expect(toolbarStatus()?.className).toBe("sr-only");
+    await browserComesUp();
+    // On screen, not only for a screen reader, and announced as a status.
+    expect(toolbarStatus()?.textContent).toBe("Waiting for you");
+    expect(toolbarStatus()?.closest(".sr-only")).toBeNull();
+    expect(toolbarStatus()?.getAttribute("role")).toBe("status");
+    await act(async () => continueButtons()[0]!.click());
+    await advance(50);
+    expect(pauseRow()).toBeNull();
+    expect(toolbarStatus()?.textContent).toBe("Ready");
+  });
+
+  it("never says Waiting for you on the toolbar while a teammate holds the browser through the pause", async () => {
+    mocks.actions = pauseAfterCard();
+    server.teammate = true;
+    server.owner = { kind: "human", participantId: "teammate" };
+    await act(async () => root.render(<Host agentHolds={false} viewOnly pausedRunId={PAUSE_RUN} earlierRunIds={[CARD_RUN]} onContinue={vi.fn(async () => true)} />));
+    await advance(1_000);
+    await browserComesUp();
+    expect(pauseRow()).not.toBeNull();
+    expect(toolbarStatus()?.textContent).toBe("Ready");
   });
 
   it("takes control of a browser nobody holds before it continues, and says when the browser does not answer", async () => {
