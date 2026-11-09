@@ -307,11 +307,13 @@ function pageOfFiles(entries: ResolvedChatFileChange[]): string | null {
 /**
  * What the row says for a page's or a site's files, never a file count or the
  * lines in them. Files that are all one page's name that page, in every chat,
- * by the title its card in this chat gives it, else by its folder ("Changed
- * Three days in Seville", "Changed framework-laptops"), never a file in it
- * ("data.json"). Other files of the chat's site read "Changed the site".
- * Either reads "Created" for the turn that made the site, when it created
- * every one of them. Null when the files are no site's.
+ * by the title its card in this chat gives it ("Changed Three days in
+ * Seville"), else as a page ("Changed a page"): never by its folder's name,
+ * which is no word of the person's, also while the chat's cards are still
+ * coming in, and never by a file in it ("data.json"). Other files of the
+ * chat's site read "Changed the site". Either reads "Created" for the turn
+ * that made the site, when it created every one of them. Null when the files
+ * are no site's.
  */
 function siteChangeLabel(
   site: ChatSite | null,
@@ -329,7 +331,7 @@ function siteChangeLabel(
     return null;
   }
   const verb = hasSite && madeTheSite && entries.every((entry) => entry.file.changeType === "created") ? "Created" : "Changed";
-  return page === null ? `${verb} the site` : `${verb} ${site?.pageTitles.get(page) ?? page}`;
+  return page === null ? `${verb} the site` : `${verb} ${site?.pageTitles.get(page) ?? "a page"}`;
 }
 
 function resolveChangeSetVerb(entries: ResolvedChatFileChange[]): string {

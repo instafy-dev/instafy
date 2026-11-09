@@ -56,8 +56,9 @@ space. They are not sent to other participants or restored on another device; at
 and file contents are not included.
 
 **Browser options** (the toolbar's three-dot button) opens sessions, a **Copy resume link**
-action and browser-data controls. The raw resume link, runtime identity and login-recovery
-status are under **Session details**; no extra session row is shown while browsing. The link contains
+action and browser-data controls. The sessions, **Copy resume link** and login-recovery
+status are under **Advanced**; no extra session row is shown while browsing. The link itself
+shows as text only when copying it fails, to select and copy by hand. The link contains
 only the space and runtime UUIDs; it grants no access
 and transfers no cookies, webpage URL, field values or browser-control token.
 Open it while signed in on another device to request that exact live Shared

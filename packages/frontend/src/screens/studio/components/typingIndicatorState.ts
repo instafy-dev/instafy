@@ -220,11 +220,13 @@ function outcomeNamesRun(outcomeIds: readonly string[], run: RunRecord): boolean
 
 /**
  * Whether the newest row is a routed card that stands for its browser turn:
- * Studio sent the person's words on by itself, and that turn has shown
- * nothing yet (the fold's waiting cards, routedBrowserFold.ts).
+ * Studio sent the person's words on by itself, and that turn, or the
+ * building turn it handed them to, has shown nothing yet (the fold's waiting
+ * cards, routedBrowserFold.ts).
  */
 function isRoutedCardStandingIn(card: ChatMessage, messages: readonly ChatMessage[]): boolean {
-  return isRoutedBrowserCard(card) && routedBrowserWaitingKeys(messages).has(browserRequestKey(card));
+  // Read only while the typing row shows, so a turn of the chat is on its way.
+  return isRoutedBrowserCard(card) && routedBrowserWaitingKeys(messages, true).has(browserRequestKey(card));
 }
 
 /**
@@ -236,10 +238,11 @@ function isRoutedCardStandingIn(card: ChatMessage, messages: readonly ChatMessag
  *   shown nothing yet: it reads "Trying again…". So is a browser turn whose
  *   hand-back has shown nothing yet: that hand-back's turn is the same row's
  *   (routedBrowserFold.ts), never a "Starting…" under it. So is a routed card whose
- *   browser turn is on its way: it is that turn's one line, "Opening
- *   Instafy's browser…", until the turn shows something (routedBrowserFold.ts),
- *   and covers the typing row as that turn's own row then does, whatever else
- *   runs; a "Starting…" under it was a second Octo for the same turn.
+ *   browser turn is on its way: it is that turn's one line, "Thinking…", until
+ *   the turn shows something, or until the building turn it handed the
+ *   message to does (routedBrowserFold.ts), and covers the typing row as that
+ *   turn's own row then does, whatever else runs; a "Starting…" under it was
+ *   a second Octo for the same turn.
  * - `answered`: the row is the turn's reply (inside its job thread, a plain
  *   reply when the turn used no tools, or a routed card), and every run still
  *   marked active is that turn's own run, whose record has not caught up yet.

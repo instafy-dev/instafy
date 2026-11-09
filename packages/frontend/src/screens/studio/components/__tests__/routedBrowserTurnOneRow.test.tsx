@@ -14,6 +14,7 @@ import {
   type BrowserRequestCardState,
   type BrowserRequestHost,
 } from "../browserRequest";
+import { BROWSER_BUILD_REQUEST_NOTE_KEY, BROWSER_HAND_BACK_RECORD_KEY } from "../browserHandBack";
 import { resolveTypingAgentLanes, type AssistantTypingAgent } from "../chatAssistantIdentity";
 import { ChatTypingRows } from "../ChatTypingRows";
 import { collapseLifecycleMessages, shouldDisplayChatMessage, synthesizeAgentJobThreadMessages } from "../chatMessagePresentation";
@@ -235,7 +236,161 @@ const routingRun = (status: RunRecord["status"]) => run(ROUTING_RUN, ROUTING_JOB
 const browserRun = (status: RunRecord["status"]) =>
   run(BROWSER_RUN, BROWSER_JOB, status, { browserTransport: "shared", browserRequestOf: CARD_KEY });
 
+// A message that asks Octo to make something can go to the browser first:
+// its browser turn opened no page and handed the person's words to the
+// building turn (the runtime's build request note), and the controller sent
+// that hand-back itself. A local test, Nov 9: "Put the hours and the metro
+// route on a small page I can share." read "Opening Instafy's browser…" for
+// 13.3 seconds, though no page ever opened, then the typing row's "Starting…"
+// for 4.8 seconds, until the building turn's first step. Below are that
+// chat's rows in their order, with their roles, metadata and times (the ids
+// are new, and the date is the visit chat's).
+const PAGE_WORDS = "Put the hours and the metro route on a small page I can share.";
+const PAGE_ROUTING_RUN = "5ed03129-0000-4000-8000-000000000001";
+const PAGE_ROUTING_JOB = "5ed03129-0000-4000-8000-000000000002";
+const PAGE_BROWSER_RUN = "5ed03129-0000-4000-8000-000000000003";
+const PAGE_BROWSER_JOB = "5ed03129-0000-4000-8000-000000000004";
+const PAGE_BUILDING_RUN = "5ed03129-0000-4000-8000-000000000005";
+const PAGE_BUILDING_JOB = "5ed03129-0000-4000-8000-000000000006";
+const PAGE_CARD_KEY = `job:${PAGE_ROUTING_JOB}`;
+const PAGE_CHAT: ChatMessage[] = [
+  stored({
+    id: "5ed03129-0000-4000-8000-0000000000a1",
+    role: "user",
+    runId: PAGE_ROUTING_RUN,
+    time: "01:11:27.011",
+    content: PAGE_WORDS,
+    metadata: {
+      intent: "feature",
+      prompt_metadata: {
+        client: { userId: PERSON, sessionId: "session-1" },
+        agentSelection: { active: ["octo"], mentions: [] },
+        clientMessageId: "5ed03129-0000-4000-8000-0000000000b1",
+        conversationId: CONVERSATION,
+      },
+    },
+  }),
+  stored({
+    id: "5ed03129-0000-4000-8000-0000000000a2",
+    role: "assistant",
+    runId: PAGE_ROUTING_RUN,
+    time: "01:11:33.334",
+    content: "Continue this task in Instafy's browser.",
+    metadata: {
+      kind: "update",
+      agent: OCTO,
+      jobId: PAGE_ROUTING_JOB,
+      source: "agent",
+      outcome: "in_progress",
+      messageType: "action_request",
+      details: {
+        kind: "runtime_selection",
+        source: "conversation",
+        messageType: "action_request",
+        details: {
+          title: "Continue in Instafy's browser",
+          testId: "browser-request-card",
+          actions: [{
+            id: "continue-browser", event: "instafy:request-browser", label: "Open browser and continue",
+            testId: "browser-request-continue", variant: "primary", busyLabel: "Opening browser…",
+          }],
+          browserRequest: { task: PAGE_WORDS, routed: true, location: "auto" },
+        },
+      },
+    },
+  }),
+  stored({
+    id: "5ed03129-0000-4000-8000-0000000000a3",
+    role: "user",
+    runId: PAGE_BROWSER_RUN,
+    time: "01:11:33.864",
+    content: PAGE_WORDS,
+    metadata: {
+      intent: "feature",
+      prompt_metadata: {
+        client: { userId: PERSON, sessionId: "session-1" },
+        agentSelection: { active: ["octo"], mentions: [] },
+        browserCardTurn: { routed: true, version: 1, cardJobId: PAGE_ROUTING_JOB },
+        clientMessageId: "5ed03129-0000-4000-8000-0000000000b2",
+        conversationId: CONVERSATION,
+        browserPageUrl: "about:blank",
+        browserRequestOf: PAGE_CARD_KEY,
+        browserTransport: "shared",
+        browserAutoStarted: true,
+      },
+    },
+  }),
+  // The browser turn's note in place of a reply, and its blank completion.
+  stored({
+    id: "5ed03129-0000-4000-8000-0000000000a4",
+    role: "assistant",
+    runId: PAGE_BROWSER_RUN,
+    time: "01:11:46.741",
+    content: "Octo opened no page in the browser: it makes this in the chat.",
+    metadata: {
+      kind: "update",
+      agent: OCTO,
+      jobId: PAGE_BROWSER_JOB,
+      source: "agent",
+      outcome: "in_progress",
+      messageType: "status",
+      details: { kind: "agent_message", [BROWSER_BUILD_REQUEST_NOTE_KEY]: { version: 1 } },
+    },
+  }),
+  stored({
+    id: "5ed03129-0000-4000-8000-0000000000a5",
+    role: "assistant",
+    runId: PAGE_BROWSER_RUN,
+    time: "01:11:46.790",
+    content: "",
+    metadata: { agent: OCTO, jobId: PAGE_BROWSER_JOB, source: "agent", outcome: "succeeded", details: { kind: "runtime_selection" } },
+  }),
+  // The controller's hand-back, in the person's name.
+  stored({
+    id: "5ed03129-0000-4000-8000-0000000000a6",
+    role: "user",
+    runId: PAGE_BUILDING_RUN,
+    time: "01:11:46.888",
+    content: "Continue building with what the browser turn found.",
+    metadata: {
+      intent: "feature",
+      prompt_metadata: {
+        agentSelection: { active: ["octo"], mentions: ["octo"] },
+        clientMessageId: `browser-build-request:${PAGE_BROWSER_JOB}`,
+        displayContent: "Octo continued in the chat",
+        [BROWSER_HAND_BACK_RECORD_KEY]: { browserJobId: PAGE_BROWSER_JOB },
+      },
+    },
+  }),
+  // The building turn's first step.
+  stored({
+    id: "5ed03129-0000-4000-8000-0000000000a7",
+    role: "assistant",
+    runId: PAGE_BUILDING_RUN,
+    time: "01:11:51.618",
+    content: "/bin/bash -lc 'ls sites'",
+    metadata: {
+      kind: "update",
+      agent: OCTO,
+      jobId: PAGE_BUILDING_JOB,
+      source: "agent",
+      outcome: "in_progress",
+      messageType: "command_execution",
+      details: { status: "in_progress", eventType: "item.started", itemId: "exec-page-1" },
+    },
+  }),
+];
+const pageRoutingRun = (status: RunRecord["status"]) => run(PAGE_ROUTING_RUN, PAGE_ROUTING_JOB, status);
+const pageBrowserRun = (status: RunRecord["status"]) =>
+  run(PAGE_BROWSER_RUN, PAGE_BROWSER_JOB, status, { browserTransport: "shared", browserRequestOf: PAGE_CARD_KEY });
+const pageBuildingRun = (status: RunRecord["status"]) => run(PAGE_BUILDING_RUN, PAGE_BUILDING_JOB, status);
+const OCTO_RUNS = [ROUTING_RUN, BROWSER_RUN, PAGE_ROUTING_RUN, PAGE_BROWSER_RUN, PAGE_BUILDING_RUN];
+
 type Step = {
+  /** The chat's stored rows: the visit chat's unless said. */
+  chat?: ChatMessage[];
+  /** The routed card Studio's own start speaks for. */
+  cardKey?: string;
   /** When, as the chat's rows and runs say. */
   time: string;
   /** The chat's runs that have not ended, as Studio holds them then. */
@@ -253,11 +408,11 @@ type Step = {
  */
 function chatPanel(step: Step) {
   const now = Date.parse(at(step.time));
-  const messages = CHAT.filter((message) => message.timestamp <= now);
+  const messages = (step.chat ?? CHAT).filter((message) => message.timestamp <= now);
   const collapsed = collapseLifecycleMessages(messages);
-  const displayed = synthesizeAgentJobThreadMessages(collapsed, collapsed.filter(shouldDisplayChatMessage));
-  const tail = displayed.at(-1);
   const isAssistantTyping = step.runs.length > 0 || step.awaitingLease === true;
+  const displayed = synthesizeAgentJobThreadMessages(collapsed, collapsed.filter(shouldDisplayChatMessage), isAssistantTyping);
+  const tail = displayed.at(-1);
   const coverage = isAssistantTyping ? resolveJobThreadTypingCoverage(tail, step.runs, messages) : "none";
   // Who the typing row speaks for, as ChatPanel works it out: one lane per AI
   // at work (the newest run first), Octo while a send waits for its run.
@@ -295,9 +450,9 @@ function chatPanel(step: Step) {
     transport: "shared",
     personalAvailable: false,
     sharedUnavailable: false,
-    cardStates: new Map(step.card ? [[CARD_KEY, step.card]] : []),
+    cardStates: new Map(step.card ? [[step.cardKey ?? CARD_KEY, step.card]] : []),
     continuedKeys: browserRequestContinuedKeys(messages),
-    routedWaitingKeys: routedBrowserWaitingKeys(messages),
+    routedWaitingKeys: routedBrowserWaitingKeys(messages, isAssistantTyping),
     newestCardKey: newestBrowserRequestKey(messages),
   };
   return {
@@ -384,8 +539,8 @@ describe("a message Octo sends straight to Instafy's browser", () => {
             conversationControllerId={CONVERSATION}
             firstPlanMessageId={null}
             humanLabelByUserId={new Map()}
-            runAgentIdentityByRunId={new Map([[ROUTING_RUN, OCTO], [BROWSER_RUN, OCTO]])}
-            runAgentHandleByRunId={new Map([[ROUTING_RUN, OCTO.handle], [BROWSER_RUN, OCTO.handle]])}
+            runAgentIdentityByRunId={new Map(OCTO_RUNS.map((runId) => [runId, OCTO]))}
+            runAgentHandleByRunId={new Map(OCTO_RUNS.map((runId) => [runId, OCTO.handle]))}
             renderAssistantAvatar={() => <span data-testid="octo-face" />}
             assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
             onRequestActions={vi.fn()}
@@ -485,15 +640,80 @@ describe("a message Octo sends straight to Instafy's browser", () => {
       ({ time, octoRows: 1, faces: { desktop: 1, phone: phoneFaces }, says, typingAnnounces });
     expect(seen).toEqual([
       one("13:07:55.960", ["Starting…"], "Octo is starting", 0),
-      one("13:07:59.673", ["Opening Instafy's browser…"]),
-      one("13:07:59.693", ["Opening Instafy's browser…"]),
-      one("13:08:00.084", ["Opening Instafy's browser…"]),
-      one("13:08:00.463", ["Opening Instafy's browser…"]),
-      one("13:08:00.572", ["Opening Instafy's browser…"]),
+      one("13:07:59.673", ["Thinking…"]),
+      one("13:07:59.693", ["Thinking…"]),
+      one("13:08:00.084", ["Thinking…"]),
+      one("13:08:00.463", ["Thinking…"]),
+      one("13:08:00.572", ["Thinking…"]),
       one("13:08:04.037", ["Using the browser…"]),
       one("13:08:09.017", ["Opening visitporto.travel…"]),
       one("13:08:42.988", ["Opened livrarialello.pt"]),
       one("13:08:43.066", ["Opened livrarialello.pt"]),
+    ]);
+  });
+
+  // Nothing opened a page in that turn, and it handed the message over: one
+  // row reads "Thinking…" from the card to the building turn's first step,
+  // never "Opening Instafy's browser…" and never a "Starting…" in between.
+  it("reads Thinking… until the building turn's first step when the browser turn opens no page and hands the message over", async () => {
+    const page = (time: string, runs: RunRecord[], card?: BrowserRequestCardState, awaitingLease = false) =>
+      show({ chat: PAGE_CHAT, cardKey: PAGE_CARD_KEY, time, runs, card, awaitingLease });
+    const seen: Array<ReturnType<typeof read>> = [];
+    seen.push(await page("01:11:27.011", [], undefined, true));
+    seen.push(await page("01:11:33.334", [pageRoutingRun("in_progress")], { kind: "opening", note: null }));
+    seen.push(await page("01:11:33.864", [pageBrowserRun("queued")], { kind: "opening", note: null }));
+    seen.push(await page("01:11:40.000", [pageBrowserRun("in_progress")], { kind: "opened" }));
+    // The note, in place of a reply: the browser turn hands the message over.
+    seen.push(await page("01:11:46.741", [pageBrowserRun("in_progress")], { kind: "opened" }));
+    seen.push(await page("01:11:46.790", [pageBrowserRun("in_progress")], { kind: "opened" }));
+    // The controller's hand-back is in the chat; its run starts.
+    seen.push(await page("01:11:46.888", [pageBuildingRun("queued")], { kind: "opened" }));
+    seen.push(await page("01:11:47.080", [pageBuildingRun("in_progress")], { kind: "opened" }));
+    // The building turn's first step takes the card's place, in the same row.
+    seen.push(await page("01:11:51.618", [pageBuildingRun("in_progress")], { kind: "opened" }));
+
+    const one = (time: string, says: string[], typingAnnounces: string | null = null, phoneFaces = 1) =>
+      ({ time, octoRows: 1, faces: { desktop: 1, phone: phoneFaces }, says, typingAnnounces });
+    expect(seen).toEqual([
+      one("01:11:27.011", ["Starting…"], "Octo is starting", 0),
+      one("01:11:33.334", ["Thinking…"]),
+      one("01:11:33.864", ["Thinking…"]),
+      one("01:11:40.000", ["Thinking…"]),
+      one("01:11:46.741", ["Thinking…"]),
+      one("01:11:46.790", ["Thinking…"]),
+      one("01:11:46.888", ["Thinking…"]),
+      one("01:11:47.080", ["Thinking…"]),
+      one("01:11:51.618", ["Working…"]),
+    ]);
+  });
+
+  // The same turn, but the controller sent no hand-back (it refuses one
+  // without a word when the chat's building lane is busy, say). Once nothing
+  // of the chat runs any more, nothing more will come: the "Thinking…" goes,
+  // as the typing row and Stop do, also after a reload, for every viewer.
+  it("stops reading Thinking… once nothing runs and the hand-over never came", async () => {
+    const noHandBack = PAGE_CHAT.slice(0, 5);
+    const page = (time: string, runs: RunRecord[], card?: BrowserRequestCardState) =>
+      show({ chat: noHandBack, cardKey: PAGE_CARD_KEY, time, runs, card });
+    const seen: Array<ReturnType<typeof read>> = [];
+    seen.push(await page("01:11:40.000", [pageBrowserRun("in_progress")], { kind: "opened" }));
+    seen.push(await page("01:11:46.741", [pageBrowserRun("in_progress")], { kind: "opened" }));
+    seen.push(await page("01:11:46.790", [pageBrowserRun("in_progress")], { kind: "opened" }));
+    // The browser turn's run ended, and no hand-back came.
+    seen.push(await page("01:11:47.100", [], { kind: "opened" }));
+    seen.push(await page("01:12:30.000", [], { kind: "opened" }));
+    // A reload: Studio holds no card state and no run.
+    seen.push(await page("01:20:00.000", []));
+
+    const one = (time: string) => ({ time, octoRows: 1, faces: { desktop: 1, phone: 1 }, says: ["Thinking…"], typingAnnounces: null });
+    const none = (time: string) => ({ time, octoRows: 0, faces: { desktop: 0, phone: 0 }, says: [], typingAnnounces: null });
+    expect(seen).toEqual([
+      one("01:11:40.000"),
+      one("01:11:46.741"),
+      one("01:11:46.790"),
+      none("01:11:47.100"),
+      none("01:12:30.000"),
+      none("01:20:00.000"),
     ]);
   });
 
@@ -516,8 +736,8 @@ describe("a message Octo sends straight to Instafy's browser", () => {
       one("13:07:55.960", ["Starting…"], "Octo is starting"),
       one("13:07:59.673", ["card"]),
       one("13:07:59.693", ["card"]),
-      one("13:08:00.463", ["Opening Instafy's browser…"]),
-      one("13:08:00.572", ["Opening Instafy's browser…"]),
+      one("13:08:00.463", ["Thinking…"]),
+      one("13:08:00.572", ["Thinking…"]),
       one("13:08:04.037", ["Using the browser…"]),
     ]);
   });
@@ -545,11 +765,11 @@ describe("a message Octo sends straight to Instafy's browser", () => {
         time: "13:08:00.084",
         octoRows: 1,
         faces: { desktop: 2, phone: 1 },
-        says: ["Opening Instafy's browser…", "Starting…"],
+        says: ["Thinking…", "Starting…"],
         typingAnnounces: "@researcher is starting",
       },
-      octoAlone("13:08:00.463", "Opening Instafy's browser…"),
-      octoAlone("13:08:00.572", "Opening Instafy's browser…"),
+      octoAlone("13:08:00.463", "Thinking…"),
+      octoAlone("13:08:00.572", "Thinking…"),
       octoAlone("13:08:04.037", "Using the browser…"),
     ]);
   });

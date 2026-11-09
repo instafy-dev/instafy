@@ -1557,7 +1557,7 @@ export function ChatComposerSurface({
                             {attachment.page.title || attachment.page.host}
                           </Text>
                           <Text as="div" variant="captionSmall" tone="muted" className="truncate">
-                            {`Page from ${attachment.page.host} · ${attachment.page.viewer === "personal" ? "This device" : "Workspace"} browser · ${formatAttachmentSize(attachment.file.size)}`}
+                            {`Page from ${attachment.page.host} · ${attachment.page.viewer === "personal" ? "This device" : "This space"}'s browser · ${formatAttachmentSize(attachment.file.size)}`}
                           </Text>
                         </div>
                         <IconButton
