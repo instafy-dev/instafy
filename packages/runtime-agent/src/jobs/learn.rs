@@ -592,6 +592,9 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // search engine only when the person named one or no official site was known, and a route's
     // finding named its end stop and whose pick it was, what it left out and when its legs ran.
     include_str!("legacy/browser-automation-v39.md"),
+    // From before a cookie notice stopped being one of the person's steps to pause on: consent
+    // left the line that lists them.
+    include_str!("legacy/browser-automation-v40.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,

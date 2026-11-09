@@ -99,7 +99,8 @@ use crate::task_usage::{UsageAttempt, UsageCall, UsageCounts, UsageOutcome};
 use crate::job_model::DEFAULT_CODEX_MODEL;
 const INVALID_CODEX_RUN_TIMEOUT_FALLBACK_SECONDS: u64 = 600;
 /// What one Shared Browser call may still do after its last approval answer:
-/// navigation (30 s), settling (8.25 s) and the snapshot, with headroom. The
+/// navigation (30 s), settling (11.25 s, a page that still reads as before
+/// its step included) and the snapshot, with headroom. The
 /// helper's browser connection runs inside the approval budget.
 const SHARED_BROWSER_TOOL_MARGIN: Duration = Duration::from_secs(60);
 const DEFAULT_CODEX_MAX_RUN_RETRIES: usize = 1;
@@ -137,14 +138,14 @@ macro_rules! shared_browser_developer_instructions {
 - The browser may start on a blank page. When `status` or `snapshot` reports `blank: true`, call `navigate` first: with the http(s) address the task names, or, when it names none, with the official site of what the task names (for a product, its maker's site); any approval the browser asks for applies there. Never end the turn on a blank page for want of an address, unless the task names nothing to look up, which ends at once with no page opened, or the person's message only asks Octo to make something and this turn's prompt offers `request_build` for that: then answer with it and open no page. A blank page has nothing to read or act on. An `[origin_not_approvable]` error means the same for any other page without an http(s) address.
 - Do not invoke Shared Browser through shell commands or write an ad-hoc Playwright/CDP script. The capability is deliberately exposed only through the bounded MCP server for this turn.
 - The controller automatically emits the visible AI cursor and action-ticker events. Do not bypass it.
-- Never type authentication, payment, or identity secrets. A sign-in, one-time code or consent step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let Octo continue. When the user asked to sign in, or a step they asked for needs it, open the site's sign-in page (a snapshot's `signIn` names the control that opens it, then its fields) and pause there; never end the turn telling them to sign in themselves. Any other sign-in, such as a page read for research, ends that page, not the task. Never ask for those values in chat.
+- Never type authentication, payment, or identity secrets. A sign-in or one-time code step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let Octo continue. When the user asked to sign in, or a step they asked for needs it, open the site's sign-in page (a snapshot's `signIn` names the control that opens it, then its fields) and pause there; never end the turn telling them to sign in themselves. Any other sign-in, such as a page read for research, ends that page, not the task. Never ask for those values in chat.
 - Never open or reveal a screen, dialog or field that shows a credential value such as an API secret, token, key or recovery code, and never ask the user to open one in this browser: the next snapshot would show the value to you. When the user needs one, stop on the screen that lists it, tell them in words which control opens it, and ask them to open that same page in a tab of their own browser to see and copy the value there; do not use `request_human_input` for it. If an observation shows a value anyway, never repeat, store or act on it.
 - For a manual field step, use `request_human_input` with one to eight indices and the fresh snapshotId. It highlights the actual fields and ends this turn. Do not issue any further browser calls; the user explicitly continues after entering values directly, and the next turn must take a fresh snapshot. Never request or repeat those values in chat.
 "#,
             $approval_start,
             "\n",
             r#"- Snapshots, status, results and errors mask values that look like keys, tokens or codes as `[redacted secret]` or `REDACTED`. Never try to recover a masked value. When a snapshot has `secretScreen: true`, the page text is withheld until a new page loads: stop, do not click anything on that page to reveal or copy the value, and tell the user in words which control on that page shows it, using the control names the snapshot still lists.
-- An error ending in `[step_refused_secret]`, `[step_refused_sign_in]`, `[step_refused_upload]` or `[step_refused_consent]` is final in every approval mode: do not retry it or look for another control that does the same. Revealing or copying a credential, signing in and choosing files are the user's steps: tell the user which step is theirs, and for a sign-in use `request_human_input` on its fields.
+- An error ending in `[step_refused_secret]`, `[step_refused_sign_in]` or `[step_refused_upload]` is final in every approval mode: do not retry it or look for another control that does the same. Revealing or copying a credential, signing in and choosing files are the user's steps: tell the user which step is theirs, and for a sign-in use `request_human_input` on its fields.
 - Downloads are blocked in this browser. Do not try to download or export files through it.
 - A denial, an approval that ran out of time, or a replayed approval is final for that attempted action. Do not retry it automatically; say in plain words which step did not go through and wait for a new user instruction. A step that ran out of its own time (`stepTimedOut: true`) is not one of these: it answered with the page as it is, so take a snapshot to see what it did and go on from there.
 - A page the network did not deliver fails with a plain reason, such as "Instafy's browser couldn't reach that site", and the browser's code only in `error.details`. It ends that page, not the task: go on to the next source in this turn. When nothing is left to try, tell the person that reason in your own words; the code is for diagnosis, never for your reply.
@@ -169,7 +170,7 @@ const PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Personal Browser transp
 - Get interactive element indices from `snapshot`, then use one fresh index for exactly one click/type/press action. Snapshot again before every subsequent indexed action and after navigation, scrolling, or DOM changes. Arbitrary CSS selectors are not accepted.
 - The Personal Browser capability is deliberately unavailable to shell tools and subprocesses. Never try to discover, print, persist, or reconstruct it.
 - A page whose snapshot lists a cookie banner's reject button ("Reject all", "Reject", "Only necessary"): press it before your next step, and nothing else on the banner; never accept. With no reject button on the banner itself, leave it up and read on. Refuse through its settings only when the person asks; saving those settings asks once.
-- Never type authentication, payment, or identity secrets. A sign-in, one-time code or consent step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let Octo continue. When the user asked to sign in, or a step they asked for needs it, open the site's sign-in page and pause there; never end the turn telling them to sign in themselves. Any other sign-in, such as a page read for research, ends that page, not the task. Never ask for those values in chat.
+- Never type authentication, payment, or identity secrets. A sign-in or one-time code step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let Octo continue. When the user asked to sign in, or a step they asked for needs it, open the site's sign-in page and pause there; never end the turn telling them to sign in themselves. Any other sign-in, such as a page read for research, ends that page, not the task. Never ask for those values in chat.
 - For a manual field step, use `request_human_input` with one to eight fresh snapshot indices. It highlights the fields and revokes agent control. End this turn immediately; the user fills the page directly and explicitly continues in a fresh turn. Never request or repeat their values in chat.
 - Never open or reveal a screen, dialog or field that shows a credential value such as an API secret, token, key or recovery code, and never ask the user to open one in this browser: the next snapshot would show the value to you. When the user needs one, stop on the screen that lists it, tell them in words which control opens it, and ask them to open that same page in a tab of their own browser to see and copy the value there; do not use `request_human_input` for it. If an observation shows a value anyway, never repeat, store or act on it.
 - Snapshots and status mask values that look like keys, tokens or codes as `[redacted secret]` or `REDACTED`. Never try to recover a masked value. When a snapshot has `secretScreen: true`, the page text is withheld until a new page loads: stop, do not click anything on that page to reveal or copy the value, and tell the user in words which control on that page shows it, using the control names the snapshot still lists.
@@ -7140,14 +7141,15 @@ mod tests {
             }
         }
         // Only the Shared Browser's page describer finds a cookie banner, so
-        // only it refuses an accept there, and a click a notice it could not
+        // only it leaves a notice's accept out of a reading's list, refuses an
+        // accept that still comes, and refuses a click a notice it could not
         // decline covers. Each refusal says what to do in its own words: a
         // press of an accept to carry on under the notice, a covered click to
-        // pause on the notice or go elsewhere. So its run text says only that
-        // a refusal is final, and never that accepting cookies is the person's
-        // step, nor to pause on a notice after a refused accept: told so, a
-        // turn asked the person to accept a notice and paused on one whose
-        // only button was its accept. It also presses a banner's own reject
+        // go elsewhere. So its run text never names the accept's refusal among
+        // the person's steps, never says accepting cookies is the person's
+        // step, nor to pause on a notice: told so, turns paused on a notice's
+        // buttons and pressed its accept, and one stopped there saying the
+        // notice blocked its result. It also presses a banner's own reject
         // button itself, so only the Personal Browser's turn is told to, and,
         // with nothing in its browser that refuses an accept and a pause that
         // takes only fields, to read on (the page's text) and stay out of a
@@ -7162,8 +7164,12 @@ mod tests {
             SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS,
         ] {
             assert!(instructions.contains(
-                "or `[step_refused_consent]` is final in every approval mode: do not retry it or look for another control that does the same. Revealing or copying a credential, signing in and choosing files are the user's steps: tell the user which step is theirs, and for a sign-in use `request_human_input` on its fields."
+                "- An error ending in `[step_refused_secret]`, `[step_refused_sign_in]` or `[step_refused_upload]` is final in every approval mode: do not retry it or look for another control that does the same. Revealing or copying a credential, signing in and choosing files are the user's steps: tell the user which step is theirs, and for a sign-in use `request_human_input` on its fields."
             ));
+            assert!(
+                !instructions.contains("step_refused_consent"),
+                "{instructions}"
+            );
             assert!(
                 !instructions.contains("accepting cookies"),
                 "{instructions}"
@@ -7850,7 +7856,7 @@ mod tests {
         use crate::shared_browser::{DEFAULT_APPROVAL_WAIT, MAX_APPROVAL_WAIT};
 
         const NAVIGATION: Duration = Duration::from_secs(30);
-        const SETTLE: Duration = Duration::from_millis(8_250);
+        const SETTLE: Duration = Duration::from_millis(11_250);
         let turn_cap = Duration::from_secs(600); // Example explicit operator budget.
 
         let shared = shared_browser_mcp_server_config(
@@ -7975,7 +7981,7 @@ mod tests {
     /// where a skill setup's replies go, and the walk would never resume.
     #[test]
     fn interactive_browser_policies_pause_for_sign_in_with_human_input() {
-        const RULE: &str = "- Never type authentication, payment, or identity secrets. A sign-in, one-time code or consent step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let Octo continue. ";
+        const RULE: &str = "- Never type authentication, payment, or identity secrets. A sign-in or one-time code step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let Octo continue. ";
         for policy in [
             append_shared_browser_developer_instructions(
                 String::new(),
@@ -7992,6 +7998,51 @@ mod tests {
             assert_eq!(policy.matches(RULE).count(), 1, "{policy}");
             assert!(policy.contains("Never ask for those values in chat.\n"));
             assert!(!policy.contains("Stop and ask the user to enter them directly"));
+        }
+    }
+
+    /// A cookie notice is never the person's step. Both browser turns of a
+    /// local test read that a consent step is a manual step to pause on, and
+    /// a cover's words said to pause on a notice's buttons: one turn pressed
+    /// a notice's accept, was refused and stopped, saying the notice blocked
+    /// its result, and another paused on an "Accept all". No browser turn's
+    /// run text names consent as a step to pause on, or a cookie notice to
+    /// answer, while the sign-in and one-time code pause stays as it was.
+    #[test]
+    fn no_browser_turn_is_told_to_pause_on_a_cookie_notice() {
+        for policy in [
+            BROWSER_MODE_DEVELOPER_INSTRUCTIONS.to_string(),
+            append_shared_browser_developer_instructions(
+                String::new(),
+                true,
+                crate::shared_browser::ApprovalStart::Ask,
+            ),
+            append_shared_browser_developer_instructions(
+                String::new(),
+                true,
+                crate::shared_browser::ApprovalStart::Routine,
+            ),
+            append_personal_browser_developer_instructions(String::new(), true),
+        ] {
+            assert!(!policy.contains("consent step"), "{policy}");
+            assert!(!policy.contains("step_refused_consent"), "{policy}");
+            for line in policy
+                .lines()
+                .filter(|line| line.contains("request_human_input"))
+            {
+                assert!(!line.contains("consent"), "{line}");
+                assert!(!line.contains("cookie"), "{line}");
+                assert!(!line.contains("notice"), "{line}");
+            }
+        }
+        for policy in [
+            SHARED_BROWSER_DEVELOPER_INSTRUCTIONS,
+            SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS,
+            PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS,
+        ] {
+            assert!(policy.contains(
+                "A sign-in or one-time code step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let Octo continue."
+            ));
         }
     }
 

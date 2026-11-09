@@ -878,19 +878,19 @@ export async function runSharedBrowserCobrowsingFixture() {
     assert.deepEqual(linksTo(rules, /\/rules\/belege\//), RULE_TRANSITION_ITEMS, "The click's result showed the menu half open");
     assert.equal(observedApprovals.length, 2 + expectedSubmissions + 2, "Routine snapshots, menus and drawers repeated a prompt");
 
-    // A cookie banner's accept link is the person's step: refused before any
-    // prompt, though a plain link would be navigation, and the page stays.
+    // A cookie banner's accept is never listed, so no step can press it:
+    // neither its accept link, though a plain link would be navigation, nor
+    // its "Consent" button, which says neither "accept" nor "agree". The
+    // reading counts both among the controls it leaves out, the banner's
+    // cookie policy link stays listed, nobody is asked, and the page stays.
     rules = (await successfulTool("POST", "/v1/navigate", { url: "/rules/consent" })).payload;
-    const accepted = await runTool("POST", "/v1/click", target(rules, "aceitar e continuar"));
-    assert.notEqual(accepted.code, 0, "The banner's accept link was followed");
-    assert.match(accepted.stderr, /\[step_refused_consent\]/, accepted.stderr);
-    assert.equal(observedApprovals.length, 2 + expectedSubmissions + 2, "The banner's accept asked");
+    for (const accept of ["aceitar e continuar", "Consent"]) {
+      assert.ok(!labels(rules).includes(accept), `The banner's ${accept} is listed`);
+    }
+    assert.ok(labels(rules).includes("Pol\u00edtica de cookies"), "The banner's policy link is not listed");
+    assert.equal(rules.omittedControls, 2, "The banner's accepts are not counted as left out");
+    assert.equal(observedApprovals.length, 2 + expectedSubmissions + 2, "The banner asked");
     assert.equal(new URL(page.url()).pathname, "/rules/consent", "The banner's accept link navigated");
-    // So is its "Consent" button, which says neither "accept" nor "agree".
-    const consented = await runTool("POST", "/v1/click", target(rules, "Consent"));
-    assert.notEqual(consented.code, 0, "The banner's Consent button was pressed");
-    assert.match(consented.stderr, /\[step_refused_consent\]/, consented.stderr);
-    assert.equal(observedApprovals.length, 2 + expectedSubmissions + 2, "The banner's Consent asked");
     // A page a consent plugin names after cookies from its root down is no
     // banner: an accept on it asks once, as anywhere, and is not refused.
     rules = (await successfulTool("POST", "/v1/navigate", { url: "/rules/marked" })).payload;

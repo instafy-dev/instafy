@@ -1745,16 +1745,19 @@ a sign-in field or with a frame holding card fields, and a dialog about a
 privacy policy on the person's signed-in page that never speaks of cookies are
 left alone. A click under a consent notice the browser could not decline, or
 under a loading screen, is refused at once in words with no call log (the
-loading screen named by its tag alone, with "try once more"),
-and a cover that goes a moment after the page moves is waited for. A cookie notice
-with a settings link and an accept but no reject is the person's step: a click
-under it and a press of its accept are refused in the same words, which the
-Personal Browser's policy gives too; a pause on its buttons highlights them as
-a cookie notice with no page text and presses none; a button outside a notice,
-or a button, field, sign-in or commit dressed up beside its accept, gets no
-pause, while a notice that speaks only of privacy, and one whose accept allows
-beside an accept limited to the necessary cookies, take it; and once the
-person has answered it, the next step works on the page under it. The Personal
+loading screen named by its tag and the first words it shows, with "try once
+more"), and a cover that goes a moment after the page moves is waited for. A
+cookie notice is never the person's step: its accept is never listed, in any
+notice, and is counted among the controls left out, while its settings, a
+limited accept and a button dressed up beside it stay listed; a click under a
+notice the browser could not decline says where to go instead, never to pause
+on it; a pause on a notice's buttons is refused as one on anything but fields,
+in the chat's own tab and in Octo's own, with nothing outlined or pressed; and
+under a bar whose only button accepts, the planner's own button works with no
+prompt. A click whose route the page draws in place 1.5 s later reads it, one
+whose page still reads as before a few seconds on says so, and a click that
+changes the page, a type step and a choice answer at once; a search typed and
+not sent says nothing was searched yet. The Personal
 Browser's page bridge, host and redaction have unit tests for the same frames,
 pictures, cut line, states, names, codes and count.
 
