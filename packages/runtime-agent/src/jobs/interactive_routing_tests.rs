@@ -954,7 +954,11 @@ fn a_comparisons_headline_comes_from_its_cells_and_no_skill_asks_for_one() {
     let sheet = include_str!(
         "../../assets/instafy/.agents/skills/instafy-bound-sites/references/cheatsheet.md"
     );
-    for gone in ["The lede: the verdict", "The lede gives the verdict", "in the lede"] {
+    for gone in [
+        "The lede: the verdict",
+        "The lede gives the verdict",
+        "in the lede",
+    ] {
         assert!(!flat(hub).contains(gone), "{gone}");
     }
     assert!(!flat(sheet).contains("biggest unknown"), "{sheet}");
