@@ -4583,14 +4583,29 @@ const PAGE_READING_IN_PAGE = new Function(
 
 // Runs inside the page. Moves focus as a press of `element` is about to: to
 // the control, or out of the field that holds it when the control takes none.
+// The field that holds it is looked for inside open shadow roots too, where
+// the document names only their host.
 function focusLikeAPressInPage(element) {
   const doc = element.ownerDocument;
-  const before = doc.activeElement;
+  const focused = () => {
+    let node = doc.activeElement;
+    for (let depth = 0; node && node.shadowRoot && node.shadowRoot.activeElement && depth < 64; depth += 1) {
+      node = node.shadowRoot.activeElement;
+    }
+    return node;
+  };
+  const inside = (node) => {
+    for (let current = node, depth = 0; current && depth < 512; current = current.parentNode || current.host, depth += 1) {
+      if (current === element) return true;
+    }
+    return false;
+  };
+  const before = focused();
   if (typeof element.focus === "function") element.focus({ preventScroll: true });
-  const active = doc.activeElement;
-  if (active && active === before && active !== element && active !== doc.body && !element.contains(active) &&
-    typeof active.blur === "function") {
-    active.blur();
+  const now = focused();
+  if (now && now === before && now !== doc.body && now !== doc.documentElement && !inside(now) &&
+    typeof now.blur === "function") {
+    now.blur();
   }
   return true;
 }
@@ -4602,8 +4617,7 @@ const UNCHANGED_EVERY_MS = 250;
 // What a step's result says when its page still reads as it did before it.
 const PAGE_UNCHANGED = "The page reads as it did before this step. What it loads may still be coming: take a snapshot before saying nothing appeared.";
 
-// The page as a step finds it right before it acts: its address, its document
-// (documentIdentity) and its reading (pageReadingInPage), or null when the
+// The page's reading as a step finds it (pageReadingInPage), or null when the
 // page cannot say in time.
 async function readingOf(page) {
   const reading = await within(
@@ -4617,9 +4631,16 @@ async function readingOf(page) {
   );
   return typeof reading === "string" ? reading : null;
 }
+// The page as a step finds it right before it acts: its address, its document
+// and its reading, or null when the page cannot say in time.
 async function readingBefore(page) {
-  const [reading, documentId] = await Promise.all([readingOf(page), documentIdentity(page)]);
+  const [reading, documentId] = await Promise.all([readingOf(page), documentOf(page)]);
   return reading === null ? null : { url: page.url(), documentId, reading };
+}
+// The page's document (documentIdentity), or null when the browser cannot
+// say in time.
+async function documentOf(page) {
+  return await within(FIELD_READ_MS, documentIdentity(page), null);
 }
 
 // Brings what a press of the control changes by itself into the page before
@@ -4666,7 +4687,7 @@ async function settleAfterAction(page, before = null) {
   // the browser does not say, `unknown`: one that reads as the last (a link to
   // the page it is on) loaded what the step asked for too.
   const newDocument = async (unknown) => {
-    const current = before.documentId === null ? null : await documentIdentity(page);
+    const current = before.documentId === null ? null : await documentOf(page);
     return current === null ? unknown : current !== before.documentId;
   };
   const until = Date.now() + UNCHANGED_LOOK_MS;
