@@ -5305,6 +5305,9 @@ impl CodexEventStreamAdapter {
                         "type": "command_execution",
                         "command": command_text,
                         "command_argv": command.command,
+                        // The folder it runs in, which a path it names is read against
+                        // (`jobs::space_pages::TurnSteps`).
+                        "cwd": command.cwd.to_path_buf(),
                         "status": "in_progress",
                         "aggregated_output": "",
                         "exit_code": JsonValue::Null,
@@ -5345,6 +5348,7 @@ impl CodexEventStreamAdapter {
                         "type": "command_execution",
                         "command": command_text,
                         "command_argv": command.command,
+                        "cwd": command.cwd.to_path_buf(),
                         "status": status,
                         "aggregated_output": aggregated_output,
                         "exit_code": command.exit_code,
@@ -10812,6 +10816,7 @@ required = true
             started[0]["item"]["command_argv"],
             json!(["bash", "-lc", "ls"])
         );
+        assert_eq!(started[0]["item"]["cwd"], "/tmp");
 
         let updated = adapter.collect(&Event {
             id: "evt_delta".to_string(),
@@ -10851,6 +10856,7 @@ required = true
             completed[0]["item"]["command_argv"],
             json!(["bash", "-lc", "ls"])
         );
+        assert_eq!(completed[0]["item"]["cwd"], "/tmp");
         assert_eq!(completed[0]["item"]["aggregated_output"], "README.md\n");
     }
 
