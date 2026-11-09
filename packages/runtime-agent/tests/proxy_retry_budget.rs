@@ -59,11 +59,16 @@ const CLAIMED_FILE_ANSWER: &str = "I created notes/plan.md with the plan.";
 /// built when the turn wrote nothing and listed no file.
 const UNMADE_CHANGE_ANSWER: &str =
     "I built the comparison page in compare.html with the verified specs.";
-/// A request read as a required change, which the agent answers with a team
-/// plan and no file: the plan card carries this lead text.
-const PLAN_REQUEST: &str = "Build a trip site with a page for each of the three days.";
-const PLAN_LEAD: &str =
-    "This trip site has three parts, so two helpers will each build some of it.";
+/// A request read as a required change whose change is already there, and the
+/// plain reply that says so and changes nothing.
+const ALREADY_THERE_REQUEST: &str = "Add a weight column to the laptop comparison.";
+const ALREADY_THERE_ANSWER: &str =
+    "The comparison already has a weight column for each laptop, so I left it as it is.";
+/// The same request's first reply when it only says the change is coming, and
+/// the progress note a recovery pass can stop at instead of replying.
+const PROMISED_CHANGE_ANSWER: &str = "I'll add the weight column now.";
+const PROGRESS_NOTE: &str = "Let me open the comparison first.";
+const PLANNING_REASONING: &str = "**Planning the edit**\n\nI need to open the comparison data and add a weight field for each laptop.";
 /// What a skill pack's command does on a turn read as needing no change: it
 /// builds a site folder.
 const SITE_BUILD_CMD: &str = "mkdir -p trip-map/data && printf '<h1>Trip</h1>' > trip-map/index.html && printf '{}' > trip-map/data/sights.geojson && printf SITE_BUILT";
@@ -387,8 +392,7 @@ async fn responses(
             };
         }
         // The routing preflight reads a follow-up as a file write, and every
-        // answer is a step for the person with no file. Once the prompt asks
-        // for it, the answer reports that it changed nothing.
+        // answer is a step for the person with no file.
         "skill_setup_write_guess" | "chat_write_guess" => {
             if ordinal == 1 {
                 return answer(
@@ -402,10 +406,7 @@ async fn responses(
                     .to_string(),
                 );
             }
-            return answer(
-                &json!({"summary":no_change_reply(&body, SETUP_STEP_ANSWER), "files":[]})
-                    .to_string(),
-            );
+            return answer(&json!({"summary":SETUP_STEP_ANSWER, "files":[]}).to_string());
         }
         // The routing preflight reads the request as a required change that
         // needs a fresh observation, or (`_lookup`) a lookup of earlier chats.
@@ -428,39 +429,8 @@ async fn responses(
                     Some(call) => sse(call),
                     None => StatusCode::BAD_REQUEST.into_response(),
                 },
-                _ => answer(
-                    &json!({"summary":no_change_reply(&body, BLOCKED_ANSWER), "files":[]})
-                        .to_string(),
-                ),
+                _ => answer(&json!({"summary":BLOCKED_ANSWER, "files":[]}).to_string()),
             };
-        }
-        // A required change answered with a team plan, which puts the change
-        // off, and the runtime's no-change line its prompt asks for.
-        "chat_write_plan" => {
-            if ordinal == 1 {
-                return answer(
-                    &json!({
-                        "summary":"The user asks for a trip site.",
-                        "route":"direct", "reason":"Build the site.",
-                        "selectedSkills":[], "confidence":0.9,
-                        "requiresContextLookup":false, "requiresCommandExecution":false,
-                        "requiresWorkspaceFileChanges":true, "observationCommands":[]
-                    })
-                    .to_string(),
-                );
-            }
-            return answer(
-                &json!({"summary":no_change_reply(&body, PLAN_LEAD), "files":[], "actions":[{
-                    "type":"multi_agent_plan", "mode":"read_only",
-                    "rationale":"Each day is its own page.", "thresholdReason":"three pages",
-                    "agents":[
-                        {"handle":"days", "label":"Days", "prompt":"Plan the three days."},
-                        {"handle":"stays", "label":"Stays", "prompt":"Pick where to stay."}
-                    ],
-                    "lead":{"leadHandle":"octo", "continuationPrompt":"Build the site."}
-                }]})
-                .to_string(),
-            );
         }
         // A required change whose every answer lists a file it never wrote.
         "chat_write_claimed_files" => {
@@ -500,6 +470,36 @@ async fn responses(
                 );
             }
             return answer(UNMADE_CHANGE_ANSWER);
+        }
+        // A required change that is already there: every plain reply says so,
+        // with no line of the runtime's, and the turn changes nothing. Or
+        // (`_no_reply_`) the first reply only says the change is coming, and the
+        // recovery pass stops with no reply of its own: at its reasoning, or at
+        // a progress note.
+        "chat_write_already_there"
+        | "chat_write_no_reply_reasoning"
+        | "chat_write_no_reply_progress_note" => {
+            if ordinal == 1 {
+                return answer(
+                    &json!({
+                        "summary":"The user asks for a weight column.",
+                        "route":"direct", "reason":"Add the column.",
+                        "selectedSkills":[], "confidence":0.9,
+                        "requiresContextLookup":false, "requiresCommandExecution":false,
+                        "requiresWorkspaceFileChanges":true, "observationCommands":[]
+                    })
+                    .to_string(),
+                );
+            }
+            return match state.scenario.as_str() {
+                "chat_write_already_there" => answer(ALREADY_THERE_ANSWER),
+                _ if ordinal == 2 => answer(PROMISED_CHANGE_ANSWER),
+                "chat_write_no_reply_progress_note" => sse(step_item(PROGRESS_NOTE)),
+                _ => sse(
+                    json!({"type":"reasoning", "summary":[{"type":"summary_text",
+                    "text":PLANNING_REASONING}]}),
+                ),
+            };
         }
         // A turn read as needing no change runs a command that builds a site
         // folder, the way a skill pack's command does, then answers.
@@ -792,18 +792,6 @@ fn offers_standalone_web_search(request: &Value) -> bool {
         || offered_tool_names(request)
             .iter()
             .any(|name| name == "web__run")
-}
-
-/// The reply of a turn that changed no file on purpose: once the request asks
-/// for the runtime's no-change line, the reply ends with it.
-fn no_change_reply(body: &Value, reply: &str) -> String {
-    let mut lines = Vec::new();
-    request_text_lines(body, &mut lines);
-    if lines.iter().any(|line| line.contains("`NO_FILE_CHANGES`")) {
-        format!("{reply}\n\nNO_FILE_CHANGES")
-    } else {
-        reply.to_string()
-    }
 }
 
 /// Collects every line of every string in a request. The prompt travels as the input's first
@@ -1192,21 +1180,37 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
             );
         }
     }
-    // A required change still missing when the recovery pass starts: the pass
-    // ends with the no-change line, after its own requirement to make the change,
-    // which overrides what comes before it (the turn's own copy of the line too).
-    if scenario == "chat_write_unmade_change" {
-        let mut lines = Vec::new();
-        request_text_lines(&requests[2], &mut lines);
-        let last = |heading: &str| lines.iter().rposition(|line| line.trim() == heading);
-        let retry = last("IMPORTANT WORKSPACE-CHANGE RETRY REQUIREMENT:")
-            .expect("the recovery pass's requirement");
-        let no_change =
-            last("IMPORTANT NO-CHANGE REPORT REQUIREMENT:").expect("the no-change line");
-        assert!(
-            no_change > retry,
-            "{scenario}: the recovery pass ends with its requirement to make the change"
-        );
+    // A reply that changes nothing has one rule, `AGENTS.md`'s, which the turn and its recovery
+    // pass both hold. No request asks for a line of the runtime's, or says such a reply falls
+    // short.
+    if matches!(
+        scenario,
+        "chat_write_guess"
+            | "chat_write_blocked"
+            | "chat_write_unmade_change"
+            | "chat_write_already_there"
+            | "chat_write_no_reply_reasoning"
+            | "chat_write_no_reply_progress_note"
+    ) {
+        for (index, request) in requests.iter().enumerate().skip(1) {
+            let mut lines = Vec::new();
+            request_text_lines(request, &mut lines);
+            assert!(
+                lines.iter().any(|line| line.trim()
+                    == "- When nothing needed changing, say what you checked and why."),
+                "{scenario}: request {index} lacks the rule for a reply that changes nothing"
+            );
+            for gone in [
+                "NO_FILE_CHANGES",
+                "does not satisfy a required edit",
+                "justified no-change result",
+            ] {
+                assert!(
+                    !lines.iter().any(|line| line.contains(gone)),
+                    "{scenario}: request {index} holds `{gone}`"
+                );
+            }
+        }
     }
     if scenario == "routing" {
         assert!(
@@ -1471,25 +1475,22 @@ scenario_test!(
     "skill_setup_write_guess",
     2
 );
-// The same request, verdict and answer outside a skill setup: the turn's own
-// prompt asks a reply that changes nothing to say so, and the answer, a
-// question for the person, stands on the first attempt, with no recovery pass
-// to ask the same again (Nov 6: a "keep going" that changed nothing and said
-// why was asked again on a thread of its own).
+// The same request, verdict and answer outside a skill setup: the answer, a
+// question for the person, gets its one recovery pass, which asks the same,
+// and then stands, with the runtime's "Nothing was changed." under it.
 scenario_test!(
-    chat_answer_without_a_file_change_stands_on_its_first_attempt,
+    chat_answer_without_a_file_change_stands_after_its_recovery_pass,
     "chat_write_guess",
-    2
+    3
 );
 // Oct 28: a turn read as a required change could verify nothing, built
 // nothing and said why. Its recovery pass, for the observation it skipped,
-// ran it and said the same, and the first answer's draft showed, then gave way
-// to the pass's (a local test, Nov 7). The reply stands on its first attempt,
-// with no pass for the observation: the turn is neither retried nor failed.
+// runs it and says the same, and that reply stands, with the runtime's
+// "Nothing was changed." under it: the turn does not fail.
 scenario_test!(
-    blocked_write_turn_reply_stands_on_its_first_attempt,
+    blocked_write_turn_reply_stands_after_its_recovery_pass,
     "chat_write_blocked",
-    2
+    4
 );
 // A lookup of earlier chats stays required: the same reply, from a turn that was also to make
 // one and made none, gets its one recovery pass, which asks for the lookup, and the turn fails
@@ -1499,14 +1500,6 @@ scenario_test!(
     "chat_write_blocked_lookup",
     4
 );
-// A required change answered with a team plan, which puts the change off: the
-// plan card carries the reply's words without the runtime's no-change line,
-// which the turn's prompt asked for.
-scenario_test!(
-    a_plan_card_never_shows_the_no_change_line,
-    "chat_write_plan",
-    2
-);
 // A reply that claims a file it never wrote is still caught: one recovery
 // pass, then the turn fails.
 scenario_test!(
@@ -1515,11 +1508,34 @@ scenario_test!(
     3
 );
 // A plain reply that says the page was built, on a turn that wrote nothing and
-// listed no file, still fails after its one recovery pass: the turn promised a
-// change it did not make.
+// listed no file, gets its one recovery pass, and then stands with the
+// runtime's "Nothing was changed." under it, so it reads as what happened.
 scenario_test!(
-    reply_promising_a_change_it_did_not_make_still_fails,
+    reply_promising_a_change_it_did_not_make_reads_nothing_was_changed,
     "chat_write_unmade_change",
+    3
+);
+// Nov 9: "Add a weight column to the laptop comparison." The column was already there, and the
+// reply and its one recovery pass both said so, without a line the runtime looked for: the turn
+// failed with "Try again". The reply that changed nothing is the turn's answer, after its one
+// recovery pass, with the runtime's "Nothing was changed." under it.
+scenario_test!(
+    a_reply_that_finds_the_change_already_made_is_the_answer,
+    "chat_write_already_there",
+    3
+);
+// The same request, whose first reply only says the change is coming, and whose recovery pass
+// stops at its reasoning or at a progress note, with no reply of its own: nothing answers the
+// person, so the turn fails, as before a reply that changed nothing could stand. Neither the
+// promise, nor the reasoning or the note, becomes the turn's answer.
+scenario_test!(
+    a_recovery_pass_that_stops_at_its_reasoning_still_fails,
+    "chat_write_no_reply_reasoning",
+    3
+);
+scenario_test!(
+    a_recovery_pass_that_stops_at_a_progress_note_still_fails,
+    "chat_write_no_reply_progress_note",
     3
 );
 // Oct 28: a skill pack's command built a site folder on a turn read as needing
@@ -1705,8 +1721,10 @@ async fn isolated_retry_child() -> Result<()> {
             | "chat_write_blocked"
             | "chat_write_blocked_lookup"
             | "chat_write_claimed_files"
-            | "chat_write_plan"
             | "chat_write_unmade_change"
+            | "chat_write_already_there"
+            | "chat_write_no_reply_reasoning"
+            | "chat_write_no_reply_progress_note"
             | "tool_write_on_no_change_turn"
     ) {
         return run_routing_job(&scenario).await;
@@ -2167,8 +2185,10 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
     let request = match scenario {
         "chat_write_blocked" | "chat_write_blocked_lookup" => Some(BLOCKED_REQUEST),
         "chat_write_claimed_files" => Some("Write the plan to notes/plan.md."),
-        "chat_write_plan" => Some(PLAN_REQUEST),
         "chat_write_unmade_change" => Some("Build the comparison page."),
+        "chat_write_already_there"
+        | "chat_write_no_reply_reasoning"
+        | "chat_write_no_reply_progress_note" => Some(ALREADY_THERE_REQUEST),
         "tool_write_on_no_change_turn" => Some("Make me a trip map of Lisbon."),
         _ => None,
     };
@@ -2206,13 +2226,16 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
     let phases: Vec<_> = calls.iter().map(|call| call["phase"].as_str()).collect();
     let expected_phases = match scenario {
         "routing" => vec![Some("routing")],
-        // A chat answer that changed nothing and said why stands on its first
-        // attempt: no recovery pass.
         "retry_usage"
         | "failed_recovery_usage"
+        | "chat_write_guess"
+        | "chat_write_blocked"
         | "chat_write_blocked_lookup"
         | "chat_write_claimed_files"
-        | "chat_write_unmade_change" => {
+        | "chat_write_unmade_change"
+        | "chat_write_already_there"
+        | "chat_write_no_reply_reasoning"
+        | "chat_write_no_reply_progress_note" => {
             vec![Some("routing"), Some("main"), Some("recovery")]
         }
         "finalization_usage" => vec![
@@ -2306,12 +2329,16 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
         );
         return Ok(());
     }
-    // A required change the turn did not make, and the reply said so: the
-    // reply stands without the runtime's line, and the turn records that it
-    // stood. The chat answer stands on its first attempt, with no retry.
+    // A required change the turn did not make, after its one recovery pass (the
+    // phases above): the reply is the turn's answer, whatever it says, with the
+    // runtime's line under it, and the turn records that it stood. The turn
+    // completes, so the person sees no failure and no Try again, and pays for
+    // one turn: the recovery pass is not billed.
     if let Some(expected) = match scenario {
         "chat_write_guess" => Some(SETUP_STEP_ANSWER),
         "chat_write_blocked" => Some(BLOCKED_ANSWER),
+        "chat_write_unmade_change" => Some(UNMADE_CHANGE_ANSWER),
+        "chat_write_already_there" => Some(ALREADY_THERE_ANSWER),
         _ => None,
     } {
         let execution = match result {
@@ -2323,7 +2350,10 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
                 bail!("{scenario}: the reply must stand, but the turn failed: {message}");
             }
         };
-        assert_eq!(execution.summary, expected);
+        assert_eq!(
+            execution.summary,
+            format!("{expected}\n\nNothing was changed.")
+        );
         assert!(
             execution
                 .artifacts
@@ -2331,38 +2361,29 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
                 .any(|artifact| artifact["kind"] == "codex/required-changes-not-made"),
             "{scenario}: the turn must record that its reply stood without the change"
         );
-        assert!(
-            !execution
-                .messages
-                .iter()
-                .chain(execution.final_messages.iter())
-                .any(|message| message
-                    .metadata
-                    .as_ref()
-                    .is_some_and(|metadata| metadata["kind"] == "codex_retry")),
-            "{scenario}: a reply that changed nothing and said why must not be retried"
-        );
         return Ok(());
     }
-    // The plan puts the change off, so the turn stands on its first attempt, and
-    // its card shows the reply's words without the runtime's line.
-    if scenario == "chat_write_plan" {
-        let execution = match result {
-            Ok(execution) => execution,
-            Err(error) => {
-                let message = runtime_agent::jobs::extract_job_failure_message(&error)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| error.to_string());
-                bail!("{scenario}: the plan must stand, but the turn failed: {message}");
-            }
+    // A recovery pass with no reply of its own leaves nothing to answer with:
+    // the turn fails, and neither the first reply's promise nor the pass's
+    // reasoning or progress note stands as its answer.
+    if matches!(
+        scenario,
+        "chat_write_no_reply_reasoning" | "chat_write_no_reply_progress_note"
+    ) {
+        let error = match result {
+            Ok(execution) => bail!(
+                "{scenario}: a recovery pass with no reply must fail the turn, but this stood: {}",
+                execution.summary
+            ),
+            Err(error) => error,
         };
-        let plan = execution
-            .final_messages
-            .iter()
-            .find(|message| message.message_type.as_deref() == Some("multi_agent_plan"))
-            .context("the plan card")?;
-        assert_eq!(plan.content, PLAN_LEAD);
-        assert_eq!(execution.summary, PLAN_LEAD);
+        let message = runtime_agent::jobs::extract_job_failure_message(&error)
+            .map(str::to_owned)
+            .unwrap_or_else(|| error.to_string());
+        assert!(
+            message.contains("did not apply any workspace changes"),
+            "{scenario}: {message}"
+        );
         return Ok(());
     }
     // A reply that claims a file it never wrote still fails the turn.
@@ -2373,24 +2394,6 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
             .unwrap_or_else(|| error.to_string());
         assert!(
             message.contains("reported file changes but no workspace files were written"),
-            "{message}"
-        );
-        return Ok(());
-    }
-    // A reply that says it made a change the turn never made still fails.
-    if scenario == "chat_write_unmade_change" {
-        let error = match result {
-            Ok(execution) => bail!(
-                "a reply that promises an unmade change must fail the turn, but it stood: {}",
-                execution.summary
-            ),
-            Err(error) => error,
-        };
-        let message = runtime_agent::jobs::extract_job_failure_message(&error)
-            .map(str::to_owned)
-            .unwrap_or_else(|| error.to_string());
-        assert!(
-            message.contains("did not apply any workspace changes"),
             "{message}"
         );
         return Ok(());

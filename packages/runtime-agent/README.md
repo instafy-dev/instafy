@@ -160,13 +160,14 @@ retaining evidence from the first attempt. See [Execution Evidence and Recovery]
 for receipt limitations and compatibility behavior.
 
 The preflight's `workspaceFileChangeRequirement` distinguishes `none` (no mutation requested),
-`conditional` (edit only when review or validation warrants it), and `required` (success needs
-an actual change). Conditional work can finish with a justified no-change result. A required
-write's prompt asks a reply that changes nothing to say why and end with the line
-`NO_FILE_CHANGES` (removed before anyone reads it); such a reply stands as the turn's result.
-Any other reply that changes nothing gets one recovery pass, and when that pass still changes
-nothing without the line, or a reply lists a file missing from disk, the turn fails. Every turn that saves to the
-workspace lists the files it changed on disk. These are completion requirements, not write
+`conditional` (edit only when review or validation warrants it), and `required` (the request
+asks for an actual change). Conditional work can finish without a change. A required write that
+changes nothing gets one recovery pass; when that pass changes nothing either, its reply is the
+turn's result, with the runtime's line "Nothing was changed." under it. A reply that lists a
+file missing from disk fails the turn, and so does a recovery pass that stops with no reply.
+What a reply that changes nothing says is one rule in `AGENTS.md`'s replies guide. Every turn
+that saves to the workspace lists the files it changed on disk. These are completion
+requirements, not write
 permissions: controller `writeIntent` and write scopes remain authoritative. Legacy Boolean
 decisions remain readable, and artifacts retain `requiresWorkspaceFileChanges`, true only
 for `required`. Invalid or conflicting requirements fail before the main turn. See the

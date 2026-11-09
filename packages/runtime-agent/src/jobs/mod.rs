@@ -224,27 +224,25 @@ enum AgentRoutingPreflightRoute {
 }
 
 /// Recorded on a turn whose request was read as needing file changes and whose
-/// recovery pass changed none and said so: the reply stood as the result.
+/// recovery pass changed none either: the reply stood as the result, with
+/// [`NOTHING_CHANGED_LINE`] under it.
 const REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND: &str = "codex/required-changes-not-made";
 
-/// The line a recovery pass for a required change ends its reply with when it
-/// changed no file on purpose (an answer, a question for the person, or what
-/// blocks the work). The runtime removes it before anyone reads the reply.
-/// Without it, a reply that changed nothing reads as one that promised a change
-/// it did not make, and the turn fails.
-const NO_FILE_CHANGES_MARKER: &str = "NO_FILE_CHANGES";
+/// The runtime's line under such a reply, whatever the reply says it did.
+const NOTHING_CHANGED_LINE: &str = "Nothing was changed.";
 
-/// Added to a required change's prompt, and once more, last, to its recovery
-/// prompt when the change is still missing.
-const NO_FILE_CHANGES_REPORT_REQUIREMENT: &str = "\n\nIMPORTANT NO-CHANGE REPORT REQUIREMENT:\n\
-- If you end this attempt without changing any file, say in plain words what you found, what you need from the person, or what blocks the change, and end that reply with a separate last line that is exactly `NO_FILE_CHANGES` (as the last line of the `summary` text when you answer in JSON). The runtime removes that line before the person reads your reply.\n\
-- Never add that line when you changed files, and never say a change was made when it was not.\n";
+/// The last line a reply that changed nothing was once asked to end with. A
+/// thread started before that ask was dropped still holds it, and a later turn
+/// there can keep adding the line: it leaves the reply before anyone reads it,
+/// and decides nothing.
+const NO_FILE_CHANGES_MARKER: &str = "NO_FILE_CHANGES";
 
 // A completion requirement, never permission to write. Conditional work may
 // legitimately finish after inspection without producing a patch. A required
-// change gets one recovery pass; a reply that still changes nothing stands
-// only when it says so (`NO_FILE_CHANGES_MARKER`), and any other, or one that
-// lists a file missing from disk, fails the turn.
+// change gets one recovery pass; a reply that still changes nothing is then
+// the turn's result, with [`NOTHING_CHANGED_LINE`] under it. A reply that lists
+// a file missing from disk fails the turn, and so does a recovery pass that
+// stops with no reply of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceFileChangeRequirement {
     None,
@@ -8118,13 +8116,6 @@ impl JobProcessor {
             pending.append_deferred_context(reply, &mut prompt);
             enrich_prompt_context_metrics(&mut prompt_context, &prompt);
         }
-        // A required change: a reply that changes nothing on purpose says why and ends with the
-        // runtime's line, and then stands as the turn's result, with no recovery pass to ask the
-        // same again (`reported_no_file_changes` below).
-        if expects_workspace_file_changes {
-            prompt.push_str(NO_FILE_CHANGES_REPORT_REQUIREMENT);
-            enrich_prompt_context_metrics(&mut prompt_context, &prompt);
-        }
         ensure_ambient_participation_prompt_context(job, &mut prompt, &mut prompt_context);
         if provider_thread_not_restorable && let Some(metrics) = prompt_context.as_object_mut() {
             metrics.insert(
@@ -8586,16 +8577,6 @@ impl JobProcessor {
         user_input_request::validate_outcome_scope(job, &outcome)?;
         outcome.read_files = normalize_codex_read_files(&workspace_dir, outcome.read_files);
         held_pages.leave_out_returned(&workspace_dir, &mut outcome.files);
-        // The runtime's no-change line: a required change's prompt asks for it, and a turn's
-        // provider thread can keep it from an earlier prompt. It leaves the reply before anything
-        // reads or shows it (a plan card carries the reply's words), so the person never reads it.
-        let reported_no_file_changes = match take_no_file_changes_marker(&outcome.summary) {
-            Some(summary) => {
-                outcome.summary = summary;
-                true
-            }
-            None => false,
-        };
         let clean_ambient_decline = clean_ambient_participation_decline(
             job,
             &output.final_json,
@@ -8867,32 +8848,6 @@ impl JobProcessor {
             && outcome.files.is_empty()
             && !workspace_file_changes_satisfied_by_patch_apply
             && !held_pages.put_a_change_back();
-        // A required change that changed nothing and says why (an answer, a question for the
-        // person, or what blocks the work) is the turn's result, as after a recovery pass: that
-        // pass, on a thread of its own, asked the same again (a local test, Nov 6: "keep going"
-        // answered that it left out the tip the person undid, and the retry's draft showed for
-        // 2 s before the same answer).
-        let required_changes_not_made = workspace_file_changes_missing && reported_no_file_changes;
-        let workspace_file_changes_missing =
-            workspace_file_changes_missing && !reported_no_file_changes;
-        if required_changes_not_made {
-            tracing::info!(
-                job_id = %job_id,
-                "no file change, and the reply says so; keeping it"
-            );
-            artifacts.push(json!({
-                "kind": REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND,
-                "metadata": { "reason": "no_change_reported" },
-            }));
-        }
-        // That answer ends the turn: no pass runs for an observation it skipped either. Such a
-        // pass asked the same again, and the answer's draft showed for 3.7 s, then gave way to
-        // the pass's (a local test, Nov 7: "Add each laptop's warranty from its own page." was
-        // to observe, ran two commands that did not count as observations, and kept its
-        // answer). A lookup of earlier chats it was to make is still asked for.
-        let command_execution_missing = command_execution_missing
-            && (!required_changes_not_made
-                || routing_recovery::blocking_missing(evidence_requirements, observed_evidence));
 
         // A browser turn that hands the person's message to the building turn
         // has its answer: no reason to run it again.
@@ -9124,7 +9079,7 @@ impl JobProcessor {
                 )
             } else if workspace_file_changes_missing {
                 format!(
-                    "{prompt}\n\nIMPORTANT (this overrides the final-response format instructions above): The latest user request requires creating/editing/deleting workspace files, but you returned an empty `files` array and no new changes were detected on disk. You MUST either (1) use the `apply_patch` tool to actually create/edit/delete the files, or (2) include the full post-change contents inline in the JSON `files` array using either `content` (UTF-8) or `contentBase64` (base64-encoded bytes) so the runtime can write them. Inline `files` entries are an executable write path and do not require `exec_command` or `shell`.\n\nExample `files` entry:\n{{ \"path\": \"hello.txt\", \"workspacePath\": \"hello.txt\", \"change\": {{ \"type\": \"created\" }}, \"content\": \"hello\\n\" }}\n\nRetry the latest user request now."
+                    "{prompt}\n\nIMPORTANT (this overrides the final-response format instructions above): The latest user request was read as needing workspace files created, edited or deleted, but you returned an empty `files` array and no new changes were detected on disk. To change a file, either (1) use the `apply_patch` tool, or (2) include the full post-change contents inline in the JSON `files` array using either `content` (UTF-8) or `contentBase64` (base64-encoded bytes) so the runtime can write them. Inline `files` entries are an executable write path and do not require `exec_command` or `shell`.\n\nExample `files` entry:\n{{ \"path\": \"hello.txt\", \"workspacePath\": \"hello.txt\", \"change\": {{ \"type\": \"created\" }}, \"content\": \"hello\\n\" }}\n\nRetry the latest user request now."
                 )
             } else {
                 prompt.to_string()
@@ -9152,13 +9107,6 @@ impl JobProcessor {
                 {
                     retry_codex_run_options.disable_shell_tool = true;
                 }
-            }
-            // A required change is still missing: the recovery pass may end
-            // without one only by saying so. The line comes last, after the
-            // retry's own requirement to make the change, which overrides
-            // what comes before it, the turn's own copy of the line included.
-            if workspace_file_changes_missing {
-                retry_prompt.push_str(NO_FILE_CHANGES_REPORT_REQUIREMENT);
             }
             let mut retry_prompt_context = prompt_context.clone();
             if let (Some(pending), Some(reply)) = (&pending_worker_input, &worker_question_reply) {
@@ -9839,16 +9787,6 @@ impl JobProcessor {
                     }));
                 }
             }
-            // The recovery pass's own report that it changed nothing on
-            // purpose; the person reads the reply without it.
-            let retry_reported_no_file_changes =
-                match take_no_file_changes_marker(&retry_outcome.summary) {
-                    Some(summary) => {
-                        retry_outcome.summary = summary;
-                        true
-                    }
-                    None => false,
-                };
             let mut retry_final_messages =
                 build_final_messages_from_outcome(&retry_outcome, Some(&workspace_dir));
             if retry_hands_the_message_to_the_building_turn {
@@ -9982,28 +9920,12 @@ impl JobProcessor {
                         job_id = %job_id,
                         "accepting successful apply_patch events as workspace file-change evidence after retry"
                     );
-                } else if retry_reported_no_file_changes {
-                    // The routing preflight read the request as needing file
-                    // changes before anything ran. The recovery pass asked
-                    // again for the changes or the concrete blocker, and the
-                    // agent changed nothing and said so (a claimed file
-                    // missing from disk failed above). Its reply answers,
-                    // asks or says what blocks the work, so it is the turn's
-                    // result: failing the turn would hide it and invite a
-                    // resend that cannot do more.
-                    tracing::info!(
-                        job_id = %job_id,
-                        "no file change after the recovery pass, and the reply says so; keeping it"
-                    );
-                    retry_artifacts.push(json!({
-                        "kind": REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND,
-                        "metadata": { "reason": "no_change_after_recovery" },
-                    }));
                 } else if held_pages.put_a_change_back() {
                     // Its change to another chat's page was put back, and its reply says so.
-                } else {
-                    // Nothing changed, and the reply did not say so: it reads
-                    // as a promise of a change that was not made.
+                } else if !has_final_reply_event(&retry_output.events) {
+                    // The recovery pass stopped at its reasoning or at a progress note, with no
+                    // reply of its own: nothing answers the person, so the turn fails, as it did
+                    // before such a reply could stand.
                     return Err(JobFailureWithArtifacts {
                         message:
                             "Codex did not apply any workspace changes for a file-modifying request."
@@ -10011,6 +9933,27 @@ impl JobProcessor {
                         artifacts: retry_artifacts,
                     }
                     .into());
+                } else {
+                    // The routing step read the request as needing file changes before anything
+                    // ran, and the recovery pass changed none either (a claimed file missing from
+                    // disk failed above). Its reply is the turn's answer: it finds the change
+                    // already made, asks the person something, or says what blocks the work.
+                    // Failing the turn hid it behind "Try again", and the resend said the same (a
+                    // local test, Nov 9: "Add a weight column to the laptop comparison." found the
+                    // column there). The runtime's line under it says what happened, whatever the
+                    // reply says it did.
+                    tracing::info!(
+                        job_id = %job_id,
+                        "no file change after the recovery pass; its reply is the answer"
+                    );
+                    save_report::append_not_saved(
+                        &mut retry_outcome.summary,
+                        &[NOTHING_CHANGED_LINE.to_string()],
+                    );
+                    retry_artifacts.push(json!({
+                        "kind": REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND,
+                        "metadata": { "reason": "no_change_after_recovery" },
+                    }));
                 }
             }
 
@@ -11302,8 +11245,8 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 // final. (The inline-JSON `files[]` write path survives as the dedicated
                 // missing-files retry prompt, which fires only when no disk changes landed.)
                 "\nDirect workspace-change response contract:\n\
-                - Complete required edits with `apply_patch`; a no-change explanation does not satisfy a required edit. Inspect current contents when needed.\n\
-                - For conditional work, inspect and validate, then make only warranted changes. Explain a justified no-change result; do not manufacture a patch.\n\
+                - Complete required edits with `apply_patch`. Inspect current contents when needed.\n\
+                - For conditional work, inspect and validate, then make only warranted changes; do not manufacture a patch.\n\
                 - Complete required context retrieval, observations and tests before deciding on changes. These requirements never waive write-scope or read-only restrictions.\n\
                 - Keep changes minimal and workspace-relative. Apply exact supplied paths and contents as-is. Do not add an extra `bash -lc` wrapper.\n\
                 - If commit/sync/status was requested, use repo/Instafy tools when callable and complete still-required changes.\n\
@@ -12160,9 +12103,9 @@ fn records_workspace_change_receipts(commit_to_workspace: bool, read_only_worksp
     commit_to_workspace && !read_only_workspace
 }
 
-/// The reply without its last line when that line is
+/// The reply without its last line when that line is an older thread's
 /// [`NO_FILE_CHANGES_MARKER`] (bare, or in backticks, brackets or bold) and
-/// something else says why nothing changed; otherwise `None`.
+/// something else comes before it; otherwise `None`.
 fn take_no_file_changes_marker(text: &str) -> Option<String> {
     let trimmed = text.trim_end();
     let (rest, last) = trimmed.rsplit_once('\n').unwrap_or(("", trimmed));
@@ -12172,6 +12115,23 @@ fn take_no_file_changes_marker(text: &str) -> Option<String> {
     let rest = rest.trim_end();
     (bare.eq_ignore_ascii_case(NO_FILE_CHANGES_MARKER) && !rest.trim().is_empty())
         .then(|| rest.to_string())
+}
+
+/// The reply without the last lines an older thread's instructions still ask for, the
+/// no-change line ([`take_no_file_changes_marker`]) and the line of offered replies
+/// ([`without_offered_replies_line`]), in whichever order it ends with them. None when it ends
+/// with neither.
+fn without_older_threads_last_lines(text: &str) -> Option<String> {
+    let mut reply: Option<String> = None;
+    loop {
+        let current = reply.as_deref().unwrap_or(text);
+        let Some(shorter) =
+            take_no_file_changes_marker(current).or_else(|| without_offered_replies_line(current))
+        else {
+            return reply;
+        };
+        reply = Some(shorter);
+    }
 }
 
 fn reported_workspace_file_changes_missing(
@@ -12413,7 +12373,9 @@ fn extract_codex_outcome(value: &JsonValue) -> Result<CodexOutcome> {
         }
     }
 
-    if let Some(reply) = without_offered_replies_line(&summary) {
+    // The lines an older thread's instructions still ask for leave the reply before anything
+    // reads or shows it (a plan card carries the reply's words).
+    if let Some(reply) = without_older_threads_last_lines(&summary) {
         summary = reply;
     }
     let mut actions = parse_codex_actions(value);
@@ -12442,13 +12404,8 @@ const OFFERED_REPLY_MAX_CHARS: usize = 160;
 /// started before that still holds the plain-text lanes' instruction to end a reply with them
 /// ("Studio shows them as buttons"), and a later turn there keeps doing it. Studio never shows
 /// them, so the line leaves the reply and is kept nowhere. None when the last line is anything
-/// else, or is all the reply says. The runtime's [`NO_FILE_CHANGES_MARKER`] line after it stays
-/// last, for the caller that reads it.
+/// else, or is all the reply says.
 fn without_offered_replies_line(summary: &str) -> Option<String> {
-    if let Some(unmarked) = take_no_file_changes_marker(summary) {
-        let reply = without_offered_replies_line(&unmarked)?;
-        return Some(format!("{reply}\n{NO_FILE_CHANGES_MARKER}"));
-    }
     let (reply, last_line) = summary.trim_end().rsplit_once('\n')?;
     let reply = reply.trim_end();
     let parts: Vec<&str> = last_line.split('·').map(str::trim).collect();
@@ -13719,19 +13676,10 @@ fn augment_summary_for_onboarding_actions(summary: &mut String, actions: &[Codex
         return;
     }
 
-    // The runtime's no-change line stays last, for the caller that reads it: a
-    // required change that only asks for a connection says why and ends with it.
-    let marked = take_no_file_changes_marker(summary);
-    let mut reply = marked.clone().unwrap_or_else(|| std::mem::take(summary));
-    if !reply.trim().is_empty() {
-        reply.push_str("\n\n");
+    if !summary.trim().is_empty() {
+        summary.push_str("\n\n");
     }
-    reply.push_str(&guidance_lines.join("\n"));
-    if marked.is_some() {
-        reply.push('\n');
-        reply.push_str(NO_FILE_CHANGES_MARKER);
-    }
-    *summary = reply;
+    summary.push_str(&guidance_lines.join("\n"));
 }
 
 fn push_unique_ci(values: &mut Vec<String>, candidate: &str) {
@@ -15088,7 +15036,7 @@ fn codex_plain_write_task_retry_prompt(prompt: &str) -> String {
         "{prompt}\n\nIMPORTANT WORKSPACE-CHANGE RETRY REQUIREMENT:\n\
         - The prior attempt did not provide a complete final response or verified requested file changes. Inspect the current state before repeating an edit.\n\
         - Complete any still-missing required lookup/observation and requested file changes under the original permissions and write-scope guardrails. Do not repeat work already completed.\n\
-        - Apply still-required changes with the available tools. For conditional changes, a completed inspection with no warranted edits is a valid result; do not manufacture a patch or repeat an already completed edit. If evidence or permission is unavailable, report the concrete blocker instead of inventing a result.\n\
+        - Apply still-required changes with the available tools; do not manufacture a patch or repeat an already completed edit. If evidence or permission is unavailable, report the concrete blocker instead of inventing a result.\n\
         - Finish with a short reply about what changed, as AGENTS.md's Replies says. Do not wrap the final answer in JSON or serialize file contents; the runtime detects actual changes from disk.\n"
     )
 }
@@ -16078,33 +16026,47 @@ fn has_successful_patch_apply_event(events: &[JsonValue]) -> bool {
 }
 
 fn has_user_visible_codex_output_event(events: &[JsonValue]) -> bool {
-    events.iter().any(|event| {
-        let is_completed = event
-            .get("type")
-            .and_then(JsonValue::as_str)
-            .is_some_and(|event_type| event_type == "item.completed");
-        if !is_completed {
-            return false;
+    events
+        .iter()
+        .any(|event| completed_output_item(event, true))
+}
+
+/// Whether a run's log holds a reply of its own: a completed agent message that is not a
+/// progress note. Reasoning, or a progress note, alone is none.
+fn has_final_reply_event(events: &[JsonValue]) -> bool {
+    events
+        .iter()
+        .any(|event| completed_output_item(event, false))
+}
+
+/// A completed item with text that a person reads: an agent message that is not a progress
+/// note, or, when `reasoning` counts, a reasoning summary.
+fn completed_output_item(event: &JsonValue, reasoning: bool) -> bool {
+    let is_completed = event
+        .get("type")
+        .and_then(JsonValue::as_str)
+        .is_some_and(|event_type| event_type == "item.completed");
+    if !is_completed {
+        return false;
+    }
+    let Some(item) = event.get("item").and_then(JsonValue::as_object) else {
+        return false;
+    };
+    let has_text = item
+        .get("text")
+        .and_then(JsonValue::as_str)
+        .is_some_and(|text| !text.trim().is_empty());
+    match item.get("type").and_then(JsonValue::as_str) {
+        Some("agent_message") => {
+            has_text
+                && item
+                    .get("phase")
+                    .and_then(JsonValue::as_str)
+                    .is_none_or(|phase| phase != "commentary")
         }
-        let Some(item) = event.get("item").and_then(JsonValue::as_object) else {
-            return false;
-        };
-        let has_text = item
-            .get("text")
-            .and_then(JsonValue::as_str)
-            .is_some_and(|text| !text.trim().is_empty());
-        match item.get("type").and_then(JsonValue::as_str) {
-            Some("agent_message") => {
-                has_text
-                    && item
-                        .get("phase")
-                        .and_then(JsonValue::as_str)
-                        .is_none_or(|phase| phase != "commentary")
-            }
-            Some("reasoning") => has_text,
-            _ => false,
-        }
-    })
+        Some("reasoning") => reasoning && has_text,
+        _ => false,
+    }
 }
 
 fn synthesize_codex_missing_final_summary(
@@ -21462,12 +21424,9 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                                 continue;
                             }
                             // The note repeats the reply as the person reads it: without the
-                            // line of replies an older thread still offers and without the
-                            // runtime's marker, in the order the reply loses them.
-                            let offered = without_offered_replies_line(text);
-                            let text = offered.as_deref().unwrap_or(text);
-                            let unmarked = take_no_file_changes_marker(text);
-                            let text = unmarked.as_deref().unwrap_or(text);
+                            // lines an older thread still asks for.
+                            let reply = without_older_threads_last_lines(text);
+                            let text = reply.as_deref().unwrap_or(text);
                             let key = format!("agent_message::{text}");
                             push_message(
                                 key,
@@ -24523,7 +24482,12 @@ mod tests {
     /// required change's first attempt, one that looks up another chat) is
     /// given that section with the lane, and the file's rule for reading a
     /// public page: a required change's build that read only "Replies" read a
-    /// shop's site twice with python's `urllib` (a local test, Nov 8).
+    /// shop's site twice with python's `urllib` (a local test, Nov 8). A reply
+    /// that changes nothing follows that section's one rule: a turn that also
+    /// read that such a reply doesn't satisfy a required change, and was asked
+    /// to end it with a line of the runtime's, answered correctly that the
+    /// change was already there without the line, and failed (a local test,
+    /// Nov 9).
     #[test]
     fn a_file_changing_turn_replies_as_agents_md_says() {
         let tmp = tempdir().expect("temp dir");
@@ -24534,6 +24498,8 @@ mod tests {
         let start = agents_doc.find("## Replies").expect("section");
         let replies_rule = "Name a site, page or file by what it is";
         assert!(agents_doc[start..].contains(replies_rule));
+        let no_change_rule = "- When nothing needed changing, say what you checked and why.\n";
+        assert!(agents_doc[start..].contains(no_change_rule));
         let reading_rule = "- Read a public page only with `instafy web read <address>` or a \
                             reading command a skill names, where robots.txt, budgets and Details \
                             apply; never with curl, wget, python, node or another script. \
@@ -24619,6 +24585,14 @@ mod tests {
             // thread in its memory snapshot, the others given it with the lane, exactly when
             // Codex leaves the file out.
             assert!(prompt.contains(replies_rule), "{case}");
+            // A reply that changes nothing has that section's one rule, and nothing else in the
+            // turn says such a reply falls short of a required change.
+            assert_eq!(prompt.matches(no_change_rule).count(), 1, "{case}");
+            assert!(
+                !prompt.contains("does not satisfy a required edit"),
+                "{case}"
+            );
+            assert!(!prompt.contains("no-change result"), "{case}");
             let pinned =
                 prompt.contains("From `AGENTS.md` (this thread may predate it):\n## Replies\n");
             assert_eq!(pinned, without_agents_md, "{case}");
@@ -24672,6 +24646,7 @@ mod tests {
             "- Finish with a short reply about what changed, as AGENTS.md's Replies says."
         ));
         assert!(!retry.contains("plain-text summary"));
+        assert!(!retry.contains("no warranted edits is a valid result"));
     }
 
     /// "keep going" answered after a look the routing step did not count, and
@@ -31867,7 +31842,8 @@ mod tests {
     // instruction to end a reply with them on its own line (`"A" · "B"`, said to show as buttons),
     // and a later turn there keeps doing it: that line leaves the reply and goes nowhere, as it did
     // when it became buttons, and the note that repeats the reply among the turn's steps reads the
-    // same. Any other last line is the reply's own words, and nothing is kept as an offer.
+    // same. So does an older thread's no-change line after it. Any other last line is the reply's
+    // own words, and nothing is kept as an offer.
     #[test]
     fn a_reply_leaves_out_the_line_of_replies_an_older_thread_still_offers() {
         let reply = "Built and opened a comparison page.\n\nAssumed: boards means the newest ones.";
@@ -31893,11 +31869,7 @@ mod tests {
             assert_eq!(messages[0].content, reply, "{offered}");
             let outcome = extract_codex_outcome(&json!({ "summary": marked, "files": [] }))
                 .expect("extract outcome");
-            assert_eq!(
-                take_no_file_changes_marker(&outcome.summary).as_deref(),
-                Some(reply),
-                "{offered}"
-            );
+            assert_eq!(outcome.summary, reply, "{offered}");
         }
         // Any other last line stays the reply's own words.
         for summary in [
@@ -34868,10 +34840,7 @@ mod tests {
                     )
                     .unwrap();
                 assert!(prompt.contains(WRITE_LANE_REPLY_LINE));
-                assert!(prompt.contains("Explain a justified no-change result"));
-                assert!(
-                    prompt.contains("a no-change explanation does not satisfy a required edit")
-                );
+                assert!(prompt.contains("make only warranted changes; do not manufacture a patch"));
                 assert!(prompt.contains("Owned paths: src/index.mjs"));
                 assert!(!prompt.contains("Return one JSON object"));
                 assert!(!prompt.contains("Return exactly one JSON object"));
@@ -38655,40 +38624,6 @@ mod tests {
         );
     }
 
-    /// A required change that only asks for a connection says why and ends with the runtime's
-    /// no-change line, as its prompt asks. The guidance goes above that line, which stays last:
-    /// after it, the line went unread, so the reply was taken for one that promised a change, ran
-    /// again on a thread of its own, and failed with the card and its steps lost.
-    #[test]
-    fn onboarding_guidance_keeps_the_no_change_line_last() {
-        let reply = "Your payments are in Example, which isn't connected to this space yet.";
-        let mut summary = format!("{reply}\n\n{NO_FILE_CHANGES_MARKER}");
-        let actions = vec![CodexAction::RequestIntegration {
-            provider: "example".to_string(),
-            description: None,
-            required_scopes: Vec::new(),
-            capabilities: Vec::new(),
-            auth_methods: Vec::new(),
-            suggested_secret_names: Vec::new(),
-            suggested_secrets: Vec::new(),
-            agent_handles: Vec::new(),
-        }];
-
-        augment_summary_for_onboarding_actions(&mut summary, &actions);
-
-        assert!(
-            summary.ends_with(&format!("\n{NO_FILE_CHANGES_MARKER}")),
-            "{summary}"
-        );
-        let read = take_no_file_changes_marker(&summary).expect("the line is read");
-        assert!(read.starts_with(reply), "{read}");
-        assert!(
-            read.ends_with("Then reply `I connected Example. Retry now.` and I will verify the connection and continue your request."),
-            "{read}"
-        );
-        assert!(!read.contains(NO_FILE_CHANGES_MARKER), "{read}");
-    }
-
     #[test]
     fn build_final_messages_from_actions_deduplicates_integration_requests_by_provider() {
         let actions = vec![
@@ -39268,18 +39203,26 @@ mod tests {
         );
     }
 
-    /// A recovery pass that changed no file on purpose ends its reply with the
-    /// runtime's marker line. The person reads the reply without it: in the
-    /// answer, and in the note that repeats the answer among the turn's steps.
+    /// A reply that changed nothing was once asked to end with a line of the
+    /// runtime's, and a turn on a thread from before can still add it. The
+    /// person reads the reply without it: in the answer, and in the note that
+    /// repeats the answer among the turn's steps. Such a thread can also still
+    /// ask for a line of offered replies, and a reply can end with both lines,
+    /// in either order.
     #[test]
     fn the_no_change_marker_never_reaches_the_person() {
         let reply = "I can't open www.roborock.com from this turn, so I left the page unbuilt.";
+        let offered = "“Sort by weight” · “Add a fifth laptop”";
         for marked in [
             format!("{reply}\n\nNO_FILE_CHANGES"),
             format!("{reply}\n`NO_FILE_CHANGES`\n"),
             format!("{reply}\n**no_file_changes.**"),
+            format!("{reply}\n{offered}\nNO_FILE_CHANGES"),
+            format!("{reply}\nNO_FILE_CHANGES\n{offered}"),
         ] {
-            assert_eq!(take_no_file_changes_marker(&marked).as_deref(), Some(reply));
+            let outcome = extract_codex_outcome(&json!({ "summary": marked, "files": [] }))
+                .expect("extract outcome");
+            assert_eq!(outcome.summary, reply);
             let messages = extract_codex_messages(&[json!({
                 "type": "item.completed",
                 "item": { "type": "agent_message", "text": marked },
@@ -39288,7 +39231,7 @@ mod tests {
             assert_eq!(messages[0].content, reply);
         }
         // A reply without the line, the line alone, or the words inside a
-        // sentence is not a report that nothing changed on purpose.
+        // sentence keeps its words.
         assert_eq!(take_no_file_changes_marker(reply), None);
         assert_eq!(take_no_file_changes_marker("NO_FILE_CHANGES"), None);
         assert_eq!(

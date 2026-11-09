@@ -332,7 +332,7 @@ keeps it, and a new record removes those older than a week. A lease after the
 first (the job's `lease_attempts` above one) that finds the job's record
 counts the paths whose status changed since then (by the save's publish
 filter) among its turn's files, so a turn that finds the work already done
-saves it rather than failing as a file-modifying request that changed
+saves it rather than taking it for a file-modifying request that changed
 nothing. What the folder held when the job first began there (the person's
 own edits, other turns' unsaved work, the runtime's memory files) is not
 counted, and a lease that finds no record counts only what its turn changes.

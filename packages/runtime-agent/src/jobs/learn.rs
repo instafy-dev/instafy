@@ -158,6 +158,9 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     // From before a turn read a public page only with `instafy web read` or a reading command a
     // skill names, never with curl, wget, python, node or another script.
     include_str!("legacy/agents-doc-v17.md"),
+    // From before a reply that changed nothing said what it checked and why, under a rule of its
+    // own.
+    include_str!("legacy/agents-doc-v18.md"),
 ];
 /// Whether `text` is a copy of `AGENTS.md` Instafy ships, the current one or an earlier one. A
 /// copy a space edited, or a team's own, is not: its rules are the space's.
@@ -2378,6 +2381,34 @@ mod tests {
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
 
         let previous = include_str!("legacy/agents-doc-v16.md");
+        assert!(!flat(previous).contains(rule));
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join(AGENTS_DOC_FILENAME);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
+    }
+
+    /// "Add a weight column to the laptop comparison." found the column already there, and the
+    /// reply said so, but the turn held other rules for such a reply: that it doesn't satisfy a
+    /// required change, and a line of the runtime's to end it with. Without the line, the
+    /// correct answer failed (a local test, Nov 9). "Replies", which every file-changing turn
+    /// reads, holds the one rule. The copy from before is upgraded.
+    #[test]
+    fn a_reply_that_changed_nothing_says_what_it_checked_and_why() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let doc = flat(AGENTS_DOC_TEMPLATE);
+        let replies = doc
+            .split("## Replies")
+            .nth(1)
+            .and_then(|rest| rest.split("## ").next())
+            .expect("Replies section");
+        let rule = "- When nothing needed changing, say what you checked and why.";
+        assert!(replies.contains(rule), "{replies}");
+        assert_eq!(doc.matches("nothing needed changing").count(), 1, "{doc}");
+        assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+
+        let previous = include_str!("legacy/agents-doc-v18.md");
         assert!(!flat(previous).contains(rule));
         let workspace = tempdir().expect("workspace");
         let path = workspace.path().join(AGENTS_DOC_FILENAME);

@@ -79,9 +79,11 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   turn with nothing to show below keeps the "Run failed" marker; "Run needs attention" stays in
   the header.
 - Every failed turn shows the same failure block (`RunFailureMessageBody`): one plain sentence,
-  "Try again", and Details with the raw error. A turn that did not make the file changes it was
-  asked for reads "Octo didn't finish the changes." (the agent's own name when the failure names
-  one). A turn that made its changes and whose save of them failed (the runtime's "Workspace sync
+  "Try again", and Details with the raw error. A turn asked for file changes whose reply listed
+  files that never reached the space, or that stopped with no reply, reads "Octo didn't finish the
+  changes." (the agent's own name when the failure names one). One that changed nothing and
+  replied has not failed: its reply shows with "Nothing was changed." under it. A turn that made
+  its changes and whose save of them failed (the runtime's "Workspace sync
   failed: …", as when the controller refused the save) reads "Octo made the changes but couldn't
   save them.", never that the turn stopped, and its files read "Not saved"
   (`origin/apply-error`), with the note "These changes weren't saved to the space. They're kept
