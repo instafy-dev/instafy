@@ -1325,6 +1325,18 @@ pub(crate) async fn agent_lease(
             );
         }
 
+        // Which chat made each of the space's pages, as of this lease: the
+        // runtime holds another chat's page for the turn from it.
+        let mut leased: Vec<crate::previews::LeasedPages<'_>> = jobs
+            .iter_mut()
+            .map(|job| crate::previews::LeasedPages {
+                project_id: job.project_id,
+                payload: &mut job.payload,
+            })
+            .collect();
+        crate::previews::add_space_pages(&connection, &mut leased).await;
+        drop(leased);
+
         // Signed last, after the commit and with the pool slot returned, so
         // neither a row lock nor a database connection waits on Storage. The
         // events above never carry the URLs. A runtime that does not download

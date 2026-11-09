@@ -168,6 +168,8 @@ async function startMockController(options: {
   thumbnailStatus?: number;
   // When the CLI has recorded the preview as last pictured, read as each request arrives.
   pictureAt?: () => number | undefined;
+  // The `page` of the ready answer: the chat the server holds for the page's folder. An older server says nothing.
+  readyPage?: () => unknown;
 }) {
   const captures: RequestCapture[] = [];
   let created = 0;
@@ -239,7 +241,8 @@ async function startMockController(options: {
         if (match[2] === "ready" && options.readyStatus) {
           json(options.readyStatus, options.readyBody ?? {});
         } else if (match[2] === "ready") {
-          json(200, { messageId: `message-${match[1]}`, health: { listening: true, status: 200 } });
+          const page = options.readyPage?.();
+          json(200, { messageId: `message-${match[1]}`, health: { listening: true, status: 200 }, ...(page === undefined ? {} : { page }) });
         } else {
           res.writeHead(204);
           res.end();
@@ -253,6 +256,14 @@ async function startMockController(options: {
   });
   const port = await listen(server);
   return { url: `http://127.0.0.1:${port}`, captures };
+}
+
+/** The folders that were in `workspace` as a turn began, as the runtime writes them down before a turn that may write
+ *  files (`.instafy/pages/turn-folders.json`). */
+function turnBeganWith(workspace: string, folders: string[]) {
+  const dir = path.join(workspace, ".instafy", "pages");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "turn-folders.json"), JSON.stringify({ version: 1, folders, complete: true }));
 }
 
 async function readAll(stream: NodeJS.ReadableStream) {
@@ -1182,6 +1193,10 @@ describe("instafy preview: the card's summary and picture", () => {
   // and an open from another chat there still finds the chat that made the page. A page written down with no chat (one
   // a wake found from before the record) is never claimed, and the workspace itself, the person's own site, is not
   // written down.
+  //
+  // The card's chat gets a folder the record does not hold only when the turn that opens it made the folder: the
+  // runtime writes down the folders that were there as each turn begins. This server says nothing of the page, as one
+  // from before it kept the record.
   it("writes down the chat that made the page in the space's folder, and keeps it on a new machine", async () => {
     const projectId = randomUUID();
     const rathole = makeStubRathole();
@@ -1192,6 +1207,8 @@ describe("instafy preview: the card's summary and picture", () => {
     for (const folder of ["sites/compare", "sites/porto"]) fs.mkdirSync(path.join(workspace, folder), { recursive: true });
     const file = path.join(workspace, ".instafy", "pages", "pages.json");
     const pages = () => (JSON.parse(fs.readFileSync(file, "utf8")) as { pages: Array<Record<string, unknown>> }).pages;
+    // as the turn began, only `sites` was there: this turn made both pages
+    turnBeganWith(workspace, ["sites"]);
     const job = (conversation: string) => ({
       RUNTIME_ID: randomUUID(),
       RUNTIME_LEASE_ID: "lease-1",
@@ -1213,6 +1230,9 @@ describe("instafy preview: the card's summary and picture", () => {
       expect.objectContaining({ folder: "sites/compare", title: "Site preview", conversationId: made, server: ["instafy", "bind"] }),
     ]);
     expect(fs.readFileSync(path.join(workspace, ".instafy", "pages", ".gitignore"), "utf8")).toBe("*\n");
+    // the server is told the turn made the folder, so it can give the page to this chat
+    const opened = controller.captures.filter((capture) => capture.method === "POST" && capture.path === `/projects/${projectId}/previews`);
+    expect(JSON.parse(opened.at(-1)!.body)).toMatchObject({ serve: { cwd: "sites/compare" }, pageFolder: "new" });
     // the machine's own state never holds it
     expect(readState(home).previews[0]).toMatchObject({ siteDir: "sites/compare" });
     expect(readState(home).previews[0]).not.toHaveProperty("conversationId");
@@ -1244,10 +1264,128 @@ describe("instafy preview: the card's summary and picture", () => {
       ["sites/porto", named],
       ["sites/compare", undefined],
     ]);
-    // the workspace itself is the person's own site: not written down
+    // the workspace itself is the person's own site: not written down, and the server is told nothing of a page
     const own = await member(workspace);
     expect(own.code, own.stderr).toBe(0);
     expect(pages().map((page) => page.folder)).toEqual(["sites/porto", "sites/compare"]);
+    const ownOpen = controller.captures.filter((capture) => capture.method === "POST" && capture.path === `/projects/${projectId}/previews`).at(-1)!;
+    expect(JSON.parse(ownOpen.body)).not.toHaveProperty("pageFolder");
+  }, 60000);
+
+  // The record is outside every save, so a hosted space starts without it after a release, or once its idle checkout
+  // is cloned again. The first chat to open a page's card then became its maker, and the chat that really made the
+  // page had its edits put back. So with the record gone, a folder that was there before the opening turn began is
+  // written down with no chat, whichever chat opens it: nothing here says who made it. So is any folder when no turn
+  // wrote down what was there (a card opened outside a turn, an older runtime).
+  it("gives a page whose record was lost to no chat when another chat opens it", async () => {
+    const projectId = randomUUID();
+    const rathole = makeStubRathole();
+    const controller = await startMockController({ projectId });
+    const sitePort = await startSite();
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-space-"));
+    cleanups.push(() => fs.rmSync(workspace, { recursive: true, force: true }));
+    const compare = path.join(workspace, "sites", "compare");
+    fs.mkdirSync(compare, { recursive: true });
+    const record = path.join(workspace, ".instafy", "pages");
+    const pages = () => (JSON.parse(fs.readFileSync(path.join(record, "pages.json"), "utf8")) as { pages: Array<Record<string, unknown>> }).pages;
+    const job = (conversation: string) => ({
+      RUNTIME_ID: randomUUID(),
+      RUNTIME_LEASE_ID: "lease-1",
+      INSTAFY_CONVERSATION_ID: conversation,
+      CONTROLLER_ACCESS_TOKEN: "active-job-token",
+      CONTROLLER_BASE_URL: controller.url,
+      WORKSPACE_PROJECT_DIR: workspace,
+    });
+    const args = [...openArgs({ projectId, port: sitePort, rathole: rathole.file }), "--serve-cmd", "instafy bind serve . --port 8000 --preview"];
+    const lastOpen = () =>
+      JSON.parse(controller.captures.filter((capture) => capture.method === "POST" && capture.path === `/projects/${projectId}/previews`).at(-1)!.body);
+    const [made, other] = [randomUUID(), randomUUID()];
+
+    // the chat that made the page opens its card, in the turn that made the folder
+    turnBeganWith(workspace, ["sites"]);
+    const first = await execCli(args, makeHome(), job(made), compare);
+    expect(first.code, first.stderr).toBe(0);
+    expect(pages()).toEqual([expect.objectContaining({ folder: "sites/compare", conversationId: made })]);
+
+    // a release: the machine is replaced and the workspace cloned again, without the record. Another chat's turn
+    // begins with the folder there, and a check that passes opens its card.
+    fs.rmSync(record, { recursive: true, force: true });
+    turnBeganWith(workspace, ["sites", "sites/compare"]);
+    const flipped = await execCli(args, makeHome(), job(other), compare);
+    expect(flipped.code, flipped.stderr).toBe(0);
+    expect(pages()).toHaveLength(1);
+    expect(pages()[0]).toMatchObject({ folder: "sites/compare", server: ["instafy", "bind"] });
+    expect(pages()[0]).not.toHaveProperty("conversationId");
+    expect(lastOpen()).toMatchObject({ pageFolder: "existing" });
+    // and no later open claims it, not even the chat that made it
+    const back = await execCli(args, makeHome(), job(made), compare);
+    expect(back.code, back.stderr).toBe(0);
+    expect(pages()[0]).not.toHaveProperty("conversationId");
+
+    // no turn wrote down what was there, or its list is not whole: nothing says the folder is new
+    for (const listed of [null, { version: 1, folders: [], complete: false }, { version: 1, folders: "sites" }]) {
+      fs.rmSync(record, { recursive: true, force: true });
+      if (listed) {
+        fs.mkdirSync(record, { recursive: true });
+        fs.writeFileSync(path.join(record, "turn-folders.json"), JSON.stringify(listed));
+      }
+      const unknown = await execCli(args, makeHome(), job(other), compare);
+      expect(unknown.code, unknown.stderr).toBe(0);
+      expect(pages()[0]).not.toHaveProperty("conversationId");
+      expect(lastOpen()).toMatchObject({ pageFolder: "existing" });
+    }
+
+    // a folder two names deep or more is read by its first two names: one made inside a page that was there is not new
+    const nested = path.join(compare, "v2");
+    fs.mkdirSync(nested);
+    fs.rmSync(record, { recursive: true, force: true });
+    turnBeganWith(workspace, ["sites", "sites/compare"]);
+    const inside = await execCli(args, makeHome(), job(other), nested);
+    expect(inside.code, inside.stderr).toBe(0);
+    expect(pages()[0]).toMatchObject({ folder: "sites/compare/v2" });
+    expect(pages()[0]).not.toHaveProperty("conversationId");
+  }, 90000);
+
+  // The server keeps which chat made each page and says so when it posts a card: its word is what the record on this
+  // machine holds, whatever the record held and whichever chat opens the card.
+  it("writes a page down with the chat the server holds for it", async () => {
+    const projectId = randomUUID();
+    const rathole = makeStubRathole();
+    let held: unknown;
+    const controller = await startMockController({ projectId, readyPage: () => held });
+    const sitePort = await startSite();
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-space-"));
+    cleanups.push(() => fs.rmSync(workspace, { recursive: true, force: true }));
+    const compare = path.join(workspace, "sites", "compare");
+    fs.mkdirSync(compare, { recursive: true });
+    const record = path.join(workspace, ".instafy", "pages");
+    const pages = () => (JSON.parse(fs.readFileSync(path.join(record, "pages.json"), "utf8")) as { pages: Array<Record<string, unknown>> }).pages;
+    const job = (conversation: string) => ({
+      RUNTIME_ID: randomUUID(),
+      RUNTIME_LEASE_ID: "lease-1",
+      INSTAFY_CONVERSATION_ID: conversation,
+      CONTROLLER_ACCESS_TOKEN: "active-job-token",
+      CONTROLLER_BASE_URL: controller.url,
+      WORKSPACE_PROJECT_DIR: workspace,
+    });
+    const args = [...openArgs({ projectId, port: sitePort, rathole: rathole.file }), "--serve-cmd", "instafy bind serve . --port 8000 --preview"];
+    const [made, other] = [randomUUID(), randomUUID()];
+
+    // the record on this machine is gone, and another chat opens the card: the page is still its maker's
+    turnBeganWith(workspace, ["sites", "sites/compare"]);
+    held = { folder: "sites/compare", conversationId: made };
+    const kept = await execCli(args, makeHome(), job(other), compare);
+    expect(kept.code, kept.stderr).toBe(0);
+    expect(pages()).toEqual([expect.objectContaining({ folder: "sites/compare", conversationId: made })]);
+
+    // the server holds the page for no chat: none is written down, even for a folder this turn made, and even where
+    // the record here held one
+    turnBeganWith(workspace, ["sites"]);
+    held = { folder: "sites/compare", conversationId: null };
+    const nobodys = await execCli(args, makeHome(), job(other), compare);
+    expect(nobodys.code, nobodys.stderr).toBe(0);
+    expect(pages()).toHaveLength(1);
+    expect(pages()[0]).not.toHaveProperty("conversationId");
   }, 60000);
 
   it("a picture that cannot be uploaded leaves the exit code alone", async () => {

@@ -9,9 +9,11 @@
 //! Each turn that may write files is now told the space's pages, each made in this chat or in
 //! another, from the space's record of its pages: `instafy preview open` writes the chat each
 //! page's card went to in `.instafy/pages/pages.json`, in the space's own folder (here the test
-//! records each card as the CLI does: its own test covers the CLI). That record outlasts the
-//! machine: a stopped space's next machine starts with a new home folder, so the turns here run with
-//! no CLI state in their home at all. The stand-in model does what the instructions it gets say, and
+//! records each card as the CLI does: its own test covers the CLI). That record is kept with the
+//! space's folder, not in the home folder: a stopped space's next machine starts with a new home
+//! folder, so the turns here run with no CLI state in their home at all (the controller keeps
+//! which chat made each page for a machine that starts without the folder's record, and these
+//! jobs carry none of its pages). The stand-in model does what the instructions it gets say, and
 //! what the model in that test did when they said nothing: it starts its own folder for a page
 //! another chat made, and changes the folder its own chat made. The first chat's page is then
 //! unchanged byte for byte, the new chat's fill-in fills its own folder, and a long chat whose page
