@@ -2999,21 +2999,30 @@ unless the policy is `"covered"`.
   JSON object per line, each fact under a page it read that states it rather
   than one that only quotes it, and carrying what it doesn't confirm (which of
   its values the turn chose rather than the page, and what it leaves out),
-  since later turns read only these lines; a value it looked for on a page and
-  didn't find under that page as where it looked ("runtime not found on this
-  page"), never that the page lacks it, and only after it searched the whole
-  text the step returned (never a slice) and opened that page's own tab or link
-  named for the value; and a page that stopped it as a stop with its word
-  (`no-page`, `timed-out` and `covered` among them). A turn whose reply answers the person
-  drafts it as it writes, up to its first finding line. A browser turn that
-  continues a building card also ends with one line naming the pages its
-  request needs that it didn't open (`{"unread": [...]}`), a page's own tab or
-  link for a value it didn't find there among them, as its wrap-up pass below
-  is told too. A tab is named with its page ("Laptop 12's Specs tab"), never by
-  the page's address: a page a finding line lists is none to read again. Told
-  only to say where it looked, a warranty's browser turn read only the last 700
-  to 1,100 characters of three product pages, each ending in a "Warranty" link
-  it never opened, and wrote the warranty as not found with nothing unread.
+  since later turns read only these lines; and a page that stopped it as a
+  stop with its word (`no-page`, `timed-out` and `covered` among them). A
+  value it looked for and didn't find is no fact of any page, and is not
+  found until the turn searched the whole text a step returned for it in the
+  script that ran the step, never by printing the text (a printed result over
+  about 10,000 tokens is cut in its middle), and opened that page's own Specs,
+  Warranty, Support or FAQ tab or link for it. Every browser turn is told so,
+  a question's turn too: later turns read its findings. Told to write such a
+  value under its page as where it looked, never that the page lacks it,
+  browser turns wrote that no review "was visible in the portion read" and
+  that a Specs page "did not show an estimated runtime", and the builds said
+  the pages "didn't identify reviews" and "don't give runtime estimates". A
+  turn whose reply answers the person drafts it as it writes, up to its first
+  finding line. A browser turn that continues a building card also ends with
+  one line naming, by name alone, the values its request needs that it looked
+  for and didn't find (`{"missing": [...]}`), and then one line naming the
+  pages its request needs that it didn't open (`{"unread": [...]}`), as its
+  wrap-up pass below is told too; a page's own tab or link for a value it
+  didn't find there is one of the unread pages until it opens it. A tab is named with
+  its page ("Laptop 12's Specs tab"), never by the page's address: a page a
+  finding line lists is none to read again. Told only to say where it looked,
+  a warranty's browser turn read only the last 700 to 1,100 characters of
+  three product pages, each ending in a "Warranty" link it never opened, and
+  wrote the warranty as not found with nothing unread.
   When it names any,
   the runtime runs the turn once more on its own thread, told only those
   pages (a page it read already only for a tab or link that line names on
@@ -3030,8 +3039,11 @@ unless the policy is `"covered"`.
   stops for the person (a pause, a step's approval that ended it) ends the
   turn with the words that say what they do next, which it posts, and its note
   keeps every finding line in hand; no hand-back follows it. Its unread line
-  starts no third pass. The unread line is the runtime's alone: no
-  reply and no note keeps it. Told only to read every page the request needs, a
+  starts no third pass, and it ends with its own missing line too. The unread
+  line is the runtime's alone: no reply and no note keeps it. The missing
+  lines of both passes go into the note as one line after the finding lines,
+  each name once, where the controller stamps them on the record as
+  `missing`; no reply keeps them. Told only to read every page the request needs, a
   comparison's browser turn read three pages and ended, and the page was built
   with four of its fifteen facts. Those lines are for Octo: the runtime takes every line
   the controller would read as a finding out of the reply the person reads, and
@@ -3082,17 +3094,29 @@ unless the policy is `"covered"`.
   turns since its last turn and its replay of the chat alike, and never reads
   the browser turn's own words. Told plain words for two stops, a build wrote
   "Notebookcheck was blocked" for a search a cookie notice covered. Its
-  hand-back also reads a "not found" fact as what Octo didn't find there: for a
-  value no other fact gives (a tab opened in the second pass adds its facts to
-  its page's), it says "I didn't find…" and where Octo looked, never that a
-  page doesn't show it, as a build once wrote that a maker's product pages "did
-  not show warranty terms" from three such facts. A browser
+  hand-back quotes, with the findings, what the browser turn didn't find in the
+  runtime's own words (`notFound`: "I didn't find <name>", never where: the
+  record says which pages the turn read, not where it looked for a value, and
+  an address the browser refused leaves no finding), and the build uses those
+  words as they are wherever such a value would go, unless a finding gives it:
+  told to say "I didn't find…" and where it looked of a "not found" fact, a
+  build still wrote that a maker's specs pages "don't give runtime estimates".
+  Wherever a building turn reads findings (its hand-back, the browser turns
+  since its last turn and its replay of the chat), it is also told that a
+  route ends at the stop its finding names, and, unless the person named that
+  stop or a finding says the place's own page names it, that the page says
+  it's Octo's pick and that the walk from it to the place isn't checked:
+  builds read only the findings, and a planner's finding that left both out
+  left the page people share without them. A stop the person named is never
+  called Octo's pick, and the page made to share a route was first built from
+  the chat's replay, after a browser part that opened no page. A browser
   turn that used the browser and wrote no
   finding line would leave a later building turn nothing of the pages it read,
   and one that continues a building card would hand nothing back: it gets the
   runtime's wrap-up pass on its own thread, which holds those
   pages, asked for the finding lines alone (and, for a turn that continues a
-  building card and had no second pass yet, its unread line after them: asked
+  building card and had no second pass yet, its missing and unread lines after
+  them: asked
   for the lines alone, a comparison's turn that said in words which pages it
   hadn't reached lost that list, and its page was built with five of fifteen
   facts), and not billed, as a recovery retry
