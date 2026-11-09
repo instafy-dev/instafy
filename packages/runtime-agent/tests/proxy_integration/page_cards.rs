@@ -47,6 +47,10 @@ const MINE_REPLY: &str = "I added the opening hours.";
 const THEIRS: &str = "Put the weights on the laptop comparison.";
 const THEIR_PAGE: &str = "sites/laptops";
 const THEIRS_REPLY: &str = "I put the weights on it.";
+/// Another chat's page is read-only here: the turn's change to it goes back, and as that was all
+/// the turn changed, the runtime's line is the whole reply.
+const NOT_CHANGED: &str =
+    "I didn't change “Three latest Framework laptops”: it was made in another chat.";
 const STOPPED: &str = "Make a packing list page.";
 const STOPPED_PAGE: &str = "sites/packing";
 const STOPPED_REPLY: &str = "I made a packing list.";
@@ -599,7 +603,8 @@ printf '{{"posted":true,"title":"%s","command":"instafy preview open","answer":{
         .collect();
     assert_eq!(folders, vec![&json!(NEW_PAGE)], "{rows}");
 
-    // This chat's page, whose card is in the chat, and another chat's page: no card.
+    // This chat's page, whose card is in the chat, and another chat's page: no card. The turn's
+    // change to another chat's page goes back as the last save holds it.
     record_pages(
         &workspace,
         &[
@@ -608,13 +613,17 @@ printf '{{"posted":true,"title":"%s","command":"instafy preview open","answer":{
             (THEIR_PAGE, "Three latest Framework laptops", another_chat),
         ],
     )?;
-    for (prompt, reply) in [(MINE, MINE_REPLY), (THEIRS, THEIRS_REPLY)] {
+    for (prompt, reply) in [(MINE, MINE_REPLY), (THEIRS, NOT_CHANGED)] {
         let (job, _) = turn(prompt)?;
         let done = run(job, None)
             .await
             .with_context(|| format!("the turn \"{prompt}\" failed"))?;
         assert_eq!(done.summary, reply);
     }
+    assert_eq!(
+        fs::read_to_string(workspace.join(THEIR_PAGE).join("index.html"))?,
+        "<!doctype html><title>Three latest Framework laptops</title>\n"
+    );
     assert_eq!(ran().len(), 1, "{:#?}", ran());
 
     // A Stop that reaches the controller once the turn's change is saved, before the job's
