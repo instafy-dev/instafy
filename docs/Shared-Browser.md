@@ -2008,10 +2008,11 @@ to, as one digest the page works out itself. So a step that only changed a
 field (an option chosen, a box checked), turned a switch on or scrolled the
 page answers at once. Whether a control is turned off is left out: a button
 that turns itself off while its result loads would read as that result. A
-click or key reads the page with the pointer over its control and the focus
-on it first, as the press is about to put them: read before them, a tip
-shown on hover, or a field's suggestions closed as it lost focus, read as the
-page answering, and the click returned before the route was drawn. A page
+click reads the page with the pointer over its control and the focus on it
+first, as the press is about to put them, and a key with the focus on its
+control: read before them, a tip shown on hover, or a field's suggestions
+closed as it lost focus, read as the page answering, and the click returned
+before the route was drawn. A page
 that still reads as it did then says so
 in the step's `done`: "The page reads as it did before this step. What it
 loads may still be coming: take a snapshot before saying nothing appeared."
