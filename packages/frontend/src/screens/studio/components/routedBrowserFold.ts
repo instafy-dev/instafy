@@ -27,8 +27,10 @@
 // refused, the browser turn shows what it has (the controller leaves a
 // refusal's reason as its reply). The card stops standing in once nothing
 // more will come: the browser turn or a hand-back's run ended before its job
-// showed anything, or someone wrote after the browser turn before any
-// hand-back came (the controller then sends none).
+// showed anything, or, before any hand-back came, someone wrote after the
+// browser turn (the controller then sends none) or nothing of the chat runs
+// any more (the controller refuses some hand-backs without a word, as when
+// the building lane is busy), as the typing row and Stop read it.
 //
 // A browser turn whose findings a hand-back took back to the building turn
 // reads as one answer with it: one Octo row, with one line, one reply and the
@@ -165,8 +167,13 @@ function settledBrowserCardIds(
  * carries it on: the continuation names the card (`browserRequestOf`), and
  * its stored row names the run that turn's job reports under. Also lists the
  * cards of any turn that have left the chat.
+ *
+ * `turnOnItsWay`: whether a turn of this chat is on its way, as the typing
+ * row and Stop read it (ChatPanel's `isAssistantTyping`). A card whose
+ * browser turn handed the message over, with no hand-back in the chat yet,
+ * stands in only while one is: without it, nothing more will come.
  */
-export function resolveRoutedBrowserFold(messages: readonly ChatMessage[]): RoutedBrowserFold {
+export function resolveRoutedBrowserFold(messages: readonly ChatMessage[], turnOnItsWay = false): RoutedBrowserFold {
   const cards: ChatMessage[] = [];
   const routedCards = new Map<string, ChatMessage>();
   const jobByRunId = new Map<string, string>();
@@ -240,14 +247,15 @@ export function resolveRoutedBrowserFold(messages: readonly ChatMessage[]): Rout
   // stands for that turn too, until it shows something (the transcript
   // takes the card out then). Not once nothing more will come: a hand-back's
   // run ended before its job showed anything, or, before any hand-back came,
-  // someone wrote after the browser turn, when the controller sends none.
-  // Nor for a hand-back whose run this chat cannot tell: that turn could not
-  // be told from any other.
+  // someone wrote after the browser turn, when the controller sends none, or
+  // nothing of the chat runs any more, when the controller refused the
+  // hand-back without a word. Nor for a hand-back whose run this chat cannot
+  // tell: that turn could not be told from any other.
   const buildingJobIdsByBrowserJobId = new Map<string, Set<string>>();
   for (const [browserJobId, { key, continuationIndex }] of handingOver) {
     const handBackRuns = buildRequestHandBacks.get(browserJobId);
     if (handBackRuns === undefined) {
-      if (messages.slice(continuationIndex + 1).some((message) => message.role === "user")) continue;
+      if (!turnOnItsWay || messages.slice(continuationIndex + 1).some((message) => message.role === "user")) continue;
     } else if (handBackRuns.some((runId) => runId === null || runsEndedWithoutAJob.has(runId))) {
       continue;
     }
@@ -272,7 +280,10 @@ export function resolveRoutedBrowserFold(messages: readonly ChatMessage[]): Rout
   };
 }
 
-/** Routed cards still opening by themselves ({@link RoutedBrowserFold.waitingCardKeys}). */
-export function routedBrowserWaitingKeys(messages: readonly ChatMessage[]): ReadonlySet<string> {
-  return resolveRoutedBrowserFold(messages).waitingCardKeys;
+/**
+ * Routed cards still standing in for their turn ({@link RoutedBrowserFold.waitingCardKeys}),
+ * with `turnOnItsWay` as {@link resolveRoutedBrowserFold} reads it.
+ */
+export function routedBrowserWaitingKeys(messages: readonly ChatMessage[], turnOnItsWay = false): ReadonlySet<string> {
+  return resolveRoutedBrowserFold(messages, turnOnItsWay).waitingCardKeys;
 }

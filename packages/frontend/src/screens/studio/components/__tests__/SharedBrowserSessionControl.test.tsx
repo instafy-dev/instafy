@@ -99,4 +99,33 @@ describe("Browser options' Advanced row", () => {
     expect(linkBox()?.value).toBe(RESUME_URL);
     expect(document.activeElement).toBe(linkBox());
   });
+
+  // The address is for that one failed copy: once the person closes Browser
+  // options, a later opening starts as any other does, with Advanced closed,
+  // no address, no old status and the focus left where it was.
+  it("shows the link only in the opening whose copy failed", async () => {
+    await render();
+    advanced().open = true;
+    clipboard.write.mockRejectedValueOnce(new Error("denied"));
+    await act(async () => copyButton()!.click());
+    expect(linkBox()?.value).toBe(RESUME_URL);
+
+    await render({ open: false });
+    for (let opening = 0; opening < 2; opening += 1) {
+      await render({ open: true });
+      expect(advanced().open).toBe(false);
+      expect(linkBox()).toBeNull();
+      expect(advanced().querySelector('[role="status"]')).toBeNull();
+      expect(document.activeElement?.tagName).not.toBe("INPUT");
+      await render({ open: false });
+    }
+
+    // A new failure shows the link again, in its own opening.
+    await render({ open: true });
+    advanced().open = true;
+    clipboard.write.mockRejectedValueOnce(new Error("denied"));
+    await act(async () => copyButton()!.click());
+    expect(linkBox()?.value).toBe(RESUME_URL);
+    expect(document.activeElement).toBe(linkBox());
+  });
 });

@@ -33,8 +33,12 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
   footer?: ReactNode;
 }) {
   const [copyStatus, setCopyStatus] = useState<{ url: string; copied: boolean } | null>(null);
-  // The link as text shows only when copying it failed, to select and copy by hand.
+  // The link as text shows only when copying it failed, to select and copy by
+  // hand, in that opening of the menu: a later one starts as any other does.
   const copyFailed = Boolean(resumeUrl) && copyStatus?.url === resumeUrl && !copyStatus.copied;
+  useEffect(() => {
+    if (!open) setCopyStatus(null);
+  }, [open]);
   const linkRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (open && copyFailed) linkRef.current?.focus();

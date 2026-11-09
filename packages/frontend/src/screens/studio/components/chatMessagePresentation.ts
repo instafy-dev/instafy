@@ -386,9 +386,17 @@ export function collapseLifecycleMessages(messages: ChatMessage[]): ChatMessage[
   return next;
 }
 
+/**
+ * The chat's rows from its collapsed messages. `turnOnItsWay` is whether a
+ * turn of the chat is on its way, as the typing row and Stop read it: a
+ * routed card whose browser turn handed the message over stands in for the
+ * building turn before its hand-back came only while one is
+ * (routedBrowserFold.ts).
+ */
 export function synthesizeAgentJobThreadMessages(
   collapsedAll: ChatMessage[],
   collapsedVisible: ChatMessage[],
+  turnOnItsWay = false,
 ): ChatMessage[] {
   const threadTriggerTypes = new Set([
     "command_execution",
@@ -414,7 +422,7 @@ export function synthesizeAgentJobThreadMessages(
   const retryFold = resolveAutomaticRetryFold(collapsedAll);
   // A message sent straight to the browser folds into its browser turn, and
   // a browser card leaves the chat once the browser opened for it.
-  const routedFold = resolveRoutedBrowserFold(collapsedAll);
+  const routedFold = resolveRoutedBrowserFold(collapsedAll, turnOnItsWay);
   // A press of Continue is no message of the person's: its turn's row follows the stopped one.
   const hiddenIds = new Set([
     ...retryFold.hiddenPromptIds,

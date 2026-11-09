@@ -410,9 +410,9 @@ function chatPanel(step: Step) {
   const now = Date.parse(at(step.time));
   const messages = (step.chat ?? CHAT).filter((message) => message.timestamp <= now);
   const collapsed = collapseLifecycleMessages(messages);
-  const displayed = synthesizeAgentJobThreadMessages(collapsed, collapsed.filter(shouldDisplayChatMessage));
-  const tail = displayed.at(-1);
   const isAssistantTyping = step.runs.length > 0 || step.awaitingLease === true;
+  const displayed = synthesizeAgentJobThreadMessages(collapsed, collapsed.filter(shouldDisplayChatMessage), isAssistantTyping);
+  const tail = displayed.at(-1);
   const coverage = isAssistantTyping ? resolveJobThreadTypingCoverage(tail, step.runs, messages) : "none";
   // Who the typing row speaks for, as ChatPanel works it out: one lane per AI
   // at work (the newest run first), Octo while a send waits for its run.
@@ -452,7 +452,7 @@ function chatPanel(step: Step) {
     sharedUnavailable: false,
     cardStates: new Map(step.card ? [[step.cardKey ?? CARD_KEY, step.card]] : []),
     continuedKeys: browserRequestContinuedKeys(messages),
-    routedWaitingKeys: routedBrowserWaitingKeys(messages),
+    routedWaitingKeys: routedBrowserWaitingKeys(messages, isAssistantTyping),
     newestCardKey: newestBrowserRequestKey(messages),
   };
   return {
@@ -684,6 +684,36 @@ describe("a message Octo sends straight to Instafy's browser", () => {
       one("01:11:46.888", ["Thinking…"]),
       one("01:11:47.080", ["Thinking…"]),
       one("01:11:51.618", ["Working…"]),
+    ]);
+  });
+
+  // The same turn, but the controller sent no hand-back (it refuses one
+  // without a word when the chat's building lane is busy, say). Once nothing
+  // of the chat runs any more, nothing more will come: the "Thinking…" goes,
+  // as the typing row and Stop do, also after a reload, for every viewer.
+  it("stops reading Thinking… once nothing runs and the hand-over never came", async () => {
+    const noHandBack = PAGE_CHAT.slice(0, 5);
+    const page = (time: string, runs: RunRecord[], card?: BrowserRequestCardState) =>
+      show({ chat: noHandBack, cardKey: PAGE_CARD_KEY, time, runs, card });
+    const seen: Array<ReturnType<typeof read>> = [];
+    seen.push(await page("01:11:40.000", [pageBrowserRun("in_progress")], { kind: "opened" }));
+    seen.push(await page("01:11:46.741", [pageBrowserRun("in_progress")], { kind: "opened" }));
+    seen.push(await page("01:11:46.790", [pageBrowserRun("in_progress")], { kind: "opened" }));
+    // The browser turn's run ended, and no hand-back came.
+    seen.push(await page("01:11:47.100", [], { kind: "opened" }));
+    seen.push(await page("01:12:30.000", [], { kind: "opened" }));
+    // A reload: Studio holds no card state and no run.
+    seen.push(await page("01:20:00.000", []));
+
+    const one = (time: string) => ({ time, octoRows: 1, faces: { desktop: 1, phone: 1 }, says: ["Thinking…"], typingAnnounces: null });
+    const none = (time: string) => ({ time, octoRows: 0, faces: { desktop: 0, phone: 0 }, says: [], typingAnnounces: null });
+    expect(seen).toEqual([
+      one("01:11:40.000"),
+      one("01:11:46.741"),
+      one("01:11:46.790"),
+      none("01:11:47.100"),
+      none("01:12:30.000"),
+      none("01:20:00.000"),
     ]);
   });
 

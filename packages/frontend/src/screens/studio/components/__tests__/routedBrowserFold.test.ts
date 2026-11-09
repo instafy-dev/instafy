@@ -202,9 +202,13 @@ const buildingReply = message({
   metadata: { jobId: BUILDING_JOB, runId: BUILDING_RUN, source: "agent", outcome: "succeeded" },
 });
 
-/** What the chat lists, from the messages it shows (ChatPanel's groupedMessages). */
-function listed(messages: ChatMessage[]): string[] {
-  return synthesizeAgentJobThreadMessages(messages, messages.filter(shouldDisplayChatMessage)).map((entry) => entry.id);
+/**
+ * What the chat lists, from the messages it shows (ChatPanel's
+ * groupedMessages), while a turn of the chat is on its way or once none is.
+ */
+function listed(messages: ChatMessage[], turnOnItsWay = false): string[] {
+  return synthesizeAgentJobThreadMessages(messages, messages.filter(shouldDisplayChatMessage), turnOnItsWay)
+    .map((entry) => entry.id);
 }
 
 describe("a message the browser turn handed to the building turn", () => {
@@ -224,8 +228,8 @@ describe("a message the browser turn handed to the building turn", () => {
     const noted = [ask, routedCard(), continuation(), buildRequestNote, emptyReply];
     const handedBack = [...noted, handBack(true)];
     for (const messages of [noted, handedBack]) {
-      expect([...resolveRoutedBrowserFold(messages).waitingCardKeys]).toEqual([`job:${ROUTED_JOB}`]);
-      expect(listed(messages)).toEqual(["ask", "card"]);
+      expect([...resolveRoutedBrowserFold(messages, true).waitingCardKeys]).toEqual([`job:${ROUTED_JOB}`]);
+      expect(listed(messages, true)).toEqual(["ask", "card"]);
     }
     // The building turn's job wrote something only Details shows: still the card.
     const reasoning = message({
@@ -262,6 +266,22 @@ describe("a message the browser turn handed to the building turn", () => {
     const browserStopped = [ask, routedCard(), continuation(), buildRequestNote, stoppedBeforeItShowedAnything];
     expect(resolveRoutedBrowserFold(browserStopped).waitingCardKeys.size).toBe(0);
     expect(listed(browserStopped)).toEqual(["ask", "stopped"]);
+  });
+
+  // The controller refuses some hand-backs without a word (when the chat's
+  // building lane is busy, say), and nobody wrote. Once nothing of the chat
+  // runs any more, as the typing row and Stop read it, nothing more will
+  // come: the card leaves, also after a reload. A hand-back in the chat
+  // still has the card stand for its turn, which its own run ends.
+  it("stops standing in once nothing runs and no hand-back came", () => {
+    const noted = [ask, routedCard(), continuation(), buildRequestNote, emptyReply];
+    expect([...resolveRoutedBrowserFold(noted, true).waitingCardKeys]).toEqual([`job:${ROUTED_JOB}`]);
+    expect(listed(noted, true)).toEqual(["ask", "card"]);
+    expect(resolveRoutedBrowserFold(noted, false).waitingCardKeys.size).toBe(0);
+    expect(resolveRoutedBrowserFold(noted, false).settledCardIds.has("card")).toBe(true);
+    expect(listed(noted, false)).toEqual(["ask"]);
+    expect([...resolveRoutedBrowserFold([...noted, handBack(true)], false).waitingCardKeys]).toEqual([`job:${ROUTED_JOB}`]);
+    expect(listed([...noted, handBack(true)], false)).toEqual(["ask", "card"]);
   });
 
   // The browser turn looked at the browser before it answered (its first step

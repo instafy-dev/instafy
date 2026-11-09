@@ -865,7 +865,7 @@ describe("PersonalBrowserSurface", () => {
     expect(shared.getAttribute("aria-label")).toBe("This space");
     expect(shared.getAttribute("aria-pressed")).toBe("false");
     const personalDescription = document.getElementById(personal.getAttribute("aria-describedby")!)?.textContent;
-    expect(personalDescription).toContain("follow you across projects");
+    expect(personalDescription).toContain("follow you across spaces");
     expect(personalDescription).toContain("not copied to this space's browser or your other devices");
   });
 

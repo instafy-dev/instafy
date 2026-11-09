@@ -194,6 +194,19 @@ for (const layout of [
     await page.screenshot({ path: bottomScreenshot, animations: "disabled" });
     await testInfo.attach("Production saved-browser status reached by scrolling", { path: bottomScreenshot, contentType: "image/png" });
 
+    // Closed and opened again, the menu starts as any other: Advanced
+    // collapsed, and no address or focus left from the failed copy.
+    await page.keyboard.press("Escape");
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await toggle.tap();
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await expect(copy).not.toBeVisible();
+    await expect(link).toHaveCount(0);
+    await expect(panel.getByRole("status").filter({ hasText: "Could not copy." })).toHaveCount(0);
+    await page.getByText("Advanced", { exact: true }).tap();
+    await expect(copy).toBeVisible();
+    await expect(link).toHaveCount(0);
+
     const lastRuntime = RUNTIME_IDS.at(-1)!;
     await page.getByRole("button", { name: /^Session 10(?!\d)/ }).tap();
     await expect(toggle).toHaveAttribute("aria-expanded", "false");

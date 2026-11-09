@@ -225,7 +225,8 @@ function outcomeNamesRun(outcomeIds: readonly string[], run: RunRecord): boolean
  * cards, routedBrowserFold.ts).
  */
 function isRoutedCardStandingIn(card: ChatMessage, messages: readonly ChatMessage[]): boolean {
-  return isRoutedBrowserCard(card) && routedBrowserWaitingKeys(messages).has(browserRequestKey(card));
+  // Read only while the typing row shows, so a turn of the chat is on its way.
+  return isRoutedBrowserCard(card) && routedBrowserWaitingKeys(messages, true).has(browserRequestKey(card));
 }
 
 /**

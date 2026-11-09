@@ -88,7 +88,7 @@ export function BrowserLocationOptions({
         <MenuItemContent start={<Computer aria-hidden="true" />} end={mode === "personal" ? <Check aria-hidden="true" /> : null}
           description={<span id={`${descriptionId}-personal`}>
             {!checked ? "Checking this device… " : !personalAvailable ? "Available in the Instafy desktop app. " : ""}
-            Your logins stay on this device and follow you across projects. They are not copied to this space's browser or your other devices.
+            Your logins stay on this device and follow you across spaces. They are not copied to this space's browser or your other devices.
           </span>}>
           This device
         </MenuItemContent>
