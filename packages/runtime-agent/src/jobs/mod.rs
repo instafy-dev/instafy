@@ -8259,8 +8259,8 @@ impl JobProcessor {
             turn_start.record(&workspace_dir, status);
         }
         // A page another chat made is read-only here, and held: what the model changes there goes
-        // back once it is done, from how the folder began this job, as its stopped attempt's work
-        // counts as the job's own.
+        // back once it is done. Only what changed since this attempt began: work another turn left
+        // there unsaved before it is never touched.
         let mut held_pages = if read_only_workspace || is_browser_turn(job) {
             space_pages::HeldPages::default()
         } else {
@@ -8447,12 +8447,7 @@ impl JobProcessor {
         // Whether or not the model's run ended well, a page another chat made is as it was before
         // anything reads the folder.
         held_pages
-            .put_back(
-                &workspace_dir,
-                earlier_attempt_status
-                    .as_ref()
-                    .or(git_status_before.as_ref()),
-            )
+            .put_back(&workspace_dir, git_status_before.as_ref())
             .await;
         let output = match output_result {
             Ok(output) => output,
@@ -9316,12 +9311,7 @@ impl JobProcessor {
                     .await
             };
             held_pages
-                .put_back(
-                    &workspace_dir,
-                    earlier_attempt_status
-                        .as_ref()
-                        .or(git_status_before.as_ref()),
-                )
+                .put_back(&workspace_dir, git_status_before.as_ref())
                 .await;
             let retry_output = retry_output_result?;
             drop(codex_guard);

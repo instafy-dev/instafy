@@ -316,9 +316,9 @@ fn pages_lines(
 ///   restore a read-only turn gets, through the space's own repository. That is what the turn
 ///   changed: a runtime runs one job at a time, from before the folder's status at its start to
 ///   after its save (the job's process environment lock), so no other chat's turn changes a page
-///   meanwhile. A path another turn had left unsaved when this one began shows as changed at the
-///   start and is never touched, and anything saved since (an Undo, a save brought in from
-///   elsewhere) is what the restore puts back.
+///   meanwhile. A path another turn had left unsaved when this one began (a stopped turn's, a save
+///   that didn't land) shows as changed at the start and is never touched, and anything saved
+///   since (an Undo, a save brought in from elsewhere) is what the restore puts back.
 /// - A file the turn returns for the runtime to write there is never written
 ///   ([`Self::leave_out_returned`]).
 /// - Either way the turn's files, its save and its card leave the page as it was; the turn's
@@ -459,7 +459,7 @@ impl HeldPages {
         self.returned.extend(returned);
     }
 
-    /// Whether the turn changed a held page, and so changed nothing there.
+    /// Whether the turn changed a held page: what it changed there went back or was never written.
     pub(super) fn put_a_change_back(&self) -> bool {
         !self.restored.is_empty() || !self.returned.is_empty()
     }
