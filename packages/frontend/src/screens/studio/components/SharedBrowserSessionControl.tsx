@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Dialog, DialogTrigger } from "react-aria-components";
 import { Check, Link, MoreHoriz, NavArrowDown, Plus, Refresh, Xmark } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
@@ -32,7 +32,13 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
   children?: ReactNode;
   footer?: ReactNode;
 }) {
-  const [copyStatus, setCopyStatus] = useState<{ url: string; text: string } | null>(null);
+  const [copyStatus, setCopyStatus] = useState<{ url: string; copied: boolean } | null>(null);
+  // The link as text shows only when copying it failed, to select and copy by hand.
+  const copyFailed = Boolean(resumeUrl) && copyStatus?.url === resumeUrl && !copyStatus.copied;
+  const linkRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (open && copyFailed) linkRef.current?.focus();
+  }, [copyFailed, open]);
   const detailsRef = useRef<HTMLDetailsElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const [bounds, setBounds] = useState({ containerPadding: 12, maxHeight: 512 });
@@ -54,9 +60,10 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
     update();
     return addFloatingSurfaceViewportChangeListener(update);
   }, [open]);
-  // A session to choose, or sessions that could not be read: Advanced opens
-  // by itself, and stays as the person leaves it once that is over.
-  const advancedNeeded = selectionRequired || Boolean(error);
+  // A session to choose, sessions that could not be read, or a link to copy
+  // by hand: Advanced opens by itself, and stays as the person leaves it once
+  // that is over.
+  const advancedNeeded = selectionRequired || Boolean(error) || copyFailed;
   useLayoutEffect(() => {
     if (open && advancedNeeded && detailsRef.current) detailsRef.current.open = true;
   }, [advancedNeeded, open]);
@@ -98,17 +105,21 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
             </summary>
             {resumeUrl ? <StudioMenuAction onPress={() => {
               void writeClipboardText(resumeUrl).then(
-                () => setCopyStatus({ url: resumeUrl, text: "Resume link copied." }),
+                () => setCopyStatus({ url: resumeUrl, copied: true }),
                 () => {
-                  setCopyStatus({ url: resumeUrl, text: "Could not copy. Select and copy the link below." });
-                  if (detailsRef.current) {
-                    detailsRef.current.open = true;
-                    detailsRef.current.querySelector("input")?.focus();
-                  }
+                  setCopyStatus({ url: resumeUrl, copied: false });
+                  // The clipboard's own fallback can take the focus, and the menu with it.
+                  onOpenChange(true);
                 },
               );
             }}><MenuItemContent start={<Link aria-hidden="true" />}>Copy resume link</MenuItemContent></StudioMenuAction> : null}
-            {copyStatus?.url === resumeUrl ? <Text variant="caption" tone="muted" className="px-2.5 py-1" role="status">{copyStatus.text}</Text> : null}
+            {copyStatus?.url === resumeUrl ? <Text variant="caption" tone="muted" className="px-2.5 py-1" role="status">
+              {copyStatus.copied ? "Resume link copied." : "Could not copy. Select and copy the link below."}
+            </Text> : null}
+            {copyFailed && resumeUrl ? <div className="px-2.5 py-1">
+              <Input ref={linkRef} size="xs" aria-label="Shared Browser resume link"
+                readOnly value={resumeUrl} onFocus={(event) => event.currentTarget.select()} />
+            </div> : null}
             <div>
               <div className="flex items-center justify-between px-2 py-1">
                 <Text as="h4" variant="caption" tone="muted">Sessions</Text>
@@ -127,8 +138,6 @@ export function SharedBrowserSessionControl({ runtimeId, resumeUrl, open, busy, 
             </div>
             <div className="space-y-2 px-2.5 py-2">
               <Text variant="caption" tone="muted">Members of this space can use the resume link to join and request control.</Text>
-              {resumeUrl ? <Input size="xs" aria-label="Shared Browser resume link"
-                readOnly value={resumeUrl} onFocus={(event) => event.currentTarget.select()} /> : null}
               {children}
             </div>
           </details>

@@ -12,18 +12,23 @@
 // which Studio opens by itself where it can, sending the person's own words
 // on as the browser turn's task. The chat leaves that continuation out (it
 // sends the person's message again), and the card shows only the turn's one line,
-// "Opening Instafy's browser…", until the browser turn shows something; then
-// the card goes too. A routed card the person pressed leaves as any card does,
+// "Thinking…", until the browser turn shows something (its first step); then
+// the card goes too. Nothing has opened a page yet, and the browser turn may
+// open none. A routed card the person pressed leaves as any card does,
 // and its continuation's one line stays. So does one whose browser turn failed
-// or was stopped before it showed anything: nothing is opening any more, and
+// or was stopped before it showed anything: nothing is on its way any more, and
 // the person's message and that turn's own failure or Stopped line remain. A
 // message that asked Octo to make something, which its browser turn handed
 // back without opening a page (the runtime's build request note), reads as
-// the building turn alone: the card goes as soon as that note arrives, and
-// once the hand-back the controller sends for it is in the chat, the browser
-// turn goes too, and the hand-back's prompt never shows. Until then, or when
-// that hand-back was refused, the browser turn shows what it has (the
-// controller leaves a refusal's reason as its reply).
+// the building turn alone: the card's "Thinking…" stays through the hand-over
+// and goes once the building turn shows something, and once the hand-back the
+// controller sends for it is in the chat, the browser turn goes too, and the
+// hand-back's prompt never shows. Until then, or when that hand-back was
+// refused, the browser turn shows what it has (the controller leaves a
+// refusal's reason as its reply). The card stops standing in once nothing
+// more will come: the browser turn or a hand-back's run ended before its job
+// showed anything, or someone wrote after the browser turn before any
+// hand-back came (the controller then sends none).
 //
 // A browser turn whose findings a hand-back took back to the building turn
 // reads as one answer with it: one Octo row, with one line, one reply and the
@@ -69,15 +74,23 @@ export type RoutedBrowserFold = {
   /**
    * Routed cards, by {@link browserRequestKey}, whose continuation Studio
    * sent by itself and whose browser turn has not ended before it showed
-   * anything: the card reads "Opening Instafy's browser…" until that turn
-   * shows something.
+   * anything: the card reads "Thinking…" until that turn shows something,
+   * or, when that turn handed the message to the building turn, until the
+   * building turn does ({@link buildingJobIdsByBrowserJobId}).
    */
   waitingCardKeys: ReadonlySet<string>;
   /**
    * Browser turns of routed cards that handed the person's message to the
-   * building turn: their card shows nothing.
+   * building turn: their card stands for the building turn, and nothing of
+   * theirs shows once the hand-back is in the chat.
    */
   buildRequestJobIds: ReadonlySet<string>;
+  /**
+   * The building turns those of {@link buildRequestJobIds} handed the
+   * message to, by the browser turn's job: each hand-back's job, once that
+   * job has written something. The card goes once one of them shows something.
+   */
+  buildingJobIdsByBrowserJobId: ReadonlyMap<string, ReadonlySet<string>>;
   /**
    * Those of {@link buildRequestJobIds} whose hand-back is in the chat: the
    * browser turn and the hand-back's prompt show nothing either.
@@ -86,9 +99,9 @@ export type RoutedBrowserFold = {
   /**
    * Browser cards of any turn, by message id, that have left the chat:
    * Instafy's browser opened for them (a continuation names them), or a newer
-   * card followed. A routed card still opening by itself
-   * ({@link waitingCardKeys}) is not among them: its line shows until its
-   * browser turn shows something.
+   * card followed. A routed card still standing in for its turn
+   * ({@link waitingCardKeys}) is not among them: its line shows until that
+   * turn shows something.
    */
   settledCardIds: ReadonlySet<string>;
   /**
@@ -177,51 +190,81 @@ export function resolveRoutedBrowserFold(messages: readonly ChatMessage[]): Rout
   const waitingCardKeys = new Set<string>();
   const buildRequestJobIds = new Set<string>();
   const handedBackBuildRequestJobIds = new Set<string>();
-  for (const message of messages) {
+  // The cards whose browser turn handed the message to the building turn,
+  // by that turn's job: whether they still stand in is known once the
+  // hand-backs are read.
+  const handingOver = new Map<string, { key: string; continuationIndex: number }>();
+  messages.forEach((message, index) => {
     const key = readBrowserRequestOf(message);
     const card = key ? routedCards.get(key) : undefined;
-    if (!key || !card || !isAutoStartedContinuation(message) || isUnsentBrowserRequestNotice(message)) continue;
+    if (!key || !card || !isAutoStartedContinuation(message) || isUnsentBrowserRequestNotice(message)) return;
     hiddenPromptIds.add(message.id);
     const runId = stringField(message, ["runId", "run_id"]);
     const browserJobId = jobByRunId.get(runId);
     if (browserJobId) cardIdByBrowserJobId.set(browserJobId, card.id);
     if (browserJobId && jobsThatRequestedABuild.has(browserJobId)) {
       buildRequestJobIds.add(browserJobId);
+      if (!runsEndedWithoutAJob.has(runId)) handingOver.set(browserJobId, { key, continuationIndex: index });
     } else if (!runsEndedWithoutAJob.has(runId)) {
       waitingCardKeys.add(key);
     }
-  }
+  });
   // The hand-back that took such a message to the building turn; any other
   // took what a browser turn found back to the building turn, and joins
   // that browser turn's row.
   const handBacksByBrowserJobId = new Map<string, BrowserHandBackTurn[]>();
   const handBackRunsEndedWithoutAJob = new Set<string>();
+  const buildRequestHandBacks = new Map<string, Array<string | null>>();
   for (const message of messages) {
     const handedBack = readBrowserHandBackOf(message);
     if (!handedBack) continue;
-    if (buildRequestJobIds.has(handedBack)) {
-      hiddenPromptIds.add(message.id);
-      handedBackBuildRequestJobIds.add(handedBack);
-      continue;
-    }
     hiddenPromptIds.add(message.id);
     // Its dispatch failed: no turn went on, and the browser turn stays the last word.
-    if (isUnsentBrowserNoticePrompt(message)) continue;
+    if (!buildRequestJobIds.has(handedBack) && isUnsentBrowserNoticePrompt(message)) continue;
     // The stored prompt names its run; the copy this page sent knows the
     // runs its dispatch started.
     const runId = stringField(message, ["runId", "run_id"]) ||
       [...jobByRunId].find(([run, job]) => wasRunStartedByPromptSentFromThisPage(message, [run, job]))?.[0] ||
       null;
+    if (buildRequestJobIds.has(handedBack)) {
+      handedBackBuildRequestJobIds.add(handedBack);
+      buildRequestHandBacks.set(handedBack, [...(buildRequestHandBacks.get(handedBack) ?? []), runId]);
+      continue;
+    }
     const turns = handBacksByBrowserJobId.get(handedBack) ?? [];
     turns.push({ promptId: message.id, runId, jobId: runId ? jobByRunId.get(runId) ?? null : null });
     handBacksByBrowserJobId.set(handedBack, turns);
     if (runId && runsEndedWithoutAJob.has(runId)) handBackRunsEndedWithoutAJob.add(runId);
+  }
+  // A card whose browser turn handed the message to the building turn
+  // stands for that turn too, until it shows something (the transcript
+  // takes the card out then). Not once nothing more will come: a hand-back's
+  // run ended before its job showed anything, or, before any hand-back came,
+  // someone wrote after the browser turn, when the controller sends none.
+  // Nor for a hand-back whose run this chat cannot tell: that turn could not
+  // be told from any other.
+  const buildingJobIdsByBrowserJobId = new Map<string, Set<string>>();
+  for (const [browserJobId, { key, continuationIndex }] of handingOver) {
+    const handBackRuns = buildRequestHandBacks.get(browserJobId);
+    if (handBackRuns === undefined) {
+      if (messages.slice(continuationIndex + 1).some((message) => message.role === "user")) continue;
+    } else if (handBackRuns.some((runId) => runId === null || runsEndedWithoutAJob.has(runId))) {
+      continue;
+    }
+    waitingCardKeys.add(key);
+    const buildingJobs = new Set<string>();
+    for (const runId of handBackRuns ?? []) {
+      const jobId = runId ? jobByRunId.get(runId) : undefined;
+      if (jobId) buildingJobs.add(jobId);
+    }
+    buildingJobIdsByBrowserJobId.set(browserJobId, buildingJobs);
   }
   return {
     hiddenPromptIds,
     cardIdByBrowserJobId,
     waitingCardKeys,
     buildRequestJobIds,
+    buildingJobIdsByBrowserJobId,
     handedBackBuildRequestJobIds,
     settledCardIds: settledBrowserCardIds(messages, cards, waitingCardKeys),
     handBacksByBrowserJobId,

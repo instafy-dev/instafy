@@ -104,18 +104,20 @@ describe("the files a site turn created", () => {
   });
 
   // A local test, Nov 7: a chat with no card of its own changed a page's data
-  // and read "data.json +23 −61" under its reply, which names a file, not the page.
-  it("names the page its files make up where the chat has no site, never a file in it", async () => {
+  // and read "data.json +23 −61" under its reply, which names a file, not the
+  // page. Nov 9: such a chat's rows read "Changed framework-laptops-compare",
+  // the folder's name, which is no word of the person's.
+  it("reads as a page where the chat has no site, never by its folder or a file in it", async () => {
     await show([changed("sites/framework-laptops/data.json")], false);
-    expect(toggle()?.textContent).toBe("Changed framework-laptops");
-    expect(container.textContent).not.toMatch(/data\.json|[+−-]\d/u);
+    expect(toggle()?.textContent).toBe("Changed a page");
+    expect(container.textContent).not.toMatch(/framework-laptops|data\.json|[+−-]\d/u);
     expect(chips()).toHaveLength(0);
     // Its files stay one press away.
     await act(async () => toggle()?.click());
     expect(chips()).toHaveLength(1);
     expect(chips()[0]?.textContent).toContain("data.json");
     await show([changed("sites/lello-visit/app.js"), created("sites/lello-visit/notes/hours.md")], false);
-    expect(toggle()?.textContent).toBe("Changed lello-visit");
+    expect(toggle()?.textContent).toBe("Changed a page");
     // Files of two pages, or outside any page, keep their names and count.
     await show([changed("sites/a/data.json"), changed("sites/b/data.json")], false);
     expect(toggle()?.textContent).toContain("Edited 2 files");
@@ -174,7 +176,7 @@ describe("the files a site turn created", () => {
   // A local test, Nov 8: "Changed framework-13-vs-16" named a page by its
   // folder, and a map's row read "Changed seville-3-days" for 0.2 s on a
   // switch to its chat, then "Created the site".
-  it("names every page by the title its card in this chat gives it, else by its folder", async () => {
+  it("names every page by the title its card in this chat gives it, else as a page, never by its folder", async () => {
     const seville: ChatSite = { firstChangeAt: 1_000, pageTitles: new Map([["seville-3-days", "Three days in Seville"]]) };
     const show = async (site: ChatSite | null, files: ChatMessageFileChange[], messageTimestamp: number) => {
       await act(async () => {
@@ -189,11 +191,11 @@ describe("the files a site turn created", () => {
     expect(toggle()?.textContent).toBe("Created Three days in Seville");
     await show(seville, [changed("sites/seville-3-days/map.config.json")], 5_000);
     expect(toggle()?.textContent).toBe("Changed Three days in Seville");
-    // A page this chat holds no card of reads by its folder, in a chat with a site or none.
+    // A page this chat holds no card of reads as a page, in a chat with a site or none.
     await show(seville, [changed("sites/framework-laptops/data.json")], 5_000);
-    expect(toggle()?.textContent).toBe("Changed framework-laptops");
+    expect(toggle()?.textContent).toBe("Changed a page");
     await show(null, [changed("sites/framework-laptops/data.json")], 5_000);
-    expect(toggle()?.textContent).toBe("Changed framework-laptops");
+    expect(toggle()?.textContent).toBe("Changed a page");
     // Files that are no one page's keep the site's line.
     await show(seville, [changed("sites/seville-3-days/map.config.json"), changed("README.md")], 5_000);
     expect(toggle()?.textContent).toBe("Changed the site");
@@ -257,12 +259,37 @@ describe("the files a site turn created", () => {
     expect(seen.some((text) => text.includes("seville-3-days"))).toBe(false);
 
     // In a window the newest page fills, no older page comes by itself: the
-    // rows show at once, naming the page by its folder until the person
-    // scrolls up to its card.
+    // rows show at once, as a page until the person scrolls up to its card,
+    // never by its folder.
     await act(async () => root.unmount());
     root = createRoot(container);
     await render(newestPage, { newestPage: true, olderPageOnItsWay: false });
-    expect(labels()).toEqual(["Changed seville-3-days", "Changed seville-3-days"]);
+    expect(labels()).toEqual(["Changed a page", "Changed a page"]);
+    expect(container.textContent).not.toContain("seville-3-days");
+  });
+
+  // A local test, Nov 9: after a reload, the chat's first frame drew both of
+  // a map's rows before its card ("Changed seville-three-days" twice), and
+  // the next, 0.12 s later, named the page by its card. No frame names a
+  // page by its folder.
+  it("names a page by its folder in no frame, also before its card is drawn", async () => {
+    const mapFiles = ["sites/seville-three-days/index.html", "sites/seville-three-days/map.config.json"].map(created);
+    const noteFiles = [changed("sites/seville-three-days/map.config.json")];
+    const seen: string[] = [];
+    const render = async (site: ChatSite | null) => {
+      await act(async () => root.render(
+        <ChatSiteContext.Provider value={site}>
+          <ChatFileChangeList files={mapFiles} projectId="project-1" messageTimestamp={1_000} />
+          <ChatFileChangeList files={noteFiles} projectId="project-1" messageTimestamp={5_000} />
+        </ChatSiteContext.Provider>,
+      ));
+      seen.push(container.textContent ?? "");
+    };
+    await render(null);
+    await render({ firstChangeAt: 1_000, pageTitles: new Map([["seville-three-days", "Three days in Seville"]]) });
+    expect(seen.filter((text) => text.includes("seville-three-days"))).toEqual([]);
+    const labels = [...container.querySelectorAll('[data-testid="chat-file-change-toggle-files"]')].map((chip) => chip.textContent);
+    expect(labels).toEqual(["Created Three days in Seville", "Changed Three days in Seville"]);
   });
 
   it("folds files shown before the chat had a site behind the site's line once it has one", async () => {

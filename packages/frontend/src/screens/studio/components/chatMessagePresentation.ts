@@ -423,12 +423,14 @@ export function synthesizeAgentJobThreadMessages(
     ...continuePromptIds(collapsedAll),
   ]);
   for (const [browserJobId, cardId] of routedFold.cardIdByBrowserJobId) {
-    // The card says the browser is opening until its browser turn shows
-    // something, or hands the message to the building turn.
-    if (
-      routedFold.buildRequestJobIds.has(browserJobId) ||
-      collapsedVisible.some((message) => message.id !== cardId && extractAgentJobId(message) === browserJobId)
-    ) {
+    // The card says Octo is thinking until a turn that carries the message
+    // on shows something: its browser turn, or the building turn that turn
+    // handed the message to.
+    const buildingJobIds = routedFold.buildingJobIdsByBrowserJobId.get(browserJobId);
+    if (collapsedVisible.some((message) => {
+      const jobId = extractAgentJobId(message);
+      return message.id !== cardId && jobId !== null && (jobId === browserJobId || buildingJobIds?.has(jobId) === true);
+    })) {
       hiddenIds.add(cardId);
     }
   }

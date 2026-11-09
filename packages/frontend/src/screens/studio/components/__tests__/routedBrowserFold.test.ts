@@ -218,10 +218,50 @@ describe("a message the browser turn handed to the building turn", () => {
     }
   });
 
-  it("stops reading Opening as soon as the note arrives", () => {
-    const messages = [ask, routedCard(), continuation(), buildRequestNote, emptyReply];
-    expect(resolveRoutedBrowserFold(messages).waitingCardKeys.size).toBe(0);
-    expect(listed(messages)).toEqual(["ask"]);
+  // The browser turn opened no page: the card's "Thinking…" stands for the
+  // message through the hand-over, until the building turn shows something.
+  it("keeps the card's line through the hand-over until the building turn shows something", () => {
+    const noted = [ask, routedCard(), continuation(), buildRequestNote, emptyReply];
+    const handedBack = [...noted, handBack(true)];
+    for (const messages of [noted, handedBack]) {
+      expect([...resolveRoutedBrowserFold(messages).waitingCardKeys]).toEqual([`job:${ROUTED_JOB}`]);
+      expect(listed(messages)).toEqual(["ask", "card"]);
+    }
+    // The building turn's job wrote something only Details shows: still the card.
+    const reasoning = message({
+      id: "building-reasoning",
+      content: "Planning the page",
+      timestamp: 7,
+      messageType: "reasoning",
+      metadata: { jobId: BUILDING_JOB, runId: BUILDING_RUN, source: "agent", kind: "update", messageType: "reasoning" },
+    });
+    expect(listed([...handedBack, reasoning])).toEqual(["ask", "card"]);
+    expect(listed([...handedBack, reasoning, buildingStep])).toEqual(["ask", `agent-job-thread:${BUILDING_JOB}`]);
+  });
+
+  // Nothing more will come: the card leaves as any opened card does, and the
+  // person's message and what ended it remain.
+  it("stops standing in once the hand-over ended, or the chat moved on before it came", () => {
+    const noted = [ask, routedCard(), continuation(), buildRequestNote, emptyReply];
+    // Someone wrote after the browser turn: the controller sends no hand-back.
+    const later = message({ id: "later", role: "user", authorId: "user-1", content: "Make it four days instead.", timestamp: 6 });
+    expect(resolveRoutedBrowserFold([...noted, later]).waitingCardKeys.size).toBe(0);
+    expect(listed([...noted, later])).toEqual(["ask", "later"]);
+    // The hand-back's run was stopped before its job showed anything.
+    const stopped = message({
+      id: "building-stopped",
+      content: "Stopped (1 run canceled.)",
+      timestamp: 7,
+      metadata: { runId: BUILDING_RUN, source: "controller", kind: "run_cancellation",
+        details: { runIds: [BUILDING_RUN], outcome: "canceled", runStatus: "canceled" } },
+    });
+    const ended = [...noted, handBack(true), stopped];
+    expect(resolveRoutedBrowserFold(ended).waitingCardKeys.size).toBe(0);
+    expect(listed(ended)).toEqual(["ask", "building-stopped"]);
+    // The browser turn itself was stopped before it showed anything.
+    const browserStopped = [ask, routedCard(), continuation(), buildRequestNote, stoppedBeforeItShowedAnything];
+    expect(resolveRoutedBrowserFold(browserStopped).waitingCardKeys.size).toBe(0);
+    expect(listed(browserStopped)).toEqual(["ask", "stopped"]);
   });
 
   // The browser turn looked at the browser before it answered (its first step

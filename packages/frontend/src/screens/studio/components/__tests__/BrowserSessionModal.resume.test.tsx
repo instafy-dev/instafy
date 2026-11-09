@@ -183,14 +183,17 @@ describe("production Shared modal resume selection", () => {
     expect(advanced[0]!.contains(options.querySelector('[data-testid="shared-browser-clear-data"]'))).toBe(false);
   });
 
-  it("reveals and focuses the resume link when clipboard copying fails", async () => {
+  // The link is an address with the space's and the session's ids: it shows
+  // only to be copied by hand, when copying it failed.
+  it("reveals and focuses the resume link only when clipboard copying fails", async () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });
     mocks.writeClipboardText.mockRejectedValue(new Error("Clipboard unavailable"));
     await render(firstId);
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="shared-browser-sessions-toggle"]')!.click());
-    const link = document.querySelector<HTMLInputElement>('[aria-label="Shared Browser resume link"]')!;
-    expect(link.closest("details")?.open).toBe(false);
+    expect(document.querySelector('[aria-label="Shared Browser resume link"]')).toBeNull();
     await act(async () => Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(button => button.textContent === "Copy resume link")!.click());
+    const link = document.querySelector<HTMLInputElement>('[aria-label="Shared Browser resume link"]')!;
+    expect(link.value).toContain(firstId);
     expect(link.closest("details")?.open).toBe(true);
     expect(document.activeElement).toBe(link);
     expect(link.selectionStart).toBe(0);
