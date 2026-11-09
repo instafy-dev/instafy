@@ -28,7 +28,7 @@ import {
   type ThumbnailAttempt,
 } from "./preview-thumbnail.js";
 import { resolveRuntimeControllerCredential } from "./runtime-controller-binding.js";
-import { pageFolder, pageFolderAge, recordPage, type PageFolderAge } from "./space-pages.js";
+import { pageFolder, pageFolderAge, recordPage, recordedServer, serverOf, type PageFolderAge } from "./space-pages.js";
 import {
   buildRatholeConfig,
   cleanUrl,
@@ -912,16 +912,24 @@ const PAGE_SERVE_COMMAND = `instafy bind serve . --port ${PORT_PLACEHOLDER} --pr
 /**
  * What `--start` runs when no `--serve-cmd` is given: Instafy's page server, in a page's own folder (`sites/<name>` in
  * the space's workspace) that holds an `index.html` and no `package.json`. Null anywhere else: that site's command is
- * its own to give.
+ * its own to give. Null too in a folder another command serves (an installed skill's host, say), which would get a
+ * second server and a second card: the space's record of its pages names another command for it, or a preview of this
+ * space on this machine was started there with one.
  */
 export function pageServeCommand(params: { projectId: string | null; cwd?: string; env?: NodeJS.ProcessEnv }): string | null {
   const root = resolveWorkspaceRoot(params.env ?? process.env, params.projectId);
   const dir = params.cwd ?? process.cwd();
   const folder = root ? workspaceRelativeDir(root, dir) : null;
   const [top, name, ...deeper] = folder?.split("/") ?? [];
-  if (top !== "sites" || !name || deeper.length > 0) return null;
+  if (!root || !folder || top !== "sites" || !name || deeper.length > 0) return null;
   const isFile = (file: string) => fs.statSync(path.join(dir, file), { throwIfNoEntry: false })?.isFile() === true;
-  return isFile("index.html") && !fs.existsSync(path.join(dir, "package.json")) ? PAGE_SERVE_COMMAND : null;
+  if (!isFile("index.html") || fs.existsSync(path.join(dir, "package.json"))) return null;
+  const start = { argv: parseExplicitServeCommand(PAGE_SERVE_COMMAND), cwd: folder };
+  const recorded = recordedServer(root, folder);
+  if (recorded && !sameArgv(recorded, serverOf(start.argv))) return null;
+  const startedAnotherWay = (entry: PreviewStateEntry) =>
+    entry.projectId === params.projectId && entry.start?.cwd === folder && !sameStart(entry.start, start);
+  return readStateFile().previews.some(startedAnotherWay) ? null : PAGE_SERVE_COMMAND;
 }
 
 /**

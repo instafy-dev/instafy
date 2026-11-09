@@ -67,6 +67,13 @@ export function serverOf(argv: string[]): string[] {
   return program === undefined ? [] : [path.basename(program), ...(first === undefined ? [] : [first])];
 }
 
+/** How the record says the page in `folder` is served (`serverOf` its command), or null when it holds no such page. */
+export function recordedServer(root: string, folder: string): string[] | null {
+  const page = readPages(path.join(root, PAGES_RECORD_FILE)).find((entry) => entry.folder === folder);
+  if (!page) return null;
+  return Array.isArray(page.server) ? page.server.filter((word) => typeof word === "string") : [];
+}
+
 /** A page's folder as the record keys it, or null for the workspace itself and for a folder outside it. */
 export function pageFolder(raw: string): string | null {
   const folder = raw.replace(/^\.\//, "").replace(/\/+$/, "");

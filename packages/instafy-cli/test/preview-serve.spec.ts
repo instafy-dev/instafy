@@ -894,6 +894,54 @@ describe("instafy preview open --start picks the site's port, and close stops th
     expect(s.requests).toEqual([]);
   }, 30000);
 
+  it("still needs --serve-cmd in a page's folder another command serves, and starts no second server there", async () => {
+    const s = await space();
+    const calls = fakeInstafy();
+    const record = path.join(s.ws.root, ".instafy", "pages", "pages.json");
+    const refusedIn = async (cwd: string) => {
+      const requests = s.requests.length;
+      const refused = await failure(s.open({ cwd, title: "Trip" }));
+      expect(refused.exitCode).toBe(2);
+      expect(refused.message).toBe('--start needs --serve-cmd "<command>" to start the site.');
+      expect(calls()).toEqual([]);
+      expect(s.requests.length).toBe(requests);
+    };
+
+    // A preview of this space started in the folder with the site's own command: the site runs, and its row in the
+    // space's record of its pages is gone (a new disk, say).
+    const running = folderWith(s.ws.root, "sites/trip", ["index.html", "site.mjs"]);
+    const first = await s.open({ cwd: running, serveCmd: `${node} site.mjs {port} own`, title: "Trip" });
+    fs.rmSync(record);
+    await refusedIn(running);
+    expect(await (await fetch(`http://127.0.0.1:${first.port}/`)).text()).toBe("own");
+    expect(s.state().previews).toHaveLength(1);
+    expect(fs.existsSync(record)).toBe(false);
+
+    // The record names the command that serves the folder: its site has stopped and no preview shows it.
+    const stopped = folderWith(s.ws.root, "sites/walk", ["index.html", "site.mjs"]);
+    const second = await s.open({ cwd: stopped, serveCmd: `${node} site.mjs {port} own`, title: "Walk" });
+    await s.close(second.previewId);
+    await until("the site to stop", () => !isAlive(second.startedPid!));
+    const before = fs.readFileSync(record, "utf8");
+    expect(JSON.parse(before).pages).toEqual([expect.objectContaining({ folder: "sites/walk", server: [path.basename(process.execPath), "site.mjs"] })]);
+    await refusedIn(stopped);
+    expect(fs.readFileSync(record, "utf8")).toBe(before);
+    expect(await answers(second.port)).toBe(false);
+  }, 60000);
+
+  it("uses the page server already running in a page's folder, however its card was first opened", async () => {
+    const s = await space();
+    const calls = fakeInstafy();
+    const page = folderWith(s.ws.root, "sites/hours", ["index.html"]);
+    // As `instafy bind card` opens it.
+    const first = await s.open({ cwd: page, serveCmd: "instafy bind serve . --port {port} --preview", title: "Bookshop hours" });
+    const again = await s.open({ cwd: page, title: "Bookshop hours" });
+    expect(again.port).toBe(first.port);
+    expect(again.previewId).toBe(first.previewId);
+    expect(again.startedPid).toBeNull();
+    expect(calls()).toHaveLength(1);
+  }, 60000);
+
   it("runs a --serve-cmd as given in a page's folder too", async () => {
     const s = await space();
     const calls = fakeInstafy();
