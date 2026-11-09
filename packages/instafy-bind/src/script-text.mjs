@@ -124,7 +124,8 @@ function skipRegex(src, i) {
 }
 
 /** JS source → tokens: {t: "str", v} (a string, or a template's fixed text), {t: "id", v}, {t: "num"}, {t: "re"} and
- *  {t: "p", v} (punctuation, "=>" and "..." as one). Comments are dropped. */
+ *  {t: "p", v} (punctuation, "=>" and "..." as one), each with where it starts and ends in the source (`at`, `end`).
+ *  Comments are dropped. */
 export function tokens(src) {
   const out = [];
   for (let i = 0; i < src.length;) {
@@ -134,28 +135,47 @@ export function tokens(src) {
     else if (c === "/" && src[i + 1] === "*") i = src.indexOf("*/", i + 2) < 0 ? src.length : src.indexOf("*/", i + 2) + 2;
     else if (c === '"' || c === "'" || c === "`") {
       const [v, next] = c === "`" ? readTemplate(src, i) : readString(src, i);
-      out.push({ t: "str", v });
+      out.push({ t: "str", v, at: i, end: Math.min(next, src.length) });
       i = next;
     } else if (c === "/" && (!out.length || ((out.at(-1).t === "p" || out.at(-1).t === "id") && BEFORE_REGEX.has(out.at(-1).v)))) {
-      out.push({ t: "re" });
-      i = skipRegex(src, i);
+      const end = skipRegex(src, i);
+      out.push({ t: "re", at: i, end });
+      i = end;
     } else if (ID_START.test(c)) {
       let j = i + 1;
       while (j < src.length && ID_PART.test(src[j])) j += 1;
-      out.push({ t: "id", v: src.slice(i, j) });
+      out.push({ t: "id", v: src.slice(i, j), at: i, end: j });
       i = j;
     } else if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(src[i + 1] ?? ""))) {
       let j = i + 1;
       while (j < src.length && /[\w.]/.test(src[j])) j += 1;
-      out.push({ t: "num" });
+      out.push({ t: "num", at: i, end: j });
       i = j;
     } else {
       const v = src.startsWith("...", i) ? "..." : src.startsWith("=>", i) ? "=>" : c;
-      out.push({ t: "p", v });
+      out.push({ t: "p", v, at: i, end: i + v.length });
       i += v.length;
     }
   }
   return out;
+}
+
+/** The source as code only: each comment, and what each string, template and regular expression holds, blanked (its
+ *  newlines and a string's own quotes kept), so a search line by line finds only what the script does, at the line it
+ *  is on: `el.textContent = "never el.innerHTML = x"` sets no HTML, and `list.innerHTML = ""` still reads as emptying. */
+export function codeOnly(source) {
+  const src = String(source ?? "");
+  const out = src.replace(/[^\n]/g, " ").split("");
+  for (const tok of tokens(src)) {
+    if (tok.t === "re") continue;
+    if (tok.t === "str") {
+      out[tok.at] = src[tok.at];
+      if (tok.end - 1 > tok.at && src[tok.end - 1] === src[tok.at]) out[tok.end - 1] = src[tok.end - 1];
+      continue;
+    }
+    for (let k = tok.at; k < tok.end; k += 1) out[k] = src[k];
+  }
+  return out.join("");
 }
 
 const is = (tok, v) => !!tok && tok.t === "p" && tok.v === v;

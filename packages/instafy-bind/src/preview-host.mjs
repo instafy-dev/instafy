@@ -39,6 +39,7 @@
 // also reads to take a card's picture again after a turn changes that folder. That folder is the one the CLI runs in
 // when it is given --serve-cmd, else the one the process on the port runs in, so in a space the command `serve
 // --preview` prints for its card runs in the folder it serves, with --serve-cmd.
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -214,20 +215,57 @@ export function pageRecorded(dir, { env = process.env } = {}) {
   return Array.isArray(pages) && pages.some((page) => typeof page?.folder === "string" && page.folder.replace(/^\.\//, "").replace(/\/+$/, "") === folder);
 }
 
-/** Whether a preview the CLI opened for this space shows the site in `dir`: one it recorded with that folder as the
- *  folder its site is served from. */
-export function previewShows(dir, { env = process.env, file = defaultPreviewStateFile() } = {}) {
+/** The preview the CLI opened for this space that shows the site in `dir` (one it recorded with that folder as the
+ *  folder its site is served from), or null. */
+function previewOf(dir, { env = process.env, file = defaultPreviewStateFile() } = {}) {
   let previews;
   try {
     previews = JSON.parse(fs.readFileSync(file, "utf8"))?.previews;
   } catch {
-    return false;
+    return null;
   }
-  if (!Array.isArray(previews)) return false;
+  if (!Array.isArray(previews)) return null;
   const folder = realOr(dir);
-  return previews.some((entry) => {
+  return previews.find((entry) => {
     if (!entry || typeof entry !== "object" || typeof entry.siteDir !== "string") return false;
     const root = workspaceOf(env, entry.projectId);
     return root !== null && realOr(path.resolve(root, entry.siteDir)) === folder;
+  }) ?? null;
+}
+
+/** Whether a preview the CLI opened for this space shows the site in `dir`: one it recorded with that folder as the
+ *  folder its site is served from. */
+export function previewShows(dir, options = {}) {
+  return previewOf(dir, options) !== null;
+}
+
+/** The port the site in `dir` is served on for the preview that shows it, or null. */
+export function previewPort(dir, options = {}) {
+  const port = Number(previewOf(dir, options)?.localPort);
+  return Number.isInteger(port) && port > 0 && port < 65536 ? port : null;
+}
+
+// How long a look at a page as drawn may take: Chromium starting, then each size loading (30 s at most each) and its
+// screenshot. A check never waits on it longer.
+export const LOOK_TIMEOUT_MS = 120_000;
+
+/** The page check (`instafy preview check`) of the site served on `port`, with the text each size drew: `{ report }`,
+ *  its JSON, or `{ error }`, why it could not look, within `timeoutMs`. */
+export function lookAtPage(port, { timeoutMs = LOOK_TIMEOUT_MS, env = process.env } = {}) {
+  const run = spawnSync("instafy", ["preview", "check", "--port", String(port), "--json", "--text"], {
+    env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024,
   });
+  if (run.error) {
+    const code = run.error.code;
+    return { error: code === "ENOENT" ? "the instafy command was not found" : code === "ETIMEDOUT" ? `the page check did not finish within ${Math.round(timeoutMs / 1000)} s` : run.error.message };
+  }
+  let answer = null;
+  try {
+    answer = JSON.parse(String(run.stdout ?? "").trim());
+  } catch {
+    // not its JSON: what it said is the reason
+  }
+  if (answer && Array.isArray(answer.viewports)) return { report: answer };
+  const said = String((answer && answer.error) || run.stderr || run.stdout || "").trim().split("\n").slice(-2).join(" ").trim();
+  return { error: said || `the page check ended with ${run.signal ?? `exit ${run.status}`}` };
 }

@@ -35,25 +35,23 @@ own kind of page.
   under `:root:not([data-theme="light"])` inside `@media (prefers-color-scheme: dark)` and under
   `:root[data-theme="dark"]` (Studio's theme, which `instafy bind serve` puts on `<html>`). Never
   `color-scheme: light` alone; one look only when asked.
-- One primary button per page; no search, filter or sort nobody asked for, and no sort by a value no row has. The
-  lede: the verdict, saying only what a page you read says: how many a page lists, or that these are all of them or
-  the latest, only when it says so. Facts carry their trust: `checked 17 Oct on maker.com`,
-  `€549 at Shop · seen 17 Oct`, `checked 4 min ago`, `Estimate`, `Unknown`. A tip no page gave is plain text, never
-  styled like a source line.
+- One primary button per page; no search, filter or sort nobody asked for, and no sort by a value no row has. Facts
+  carry their trust: `checked 17 Oct on maker.com`, `€549 at Shop · seen 17 Oct`, `checked 4 min ago`, `Estimate`,
+  `Unknown`. A tip no page gave is plain text, never styled like a source line.
 - Options side by side: each value names the page it was read on and the day; one nobody found reads `Unknown` and
   why ("price not found on maker.com's page"), never a blank or a dash. A note on the page says where you looked, never
   the tools, searches or services you used. A value cites only a page that gives it: a count of
   what you found cites only what it counts, so none found cites no page. A filter from a stated limit ("under €600")
   counts known values only: an item whose value is unknown is listed apart ("Price unknown"), never as within it, on
-  the page, in the lede and in the reply. The starters do this with `site.byFilter`; a page you write uses it too. A
+  the page or in the reply. The starters do this with `site.byFilter`; a page you write uses it too. A
   candidate nothing could be read for is still a row, with `Unknown` in each cell: a page of options is never empty
   ("No options yet") while a page you read named what to compare. An item whose own page wasn't opened is "not
   checked (its own page wasn't opened)" in the reply, and each of its unknown values has `"note": "its own page wasn't
-  opened"`. The lede gives the verdict; the page names what's missing.
+  opened"`.
 - Options asked for from what you already know, with nothing looked up: the compare starter with `"from": "memory"`,
   each value only its `"v"`, from your own knowledge, never from the space's other pages. No `src`, `url`, `date`,
-  store or filter (`instafy bind check` fails them): the starter reads each value "<value>, not checked" and adds
-  "From what Octo knows; nothing checked." to the lede.
+  store or filter (`instafy bind check` fails them): the starter reads each value "<value>, not checked" and says
+  "From what Octo knows; nothing checked." under the title.
 - Keep sort, filters and the open tab in the URL query and give rows ids, so links and Studio's Follow keep them.
 - Every item the request names (stops, products, entries) is on the page, or the reply says plainly which is
   missing and why. Check with `instafy bind check <dir> --expect "<item>,<item>"` (it also lists blank values, values

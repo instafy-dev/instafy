@@ -50,6 +50,8 @@ export const CHECK_EXIT_INTERNAL = 70;
 const MAX_PATH_LENGTH = 512;
 const MAX_LIST = 20;
 const MAX_TEXT = 300;
+/** The most of a page's drawn text `--text` gives back, per size. */
+const MAX_PAGE_TEXT = 200_000;
 // With --framed, the frame page comes from a throwaway server on loopback, opened as http://localhost:<its port> while
 // the site is http://127.0.0.1:<port>: another origin, and both loopback, so Chromium's local-network-access
 // checks let the frame load (a page answered from memory counts as public and may not frame a loopback site).
@@ -704,6 +706,8 @@ export type ViewportReport = {
   warnings: string[];
   /** requests Instafy did not let the page make, with the reason; never page errors */
   blocked: string[];
+  /** with `text`: the text the page drew at this size, as a person reads it (the site's own frame when framed) */
+  text?: string;
 };
 
 export type SiteCheckReport = {
@@ -745,6 +749,8 @@ export type SiteCheckOptions = {
   thumbnail?: boolean;
   /** test hook: send requests off the site to this proxy instead of the image's egress proxy */
   proxyServer?: string;
+  /** give back the text each size drew (`instafy bind check` looks for what its files don't say in it) */
+  text?: boolean;
 };
 
 export function parseCheckPath(raw: string | undefined): string {
@@ -909,6 +915,7 @@ async function checkViewport(
   waitMs: number,
   network: ViewportNetwork,
   takeThumbnail: boolean,
+  wantText = false,
 ): Promise<ViewportReport & { thumbnail?: CheckThumbnail }> {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -1008,12 +1015,14 @@ async function checkViewport(
     const frame = siteFrame();
     let framed: "ok" | "refused" | "missing" = "ok";
     let snap = { text: 0, media: 0, elements: 0, title: "" };
+    let drawn = "";
     if (refused) framed = "refused";
     else if (!frame) framed = "missing";
     else {
       await frame.evaluate(() => (document as Document & { fonts?: { ready: Promise<unknown> } }).fonts?.ready).catch(() => {});
       await page.waitForTimeout(waitMs);
       snap = await frame.evaluate(FRAME_SNAPSHOT).catch(() => snap);
+      if (wantText) drawn = String(await frame.evaluate(() => document.body?.innerText ?? "").catch(() => "")).slice(0, MAX_PAGE_TEXT);
     }
     if (status !== null && status >= 400) framed = "missing";
     const file = path.join(outDir, `${vp.name}.png`);
@@ -1061,6 +1070,7 @@ async function checkViewport(
       errors: [...new Set(errors)].slice(0, MAX_LIST),
       warnings: [...new Set(warnings)].slice(0, MAX_LIST),
       blocked: blockedList(),
+      ...(wantText ? { text: drawn } : {}),
       ...(thumbnail ? { thumbnail } : {}),
     };
   } catch (error) {
@@ -1078,6 +1088,7 @@ async function checkViewport(
       errors: [...new Set(errors)].slice(0, MAX_LIST),
       warnings: [...new Set(warnings)].slice(0, MAX_LIST),
       blocked: blockedList(),
+      ...(wantText ? { text: "" } : {}),
       ...(takeThumbnail ? { thumbnail: { skipped: "the page did not load" } } : {}),
     };
   } finally {
@@ -1152,7 +1163,7 @@ export async function runSiteCheck(
       // The card shows the site as a page of its own, so only the plain desktop load is pictured.
       const takeThumbnail = Boolean(opts.thumbnail) && vp.name === "desktop" && !opts.framed;
       const { thumbnail: shot, ...report } = await checkViewport(
-        launched.browser, target, vp, siteOrigin, shots, timeoutMs, opts.waitMs ?? 600, { rules, gate }, takeThumbnail,
+        launched.browser, target, vp, siteOrigin, shots, timeoutMs, opts.waitMs ?? 600, { rules, gate }, takeThumbnail, Boolean(opts.text),
       );
       if (shot) thumbnail = shot;
       reports.push(report);
@@ -1223,6 +1234,8 @@ export type PreviewCheckCliOptions = {
   timeout?: string;
   wait?: string;
   json?: boolean;
+  /** `instafy bind check` only: with --json, the text each size drew */
+  text?: boolean;
   /**
    * Instafy's runtime only: save the picture for the card of the preview open on this port and path to this file
    * instead of sending it, with what the card needs beside it (see `CheckPictureSaver`). The runtime sends it with its
@@ -1307,6 +1320,7 @@ export async function runPreviewCheckCli(opts: PreviewCheckCliOptions, io: Previ
       desktop: opts.desktop,
       framed: opts.framed,
       workspacePlaywright: opts.workspacePlaywright,
+      text: opts.text,
       outDir: opts.out,
       timeoutMs: num(opts.timeout, "--timeout", 1_000, 120_000),
       waitMs: num(opts.wait, "--wait", 0, 30_000),
@@ -1371,6 +1385,8 @@ export function registerPreviewCheckCommand(
     .option("--json", "Output JSON")
     // Instafy's runtime takes a card's picture at a turn's end this way and sends it itself.
     .addOption(new Option("--picture-to <file>").hideHelp())
+    // `instafy bind check` looks in the page as drawn for what its files don't say.
+    .addOption(new Option("--text").hideHelp())
     .action(async (opts: PreviewCheckCliOptions) => {
       process.exitCode = await runPreviewCheckCli(opts, { out: console.log, err: console.error, ...card });
     });

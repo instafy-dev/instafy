@@ -929,7 +929,7 @@ try {
           ok(seen.underLede, `${where}: right under the lede`);
           eq(seen.saidMissing, 1, `${where}: said in that one line, by no row and in no other line`);
           eq(seen.gapElsewhere, [], `${where}: the missing reviews are named in that line and their cells only`);
-          eq(seen.lede, "The Laptop 12 starts lowest and is lightest; the 16 has the largest battery.", `${where}: the lede is the verdict as written`);
+          eq(seen.lede, "", `${where}: with nothing to sort nothing is decided, and the stored lede is not drawn`);
           ok(seen.links.length >= 6, `${where}: the page links its sources (${seen.links.length})`);
           for (const link of seen.links) eq(link.text, link.site, `${where}: a source is named by its page's site`);
           ok(!/Review One \/ Maker|Review Two review|Maker Laptop 12 overview/.test(JSON.stringify(seen.links)), `${where}: no source keeps a name of its own`);
@@ -940,6 +940,62 @@ try {
           if (SHOTS && !open13) await page.screenshot({ path: path.join(SHOTS, `compare-says-missing-${width}-${scheme}.png`), fullPage: true });
           await page.context().close();
         }
+      }
+    }
+  }
+
+  // ---------- 2l. the line under the title names what the cells decide, from the page's own sorts. A comparison's
+  // free-text headline, asked for the verdict, gave none and named the missing reviews right above the line that names
+  // them; a "lede" in data.json is not drawn, and a page that still has one loads as any other. ----------
+  {
+    const day = "2026-11-09";
+    const at = (v, url) => ({ v, src: "Maker", url: `https://maker.example/${url}`, date: day });
+    const laptops = (d) => ({
+      ...d, title: "Three latest laptops", filter: undefined, unchecked: [],
+      lede: "Maker's featured laptops include the 13 Pro, 12 and 16; two independent reviews per model were not found in the pages read.",
+      sort: [{ key: "price", label: "Starting price, low to high", dir: "asc" }, { key: "weight", label: "Weight, light first", dir: "asc" }],
+      columns: [{ key: "cpu", label: "CPU", type: "text" }, { key: "battery", label: "Battery", type: "text" }, { key: "weight", label: "Weight", type: "text" },
+        { key: "price", label: "Starting price", type: "price" }, { key: "reviews", label: "Independent reviews", type: "text" }],
+      items: [
+        { ref: "laptop:13-pro", name: "Maker Laptop 13 Pro", why: "The newest chip", facts: { cpu: at("Chip Ultra 5", "13pro?tab=specs"), battery: at("74.45 Wh", "13pro?tab=specs"),
+          weight: at("1.41 kg (no cards); 1.44 kg (four cards)", "13pro?tab=specs"), price: at("€1,349", "13pro/configure"), reviews: { note: "two independent reviews not found" } } },
+        { ref: "laptop:12", name: "Maker Laptop 12", why: "A small convertible", facts: { cpu: at("Chip 3", "12?tab=specs"), battery: at("50 Wh", "12?tab=specs"),
+          weight: at("1.3 kg", "12?tab=specs"), price: at("€619", "12/configure"), reviews: { note: "two independent reviews not found" } } },
+        { ref: "laptop:16", name: "Maker Laptop 16", why: "The largest", facts: { cpu: at("Chip AI 5", "16?tab=specs"), battery: at("85 Wh", "16?tab=specs"),
+          weight: at("2.10 kg", "16?tab=specs"), price: at("€1,409", "16/configure"), reviews: { note: "two independent reviews not found" } } },
+      ],
+    });
+    const site = await staticServer(makeSite("compare-says-what-cells-decide", "compare", laptops));
+    for (const [width, height] of [[390, 844], [1280, 800]]) {
+      for (const scheme of ["light", "dark"]) {
+        const where = `${width} px ${scheme}`;
+        const page = await open(`${site}/`, { width, height, scheme });
+        const seen = await page.evaluate(() => {
+          const lede = document.getElementById("lede");
+          return {
+            lede: lede.getClientRects().length ? lede.innerText : null,
+            ink: getComputedStyle(lede).color !== getComputedStyle(document.body).backgroundColor,
+            missing: [...document.querySelectorAll("#missing .not-found")].filter((p) => p.getClientRects().length).map((p) => p.innerText),
+            saidMissing: (document.body.innerText.match(/Still missing/g) || []).length,
+            reviewsSaid: (document.body.innerText.match(/two independent reviews not found/g) || []).length,
+            elsewhere: ["title", "lede", "notes"].map((id) => document.getElementById(id).innerText).filter((t) => /independent review|featured/i.test(t)),
+            rows: document.querySelectorAll("#list [data-ref]").length,
+            notice: !!document.querySelector(".notice.is-error"),
+            overflow: document.documentElement.scrollWidth - innerWidth,
+          };
+        });
+        eq(seen.lede, "Lowest starting price and lowest weight: Maker Laptop 12", `${where}: the line under the title names what the cells decide`);
+        ok(seen.ink, `${where}: the line is drawn in a colour of its own`);
+        eq(seen.missing, ["Still missing for Maker Laptop 13 Pro, Maker Laptop 12 and Maker Laptop 16: Independent reviews (two independent reviews not found)"], `${where}: what is missing, under it`);
+        eq(seen.saidMissing, 1, `${where}: said once`);
+        // on the table each cell says why too; on a phone only that line does
+        eq(seen.reviewsSaid, width >= 760 ? 4 : 1, `${where}: the missing reviews are said in that line${width >= 760 ? " and their cells" : ""} only`);
+        eq(seen.elsewhere, [], `${where}: not by the title, the line above it or the footer`);
+        eq({ rows: seen.rows, notice: seen.notice }, { rows: 3, notice: false }, `${where}: a page that still has a stored lede loads`);
+        eq(seen.overflow, 0, `${where}: no sideways scroll`);
+        eq(page.errors.filter((e) => !/404|Failed to load resource/.test(e)), [], `${where}: no script errors`);
+        if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `compare-cells-decide-${width}-${scheme}.png`), fullPage: true });
+        await page.context().close();
       }
     }
   }

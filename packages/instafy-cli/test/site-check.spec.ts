@@ -331,10 +331,10 @@ describe("preview check: pure parts", () => {
     const check = registerPreviewCheckCommand(preview);
     expect(check.name()).toBe("check");
     const flags = check.options.map((o) => o.long);
-    expect(flags).toEqual(["--port", "--path", "--phone", "--desktop", "--framed", "--workspace-playwright", "--out", "--timeout", "--wait", "--json", "--picture-to"]);
-    // The runtime's own option is not offered in help.
-    expect(check.options.filter((o) => o.hidden).map((o) => o.long)).toEqual(["--picture-to"]);
-    expect(check.helpInformation()).not.toContain("--picture-to");
+    expect(flags).toEqual(["--port", "--path", "--phone", "--desktop", "--framed", "--workspace-playwright", "--out", "--timeout", "--wait", "--json", "--picture-to", "--text"]);
+    // The runtime's own option, and the text `instafy bind check` reads, are not offered in help.
+    expect(check.options.filter((o) => o.hidden).map((o) => o.long)).toEqual(["--picture-to", "--text"]);
+    expect(check.helpInformation()).not.toMatch(/--picture-to|--text/);
   });
 });
 
@@ -455,6 +455,27 @@ describe.skipIf(!browserOk)("preview check: in a browser", () => {
       expect(v.status).toBe(200);
     }
     expect(formatSiteCheck(r)).toMatch(/Loaded on both sizes with no errors; how it looks isn't checked/);
+  });
+
+  // `instafy bind check` looks for what a page's files don't say in the text each size drew: a script's own words, as
+  // a person reads them, and none it hides on that size.
+  it("with text, each size gives back the text it drew; without, none", { timeout: 90_000 }, async () => {
+    const drawn = `<!doctype html><html><head><title>Hours</title><meta name="viewport" content="width=device-width">
+<style>@media (max-width: 600px) { .wide { display: none } }</style></head><body><main id="list"></main>
+<script>
+  const p = document.createElement("p"); p.textContent = "Open daily from " + ["9:00", "19:00"].join(" to ");
+  const wide = document.createElement("p"); wide.className = "wide"; wide.textContent = "Metro from Aliados";
+  document.getElementById("list").append(p, wide);
+</script></body></html>`;
+    const port = await serve({ "/": { body: drawn } });
+    const result = await check({ port, outDir: path.join(tmp, "text"), text: true });
+    expect(result.code).toBe(CHECK_EXIT_OK);
+    expect(result.report!.viewports.map((v) => [v.name, v.text])).toEqual([
+      ["desktop", "Open daily from 9:00 to 19:00\n\nMetro from Aliados"],
+      ["phone", "Open daily from 9:00 to 19:00"],
+    ]);
+    const plain = await check({ port, outDir: path.join(tmp, "text"), desktop: true });
+    expect(plain.report!.viewports.map((v) => "text" in v)).toEqual([false]);
   });
 
   it("console errors, uncaught exceptions and the site's own failed requests are problems (exit 1)", { timeout: 90_000 }, async () => {

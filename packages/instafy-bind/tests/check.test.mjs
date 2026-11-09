@@ -483,7 +483,8 @@ test("an item whose words are in page code the check does not read as a script i
   }
 });
 
-// The check says an item is missing only when it could have seen it.
+// The check says an item is missing only when it could have seen it: one its files don't say is looked for on the page
+// as drawn, and where nothing serves the page (here: outside a space, with no preview) it cannot tell.
 test("an item whose words a script holds where the check cannot place them, or that it fetches from another site, is never reported missing (exit 2)", () => {
   const dir = blankSite(`var heading = "Opening hours";
 var card = document.createElement("article");
@@ -493,11 +494,11 @@ document.getElementById("list").appendChild(card);
   try {
     const out = run("check", dir, "--expect", "New page, Opening hours");
     assert.equal(out.status, 2, out.stdout + out.stderr);
-    assert.doesNotMatch(out.stdout, /MISSING/);
-    assert.match(out.stdout, /^UNREAD: app\.js may draw .*, so the check cannot tell whether the page shows: Opening hours\.$/m);
+    assert.doesNotMatch(out.stdout, /MISSING|UNREAD/);
+    assert.match(out.stdout, /^Nothing serves the page yet, so the check cannot tell whether it shows: Opening hours\. Look at it where it is served: `instafy preview check --port <its port>`\.$/m);
     assert.match(out.stdout, /1 of 2 expected item\(s\) shown: New page\./);
     const json = JSON.parse(run("check", dir, "--expect", "Opening hours", "--json").stdout);
-    assert.deepEqual([json.ok, json.missing, json.unknown, json.unread], [false, [], ["Opening hours"], ["app.js"]]);
+    assert.deepEqual([json.ok, json.missing, json.unknown, json.unread, json.drawn], [false, [], ["Opening hours"], ["app.js"], { port: null, error: "nothing serves the page" }]);
     // every item it can see: a pass
     assert.equal(run("check", dir, "--expect", "New page").status, 0);
     // an item no file names is missing
@@ -508,6 +509,68 @@ document.getElementById("list").appendChild(card);
     fs.appendFileSync(path.join(dir, "app.js"), 'fetch("https://hours.example/today").then((r) => r.text()).then((t) => { card.textContent = t; });\n');
     const fetched = JSON.parse(run("check", dir, "--expect", "Opening hours, Closing day", "--json").stdout);
     assert.deepEqual([fetched.missing, fetched.unknown, fetched.unread], [[], ["Opening hours", "Closing day"], ["app.js"]]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The check names each line that sets HTML from a string, so the turn redraws it with site.h and site.trust. A line
+// that only empties an element draws nothing, and words that only mention innerHTML (in a string, a comment, a
+// regular expression or a page's own text) set nothing: none of them is named.
+test("the check names each line that sets HTML from a string, and no line that only empties an element or mentions innerHTML", () => {
+  const dir = blankSite(`var list = document.getElementById("list");
+list.innerHTML = ''; // clear the list
+list.innerHTML = ""; list.append(document.createElement("p"));
+var tip = document.createElement("p");
+tip.textContent = "Use el.innerHTML = x never";
+// list.innerHTML = rows.join("");
+/* list.innerHTML = rows.join(""); */
+var re = /\\.innerHTML\\s*=/;
+var note = \`
+list.innerHTML = rows;
+\`;
+if (list.innerHTML === "") list.dataset.empty = "1";
+var old = list.innerHTML;
+list.innerHTML = "<li>" + old + "</li>";
+list.innerHTML = ""; list.innerHTML = old;
+list.insertAdjacentHTML("beforeend", old);
+list.innerHTML += old;
+list.outerHTML = old;
+`);
+  try {
+    assert.deepEqual(checkSite(dir).markup.map((m) => [m.file, m.line]), [14, 15, 16, 17, 18].map((line) => ["app.js", line]));
+    // an HTML page: its own scripts' lines, never its text
+    fs.writeFileSync(path.join(dir, "app.js"), "site.head({ title: \"New page\" });\n");
+    const html = fs.readFileSync(path.join(dir, "index.html"), "utf8")
+      .replace('<section id="list"></section>', '<section id="list"><p>Never set el.innerHTML = x with what a page said.</p></section>')
+      .replace('<script src="app.js"></script>', '<script src="app.js"></script>\n<script>\n  var box = document.getElementById("list");\n  box.innerHTML = ""; // emptied\n  box.innerHTML = window.saved;\n</script>');
+    fs.writeFileSync(path.join(dir, "index.html"), html);
+    const at = html.split("\n").findIndex((line) => line.includes("box.innerHTML = window.saved")) + 1;
+    assert.deepEqual(checkSite(dir).markup.map((m) => [m.file, m.line, m.code]), [["index.html", at, "box.innerHTML = window.saved;"]]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A comparison's line under its title is the compare starter's own, from its sorts and cells, and data.json's "lede" is
+// not drawn: an item only that lede names is not on the page, and the check says the lede isn't drawn. A page made
+// before keeps its own app.js, which draws the lede, so there it counts.
+test("a comparison's stored lede isn't drawn, so an item only it names is missing; on a page made before it still counts", () => {
+  const dir = compareSite(["Option A", "Option B", "Option C"]);
+  try {
+    const file = path.join(dir, "data.json");
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    data.lede = "Option D isn't sold here, so it has no row.";
+    fs.writeFileSync(file, JSON.stringify(data, null, 2));
+    const out = run("check", dir, "--expect", "Option A, Option B, Option C, Option D");
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    assert.match(out.stdout, /^MISSING: the request named 1 item\(s\) the site does not show: Option D\.$/m);
+    assert.match(out.stdout, /^NOTE: data\.json's "lede" is not drawn: the line under a comparison's title comes from its sorts and cells\. Say in the reply what it says\.$/m);
+    // a page made before: its own app.js draws the lede
+    fs.writeFileSync(path.join(dir, "app.js"), 'site.start({ data: "data.json", render: function (data) { site.head(data); } });\n');
+    const before = run("check", dir, "--expect", "Option A, Option B, Option C, Option D");
+    assert.equal(before.status, 0, before.stdout + before.stderr);
+    assert.doesNotMatch(before.stdout, /lede/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -786,7 +849,6 @@ test("a page from what Octo knows passes without pages, and fails with any page 
 test("a page from what Octo knows keeps its own columns, and fails a source, a store, a filter, or a starter that can't draw it", () => {
   const remembered = () => ({
     title: "Maker Laptop 13 vs 16",
-    lede: "The 16 is the bigger one.",
     from: "memory",
     columns: [{ key: "date", label: "Released", type: "text" }, { key: "url", label: "Website", type: "text" }, { key: "store", label: "Sold at", type: "text" }, { key: "price", label: "Price", type: "price" }],
     items: [
@@ -811,7 +873,7 @@ test("a page from what Octo knows keeps its own columns, and fails a source, a s
     assert.match(problems[0], /^Maker Laptop 13: this page is from what Octo knows .* leave out its "src"\./);
     assert.match(problems[1], /^Maker Laptop 16: this page is from what Octo knows .* leave out its "store"\./);
     assert.match(problems[2], /^the filter "Under \$1,500": nothing on a page from what Octo knows was checked, so no value on it counts as within the limit\. Leave out "filter"/);
-    assert.deepEqual(notes, [], "no note asks the lede to call the remembered prices unknown");
+    assert.deepEqual(notes, [], "no note asks to call the remembered prices unknown");
     assert.equal(run("check", dir, "--expect", expect).status, 1);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
