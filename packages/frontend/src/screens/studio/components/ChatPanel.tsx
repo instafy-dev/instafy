@@ -2987,7 +2987,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const groupedMessages = useMemo(() => {
     void promptSendFailures;
     const collapsedVisible = collapsedConversationMessages.filter((message) => shouldDisplayChatMessage(message));
-    const jobThreads = synthesizeAgentJobThreadMessages(collapsedConversationMessages, collapsedVisible);
+    const jobThreads = synthesizeAgentJobThreadMessages(collapsedConversationMessages, collapsedVisible, isAssistantTyping);
 
     const parentControllerId = activeConversation?.controllerId ?? null;
     if (!parentControllerId) {
@@ -3021,7 +3021,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     });
 
     return [...jobThreads, ...threadMessages];
-  }, [activeConversation?.controllerId, collapsedConversationMessages, previewThreads, messages, promptSendFailures]);
+  }, [activeConversation?.controllerId, collapsedConversationMessages, isAssistantTyping, previewThreads, messages, promptSendFailures]);
   const displayedMessages = useMemo(() => revealCanonicalMessageTarget(
     groupedMessages, messages, messageTargetActive ? requestedMessageId : null,
   ), [groupedMessages, messages, messageTargetActive, requestedMessageId]);
@@ -5023,11 +5023,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, [messages, promptSendFailures]);
   const newestBrowserRequest = useMemo(() => newestBrowserRequestKey(messages), [messages]);
   // Cards for a message Octo sent straight to the browser that Studio opened
-  // by itself and that are still opening (routedBrowserFold.ts).
+  // by itself and that still stand in for their turn (routedBrowserFold.ts).
   const routedBrowserWaiting = useMemo(() => {
     void promptSendFailures;
-    return routedBrowserWaitingKeys(messages);
-  }, [messages, promptSendFailures]);
+    return routedBrowserWaitingKeys(messages, isAssistantTyping);
+  }, [isAssistantTyping, messages, promptSendFailures]);
   const browserRequestHost = useMemo<BrowserRequestHost>(() => ({
     transport: browserTransport,
     personalAvailable: personalBrowser.available,

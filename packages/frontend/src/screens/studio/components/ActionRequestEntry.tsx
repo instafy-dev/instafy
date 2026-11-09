@@ -15,6 +15,7 @@ import {
 } from "./browserRequest";
 import { ChatActionCard, type ChatActionCardAction } from "./ChatActionCard";
 import { TurnActivityLine } from "./TurnActivityLine";
+import { THINKING_LINE } from "./turnActivity";
 import type { ChatMessage } from "../types";
 
 type ParsedActionRequest = {
@@ -259,8 +260,10 @@ export function ActionRequestEntry({
   const browserCardState = browserKey ? browserHost?.cardStates?.get(browserKey) ?? null : null;
   const browserOpened = Boolean(browserKey &&
     (browserHost?.continuedKeys?.has(browserKey) || browserCardState?.kind === "opened"));
-  // A message Octo sent straight to the browser keeps its line until that
-  // browser turn shows something (routedBrowserFold.ts).
+  // A message Octo sent straight to the browser keeps its line until a turn
+  // that carries it on shows something (routedBrowserFold.ts). It reads
+  // "Thinking…": nothing has opened a page yet, and that turn may open none
+  // (it can hand the message to the building turn).
   const browserOpening = Boolean(browserKey && (browserRequest?.routed
     ? browserCardState?.kind === "opening" || browserHost?.routedWaitingKeys?.has(browserKey)
     : browserCardState?.kind === "opening" && !browserOpened));
@@ -344,7 +347,7 @@ export function ActionRequestEntry({
     return (
       <div className="space-y-1" data-testid="browser-request-opening">
         <TurnActivityLine
-          text="Opening Instafy's browser…"
+          text={browserRequest?.routed ? THINKING_LINE : "Opening Instafy's browser…"}
           live
           animate
           interactive={false}

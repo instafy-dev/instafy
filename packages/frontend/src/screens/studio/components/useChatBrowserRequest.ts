@@ -274,8 +274,8 @@ type DraftHold = { key: string; reason: string | null };
  * What deciding the newest card left: whether it waits on a reading of
  * Instafy's browser, the card a draft holds, and a card for a message Octo
  * sent straight to the browser that Studio is about to open by itself
- * (`opensSoon`): it reads "Opening Instafy's browser…" from the moment it
- * lands, while the run that routed it ends or that reading comes.
+ * (`opensSoon`): it reads "Thinking…" from the moment it lands, while the
+ * run that routed it ends or that reading comes.
  */
 type CardDecision = { waiting: boolean; draftHold: DraftHold | null; opensSoon?: string | null };
 const DECIDED: CardDecision = { waiting: false, draftHold: null };

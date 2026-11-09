@@ -52,7 +52,17 @@ const STILL_UNREAD: &str = "a second review of the Laptop 16";
 const PASS_OPENING: &str = "Your answer has no finding lines";
 /// What that request asks a turn whose findings go back to the building turn for after its
 /// lines (runtime-agent `UNREAD_LINE`).
-const PASS_ASKS_FOR_UNREAD: &str = "After them, one last line `{\"unread\": [";
+const PASS_ASKS_FOR_UNREAD: &str = "Then one last line `{\"unread\": [";
+/// What it asks such a turn for before that line: the values it looked for and didn't find, by
+/// name (runtime-agent `MISSING_LINE`).
+const PASS_ASKS_FOR_MISSING: &str = "After your finding lines, one line `{\"missing\": [";
+/// The missing line the turn ends its answer with, and its second pass's: the values each looked
+/// for and didn't find. The turn's note keeps their names once, in one line.
+const MISSING_FIRST: &str = r#"{"missing": ["warranty"]}"#;
+const MISSING_SECOND: &str = r#"{"missing": ["price", "warranty"]}"#;
+const NOTE_MISSING: &str = r#"{"missing":["warranty","price"]}"#;
+/// What the second pass is told of its missing line (runtime-agent `unread_pages_prompt`).
+const SECOND_PASS_MISSING: &str = "the missing line for each value you still didn't find";
 /// A turn's answer that says in words which pages it didn't read, with no finding line and no
 /// unread line, as a comparison's browser part answered (a local test, Nov 8).
 const FIRST_PROSE: &str = "Read 2 pages on maker.example. I didn't reach the Laptop 12's and Laptop 16's own pages or the Laptop 12's review.";
@@ -64,7 +74,7 @@ const SECOND_PROSE: &str = "I read the Laptop 12's own page.";
 /// A turn that read a product page and didn't find the value it looked for there, beside the
 /// page's own link for it, which it didn't open, and answered in words.
 const NOT_FOUND_WORDS: &str = "Read the Laptop 12's own page. Its text didn't give the warranty.";
-const NOT_FOUND_12: &str = r#"{"url": "https://maker.example/laptop-12", "title": "Laptop 12", "facts": ["Warranty not found on this page."]}"#;
+const READ_12_PAGE: &str = r#"{"url": "https://maker.example/laptop-12", "title": "Laptop 12", "facts": ["Battery: 50 Wh"]}"#;
 /// The product page's own link for the warranty.
 const WARRANTY_LINK: &str = "https://maker.example/warranty";
 const WARRANTY_WORDS: &str = "Read the maker's warranty page.";
@@ -348,7 +358,7 @@ async fn provider_request(
             } else {
                 &[]
             };
-            format!("{NOT_FOUND_12}\n{}", unread_line(unread))
+            format!("{READ_12_PAGE}\n{}", unread_line(unread))
         } else if turn.contains(SECOND_PASS_OPENING) {
             format!("{WARRANTY_WORDS}\n{READ_WARRANTY}\n{}", unread_line(&[]))
         } else {
@@ -398,6 +408,10 @@ async fn provider_request(
             device_step("open", "navigate", json!({ "url": DEVICE_PAGE }))
         }
         (Case::SecondPassWritesNoLines, _) => final_answer(SECOND_PROSE),
+        (Case::Reads, _) => final_answer(&format!(
+            "{SECOND_WORDS}\n{READ_12}\n{READ_16}\n{READ_12_REVIEW}\n{MISSING_SECOND}\n{}",
+            unread_line(&[STILL_UNREAD])
+        )),
         _ => final_answer(&second_answer()),
     }
 }
@@ -709,7 +723,11 @@ async fn two_passes(
         return Ok(());
     }
 
-    let mut summary = first_answer();
+    // The turn named a value it looked for and didn't find, beside its unread line.
+    let mut summary = format!(
+        "{FIRST_WORDS}\n{READ_HOME}\n{READ_13}\n{MISSING_FIRST}\n{}",
+        unread_line(&UNREAD)
+    );
     let task_usage = TaskUsage::default();
     let read = tokio::time::timeout(
         Duration::from_secs(60),
@@ -726,6 +744,7 @@ async fn two_passes(
         asked.contains(&serde_json::to_string(&UNREAD).unwrap()),
         "{asked}"
     );
+    assert!(asked.contains(SECOND_PASS_MISSING), "{asked}");
     for read_already in [
         "https://maker.example/laptops/13",
         "https://maker.example/\"",
@@ -761,7 +780,7 @@ async fn two_passes(
     let lines = [READ_HOME, READ_13, READ_12, READ_16, READ_12_REVIEW].join("\n");
     assert_eq!(
         summary,
-        format!("{FIRST_WORDS}\n\n{SECOND_WORDS}\n\n{lines}")
+        format!("{FIRST_WORDS}\n{MISSING_FIRST}\n\n{SECOND_WORDS}\n{MISSING_SECOND}\n\n{lines}")
     );
     assert!(!summary.contains(STILL_UNREAD), "{summary}");
     assert_eq!(state.requests.lock().unwrap().len(), 2, "no third pass");
@@ -788,6 +807,12 @@ async fn two_passes(
     move_findings_into_details(&job, &mut ended);
     assert_eq!(ended.summary, "", "no reply bubble");
     assert_eq!(ended.final_messages.len(), 1);
+    // The names both passes' missing lines gave, once each, after the lines: the controller
+    // reads them there for the hand-back, and no person reads them.
+    assert_eq!(
+        ended.final_messages[0].content,
+        format!("{FIRST_WORDS}\n\n{SECOND_WORDS}\n\n{lines}\n{NOTE_MISSING}")
+    );
     assert_eq!(
         ended.final_messages[0].metadata.as_ref().unwrap()["browserFindings"],
         json!({ "pages": 5, "pagesRead": 5 })
@@ -966,6 +991,7 @@ async fn words_then_the_wrap_up_then_a_second_pass(
     let wrap_up = last_user_text(&requests[1]);
     assert!(wrap_up.contains(PASS_OPENING), "{wrap_up}");
     assert!(wrap_up.contains(PASS_ASKS_FOR_UNREAD), "{wrap_up}");
+    assert!(wrap_up.contains(PASS_ASKS_FOR_MISSING), "{wrap_up}");
     // The second pass reads only the pages that line named, on the turn's own thread.
     let passes = second_passes(state);
     assert_eq!(passes.len(), 1, "one second pass");
@@ -1045,14 +1071,15 @@ async fn words_then_the_wrap_up_then_a_second_pass(
     let wrap_up = last_user_text(&requests[3]);
     assert!(wrap_up.contains(PASS_OPENING), "{wrap_up}");
     assert!(!wrap_up.contains(PASS_ASKS_FOR_UNREAD), "{wrap_up}");
+    assert!(!wrap_up.contains(PASS_ASKS_FOR_MISSING), "{wrap_up}");
     assert_eq!(summary, format!("{FIRST_PROSE}\n\n{READ_HOME}\n{READ_13}"));
     Ok(())
 }
 
 /// The turn answered in words that it didn't find the warranty on the product page it read. The
 /// wrap-up pass is told that the page's own link for it is unread until opened, names it, and
-/// the second pass reads it before the build: the turn ends with the value not found on the
-/// product page and the warranty page's own fact.
+/// the second pass reads it before the build: the turn ends with the product page's fact and
+/// the warranty page's own.
 async fn the_link_for_a_value_not_found_is_read(
     workspace: &Path,
     project_id: Uuid,
@@ -1103,7 +1130,7 @@ async fn the_link_for_a_value_not_found_is_read(
     assert!(wrap_up.contains(UNREAD_LINK), "{wrap_up}");
     assert_eq!(
         summary,
-        format!("{NOT_FOUND_WORDS}\n\n{WARRANTY_WORDS}\n\n{NOT_FOUND_12}\n{READ_WARRANTY}")
+        format!("{NOT_FOUND_WORDS}\n\n{WARRANTY_WORDS}\n\n{READ_12_PAGE}\n{READ_WARRANTY}")
     );
     Ok(())
 }

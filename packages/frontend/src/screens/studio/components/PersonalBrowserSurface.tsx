@@ -88,16 +88,16 @@ export function BrowserLocationOptions({
         <MenuItemContent start={<Computer aria-hidden="true" />} end={mode === "personal" ? <Check aria-hidden="true" /> : null}
           description={<span id={`${descriptionId}-personal`}>
             {!checked ? "Checking this device… " : !personalAvailable ? "Available in the Instafy desktop app. " : ""}
-            Your logins stay on this device and follow you across projects. They are not copied to Shared Browser or your other devices.
+            Your logins stay on this device and follow you across spaces. They are not copied to this space's browser or your other devices.
           </span>}>
           This device
         </MenuItemContent>
       </StudioMenuAction>
-      <StudioMenuAction aria-label="Workspace browser" aria-pressed={mode === "shared"}
+      <StudioMenuAction aria-label="This space" aria-pressed={mode === "shared"}
         aria-describedby={`${descriptionId}-shared`} data-testid="browser-transport-shared" onPress={() => choose("shared")}>
         <MenuItemContent start={<Globe aria-hidden="true" />} end={mode === "shared" ? <Check aria-hidden="true" /> : null}
-          description={<span id={`${descriptionId}-shared`}>Project members see the same remote browser and logged-in pages. Your personal logins are not copied here.</span>}>
-          Workspace
+          description={<span id={`${descriptionId}-shared`}>People in this space see the same remote browser and logged-in pages. Your personal logins are not copied here.</span>}>
+          This space
         </MenuItemContent>
       </StudioMenuAction>
     </div>
@@ -113,10 +113,10 @@ export function BrowserTransportSelector({
   ...location
 }: BrowserLocationProps & { compact?: boolean }) {
   const [open, setOpen] = useState(false);
-  const label = location.mode === "personal" ? "This device" : "Workspace";
+  const label = location.mode === "personal" ? "This device" : "This space";
   return <div data-browser-session-safe-zone="true" data-testid="browser-transport-selector" data-compact={compact ? "true" : "false"}>
     <BrowserToolsPopover placement="bottom start" label="Browser location" isOpen={open} onOpenChange={setOpen} trigger={
-      <Button variant="ghost" preset="toolbar" className="shrink-0" aria-label={`Browser location: ${label}`} data-testid="browser-location-menu" title={`Runs on ${label.toLowerCase()}`}>
+      <Button variant="ghost" preset="toolbar" className="shrink-0" aria-label={`Browser location: ${label}`} data-testid="browser-location-menu" title={location.mode === "personal" ? "Runs on this device" : "Runs in this space"}>
         {location.mode === "personal" ? <Computer className="h-3.5 w-3.5" aria-hidden="true" /> : <Globe className="h-3.5 w-3.5" aria-hidden="true" />}
         <NavArrowDown className="h-3 w-3" aria-hidden="true" />
       </Button>

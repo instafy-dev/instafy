@@ -86,6 +86,36 @@ describe("chatTranscriptCopy", () => {
     );
   });
 
+  // A local test, Nov 9: Copy conversation ended a comparison's reply with
+  // "Updated data.json.", a file's name the reply never used.
+  it("copies a reply's words and nothing after them", () => {
+    const dataFile = {
+      path: "sites/framework-laptops-compare/data.json",
+      workspacePath: "sites/framework-laptops-compare/data.json",
+      label: "data.json",
+      changeType: "changed" as const,
+      lineRanges: [],
+    };
+    const reply = "Added a warranty column to the comparison with each laptop’s warranty from its own specs page.";
+    const transcript = formatConversationTranscript([
+      createMessage({ id: "user-1", role: "user", content: "Add each laptop's warranty." }),
+      createMessage({
+        id: "thread-1",
+        role: "assistant",
+        messageType: "agent_job_thread",
+        metadata: {
+          messageType: "agent_job_thread",
+          threadMessages: [
+            createMessage({ id: "edit", role: "assistant", messageType: "file_change", timestamp: 5, files: [dataFile] }),
+            createMessage({ id: "reply", role: "assistant", content: reply, timestamp: 10, files: [dataFile] }),
+          ],
+        },
+      }),
+    ]);
+
+    expect(transcript).toBe(`User: Add each laptop's warranty.\n\nAssistant: ${reply}`);
+  });
+
   it("falls back to a file summary when a run-thread only contains file changes", () => {
     const transcript = formatConversationTranscript([
       createMessage({
