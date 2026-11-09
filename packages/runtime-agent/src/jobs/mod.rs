@@ -240,8 +240,9 @@ const NO_FILE_CHANGES_MARKER: &str = "NO_FILE_CHANGES";
 // A completion requirement, never permission to write. Conditional work may
 // legitimately finish after inspection without producing a patch. A required
 // change gets one recovery pass; a reply that still changes nothing is then
-// the turn's result, with [`NOTHING_CHANGED_LINE`] under it, and one that lists
-// a file missing from disk fails the turn.
+// the turn's result, with [`NOTHING_CHANGED_LINE`] under it. A reply that lists
+// a file missing from disk fails the turn, and so does a recovery pass that
+// stops with no reply of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceFileChangeRequirement {
     None,
@@ -9921,6 +9922,17 @@ impl JobProcessor {
                     );
                 } else if held_pages.put_a_change_back() {
                     // Its change to another chat's page was put back, and its reply says so.
+                } else if !has_final_reply_event(&retry_output.events) {
+                    // The recovery pass stopped at its reasoning or at a progress note, with no
+                    // reply of its own: nothing answers the person, so the turn fails, as it did
+                    // before such a reply could stand.
+                    return Err(JobFailureWithArtifacts {
+                        message:
+                            "Codex did not apply any workspace changes for a file-modifying request."
+                                .to_string(),
+                        artifacts: retry_artifacts,
+                    }
+                    .into());
                 } else {
                     // The routing step read the request as needing file changes before anything
                     // ran, and the recovery pass changed none either (a claimed file missing from
@@ -12105,6 +12117,23 @@ fn take_no_file_changes_marker(text: &str) -> Option<String> {
         .then(|| rest.to_string())
 }
 
+/// The reply without the last lines an older thread's instructions still ask for, the
+/// no-change line ([`take_no_file_changes_marker`]) and the line of offered replies
+/// ([`without_offered_replies_line`]), in whichever order it ends with them. None when it ends
+/// with neither.
+fn without_older_threads_last_lines(text: &str) -> Option<String> {
+    let mut reply: Option<String> = None;
+    loop {
+        let current = reply.as_deref().unwrap_or(text);
+        let Some(shorter) =
+            take_no_file_changes_marker(current).or_else(|| without_offered_replies_line(current))
+        else {
+            return reply;
+        };
+        reply = Some(shorter);
+    }
+}
+
 fn reported_workspace_file_changes_missing(
     tracks_changes: bool,
     reported_files_len: usize,
@@ -12345,12 +12374,8 @@ fn extract_codex_outcome(value: &JsonValue) -> Result<CodexOutcome> {
     }
 
     // The lines an older thread's instructions still ask for leave the reply before anything
-    // reads or shows it (a plan card carries the reply's words): the no-change line, which comes
-    // last, then the line of offered replies.
-    if let Some(reply) = take_no_file_changes_marker(&summary) {
-        summary = reply;
-    }
-    if let Some(reply) = without_offered_replies_line(&summary) {
+    // reads or shows it (a plan card carries the reply's words).
+    if let Some(reply) = without_older_threads_last_lines(&summary) {
         summary = reply;
     }
     let mut actions = parse_codex_actions(value);
@@ -16001,33 +16026,47 @@ fn has_successful_patch_apply_event(events: &[JsonValue]) -> bool {
 }
 
 fn has_user_visible_codex_output_event(events: &[JsonValue]) -> bool {
-    events.iter().any(|event| {
-        let is_completed = event
-            .get("type")
-            .and_then(JsonValue::as_str)
-            .is_some_and(|event_type| event_type == "item.completed");
-        if !is_completed {
-            return false;
+    events
+        .iter()
+        .any(|event| completed_output_item(event, true))
+}
+
+/// Whether a run's log holds a reply of its own: a completed agent message that is not a
+/// progress note. Reasoning, or a progress note, alone is none.
+fn has_final_reply_event(events: &[JsonValue]) -> bool {
+    events
+        .iter()
+        .any(|event| completed_output_item(event, false))
+}
+
+/// A completed item with text that a person reads: an agent message that is not a progress
+/// note, or, when `reasoning` counts, a reasoning summary.
+fn completed_output_item(event: &JsonValue, reasoning: bool) -> bool {
+    let is_completed = event
+        .get("type")
+        .and_then(JsonValue::as_str)
+        .is_some_and(|event_type| event_type == "item.completed");
+    if !is_completed {
+        return false;
+    }
+    let Some(item) = event.get("item").and_then(JsonValue::as_object) else {
+        return false;
+    };
+    let has_text = item
+        .get("text")
+        .and_then(JsonValue::as_str)
+        .is_some_and(|text| !text.trim().is_empty());
+    match item.get("type").and_then(JsonValue::as_str) {
+        Some("agent_message") => {
+            has_text
+                && item
+                    .get("phase")
+                    .and_then(JsonValue::as_str)
+                    .is_none_or(|phase| phase != "commentary")
         }
-        let Some(item) = event.get("item").and_then(JsonValue::as_object) else {
-            return false;
-        };
-        let has_text = item
-            .get("text")
-            .and_then(JsonValue::as_str)
-            .is_some_and(|text| !text.trim().is_empty());
-        match item.get("type").and_then(JsonValue::as_str) {
-            Some("agent_message") => {
-                has_text
-                    && item
-                        .get("phase")
-                        .and_then(JsonValue::as_str)
-                        .is_none_or(|phase| phase != "commentary")
-            }
-            Some("reasoning") => has_text,
-            _ => false,
-        }
-    })
+        Some("reasoning") => reasoning && has_text,
+        _ => false,
+    }
 }
 
 fn synthesize_codex_missing_final_summary(
@@ -21385,12 +21424,9 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                                 continue;
                             }
                             // The note repeats the reply as the person reads it: without the
-                            // lines an older thread still asks for, in the order the reply loses
-                            // them.
-                            let unmarked = take_no_file_changes_marker(text);
-                            let text = unmarked.as_deref().unwrap_or(text);
-                            let offered = without_offered_replies_line(text);
-                            let text = offered.as_deref().unwrap_or(text);
+                            // lines an older thread still asks for.
+                            let reply = without_older_threads_last_lines(text);
+                            let text = reply.as_deref().unwrap_or(text);
                             let key = format!("agent_message::{text}");
                             push_message(
                                 key,
@@ -39170,14 +39206,19 @@ mod tests {
     /// A reply that changed nothing was once asked to end with a line of the
     /// runtime's, and a turn on a thread from before can still add it. The
     /// person reads the reply without it: in the answer, and in the note that
-    /// repeats the answer among the turn's steps.
+    /// repeats the answer among the turn's steps. Such a thread can also still
+    /// ask for a line of offered replies, and a reply can end with both lines,
+    /// in either order.
     #[test]
     fn the_no_change_marker_never_reaches_the_person() {
         let reply = "I can't open www.roborock.com from this turn, so I left the page unbuilt.";
+        let offered = "“Sort by weight” · “Add a fifth laptop”";
         for marked in [
             format!("{reply}\n\nNO_FILE_CHANGES"),
             format!("{reply}\n`NO_FILE_CHANGES`\n"),
             format!("{reply}\n**no_file_changes.**"),
+            format!("{reply}\n{offered}\nNO_FILE_CHANGES"),
+            format!("{reply}\nNO_FILE_CHANGES\n{offered}"),
         ] {
             let outcome = extract_codex_outcome(&json!({ "summary": marked, "files": [] }))
                 .expect("extract outcome");

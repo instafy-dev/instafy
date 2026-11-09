@@ -439,8 +439,9 @@ which also asks for an observation or a lookup of earlier chats the turn skipped
 changes nothing either, its reply (it finds the change already made, asks the person something,
 or says what blocks the work) is the turn's result, with the runtime's line "Nothing was
 changed." under it, recorded as a `codex/required-changes-not-made` artifact. A lookup it still
-skipped fails the turn, as does a reply that lists a file missing from disk. What such a reply
-says is one rule in `AGENTS.md`'s replies guide.
+skipped fails the turn, as does a reply that lists a file missing from disk, or a pass that
+stops with no reply of its own. What such a reply says is one rule in `AGENTS.md`'s replies
+guide.
 
 Every turn that saves to the workspace lists the files it changed on disk in its receipts,
 whatever the requirement: a tool such as a skill pack's command can write files on a turn read

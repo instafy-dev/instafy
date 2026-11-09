@@ -163,10 +163,11 @@ The preflight's `workspaceFileChangeRequirement` distinguishes `none` (no mutati
 `conditional` (edit only when review or validation warrants it), and `required` (the request
 asks for an actual change). Conditional work can finish without a change. A required write that
 changes nothing gets one recovery pass; when that pass changes nothing either, its reply is the
-turn's result, with the runtime's line "Nothing was changed." under it, and a reply that lists a
-file missing from disk fails the turn. What a reply that changes nothing says is one rule in
-`AGENTS.md`'s replies guide. Every turn that saves to the workspace lists the files it changed
-on disk. These are completion requirements, not write
+turn's result, with the runtime's line "Nothing was changed." under it. A reply that lists a
+file missing from disk fails the turn, and so does a recovery pass that stops with no reply.
+What a reply that changes nothing says is one rule in `AGENTS.md`'s replies guide. Every turn
+that saves to the workspace lists the files it changed on disk. These are completion
+requirements, not write
 permissions: controller `writeIntent` and write scopes remain authoritative. Legacy Boolean
 decisions remain readable, and artifacts retain `requiresWorkspaceFileChanges`, true only
 for `required`. Invalid or conflicting requirements fail before the main turn. See the
