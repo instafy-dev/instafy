@@ -30,8 +30,8 @@ export type VoiceConversationActionStripProps = {
   onVoicePressStart: () => void | Promise<void>;
   onVoicePressEnd: () => void;
   onVoiceTap?: () => void | Promise<void>;
-  primaryActionClassName: string;
-  ghostActionClassName: string;
+  /** Placement and composer-specific corner geometry; appearance is shared. */
+  actionClassName?: string;
   actionIconClassName: string;
   voiceRepliesTestId?: string;
   voiceInputTestId?: string;
@@ -58,8 +58,7 @@ export function VoiceConversationActionStrip({
   onVoicePressStart,
   onVoicePressEnd,
   onVoiceTap,
-  primaryActionClassName,
-  ghostActionClassName,
+  actionClassName,
   actionIconClassName,
   voiceRepliesTestId = "chat-voice-replies-toggle",
   voiceInputTestId = "chat-voice-input-button",
@@ -220,6 +219,8 @@ export function VoiceConversationActionStrip({
           type="button"
           onPress={onToggleVoiceReplies}
           variant={voiceRepliesEnabled ? "primary" : "ghost"}
+          tone="neutral"
+          elevation="none"
           size="md"
           radius="xl"
           aria-label={
@@ -240,7 +241,7 @@ export function VoiceConversationActionStrip({
           data-voice-replies-speaking={replySpeaking ? "true" : "false"}
           data-voice-replies-backend={replyBackendLabel ?? ""}
           data-voice-replies-error={replyError ?? ""}
-          className={voiceRepliesEnabled ? primaryActionClassName : ghostActionClassName}
+          className={actionClassName}
         >
           <span className="sr-only">
             {voiceRepliesEnabled
@@ -268,6 +269,8 @@ export function VoiceConversationActionStrip({
         style={{ touchAction: "none" }}
         aria-pressed={voiceActionActive}
         variant={voiceActionActive ? "primary" : "ghost"}
+        tone="neutral"
+        elevation="none"
         size="md"
         radius="xl"
         aria-label={voiceButtonAccessibleLabel}
@@ -279,7 +282,7 @@ export function VoiceConversationActionStrip({
         data-voice-state={voiceState}
         data-voice-backend={voiceBackendLabel ?? ""}
         data-voice-error={voiceError ?? ""}
-        className={voiceActionActive ? primaryActionClassName : ghostActionClassName}
+        className={actionClassName}
       >
         {voiceActionActive ? (
           <Microphone className={`${actionIconClassName} animate-pulse`} aria-hidden="true" />

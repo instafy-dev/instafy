@@ -80,17 +80,10 @@ export function resolveChatComposerAffordances({
     sharedBrowserSendBlocked;
   const sendButtonVariant: "primary" | "ghost" =
     composerHasSendPayload && !sendButtonDisabled ? "primary" : "ghost";
-  // The composer owns the surface. Ghost controls only tone the glyph,
-  // retaining the shared 36px fine-pointer / 44px touch target geometry.
-  const composerGhostActionClass = "[&_svg]:text-slate-600 dark:[&_svg]:text-slate-300";
-  // A single primary action supplies the accent without a second shadow.
-  const composerPrimaryActionClass = "shadow-none";
   const composerActionIconClass = "h-[22px] w-[22px]";
 
   return {
     composerActionIconClass,
-    composerGhostActionClass,
-    composerPrimaryActionClass,
     queueCanSendNow,
     sendButtonDisabled,
     sendButtonVariant,

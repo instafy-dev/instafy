@@ -938,7 +938,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     browserPanelSize !== null
       ? (splitSurfaces ? browserPanelSize.width * surfaces.ratio : browserPanelSize.width) < ADAPTIVE_SHARED_BROWSER_WIDTH_PX
       : compactBrowserViewport;
-  const homeAttentionBadge = homeAttentionCount > 9 ? "9+" : homeAttentionCount.toString();
   const pinChatMessagesToBottom = !messageTargetActive && shouldPinChatMessagesToBottom({
     hasMoreHistory,
     smallViewport: compactBrowserViewport,
@@ -5913,8 +5912,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   );
   const {
     composerActionIconClass,
-    composerGhostActionClass,
-    composerPrimaryActionClass,
     queueCanSendNow,
     sendButtonDisabled,
     sendButtonVariant,
@@ -6963,7 +6960,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         composerNavigationDestination="sheet"
         onOpenNavigation={() => onOpenChatNavigation?.()}
         homeAttentionCount={homeAttentionCount}
-        homeAttentionBadge={homeAttentionBadge}
         composerActionMenuProps={{
           // The pre-AI lock gates sending, not the "+" actions (import a repo,
           // open a browser, invite), none of which need AI connected. Keeping
@@ -7050,8 +7046,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             : null
         }
         onSendButtonPress={handleSendButtonPress}
-        composerGhostActionClass={composerGhostActionClass}
-        composerPrimaryActionClass={composerPrimaryActionClass}
         composerActionIconClass={composerActionIconClass}
         inviteModalProps={{
           isOpen: addMenuOpen,

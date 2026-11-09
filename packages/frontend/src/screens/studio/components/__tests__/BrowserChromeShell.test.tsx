@@ -54,15 +54,16 @@ describe("BrowserChromeShell", () => {
     expect(toolbar?.textContent).toContain("Ready");
   });
 
-  it("shows long feedback outside the toolbar without truncating it", async () => {
+  it.each(["error", "success"] as const)("keeps %s feedback addressable and dismissible outside the toolbar", async (feedbackTone) => {
     const onDismiss = vi.fn();
     await act(async () => {
       root.render(
         <BrowserChromeShell
-          address={<input aria-label="Address" />}
+          address={<input aria-label="Address" aria-describedby="browser-error" />}
           feedback="The complete browser error stays readable at narrow widths."
           feedbackId="browser-error"
           feedbackTestId="browser-feedback"
+          feedbackTone={feedbackTone}
           label="Browser controls"
           navigation={<button type="button">Back</button>}
           onDismissFeedback={onDismiss}
@@ -71,14 +72,35 @@ describe("BrowserChromeShell", () => {
     });
 
     const feedback = container.querySelector<HTMLElement>('[data-testid="browser-feedback"]');
-    expect(feedback?.getAttribute("role")).toBe("alert");
+    expect(feedback?.getAttribute("role")).toBe(feedbackTone === "error" ? "alert" : "status");
     expect(feedback?.id).toBe("browser-error");
     expect(feedback?.className).not.toContain("truncate");
     expect(feedback?.textContent).toContain("complete browser error");
+    const toolbar = container.querySelector('[role="toolbar"]')!;
+    expect(toolbar.contains(feedback)).toBe(false);
+    expect(toolbar.querySelector('[aria-label="Address"]')?.getAttribute("aria-describedby")).toBe(feedback?.id);
     await act(async () => {
       container.querySelector<HTMLButtonElement>('[aria-label="Dismiss browser message"]')?.click();
     });
     expect(onDismiss).toHaveBeenCalledOnce();
+  });
+
+  it("keeps Resume an independently labelled action and honors disabled control", async () => {
+    const resume = vi.fn();
+    const render = (disabled: boolean) => act(async () => root.render(
+      <BrowserStatusPill state="paused" resume={{ onPress: resume, disabled }} />,
+    ));
+    await render(true);
+    const disabledButton = container.querySelector<HTMLButtonElement>('[aria-label="Resume agent control"]')!;
+    expect(disabledButton.disabled).toBe(true);
+    await act(async () => disabledButton.click());
+    expect(resume).not.toHaveBeenCalled();
+    await render(false);
+    const button = container.querySelector<HTMLButtonElement>('[aria-label="Resume agent control"]')!;
+    expect(button.textContent).toBe("Resume");
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    await act(async () => button.click());
+    expect(resume).toHaveBeenCalledOnce();
   });
 
   it.each([

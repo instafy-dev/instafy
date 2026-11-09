@@ -1,0 +1,29 @@
+html, body, #root { height: 100%; margin: 0; }
+.review-app { display: flex; flex-direction: column; height: 100dvh; min-width: 0; background: white; }
+.dark .review-app { background: var(--color-studio-dark-panel); }
+.review-heading { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 20px; border-bottom: 1px solid #e9e7e4; }
+.dark .review-heading { border-color: var(--color-studio-dark-divider); }
+.review-layout { display: grid; grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); flex: 1; min-height: 0; }
+.review-conversation { display: flex; position: relative; min-width: 0; min-height: 0; flex-direction: column; }
+.review-conversation > [data-testid="composer-preview"] { min-height: 0; }
+.review-transcript { padding: 24px; overflow: auto; min-height: 0; flex: 1; }
+.review-transcript > p { margin-top: 8px; }
+.review-reply { margin-top: 32px; max-width: 34rem; }
+.review-browser { min-width: 0; min-height: 0; display: flex; flex-direction: column; border-left: 1px solid #e9e7e4; }
+.dark .review-browser { border-color: var(--color-studio-dark-divider); }
+.review-webpage { flex: 1; min-height: 0; overflow: auto; padding: clamp(24px, 4vw, 60px); background: #f3f1e7; color: #304236; }
+.review-webpage-kicker { font-size: 11px; letter-spacing: .18em; font-weight: 600; }
+.review-webpage h1 { font-size: clamp(30px, 3vw, 46px); line-height: 1.15; letter-spacing: -.04em; margin: 24px 0; max-width: 500px; }
+.review-webpage p { font-size: 15px; line-height: 1.7; max-width: 480px; }
+.review-webpage-rule { height: 1px; background: #bfc5b7; margin: 32px 0; }
+.review-webpage h2 { font-size: 18px; font-weight: 600; margin-bottom: 12px; }
+.dark .review-webpage { background: #202d25; color: #e7eadc; }
+.dark .review-webpage-rule { background: #4b594e; }
+@media (max-width: 767px) {
+  .review-layout { display: flex; flex-direction: column; }
+  .review-conversation, .review-browser { flex: 1; border-left: 0; }
+  .review-composer-primary .review-browser, .review-browser-primary .review-conversation { display: none; }
+  .review-heading { padding: 12px 16px; }
+  .review-heading > :last-child { display: none; }
+  .review-transcript { padding: 20px 16px; }
+}

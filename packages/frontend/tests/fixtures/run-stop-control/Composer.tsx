@@ -10,6 +10,12 @@ import type { PendingChatImageAttachment } from "../../../src/screens/studio/com
 import reviewImageUrl from "../../../public/og-image.png?inline";
 
 const noop = () => {};
+// Keep the pre-preset appearance when the same fixture loads baseline sources.
+// Current production sources ignore these former presentation props.
+const baselineActionAppearance = {
+  composerGhostActionClass: "[&_svg]:text-slate-600 dark:[&_svg]:text-slate-300",
+  composerPrimaryActionClass: "shadow-none",
+};
 const reviewImageBytes = Uint8Array.from(atob(reviewImageUrl.split(",")[1]), character => character.charCodeAt(0));
 
 /** The real composer and Lexical editor; only submission and peripheral panes are inert. */
@@ -101,8 +107,7 @@ export function Composer({ controller, readOnly, recording, viewNavigation, queu
           voiceRoute: "fixture", voiceCapture: "fixture", onVoicePressStart: noop, onVoicePressEnd: noop,
           onVoiceTap: noop, voiceInteractionMode: "tap" }}
         sendButtonDisabled={readOnly || recording} sendButtonVariant={draft.trim() ? "primary" : "ghost"}
-        onSendButtonPress={send} composerGhostActionClass="[&_svg]:text-slate-600 dark:[&_svg]:text-slate-300"
-        composerPrimaryActionClass="shadow-none" composerActionIconClass="h-[22px] w-[22px]"
+        onSendButtonPress={send} {...baselineActionAppearance} composerActionIconClass="h-[22px] w-[22px]"
         inviteModalProps={{ isOpen: false, onOpenChange: noop, mentionableUsers: [], inviteParticipantIdSet: new Set(),
           inviteParticipantBusyUserId: null, inviteParticipantsLoading: false, onInviteTeammate: async () => {},
           activeConversationVisibility: null, activeConversationControllerId: null, activeOrgId: null, activeProjectId: null,

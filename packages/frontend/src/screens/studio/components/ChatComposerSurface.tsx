@@ -18,7 +18,6 @@ import {
   Check,
   Lock,
   Menu,
-  Microphone,
   NavArrowDown,
   NavArrowLeft,
   Pause,
@@ -33,6 +32,7 @@ import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAc
 import { useVisualViewportBounds } from "../../../hooks/useVisualViewportBounds";
 import { Surface } from "../../../components/Surface";
 import { AttachmentThumbnail } from "../../../components/AttachmentThumbnail";
+import { AttentionBadge } from "../../../components/AttentionBadge";
 import { Text } from "../../../components/Text";
 import { ComposerMessagePopover } from "./ComposerMessagePanel";
 import { ComposerActionMenu } from "./ComposerActionMenu";
@@ -61,6 +61,7 @@ import {
 import { OctoSilenceHint } from "./OctoSilenceHint";
 import { StatusPill, StatusPillButton, type StatusPillTone } from "./StatusPill";
 import { VoiceConversationActionStrip } from "./VoiceConversationActionStrip";
+import { RecordingIndicator } from "./RecordingIndicator";
 import { ProviderTriggerNotice } from "../../../extensions/ProviderTriggerNotice";
 import {
   normalizeConversationGoalProgressSummaryForDisplay,
@@ -130,10 +131,8 @@ type ChatComposerSurfaceProps = {
   composerNavigationLabel?: string;
   onOpenNavigation: () => void;
   homeAttentionCount: number;
-  homeAttentionBadge: string;
-  // The surface dresses the "+" trigger and the mic itself (see the class
-  // props below) — the box from the ghost family and the glyph from the one
-  // icon class — so every rest-row control resolves to the one dress here.
+  // The surface supplies corner and glyph geometry; shared buttons own tone
+  // and elevation for every rest-row control.
   composerActionMenuProps: Omit<
     ComponentProps<typeof ComposerActionMenu>,
     "triggerClassName" | "triggerIconClassName"
@@ -148,7 +147,7 @@ type ChatComposerSurfaceProps = {
   showVoiceSecondaryAction: boolean;
   voiceConversationActionStripProps: Omit<
     ComponentProps<typeof VoiceConversationActionStrip>,
-    "primaryActionClassName" | "ghostActionClassName" | "actionIconClassName"
+    "actionClassName" | "actionIconClassName"
   >;
   sendButtonDisabled: boolean;
   sendButtonVariant: ComponentProps<typeof IconButton>["variant"];
@@ -161,8 +160,6 @@ type ChatComposerSurfaceProps = {
   primaryActionBlockedStatus?: string | null;
   onSendButtonPress: ComponentProps<typeof IconButton>["onPress"];
   // Shared control geometry keeps the primary slot steady as mic becomes Send.
-  composerGhostActionClass: string;
-  composerPrimaryActionClass: string;
   composerActionIconClass: string;
   inviteModalProps: ComponentProps<typeof ComposerInviteModal>;
   mutationDisabled?: boolean;
@@ -254,9 +251,6 @@ function resolveGoalStatusPillTone(tone: ConversationGoalHealth["tone"]): Status
   return "primary";
 }
 
-// Clients without voice capture retain a quiet Send affordance at rest.
-export const COMPOSER_SEND_REST_CLASS = "[&_svg]:text-slate-400 dark:[&_svg]:text-slate-500";
-
 // The editor wrapper in the one-row composer is exactly as tall as the row's
 // controls (IconButton md: h-9 on a fine pointer, min-h-11 on a coarse one —
 // the same tokens chatInputGrowth.ts sizes the editor by) and centres the
@@ -338,7 +332,6 @@ export function ChatComposerSurface({
   composerNavigationLabel = "Back to chats",
   onOpenNavigation,
   homeAttentionCount,
-  homeAttentionBadge,
   composerActionMenuProps,
   onOpenImagePicker,
   imageUploadUnavailableReason = null,
@@ -354,8 +347,6 @@ export function ChatComposerSurface({
   sendActionLabel,
   primaryActionBlockedStatus = null,
   onSendButtonPress,
-  composerGhostActionClass: ghostActionClass,
-  composerPrimaryActionClass: primaryActionClass,
   composerActionIconClass,
   inviteModalProps,
   mutationDisabled = false,
@@ -364,8 +355,7 @@ export function ChatComposerSurface({
   silenceHintProps = null,
   composerRunStopController = null,
 }: ChatComposerSurfaceProps) {
-  const composerGhostActionClass = `chat-composer-action ${ghostActionClass}`;
-  const composerPrimaryActionClass = `chat-composer-action ${primaryActionClass}`;
+  const composerActionClass = "chat-composer-action";
   const [draftExpanded, setDraftExpanded] = useState(false);
   const visibleViewport = useVisualViewportBounds(imageAttachments.length > 0);
   useEffect(() => setDraftExpanded(false), [chatInputProps.draftKey]);
@@ -474,7 +464,7 @@ export function ChatComposerSurface({
     hasUsablePayload: composerHasUsablePayload,
     voiceCaptureInProgress: Boolean(voiceCaptureInProgress),
     mutationDisabled: mutationDisabled || accessChecking,
-    actionClassName: composerGhostActionClass,
+    actionClassName: composerActionClass,
     iconClassName: composerActionIconClass,
   };
   const runStopPlacement = resolveComposerRunStopPlacement(runStopActionProps);
@@ -1033,7 +1023,7 @@ export function ChatComposerSurface({
       }
       voiceRepliesEnabled={voiceConversationActionStripProps.voiceRepliesEnabled}
       voiceRepliesDisabled={voiceConversationActionStripProps.disabled}
-      triggerClassName={composerGhostActionClass}
+      triggerClassName={composerActionClass}
       triggerIconClassName={composerActionIconClass}
     />
   );
@@ -1048,29 +1038,26 @@ export function ChatComposerSurface({
       title={mobileChatsNavigation ? composerNavigationLabel : "Open navigation"}
       aria-haspopup={mobileChatsNavigation ? undefined : "dialog"}
       data-testid="chat-composer-navigation-button"
-      className={composerGhostActionClass}
+      className={composerActionClass}
     >
       <span className="relative flex h-full w-full items-center justify-center">
         {mobileChatsNavigation
           ? <NavArrowLeft className={composerActionIconClass} aria-hidden="true" />
           : <Menu className={composerActionIconClass} aria-hidden="true" />}
         {!mobileChatsNavigation && homeAttentionCount > 0 ? (
-          <span
-            aria-hidden="true"
-            data-testid="chat-composer-navigation-badge"
-            className="absolute right-[1px] top-[1px] flex h-3.5 min-w-[0.875rem] items-center justify-center rounded-full bg-primary-600 px-1 text-3xs font-semibold leading-none text-white ring-2 ring-white translate-x-[16%] -translate-y-[16%] dark:bg-primary-500 dark:ring-[color:var(--color-studio-dark-panel)]"
-          >
-            {homeAttentionBadge}
-          </span>
+          <AttentionBadge
+            count={homeAttentionCount}
+            aria-hidden={true}
+            testId="chat-composer-navigation-badge"
+            className="absolute right-[1px] top-[1px] ring-2 ring-white translate-x-[16%] -translate-y-[16%] dark:ring-[color:var(--color-studio-dark-panel)]"
+          />
         ) : null}
       </span>
     </IconButton>
   ) : null;
-  // The mic wears the same two dresses as Send: ghost at rest, primary while
-  // it is the active control.
+  // The mic shares Send's geometry in both its quiet and active states.
   const voiceStripDressProps = {
-    primaryActionClassName: composerPrimaryActionClass,
-    ghostActionClassName: composerGhostActionClass,
+    actionClassName: composerActionClass,
     actionIconClassName: composerActionIconClass,
   };
   const voiceStripNode = showInlineVoiceAction ? (
@@ -1102,14 +1089,12 @@ export function ChatComposerSurface({
           title={primaryActionLabel}
           style={{ touchAction: "none" }}
           variant={sendButtonVariant === "primary" ? "primary" : "ghost"}
+          tone="muted"
           elevation="none"
           size="md"
           radius="xl"
           className={[
-            "chat-composer-action",
-            sendButtonVariant === "primary"
-              ? composerPrimaryActionClass
-              : COMPOSER_SEND_REST_CLASS,
+            composerActionClass,
             sendingAttachment ? "opacity-70" : "",
           ]
             .filter(Boolean)
@@ -1201,8 +1186,11 @@ export function ChatComposerSurface({
           <div className={`pointer-events-auto ${draftExpanded ? "flex h-full min-h-0 flex-col gap-2" : "space-y-2"}`}>
             {replyContext}
             {showActiveGoal && !draftExpanded ? (
-              <div
-                className={`@container/goal pointer-events-auto flex min-w-0 flex-col gap-2 rounded-2xl border border-slate-200/70 bg-white/95 px-3 py-2 text-sm shadow-sm dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-strong)] ${
+              <Surface
+                tone="subtle"
+                radius="2xl"
+                shadow="none"
+                className={`@container/goal pointer-events-auto flex min-w-0 flex-col gap-2 px-3 py-2 ${
                   compactBrowserViewport ? "mx-2" : "mx-1 sm:mx-2"
                 }`}
                 data-testid="chat-active-goal"
@@ -1216,40 +1204,44 @@ export function ChatComposerSurface({
                     <Archery className="h-4 w-4" aria-hidden="true" />
                   </span>
                   {hasGoalDetails ? (
-                    <button
+                    <Button
                       type="button"
+                      preset="inline"
+                      variant="ghost"
                       aria-controls={goalDetailsId}
                       aria-expanded={goalDetailsExpanded}
                       onClick={toggleGoalDetails}
-                      className="-m-1 min-w-0 flex-1 rounded-xl p-1 text-left transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 dark:hover:bg-slate-900/40"
+                      className="min-w-0 flex-1 justify-start text-left"
                       data-testid="chat-active-goal-summary"
                     >
-                      <span className="block truncate font-medium text-slate-700 dark:text-slate-200">
-                        {activeGoal.objective}
+                      <span className="min-w-0 flex-1">
+                        <Text as="span" variant="bodyStrong" tone="secondary" className="block truncate">
+                          {activeGoal.objective}
+                        </Text>
+                        <Text as="span" variant="caption" tone="muted" className="block truncate">
+                          {goalDetail}
+                        </Text>
+                        {activeGoalHealth && activeGoalHealth.turnCount > 0 ? (
+                          <span className="mt-1 block h-1 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                            <span
+                              className={`block h-full rounded-full ${
+                                goalHealthTone === "blocked"
+                                  ? "bg-rose-500"
+                                  : goalHealthTone === "warning"
+                                    ? "bg-amber-500"
+                                    : "bg-primary-500"
+                              }`}
+                              style={{ width: `${Math.max(4, activeGoalHealth.progressRatio * 100)}%` }}
+                            />
+                          </span>
+                        ) : null}
                       </span>
-                      <span className="block truncate text-xs text-slate-500 dark:text-slate-400">
-                        {goalDetail}
-                      </span>
-                      {activeGoalHealth && activeGoalHealth.turnCount > 0 ? (
-                        <span className="mt-1 block h-1 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
-                          <span
-                            className={`block h-full rounded-full ${
-                              goalHealthTone === "blocked"
-                                ? "bg-rose-500"
-                                : goalHealthTone === "warning"
-                                  ? "bg-amber-500"
-                                  : "bg-primary-500"
-                            }`}
-                            style={{ width: `${Math.max(4, activeGoalHealth.progressRatio * 100)}%` }}
-                          />
-                        </span>
-                      ) : null}
-                    </button>
+                    </Button>
                   ) : (
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate font-medium text-slate-700 dark:text-slate-200">
+                      <Text as="span" variant="bodyStrong" tone="secondary" className="block truncate">
                         {activeGoal.objective}
-                      </span>
+                      </Text>
                       {activeGoalHealth && activeGoalHealth.turnCount > 0 ? (
                         <span className="mt-1 block h-1 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
                           <span
@@ -1354,9 +1346,9 @@ export function ChatComposerSurface({
                   <div
                     id={goalDetailsId}
                     data-testid="chat-active-goal-details"
-                    className="rounded-xl bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-600 dark:bg-slate-900/40 dark:text-slate-300"
+                    className="px-3 py-2"
                   >
-                    <p>{goalDetail}</p>
+                    <Text variant="caption" tone="muted">{goalDetail}</Text>
                     {showGoalHelpAction ? (
                       <Button
                         type="button"
@@ -1371,7 +1363,7 @@ export function ChatComposerSurface({
                     ) : null}
                   </div>
                 ) : null}
-              </div>
+              </Surface>
             ) : null}
             {accessNotice ? (
               <div
@@ -1712,20 +1704,20 @@ export function ChatComposerSurface({
               {showVoiceActiveStrip ? (
                 <div className="pt-1.5">
                   <div className="space-y-2">
-                    <div
-                      className="flex min-h-[3.5rem] items-center justify-between gap-3 rounded-2xl border border-slate-200/70 bg-slate-50/90 px-3 py-2 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)]"
+                    <Surface
+                      tone="muted"
+                      radius="2xl"
+                      shadow="none"
+                      className="flex min-h-14 items-center justify-between gap-3 px-3 py-2"
                       data-testid="chat-voice-active-strip"
                     >
                       <div className="flex min-w-0 items-center gap-3">
-                        <span className="relative inline-flex h-9 w-9 flex-none items-center justify-center rounded-full border border-primary-300/70 bg-primary-500/10 text-primary-600 shadow-[0_0_0_10px_rgba(59,130,246,0.08)] dark:border-primary-400/50 dark:bg-primary-400/10 dark:text-primary-200 dark:shadow-[0_0_0_8px_rgba(96,165,250,0.06)]">
-                          <span className="absolute inset-0 rounded-full bg-primary-500/20 animate-ping dark:bg-primary-400/20" />
-                          <Microphone className="relative h-4.5 w-4.5" aria-hidden="true" />
-                        </span>
+                        <RecordingIndicator presentation="strip" />
                         <Text
                           as="div"
-                          variant="body"
+                          variant="bodyStrong"
                           tone="secondary"
-                          className="min-w-0 truncate text-sm font-medium text-slate-700 dark:text-slate-200"
+                          className="min-w-0 truncate"
                           data-testid="chat-voice-active-strip-status"
                         >
                           {displayedVoiceStatusMessage}
@@ -1741,7 +1733,7 @@ export function ChatComposerSurface({
                             showVoiceRepliesToggle={false}
                           />} />
                       </div>
-                    </div>
+                    </Surface>
                   </div>
                 </div>
               ) : null}

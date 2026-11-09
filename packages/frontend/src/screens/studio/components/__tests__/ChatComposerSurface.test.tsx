@@ -61,8 +61,7 @@ vi.mock("../VoiceConversationActionStrip", () => ({
       data-voice-input-testid={String(props.voiceInputTestId ?? "chat-voice-input-button")}
       data-voice-replies-toggle={String(props.showVoiceRepliesToggle === true)}
       data-voice-interaction-mode={String(props.voiceInteractionMode ?? "hold")}
-      data-ghost-class={String(props.ghostActionClassName ?? "")}
-      data-primary-class={String(props.primaryActionClassName ?? "")}
+      data-action-class={String(props.actionClassName ?? "")}
       data-icon-class={String(props.actionIconClassName ?? "")}
     >
       <button type="button" data-testid="mock-voice-tap" onClick={props.onVoiceTap as () => void} />
@@ -227,7 +226,6 @@ function createProps(
     showComposerNavigationButton: false,
     onOpenNavigation: () => undefined,
     homeAttentionCount: 0,
-    homeAttentionBadge: "",
     composerActionMenuProps: {} as never,
     onOpenImagePicker: () => undefined,
     sendingAttachment: false,
@@ -239,8 +237,6 @@ function createProps(
     sendButtonDisabled: false,
     sendButtonVariant: "primary",
     onSendButtonPress: () => undefined,
-    composerGhostActionClass: "ghost",
-    composerPrimaryActionClass: "primary",
     composerActionIconClass: "icon",
     inviteModalProps: {} as never,
     ...overrides,
@@ -1047,7 +1043,6 @@ describe("ChatComposerSurface", () => {
       renderLayout({
         showComposerNavigationButton: true,
         homeAttentionCount: 2,
-        homeAttentionBadge: "2",
         chatInputProps: { value } as never,
         sendButtonVariant: value ? "primary" : "ghost",
       });
@@ -1057,7 +1052,7 @@ describe("ChatComposerSurface", () => {
     expect(layoutNodes().leading?.contains(navigation)).toBe(true);
     expect(layoutNodes().leading?.firstElementChild).toBe(navigation);
     expect(navigation?.getAttribute("aria-label")).toBe("Open navigation");
-    expect(navigation?.className.split(" ")).toContain("ghost");
+    expect(navigation?.className.split(" ")).toContain("bg-transparent");
     expect(navigation?.querySelector('[data-testid="chat-composer-navigation-badge"]')?.textContent).toBe("2");
     const navigationClass = navigation?.className;
 
@@ -1119,7 +1114,6 @@ describe("ChatComposerSurface", () => {
       onOpenNavigation,
       onSubmit,
       homeAttentionCount: 2,
-      homeAttentionBadge: "2",
       chatInputProps: { value } as never,
     });
     await act(async () => renderMobile("", false));

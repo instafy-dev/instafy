@@ -1,6 +1,7 @@
 import { useId } from "react";
 import { Button } from "../../../components/Button";
 import { InlineNotice } from "../../../components/InlineNotice";
+import { DARK_DIVIDER_BORDER_CLASS } from "../../../theme/darkSurfaces";
 import type { BrowserSessionPage } from "./browserSessionPages";
 import {
   BROWSER_AGENT_DEFAULT_NAME,
@@ -75,7 +76,7 @@ export function BrowserReadingRow({
   const openingLine = opening ? `Opening ${sitesInWords(pages)}…` : null;
   return (
     <div
-      className="flex min-w-0 shrink-0 flex-wrap items-center gap-2 border-b border-slate-200 px-3 py-1 text-xs dark:border-slate-800"
+      className={`flex min-w-0 shrink-0 flex-wrap items-center gap-2 border-b border-slate-200 px-3 py-1 text-xs ${DARK_DIVIDER_BORDER_CLASS}`}
       data-browser-session-safe-zone="true"
       data-testid="browser-reading-row"
     >

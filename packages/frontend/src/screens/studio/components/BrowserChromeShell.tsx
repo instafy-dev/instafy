@@ -1,8 +1,11 @@
 import { createContext, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Pause, Play, Xmark } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
+import { InlineNotice } from "../../../components/InlineNotice";
 import { Spinner } from "../../../components/Spinner";
 import { useToastClearanceRef } from "../../../status/toastClearance";
+import { DARK_DIVIDER_BORDER_CLASS, DARK_PANEL_SOFT_BG_CLASS } from "../../../theme/darkSurfaces";
+import { BrowserStateBadge } from "./BrowserStateBadge";
 
 /** `off` is neutral: Instafy's browser is not running. `unavailable` is for the Personal Browser and the site preview. */
 export type BrowserChromeState = "ready" | "starting" | "paused" | "off" | "unavailable";
@@ -54,18 +57,13 @@ export function BrowserStatusPill({
       </span>
     );
   }
-  const toneClassName =
-    state === "unavailable"
-      ? "border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300"
-      : "border-slate-300/80 bg-slate-100/80 text-slate-600 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300";
-
   if (state === "paused" && resume) {
     return (
       <Button
         type="button"
         aria-label="Resume agent control"
         variant="secondary"
-        size="sm"
+        preset="toolbarLabel"
         className="shrink-0"
         data-testid={testId}
         isDisabled={resume.disabled}
@@ -79,10 +77,11 @@ export function BrowserStatusPill({
   }
 
   return (
-    <span
+    <BrowserStateBadge
+      tone={state === "unavailable" ? "danger" : "neutral"}
+      compact={compact}
       aria-label={detail ? `${label}: ${detail}` : label}
       aria-live="polite"
-      className={`inline-flex h-7 shrink-0 items-center gap-1 rounded-full border text-xxs font-medium ${compact ? "px-1.5" : "px-2"} ${toneClassName}`}
       data-testid={testId}
       role="status"
       title={detail ?? label}
@@ -98,7 +97,7 @@ export function BrowserStatusPill({
         </span>
       ) : null}
       {compact ? <span className="sr-only">{label}</span> : <span>{label}</span>}
-    </span>
+    </BrowserStateBadge>
   );
 }
 
@@ -164,7 +163,7 @@ export function BrowserChromeShell({
         ref={toolbarRef}
         aria-busy={busy || undefined}
         aria-label={label}
-        className={`flex w-full min-w-0 flex-nowrap items-center gap-1 overflow-hidden border-b border-slate-200 bg-slate-50 px-2 max-[400px]:px-1 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel-soft)] ${compact ? "min-h-12 py-1" : "h-11 max-[540px]:h-auto max-[540px]:flex-wrap max-[540px]:py-1 max-[400px]:gap-0.5"}`}
+        className={`flex w-full min-w-0 flex-nowrap items-center gap-1 overflow-hidden border-b border-slate-200 bg-slate-50 px-2 max-[400px]:px-1 ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_SOFT_BG_CLASS} ${compact ? "min-h-12 py-1" : "h-11 max-[540px]:h-auto max-[540px]:flex-wrap max-[540px]:py-1 max-[400px]:gap-0.5"}`}
         data-testid={testId}
         data-browser-session-safe-zone="true"
         role="toolbar"
@@ -194,18 +193,13 @@ export function BrowserChromeShell({
         ) : null}
       </div>
       {feedback ? (
-        <div
-          className={`flex min-h-8 items-center gap-2 border-b px-3 py-1 text-xs ${
-            feedbackTone === "error"
-            ? "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-300"
-              : "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-300"
-          }`}
+        <InlineNotice
+          appearance="bar"
+          tone={feedbackTone === "error" ? "danger" : "success"}
           data-testid={feedbackTestId}
           id={feedbackId}
           role={feedbackTone === "error" ? "alert" : "status"}
-        >
-          <span className="min-w-0 flex-1 break-words">{feedback}</span>
-          {onDismissFeedback ? (
+          dismiss={onDismissFeedback ? (
             <IconButton
               aria-label="Dismiss browser message"
               size="xs"
@@ -218,7 +212,9 @@ export function BrowserChromeShell({
               <Xmark className="h-3.5 w-3.5" aria-hidden="true" />
             </IconButton>
           ) : null}
-        </div>
+        >
+          {feedback}
+        </InlineNotice>
       ) : null}
     </div>
     </BrowserAddressMenuAnchorContext.Provider>
