@@ -1746,7 +1746,8 @@ privacy policy on the person's signed-in page that never speaks of cookies are
 left alone. A click under a consent notice the browser could not decline, or
 under a loading screen, is refused at once in words with no call log (the
 loading screen named by its tag and the first words it shows, with "try once
-more"), and a cover that goes a moment after the page moves is waited for. A
+more", as is one whose role says it has none), and a cover that goes a moment
+after the page moves is waited for. A
 cookie notice is never the person's step: its accept is never listed, in any
 notice, and is counted among the controls left out, while its settings, a
 limited accept and a button dressed up beside it stay listed; a click under a
@@ -1754,9 +1755,12 @@ notice the browser could not decline says where to go instead, never to pause
 on it; a pause on a notice's buttons is refused as one on anything but fields,
 in the chat's own tab and in Octo's own, with nothing outlined or pressed; and
 under a bar whose only button accepts, the planner's own button works with no
-prompt. A click whose route the page draws in place 1.5 s later reads it, one
-whose page still reads as before a few seconds on says so, and a click that
-changes the page, a type step and a choice answer at once; a search typed and
+prompt. A click whose route the page draws in place 1.5 s later reads it,
+after a hidden field, a tip on hover, a suggestion a field drops as it loses
+focus or the address changed first, one whose page still reads as before a few
+seconds on says so, and a click that changes the page, shows a section, menu,
+drawer or carousel item in place, turns a switch on, opens a page or loads the
+same one again, a type step and a choice answer at once; a search typed and
 not sent says nothing was searched yet. The Personal
 Browser's page bridge, host and redaction have unit tests for the same frames,
 pictures, cut line, states, names, codes and count.

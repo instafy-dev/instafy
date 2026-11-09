@@ -1993,9 +1993,10 @@ const DESCRIBE_ALL_IN_PAGE = new Function(
 // has a role, a label or is a control (a picker's dialog, not one of its days;
 // a carousel's link), else of the element there. Its label is what the page
 // gives it as one (aria-label, aria-labelledby, title, alt). One with no role
-// and no label is named by its first words a person sees instead (a bare
-// `<ol>` read as no name at all): never text in a style sheet, a script or a
-// part hidden from people, which no reading shows either.
+// (or one that says it has none: "presentation", "none") and no label is
+// named by its first words a person sees instead (a bare `<ol>` read as no
+// name at all): never text in a style sheet, a script or a part hidden from
+// people, which no reading shows either.
 function clickLandingInPage(element, request) {
   const view = element.ownerDocument.defaultView;
   let point = null;
@@ -2089,7 +2090,8 @@ function clickLandingInPage(element, request) {
     }
     return words.length > FIRST_WORDS ? `${words.slice(0, FIRST_WORDS).join(" ")}\u2026` : words.join(" ");
   };
-  const coverName = roots.includes(cover) ? "" : coverLabel || (coverRole ? "" : squeeze(firstWords()));
+  const roleless = !coverRole || coverRole === "presentation" || coverRole === "none";
+  const coverName = roots.includes(cover) ? "" : coverLabel || (roleless ? squeeze(firstWords()) : "");
   return {
     other: false,
     covered: true,
@@ -3703,9 +3705,11 @@ async function clickLanding(target) {
 // answered: a person waited 45 seconds to allow a search button a cookie
 // notice covered, which was then refused, and the turn's line still said they
 // allowed a click. Answers with the page as it was right before the click
-// (readingBefore), for the step's settle.
+// (readingBefore), with the pointer over the control and the focus on it
+// (pointAtControl), for the step's settle.
 async function clickControlItself(page, target) {
   await refuseUnlandableClick(page, target);
+  await pointAtControl(target);
   const before = await readingBefore(page);
   await target.locator.click();
   return before;
@@ -4502,38 +4506,67 @@ async function openAddress(page, url) {
   await page.waitForLoadState("domcontentloaded", { timeout: Math.max(deadline - Date.now(), 1) });
 }
 
-// Runs inside the page. What a step's reading is compared with before and
-// after the step: the page's rendered text, the text of its open shadow
-// roots, which the body's text leaves out, what its fields hold, which no
-// text shows (a field typed into, an option chosen, a box checked), and where
-// the page is scrolled to, which moves what a reading shows, as one short
-// digest the page works out itself: nothing of the page leaves it.
-function pageReadingInPage() {
-  const body = document.body;
+// Runs inside the page (PAGE_READING_IN_PAGE). What a step's reading is
+// compared with before and after the step, as one short digest the page works
+// out itself: nothing of the page leaves it. It is what the reading shows: the
+// text a person can see, read by the reading's own rule (shownTextInPage), so
+// a part a step shows in place (a section that slides open, a drawer, a menu
+// that fades in) counts, as the body's whole text would not; what the fields
+// a person can see hold, which no text shows (a field typed into, an option
+// chosen, a box checked), never one nobody sees (a hidden field a page fills
+// as it works, which kept a step from waiting for its result); the states a
+// reading gives its controls (checked, pressed, selected, open); and where the
+// page is scrolled to. Never whether a control is turned off: a button that
+// turns itself off while its result loads would read as that result.
+function pageReadingInPage(rule, shownText, request) {
+  const doc = document;
+  const body = doc.body;
   if (!body) return "";
-  const texts = [body.innerText];
-  const values = [];
+  const shown = shownText(rule, { limit: request.limit, window: request.window });
+  const states = [];
+  const ARIA_STATES = ["aria-checked", "aria-pressed", "aria-selected", "aria-expanded"];
+  const MAX_JUDGED = 2_000;
   let visited = 0;
+  let judged = 0;
+  const seen = (element) => {
+    if (judged >= MAX_JUDGED) return true;
+    judged += 1;
+    try {
+      return rule.elementShown(element);
+    } catch (_) {
+      return true;
+    }
+  };
   const visit = (root) => {
-    const walker = document.createTreeWalker(root, 1);
+    const walker = doc.createTreeWalker(root, 1);
     for (let node = walker.nextNode(); node && visited < 50_000; node = walker.nextNode()) {
       visited += 1;
-      if (node.tagName === "INPUT") {
+      const tag = String(node.tagName).toUpperCase();
+      let state = null;
+      if (tag === "INPUT") {
         const type = String(node.type).toLowerCase();
-        values.push(type === "checkbox" || type === "radio"
+        state = type === "checkbox" || type === "radio"
           ? String(node.checked)
-          : type === "password" ? String(node.value.length) : node.value);
-      } else if (node.tagName === "TEXTAREA" || node.tagName === "SELECT") {
-        values.push(node.value);
+          : type === "password" ? String(node.value.length) : type === "hidden" ? null : node.value;
+      } else if (tag === "TEXTAREA") {
+        state = node.value;
+      } else if (tag === "SELECT") {
+        state = Array.from(node.selectedOptions || [], (option) => option.index).join(",");
       }
-      if (node.shadowRoot) {
-        for (const child of Array.from(node.shadowRoot.children)) texts.push(String(child.innerText || ""));
-        visit(node.shadowRoot);
-      }
+      const aria = ARIA_STATES.map((name) => node.getAttribute(name));
+      if (aria.some((value) => value !== null)) state = `${state === null ? "" : state}\u0002${aria.join(",")}`;
+      if (state !== null && seen(node)) states.push(state);
+      if (node.shadowRoot) visit(node.shadowRoot);
     }
   };
   visit(body);
-  const all = `${Math.round(window.scrollX)},${Math.round(window.scrollY)}\u0000${texts.join("\n")}\u0000${values.join("\u0001")}`;
+  const all = [
+    `${Math.round(window.scrollX)},${Math.round(window.scrollY)}`,
+    doc.title,
+    shown.text,
+    JSON.stringify([shown.start, shown.end, shown.above, shown.below, shown.more, shown.markers]),
+    states.join("\u0001"),
+  ].join("\u0000");
   let first = 0x811c9dc5;
   let second = 5381;
   for (let index = 0; index < all.length; index += 1) {
@@ -4543,6 +4576,24 @@ function pageReadingInPage() {
   }
   return `${all.length}.${first.toString(16)}.${second.toString(16)}`;
 }
+const PAGE_READING_IN_PAGE = new Function(
+  "...args",
+  `return (${pageReadingInPage})((${shownRuleInPage})(), (${shownTextInPage}), ...args);`,
+);
+
+// Runs inside the page. Moves focus as a press of `element` is about to: to
+// the control, or out of the field that holds it when the control takes none.
+function focusLikeAPressInPage(element) {
+  const doc = element.ownerDocument;
+  const before = doc.activeElement;
+  if (typeof element.focus === "function") element.focus({ preventScroll: true });
+  const active = doc.activeElement;
+  if (active && active === before && active !== element && active !== doc.body && !element.contains(active) &&
+    typeof active.blur === "function") {
+    active.blur();
+  }
+  return true;
+}
 
 // How long a step whose page still reads as it did before it reads the page
 // again, and how often.
@@ -4551,31 +4602,55 @@ const UNCHANGED_EVERY_MS = 250;
 // What a step's result says when its page still reads as it did before it.
 const PAGE_UNCHANGED = "The page reads as it did before this step. What it loads may still be coming: take a snapshot before saying nothing appeared.";
 
-// The page as a step finds it right before it acts: its address and its
-// reading (pageReadingInPage), or null when the page cannot say in time.
+// The page as a step finds it right before it acts: its address, its document
+// (documentIdentity) and its reading (pageReadingInPage), or null when the
+// page cannot say in time.
 async function readingOf(page) {
   const reading = await within(
     FIELD_READ_MS,
-    page.evaluate(pageReadingInPage, { kind: "page-reading" }).catch(() => null),
+    page.evaluate(PAGE_READING_IN_PAGE, {
+      kind: "page-reading",
+      limit: MAX_VISIBLE_TEXT_CHARS * 5,
+      window: TEXT_WINDOW_CHARS,
+    }).catch(() => null),
     null,
   );
   return typeof reading === "string" ? reading : null;
 }
 async function readingBefore(page) {
-  const reading = await readingOf(page);
-  return reading === null ? null : { url: page.url(), reading };
+  const [reading, documentId] = await Promise.all([readingOf(page), documentIdentity(page)]);
+  return reading === null ? null : { url: page.url(), documentId, reading };
 }
+
+// Brings what a press of the control changes by itself into the page before
+// the step reads it (readingBefore): the pointer over it and the focus on it.
+// Read before them, a tip shown on hover, or a field's suggestions closed as
+// it lost focus, read as the page answering the press, and the step returned
+// before its result was drawn.
+async function pointAtControl(target, { hover = true } = {}) {
+  if (hover && typeof target.locator.hover === "function") {
+    await Promise.resolve()
+      .then(() => target.locator.hover({ timeout: POINT_AT_CONTROL_MS }))
+      .catch(() => {});
+  }
+  await Promise.resolve()
+    .then(() => target.locator.evaluate(focusLikeAPressInPage, { kind: "press-focus" }))
+    .catch(() => {});
+}
+const POINT_AT_CONTROL_MS = 1_000;
 
 // Waits for what a step loads. A step that opens a new document is read once
 // it has loaded and settled. A result a page draws in place (a planner's
 // route, a search's list) loads no new document, and was read before it was
 // drawn: a click's reading matched the one before it, and the turn said the
 // planner showed no route while the route was on the page. So a step given
-// its page as it was before it (`before`) that left the page at the same
-// address, reading as it did, reads it again for up to UNCHANGED_LOOK_MS.
-// True when the page still reads as it did then, which the step's result
-// says (PAGE_UNCHANGED). Its fields count with its text, so a step that only
-// changed a field (an option chosen, a box checked) does not wait.
+// its page as it was before it (`before`) that left it on the same document,
+// reading as it did, reads it again for up to UNCHANGED_LOOK_MS: at the same
+// address, or at one the page put in its address bar itself (a search that
+// writes its words there and draws its list after). True when the page still
+// reads as it did then, which the step's result says (PAGE_UNCHANGED). Its
+// fields count with its text, so a step that only changed a field (an option
+// chosen, a box checked) does not wait.
 async function settleAfterAction(page, before = null) {
   const settle = async () => {
     await page.waitForLoadState("domcontentloaded", { timeout: 8_000 }).catch(() => {});
@@ -4587,21 +4662,31 @@ async function settleAfterAction(page, before = null) {
   };
   await settle();
   if (!before) return false;
+  // Whether the page holds another document than the step began on, or, when
+  // the browser does not say, `unknown`: one that reads as the last (a link to
+  // the page it is on) loaded what the step asked for too.
+  const newDocument = async (unknown) => {
+    const current = before.documentId === null ? null : await documentIdentity(page);
+    return current === null ? unknown : current !== before.documentId;
+  };
   const until = Date.now() + UNCHANGED_LOOK_MS;
   for (let looks = 0; ; looks += 1) {
-    if (page.url() !== before.url) {
+    // Another address is another page, unless the browser says the document
+    // is the one the step began on.
+    if (page.url() !== before.url && (await newDocument(true))) {
       // A document that came while the step looked loads and settles first.
       if (looks > 0) await settle();
       else await page.waitForLoadState("domcontentloaded", { timeout: 8_000 }).catch(() => {});
       return false;
     }
     const now = await readingOf(page);
-    if (now !== before.reading) {
+    const last = Date.now() >= until || stepClock.isUp();
+    if (now !== before.reading || ((looks === 0 || last) && (await newDocument(false)))) {
       // What came while the step looked is read once it has settled too.
       if (looks > 0) await settle();
       return false;
     }
-    if (Date.now() >= until || stepClock.isUp()) return true;
+    if (last) return true;
     await page.waitForTimeout(UNCHANGED_EVERY_MS).catch(() => {});
   }
 }
@@ -6627,6 +6712,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       label: `Press ${pressKey}`,
       url: page.url(),
     });
+    await pointAtControl(target, { hover: false });
     const before = await readingBefore(page);
     await target.locator.press(pressKey);
     const unchanged = await settleAfterAction(page, before);

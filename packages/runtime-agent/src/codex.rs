@@ -8007,9 +8007,34 @@ mod tests {
     /// a notice's accept, was refused and stopped, saying the notice blocked
     /// its result, and another paused on an "Accept all". No browser turn's
     /// run text names consent as a step to pause on, or a cookie notice to
-    /// answer, while the sign-in and one-time code pause stays as it was.
+    /// answer, nor does the Shared Browser's pause tool, whose words every
+    /// browser turn reads, while the sign-in and one-time code pause stays as
+    /// it was.
     #[test]
     fn no_browser_turn_is_told_to_pause_on_a_cookie_notice() {
+        let tools = crate::shared_browser::shared_browser_mcp_tools();
+        let pause = tools
+            .iter()
+            .find(|tool| tool.name == "request_human_input")
+            .and_then(|tool| tool.description.as_deref())
+            .expect("the Shared Browser serves request_human_input");
+        assert!(pause.contains("highlighted fields"), "{pause}");
+        for word in ["cookie", "consent", "notice", "button"] {
+            assert!(!pause.contains(word), "{pause}");
+        }
+        // The reading counts a notice's accept among what it leaves out, and
+        // says nobody presses it, so no turn opens a menu or scrolls for it.
+        let snapshot = tools
+            .iter()
+            .find(|tool| tool.name == "snapshot")
+            .and_then(|tool| tool.description.as_deref())
+            .expect("the Shared Browser serves snapshot");
+        assert!(
+            snapshot.contains(
+                "A cookie notice's accept is never listed and counts there too: it is never pressed."
+            ),
+            "{snapshot}"
+        );
         for policy in [
             BROWSER_MODE_DEVELOPER_INSTRUCTIONS.to_string(),
             append_shared_browser_developer_instructions(

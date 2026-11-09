@@ -51,7 +51,8 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    about a privacy policy that never speaks of cookies. A click that
 //    something outside its control covers is refused at once, in words (a
 //    cookie notice the browser could not decline says so, and any other cover
-//    is named by its role and label, or the first words a person sees on it),
+//    is named by its role and label, or the first words a person sees on it
+//    when it has no role or says it has none),
 //    with no wait and no call log, and a cover that goes within a moment is
 //    waited for.
 // 9. A cookie notice is never the person's step. A notice's accept is never
@@ -66,11 +67,15 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    outlined or pressed. Under a bar whose only button accepts, which covers
 //    nothing, the planner's own button works with no prompt.
 // 10. A step's reading waits for what it draws: a click whose result the page
-//    draws in place a moment later reads it, one whose page still reads as
-//    before a few seconds on says so and to take a snapshot before saying
-//    nothing appeared, and a click that changes the page, a type step and a
-//    choice answer at once. A search typed and not sent says nothing was
-//    searched yet, and a field that is no search that nothing was sent yet.
+//    draws in place a moment later reads it, whatever the click changed
+//    first (a hidden field, a tip on hover, a suggestion dropped as a field
+//    loses focus, the address), one whose page still reads as before a few
+//    seconds on says so and to take a snapshot before saying nothing
+//    appeared, and a click that changes the page, shows a part of it (a
+//    section, a menu, a drawer, a carousel's next item) or turns a switch on,
+//    opens a page or loads the same one again, a type step and a choice
+//    answer at once. A search typed and not sent says nothing was searched
+//    yet, and a field that is no search that nothing was sent yet.
 // Every site is a loopback fixture; Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
@@ -399,8 +404,8 @@ const DRESSED_SIGN_IN = `<h1>Your account</h1>
 </div>`;
 // A journey planner that draws its route in place, without a new document:
 // 1.5 s after its button, 5 s after a slow one, and at once for its fares;
-// a button that only scrolls to its end; a link to another page; a search
-// box with no form, a field and a list.
+// a button that only scrolls to its end; a link to another page and one to
+// itself; a search box with no form, a field and a list.
 const DRAWS = `<h1>Journey planner</h1>
 <p><input aria-label="From" name="from" value="São Bento"> <select aria-label="Day"><option>Monday</option><option>Tuesday</option></select></p>
 <p><input type="search" aria-label="Search stops"></p>
@@ -408,13 +413,49 @@ const DRAWS = `<h1>Journey planner</h1>
 <button type="button" onclick="setTimeout(() => { document.getElementById('route').textContent = 'Route: Line A towards Senhor de Matosinhos, 5 stops'; }, 5000)">Plan the slow way</button>
 <button type="button" onclick="document.getElementById('route').textContent = 'Fares: Z2 1.40 euros'">Show fares</button>
 <button type="button" onclick="window.scrollTo(0, document.body.scrollHeight)">Go to the end</button>
-<a href="/reading/visit">Plan your visit</a></p>
+<a href="/reading/visit">Plan your visit</a> <a href="/reading/draws">Start over</a></p>
 <p id="route"></p><div style="height:3000px"></div><p>End of the planner</p>`;
+// What a step shows in place without changing the page's text, as a person
+// sees it: a section that slides open, a menu that fades in, a drawer and a
+// carousel that move into view, a switch and a toggle button. A planner that
+// keeps the place it found in a hidden field, one with a tip shown on hover,
+// one whose field shows a suggestion until it loses focus, and one that puts
+// its search in its address: each draws its route 1.5 s after its button.
+const REVEALS = `<style>#specs{max-height:0;overflow:hidden}#specs.open{max-height:500px}
+#menu{opacity:0}#menu.open{opacity:1}
+#drawer{position:fixed;left:0;top:200px;width:300px;background:#eee;transform:translateX(-110%)}#drawer.open{transform:none}
+#view{width:300px;overflow:hidden}#track{display:flex;width:900px}#track>p{width:300px;flex:none;margin:0}#track.second{transform:translateX(-300px)}</style>
+<h1>Laptop</h1>
+<p><button type="button" onclick="document.getElementById('specs').classList.add('open')">Show specs</button>
+<button type="button" onclick="document.getElementById('menu').classList.add('open')">Menu</button>
+<button type="button" onclick="document.getElementById('drawer').classList.add('open')">Open filters</button>
+<button type="button" onclick="document.getElementById('track').classList.add('second')">More reviews</button>
+<button type="button" role="switch" aria-checked="false" onclick="this.setAttribute('aria-checked', 'true')">Step-free routes</button>
+<button type="button" aria-pressed="false" onclick="this.setAttribute('aria-pressed', 'true')">Large text</button></p>
+<div id="specs"><p>Battery 61 Wh, warranty one year</p></div>
+<div id="menu"><p>Laptops, desktops and monitors</p></div>
+<div id="drawer"><p>Price under 1000 euros</p></div>
+<div id="view"><div id="track"><p>Review one: a great keyboard</p><p>Review two: the battery lasts long</p><p>Review three: loud fans</p></div></div>`;
+const DRAW_ROUTE = "setTimeout(() => { document.getElementById('route').textContent = 'Route: Line D towards Hospital São João, 2 stops'; }, 1500)";
+const HIDDEN_FIELD = `<h1>Journey planner</h1><input type="hidden" id="place">
+<p><button type="button" onclick="document.getElementById('place').value = '41.15,-8.61'; ${DRAW_ROUTE}">Plan journey</button></p><p id="route"></p>`;
+const HOVER_TIP = `<style>#tip{display:none}button:hover + #tip{display:inline}</style><h1>Journey planner</h1>
+<p><button type="button" onclick="${DRAW_ROUTE}">Plan journey</button><span id="tip">Plans the fastest trip</span></p><p id="route"></p>`;
+const BLUR_SUGGESTION = `<h1>Journey planner</h1>
+<p><input aria-label="From" oninput="document.getElementById('suggestion').textContent = this.value ? 'Did you mean ' + this.value + ' station?' : ''" onblur="document.getElementById('suggestion').textContent = ''"></p>
+<p id="suggestion"></p><p><button type="button" onclick="${DRAW_ROUTE}">Plan journey</button></p><p id="route"></p>`;
+const ADDRESS_SEARCH = `<h1>Journey planner</h1>
+<p><button type="button" onclick="history.pushState(null, '', '/reading/address-search?to=trindade'); ${DRAW_ROUTE}">Plan journey</button></p><p id="route"></p>`;
 const COVERED = `<h1>Timetable</h1><p style="margin-top:1200px"><a href="/reading/visit" id="lines">All lines</a></p>
 <div id="loading" style="position:fixed;inset:0;background:rgba(255,255,255,.8)"><p>Loading departures</p></div>
 <script>
 window.live = { hideOnScroll() { addEventListener("scroll", () => setTimeout(() => document.getElementById("loading").remove(), 300), { once: true }); } };
 </script>`;
+
+// A loading screen that says it has no role, over the timetable's link.
+const PRESENTATION_COVER = `<h1>Timetable</h1><p><a href="/reading/visit">All lines</a></p>
+<div role="presentation" style="position:fixed;inset:0"><div aria-hidden="true" style="position:absolute;inset:0;background:rgba(0,0,0,.3)">Backdrop</div>
+<div style="position:absolute;top:30%;left:30%;background:#fff;padding:20px">Choose your ticket type</div></div>`;
 
 export async function runSharedBrowserPageReadingFixture() {
   assert.ok(fs.existsSync(executablePath), "Locked Playwright Chromium is missing; run pnpm --filter @instafy/frontend exec playwright install chromium");
@@ -483,6 +524,12 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/disagree-notice": page("Visit the city", DISAGREE_NOTICE),
       "site.test /reading/covered": page("Timetable", COVERED),
       "site.test /reading/draws": page("Journey planner", DRAWS),
+      "site.test /reading/reveals": page("Laptop", REVEALS),
+      "site.test /reading/hidden-field": page("Journey planner", HIDDEN_FIELD),
+      "site.test /reading/hover-tip": page("Journey planner", HOVER_TIP),
+      "site.test /reading/blur-suggestion": page("Journey planner", BLUR_SUGGESTION),
+      "site.test /reading/address-search": page("Journey planner", ADDRESS_SEARCH),
+      "site.test /reading/presentation-cover": page("Timetable", PRESENTATION_COVER),
       "site.test /reading/visit": page("Visit", "<h1>Plan your visit</h1>"),
       "frame.test /banner": page("Cookies", BANNER("frame_consent")),
       "frame.test /card": page("Card", '<label>Card number <input autocomplete="cc-number"></label><label>CVC <input autocomplete="cc-csc"></label>'),
@@ -935,6 +982,15 @@ export async function runSharedBrowserPageReadingFixture() {
     );
     assert.doesNotMatch(underCover.stderr, /read on without it/u);
     assert.doesNotMatch(underCover.stderr, /Call log|Timeout/u);
+    // One whose role says it has none is named by its words too, never by
+    // its backdrop, which it hides from people.
+    reading = await read("/reading/presentation-cover");
+    const underNoRole = await runTool("POST", "/v1/click", { index: control(reading, "All lines").index, snapshotId: reading.snapshotId });
+    assert.equal(underNoRole.code, 1, underNoRole.stdout);
+    assert.ok(
+      underNoRole.stderr.includes('Something else on the page covers "All lines" (<div role="presentation"> named "Choose your ticket type"), so nothing was clicked.'),
+      underNoRole.stderr,
+    );
     // f. A cover that goes a moment after the page moves is waited for, and
     // the click is done.
     reading = await read("/reading/covered");
@@ -1074,6 +1130,13 @@ export async function runSharedBrowserPageReadingFixture() {
     measurements.openedClickMs = Date.now() - started;
     assert.equal(new URL(visit.url).pathname, "/reading/visit");
     assert.equal(visit.done, undefined, visit.done);
+    // A link to the page it is on loads it again, which reads as it did: that
+    // new page is what the click asked for, so it answers at once too.
+    reading = await read("/reading/draws");
+    started = Date.now();
+    const again = await ok("POST", "/v1/click", { index: control(reading, "Start over").index, snapshotId: reading.snapshotId });
+    measurements.reloadedClickMs = Date.now() - started;
+    assert.equal(again.done, undefined, again.done);
     // d. A type step answers at once and says nothing was searched, or for a
     // field that is no search sent, yet: a turn typed into a site's search,
     // never sent it, and wrote that it returned no results. A choice that
@@ -1089,10 +1152,54 @@ export async function runSharedBrowserPageReadingFixture() {
     const chosen = await ok("POST", "/v1/choose", { index: control(typedFrom, "Day").index, snapshotId: typedFrom.snapshotId, option: "Tuesday" });
     measurements.chooseMs = Date.now() - started;
     assert.equal(chosen.done, undefined, chosen.done);
+    // e. What a click shows in place counts as the page answering, as the
+    // reading shows it, though the page's text was there all along: a section
+    // that slides open, a menu that fades in, a drawer and a carousel that
+    // move into view, and a switch or a toggle button the click turned on.
+    // Each answers at once: compared with the page's whole text, each waited
+    // and said the page read as before, beside a reading that showed it.
+    for (const [label, shown] of [
+      ["Show specs", /Battery 61 Wh, warranty one year/u],
+      ["Menu", /Laptops, desktops and monitors/u],
+      ["Open filters", /Price under 1000 euros/u],
+      ["More reviews", /Review two: the battery lasts long/u],
+      ["Step-free routes", null],
+      ["Large text", null],
+    ]) {
+      reading = await read("/reading/reveals");
+      if (shown) assert.doesNotMatch(reading.visibleText, shown, `${label} showed before its click`);
+      started = Date.now();
+      const revealed = await ok("POST", "/v1/click", { index: control(reading, label).index, snapshotId: reading.snapshotId });
+      measurements[`revealed ${label}`] = Date.now() - started;
+      if (shown) assert.match(revealed.visibleText, shown, `${label} did not show`);
+      assert.doesNotMatch(String(revealed.done || ""), /reads as it did before/u, `${label}: ${revealed.done}`);
+      assert.ok(measurements[`revealed ${label}`] < measurements.unchangedClickMs - 1_500,
+        `${label} waited ${measurements[`revealed ${label}`]} ms, against ${measurements.unchangedClickMs} ms for a page that read as before`);
+    }
+    // f. A route drawn 1.5 s after the click is read whatever else the click
+    // changed first: a field nobody sees, a tip the pointer shows over the
+    // button, a suggestion a field drops as it loses focus, or an address the
+    // page writes its search into. Each of these returned the planner without
+    // its route, and said nothing of it.
+    for (const [pathname, prepare] of [
+      ["/reading/hidden-field", null],
+      ["/reading/hover-tip", null],
+      ["/reading/blur-suggestion", async (planner) =>
+        await ok("POST", "/v1/type", { index: control(planner, "From").index, snapshotId: planner.snapshotId, text: "Sao Bento" })],
+      ["/reading/address-search", null],
+    ]) {
+      reading = await read(pathname);
+      await runPage.mouse.move(1, 1);
+      if (prepare) reading = await prepare(reading);
+      const routed = await ok("POST", "/v1/click", { index: control(reading, "Plan journey").index, snapshotId: reading.snapshotId });
+      assert.match(routed.visibleText, /Route: Line D towards Hospital São João, 2 stops/u, `${pathname}: the click read the page before its route was drawn`);
+      assert.equal(routed.done, undefined, `${pathname}: ${routed.done}`);
+    }
     for (const [name, ms] of [
       ["a click that changed the page", measurements.changedClickMs],
       ["a click that scrolled the page", measurements.scrolledClickMs],
       ["a click that opened a page", measurements.openedClickMs],
+      ["a click that opened the page it was on", measurements.reloadedClickMs],
       ["a type step", measurements.typeMs],
       ["a choice", measurements.chooseMs],
     ]) {
@@ -1111,9 +1218,9 @@ export async function runSharedBrowserPageReadingFixture() {
         "a long page's text says where it is cut and how far to scroll, and scrolling reads all of it within the reading's cap, past a skip link and a pinned header, on a plain-text page and in a long paragraph; a view out of reach says so; past 200 controls those scrolled past are left out and counted, past 600 matches too, and a closed list's options never crowd out a form",
         "password, card and code fields in a frame or a shadow root carry no value into the reading, a frame's fields are never listed, a key in a shadow root's read-only field or in a control's name the list leaves out still makes a secret screen, and a code in boxes of its own is masked",
         "a section marked open is no control, and a click whose middle lands on a form's button or a frame inside the control is refused, sending and asking nothing",
-        "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, and a cover that goes within a moment is waited for",
+        "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, a cover with no role, or one that says it has none, named by the first words a person sees on it, and a cover that goes within a moment is waited for",
         "a cookie notice is never the person's step: its accept is never listed, as a button, a link, an Allow all or an Agree and close, and is counted among the controls left out, while its settings, a limited accept, a refusal no list knows and a button dressed up beside it stay listed, and the policy's refusal of an accept keeps its words; a click under a notice the browser could not decline says where to go instead and never to pause on it; a pause on a notice's buttons is refused as one on anything but fields, outlining, publishing and pressing nothing, in the chat's own tab and in Octo's own; under a bar whose only button accepts the planner's own button works with no prompt",
-        "a click whose result the page draws in place 1.5 s later reads it; one whose page still reads as before a few seconds on says so and to take a snapshot before saying nothing appeared, and a snapshot then reads the result; a click that changes the page, scrolls it or opens another, a type step and a choice answer at once; a search typed and not sent says nothing was searched yet, and another field that nothing was sent yet",
+        "a click whose result the page draws in place 1.5 s later reads it, after a hidden field, a tip on hover, a suggestion a field drops as it loses focus or the address changed first; one whose page still reads as before a few seconds on says so and to take a snapshot before saying nothing appeared, and a snapshot then reads the result; a click that changes the page, scrolls it, shows a section, menu, drawer or carousel item in place, turns a switch or toggle on, opens another page or loads the same one again, a type step and a choice answer at once; a search typed and not sent says nothing was searched yet, and another field that nothing was sent yet",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",

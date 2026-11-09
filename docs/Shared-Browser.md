@@ -507,7 +507,8 @@ Two steps never ask, in Ask too:
   else on the page covers "Plan your journey" (<div role="dialog"> named
   "Choose a time"), so nothing was clicked.`; the label is one the page
   gives it, its `aria-label`, `aria-labelledby`, `title` or `alt`. One with
-  neither a role nor a label is named by the first eight words a person sees
+  neither a role nor a label, or whose role says it has none
+  (`presentation`, `none`), is named by the first eight words a person sees
   on it (`(<ol> named "Lines Timetables Fares")`): a click refused under a
   bare `(<ol>)` was never tried again. Never a style sheet, a script, a part
   hidden or faded out, or one marked `aria-hidden` or `inert`, which can hold
@@ -556,7 +557,8 @@ Two steps never ask, in Ask too:
   too, because pre-ticked purposes could ride along.
 - **A cookie notice is never the person's step.** `request_human_input` takes
   editable fields only (a sign-in, a one-time code, a form the person fills
-  in), and no run text, skill line or refusal asks to pause on a notice:
+  in), and no run text, skill line, tool description or refusal asks to
+  pause on a notice:
   both browser turns of a local test read that a consent step was the
   person's to pause on, and a cover's words said to pause on a notice's
   buttons, so one turn paused on a notice's "Accept all" and another pressed
@@ -1988,14 +1990,28 @@ shows up in the click's own result: after an action the controller waits, at
 most a second, for running transitions and animations that end, so a menu that
 opens with a transition is observed where it lands. A result a page draws in
 place (a planner's route, a search's list) loads no new document, so a click,
-a key, a choice or a sent search that leaves the page at the same address,
+a key, a choice or a sent search that leaves the page on the same document,
 reading as it did before the step, reads it again for up to about 3 seconds:
 a click read a planner before its route was drawn, and the turn said the
-planner showed none. The reading compared is the page's rendered text, its
-open shadow roots' text, what its fields hold and where the page is
-scrolled to, as one digest the page works out itself, so a step that only
-changed a field (an option chosen, a box checked) or scrolled the page
-answers at once. A page that still reads as it did then says so
+planner showed none. The same document is the one the browser names by its
+loader id: at the same address, or at one the page wrote into its address
+bar itself (a search that puts its words there and draws its list after). A
+new document is read once it has loaded and settled, one at the same address
+too (a link to the page it is on). The reading compared is what the reading
+itself shows: the text a person can see, by the reading's own rule, so a
+section that slides open, a menu that fades in or a drawer or carousel item
+that moves into view counts; what the fields a person can see hold, never a
+hidden field a page fills as it works; the states the reading gives its
+controls (checked, pressed, selected, open); and where the page is scrolled
+to, as one digest the page works out itself. So a step that only changed a
+field (an option chosen, a box checked), turned a switch on or scrolled the
+page answers at once. Whether a control is turned off is left out: a button
+that turns itself off while its result loads would read as that result. A
+click or key reads the page with the pointer over its control and the focus
+on it first, as the press is about to put them: read before them, a tip
+shown on hover, or a field's suggestions closed as it lost focus, read as the
+page answering, and the click returned before the route was drawn. A page
+that still reads as it did then says so
 in the step's `done`: "The page reads as it did before this step. What it
 loads may still be coming: take a snapshot before saying nothing appeared."
 `omittedControls` counts
