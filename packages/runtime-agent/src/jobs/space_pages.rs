@@ -651,10 +651,10 @@ impl HeldPages {
         self.restored.extend(restored);
     }
 
-    /// Puts back each held page's entry in the space's record as the turn began, when it is gone
-    /// from the record or names another chat: a turn's card writes the record again without a page
-    /// whose folder was gone at that moment, and nothing else brings an entry back. The record is
-    /// written only when it is still the one read.
+    /// Puts back each held page's entry in the space's record as the turn began, when the turn took
+    /// it out or changed it: a turn's card writes the record again without a page whose folder was
+    /// gone at that moment, and another title on a page it opens, and nothing else brings an entry
+    /// back. The record is written only when it is still the one read.
     fn keep_rows(&self, workspace_dir: &Path) {
         let record = read_record(workspace_dir);
         let mut entries = record
@@ -665,12 +665,11 @@ impl HeldPages {
             .unwrap_or_default();
         let mut changed = false;
         for (page, _) in self.pages.iter().filter(|(_, held)| *held) {
-            let maker = page.entry.get("conversationId");
             match entries
                 .iter()
                 .position(|entry| entry_folder(entry).as_deref() == Some(page.folder.as_str()))
             {
-                Some(at) if entries[at].get("conversationId") == maker => {}
+                Some(at) if entries[at] == page.entry => {}
                 Some(at) => {
                     entries[at] = page.entry.clone();
                     changed = true;
