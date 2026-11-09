@@ -59,9 +59,8 @@ const RETRIED: &str = "Make a page of the Porto viewpoints.";
 const RETRIED_PAGE: &str = "sites/viewpoints";
 const RETRIED_TITLE: &str = "Porto viewpoints";
 const RETRIED_REPLY: &str = "I made a page of the Porto viewpoints.";
-/// The recovery pass's own words, after a first pass that changed none of a required change's
-/// files (as after any first pass it follows).
-const RECOVERY_PASS: &str = "Retry the latest user request now.";
+/// Whether the viewpoints turn's first pass answered: its recovery pass makes the page.
+static RETRIED_FIRST_PASS_ANSWERED: AtomicBool = AtomicBool::new(false);
 
 #[test]
 fn a_page_a_turn_made_by_hand_gets_its_card_before_the_reply_via_proxy() -> Result<()> {
@@ -138,9 +137,11 @@ async fn provider_request(Json(body): Json<Value>) -> axum::response::Response {
     let ran = input[start..]
         .iter()
         .any(|item| item["type"] == "function_call_output");
-    // The viewpoints page is made only by the recovery pass: its first pass changes nothing.
+    // The viewpoints page is made only by the recovery pass: its first pass answers at once and
+    // changes nothing.
     if asks(RETRIED) {
-        return if !asked.contains(RECOVERY_PASS) || ran {
+        let first_pass = !RETRIED_FIRST_PASS_ANSWERED.swap(true, Ordering::SeqCst);
+        return if first_pass || ran {
             response(final_json(RETRIED_REPLY))
         } else {
             response(write_page(RETRIED_PAGE, RETRIED_TITLE))
