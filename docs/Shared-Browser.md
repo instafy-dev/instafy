@@ -484,8 +484,8 @@ Two steps never ask, in Ask too:
   "Declined cookies on <site>" after the step; a banner whose button took no
   press (its script not ready yet) stays up and is not said to be declined.
   Octo reads the page as it is after the press. A banner with no refusal of
-  its own stays up: answering it is the person's step (see the notice pause
-  below).
+  its own stays up, and Octo carries on under it: a cookie notice is never
+  the person's step (below).
 - **A covered click is refused at once, before anyone is asked.** A click
   whose control has something outside it over its middle (a notice, a dialog,
   a loading screen) would go to that instead. A click that asks the person is
@@ -497,20 +497,23 @@ Two steps never ask, in Ask too:
   had allowed a click. The control is brought to the middle of the view, past
   a pinned header, and a cover still there after about 600 ms refuses the
   step at once, in words: a cookie or consent notice says
-  "A cookie notice covers this page, and the browser could not decline it. If
-  the task needs this page, pause on the notice's buttons with
-  request_human_input in the chat's own tab: the person answers it there and
-  chooses Let Octo continue. Otherwise open a link under it by its address, or
-  the official site of the place or service the task is about." (it may have no reject button, sit on a page the
+  "A cookie notice covers this page, and the browser could not decline it.
+  Open a link under it by its address, or the official site of the place or
+  service the task is about." (it may have no reject button, sit on a page the
   browser presses nothing on, or have come after the page was read, which the
-  next look declines when it can), any other cover that something covers the
+  next look declines when it can), never to pause on it, any other cover that something covers the
   control, names it by its tag, role and label from the same look (the
   nearest element around the click's point that has a role or a label or is a
   control, such as a page's own date picker or a carousel's slide: `Something
   else on the page covers "Plan your journey" (<div role="dialog"> named
-  "Choose a time"), so nothing was clicked.`; the label is only one the page
-  gives it, its `aria-label`, `aria-labelledby`, `title` or `alt`, never its
-  text, which can hold a style sheet or words nobody sees, and it is left out
+  "Choose a time"), so nothing was clicked.`; the label is one the page
+  gives it, its `aria-label`, `aria-labelledby`, `title` or `alt`. One with
+  neither a role nor a label, or whose role says it has none
+  (`presentation`, `none`), is named by the first eight words a person sees
+  on it (`(<ol> named "Lines Timetables Fares")`): a click refused under a
+  bare `(<ol>)` was never tried again. Never a style sheet, a script, a part
+  hidden or faded out, or one marked `aria-hidden` or `inert`, which can hold
+  words nobody sees. Either is left out
   on a page that may show a secret, as a list's options are), and says to
   take a fresh snapshot and try once more, never to read on without it: a
   planner's button the person allowed was refused under a cover nobody could
@@ -525,18 +528,23 @@ Two steps never ask, in Ask too:
   toast that fades) is waited for. No failed step carries Playwright's call
   log: only its first line, and an action Playwright gave up waiting on says
   that the page did not take the step in time.
-- **A cookie banner's accept is refused.** In the same banner, a control or a
-  link whose words accept, agree or consent ("Accept all", "I agree", "Agree
-  and close", "Consent", "Alle akzeptieren", "Einwilligen", "aceitar e
-  continuar", "Toestemming geven", …, in the refusal's languages), or that
-  only allows ("Allow", "Allow all cookies", "Autoriser", "Alle Cookies
-  zulassen"), is refused in every mode before any prompt
-  (`step_refused_consent`), in words of its own, which the Personal
-  Browser's policy gives too: "Octo never accepts cookies, so nothing was
-  pressed. Carry on under the notice from a fresh snapshot. If it covers what
-  you need, open that link by its address, or another official source." They
-  never say the notice covers the page, which only a covered click does: a
-  turn told so of a bar that covered nothing wrote that a page it had read
+- **A cookie banner's accept is never listed, and refused.** In the same
+  banner, a button, link or toggle whose words accept, agree or consent
+  ("Accept all", "I agree", "Agree and close", "Consent", "Alle akzeptieren",
+  "Einwilligen", "aceitar e continuar", "Toestemming geven", …, in the
+  refusal's languages), or that only allows ("Allow", "Allow all cookies",
+  "Autoriser", "Alle Cookies zulassen"), is left out of a reading's list and
+  counted in its `omittedControls`, so no step can target it: a turn that
+  saw a bar's accept listed pressed it, was refused, and stopped there,
+  saying the notice blocked its result. The browser's own decline still
+  finds a banner's refusal beside it. A step that still reaches an accept (a
+  field or a list in a notice, which stay listed) is refused in every mode
+  before any prompt (`step_refused_consent`), in words of its own, which the
+  Personal Browser's policy gives too: "Octo never accepts cookies, so nothing
+  was pressed. Carry on under the notice from a fresh snapshot. If it covers
+  what you need, open that link by its address, or another official source."
+  They never say the notice covers the page, which only a covered click does:
+  a turn told so of a bar that covered nothing wrote that a page it had read
   was covered, asked the person to accept, and paused on that bar twice. A
   link is refused too, which plain-link navigation would
   otherwise take. Only these words count: a banner's "Disagree" toggles, its
@@ -548,57 +556,20 @@ Two steps never ask, in Ask too:
   selection", "Save and accept") is how a refusal made in the banner's
   settings is saved, so it is not refused: it asks once in every mode, a link
   too, because pre-ticked purposes could ride along.
-- **A notice the browser could not decline is the person's step, like a
-  sign-in.** `request_human_input` takes a cookie notice's buttons as well as
-  editable fields, in the chat's own tab only (Octo's own tabs refuse it, and
-  say to open that page in the chat's own tab and pause there). Each one must
-  be a button or link the describer found in a consent banner, as both
-  refusals judge a notice (so a notice that speaks only of privacy counts
-  too), in one small part of the page with a button of that banner that
-  accepts, and turned on. And it must be the notice's own answer (its accept,
-  an accept limited to the necessary cookies or a selection, or a refusal)
-  that on its own asks only as an accept or allow word does, or a step the
-  browser takes by itself while it reads (a settings link, "Learn more"). So
-  a page cannot dress a field, a payment, a sign-in, a deletion or a commit
-  ("Book now") up as a notice's button to get a pause. A notice in a frame is
-  never listed, so never handed over. The pause highlights every such button
-  of the notice, the ones Octo named first, up to eight, and nothing outside
-  it: only buttons inside the container around one Octo named that is a
-  dialog or is named after cookies or consent (its id, class, label or test
-  id, or the title it is labelled by), when that is a small part of the page.
-  A notice that is neither outlines only the buttons Octo named: on a small
-  page held in one wrapper, that wrapper speaks of cookies and holds the menu
-  and footer too. A pause on a notice's accept alone would show the person
-  the accept outlined by itself, and a turn went for an accept twice. A pause
-  needs a way out of the notice among the buttons it would outline: a
-  refusal, an accept limited to the necessary cookies or a selection, a
-  control that acts on the notice itself and is no accept (its settings
-  panel, a refusal in words no list knows such as "Disagree and close", a
-  close), or a link whose words name its settings ("Cookie settings",
-  "Manage preferences", "Personalizar cookies"). Any other link goes to
-  another page (its cookie policy, "Learn more"), and a pause on one beside
-  the accept asked the person to answer a notice whose only answer was
-  accepting. A pause with no way out (a bar whose only button accepts, an
-  accept beside its policy link, or an accept whose notice's other buttons it
-  cannot find) gets none: Octo never asks anyone to accept cookies, so it is
-  refused, with nothing outlined, in the words a press of the accept gets,
-  and the turn carries on under the notice. In a tab of Octo's own it is
-  refused in the same words, before the words that send a pause to the
-  chat's own tab, so the person's page is never moved for a pause that would
-  be refused. It
-  presses none of them; its
-  guidance says
-  `kind: "cookies"` with fixed labels ("Highlighted button 1") and nothing of
-  the page, and ends the run under its own code (`cookie_notice_required`).
-  The Browser view's hint says "Answer the highlighted cookie notice, then let
-  Octo continue." and the turn's reply "Answer the highlighted cookie notice
-  in Instafy's browser, then choose Let Octo continue." (after a pause right
-  before it, "Instafy's browser is still waiting for you. Answer the
-  highlighted cookie notice, then choose Let Octo continue."). The Browser
-  view's row under the toolbar holds **Let Octo continue** without the
-  sign-in note, since nobody signs in. The person answers the
-  notice on the page (in its settings, if they like), and the next turn reads
-  the page under it.
+- **A cookie notice is never the person's step.** `request_human_input` takes
+  editable fields only (a sign-in, a one-time code, a form the person fills
+  in), and no run text, skill line, tool description or refusal asks to
+  pause on a notice:
+  both browser turns of a local test read that a consent step was the
+  person's to pause on, and a cover's words said to pause on a notice's
+  buttons, so one turn paused on a notice's "Accept all" and another pressed
+  a bar's accept and stopped. The browser declines a notice itself where it
+  can, and Octo carries on under one it could not: a click it covers says
+  where to go instead. A pause a turn still asks for on a notice's buttons
+  is refused as one on anything but fields is, with nothing outlined, in the
+  chat's own tab and in Octo's own. Studio and runtime-agent still read a
+  cookie notice pause an earlier turn left in a chat (`kind: "cookies"`,
+  `cookie_notice_required`).
 
 The browser view's prompt asks in the chat row's words: "Octo wants to use
 example.com." with **Deny** and **Allow site** (or "Octo wants to click “Search”
@@ -1067,8 +1038,8 @@ browser. So a turn's first `open_tab`, while the run has no tab of its own and
 no step of it has acted in the chat's own tab (a `navigate`, click, typing,
 choice, key or scroll there; a reading does not count), opens its page in the
 chat's own tab as `navigate` does, and its result says so: a turn opened a
-journey planner in a tab of its own three times running, where neither a
-cookie notice's pause nor the planner's prompt can happen. A page an earlier
+journey planner in a tab of its own three times running, where the
+planner's prompt can't happen. A page an earlier
 turn left there is replaced, as `navigate` replaces it, unless it is one to
 keep: a page holding what someone typed or chose in its fields (a form the
 person was handed and filled in before Let Octo continue, notes they wrote),
@@ -2018,10 +1989,38 @@ transparent over the styled control or operated through a visible label.
 Collapsed menus therefore no longer fill the 200-control limit, and opening one
 shows up in the click's own result: after an action the controller waits, at
 most a second, for running transitions and animations that end, so a menu that
-opens with a transition is observed where it lands. `omittedControls` counts
+opens with a transition is observed where it lands. A result a page draws in
+place (a planner's route, a search's list) loads no new document, so a click,
+a key, a choice or a sent search that leaves the page on the same document,
+reading as it did before the step, reads it again for up to about 3 seconds:
+a click read a planner before its route was drawn, and the turn said the
+planner showed none. The same document is the one the browser names by its
+loader id: at the same address, or at one the page wrote into its address
+bar itself (a search that puts its words there and draws its list after). A
+new document is read once it has loaded and settled, one at the same address
+too (a link to the page it is on). The reading compared is what the reading
+itself shows: the text a person can see, by the reading's own rule, so a
+section that slides open, a menu that fades in or a drawer or carousel item
+that moves into view counts; what the fields a person can see hold, never a
+hidden field a page fills as it works; the states the reading gives its
+controls (checked, pressed, selected, open); and where the page is scrolled
+to, as one digest the page works out itself. So a step that only changed a
+field (an option chosen, a box checked), turned a switch on or scrolled the
+page answers at once. Whether a control is turned off is left out: a button
+that turns itself off while its result loads would read as that result. A
+click reads the page with the pointer over its control and the focus on it
+first, as the press is about to put them, and a key with the focus on its
+control: read before them, a tip shown on hover, or a field's suggestions
+closed as it lost focus, read as the page answering, and the click returned
+before the route was drawn. A page
+that still reads as it did then says so
+in the step's `done`: "The page reads as it did before this step. What it
+loads may still be coming: take a snapshot before saying nothing appeared."
+`omittedControls` counts
 the controls left out, so a list cut short by a closed menu, or by a box the
 page scrolls itself, does not read as the whole page; it counts the controls
-past the list's 200 too. Every control the page has (up to 5,000) is judged
+past the list's 200 too, and a cookie notice's accept, which is never
+listed. Every control the page has (up to 5,000) is judged
 before the list is chosen, so a closed list's hundreds of options never crowd
 a form's fields and button out of it. When a page shows more than 200, the
 ones scrolled past, above the view, are left out, then the ones the page
@@ -2068,13 +2067,15 @@ misses. A secret screen gives neither field. A snapshot
 never shows what is typed into a field, so the reading after such a step
 matches the one before it, and a turn that could not tell its text went in gave
 up a form after its first field. A `type` step's result says what it did in
-`done` instead: the field, how many characters went in, and whether the field
-holds them, read only to be counted ("Typed 12 characters into "Customer
-name:", and the field holds them."), never the text, which may be private.
-Typing into a box where Enter, as the box holds the text, is a site search
-that goes without a prompt (below) adds "Nothing was searched yet: press
-Enter to search (no prompt needed).": a turn typed into a site's search,
-never sent it, and read the list the page still showed as no result. A
+`done` instead: the field, how many characters went in, and what the field
+holds when that differs, read only to be counted, never the text, which may
+be private. One not sent says so: "Nothing was searched yet." for a search
+field and "Nothing was sent yet." for any other ("Typed 12 characters into
+"Customer name:". A page's reading never shows typed text. Nothing was sent
+yet."): a turn typed into a site's search, never sent it, and wrote that the
+page returned no results. Where Enter, as the box holds the text, is a site
+search that goes without a prompt (below), it reads "Nothing was searched
+yet: press Enter to search (no prompt needed).". A
 click on a checkbox, a radio button or a switch says whether it is checked now.
 
 What the text cannot hold is named where a person sees it: a frame (an

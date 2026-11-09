@@ -928,11 +928,9 @@ fn a_page_to_share_is_built_the_hubs_way_not_served_by_hand() {
 /// A comparison asked for "from what you already know, without browsing" claimed "checked 1 Mar 2025
 /// on frame.work" on every row: the hub said "never from memory" and had no form for a person who
 /// asks for exactly that. Such a page says so (`"from": "memory"`), and its values cite no page. On
-/// pages of options, the lede also named the wrong laptop for a missing review, an item whose own
-/// page nobody opened read "Not found yet", and a tip from no page sat in the style of the hours'
-/// source line: the page names what's missing (a lede written before the check changed a cell once
-/// claimed reviews the page showed as missing), such an item says it wasn't checked, and a tip is
-/// plain text. An unedited hub from before is upgraded.
+/// pages of options, an item whose own page nobody opened read "Not found yet", and a tip from no
+/// page sat in the style of the hours' source line: such an item says it wasn't checked, and a tip
+/// is plain text. An unedited hub from before is upgraded.
 #[test]
 fn a_page_from_what_octo_knows_says_so_and_its_rows_say_what_was_not_checked() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -942,13 +940,69 @@ fn a_page_from_what_octo_knows_says_so_and_its_rows_say_what_was_not_checked() {
     let previous = flat(include_str!("legacy/interactive-artifacts-v12.md"));
     for needle in [
         "Options asked for from what you already know, with nothing looked up: the compare starter with `\"from\": \"memory\"`, each value only its `\"v\"`, from your own knowledge, never from the space's other pages.",
-        "the starter reads each value \"<value>, not checked\" and adds \"From what Octo knows; nothing checked.\" to the lede.",
+        "the starter reads each value \"<value>, not checked\" and says \"From what Octo knows; nothing checked.\" under the title.",
         "never from memory unless asked (above)",
         "An item whose own page wasn't opened is \"not checked (its own page wasn't opened)\" in the reply, and each of its unknown values has `\"note\": \"its own page wasn't opened\"`.",
-        "The lede gives the verdict; the page names what's missing.",
         "A tip no page gave is plain text, never styled like a source line.",
     ] {
         assert!(hub.contains(needle), "{needle}");
         assert!(!previous.contains(needle), "new in this version: {needle}");
+    }
+}
+
+/// A comparison's headline was free text the hub asked for ("The lede gives the verdict"). Asked
+/// for it three times, a build wrote what a page lists and named the missing reviews right above
+/// the line that names them; the build before it claimed reviews the page didn't have. The compare
+/// starter now writes that line itself, from its own sorts and cells, so neither the hub nor the
+/// bound-sites cheat sheet asks a comparison for a headline, or for its biggest unknown. Unedited
+/// copies from before are upgraded; an edited one is kept.
+#[test]
+fn a_comparisons_headline_comes_from_its_cells_and_no_skill_asks_for_one() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hub =
+        include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
+    let sheet = include_str!(
+        "../../assets/instafy/.agents/skills/instafy-bound-sites/references/cheatsheet.md"
+    );
+    for gone in [
+        "The lede: the verdict",
+        "The lede gives the verdict",
+        "in the lede",
+    ] {
+        assert!(!flat(hub).contains(gone), "{gone}");
+    }
+    assert!(!flat(sheet).contains("biggest unknown"), "{sheet}");
+    assert!(flat(sheet).contains(
+        "Lede: the verdict. A comparison has none of its own: under its title the compare starter names the row each `sort` entry puts first, when every row shows that value, and what each row is still missing."
+    ));
+
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    learn::ensure_project_memory_scaffold(root);
+    for (relative, previous, current) in [
+        (
+            learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
+            include_str!("legacy/interactive-artifacts-v16.md"),
+            hub,
+        ),
+        (
+            learn::BOUND_SITES_CHEATSHEET_RELATIVE_PATH,
+            include_str!("legacy/bound-sites-cheatsheet-v5.md"),
+            sheet,
+        ),
+    ] {
+        assert!(
+            flat(previous).contains("The lede gives the verdict")
+                || flat(previous).contains("plus the biggest unknown"),
+            "{relative}"
+        );
+        let path = root.join(relative);
+        fs::write(&path, previous).unwrap();
+        learn::ensure_project_memory_scaffold(root);
+        assert_eq!(fs::read_to_string(&path).unwrap(), current, "{relative}");
+        let edited = format!("{previous}\nLocal page preference.\n");
+        fs::write(&path, &edited).unwrap();
+        learn::ensure_project_memory_scaffold(root);
+        assert_eq!(fs::read_to_string(&path).unwrap(), edited, "{relative}");
     }
 }

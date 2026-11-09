@@ -447,7 +447,7 @@ describe("the shopping comparison eval (fixtures)", () => {
     for (const rule of [
       "each value names the page it was read on and the day; one nobody found reads `Unknown` and why",
       "never a blank or a dash",
-      "an item whose value is unknown is listed apart (\"Price unknown\"), never as within it, on the page, in the lede and in the reply",
+      "an item whose value is unknown is listed apart (\"Price unknown\"), never as within it, on the page or in the reply",
       "`site.byFilter`",
       "A candidate nothing could be read for is still a row, with `Unknown` in each cell: a page of options is never empty (\"No options yet\") while a page you read named what to compare.",
     ]) {

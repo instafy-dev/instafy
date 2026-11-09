@@ -216,10 +216,11 @@ Never a second parallel theme, a webfont, a gradient or pill buttons unless aske
 
 ## Writing the content (every starter)
 
-- Lede: the verdict, plus the biggest unknown about the title's question ("None was tested for flat feet; try
-  the Brooks first."). A row names only its own unknown. The footer ("Still to confirm") holds only what the page
-  does not already say (not the lede's unknown, not a cell's "Not found"), each as something the reader can do
-  ("Check train times on Taiwan Railway before you book"), never how you worked ("no timetable was read").
+- Lede: the verdict. A comparison has none of its own: under its title the compare starter names the row each `sort`
+  entry puts first, when every row shows that value, and what each row is still missing. A row names only its own
+  unknown. The footer ("Still to confirm") holds only what the page does not already say (not a cell's "Not found"),
+  each as something the reader can do ("Check train times on Taiwan Railway before you book"), never how you worked
+  ("no timetable was read").
 - `url` is the page you read and `date` the day you read it: each value cites them ("checked 17 Oct on
   fleetfeet.com ↗"; a price "seen 17 Oct"); add `asof` when the source dates the fact itself
   (shown instead: "seen 5 Aug"; a price over 30 days old also says "may have changed"), so an old list price never
@@ -238,11 +239,10 @@ Never a second parallel theme, a webfont, a gradient or pill buttons unless aske
   where to check. A page you read without finding the value on it is `{"src", "url", "date"}` without `v`: "Not
   found · checked 17 Oct on fleetfeet.com ↗". On a checklist the same reads "To confirm" ("checked" is the tick there).
 - A review site's price is its list price, `"list": true`: the row says "list price" next to the store link, so it
-  never reads as the store's price today, and the line under the list names the source once; the lede need not say
-  it again.
+  never reads as the store's price today, and the line under the list names the source once.
 - No control nobody asked for: compare shows "Sort by" only with 5+ options (otherwise rows keep the order in
-  `items`, so list them in the lede's order); one filter only from a stated constraint, and a row whose value is
-  unknown is listed apart from it ("Price unknown"), never in the lede as within it. A per-person checklist (`people`) asks "Whose list is this?" before showing any ticks.
+  `items`); one filter only from a stated constraint, and a row whose value is unknown is listed apart from it
+  ("Price unknown"), never in the lede as within it. A per-person checklist (`people`) asks "Whose list is this?" before showing any ticks.
 - Details holds only what the row does not already show. No emoji in labels or notes.
 
 ## Products and prices

@@ -584,17 +584,18 @@ export async function runSharedBrowserAllowedStepFixture() {
     // a cookie notice that came after the page was read. The browser looks
     // where the click would land before anyone is asked, so the click is
     // refused at once with no prompt, naming the cover by its tag, role and
-    // label (never its text, which can hold what nobody sees), or saying a
-    // cookie notice covers the page and to pause on it; nothing is sent, and
-    // no yes is listed. A person waited about 45 seconds to allow a click on a
+    // label, or, with neither, by the first words a person sees on it (never
+    // a style sheet, a hidden part or a part hidden from people), or saying a
+    // cookie notice covers the page and where to go instead, never to pause
+    // on it; nothing is sent, and no yes is listed. A person waited about 45 seconds to allow a click on a
     // search button a cookie notice covered, which was then refused, and the
     // turn's line said they had allowed it. Once the cover goes, the next try
     // asks and runs.
     for (const [name, kind, words] of [
       ["the page's own time picker", "picker", 'Something else on the page covers "Plan your journey" (<div role="dialog"> named "Choose a time"), so nothing was clicked. Take a fresh snapshot and try once more.'],
-      ["a carousel's slide", "slide", 'Something else on the page covers "Plan your journey" (<a>), so nothing was clicked. Take a fresh snapshot and try once more.'],
-      ["a banner with no name", "banner", 'Something else on the page covers "Plan your journey" (<div>), so nothing was clicked. Take a fresh snapshot and try once more.'],
-      ["a cookie notice", "cookies", "A cookie notice covers this page, and the browser could not decline it. If the task needs this page, pause on the notice's buttons with request_human_input in the chat's own tab"],
+      ["a carousel's slide", "slide", 'Something else on the page covers "Plan your journey" (<a> named "Night service"), so nothing was clicked. Take a fresh snapshot and try once more.'],
+      ["a banner with no name", "banner", 'Something else on the page covers "Plan your journey" (<div> named "Subscribe"), so nothing was clicked. Take a fresh snapshot and try once more.'],
+      ["a cookie notice", "cookies", "A cookie notice covers this page, and the browser could not decline it. Open a link under it by its address, or the official site of the place or service the task is about."],
     ]) {
       await check(`a button under ${name}`, async () => {
         freshRun();
@@ -605,7 +606,7 @@ export async function runSharedBrowserAllowedStepFixture() {
         const covered = await runTool("POST", "/v1/click", control(planned, "Plan your journey"), []);
         assert.equal(covered.code, 1, `the covered step ran: ${covered.stdout}`);
         assert.ok(covered.stderr.includes(words), covered.stderr);
-        assert.doesNotMatch(covered.stderr, /read on without it|_non_retryable|Night service|Subscribe|Sponsored|assistant|evil|margin/u);
+        assert.doesNotMatch(covered.stderr, /read on without it|_non_retryable|request_human_input|pause on|Sponsored|assistant|evil|margin/u);
         assert.equal(prompts.length, asked, "the person was asked about a click that cannot land");
         assert.equal(covered.stdout, "", "a yes is listed for a click nobody was asked about");
         assert.deepEqual(sent(), [], "something was sent under the cover");
@@ -662,7 +663,7 @@ export async function runSharedBrowserAllowedStepFixture() {
         "of two controls alike, the one asked about is used once the page changed or a look-alike appeared ahead of it, and on an unchanged page; never its twin once it went, after the yes or before anyone is asked",
         "a take-over while the prompt waits ends the step, and a yes then does nothing",
         "a page that left its site after the yes ends the run with the stale code, and the failed command lists the yes",
-        "a planner's button under the page's own time picker, a carousel's slide, a banner with no name or a cookie notice is refused before anyone is asked, naming the cover by its tag, role and label and never by its text, or saying a cookie notice covers the page, with nothing sent and no yes listed; once the cover goes, the next try asks and runs",
+        "a planner's button under the page's own time picker, a carousel's slide, a banner with no name or a cookie notice is refused before anyone is asked, naming the cover by its tag, role and label, or one with neither by the first words a person sees on it, never a style sheet or a hidden part, or saying a cookie notice covers the page and never to pause on it, with nothing sent and no yes listed; once the cover goes, the next try asks and runs",
         "under a cover that stays, the first refusal says to try once more and every later try on that page is left to the person, all before anyone is asked; once the cover goes, a try asks and runs",
       ],
       runs,
