@@ -12,6 +12,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { cardArgs, cardCommand, inSpace, previewShows } from "../src/preview-host.mjs";
+import { cardTitle } from "../src/check.mjs";
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "instafy-bind.mjs");
 const SPACE = "33a2c783-570e-49dd-bd51-17d088e21387";
@@ -272,6 +273,75 @@ test("a page that loads another page's files fails the check with the command th
       server.kill("SIGTERM");
       await exited;
     }
+    s.done();
+  }
+});
+
+// A turn wrote a comparison page by hand (`sites/framework-13-vs-16/index.html`) and posted no card: nobody could open
+// the page, and its files' row named the folder, over two turns. The runtime now takes the card's step for a page a turn
+// left without one, with `card`: the step a check that passes takes, the same command titled from the page, for a page
+// whose card was never opened. Like the check, it posts none for a page the space's record of its pages holds (another
+// chat's page, or one a person stopped) or a preview shows, and none outside a space.
+test("card posts the card of a page that never had one, titled from the page, and none for a page that had one", () => {
+  const s = space();
+  try {
+    const page = path.join(s.project, "sites", "framework-13-vs-16");
+    fs.mkdirSync(page, { recursive: true });
+    fs.writeFileSync(path.join(page, "index.html"), "<!doctype html>\n<title>Framework Laptop 13 vs 16</title>\n<h1>Which one to carry</h1>\n");
+    const card = (dir, options) => s.run(["card", dir, "--json"], options);
+    const posted = card("sites/framework-13-vs-16");
+    assert.equal(posted.status, 0, posted.stdout + posted.stderr);
+    const opened = "(cd sites/framework-13-vs-16 && instafy preview open --title 'Framework Laptop 13 vs 16' --serve-cmd 'instafy bind serve . --port {port} --preview' --start --json)";
+    assert.deepEqual(JSON.parse(posted.stdout), { posted: true, title: "Framework Laptop 13 vs 16", command: opened, answer: { status: "live", port: 24087 } });
+    // the command a check that passes runs: in the page's folder, with the title the check gives the page
+    assert.equal(cardTitle(page), "Framework Laptop 13 vs 16");
+    assert.deepEqual(s.cards(), [{ cwd: fs.realpathSync(page), args: cardArgs("Framework Laptop 13 vs 16") }]);
+    // it wrote the page in the space's record of its pages: the card is posted once
+    const again = card("sites/framework-13-vs-16");
+    assert.equal(again.status, 2, again.stdout + again.stderr);
+    assert.deepEqual(JSON.parse(again.stdout), { posted: false, reason: "its card was opened before" });
+    // without --json it says the same in words, and the check's own lines when it posts
+    assert.equal(s.run(["card", "sites/framework-13-vs-16"]).stdout, "No card to post: its card was opened before.\n");
+    fs.mkdirSync(path.join(s.project, "sites", "plan"));
+    fs.writeFileSync(path.join(s.project, "sites", "plan", "index.html"), "<title>Three days in Porto</title>\n");
+    const words = s.run(["card", "sites/plan"]);
+    assert.equal(words.status, 0, words.stdout + words.stderr);
+    assert.equal(words.stdout.split("\n")[0], "Posted its card: ran (cd sites/plan && instafy preview open --title 'Three days in Porto' --serve-cmd 'instafy bind serve . --port {port} --preview' --start --json), which answered:");
+    assert.equal(s.cards().length, 2);
+
+    // another chat's page, and a page from before the record, are in the record: no card
+    for (const folder of ["sites/laptops", "sites/old-plan"]) {
+      fs.mkdirSync(path.join(s.project, folder), { recursive: true });
+      fs.writeFileSync(path.join(s.project, folder, "index.html"), "<title>A page</title>\n");
+    }
+    s.pages({ folder: "sites/laptops", chat: "6f0e3c7d-2b19-4d8a-9a51-b0f6a1de2c4e" }, { folder: "sites/old-plan" });
+    for (const folder of ["sites/laptops", "sites/old-plan"]) {
+      const held = card(folder);
+      assert.equal(held.status, 2, `${folder}: ${held.stdout}${held.stderr}`);
+      assert.deepEqual(JSON.parse(held.stdout), { posted: false, reason: "its card was opened before" });
+    }
+    // a page a preview on this machine shows has its card
+    fs.mkdirSync(path.join(s.project, "sites", "shown"));
+    fs.writeFileSync(path.join(s.project, "sites", "shown", "index.html"), "<title>Shown</title>\n");
+    s.open("sites/shown");
+    assert.deepEqual(JSON.parse(card("sites/shown").stdout), { posted: false, reason: "a preview shows it" });
+    // a folder of pages is no one page; outside a space nothing serves a card
+    assert.deepEqual(JSON.parse(card("sites").stdout), { posted: false, reason: "the binder serves no one page from this folder" });
+    fs.mkdirSync(path.join(s.project, "sites", "away"));
+    fs.writeFileSync(path.join(s.project, "sites", "away", "index.html"), "<title>Away</title>\n");
+    const away = card("sites/away", { environment: { PATH: s.env.PATH, HOME: s.env.HOME } });
+    assert.equal(away.status, 2);
+    assert.deepEqual(JSON.parse(away.stdout), { posted: false, reason: "the folder is not in a space" });
+    assert.equal(s.cards().length, 2);
+
+    // a card's command that fails says why, and posts nothing (exit 1)
+    const failed = card("sites/away", { environment: { ...s.env, PATH: path.dirname(process.execPath) } });
+    assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+    const said = JSON.parse(failed.stdout);
+    assert.deepEqual([said.posted, said.title, said.error], [false, "Away", "the instafy command was not found"]);
+    assert.equal(s.cards().length, 2);
+    assert.match(s.run(["card"]).stderr, /usage: instafy-bind card <dir> \[--json\]/);
+  } finally {
     s.done();
   }
 });

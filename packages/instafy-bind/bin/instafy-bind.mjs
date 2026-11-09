@@ -33,6 +33,7 @@ Usage:
   instafy-bind doctor [dir]
   instafy-bind try <dir> <intent> [json-params] [--save] [--allow-local]
   instafy-bind check <dir> --expect "<item>,<item>,…" [--json]
+  instafy-bind card <dir> [--json]
 
 serve      Serve the site (or every subfolder with a bound.json) with the binder endpoints under
            __bind/. Prints share URLs with the viewer token: #k=... for pages that load __bind/client.js,
@@ -77,6 +78,9 @@ check      Does the site show every item the request named (each product, stop o
            the site, a check that passes on a new page (one whose card was never opened) serves it and posts its
            card itself, and any other check ends with the command that does: a failing check never holds the card
            back, except for a page that loads files from outside its folder.
+card       The card step a check that passes takes, without the check: in a space, for a page whose card was
+           never opened, while no preview shows it, it serves the page and posts its card, titled from the page.
+           Exit 0 when it posted the card, 1 when the card's command failed, 2 when there is no card to post.
 command    Push a command (select, highlight, toast, reload) to every open viewer. Uses the
            admin token in .bind/admin-token.
 confirm    Approve (or --no: decline) jobs waiting for confirmation.
@@ -375,17 +379,48 @@ function cardStep(dir) {
 const CARD_TIMEOUT_MS = 300_000;
 
 /** The card's step for the site in `dir`, taken by a check that passes: its command, run in the site's folder and titled
- *  from the page. `{ ok, command, output, error }`: whether it posted the card, the command as a shell would say it,
- *  what it printed, and why it did not. */
+ *  from the page. `{ ok, title, command, output, error }`: whether it posted the card, the card's title, the command as
+ *  a shell would say it, what it printed, and why it did not. */
 function postCard(dir) {
   const title = cardTitle(dir);
   const command = cardCommand(dir, title);
   const run = spawnSync("instafy", cardArgs(title), { cwd: dir, env: process.env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: CARD_TIMEOUT_MS });
   const output = String(run.stdout ?? "").trim();
-  if (!run.error && run.status === 0) return { ok: true, command, output };
+  if (!run.error && run.status === 0) return { ok: true, title, command, output };
   const said = String(run.stderr || run.stdout || "").trim().split("\n").slice(-3).join(" ").trim();
   const error = run.error?.code === "ENOENT" ? "the instafy command was not found" : run.error ? run.error.message : said || `its command ended with ${run.signal ?? `exit ${run.status}`}`;
-  return { ok: false, command, output, error };
+  return { ok: false, title, command, output, error };
+}
+
+/** `card <dir>`: the card's step a check that passes takes, without the check, for a page that never had a card (the
+ *  runtime takes it for a page a turn left without one). As for a check, nothing is posted for a page the space's record
+ *  of its pages holds (its card was opened before: another chat's page, or one a person stopped), while a preview shows
+ *  the folder, outside a space, or for a folder the binder does not serve as one page. `{ exit, lines }`: 0 posted, 1
+ *  its command failed, 2 no card to post, with why. */
+function cardReport(dir, { json = false } = {}) {
+  const none = !inSpace(dir)
+    ? "the folder is not in a space"
+    : pageRecorded(dir)
+      ? "its card was opened before"
+      : previewShows(dir)
+        ? "a preview shows it"
+        : cardStep(dir) === null
+          ? "the binder serves no one page from this folder"
+          : null;
+  if (none) return { exit: 2, lines: [json ? JSON.stringify({ posted: false, reason: none }) : `No card to post: ${none}.`] };
+  const posted = postCard(dir);
+  const exit = posted.ok ? 0 : 1;
+  if (json) {
+    let answer = posted.output;
+    try {
+      answer = JSON.parse(posted.output);
+    } catch {
+      /* its words */
+    }
+    return { exit, lines: [JSON.stringify({ posted: posted.ok, title: posted.title, command: posted.command, ...(posted.ok ? { answer } : { error: posted.error }) })] };
+  }
+  if (posted.ok) return { exit, lines: [`Posted its card: ran ${posted.command}, which answered:`, ...(posted.output ? posted.output.split("\n") : [])] };
+  return { exit, lines: [`The card was not posted: ${posted.error}.`, `next: post its card: ${posted.command}`] };
 }
 
 /** The `instafy preview open` command that shows one site of the binder serving `root` in Studio's preview card. */
@@ -636,6 +671,13 @@ async function main() {
       } catch (error) {
         fail(error.message, 64);
       }
+      process.stdout.write(`${report.lines.join("\n")}\n`);
+      process.exitCode = report.exit;
+      return;
+    }
+    case "card": {
+      if (!rest[0]) fail("usage: instafy-bind card <dir> [--json]", 64);
+      const report = cardReport(rest[0], { json: Boolean(flags.json) });
       process.stdout.write(`${report.lines.join("\n")}\n`);
       process.exitCode = report.exit;
       return;

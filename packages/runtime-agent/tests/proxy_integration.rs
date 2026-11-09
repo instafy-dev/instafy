@@ -57,6 +57,9 @@ mod native_images;
 #[path = "proxy_integration/native_subagents.rs"]
 mod native_subagents;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "proxy_integration/page_cards.rs"]
+mod page_cards;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "proxy_integration/pages_of_their_own_chats.rs"]
 mod pages_of_their_own_chats;
 #[path = "proxy_integration/proxy_stream.rs"]

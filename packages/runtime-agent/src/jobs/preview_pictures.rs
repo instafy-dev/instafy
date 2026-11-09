@@ -70,7 +70,7 @@ use crate::job_cancel::JobCancelSignal;
 use crate::model_environment::{PREVIEW_CHECK_ENV_KEYS, allowlisted_environment};
 
 /// The CLI's record of the previews it opened on this machine, under `HOME`.
-const PREVIEW_STATE_RELATIVE_PATH: &str = ".instafy/cli-preview-state.json";
+pub(super) const PREVIEW_STATE_RELATIVE_PATH: &str = ".instafy/cli-preview-state.json";
 /// At most this many previews are checked when one turn ends.
 const MAX_CHECKS: usize = 3;
 /// The page load limit each check gets (the CLI's own default is 30 s).

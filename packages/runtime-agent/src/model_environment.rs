@@ -211,6 +211,39 @@ pub(crate) const PREVIEW_CHECK_ENV_KEYS: &[&str] = &[
     "ORIGIN_BIND_PORT",
 ];
 
+/// What the card a building turn left a page without (`jobs::page_cards`) may inherit on top of the
+/// persistent helper baseline and [`PREVIEW_CHECK_ENV_KEYS`] (the settings its picture reads): what
+/// `instafy bind card` and the `instafy preview open --start` it runs read to post the card to the
+/// turn's chat, before the turn ends. That is the turn's own controller token and where it goes,
+/// the runtime, space, chat and workspace, and the preview tunnel's settings. Never another
+/// credential: not the turn's granted secrets, nor Instafy's, a model's or this runtime's own. The
+/// site it starts keeps none of these credentials (the binder's `credentialFreeEnv`).
+pub(crate) const PAGE_CARD_ENV_KEYS: &[&str] = &[
+    "CONTROLLER_ACCESS_TOKEN",
+    "CONTROLLER_ACCESS_SCOPES",
+    "CONTROLLER_ACCESS_EXPIRES_AT",
+    "CONTROLLER_BASE_URL",
+    "RUNTIME_ID",
+    "RUNTIME_LEASE_ID",
+    "SPACE_ID",
+    "INSTAFY_SPACE_ID",
+    "PROJECT_ID",
+    "INSTAFY_PROJECT_ID",
+    "CONTROLLER_SPACE_ID",
+    "CONVERSATION_ID",
+    "INSTAFY_CONVERSATION_ID",
+    "WORKSPACE_DIR",
+    "WORKSPACE_PROJECT_DIR",
+    "INSTAFY_SERVER_URL",
+    "INSTAFY_URL",
+    "INSTAFY_TUNNEL_SERVER_HOST",
+    "INSTAFY_HTTP_TIMEOUT_MS",
+    "INSTAFY_BIND_BIN",
+    "RATHOLE_BIN",
+    "RATHOLE_VERSION",
+    "RATHOLE_CACHE_DIR",
+];
+
 pub(crate) const TERMINAL_HELPER_ENV_KEYS: &[&str] = &[
     "CARGO_HOME",
     "RUSTUP_HOME",
