@@ -131,7 +131,7 @@ chat turn, and is never aimed at the open page because of its words. Only the br
 controls (the card's button, **Let Octo continue**, a new browser page) carry the walk on. When
 the chat's opener is older than the loaded messages, a chat titled the way Studio titles a
 connector's setup (such as "Connect FreeFinance") counts as one too. On Personal and Shared
-Browser turns the agent is told to pause at a sign-in, one-time code or consent step with
+Browser turns the agent is told to pause at a sign-in or one-time code step with
 `request_human_input`, so the person completes it on the page and chooses **Let Octo continue**,
 and never to open, or ask the person to open, a screen, dialog or field that shows a
 credential value: it stops on the screen that lists it, names the control that opens it, and
