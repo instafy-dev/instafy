@@ -84,11 +84,14 @@ process.stdout.write(JSON.stringify({ status: "live", port: 24087 }, null, 2) + 
     },
     // the card commands a check ran: [{ cwd, args }]
     cards: () => (fs.existsSync(cardLog) ? fs.readFileSync(cardLog, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : []),
-    // what the page check finds the page drew, on each size (the phone's own text when given), and the errors on it
-    drawn: (text, { phone = text, errors = [] } = {}) => fs.writeFileSync(drawnFile, JSON.stringify({ ok: !errors.length, url: "http://127.0.0.1:24087/", viewports: [
-      { name: "desktop", screenshot: "/tmp/instafy-preview-check-24087-a/desktop.png", errors, warnings: [], blocked: [], text },
-      { name: "phone", screenshot: "/tmp/instafy-preview-check-24087-a/phone.png", errors: [], warnings: [], blocked: [], text: phone },
-    ] })),
+    // what the page check finds the page drew, on each size (the phone's own text when given), and the errors on it;
+    // a size in `unloaded` is one the page check could not load, as it reports one
+    drawn: (text, { phone = text, errors = [], unloaded = [] } = {}) => {
+      const view = (name, shown, own) => (unloaded.includes(name)
+        ? { name, screenshot: null, blank: { blank: true, reason: "the page did not load" }, errors: ["the page did not load: page.goto: Timeout 30000ms exceeded."], warnings: [], blocked: [], text: "" }
+        : { name, screenshot: `/tmp/instafy-preview-check-24087-a/${name}.png`, errors: own, warnings: [], blocked: [], text: shown });
+      fs.writeFileSync(drawnFile, JSON.stringify({ ok: !errors.length && !unloaded.length, url: "http://127.0.0.1:24087/", viewports: [view("desktop", text, errors), view("phone", phone, [])] }));
+    },
     done: () => fs.rmSync(base, { recursive: true, force: true }),
   };
 }
@@ -369,6 +372,48 @@ test("an item the page as drawn doesn't show fails the check, named, and so does
     const broken = s.run(["check", "sites/visit", "--expect", "Sao Bento, Aliados"]);
     assert.equal(broken.status, 1, broken.stdout);
     assert.match(broken.stdout, /^PAGE: the page as drawn has 1 error\(s\) to fix:\n- desktop: uncaught: stops is not defined$/m);
+  } finally {
+    s.done();
+  }
+});
+
+// The files check never counts a line that only says an item isn't there ("Not found yet: Aliados") as showing it: a
+// page says what it couldn't add, and that line must not pass. The page as drawn is read the same way.
+test("a line of the page as drawn that says an item isn't there never counts as drawing it", () => {
+  const s = space();
+  try {
+    s.run(["init", "sites/visit", "--starter", "blank"]);
+    fs.writeFileSync(path.join(s.project, "sites", "visit", "app.js"), DRAWS);
+    s.drawn("Bookshop hours and metro\n\nOpen daily. Metro from Sao Bento.\nNot found yet: Aliados\n\nStill missing for the route: Aliados");
+    const out = s.run(["check", "sites/visit", "--expect", "Sao Bento, Aliados"]);
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    assert.match(out.stdout, /^MISSING: the request named 1 item\(s\) the page as drawn does not show: Aliados\.$/m);
+    assert.match(out.stdout, /^1 of 2 expected item\(s\) shown: Sao Bento\.$/m);
+  } finally {
+    s.done();
+  }
+});
+
+// A size the page check couldn't load drew nothing anyone saw: that is an error on the page, never an item it leaves
+// out, and the sizes the check looked at are the ones that loaded. With none loaded, nothing looked at the page.
+test("a size the page check couldn't load is an error on the page, never an item it doesn't draw", () => {
+  const s = space();
+  try {
+    s.run(["init", "sites/visit", "--starter", "blank"]);
+    fs.writeFileSync(path.join(s.project, "sites", "visit", "app.js"), DRAWS);
+    s.drawn("Bookshop hours and metro\n\nOpen daily. Metro from Sao Bento to Aliados.", { unloaded: ["phone"] });
+    const out = s.run(["check", "sites/visit", "--expect", "Sao Bento, Aliados"]);
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    assert.doesNotMatch(out.stdout, /MISSING|Add each one/);
+    assert.match(out.stdout, /^PAGE: the page as drawn has 1 error\(s\) to fix:\n- phone: the page did not load: page\.goto: Timeout 30000ms exceeded\.$/m);
+    assert.match(out.stdout, /^2 of 2 expected item\(s\) shown: Sao Bento, Aliados\.$/m);
+    assert.match(out.stdout, /^Looked at the page as drawn on port 24087 \(desktop\) for what its files don't say: Aliados\. Screenshots: \/tmp\/instafy-preview-check-24087-a\/desktop\.png\.$/m);
+    s.open("sites/visit");
+    s.drawn("", { unloaded: ["desktop", "phone"] });
+    const none = s.run(["check", "sites/visit", "--expect", "Sao Bento, Aliados"]);
+    assert.equal(none.status, 2, none.stdout + none.stderr);
+    assert.doesNotMatch(none.stdout, /MISSING|PAGE:|Looked at/);
+    assert.match(none.stdout, /^The page as drawn could not be looked at \(the page did not load: page\.goto: Timeout 30000ms exceeded\.\), so the check cannot tell whether it shows: Aliados\.$/m);
   } finally {
     s.done();
   }

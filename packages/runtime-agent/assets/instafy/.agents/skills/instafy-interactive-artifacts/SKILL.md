@@ -43,7 +43,7 @@ own kind of page.
   the tools, searches or services you used. A value cites only a page that gives it: a count of
   what you found cites only what it counts, so none found cites no page. A filter from a stated limit ("under €600")
   counts known values only: an item whose value is unknown is listed apart ("Price unknown"), never as within it, on
-  the page, in the lede and in the reply. The starters do this with `site.byFilter`; a page you write uses it too. A
+  the page or in the reply. The starters do this with `site.byFilter`; a page you write uses it too. A
   candidate nothing could be read for is still a row, with `Unknown` in each cell: a page of options is never empty
   ("No options yet") while a page you read named what to compare. An item whose own page wasn't opened is "not
   checked (its own page wasn't opened)" in the reply, and each of its unknown values has `"note": "its own page wasn't

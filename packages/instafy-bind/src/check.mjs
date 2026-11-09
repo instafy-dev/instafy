@@ -20,7 +20,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import fs from "node:fs";
 import path from "node:path";
-import { readScript } from "./script-text.mjs";
+import { codeOnly, readScript } from "./script-text.mjs";
 import { STARTER_HTML, STARTERS, STARTERS_DIR } from "./init.mjs";
 import { shellWord } from "./preview-host.mjs";
 
@@ -177,18 +177,28 @@ const SOURCE = /\.(?:jsx|tsx|m?ts|vue|svelte|astro)$/i;
 const SOURCE_LOADS = /\b(?:fetch|EventSource|WebSocket)\s*\(\s*[`'"]\s*(?:(?:https?|wss?):)?\/\//i;
 /** The starters' shared helpers (site.js) define `site`: their own words are no page's text. */
 const DEFINES_SITE = /\bwindow\.site\s*=\s*\{/;
-/** A line that sets HTML from a string (`el.innerHTML = …`, `+=`, outerHTML, insertAdjacentHTML). The starters draw
+/** The compare starter's app.js writes the line under a comparison's title itself, from its sorts and cells
+ *  (`lede: verdict(…)`), so data.json's "lede" is not drawn on that page. A page made before keeps its own app.js,
+ *  which draws it. */
+const OWN_LEDE = /\blede\s*:\s*verdict\s*\(/;
+/** Code that sets HTML from a string (`el.innerHTML = …`, `+=`, outerHTML, insertAdjacentHTML). The starters draw
  *  text with site.h, always as text, and a fact with site.trust, which links its page; HTML from a string is text the
- *  check cannot read, and runs whatever markup it holds. Emptying an element (`el.innerHTML = ""`) draws nothing. */
-const SETS_HTML = /\.\s*(?:innerHTML|outerHTML)\s*\+?=(?!=)|\.\s*insertAdjacentHTML\s*\(/;
-const EMPTIES = /\.\s*(?:innerHTML|outerHTML)\s*=\s*(["'`])\1\s*;?$/;
-/** The lines of a page's own file that set HTML from a string: [{ file, line, code }]. */
-function htmlFromStrings(rel, raw) {
+ *  check cannot read, and runs whatever markup it holds. Read in code only (codeOnly), so words in a string, a comment
+ *  or a regular expression set nothing. */
+const SETS_HTML = /\.\s*(?:innerHTML|outerHTML)\s*(\+?)=(?!=)|\.\s*insertAdjacentHTML\s*\(/g;
+/** What follows an `=` that only empties an element (`el.innerHTML = "";`): an empty string, and the assignment ends. */
+const EMPTY_STRING = /^\s*(["'`])\1\s*(?:[;,)}]|$)/;
+/** The lines of a script that set HTML from a string: [{ line, code }], numbered from `first`. A line that only empties
+ *  an element draws nothing; one that also sets HTML is named. */
+function htmlFromStrings(source, first = 1) {
+  const lines = String(source).split("\n");
   const out = [];
-  String(raw).split("\n").forEach((text, index) => {
-    const code = text.trim();
-    if (!SETS_HTML.test(code) || EMPTIES.test(code) || /^(?:\/\/|\/\*|\*)/.test(code)) return;
-    out.push({ file: rel, line: index + 1, code: code.length > 100 ? `${code.slice(0, 99)}…` : code });
+  codeOnly(source).split("\n").forEach((code, index) => {
+    // m[1]: "" for "=", "+" for "+=", none for insertAdjacentHTML
+    const sets = [...code.matchAll(SETS_HTML)].some((m) => m[1] !== "" || !EMPTY_STRING.test(code.slice(m.index + m[0].length)));
+    if (!sets) return;
+    const text = lines[index].trim();
+    out.push({ line: first + index, code: text.length > 100 ? `${text.slice(0, 99)}…` : text });
   });
   return out;
 }
@@ -470,11 +480,19 @@ export function readSite(dir) {
   // site.js before 1.7.0 draws nothing for a second argument to site.h that is not its props (h("p", "text"))
   const childArg = !files.some(({ file, raw }) => /\.m?js$/i.test(file) && DEFINES_SITE.test(raw) && before(siteVersion(raw), [1, 7]));
   const read = (source) => readScript(source, { childArg, lists: UNAVAILABLE_KEYS });
+  const ownLede = files.some(({ rel, raw }) => rel === "app.js" && OWN_LEDE.test(raw));
   const shownText = (script) => [...script.lines, ...script.data].filter((text) => !UNAVAILABLE_RE.test(text));
   const otherText = (script) => script.other.filter((text) => !UNAVAILABLE_RE.test(text));
   for (const { file, rel, raw } of files) {
     if (/\.css$/i.test(file)) continue;
-    if (!/\.(geo)?json$/i.test(file) && !DEFINES_SITE.test(raw)) markup.push(...htmlFromStrings(rel, raw));
+    if (/\.html?$/i.test(file)) {
+      // an HTML page's own scripts, each line numbered as it is in the page; never the page's text
+      for (const m of raw.matchAll(INLINE_SCRIPTS)) {
+        if (!JS_TYPE.test(SCRIPT_TYPE.exec(m[1])?.[1] ?? "") || DEFINES_SITE.test(m[2])) continue;
+        const start = m.index + m[0].indexOf(">") + 1;
+        markup.push(...htmlFromStrings(m[2], raw.slice(0, start).split("\n").length).map((line) => ({ file: rel, ...line })));
+      }
+    } else if (!/\.(geo)?json$/i.test(file) && !DEFINES_SITE.test(raw)) markup.push(...htmlFromStrings(raw).map((line) => ({ file: rel, ...line })));
     if (/\.(geo)?json$/i.test(file)) {
       let value;
       try {
@@ -483,6 +501,8 @@ export function readSite(dir) {
         continue;
       }
       if (rel === "data.json" && Array.isArray(value?.expect)) declared = parseExpect(value.expect);
+      // a comparison's stored lede is not drawn: only the words the page shows count
+      if (rel === "data.json" && ownLede && value && typeof value === "object" && "lede" in value) value = { ...value, lede: undefined };
       parts.push({ file: rel, kind: "data", text: jsonStrings(value).join("\n") });
     } else if (SOURCE.test(file)) {
       scripts.push({ file: rel, other: raw, loads: SOURCE_LOADS.test(raw) });
@@ -738,6 +758,15 @@ export function checkValues(dir) {
   }
   if (!isOptionsData(data)) return { checked: false, problems, notes };
   const memory = fromMemory(data);
+  let app = "";
+  try {
+    app = fs.readFileSync(path.join(root, "app.js"), "utf8");
+  } catch {
+    /* a page without app.js draws no filter */
+  }
+  if (typeof data.lede === "string" && data.lede.trim() && OWN_LEDE.test(app)) {
+    notes.push(`data.json's "lede" is not drawn: the line under a comparison's title comes from its sorts and cells. Say in the reply what it says.`);
+  }
   for (const cell of optionCells(data)) {
     const { fact } = cell;
     const where = `${cell.item} · ${cell.label}`;
@@ -765,12 +794,6 @@ export function checkValues(dir) {
     if (!filter.label) problems.push('the filter has no "label" (what the person asked for: "€600 or less").');
     else if (columns && !columns.some((c) => c && c.key === filter.key)) problems.push(`the filter's key "${filter.key}" is not a column, so "${label}" filters nothing.`);
     if (!isNumber(filter.max) && !isNumber(filter.min)) problems.push(`the filter "${label}" has no number in "max" or "min".`);
-    let app = "";
-    try {
-      app = fs.readFileSync(path.join(root, "app.js"), "utf8");
-    } catch {
-      /* a page without app.js draws no filter */
-    }
     if (app && !/\bsite\.byFilter\s*\(|\bsite\.within\s*\(/.test(app)) {
       problems.push(`data.json has a filter, and app.js applies it without site.byFilter: a row whose value is unknown may be listed as "${label}". Use the starter's filter code (site.byFilter), which lists such rows apart.`);
     }
@@ -840,23 +863,38 @@ function outsideLines(dir, outside, starter) {
   };
 }
 
-/** What the page drew on each size the page check loaded (`report`: `instafy preview check --json --text`), for the
- *  items its files can't tell about: `{ port, sizes, shown, missing: [{ item, sizes }], errors, shots }`, or null when
- *  it loaded no size; an item the page drew on one size and not the other is missing on that one. `errors`: the page's
- *  own, as the page check lists them ("phone: uncaught: …"). */
-export function drawnItems(report, items, port) {
+/** The sizes of a page check's report (`instafy preview check --json --text`), and the ones it loaded: a size it could
+ *  not load drew nothing anyone saw (no screenshot, "the page did not load"). */
+function viewsOf(report) {
   const views = (Array.isArray(report?.viewports) ? report.viewports : []).filter((v) => v && typeof v === "object");
-  if (!views.length) return null;
-  const sizes = views.map((v) => String(v.name ?? "page"));
+  return { views, loaded: views.filter((v) => v.screenshot !== null && v.blank?.reason !== "the page did not load") };
+}
+
+/** What the page drew on each size the page check loaded (`report`), for the items its files can't tell about:
+ *  `{ port, sizes, shown, missing: [{ item, sizes }], errors, shots }`, or null when it loaded no size. The text each
+ *  size drew is read as the files are: a line that only says an item isn't there ("Not found yet: Aliados") never
+ *  shows it. An item the page drew on one size and not the other is missing on that one. `errors`: the page's own on
+ *  every size, as the page check lists them ("phone: uncaught: …"), a size it could not load among them. */
+export function drawnItems(report, items, port) {
+  const { views, loaded } = viewsOf(report);
+  if (!loaded.length) return null;
+  const sizes = loaded.map((v) => String(v.name ?? "page"));
+  const texts = loaded.map((v) => hay(String(v.text ?? "").split("\n").filter((line) => !UNAVAILABLE_RE.test(line)).join("\n")));
   const shown = [];
   const missing = [];
   for (const item of items) {
-    const without = views.filter((v) => !names(v.text ?? "", item)).map((v) => String(v.name ?? "page"));
+    const without = sizes.filter((_, k) => !named(texts[k], item));
     if (!without.length) shown.push(item);
-    else missing.push({ item, sizes: without.length < views.length ? without : [] });
+    else missing.push({ item, sizes: without.length < sizes.length ? without : [] });
   }
   const errors = [...new Set(views.flatMap((v) => (Array.isArray(v.errors) ? v.errors : []).map((e) => `${v.name}: ${e}`)))];
-  return { port, sizes, shown, missing, errors, shots: views.map((v) => v.screenshot).filter(Boolean) };
+  return { port, sizes, shown, missing, errors, shots: loaded.map((v) => v.screenshot).filter(Boolean) };
+}
+
+/** Why a page check that ran loaded no size of the page: what it said of each ("the page did not load: …"). */
+function unloadedWhy(report) {
+  const said = [...new Set(viewsOf(report).views.flatMap((v) => (Array.isArray(v.errors) ? v.errors : [])))];
+  return said.length ? said.slice(0, 2).join("; ") : "the page check loaded no size of it";
 }
 
 /** The port the card's command answered with (`instafy preview open --json`), or null. */
@@ -899,7 +937,7 @@ export function checkReport(dir, expect, { json = false, card = null, post = nul
   if (!failing && unknown.length) port = posted ? (posted.ok ? answeredPort(posted.output) ?? served?.() ?? null : null) : served?.() ?? null;
   const looked = port && look ? look(port) : null;
   const drawn = looked?.report ? drawnItems(looked.report, unknown, port) : null;
-  const unseen = !failing && unknown.length && !drawn ? (looked?.error ?? (looked ? "the page check loaded no size of it" : port ? "nothing looked at it" : null)) : null;
+  const unseen = !failing && unknown.length && !drawn ? (looked?.error ?? (looked ? unloadedWhy(looked.report) : port ? "nothing looked at it" : null)) : null;
   const exit = failing || drawn?.missing.length || drawn?.errors.length ? 1 : unknown.length && !drawn ? 2 : 0;
   if (json) {
     const step = posted ? { card: { posted: posted.ok, command: posted.command, ...(posted.ok ? { answer: answerOf(posted.output) } : { error: posted.error }) }, ...(posted.ok ? {} : { next: `post its card: ${posted.command}` }) } : next ? { next } : {};

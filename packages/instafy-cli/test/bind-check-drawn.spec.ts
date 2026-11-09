@@ -148,8 +148,9 @@ describe("bind check looks at the page as drawn for what its files don't say", (
     180_000,
   );
 
+  // a line that only says an item isn't there ("Not found yet: Trindade") never counts as drawing it, as in the files
   it.skipIf(!browserOk)(
-    "an item the page as drawn doesn't show fails the check, named",
+    "an item the page as drawn doesn't show, or only says it couldn't find, fails the check, named",
     async () => {
       fs.rmSync(calls, { force: true });
       const { dir, port } = await page(
@@ -159,7 +160,9 @@ describe("bind check looks at the page as drawn for what its files don't say", (
   var later = "Trindade";
   var p = document.createElement("p");
   p.textContent = "Open daily 9:00 to 19:00.";
-  document.getElementById("list").replaceChildren(p);
+  var gap = document.createElement("p");
+  gap.textContent = "Not found yet: " + later;
+  document.getElementById("list").replaceChildren(p, gap);
 } });
 `,
       );
