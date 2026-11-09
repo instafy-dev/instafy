@@ -853,13 +853,14 @@ impl ReadReferenceCase {
 
     /// How the job fails, when it does.
     fn failure(self) -> Option<&'static str> {
-        if self == Self::ResumedRequiredWriteWithoutAFinalAnswer {
-            Some("without returning a final assistant message")
-        } else if self.required_write() && !self.saves_the_cut_off_attempts_file() {
-            Some("did not apply any workspace changes")
-        } else {
-            None
-        }
+        (self == Self::ResumedRequiredWriteWithoutAFinalAnswer)
+            .then_some("without returning a final assistant message")
+    }
+
+    /// A required write whose attempts only read the reference: after its recovery pass, its
+    /// reply stands, with the runtime's "Nothing was changed." under it.
+    fn changed_nothing(self) -> bool {
+        self.required_write() && !self.saves_the_cut_off_attempts_file() && self.failure().is_none()
     }
 
     /// Why the job's last attempt retried, where the case checks it.
@@ -1283,10 +1284,15 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
             .to_vec()
     } else {
         let execution = result.context("read-reference apply job failed")?;
-        assert_eq!(
-            execution.summary,
-            "Read reference.txt: deployment_status is READY_FOR_REVIEW."
-        );
+        let reply = "Read reference.txt: deployment_status is READY_FOR_REVIEW.";
+        if case.changed_nothing() {
+            assert_eq!(
+                execution.summary,
+                format!("{reply}\n\nNothing was changed.")
+            );
+        } else {
+            assert_eq!(execution.summary, reply);
+        }
         execution.artifacts
     };
     if case.reads_the_reference() {

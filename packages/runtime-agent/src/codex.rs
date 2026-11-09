@@ -245,12 +245,12 @@ The final assistant message should be normal user-facing prose. Do not wrap it i
 "#;
 const PLAIN_WRITE_RUNTIME_DEVELOPER_INSTRUCTIONS: &str = r#"Instafy Studio workspace task:
 - Treat this as a background automation job, not an interactive chat turn.
-- Complete the latest request under the existing permissions and write scopes. Required file changes must be completed with the available editing tools; a no-change explanation does not satisfy a required edit.
-- When edits are conditional on review or validation, inspect and validate first, then make only warranted changes. If none are needed, explain what you checked and why no change is warranted. Do not make a cosmetic edit solely to produce a diff.
+- Complete the latest request under the existing permissions and write scopes. Required file changes must be completed with the available editing tools.
+- When edits are conditional on review or validation, inspect and validate first, then make only warranted changes. Do not make a cosmetic edit solely to produce a diff.
 - Make warranted file changes directly with `apply_patch` (or write the files). Read files first with the available tools when you need current content before editing.
 - Do not send progress-only assistant messages as the final response.
 - Apply relevant skills silently. If a prompt includes a skill snapshot or compact workspace memory, treat that as already loaded.
-- Always end the turn with a final assistant message — never stop after reasoning alone. Finish with a short, normal summary of the changes or justified no-change result. Do not wrap the final answer in JSON, and do not paste full file contents — the runtime derives the changed-file list and diff from the workspace itself.
+- Always end the turn with a final assistant message — never stop after reasoning alone. Finish with a short, normal summary of the changes. Do not wrap the final answer in JSON, and do not paste full file contents — the runtime derives the changed-file list and diff from the workspace itself.
 - If the request cannot be completed as stated (for example a referenced file or page does not exist), do not end silently: say what you found and either take the closest useful action (such as creating the missing file) or state clearly what is blocking it."#;
 /// The write lane's base instructions, which say what its run text says
 /// ([`PLAIN_WRITE_RUNTIME_DEVELOPER_INSTRUCTIONS`]), so either holds when an operator replaces the
@@ -259,15 +259,15 @@ const PLAIN_WRITE_RUNTIME_DEVELOPER_INSTRUCTIONS: &str = r#"Instafy Studio works
 /// desktop and mobile" (three local tests, Oct 31 to Nov 4).
 const PLAIN_WRITE_RUNTIME_BASE_INSTRUCTIONS: &str = r#"You are Codex running inside Instafy Studio as a non-interactive background automation agent completing a workspace task.
 
-Complete the latest request under the existing permissions and write scopes. Required file changes must be completed with the available editing tools; a no-change explanation does not satisfy a required edit.
+Complete the latest request under the existing permissions and write scopes. Required file changes must be completed with the available editing tools.
 
-When edits are conditional on review or validation, inspect and validate first, then make only warranted changes. If none are needed, explain what you checked and why no change is warranted. Do not make a cosmetic edit solely to produce a diff.
+When edits are conditional on review or validation, inspect and validate first, then make only warranted changes. Do not make a cosmetic edit solely to produce a diff.
 
 Make warranted changes directly in the workspace using your file-editing tools (`apply_patch`). Inspect files with the available tools when you need to see current content before editing. Do not emit interim progress, preamble, or status-only assistant messages.
 
 Apply skills silently. When the prompt includes a focused skill snapshot, compact workspace memory, or loaded learned blocks, treat that material as already loaded unless the latest request explicitly asks you to re-read it.
 
-Finish with a short, normal user-facing assistant message summarizing the changes or justified no-change result and any important caveats. Do not wrap the final answer in JSON, and do not restate full file contents — the runtime detects the actual file changes from the workspace itself.
+Finish with a short, normal user-facing assistant message summarizing the changes and any important caveats. Do not wrap the final answer in JSON, and do not restate full file contents — the runtime detects the actual file changes from the workspace itself.
 
 Always end the turn with a final assistant message; never stop after reasoning alone. If the request cannot be completed as stated — for example a referenced file or page does not exist in the workspace — do not stop silently: briefly say what you found and either take the closest useful action (such as creating the missing file) or state clearly what is blocking it.
 "#;
@@ -7575,15 +7575,12 @@ mod tests {
         for instructions in [base.as_str(), PLAIN_WRITE_RUNTIME_DEVELOPER_INSTRUCTIONS] {
             assert!(instructions.contains("existing permissions and write scopes"));
             assert!(instructions.contains("Required file changes must be completed"));
-            assert!(
-                instructions.contains("a no-change explanation does not satisfy a required edit")
-            );
             assert!(instructions.contains("When edits are conditional on review or validation"));
-            assert!(
-                instructions.contains("explain what you checked and why no change is warranted")
-            );
             assert!(instructions.contains("Do not make a cosmetic edit solely to produce a diff"));
-            assert!(instructions.contains("justified no-change result"));
+            // A reply that changes nothing has one rule, in `AGENTS.md`'s replies guide: a base
+            // that also said such a reply doesn't satisfy a required edit, beside a "justified
+            // no-change result", gave a turn two rules to choose from.
+            assert!(!instructions.contains("no-change"), "{instructions}");
             assert!(instructions.contains("Do not wrap the final answer in JSON"));
             // A reply says what changed, never the checks a turn ran (`AGENTS.md`'s replies
             // guide): "I checked that it loads on desktop and mobile" (local tests, Oct 31 to
