@@ -346,6 +346,39 @@ test("card posts the card of a page that never had one, titled from the page, an
   }
 });
 
+// A page written by hand that loads another page's files ("../framework-laptops/site.js") can't be served from its own
+// folder, so the check holds its card back and names the command that gives it its own files. The card step without
+// the check holds it back too: its card would open a page whose files don't load, and the space's record would then
+// hold it as carded. Once the page loads its own files, the card step posts its card.
+test("card posts no card for a page that loads files from outside its folder, as the check posts none", () => {
+  const s = space();
+  try {
+    s.run(["init", "sites/framework-laptops", "--starter", "compare"]);
+    s.open("sites/framework-laptops");
+    const page = path.join(s.project, "sites", "framework-13-vs-16");
+    fs.mkdirSync(page);
+    const html = fs.readFileSync(path.join(s.project, "sites", "framework-laptops", "index.html"), "utf8");
+    fs.writeFileSync(path.join(page, "index.html"), html.replace(/(href|src)="(theme\.css|site\.js|app\.js)"/g, '$1="../framework-laptops/$2"'));
+    assert.match(s.run(["check", "sites/framework-13-vs-16", "--expect", "Framework Laptop 13"]).stdout, /^OUTSIDE: /m);
+
+    const held = s.run(["card", "sites/framework-13-vs-16", "--json"]);
+    assert.equal(held.status, 2, held.stdout + held.stderr);
+    assert.deepEqual(JSON.parse(held.stdout), { posted: false, reason: "it loads files from outside its folder" });
+    assert.equal(s.run(["card", "sites/framework-13-vs-16"]).stdout, "No card to post: it loads files from outside its folder.\n");
+    assert.deepEqual(s.cards(), []);
+
+    // with its own files, its card is posted
+    assert.equal(s.run(["init", "sites/framework-13-vs-16", "--starter", "compare"]).status, 0);
+    fs.writeFileSync(path.join(page, "index.html"), fs.readFileSync(path.join(page, "index.html"), "utf8").replaceAll("../framework-laptops/", ""));
+    const posted = s.run(["card", "sites/framework-13-vs-16", "--json"]);
+    assert.equal(posted.status, 0, posted.stdout + posted.stderr);
+    assert.equal(JSON.parse(posted.stdout).posted, true);
+    assert.deepEqual(s.cards().map((card) => card.cwd), [fs.realpathSync(page)]);
+  } finally {
+    s.done();
+  }
+});
+
 test("a card's command that fails leaves the check passed, and names the command to run again", () => {
   const s = space();
   try {

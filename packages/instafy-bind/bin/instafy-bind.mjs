@@ -16,7 +16,7 @@ import { COMMAND_NAMES, safeText } from "../src/protocol.mjs";
 import { envNameRefusal } from "../src/executors/script.mjs";
 import { DEFAULT_AGENT_BUDGET_PER_HOUR } from "../src/budget.mjs";
 import { handlerHash, readTried, tryIntent } from "../src/try.mjs";
-import { cardTitle, checkReport } from "../src/check.mjs";
+import { cardTitle, checkReport, readSite } from "../src/check.mjs";
 import { cardArgs, cardCommand, inFolder, inSpace, pageRecorded, previewShows, shellWord } from "../src/preview-host.mjs";
 
 const HELP = `instafy-bind: a website plus a generic backend that turns clicks into typed intents.
@@ -80,7 +80,8 @@ check      Does the site show every item the request named (each product, stop o
            back, except for a page that loads files from outside its folder.
 card       The card step a check that passes takes, without the check: in a space, for a page whose card was
            never opened, while no preview shows it, it serves the page and posts its card, titled from the page.
-           Exit 0 when it posted the card, 1 when the card's command failed, 2 when there is no card to post.
+           As for a check, none for a page that loads files from outside its folder. Exit 0 when it posted the
+           card, 1 when the card's command failed, 2 when there is no card to post.
 command    Push a command (select, highlight, toast, reload) to every open viewer. Uses the
            admin token in .bind/admin-token.
 confirm    Approve (or --no: decline) jobs waiting for confirmation.
@@ -395,8 +396,10 @@ function postCard(dir) {
 /** `card <dir>`: the card's step a check that passes takes, without the check, for a page that never had a card (the
  *  runtime takes it for a page a turn left without one). As for a check, nothing is posted for a page the space's record
  *  of its pages holds (its card was opened before: another chat's page, or one a person stopped), while a preview shows
- *  the folder, outside a space, or for a folder the binder does not serve as one page. `{ exit, lines }`: 0 posted, 1
- *  its command failed, 2 no card to post, with why. */
+ *  the folder, outside a space, for a folder the binder does not serve as one page, or for a page that loads files from
+ *  outside its folder (the check's own reading of it): served from its own folder it can't load them, so, as for the
+ *  check, its card waits until it loads its own. `{ exit, lines }`: 0 posted, 1 its command failed, 2 no card to post,
+ *  with why. */
 function cardReport(dir, { json = false } = {}) {
   const none = !inSpace(dir)
     ? "the folder is not in a space"
@@ -406,7 +409,9 @@ function cardReport(dir, { json = false } = {}) {
         ? "a preview shows it"
         : cardStep(dir) === null
           ? "the binder serves no one page from this folder"
-          : null;
+          : readSite(dir).outside.length
+            ? "it loads files from outside its folder"
+            : null;
   if (none) return { exit: 2, lines: [json ? JSON.stringify({ posted: false, reason: none }) : `No card to post: ${none}.`] };
   const posted = postCard(dir);
   const exit = posted.ok ? 0 : 1;
@@ -677,7 +682,12 @@ async function main() {
     }
     case "card": {
       if (!rest[0]) fail("usage: instafy-bind card <dir> [--json]", 64);
-      const report = cardReport(rest[0], { json: Boolean(flags.json) });
+      let report;
+      try {
+        report = cardReport(rest[0], { json: Boolean(flags.json) });
+      } catch (error) {
+        fail(error.message, 64);
+      }
       process.stdout.write(`${report.lines.join("\n")}\n`);
       process.exitCode = report.exit;
       return;
