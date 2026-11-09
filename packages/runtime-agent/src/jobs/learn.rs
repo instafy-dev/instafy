@@ -246,6 +246,9 @@ const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
     // From before a page made for the person (a map, a comparison, a page to share) was built per the
     // interactive artifacts skill, and a static file server served only other sites.
     include_str!("legacy/frontend-previews-v16.md"),
+    // From before `instafy preview open --start` served a page's folder with no toolchain by itself:
+    // it spelled out `python3 -m http.server` as the serve command, twice.
+    include_str!("legacy/frontend-previews-v17.md"),
 ];
 /// What a previewed site asks Studio for (the person's location, Present and
 /// Follow), read only when a site needs it.
@@ -439,6 +442,9 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // From before a comparison's line under its title came from its own sorts and cells (it said
     // "The lede: the verdict, saying only what a page you read says").
     include_str!("legacy/interactive-artifacts-v16.md"),
+    // From before the card command of a page with no builder skill took no `--serve-cmd` (it said
+    // "The serve command is the builder skill's.").
+    include_str!("legacy/interactive-artifacts-v17.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),

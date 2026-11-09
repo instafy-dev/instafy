@@ -20,7 +20,7 @@ Use this whenever a site or server runs in this space (or should) and someone sh
 
 1. From the site's folder inside the workspace (not a temporary folder), start it and show it in one command:
    `instafy preview open --title "<short name>" --serve-cmd "<command>" --start --json`
-   Write `{port}` where the command takes its port (`--serve-cmd "python3 -m http.server {port} --bind 127.0.0.1"`): it picks a free port for this site, starts the command on it, waits for the site, posts the card and takes the card's picture. Never choose a port yourself: the JSON's `port` is the site's. Add `--path /<page>` for a sub-page. See "Keep it running after your turn" for what `--start` does.
+   Write `{port}` where the command takes its port: it picks a free port for this site, starts the command on it, waits for the site, posts the card and takes the card's picture. Never choose a port yourself: the JSON's `port` is the site's. Add `--path /<page>` for a sub-page. See "Keep it running after your turn" for what `--start` does.
    - Add `--summary "<facts>"` for one line under the card's title: numbers and plain words, at most 80 characters, such as `Trip · 3 days · 14 places`. Without it the card shows the page's own `<meta name="description">`: write it after the page, from what the page shows, and again when a change alters what it shows ("Not checked" stays not checked).
    - Once the site is live it takes a picture of the page for the card (`thumbnail` in the JSON says whether it did). A page that draws itself after it loads (a map, a chart) marks `<html data-instafy-ready="false">` and sets it to `"true"` once drawn; the picture waits for that. `--thumbnail <file>` uses a picture you made instead (JPEG, PNG or WebP); `--no-thumbnail` puts none.
    - It posts the card in this conversation and prints no URL. Do not paste a preview, tunnel or localhost URL for it, and do not send the person to the card: it is there when the command succeeded.
@@ -51,7 +51,7 @@ Every process your turn starts is killed with its terminal's process group when 
 ## Building a site to show
 
 - Don't assume a framework. Inspect the workspace (`package.json`, `vite.config.*`, `next.config.*`, etc) and use its own dev or preview command with `{port}` for its port and a reachable host (Vite: `npx vite --host 127.0.0.1 --port {port} --strictPort`).
-- A page made for the person (a map, a comparison, a page to share) is built per `instafy-interactive-artifacts`. Any other site with no toolchain: one `index.html` (React through ESM CDN imports such as `https://esm.sh/react@18` if needed) served by a static file server, for example `--serve-cmd "python3 -m http.server {port} --bind 127.0.0.1"`.
+- A page made for the person (a map, a comparison, a page to share) is built per `instafy-interactive-artifacts`. Any other site with no toolchain: one `index.html` (React through ESM CDN imports such as `https://esm.sh/react@18` if needed) in `sites/<name>/`, shown from there with `--start` and no `--serve-cmd`.
 - Install dependencies only when needed, and say you did.
 - Reuse the running site: rerun the same command instead of starting a duplicate.
 - Never store secrets in the workspace. Request them with `request_secret` actions; if a provider's screens are involved, open Instafy's browser on the provider's public site to show the way.

@@ -523,6 +523,7 @@ Unlike `instafy tunnel`, nothing becomes public and the CLI never prints a URL.
 
 ```bash
 instafy preview open --title "Site preview" --serve-cmd "python3 -m http.server {port} --bind 127.0.0.1" --start --json
+instafy preview open --title "Trip plan" --start --json           # in sites/<name> with an index.html and no package.json: Instafy's page server (instafy bind serve) serves it
 instafy preview open --port 4173 --title "Site preview" --json   # a site that already runs on 4173
 instafy preview list
 instafy preview close <previewId>

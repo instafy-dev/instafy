@@ -69,9 +69,9 @@ own kind of page.
 
 1. A page `instafy bind check` checks gets its card from that check (above), whose answer gives its port. Any other
    site: one command, run inside the site's folder, starts it so it outlives your turn and posts its card:
-   `(cd sites/<slug> && instafy preview open --title '<short title>' --serve-cmd "<serve command>" --start --json)`,
-   with `{port}` where the serve command takes its port. The serve command is the builder skill's. It picks the port:
-   never choose one.
+   `(cd sites/<slug> && instafy preview open --title '<short title>' --start --json)`. A builder skill's site adds
+   that skill's `--serve-cmd "<serve command>"`, with `{port}` where it takes its port. It picks the port: never
+   choose one.
 2. `instafy preview check --port <port>` (the JSON's) loads it as Studio does: fix every error it lists and look at
    the phone screenshot.
 3. Never post preview, tunnel or localhost URLs. A public link only when the user asks for one:

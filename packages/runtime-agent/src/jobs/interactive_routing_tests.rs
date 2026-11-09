@@ -269,8 +269,10 @@ fn a_page_written_by_hand_follows_light_and_dark() {
 /// space and another chat's build took a new picture of it. The card step's command goes into the
 /// site's folder itself and serves `.`, as the map skill's does; a page `instafy bind check` checks
 /// gets that command from the check, which runs it when it passes (named in the hub as well, the
-/// card was asked for twice). An unedited earlier copy of the hub is upgraded; an edited one is
-/// kept.
+/// card was asked for twice). A page with no builder skill names no serve command there: the
+/// command serves its folder by itself
+/// (`no_skill_spells_out_a_serve_command_for_a_page_with_no_builder_skill`). An unedited earlier
+/// copy of the hub is upgraded; an edited one is kept.
 #[test]
 fn a_pages_card_starts_inside_the_sites_own_folder() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -280,8 +282,8 @@ fn a_pages_card_starts_inside_the_sites_own_folder() {
     let step = r#"1. A page `instafy bind check` checks gets its card from that check (above), whose answer
         gives its port. Any other site: one command, run inside the site's folder, starts it so it
         outlives your turn and posts its card: `(cd sites/<slug> && instafy preview open --title
-        '<short title>' --serve-cmd "<serve command>" --start --json)`, with `{port}` where the serve
-        command takes its port. The serve command is the builder skill's."#;
+        '<short title>' --start --json)`. A builder skill's site adds that skill's `--serve-cmd
+        "<serve command>"`, with `{port}` where it takes its port."#;
     assert!(flat(hub).contains(&flat(step)), "{hub}");
     assert!(!hub.contains("a bound or plain site's is"), "{hub}");
     assert!(!hub.contains("from the site's folder"), "{hub}");
@@ -873,7 +875,8 @@ fn every_turn_that_may_write_reads_whose_page_it_changes_and_never_whose_app() {
 /// small page I can share.") was written by hand and served by a static file server, with no links,
 /// no reload and no starter: after the hub, its turn read the previews skill, whose "With no
 /// toolchain, prefer one `index.html` … served by a static file server" won. The previews skill now
-/// sends a page made for the person to the hub, and keeps the static file server for other sites.
+/// sends a page made for the person to the hub, and names no static file server for any site
+/// (`no_skill_spells_out_a_serve_command_for_a_page_with_no_builder_skill`).
 /// That its prompt names the hub, and no static file server, held before too ("small page" is a
 /// keyword of the hub): it is kept as a guard. An unedited previews skill from before is upgraded.
 #[test]
@@ -906,11 +909,7 @@ fn a_page_to_share_is_built_the_hubs_way_not_served_by_hand() {
         !building.contains("With no toolchain, prefer one `index.html`"),
         "{building}"
     );
-    assert_eq!(
-        building.matches("static file server").count(),
-        1,
-        "{building}"
-    );
+    assert!(!building.contains("static file server"), "{building}");
     assert!(
         previews.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
         "{} bytes",
@@ -923,6 +922,106 @@ fn a_page_to_share_is_built_the_hubs_way_not_served_by_hand() {
     fs::write(&path, previous).unwrap();
     learn::ensure_project_memory_scaffold(tmp.path());
     assert_eq!(fs::read_to_string(&path).unwrap(), previews);
+}
+
+/// A page with no builder skill ("Put the hours and the metro route on a small page I can share.")
+/// was written by hand and started with `--serve-cmd 'python3 -m http.server {port} --bind
+/// 127.0.0.1'`, the only serve command the skills spelled out for such a page. Three later saved
+/// changes reached no open view of it (a saved change reloads a page through Instafy's page
+/// server, which that server isn't), no check of the page ran, and later requests listed the
+/// space's other pages and not this one (the pages a turn is told are those Instafy's page server
+/// or an installed skill's command serves). `instafy preview open --start` with no `--serve-cmd`
+/// now starts Instafy's page server in such a folder itself (the CLI's `pageServeCommand`), so no
+/// skill a turn reads spells out a serve command for it: the previews skill's two python examples
+/// are gone, and the hub's card command for a page with no builder skill takes no `--serve-cmd`.
+/// The copies from before are kept, and an unedited one is upgraded.
+#[test]
+fn no_skill_spells_out_a_serve_command_for_a_page_with_no_builder_skill() {
+    fn markdown_under(dir: &Path, found: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).expect("read_dir").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                markdown_under(&path, found);
+            } else if path.extension().is_some_and(|ext| ext == "md") {
+                found.push(path);
+            }
+        }
+    }
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Everything a turn is given to read: AGENTS.md, the skills and their references.
+    let mut read_by_turns = Vec::new();
+    markdown_under(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/instafy"),
+        &mut read_by_turns,
+    );
+    assert!(read_by_turns.len() > 10, "{read_by_turns:?}");
+    for path in &read_by_turns {
+        let text = fs::read_to_string(path).expect("skill text");
+        for gone in ["http.server", "python3 -m"] {
+            assert!(!text.contains(gone), "{gone} in {}", path.display());
+        }
+    }
+
+    let previews = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/instafy/.agents/skills/instafy-frontend-previews/SKILL.md"
+    ));
+    let hub =
+        include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
+    assert!(
+        previews.contains("Write `{port}` where the command takes its port: it picks a free port"),
+        "{previews}"
+    );
+    assert!(
+        previews.contains(
+            "in `sites/<name>/`, shown from there with `--start` and no `--serve-cmd`.\n"
+        ),
+        "{previews}"
+    );
+    assert!(
+        flat(hub).contains(
+            "`(cd sites/<slug> && instafy preview open --title '<short title>' --start --json)`. A builder skill's site adds that skill's `--serve-cmd \"<serve command>\"`, with `{port}` where it takes its port."
+        ),
+        "{hub}"
+    );
+    assert!(
+        !hub.contains("The serve command is the builder skill's."),
+        "{hub}"
+    );
+    for (text, name) in [(previews, "previews"), (hub, "hub")] {
+        assert!(
+            text.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+            "{name}: {} bytes",
+            text.len()
+        );
+    }
+
+    let previous_previews = include_str!("legacy/frontend-previews-v17.md");
+    let previous_hub = include_str!("legacy/interactive-artifacts-v17.md");
+    assert_eq!(
+        previous_previews.matches("python3 -m http.server").count(),
+        2
+    );
+    assert!(previous_hub.contains("The serve command is the builder skill's."));
+    let tmp = tempdir().expect("tmp");
+    learn::ensure_project_memory_scaffold(tmp.path());
+    for (relative, previous, current) in [
+        (
+            learn::FRONTEND_PREVIEWS_RELATIVE_PATH,
+            previous_previews,
+            previews,
+        ),
+        (
+            learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
+            previous_hub,
+            hub,
+        ),
+    ] {
+        let path = tmp.path().join(relative);
+        fs::write(&path, previous).unwrap();
+        learn::ensure_project_memory_scaffold(tmp.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), current, "{relative}");
+    }
 }
 
 /// A comparison asked for "from what you already know, without browsing" claimed "checked 1 Mar 2025

@@ -72,7 +72,8 @@ export type PreviewOpenOptions = {
   cwd?: string;
   // `--start`: start `serveCmd` in the background, in its own session, without Instafy credentials, logging to
   // .instafy/agent/logs, and wait for the port. Without `port` it picks a free port and puts it in `{port}`. A port that
-  // already answers is used only when it runs this same site; any other site there is refused.
+  // already answers is used only when it runs this same site; any other site there is refused. Without `serveCmd`, in
+  // a page's folder with no toolchain, it starts Instafy's page server there (`pageServeCommand`).
   start?: boolean;
   // How long `start` waits for the port (default 60 s, as a wake does).
   startTimeoutMs?: number;
@@ -905,6 +906,24 @@ export function parseExplicitServeCommand(raw: string): string[] {
   return argv;
 }
 
+/** How Instafy's page server serves a page's folder for its card, on this machine only (`instafy bind card` runs the same). */
+const PAGE_SERVE_COMMAND = `instafy bind serve . --port ${PORT_PLACEHOLDER} --preview`;
+
+/**
+ * What `--start` runs when no `--serve-cmd` is given: Instafy's page server, in a page's own folder (`sites/<name>` in
+ * the space's workspace) that holds an `index.html` and no `package.json`. Null anywhere else: that site's command is
+ * its own to give.
+ */
+export function pageServeCommand(params: { projectId: string | null; cwd?: string; env?: NodeJS.ProcessEnv }): string | null {
+  const root = resolveWorkspaceRoot(params.env ?? process.env, params.projectId);
+  const dir = params.cwd ?? process.cwd();
+  const folder = root ? workspaceRelativeDir(root, dir) : null;
+  const [top, name, ...deeper] = folder?.split("/") ?? [];
+  if (top !== "sites" || !name || deeper.length > 0) return null;
+  const isFile = (file: string) => fs.statSync(path.join(dir, file), { throwIfNoEntry: false })?.isFile() === true;
+  return isFile("index.html") && !fs.existsSync(path.join(dir, "package.json")) ? PAGE_SERVE_COMMAND : null;
+}
+
 /**
  * How to start the site again when the process that started it exits, or the space sleeps: `--serve-cmd` from the
  * current directory, else the argv and directory of the process listening on the port. `note` says why there is none.
@@ -1492,6 +1511,15 @@ function heldPage(readyBody: Record<string, unknown>): { conversationId: string 
   return { conversationId: typeof chat === "string" && chat.trim() ? chat.trim() : null };
 }
 
+/** The space this command is for, or null when none is configured (the open itself says so further on). */
+function spaceIfAny(project: string | undefined): string | null {
+  try {
+    return resolveProject({ project });
+  } catch {
+    return null;
+  }
+}
+
 export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpenResult> {
   // A port that is out of range or Instafy's own (the same rules as `preview check`) is refused
   // before anything else: no probe, no request. The server decides as well (400 port_not_allowed).
@@ -1499,8 +1527,14 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
   const title = parsePreviewTitle(opts.title);
   const sitePath = parsePreviewPath(opts.path);
   const summary = parsePreviewSummary(opts.summary);
+  // --start with no --serve-cmd, in a page's folder with no toolchain: Instafy's page server serves it.
+  const serveCmd = opts.serveCmd?.trim()
+    ? opts.serveCmd
+    : opts.start
+      ? (pageServeCommand({ projectId: spaceIfAny(opts.project), cwd: opts.cwd }) ?? undefined)
+      : undefined;
   // A malformed --serve-cmd, or one carrying a secret, is refused before anything is probed or asked for.
-  const serveArgv = opts.serveCmd?.trim() ? parseExplicitServeCommand(opts.serveCmd) : null;
+  const serveArgv = serveCmd ? parseExplicitServeCommand(serveCmd) : null;
   if (opts.start && !serveArgv) {
     throw new PreviewCommandError('--start needs --serve-cmd "<command>" to start the site.', PREVIEW_EXIT_NOT_LISTENING);
   }
@@ -1510,7 +1544,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
     }
     if (!serveArgv!.some((arg) => arg.includes(PORT_PLACEHOLDER))) {
       throw new Error(
-        `--serve-cmd needs ${PORT_PLACEHOLDER} where the site's port goes, e.g. --serve-cmd "python3 -m http.server ${PORT_PLACEHOLDER} --bind 127.0.0.1": --start picks the port.`,
+        `--serve-cmd needs ${PORT_PLACEHOLDER} where the site's port goes: --start picks the port.`,
       );
     }
   }
@@ -1524,7 +1558,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
   // With --start, the command is checked (one command, from inside the workspace, no secret) before anything runs.
   // Kept as given, `{port}` left in: that, and the directory it runs from, is what makes it this same site next time.
   const start = opts.start
-    ? resolvePreviewServe({ port: explicitPort ?? 0, serveCmd: opts.serveCmd, projectId, cwd: opts.cwd }).serve
+    ? resolvePreviewServe({ port: explicitPort ?? 0, serveCmd, projectId, cwd: opts.cwd }).serve
     : null;
 
   // From choosing the port to the state write, one `instafy preview` command at a time on this machine: two commands
@@ -1564,7 +1598,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
       // Read before anything else changes on the port: the process listening now is the one to restart later.
       const { serve, note } = resolvePreviewServe({
         port,
-        serveCmd: opts.serveCmd?.split(PORT_PLACEHOLDER).join(String(port)),
+        serveCmd: serveCmd?.split(PORT_PLACEHOLDER).join(String(port)),
         projectId,
         cwd: opts.cwd,
         procRoot: opts.procRoot,
