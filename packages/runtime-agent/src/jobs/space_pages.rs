@@ -339,7 +339,7 @@ pub(crate) struct HeldPages {
 
 impl HeldPages {
     /// The pages a turn of `conversation_id` in `workspace_dir` holds, from the space's record.
-    pub(crate) fn of_turn(
+    pub(super) fn of_turn(
         workspace_dir: &Path,
         conversation_id: Option<&Uuid>,
         page_commands: &[String],
@@ -385,7 +385,7 @@ impl HeldPages {
 
     /// Puts back what changed under a held page between `start`, the folder's status as the turn
     /// began, and now: each path the turn found as saved goes back as the latest save holds it.
-    pub(crate) async fn put_back(
+    pub(super) async fn put_back(
         &mut self,
         workspace_dir: &Path,
         start: Option<&HashMap<String, GitStatusEntry>>,
@@ -431,7 +431,7 @@ impl HeldPages {
 
     /// Leaves out of a turn's returned `files` each one under a held page, so the runtime never
     /// writes it. One returned with its contents counts as a change the turn made there.
-    pub(crate) fn leave_out_returned(
+    pub(super) fn leave_out_returned(
         &mut self,
         workspace_dir: &Path,
         files: &mut Vec<CodexFileDescriptor>,
@@ -460,12 +460,12 @@ impl HeldPages {
     }
 
     /// Whether the turn changed a held page, and so changed nothing there.
-    pub(crate) fn put_a_change_back(&self) -> bool {
+    pub(super) fn put_a_change_back(&self) -> bool {
         !self.restored.is_empty() || !self.returned.is_empty()
     }
 
     /// The blocked write a turn's artifacts record when it changed a held page.
-    pub(crate) fn artifact(&self) -> Option<JsonValue> {
+    pub(super) fn artifact(&self) -> Option<JsonValue> {
         if self.changed.is_empty() && self.returned.is_empty() {
             return None;
         }
@@ -486,7 +486,7 @@ impl HeldPages {
 
     /// The reply's last line when the turn changed a held page: "I didn't change “<title>”: it was
     /// made in another chat." The record keeps no chat's name, so the line can't say which.
-    pub(crate) fn reply_line(&self) -> Option<String> {
+    pub(super) fn reply_line(&self) -> Option<String> {
         let mut pages: Vec<&RecordedPage> = Vec::new();
         for path in self.restored.iter().chain(&self.returned) {
             if let Some(page) = self.page_of(path)

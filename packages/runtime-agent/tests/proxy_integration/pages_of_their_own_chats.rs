@@ -731,8 +731,8 @@ async fn run_case() -> Result<()> {
     space.finish().await
 }
 
-/// A change the routing step sent straight to the building thread, which must change files: in a
-/// space whose repository counts a turn's changes, as the local test's message was routed.
+/// A change the routing step sent straight to the building thread, which must change files, as the
+/// local test's message was routed: in a space whose repository counts a turn's changes.
 fn required_job(
     project_id: Uuid,
     conversation_id: Uuid,
@@ -743,6 +743,7 @@ fn required_job(
     job.payload["metadata"] = json!({
         "execution_mode": "apply",
         "agentRoutingPreflight": { "workspaceFileChangeRequirement": "required" },
+        "runtimeExpectations": { "workspaceFileChanges": true },
     });
     job
 }
