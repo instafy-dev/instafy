@@ -19,10 +19,11 @@
 //! A page another chat made is read-only here, and the runtime holds it to that ([`HeldPages`]).
 //! Told so in words, a new chat's turn still deleted another chat's comparison data and typed it
 //! again with a stray character, and that page was broken until a later turn mended it in passing
-//! (a local test, Nov 9). So what a turn changes under such a page's folder goes back as the
-//! space's latest save holds it once the turn's model is done, a file the turn returns there is
-//! never written, and the reply says which page it didn't change. The person changes that page in
-//! the chat that made it, as an artifact belongs to its conversation in other chat apps.
+//! (a local test, Nov 9). So what a turn's own steps change under such a page's folder goes back as
+//! it was when the turn began once the turn's model is done, a file the turn returns there is never
+//! written, and the reply says which page it didn't change. The person changes that page in the
+//! chat that made it, as an artifact belongs to its conversation in other chat apps. An
+//! automation's run has no chat to ask in: nothing holds a page for it.
 //!
 //! A page whose chat is not recorded is a page from before the record: a wake that starts its site
 //! again ([`record_woken_page`]) writes it down with no chat, so no later open claims it. Nothing
@@ -40,7 +41,7 @@ use std::path::{Component, Path};
 
 use origin_http_server::workspace_fs::WorkspaceDir;
 use serde_json::{Value as JsonValue, json};
-use tracing::warn;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::{CodexFileDescriptor, GitStatusEntry};
@@ -214,12 +215,14 @@ fn entry_folder(entry: &JsonValue) -> Option<String> {
 }
 
 /// A page made for the person, as the record keeps it: its folder, its title, and the chat that
-/// made it, when the record says.
+/// made it, when the record says, with its entry and that entry's place in the record.
 #[derive(Debug, Clone)]
 struct RecordedPage {
     folder: String,
     title: Option<String>,
     chat: Option<Uuid>,
+    index: usize,
+    entry: JsonValue,
 }
 
 impl RecordedPage {
@@ -240,7 +243,7 @@ fn recorded_pages(
         return Vec::new();
     };
     let mut pages: Vec<RecordedPage> = Vec::new();
-    for entry in entries {
+    for (index, entry) in entries.iter().enumerate() {
         let Some(folder) = entry_folder(entry) else {
             continue;
         };
@@ -268,6 +271,8 @@ fn recorded_pages(
             folder,
             title,
             chat,
+            index,
+            entry: entry.clone(),
         });
     }
     pages
@@ -308,21 +313,162 @@ fn pages_lines(
     }
 }
 
+/// The longest file under a held page whose bytes a turn keeps when it begins with that file not
+/// saved, and the most it keeps in all: page files are small, and one past these can't be put back.
+const MAX_KEPT_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_KEPT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// What a turn's own steps reached, from its run's events: the paths its edit steps named, and the
+/// commands it ran that may write. A change under another chat's page is the turn's only when one
+/// of these reached it: anything else that changed there while the turn ran (a page's own server
+/// saving a viewer's click, say) is someone else's.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct TurnSteps {
+    /// The workspace paths the turn's edit steps (`apply_patch`) named.
+    edited: BTreeSet<String>,
+    /// Each command the turn ran that may write, and an edit step's path the workspace's own
+    /// spelling doesn't hold: what names a place the turn may have written.
+    named: Vec<String>,
+    /// No record of the run's steps (it failed before any reached the runtime): every change counts
+    /// as the turn's.
+    unknown: bool,
+}
+
+impl TurnSteps {
+    /// The steps in a run's `events`, begun or done: its edit steps (`file_change`) and its commands
+    /// (`command_execution`), leaving out a command the read-only list holds (`cat`, `ls`, `git
+    /// show`).
+    pub(super) fn of_events(workspace_dir: &Path, events: &[JsonValue]) -> Self {
+        let mut steps = Self::default();
+        for item in events.iter().filter_map(|event| event.get("item")) {
+            match item.get("type").and_then(JsonValue::as_str) {
+                Some("file_change") => {
+                    let paths = item.get("paths").and_then(JsonValue::as_array);
+                    for raw in paths.into_iter().flatten().filter_map(JsonValue::as_str) {
+                        match workspace_path(workspace_dir, raw) {
+                            Some(path) => {
+                                steps.edited.insert(path);
+                            }
+                            None => steps.name(raw),
+                        }
+                    }
+                }
+                Some("command_execution") => {
+                    let argv: Vec<String> = item
+                        .get("command_argv")
+                        .and_then(JsonValue::as_array)
+                        .map(|words| {
+                            words
+                                .iter()
+                                .filter_map(JsonValue::as_str)
+                                .map(str::to_string)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !argv.is_empty() && super::known_safe_command::is_known_safe_command(&argv) {
+                        continue;
+                    }
+                    if let Some(command) = item.get("command").and_then(JsonValue::as_str) {
+                        steps.name(command);
+                    }
+                }
+                _ => {}
+            }
+        }
+        steps
+    }
+
+    /// A run that kept no record of its steps.
+    pub(super) fn unknown() -> Self {
+        Self {
+            unknown: true,
+            ..Self::default()
+        }
+    }
+
+    fn name(&mut self, text: &str) {
+        if !self.named.iter().any(|named| named == text) {
+            self.named.push(text.to_string());
+        }
+    }
+
+    fn add(&mut self, other: Self) {
+        self.edited.extend(other.edited);
+        for named in &other.named {
+            self.name(named);
+        }
+        self.unknown |= other.unknown;
+    }
+
+    /// Whether a step reached `path`, in the page in `folder`: an edit step named that path, or a
+    /// command named the folder.
+    fn reached(&self, path: &str, folder: &str) -> bool {
+        self.unknown
+            || self.edited.contains(path)
+            || self.named.iter().any(|named| names_folder(named, folder))
+    }
+}
+
+/// `raw`, a path an edit step named, as a workspace path, or None outside the workspace.
+fn workspace_path(workspace_dir: &Path, raw: &str) -> Option<String> {
+    let path = Path::new(raw.trim());
+    let relative = if path.is_absolute() {
+        match path.strip_prefix(workspace_dir) {
+            Ok(relative) => relative.to_path_buf(),
+            Err(_) => {
+                let root = std::fs::canonicalize(workspace_dir).ok()?;
+                path.strip_prefix(root).ok()?.to_path_buf()
+            }
+        }
+    } else {
+        path.to_path_buf()
+    };
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_str()?.to_string()),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// Whether `text` names the page in `folder` (`sites/porto`): its workspace path, or its own name,
+/// as a whole part of a path.
+fn names_folder(text: &str, folder: &str) -> bool {
+    let name = folder.rsplit('/').next().unwrap_or(folder);
+    let is_name_char = |c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | '.');
+    [folder, name].into_iter().any(|needle| {
+        !needle.is_empty()
+            && text.match_indices(needle).any(|(at, _)| {
+                let before = text[..at].chars().next_back();
+                let after = text[at + needle.len()..].chars().next();
+                !before.is_some_and(is_name_char) && !after.is_some_and(is_name_char)
+            })
+    })
+}
+
 /// The pages another chat made, held for a turn of this chat that may write files: they are
 /// read-only here ([`super::PAGE_OF_ITS_OWN_CHAT_RULE`]).
 ///
-/// - Once the turn's model is done, ended well or not, what changed under such a page's folder
-///   since the turn began goes back as the space's latest save holds it ([`Self::put_back`]): the
-///   restore a read-only turn gets, through the space's own repository. That is what the turn
-///   changed: a runtime runs one job at a time, from before the folder's status at its start to
-///   after its save (the job's process environment lock), so no other chat's turn changes a page
-///   meanwhile. A path another turn had left unsaved when this one began (a stopped turn's, a save
-///   that didn't land) shows as changed at the start and is never touched, and anything saved
-///   since (an Undo, a save brought in from elsewhere) is what the restore puts back.
+/// - Once the turn's model is done, ended well or not, what the turn changed under such a page's
+///   folder goes back as it was when the turn began ([`Self::put_back`]): a file that was saved
+///   then as the space's latest save holds it, through the space's own repository; one that wasn't
+///   to the bytes it held then, which the turn kept as it began.
+/// - What the turn changed is what its own steps reached ([`TurnSteps`]): a path one of its edit
+///   steps named, or anything in a page's folder that one of its commands named. Nothing else
+///   there is touched: a page's own server saving a viewer's click while the turn ran, or work
+///   another turn left there unsaved. A runtime runs one turn at a time, so no other chat's turn
+///   changes a page while this one runs.
 /// - A file the turn returns for the runtime to write there is never written
-///   ([`Self::leave_out_returned`]).
-/// - Either way the turn's files, its save and its card leave the page as it was; the turn's
-///   artifacts record it as a blocked write, and its reply ends on [`Self::reply_line`].
+///   ([`Self::leave_out_returned`]), and no path under such a page goes in the turn's files, its
+///   save or its card ([`Self::holds`]).
+/// - A turn's card writes the space's record of its pages again, without a page whose folder was
+///   gone at that moment, and the record is outside every save: each held page's entry goes back
+///   as the turn began.
+/// - The turn's artifacts record a change put back as a blocked write, and its reply says which
+///   page it didn't change ([`Self::reply`]).
 ///
 /// A page is held by its own folder: a path in the folder of a page this chat made, or one whose
 /// chat isn't recorded, within another chat's page's folder stays this turn's.
@@ -330,7 +476,12 @@ fn pages_lines(
 pub(crate) struct HeldPages {
     /// The space's pages, each with whether this turn holds it.
     pages: Vec<(RecordedPage, bool)>,
-    /// The paths under a held page that changed while the turn ran, and those put back.
+    /// Each held path that wasn't saved when the turn began, as it was then, or None when it was
+    /// gone then. One left out had no bytes the turn could keep (a large file, or no plain file).
+    unsaved: HashMap<String, Option<KeptFile>>,
+    /// What the turn's own steps reached.
+    steps: TurnSteps,
+    /// The paths under a held page the turn changed, and those put back.
     changed: BTreeSet<String>,
     restored: BTreeSet<String>,
     /// The files under a held page the turn returned with their contents, never written.
@@ -338,11 +489,14 @@ pub(crate) struct HeldPages {
 }
 
 impl HeldPages {
-    /// The pages a turn of `conversation_id` in `workspace_dir` holds, from the space's record.
+    /// The pages a turn of `conversation_id` in `workspace_dir` holds, from the space's record, with
+    /// the bytes of each file under them that `start`, the folder's status as the turn begins, shows
+    /// not saved.
     pub(super) fn of_turn(
         workspace_dir: &Path,
         conversation_id: Option<&Uuid>,
         page_commands: &[String],
+        start: Option<&HashMap<String, GitStatusEntry>>,
     ) -> Self {
         let pages = read_record(workspace_dir)
             .map(|record| {
@@ -357,10 +511,23 @@ impl HeldPages {
                 (page, held)
             })
             .collect();
-        Self {
+        let mut held = Self {
             pages,
             ..Self::default()
+        };
+        let mut paths: Vec<&String> = start
+            .into_iter()
+            .flat_map(|status| status.keys())
+            .filter(|path| held.holds(path))
+            .collect();
+        paths.sort();
+        let mut budget = MAX_KEPT_BYTES;
+        for path in paths {
+            if let Some(kept) = keep_unsaved(workspace_dir, path, &mut budget) {
+                held.unsaved.insert(path.clone(), kept);
+            }
         }
+        held
     }
 
     fn holds_any(&self) -> bool {
@@ -383,16 +550,39 @@ impl HeldPages {
             .and_then(|(page, held)| held.then_some(page))
     }
 
-    /// Puts back what changed under a held page between `start`, the folder's status as the turn
-    /// began, and now: each path the turn found as saved goes back as the latest save holds it.
+    /// Whether a workspace path is under a page another chat made: never in this turn's files, save
+    /// or card.
+    pub(super) fn holds(&self, path: &str) -> bool {
+        self.page_of(path).is_some()
+    }
+
+    /// Leaves out of `files` each one under a held page.
+    pub(super) fn leave_out_held(&self, files: &mut Vec<CodexFileDescriptor>) {
+        if !self.holds_any() {
+            return;
+        }
+        files.retain(|file| {
+            ![&file.workspace_path, &file.path].into_iter().any(|raw| {
+                super::sanitize_relative_workspace_path(raw)
+                    .is_some_and(|path| self.holds(&path.to_string_lossy().replace('\\', "/")))
+            })
+        });
+    }
+
+    /// Puts back what the turn changed under a held page since `start`, the folder's status as the
+    /// turn began, with `steps` the steps of the run just done: each path one of the turn's steps
+    /// reached goes back as it was then.
     pub(super) async fn put_back(
         &mut self,
         workspace_dir: &Path,
         start: Option<&HashMap<String, GitStatusEntry>>,
+        steps: TurnSteps,
     ) {
         if !self.holds_any() {
             return;
         }
+        self.steps.add(steps);
+        self.keep_rows(workspace_dir);
         let Some(start) = start else {
             return;
         };
@@ -402,31 +592,113 @@ impl HeldPages {
         let held = |status: &HashMap<String, GitStatusEntry>| -> HashMap<String, GitStatusEntry> {
             status
                 .iter()
-                .filter(|(path, _)| self.page_of(path).is_some())
+                .filter(|(path, _)| self.holds(path))
                 .map(|(path, entry)| (path.clone(), entry.clone()))
                 .collect()
         };
         let (start, now) = (held(start), held(&now));
-        let changed = super::git_status_delta_paths(&start, &now);
-        if changed.is_empty() {
+        // What changed there: a path whose status isn't what it was, or one not saved then and as
+        // saved now.
+        let mut changed: BTreeSet<String> = super::git_status_delta_paths(&start, &now)
+            .into_iter()
+            .collect();
+        changed.extend(
+            start
+                .keys()
+                .filter(|path| !now.contains_key(*path))
+                .cloned(),
+        );
+        let (theirs, others): (BTreeSet<String>, BTreeSet<String>) =
+            changed.into_iter().partition(|path| {
+                self.page_of(path)
+                    .is_some_and(|page| self.steps.reached(path, &page.folder))
+            });
+        if !others.is_empty() {
+            info!(paths = ?others, "left a change under another chat's page that no step of this turn reached");
+        }
+        if theirs.is_empty() {
             return;
         }
-        let restored = super::restore_clean_baseline_git_status_delta_excluding(
+        // Saved when the turn began: back as the latest save holds it.
+        let saved: HashMap<String, GitStatusEntry> = now
+            .iter()
+            .filter(|(path, _)| theirs.contains(*path) && !start.contains_key(*path))
+            .map(|(path, entry)| (path.clone(), entry.clone()))
+            .collect();
+        let mut restored = super::restore_clean_baseline_git_status_delta_excluding(
             workspace_dir,
             &start,
-            &now,
+            &saved,
             &HashSet::new(),
         )
         .await;
-        let left: Vec<&String> = changed
+        // Not saved then: back to the bytes it held then.
+        for path in theirs.iter().filter(|path| start.contains_key(*path)) {
+            if let Some(kept) = self.unsaved.get(path)
+                && put_unsaved_back(workspace_dir, path, kept.as_ref())
+            {
+                restored.push(path.clone());
+            }
+        }
+        let left: Vec<&String> = theirs
             .iter()
             .filter(|path| !restored.contains(*path))
             .collect();
         if !left.is_empty() {
             warn!(paths = ?left, "a change under a page another chat made was not put back");
         }
-        self.changed.extend(changed);
+        self.changed.extend(theirs);
         self.restored.extend(restored);
+    }
+
+    /// Puts back each held page's entry in the space's record as the turn began, when it is gone
+    /// from the record or names another chat: a turn's card writes the record again without a page
+    /// whose folder was gone at that moment, and nothing else brings an entry back. The record is
+    /// written only when it is still the one read.
+    fn keep_rows(&self, workspace_dir: &Path) {
+        let record = read_record(workspace_dir);
+        let mut entries = record
+            .as_ref()
+            .and_then(|record| record.get("pages"))
+            .and_then(JsonValue::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut changed = false;
+        for (page, _) in self.pages.iter().filter(|(_, held)| *held) {
+            let maker = page.entry.get("conversationId");
+            match entries
+                .iter()
+                .position(|entry| entry_folder(entry).as_deref() == Some(page.folder.as_str()))
+            {
+                Some(at) if entries[at].get("conversationId") == maker => {}
+                Some(at) => {
+                    entries[at] = page.entry.clone();
+                    changed = true;
+                }
+                None => {
+                    entries.insert(page.index.min(entries.len()), page.entry.clone());
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return;
+        }
+        let Ok(text) = serde_json::to_string_pretty(&json!({ "version": 1, "pages": entries }))
+        else {
+            return;
+        };
+        let Ok(dir) =
+            WorkspaceDir::open(workspace_dir).and_then(|w| w.create_dir_all(PAGES_RECORD_DIR))
+        else {
+            return;
+        };
+        if dir.entry_kind(".gitignore").is_err() {
+            let _ = dir.replace_file(".gitignore", &mut &PAGES_RECORD_IGNORE[..], false);
+        }
+        if read_record(workspace_dir) == record {
+            let _ = dir.replace_file("pages.json", &mut text.as_bytes(), false);
+        }
     }
 
     /// Leaves out of a turn's returned `files` each one under a held page, so the runtime never
@@ -448,7 +720,7 @@ impl HeldPages {
             else {
                 return true;
             };
-            if self.page_of(&path).is_none() {
+            if !self.holds(&path) {
                 return true;
             }
             if file.content.is_some() || file.content_base64.is_some() {
@@ -513,6 +785,91 @@ impl HeldPages {
             )),
         }
     }
+
+    /// Ends a turn's reply on [`Self::reply_line`] when the turn changed a held page. When that was
+    /// the turn's only change (`files`, its own, hold none), the line is the reply: the model's
+    /// words would tell of a change no one can see.
+    pub(super) fn reply(&self, summary: &mut String, files: &[CodexFileDescriptor]) {
+        let Some(line) = self.reply_line() else {
+            return;
+        };
+        if files.iter().any(|file| !file.is_read_reference()) {
+            super::save_report::append_not_saved(summary, &[line]);
+        } else {
+            *summary = line;
+        }
+    }
+}
+
+/// A file under a held page as a turn found it, not saved: its bytes, whether it runs as a
+/// program, and when it was last written, so that once it is back the folder's status reads as the
+/// turn found it.
+#[derive(Debug)]
+struct KeptFile {
+    bytes: Vec<u8>,
+    executable: bool,
+    modified: Option<std::time::SystemTime>,
+}
+
+/// A held `path` not saved as the turn begins: `Some(None)` when it is gone, None when it can't be
+/// kept (no plain file, or past the limits).
+#[allow(clippy::option_option)]
+fn keep_unsaved(workspace_dir: &Path, path: &str, budget: &mut u64) -> Option<Option<KeptFile>> {
+    let file = match WorkspaceDir::open(workspace_dir).and_then(|w| w.open_file(path)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(None),
+        Err(_) => return None,
+    };
+    let metadata = file.metadata().ok()?;
+    if metadata.len() > MAX_KEPT_FILE_BYTES || metadata.len() > *budget {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_KEPT_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_KEPT_FILE_BYTES {
+        return None;
+    }
+    *budget -= bytes.len() as u64;
+    #[cfg(unix)]
+    let executable = {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    };
+    #[cfg(not(unix))]
+    let executable = false;
+    Some(Some(KeptFile {
+        bytes,
+        executable,
+        modified: metadata.modified().ok(),
+    }))
+}
+
+/// Writes a held `path` back as the turn kept it when it began, or takes it away when it was gone
+/// then; true when it is back.
+fn put_unsaved_back(workspace_dir: &Path, path: &str, kept: Option<&KeptFile>) -> bool {
+    let Ok(workspace) = WorkspaceDir::open(workspace_dir) else {
+        return false;
+    };
+    let Some(kept) = kept else {
+        return match workspace.remove_file(path) {
+            Ok(()) => true,
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        };
+    };
+    if workspace
+        .replace_file(path, &mut kept.bytes.as_slice(), kept.executable)
+        .is_err()
+    {
+        return false;
+    }
+    if let Some(modified) = kept.modified
+        && let Ok(file) = workspace.open_file(path)
+    {
+        let _ = file.set_modified(modified);
+    }
+    true
 }
 
 /// A page's folder as a workspace path (`sites/porto`), or None for the workspace itself and for a
@@ -854,7 +1211,7 @@ mod tests {
                 page("seville-3-days", "Seville in 3 days", None, &PAGE_SERVER),
             ],
         );
-        let mut held = HeldPages::of_turn(workspace.path(), Some(&this), &[]);
+        let mut held = HeldPages::of_turn(workspace.path(), Some(&this), &[], None);
         let held_in = |path: &str| held.page_of(path).map(|page| page.folder.clone());
         assert_eq!(
             held_in("sites/framework-laptops/data.json").as_deref(),
@@ -871,7 +1228,7 @@ mod tests {
             assert_eq!(held_in(free), None, "{free}");
         }
         assert!(
-            HeldPages::of_turn(workspace.path(), Some(&other), &[])
+            HeldPages::of_turn(workspace.path(), Some(&other), &[], None)
                 .page_of("sites/framework-laptops/data.json")
                 .is_none()
         );
@@ -904,7 +1261,7 @@ mod tests {
         );
 
         // nothing returned for a held page: nothing to say
-        let mut quiet = HeldPages::of_turn(workspace.path(), Some(&this), &[]);
+        let mut quiet = HeldPages::of_turn(workspace.path(), Some(&this), &[], None);
         let mut own = vec![returned_file(
             "sites/framework-13-16/data.json",
             Some("{}\n"),
@@ -936,22 +1293,25 @@ mod tests {
         );
     }
 
-    /// Once the turn's model is done, what it changed in another chat's page goes back as the
-    /// space's latest save holds it, in a space whose repository is its `.instafy/.git`: a file it
-    /// deleted and typed again, and one it added. Work another turn had left unsaved there when this
-    /// one began stays, and so does what the turn changed in its own page.
-    #[tokio::test]
-    async fn a_turn_puts_back_only_what_it_changed_in_another_chats_page() {
-        let (this, other) = (Uuid::new_v4(), Uuid::new_v4());
+    /// A space whose repository is its `.instafy/.git`, as a hosted space's is: another chat's
+    /// comparison and this chat's page, both saved, and the record of which chat made each.
+    fn space_with_two_pages(this: &Uuid, other: &Uuid) -> tempfile::TempDir {
         let workspace = tempfile::tempdir().unwrap();
         let ws = workspace.path();
         std::fs::create_dir_all(ws.join(".instafy")).unwrap();
         canonical_git(ws, &["init", "-q", "-b", "main"]);
-        let theirs = "{\"items\":[\"Laptop 12\",\"Laptop 13\",\"Laptop 16\"]}\n";
-        std::fs::create_dir_all(ws.join("sites/framework-laptops")).unwrap();
-        std::fs::create_dir_all(ws.join("sites/framework-13-16")).unwrap();
-        std::fs::write(ws.join("sites/framework-laptops/data.json"), theirs).unwrap();
-        std::fs::write(ws.join("sites/framework-13-16/data.json"), "{}\n").unwrap();
+        for (path, text) in [
+            ("sites/framework-laptops/data.json", THEIRS),
+            ("sites/framework-laptops/notes.md", "saved notes\n"),
+            (
+                "sites/framework-laptops/data/records/read_offer.json",
+                "[]\n",
+            ),
+            ("sites/framework-13-16/data.json", "{}\n"),
+        ] {
+            std::fs::create_dir_all(ws.join(path).parent().unwrap()).unwrap();
+            std::fs::write(ws.join(path), text).unwrap();
+        }
         canonical_git(ws, &["add", "--", "sites"]);
         canonical_git(
             ws,
@@ -972,36 +1332,63 @@ mod tests {
                 page(
                     "sites/framework-laptops",
                     "Framework Laptop 12, 13 and 16",
-                    Some(&other),
+                    Some(other),
                     &PAGE_SERVER,
                 ),
                 page(
                     "sites/framework-13-16",
                     "Framework Laptop 13 vs 16",
-                    Some(&this),
+                    Some(this),
                     &PAGE_SERVER,
                 ),
             ],
         );
+        workspace
+    }
+
+    const THEIRS: &str = "{\"items\":[\"Laptop 12\",\"Laptop 13\",\"Laptop 16\"]}\n";
+    const NOT_CHANGED: &str =
+        "I didn't change “Framework Laptop 12, 13 and 16”: it was made in another chat.";
+
+    /// An edit step of a run, as the run's events carry it.
+    fn edit_step(path: &str) -> JsonValue {
+        json!({"type": "item.completed", "item": {
+            "id": "patch", "type": "file_change", "paths": [path], "status": "completed",
+        }})
+    }
+
+    /// A command of a run, as the run's events carry it.
+    fn command_step(command: &str) -> JsonValue {
+        json!({"type": "item.completed", "item": {
+            "id": "command", "type": "command_execution", "command": command,
+            "command_argv": ["bash", "-lc", command], "status": "completed",
+        }})
+    }
+
+    /// Once the turn's model is done, what its own steps changed in another chat's page goes back
+    /// as the space's latest save holds it, in a space whose repository is its `.instafy/.git`: a
+    /// file an edit step deleted and typed again. What else changed there while the turn ran, which
+    /// no step of the turn reached, stays: the page's own server saving a viewer's click. So does
+    /// work another turn left there unsaved, and what the turn changed in its own page.
+    #[tokio::test]
+    async fn a_turn_puts_back_only_what_its_own_steps_changed_in_another_chats_page() {
+        let (this, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let workspace = space_with_two_pages(&this, &other);
+        let ws = workspace.path();
         // the other chat's work, not saved yet when this turn begins
         std::fs::write(ws.join("sites/framework-laptops/weights.json"), "{}\n").unwrap();
         let start = super::super::collect_git_status_porcelain(ws)
             .await
             .unwrap();
-        let mut held = HeldPages::of_turn(ws, Some(&this), &[]);
+        let mut held = HeldPages::of_turn(ws, Some(&this), &[], Some(&start));
 
-        // the turn deletes the other chat's data, types it again with a stray character, adds a
-        // page beside it, and changes its own page
-        std::fs::remove_file(ws.join("sites/framework-laptops/data.json")).unwrap();
+        // the turn deletes the other chat's data and types it again with a stray character, and
+        // changes its own page; meanwhile a viewer's click on the other chat's page is written
+        let their_data = ws.join("sites/framework-laptops/data.json");
+        std::fs::remove_file(&their_data).unwrap();
         std::fs::write(
-            ws.join("sites/framework-laptops/data.json"),
+            &their_data,
             "{\"items\":[\"Laptop 12\",\n+  \"Laptop 16\"]}\n",
-        )
-        .unwrap();
-        std::fs::create_dir_all(ws.join("sites/framework-laptops/v2")).unwrap();
-        std::fs::write(
-            ws.join("sites/framework-laptops/v2/index.html"),
-            "<p>new</p>\n",
         )
         .unwrap();
         std::fs::write(
@@ -1009,13 +1396,30 @@ mod tests {
             "{\"from\":\"memory\"}\n",
         )
         .unwrap();
-        held.put_back(ws, Some(&start)).await;
-
-        assert_eq!(
-            std::fs::read_to_string(ws.join("sites/framework-laptops/data.json")).unwrap(),
-            theirs
+        let click = "[{\"ref\":\"laptop:12\",\"price\":\"999\"}]\n";
+        std::fs::write(
+            ws.join("sites/framework-laptops/data/records/read_offer.json"),
+            click,
+        )
+        .unwrap();
+        let steps = TurnSteps::of_events(
+            ws,
+            &[
+                edit_step(&their_data.display().to_string()),
+                edit_step("sites/framework-13-16/data.json"),
+                command_step("cat sites/framework-laptops/data.json"),
+            ],
         );
-        assert!(!ws.join("sites/framework-laptops/v2/index.html").exists());
+        held.put_back(ws, Some(&start), steps).await;
+
+        assert_eq!(std::fs::read_to_string(&their_data).unwrap(), THEIRS);
+        assert_eq!(
+            std::fs::read_to_string(
+                ws.join("sites/framework-laptops/data/records/read_offer.json")
+            )
+            .unwrap(),
+            click
+        );
         assert_eq!(
             std::fs::read_to_string(ws.join("sites/framework-laptops/weights.json")).unwrap(),
             "{}\n"
@@ -1026,26 +1430,243 @@ mod tests {
         );
         assert_eq!(
             held.restored,
-            BTreeSet::from([
-                "sites/framework-laptops/data.json".to_string(),
-                "sites/framework-laptops/v2/index.html".to_string(),
-            ])
+            BTreeSet::from(["sites/framework-laptops/data.json".to_string()])
         );
-        assert_eq!(
-            held.reply_line().as_deref(),
-            Some("I didn't change “Framework Laptop 12, 13 and 16”: it was made in another chat.")
-        );
+        assert_eq!(held.reply_line().as_deref(), Some(NOT_CHANGED));
         let artifact = held.artifact().unwrap();
         assert_eq!(artifact["kind"], "write-scope/read-only-blocked");
         assert_eq!(
-            artifact["metadata"]["restoredPaths"],
-            json!([
-                "sites/framework-laptops/data.json",
-                "sites/framework-laptops/v2/index.html"
-            ])
+            artifact["metadata"]["changedPaths"],
+            json!(["sites/framework-laptops/data.json"])
         );
+        assert_eq!(
+            artifact["metadata"]["restoredPaths"],
+            json!(["sites/framework-laptops/data.json"])
+        );
+        // no path under the other chat's page goes in the turn's files or its save
+        let mut files = vec![
+            returned_file("sites/framework-laptops/data/records/read_offer.json", None),
+            returned_file("./sites/framework-laptops/weights.json", None),
+            returned_file("sites/framework-13-16/data.json", None),
+        ];
+        held.leave_out_held(&mut files);
+        let kept: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(kept, ["sites/framework-13-16/data.json"]);
         // nothing more to put back: the page is as it was
-        held.put_back(ws, Some(&start)).await;
-        assert_eq!(held.restored.len(), 2);
+        held.put_back(ws, Some(&start), TurnSteps::default()).await;
+        assert_eq!(held.restored.len(), 1);
+    }
+
+    /// A command that names another chat's page reached all of it: what changed there goes back as
+    /// it was when the turn began. A file saved then comes back as the latest save holds it, one
+    /// the turn added goes, and one that wasn't saved then gets back the bytes it held then (a
+    /// stopped turn's edit, kept unsaved): putting it back as saved would undo that work, and
+    /// leaving it would save the turn's change under its message.
+    #[tokio::test]
+    async fn a_file_not_saved_when_the_turn_began_goes_back_to_its_bytes_then() {
+        let (this, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let workspace = space_with_two_pages(&this, &other);
+        let ws = workspace.path();
+        let notes = ws.join("sites/framework-laptops/notes.md");
+        let weights = ws.join("sites/framework-laptops/weights.json");
+        std::fs::write(&notes, "an edit not saved yet\n").unwrap();
+        std::fs::write(&weights, "{\"Laptop 12\":\"1.3 kg\"}\n").unwrap();
+        let start = super::super::collect_git_status_porcelain(ws)
+            .await
+            .unwrap();
+        let mut held = HeldPages::of_turn(ws, Some(&this), &[], Some(&start));
+
+        let command = "cd sites && rm -f framework-laptops/weights.json && printf 'mine\\n' > framework-laptops/notes.md && mkdir -p framework-laptops/v2 && echo '<p>new</p>' > framework-laptops/v2/index.html && printf '{}' > framework-laptops/data.json";
+        std::fs::remove_file(&weights).unwrap();
+        std::fs::write(&notes, "mine\n").unwrap();
+        std::fs::create_dir_all(ws.join("sites/framework-laptops/v2")).unwrap();
+        std::fs::write(
+            ws.join("sites/framework-laptops/v2/index.html"),
+            "<p>new</p>\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join("sites/framework-laptops/data.json"), "{}").unwrap();
+        held.put_back(
+            ws,
+            Some(&start),
+            TurnSteps::of_events(ws, &[command_step(command)]),
+        )
+        .await;
+
+        assert_eq!(
+            std::fs::read_to_string(&notes).unwrap(),
+            "an edit not saved yet\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&weights).unwrap(),
+            "{\"Laptop 12\":\"1.3 kg\"}\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.join("sites/framework-laptops/data.json")).unwrap(),
+            THEIRS
+        );
+        assert!(!ws.join("sites/framework-laptops/v2/index.html").exists());
+        assert_eq!(held.restored.len(), 4, "{:?}", held.restored);
+        assert_eq!(held.reply_line().as_deref(), Some(NOT_CHANGED));
+        // the folder's status is as the turn found it, so its save holds nothing of the page
+        let now = super::super::collect_git_status_porcelain(ws)
+            .await
+            .unwrap();
+        assert!(
+            super::super::git_status_delta_paths(&start, &now).is_empty(),
+            "{now:?}"
+        );
+    }
+
+    /// A turn's card writes the space's record again without a page whose folder was gone at that
+    /// moment (the turn had moved it), and a turn can write the record itself: each held page's
+    /// entry goes back as the turn began, so the next turn still holds that page and its own chat
+    /// still reads it as its own.
+    #[tokio::test]
+    async fn a_held_pages_entry_goes_back_into_the_record() {
+        let (this, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let workspace = space_with_two_pages(&this, &other);
+        let ws = workspace.path();
+        let start = super::super::collect_git_status_porcelain(ws)
+            .await
+            .unwrap();
+        let mut held = HeldPages::of_turn(ws, Some(&this), &[], Some(&start));
+
+        // the turn moves the other chat's page to a folder of its own and opens its card there:
+        // the record keeps only folders that exist at that moment
+        std::fs::rename(
+            ws.join("sites/framework-laptops"),
+            ws.join("sites/framework-13-vs-16"),
+        )
+        .unwrap();
+        write_record(
+            ws,
+            vec![
+                page(
+                    "sites/framework-13-vs-16",
+                    "13 vs 16",
+                    Some(&this),
+                    &PAGE_SERVER,
+                ),
+                page(
+                    "sites/framework-13-16",
+                    "Framework Laptop 13 vs 16",
+                    Some(&this),
+                    &PAGE_SERVER,
+                ),
+            ],
+        );
+        let command = "mv sites/framework-laptops sites/framework-13-vs-16";
+        held.put_back(
+            ws,
+            Some(&start),
+            TurnSteps::of_events(ws, &[command_step(command)]),
+        )
+        .await;
+
+        assert_eq!(
+            std::fs::read_to_string(ws.join("sites/framework-laptops/data.json")).unwrap(),
+            THEIRS
+        );
+        assert!(space_pages_lines(ws, Some(&other), &[]).contains(
+            "\"Framework Laptop 12, 13 and 16\", in `sites/framework-laptops/`: made in this chat."
+        ));
+        assert!(
+            space_pages_lines(ws, Some(&this), &[]).contains(
+                "\"Framework Laptop 12, 13 and 16\", in `sites/framework-laptops/`: made in another chat, read-only here."
+            )
+        );
+        // a turn that wrote the record to claim the page: the entry goes back too
+        write_record(
+            ws,
+            vec![page(
+                "sites/framework-laptops",
+                "Mine now",
+                Some(&this),
+                &PAGE_SERVER,
+            )],
+        );
+        held.put_back(ws, Some(&start), TurnSteps::default()).await;
+        assert!(space_pages_lines(ws, Some(&other), &[]).contains(
+            "\"Framework Laptop 12, 13 and 16\", in `sites/framework-laptops/`: made in this chat."
+        ));
+    }
+
+    /// The steps a run's events carry: the paths its edit steps named, as workspace paths, and the
+    /// commands that may write. A read-only command names nothing the turn changed. A command names
+    /// a page by its folder or its own name as a whole part of a path, never a longer name that
+    /// starts the same.
+    #[test]
+    fn a_turns_steps_reach_what_they_name() {
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path();
+        let steps = TurnSteps::of_events(
+            ws,
+            &[
+                edit_step(&ws.join("sites/porto/data.json").display().to_string()),
+                edit_step("./sites/seville/index.html"),
+                command_step("cat sites/lisbon/data.json"),
+                command_step("rg -n price sites/faro"),
+                json!({"type": "item.started", "item": {
+                    "id": "c2", "type": "command_execution",
+                    "command": "printf x > sites/madrid-2/data.json",
+                    "command_argv": ["bash", "-lc", "printf x > sites/madrid-2/data.json"],
+                }}),
+                command_step("cd sites && rm -rf braga"),
+            ],
+        );
+        assert!(steps.reached("sites/porto/data.json", "sites/porto"));
+        assert!(!steps.reached("sites/porto/app.js", "sites/porto"));
+        assert!(steps.reached("sites/seville/index.html", "sites/seville"));
+        assert!(!steps.reached("sites/lisbon/data.json", "sites/lisbon"));
+        assert!(!steps.reached("sites/faro/data.json", "sites/faro"));
+        assert!(steps.reached("sites/madrid-2/data.json", "sites/madrid-2"));
+        assert!(!steps.reached("sites/madrid/data.json", "sites/madrid"));
+        assert!(steps.reached("sites/braga/index.html", "sites/braga"));
+        assert!(TurnSteps::unknown().reached("sites/any/file", "sites/any"));
+        assert!(names_folder("/workspace/sites/porto/x", "sites/porto"));
+        assert!(names_folder("'sites/porto'", "sites/porto"));
+        assert!(!names_folder("sites/porto-2/x", "sites/porto"));
+        assert!(!names_folder("porto.pt", "sites/porto"));
+        assert!(!names_folder("transporto", "sites/porto"));
+    }
+
+    /// When the turn's change to another chat's page was all it changed, the runtime's line is its
+    /// reply: the model's words would tell of a change no one can see. With a change of its own,
+    /// the line ends the reply.
+    #[test]
+    fn the_line_is_the_reply_when_that_change_was_all_the_turn_made() {
+        let (this, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("sites/framework-laptops")).unwrap();
+        write_record(
+            workspace.path(),
+            vec![page(
+                "sites/framework-laptops",
+                "Framework Laptop 12, 13 and 16",
+                Some(&other),
+                &PAGE_SERVER,
+            )],
+        );
+        let mut held = HeldPages::of_turn(workspace.path(), Some(&this), &[], None);
+        let mut files = vec![returned_file(
+            "sites/framework-laptops/data.json",
+            Some("{}\n"),
+        )];
+        held.leave_out_returned(workspace.path(), &mut files);
+        let mut reply = "I added each one's weight to the comparison.".to_string();
+        held.reply(&mut reply, &files);
+        assert_eq!(reply, NOT_CHANGED);
+        let mut reply = "I made a page of my own.".to_string();
+        held.reply(
+            &mut reply,
+            &[returned_file("sites/framework-13-16/index.html", None)],
+        );
+        assert_eq!(reply, format!("I made a page of my own.\n\n{NOT_CHANGED}"));
+        // nothing held back: the reply is the model's
+        let quiet = HeldPages::of_turn(workspace.path(), Some(&other), &[], None);
+        let mut reply = "I added each one's weight.".to_string();
+        quiet.reply(&mut reply, &[]);
+        assert_eq!(reply, "I added each one's weight.");
     }
 }

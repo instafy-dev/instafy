@@ -204,6 +204,7 @@ async fn direct_workers_defer_questions_without_forcing_files_or_tool_calls() {
         &scopes,
         Uuid::new_v4(),
         &config,
+        &mut space_pages::HeldPages::default(),
     )
     .await
     .unwrap();
@@ -247,7 +248,8 @@ async fn direct_workers_defer_questions_without_forcing_files_or_tool_calls() {
             &JsonValue::Null,
             &scopes,
             Uuid::new_v4(),
-            &config
+            &config,
+            &mut space_pages::HeldPages::default(),
         )
         .await
         .is_err()
@@ -261,7 +263,8 @@ async fn direct_workers_defer_questions_without_forcing_files_or_tool_calls() {
             &JsonValue::Null,
             &scopes,
             Uuid::new_v4(),
-            &config
+            &config,
+            &mut space_pages::HeldPages::default(),
         )
         .await
         .is_err(),
@@ -401,4 +404,94 @@ fn required_worker_tool_evidence_accepts_commands_or_mcp_and_retains_failed_atte
         .unwrap()
         .remove("multiAgentPlan");
     ensure_worker_tool_evidence(&job, &completed, false, false, &mut vec![]).unwrap();
+}
+
+/// A team plan's worker owns the paths its lead's plan names, and a plan can name a page another
+/// chat made. The file the worker returns there is never written, its own file is, and its reply
+/// says which page it didn't change.
+#[tokio::test]
+async fn a_worker_never_writes_a_page_another_chat_made() {
+    use axum::{extract::State, routing::post};
+    async fn completion(State(output): State<Arc<Mutex<JsonValue>>>) -> axum::Json<JsonValue> {
+        axum::Json(json!({"choices":[{"message":{"content":output.lock().to_string()}}]}))
+    }
+    let output = Arc::new(Mutex::new(json!({
+        "summary": "I updated both pages.",
+        "files": [
+            {"path": "sites/compare/data.json", "content": "{\"items\":[\n+]\n"},
+            {"path": "sites/mine/index.html", "content": "<h1>Mine</h1>\n"},
+        ],
+        "actions": [],
+    })));
+    let router = axum::Router::new()
+        .route("/v1/chat/completions", post(completion))
+        .with_state(output.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let config = DirectWorkerProxyConfig {
+        run_timeout: None,
+        chat_completions_endpoint: format!("http://{address}/v1/chat/completions"),
+        api_key: "inert-scoped-test-token".into(),
+        model: "test-model".into(),
+        reasoning_effort: ReasoningEffort::Low,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    for (path, text) in [
+        ("sites/compare/data.json", "{\"items\":[]}\n"),
+        ("sites/mine/index.html", "<h1>Draft</h1>\n"),
+    ] {
+        fs::create_dir_all(temp.path().join(path).parent().unwrap()).unwrap();
+        fs::write(temp.path().join(path), text).unwrap();
+    }
+    let (this, other) = (Uuid::new_v4(), Uuid::new_v4());
+    fs::create_dir_all(temp.path().join(".instafy/pages")).unwrap();
+    fs::write(
+        temp.path().join(space_pages::PAGES_RECORD),
+        json!({"version": 1, "pages": [{
+            "folder": "sites/compare", "title": "Compare", "conversationId": other.to_string(),
+            "server": ["instafy", "bind"], "openedAt": "2026-11-08T00:00:00.000Z",
+        }]})
+        .to_string(),
+    )
+    .unwrap();
+    let job = test_lease_job(
+        Some("feature"),
+        json!({"metadata":{
+        "multiAgentPlan":{"role":"worker", "groupId":"test"},
+        "writeScope":{"mode":"owned", "ownedPaths":["sites/compare/data.json", "sites/mine/index.html"]}}}),
+    );
+    let scopes = direct_owned_write_scopes(temp.path(), &job).unwrap();
+    let (execution, written) = execute_write_scoped_worker_direct(
+        temp.path(),
+        "Update the pages.",
+        &JsonValue::Null,
+        &scopes,
+        Uuid::new_v4(),
+        &config,
+        &mut space_pages::HeldPages::of_turn(temp.path(), Some(&this), &[], None),
+    )
+    .await
+    .unwrap();
+    server.abort();
+    assert_eq!(
+        fs::read_to_string(temp.path().join("sites/compare/data.json")).unwrap(),
+        "{\"items\":[]}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(temp.path().join("sites/mine/index.html")).unwrap(),
+        "<h1>Mine</h1>\n"
+    );
+    let written: Vec<&str> = written.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(written, ["sites/mine/index.html"]);
+    assert_eq!(
+        execution.summary,
+        "I updated both pages.\n\nI didn't change “Compare”: it was made in another chat."
+    );
+    assert!(
+        execution
+            .artifacts
+            .iter()
+            .any(|artifact| artifact["kind"] == "write-scope/read-only-blocked")
+    );
 }

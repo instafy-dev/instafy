@@ -21,7 +21,9 @@
 //! "+", and that page was broken until a later turn mended it in passing (a local test, Nov 9). So
 //! a page made in another chat is read-only here, and the runtime holds it: in a space whose
 //! repository is its `.instafy/.git`, as a hosted space's is, the second case's stand-in model
-//! breaks the first chat's page whatever it is told, and the page stays as its last save holds it.
+//! breaks the first chat's page whatever it is told, and what its steps changed there goes back as
+//! the turn found it. What no step of the turn wrote there stays: a viewer's click the page's own
+//! server writes meanwhile. A scheduled run has no chat to ask in, and changes the page it names.
 
 use super::*;
 use runtime_agent::jobs::JobExecution;
@@ -58,6 +60,15 @@ const AGAIN: &str = "Start the comparison again from what you already know.";
 const AGAIN_REPLY: &str = "I started the comparison again.";
 /// What the first chat adds to its own page, beside its data.
 const THEIR_WEIGHTS: &str = "{\"Laptop 12\":\"1.3 kg\"}\n";
+/// Where the first chat's page keeps what its viewers' clicks record, as saved, and a click its
+/// page's server writes there while the new chat's turn runs.
+const THEIR_RECORDS: &str = "data/records/read_offer.json";
+const NO_RECORDS: &str = "[]\n";
+const CLICKED: &str = "[{\"ref\":\"laptop:12\",\"price\":\"1049 EUR\"}]\n";
+/// A scheduled run the first chat set up for its page: it runs in a conversation of its own.
+const PRICES: &str = "Every morning, add today's prices to the laptop comparison.";
+const PRICED: &str = "I added today's prices to the comparison.";
+const PRICES_LINE: &str = "{\"Laptop 12\":\"1049 EUR\"}\n";
 /// The runtime's line when a turn changed the first chat's page.
 const NOT_CHANGED: &str =
     "I didn't change “Framework Laptop 12, 13 and 16”: it was made in another chat.";
@@ -114,6 +125,33 @@ fn a_page_another_chat_made_stays_as_its_last_save_holds_it_via_proxy() -> Resul
         .map_err(|_| anyhow::anyhow!("held pages fixture panicked"))?
 }
 
+const SCHEDULED_CHILD: &str = "INSTAFY_PAGES_SCHEDULED_RUN_TEST_CHILD";
+
+#[test]
+fn a_scheduled_run_changes_the_page_it_names_via_proxy() -> Result<()> {
+    if std::env::var(SCHEDULED_CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(
+            SCHEDULED_CHILD,
+            "pages_of_their_own_chats::a_scheduled_run_changes_the_page_it_names_via_proxy",
+            "pages-scheduled-run",
+        );
+    }
+    const STACK: usize = 32 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("pages-scheduled-proxy".to_string())
+        .stack_size(STACK)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .thread_stack_size(STACK)
+                .build()?
+                .block_on(run_scheduled_case())
+        })?
+        .join()
+        .map_err(|_| anyhow::anyhow!("scheduled run fixture panicked"))?
+}
+
 struct Provider {
     requests: StdMutex<Vec<Value>>,
     /// The stand-in model breaks the first chat's page whatever it is told, as the model in the
@@ -122,6 +160,9 @@ struct Provider {
     /// Holds the first chat's request to add its weights until the test lets it go: that turn is
     /// under way when the new chat's message comes.
     weights_gate: tokio::sync::Notify,
+    /// A viewer's click on the first chat's page, which its page's server writes when the new
+    /// chat's turn begins: the file and what it records.
+    click: StdMutex<Option<(PathBuf, String)>>,
 }
 
 impl Provider {
@@ -130,6 +171,7 @@ impl Provider {
             requests: StdMutex::new(Vec::new()),
             breaks_their_page,
             weights_gate: tokio::sync::Notify::new(),
+            click: StdMutex::new(None),
         })
     }
 }
@@ -327,13 +369,30 @@ async fn breaking_request(state: &Provider, body: &Value) -> axum::response::Res
             vec![command(
                 "write",
                 &format!(
-                    "mkdir -p {THEIRS} && printf '%s\\n' '{}' > {THEIRS}/data.json",
-                    THEIR_DATA.trim_end()
+                    "mkdir -p {THEIRS}/data/records && printf '%s\\n' '{}' > {THEIRS}/data.json && printf '%s\\n' '{}' > {THEIRS}/{THEIR_RECORDS}",
+                    THEIR_DATA.trim_end(),
+                    NO_RECORDS.trim_end()
                 ),
             )],
             COMPARED,
         )
+    } else if asks(body, PRICES) {
+        (
+            vec![command(
+                "prices",
+                &format!(
+                    "printf '%s\\n' '{}' > {THEIRS}/prices.json",
+                    PRICES_LINE.trim_end()
+                ),
+            )],
+            PRICED,
+        )
     } else if asks(body, FROM_MEMORY) {
+        if steps_run(body) == 0
+            && let Some((file, click)) = state.click.lock().unwrap().take()
+        {
+            fs::write(file, click).expect("the click is written");
+        }
         let mut steps = break_their_data(body);
         steps.push(command(
             "own",
@@ -369,7 +428,17 @@ async fn breaking_request(state: &Provider, body: &Value) -> axum::response::Res
             WEIGHED,
         )
     } else {
-        (break_their_data(body), AGAIN_REPLY)
+        // The new chat starts the comparison again over the first chat's page, its weights too.
+        let mut steps = break_their_data(body);
+        steps.push(patch(
+            body,
+            "reweigh",
+            &format!(
+                "*** Begin Patch\n*** Update File: {THEIRS}/weights.json\n@@\n-{}\n+{{}}\n*** End Patch\n",
+                THEIR_WEIGHTS.trim_end()
+            ),
+        ));
+        (steps, AGAIN_REPLY)
     };
     match steps.get(steps_run(body)) {
         Some(step) => response(step.clone()),
@@ -822,11 +891,17 @@ async fn run_held_case() -> Result<()> {
         .context("the comparison's turn failed")?;
     assert_eq!(compared.summary, COMPARED);
     assert_eq!(read(&their_data)?, THEIR_DATA.as_bytes());
+    let their_records = format!("{THEIRS}/{THEIR_RECORDS}");
+    assert_eq!(read(&their_records)?, NO_RECORDS.as_bytes());
     save(&workspace)?;
     record_card(&workspace, first_chat, THEIRS, THEIR_TITLE)?;
 
     // A new chat asks for its own comparison. Its turn is told the first chat's page is read-only
     // here, deletes that page's data and types it again broken anyway, then makes its own page.
+    // As it begins, a viewer's click on the first chat's page is written there by that page's
+    // server, which saves it itself a moment later: no step of the turn wrote it.
+    *space.state.click.lock().unwrap() =
+        Some((workspace.join(&their_records), CLICKED.to_string()));
     let remembered = space
         .run(required_job(
             project_id,
@@ -848,19 +923,21 @@ async fn run_held_case() -> Result<()> {
         )),
         "{prompt}"
     );
-    // The first chat's page is as its last save holds it, byte for byte; the new chat's page is in
-    // a folder of its own; the reply says which page it didn't change.
+    // The first chat's data is as its last save holds it, byte for byte, and the click is kept;
+    // the new chat's page is in a folder of its own; the reply says which page it didn't change.
     assert_eq!(read(&their_data)?, THEIR_DATA.as_bytes());
+    assert_eq!(read(&their_records)?, CLICKED.as_bytes());
     assert_eq!(read(&format!("{OWN}/data.json"))?, OWN_DATA.as_bytes());
     assert_eq!(remembered.summary, format!("{REMEMBERED}\n\n{NOT_CHANGED}"));
     let held = blocked(&remembered).context("the held write")?;
+    assert_eq!(held["metadata"]["changedPaths"], json!([their_data]));
     assert_eq!(held["metadata"]["restoredPaths"], json!([their_data]));
     assert_eq!(
         held["metadata"]["readOnlyPaths"],
         json!([format!("{THEIRS}/")])
     );
-    // No file of the first chat's page in the new chat's reply, so no card names it and no Undo
-    // takes it back there.
+    // No file of the first chat's page in the new chat's reply, the click's neither, so no card
+    // names it and no Undo takes it back there.
     let files = turn_files(&remembered);
     assert!(files.contains(&format!("{OWN}/data.json")), "{files:?}");
     assert!(
@@ -872,8 +949,9 @@ async fn run_held_case() -> Result<()> {
     save(&workspace)?;
     record_card(&workspace, new_chat, OWN, OWN_TITLE)?;
 
-    // The new chat points at the first chat's page. The page stays as it was, the reply says which
-    // chat's page it is, and the turn is not run again for the change it couldn't keep.
+    // The new chat points at the first chat's page. The page stays as it was, the runtime's line is
+    // the reply (the turn's words told of a change no one can see), and the turn is not run again
+    // for the change it couldn't keep.
     let before = space.state.requests.lock().unwrap().len();
     let pointed = space
         .run(required_job(
@@ -889,7 +967,8 @@ async fn run_held_case() -> Result<()> {
         .await
         .context("the pointed turn failed")?;
     assert_eq!(read(&their_data)?, THEIR_DATA.as_bytes());
-    assert_eq!(pointed.summary, format!("{POINTED_REPLY}\n\n{NOT_CHANGED}"));
+    assert_eq!(pointed.summary, NOT_CHANGED);
+    assert!(!pointed.summary.contains(POINTED_REPLY));
     assert!(blocked(&pointed).is_some());
     let files = turn_files(&pointed);
     assert!(
@@ -905,9 +984,10 @@ async fn run_held_case() -> Result<()> {
     assert_eq!(asked, 2, "one step and the answer, with no second run");
 
     // The first chat adds its weights to its own page, and while that turn is under way, the new
-    // chat's next message breaks the page's data again. The runtime runs them one after the
-    // other: the first chat's change, not saved yet when the new chat's turn begins, stays, and
-    // the data the new chat broke is as its last save holds it.
+    // chat's next message breaks the page's data again and writes over those weights. The runtime
+    // runs them one after the other: the first chat's weights, not saved yet when the new chat's
+    // turn begins, are back as that turn found them, and the data the new chat broke is as its
+    // last save holds it.
     let weights = format!("{THEIRS}/weights.json");
     let first = space.run(required_job(
         project_id,
@@ -957,9 +1037,79 @@ async fn run_held_case() -> Result<()> {
     assert_eq!(weighed.summary, WEIGHED);
     assert_eq!(read(&weights)?, THEIR_WEIGHTS.as_bytes());
     assert_eq!(read(&their_data)?, THEIR_DATA.as_bytes());
-    assert_eq!(again.summary, format!("{AGAIN_REPLY}\n\n{NOT_CHANGED}"));
+    assert_eq!(again.summary, NOT_CHANGED);
     let held = blocked(&again).context("the held write")?;
-    assert_eq!(held["metadata"]["restoredPaths"], json!([their_data]));
+    assert_eq!(
+        held["metadata"]["restoredPaths"],
+        json!([their_data, weights])
+    );
+    let files = turn_files(&again);
+    assert!(
+        !files
+            .iter()
+            .any(|file| file.starts_with(&format!("{THEIRS}/"))),
+        "{files:?}"
+    );
+    space.finish().await
+}
+
+/// A scheduled run the first chat set up for its page runs in a conversation of its own. It has no
+/// chat to ask in, so it reads neither the rule nor the space's pages, and nothing holds the page
+/// for it: its prices stay.
+async fn run_scheduled_case() -> Result<()> {
+    let _env = env_guard().await;
+    let space = Space::start(Provider::new(true)).await?;
+    let (project_id, workspace) = (space.project_id, space.workspace.clone());
+    fs::create_dir_all(workspace.join(".instafy"))?;
+    space_git(&workspace, &["init", "-q", "-b", "main"])?;
+    let first_chat = Uuid::new_v4();
+    let compared = space
+        .run(required_job(
+            project_id,
+            first_chat,
+            COMPARE,
+            vec![person(COMPARE, "run-1")],
+        ))
+        .await
+        .context("the comparison's turn failed")?;
+    assert_eq!(compared.summary, COMPARED);
+    save(&workspace)?;
+    record_card(&workspace, first_chat, THEIRS, THEIR_TITLE)?;
+
+    let mut scheduled = required_job(
+        project_id,
+        Uuid::new_v4(),
+        PRICES,
+        vec![person(PRICES, "run-2")],
+    );
+    scheduled.payload["metadata"]["automation"] =
+        json!({ "id": "morning-prices", "name": "Morning prices" });
+    let priced = space
+        .run(scheduled)
+        .await
+        .context("the scheduled run failed")?;
+    assert_eq!(priced.summary, PRICED);
+    assert_eq!(
+        fs::read(workspace.join(format!("{THEIRS}/prices.json")))?,
+        PRICES_LINE.as_bytes()
+    );
+    assert!(blocked(&priced).is_none());
+    let files = turn_files(&priced);
+    assert!(
+        files.contains(&format!("{THEIRS}/prices.json")),
+        "{files:?}"
+    );
+    let prompt = space
+        .state
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|request| asks(request, PRICES))
+        .map(last_user_text)
+        .context("the scheduled run's request")?;
+    assert!(!prompt.contains("The space's pages"), "{prompt}");
+    assert!(!prompt.contains("is read-only here"), "{prompt}");
 
     space.finish().await
 }

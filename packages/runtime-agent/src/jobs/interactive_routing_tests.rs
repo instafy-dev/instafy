@@ -675,7 +675,8 @@ fn recorded_page(folder: &str, title: &str, chat: Option<Uuid>) -> JsonValue {
 /// changes it in that chat), then the space's pages, each made in this chat or in another, by the
 /// chat the space's record keeps with the page, not by the chat's history: a long chat whose page
 /// has left the history it sends still reads that page as its own. A page from before the record
-/// says that no one knows which chat made it, in its own chat too.
+/// says that no one knows which chat made it, in its own chat too. An automation's run reads
+/// neither: it has no chat to ask in.
 #[test]
 fn a_writing_turn_is_told_which_chat_made_each_of_the_spaces_pages() {
     let tmp = tempdir().expect("tmp");
@@ -760,8 +761,17 @@ fn a_writing_turn_is_told_which_chat_made_each_of_the_spaces_pages() {
         let prompt = pages(ours, metadata, provider_state);
         assert!(prompt.contains(&rule_and_pages), "{lane}: {prompt}");
     }
-    // A turn that may not write, and a browser turn, read neither.
+    // A turn that may not write, a browser turn, and an automation's run read neither: an
+    // automation has no chat to ask in, and changes what its standing request names.
     for (lane, metadata, provider_state) in [
+        (
+            "an automation's run",
+            json!({
+                "runtimeExpectations": { "workspaceFileChanges": true },
+                "automation": { "id": "morning-prices", "name": "Morning prices" },
+            }),
+            None,
+        ),
         (
             "a read-only turn",
             json!({ "writeScope": "read_only" }),
