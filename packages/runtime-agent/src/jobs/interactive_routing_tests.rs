@@ -671,11 +671,12 @@ fn recorded_page(folder: &str, title: &str, chat: Option<Uuid>) -> JsonValue {
 /// comparison page of the Framework Laptop 13 and 16 from what you already know, without
 /// browsing." had the rule in its instructions and still wrote over another chat's comparison:
 /// nothing told it which chat made `sites/framework-laptops`. Every turn that may write files reads
-/// the rule (a new page is a new folder; another chat's page changes only when the person points at
-/// it), then the space's pages, each made in this chat or in another, by the chat the space's record
-/// keeps with the page, not by the chat's history: a long chat whose page has left the history it
-/// sends still reads that page as its own. A page from before the record reads as another chat's,
-/// in its own chat too: a follow-up there may start a new folder, never replace a page.
+/// the rule (a new page is a new folder; another chat's page is read-only here, and the person
+/// changes it in that chat), then the space's pages, each made in this chat or in another, by the
+/// chat the space's record keeps with the page, not by the chat's history: a long chat whose page
+/// has left the history it sends still reads that page as its own. A page from before the record
+/// says that no one knows which chat made it, in its own chat too. An automation's run reads
+/// neither: it has no chat to ask in.
 #[test]
 fn a_writing_turn_is_told_which_chat_made_each_of_the_spaces_pages() {
     let tmp = tempdir().expect("tmp");
@@ -719,8 +720,8 @@ fn a_writing_turn_is_told_which_chat_made_each_of_the_spaces_pages() {
         PAGE_OF_ITS_OWN_CHAT_RULE,
         "- The space's pages:\n",
         "  - \"Framework Laptop 13 vs 16\", in `sites/framework-13-16/`: made in this chat.\n",
-        "  - \"Framework Laptop 12, 13 and 16\", in `sites/framework-laptops/`: made in another chat.\n",
-        "  - \"Seville in 3 days\", in `seville-3-days/`: made in another chat.\n",
+        "  - \"Framework Laptop 12, 13 and 16\", in `sites/framework-laptops/`: made in another chat, read-only here.\n",
+        "  - \"Seville in 3 days\", in `seville-3-days/`: which chat made it isn't known.\n",
     ]
     .concat();
     let invariants = prompt
@@ -729,14 +730,14 @@ fn a_writing_turn_is_told_which_chat_made_each_of_the_spaces_pages() {
         .expect("the invariants");
     assert!(invariants.contains(&rule_and_pages), "{prompt}");
     assert!(
-        PAGE_OF_ITS_OWN_CHAT_RULE.contains("A request for a new page starts a new folder, even on the same subject. A page made for the person in another chat (a map, a comparison, a page to share) changes only when the person points at that page (\"the laptop comparison\", \"that page\")."),
+        PAGE_OF_ITS_OWN_CHAT_RULE.contains("A request for a new page starts a new folder, even on the same subject. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat."),
         "{PAGE_OF_ITS_OWN_CHAT_RULE}"
     );
     // The other chat, with no history at all: its page is its own.
     let theirs_prompt = pages(theirs, direct, None);
     assert!(
         theirs_prompt.contains("  - \"Framework Laptop 12, 13 and 16\", in `sites/framework-laptops/`: made in this chat.\n")
-            && theirs_prompt.contains("  - \"Framework Laptop 13 vs 16\", in `sites/framework-13-16/`: made in another chat.\n"),
+            && theirs_prompt.contains("  - \"Framework Laptop 13 vs 16\", in `sites/framework-13-16/`: made in another chat, read-only here.\n"),
         "{theirs_prompt}"
     );
     // Every lane that may write files: a chat with a goal, a turn the routing step expected no
@@ -760,8 +761,17 @@ fn a_writing_turn_is_told_which_chat_made_each_of_the_spaces_pages() {
         let prompt = pages(ours, metadata, provider_state);
         assert!(prompt.contains(&rule_and_pages), "{lane}: {prompt}");
     }
-    // A turn that may not write, and a browser turn, read neither.
+    // A turn that may not write, a browser turn, and an automation's run read neither: an
+    // automation has no chat to ask in, and changes what its standing request names.
     for (lane, metadata, provider_state) in [
+        (
+            "an automation's run",
+            json!({
+                "runtimeExpectations": { "workspaceFileChanges": true },
+                "automation": { "id": "morning-prices", "name": "Morning prices" },
+            }),
+            None,
+        ),
         (
             "a read-only turn",
             json!({ "writeScope": "read_only" }),

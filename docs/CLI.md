@@ -626,9 +626,11 @@ Which chat made each page: `open` also writes the page down in the space's own f
 is served (the command's program and first argument) and the chat its card went to (a job's own chat, or
 `--conversation`). Opening the same folder again from another chat keeps the chat that made it, and the workspace
 itself is not written down. A wake that starts a page this record does not hold writes it down with no chat. Every
-Octo turn that may write files is told the space's pages from this record, each made in its own chat or in another;
-only a page Instafy's page server (`instafy bind serve`) or an installed skill's command serves is listed, never the
-person's own app.
+Octo turn that may write files is told the space's pages from this record, each made in its own chat, or in another
+and read-only there, or with no chat recorded; only a page Instafy's page server (`instafy bind serve`) or an installed
+skill's command serves is listed, never the person's own app. What a turn's own steps change in a page another chat
+made goes back as it was when the turn began, and the reply says which page it didn't change: that page changes in the
+chat that made it. A scheduled run has no chat to ask in, so nothing holds a page for it.
 
 Exit codes:
 

@@ -4128,6 +4128,19 @@ fn job_is_unattended(job: &LeaseJob) -> bool {
             .unwrap_or(false)
 }
 
+/// An automation's run: the controller stamps `automation` on every one. It runs in a conversation
+/// of its own, where no one asks to change a page another chat made: it changes what its standing
+/// request names. So it reads neither [`PAGE_OF_ITS_OWN_CHAT_RULE`] nor the space's pages, and
+/// nothing holds a page for it. A team plan's workers are unattended too, but they work for their
+/// chat, and its pages are held for them as for it. A client that stamped this on its own message
+/// would gain nothing an automation of its own could not do.
+fn job_is_an_automations_run(job: &LeaseJob) -> bool {
+    job.payload
+        .get("metadata")
+        .and_then(|metadata| metadata.get("automation"))
+        .is_some_and(|automation| !automation.is_null())
+}
+
 /// Whether a turn carries [`BROWSER_CHOICE_CONTRACT`]: an interactive turn
 /// that can emit actions and has no browser tools of its own. Workers, lead
 /// checkpoints and planning turns act on work handed to them, a Personal or
@@ -4191,12 +4204,17 @@ const WORKSPACE_IS_CURRENT_RULE: &str = "\
 /// so that chat's page and card showed the new one, twice: the rule it read left it to judge
 /// whether the person named that page, and nothing told it which chat made the folder. Every turn
 /// that may write files reads this, whatever skill it reads and whichever form its answer takes,
-/// with the space's pages after it, each made in this chat or in another
+/// with the space's pages after it, each made in this chat or in another and read-only here
 /// ([`space_pages::space_pages_lines`]): a fact in place of the judgement. It is said here only.
+/// Told that its page was another chat's and that it changed only when the person pointed at it,
+/// a new chat's turn still deleted that page's data and typed it again broken (a local test,
+/// Nov 9): a page made in another chat now changes only from that chat, as an artifact belongs to
+/// its conversation in other chat apps, and the runtime holds it ([`space_pages::HeldPages`]).
+/// An automation's run reads neither this nor the pages: it has no chat to ask in.
 /// It speaks of a page made for the person (a map, a comparison, a page to share), and the list
 /// holds only those: the person's own app or site, from the workspace or a folder of it (an
 /// imported repository), is changed as asked from any chat ("Make the buttons rounder.").
-const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A request for a new page starts a new folder, even on the same subject. A page made for the person in another chat (a map, a comparison, a page to share) changes only when the person points at that page (\"the laptop comparison\", \"that page\").\n";
+const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A request for a new page starts a new folder, even on the same subject. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat.\n";
 
 /// True when a person in this conversation opened a skill setup with
 /// `/skills import ... --start` or `/skills start <name>` and the setup began.
@@ -6189,6 +6207,12 @@ impl JobProcessor {
             &owned_paths,
             registration.runtime_id,
             &proxy_config,
+            &mut space_pages::HeldPages::of_turn(
+                &workspace_dir,
+                job.conversation_id.as_ref(),
+                &space_pages::installed_page_commands(),
+                None,
+            ),
         )
         .await?;
         // A worker running beside others saves its own files: nothing else
@@ -8204,6 +8228,12 @@ impl JobProcessor {
                 &owned_paths,
                 registration.runtime_id,
                 &proxy_config,
+                &mut space_pages::HeldPages::of_turn(
+                    &workspace_dir,
+                    job.conversation_id.as_ref(),
+                    &space_pages::installed_page_commands(),
+                    None,
+                ),
             )
             .await?;
             let checkpoint = workspace_commit::LaneCheckpoint {
@@ -8255,6 +8285,20 @@ impl JobProcessor {
         {
             turn_start.record(&workspace_dir, status);
         }
+        // A page another chat made is read-only here, and held: what the model's own steps change
+        // there goes back as it was when this attempt began, once the model is done. An
+        // automation's run has no chat to ask in: it changes what its standing request names.
+        let mut held_pages =
+            if read_only_workspace || is_browser_turn(job) || job_is_an_automations_run(job) {
+                space_pages::HeldPages::default()
+            } else {
+                space_pages::HeldPages::of_turn(
+                    &workspace_dir,
+                    job.conversation_id.as_ref(),
+                    &space_pages::installed_page_commands(),
+                    git_status_before.as_ref(),
+                )
+            };
         let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
         confirm_lease_held(
             cancel_signal.as_ref(),
@@ -8429,6 +8473,18 @@ impl JobProcessor {
                 result => break result,
             }
         };
+        // Whether or not the model's run ended well, a page another chat made is as it was before
+        // anything reads the folder.
+        let steps = match &output_result {
+            Ok(output) => space_pages::TurnSteps::of_events(&workspace_dir, &output.events),
+            Err(_) => streaming_context
+                .as_ref()
+                .map(|ctx| space_pages::TurnSteps::of_events(&workspace_dir, &ctx.events))
+                .unwrap_or_else(space_pages::TurnSteps::unknown),
+        };
+        held_pages
+            .put_back(&workspace_dir, git_status_before.as_ref(), steps)
+            .await;
         let output = match output_result {
             Ok(output) => output,
             Err(error) => {
@@ -8529,6 +8585,7 @@ impl JobProcessor {
         let mut outcome = extract_codex_outcome(&output.final_json)?;
         user_input_request::validate_outcome_scope(job, &outcome)?;
         outcome.read_files = normalize_codex_read_files(&workspace_dir, outcome.read_files);
+        held_pages.leave_out_returned(&workspace_dir, &mut outcome.files);
         // The runtime's no-change line: a required change's prompt asks for it, and a turn's
         // provider thread can keep it from an earlier prompt. It leaves the reply before anything
         // reads or shows it (a plan card carries the reply's words), so the person never reads it.
@@ -8652,23 +8709,13 @@ impl JobProcessor {
         let mut read_only_restored_paths = Vec::new();
         let mut read_only_changed_paths = Vec::new();
         if read_only_workspace {
-            if let Some(before) = git_status_before.as_ref()
-                && let Some(after) = collect_git_status_porcelain(&workspace_dir).await
-            {
-                read_only_changed_paths = git_status_delta_paths(before, &after);
-                let has_disallowed_read_only_changes = read_only_changed_paths
-                    .iter()
-                    .any(|path| !read_only_coordination_paths.contains(path));
-                if has_disallowed_read_only_changes {
-                    read_only_restored_paths = restore_clean_baseline_git_status_delta_excluding(
-                        &workspace_dir,
-                        before,
-                        &after,
-                        &read_only_coordination_paths,
-                    )
-                    .await;
-                }
-            }
+            (read_only_changed_paths, read_only_restored_paths) = put_back_read_only_turn_changes(
+                &workspace_dir,
+                git_status_before.as_ref(),
+                &read_only_coordination_paths,
+                !bounded_execution,
+            )
+            .await;
             if reported_files_len > normalized_files_len {
                 warn!(
                     job_id = %job_id,
@@ -8684,6 +8731,7 @@ impl JobProcessor {
             records_workspace_change_receipts,
             git_status_before.as_ref(),
             earlier_attempt_status.as_ref(),
+            &held_pages,
         )
         .await?
             == 0;
@@ -8813,9 +8861,12 @@ impl JobProcessor {
                 "accepting successful apply_patch events as workspace file-change evidence despite an empty files list"
             );
         }
+        // A change put back in another chat's page is the turn's result, which its reply says: run
+        // again, the turn would make it again.
         let workspace_file_changes_missing = expects_workspace_file_changes_after_actions
             && outcome.files.is_empty()
-            && !workspace_file_changes_satisfied_by_patch_apply;
+            && !workspace_file_changes_satisfied_by_patch_apply
+            && !held_pages.put_a_change_back();
         // A required change that changed nothing and says why (an answer, a question for the
         // person, or what blocks the work) is the turn's result, as after a recovery pass: that
         // pass, on a thread of its own, asked the same again (a local test, Nov 6: "keep going"
@@ -9225,7 +9276,7 @@ impl JobProcessor {
             // run trace loses the retry's interim evidence.
             let native_retry_prompt =
                 without_project_preferences(&retry_prompt, &project_id, &retry_preferences)?;
-            let retry_output = if let Some(progress) = progress_sender.as_ref() {
+            let retry_output_result = if let Some(progress) = progress_sender.as_ref() {
                 let retry_sender = progress.sender.clone();
                 let retry_status = progress.status.clone();
                 let mut retry_stream_events: Vec<JsonValue> = Vec::new();
@@ -9274,18 +9325,34 @@ impl JobProcessor {
                     }
                     Ok(())
                 };
-                codex
+                let result = codex
                     .execute_with_options(
                         native_retry_prompt,
                         Some(&mut retry_event_handler),
                         retry_codex_run_options,
                     )
-                    .await?
+                    .await;
+                let events = match &result {
+                    Ok(output) => &output.events,
+                    Err(_) => &retry_stream_events,
+                };
+                let steps = space_pages::TurnSteps::of_events(&workspace_dir, events);
+                (result, steps)
             } else {
-                codex
+                let result = codex
                     .execute_with_options(native_retry_prompt, None, retry_codex_run_options)
-                    .await?
+                    .await;
+                let steps = match &result {
+                    Ok(output) => space_pages::TurnSteps::of_events(&workspace_dir, &output.events),
+                    Err(_) => space_pages::TurnSteps::unknown(),
+                };
+                (result, steps)
             };
+            let (retry_output_result, retry_steps) = retry_output_result;
+            held_pages
+                .put_back(&workspace_dir, git_status_before.as_ref(), retry_steps)
+                .await;
+            let retry_output = retry_output_result?;
             drop(codex_guard);
             if !codex_run_options.input_images.is_empty() {
                 annotate_prompt_context_native_image_inputs(
@@ -9311,6 +9378,7 @@ impl JobProcessor {
             user_input_request::validate_outcome_scope(job, &retry_outcome)?;
             retry_outcome.read_files =
                 normalize_codex_read_files(&workspace_dir, retry_outcome.read_files);
+            held_pages.leave_out_returned(&workspace_dir, &mut retry_outcome.files);
             suppress_multi_agent_plan_actions_for_worker(job, &mut retry_outcome);
             log_browser_requests_dropped_as_read(job, &retry_output.final_json);
             suppress_browser_requests_where_unsupported(job, &mut retry_outcome);
@@ -9368,24 +9436,16 @@ impl JobProcessor {
             let mut retry_read_only_restored_paths = Vec::new();
             let mut retry_read_only_changed_paths = Vec::new();
             if read_only_workspace {
-                if let Some(before) = git_status_before.as_ref()
-                    && let Some(after) = collect_git_status_porcelain(&workspace_dir).await
-                {
-                    retry_read_only_changed_paths = git_status_delta_paths(before, &after);
-                    let has_disallowed_read_only_changes = retry_read_only_changed_paths
-                        .iter()
-                        .any(|path| !retry_read_only_coordination_paths.contains(path));
-                    if has_disallowed_read_only_changes {
-                        retry_read_only_restored_paths =
-                            restore_clean_baseline_git_status_delta_excluding(
-                                &workspace_dir,
-                                before,
-                                &after,
-                                &retry_read_only_coordination_paths,
-                            )
-                            .await;
-                    }
-                }
+                (
+                    retry_read_only_changed_paths,
+                    retry_read_only_restored_paths,
+                ) = put_back_read_only_turn_changes(
+                    &workspace_dir,
+                    git_status_before.as_ref(),
+                    &retry_read_only_coordination_paths,
+                    !bounded_execution,
+                )
+                .await;
                 if retry_reported_files_len > retry_normalized_files_len {
                     warn!(
                         job_id = %job_id,
@@ -9401,6 +9461,7 @@ impl JobProcessor {
                 records_workspace_change_receipts,
                 git_status_before.as_ref(),
                 earlier_attempt_status.as_ref(),
+                &held_pages,
             )
             .await?;
             // Recognize each attempt independently before merging: event IDs may
@@ -9938,6 +9999,8 @@ impl JobProcessor {
                         "kind": REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND,
                         "metadata": { "reason": "no_change_after_recovery" },
                     }));
+                } else if held_pages.put_a_change_back() {
+                    // Its change to another chat's page was put back, and its reply says so.
                 } else {
                     // Nothing changed, and the reply did not say so: it reads
                     // as a promise of a change that was not made.
@@ -9981,12 +10044,14 @@ impl JobProcessor {
                 let retry_commit_files = if read_only_workspace {
                     retry_outcome.files.clone()
                 } else {
-                    Box::pin(checkpoint_files_with_status_delta(
+                    let mut files = Box::pin(checkpoint_files_with_status_delta(
                         &workspace_dir,
                         git_status_before.as_ref(),
                         &retry_outcome.files,
                     ))
-                    .await
+                    .await;
+                    held_pages.leave_out_held(&mut files);
+                    files
                 };
                 if let Some(token) = workspace_token.as_deref() {
                     if !retry_commit_files.is_empty() {
@@ -10098,6 +10163,7 @@ impl JobProcessor {
                     retry_read_only_coordination_paths,
                 ));
             }
+            retry_artifacts.extend(held_pages.artifact());
 
             let mut retry_messages = merge_skills_kickoff_into_execution(
                 skills_kickoff.take(),
@@ -10178,6 +10244,8 @@ impl JobProcessor {
                 // An empty reply is no reply: the building turn answers.
                 retry_outcome.summary.clear();
             }
+            // The page another chat made that it didn't change, on a line of its own.
+            held_pages.reply(&mut retry_outcome.summary, &retry_outcome.files);
             save_report::append_not_saved(&mut retry_outcome.summary, &retry_not_saved);
             user_input_request::append_outcome_artifact(&mut retry_artifacts, &retry_outcome);
             return Ok(JobExecution {
@@ -10330,12 +10398,14 @@ impl JobProcessor {
             let commit_files = if read_only_workspace {
                 outcome.files.clone()
             } else {
-                Box::pin(checkpoint_files_with_status_delta(
+                let mut files = Box::pin(checkpoint_files_with_status_delta(
                     &workspace_dir,
                     git_status_before.as_ref(),
                     &outcome.files,
                 ))
-                .await
+                .await;
+                held_pages.leave_out_held(&mut files);
+                files
             };
             if let Some(token) = workspace_token.as_deref() {
                 if !commit_files.is_empty() {
@@ -10442,6 +10512,7 @@ impl JobProcessor {
                 read_only_coordination_paths,
             ));
         }
+        artifacts.extend(held_pages.artifact());
 
         let interim_messages = merge_skills_kickoff_into_execution(
             skills_kickoff.take(),
@@ -10453,6 +10524,8 @@ impl JobProcessor {
             // An empty reply is no reply: the building turn answers.
             outcome.summary.clear();
         }
+        // The page another chat made that it didn't change, on a line of its own.
+        held_pages.reply(&mut outcome.summary, &outcome.files);
         save_report::append_not_saved(&mut outcome.summary, &not_saved);
         user_input_request::append_outcome_artifact(&mut artifacts, &outcome);
         Ok(JobExecution {
@@ -10666,20 +10739,27 @@ impl JobProcessor {
         let browser_turn = is_browser_turn(job);
         // Whose page a turn that may write files changes: the rule, then the space's pages, each
         // made in this chat or in another. A browser turn or a read-only one never reads the
-        // space's record of its pages.
-        let page_rule = [
-            PAGE_OF_ITS_OWN_CHAT_RULE,
-            &if browser_turn || metadata_requests_read_only_workspace(job.payload.get("metadata")) {
-                String::new()
-            } else {
-                space_pages::space_pages_lines(
-                    workspace_dir,
-                    job.conversation_id.as_ref(),
-                    &space_pages::installed_page_commands(),
-                )
-            },
-        ]
-        .concat();
+        // space's record of its pages. An automation's run reads neither
+        // ([`job_is_an_automations_run`]).
+        let page_rule = if job_is_an_automations_run(job) {
+            String::new()
+        } else {
+            [
+                PAGE_OF_ITS_OWN_CHAT_RULE,
+                &if browser_turn
+                    || metadata_requests_read_only_workspace(job.payload.get("metadata"))
+                {
+                    String::new()
+                } else {
+                    space_pages::space_pages_lines(
+                        workspace_dir,
+                        job.conversation_id.as_ref(),
+                        &space_pages::installed_page_commands(),
+                    )
+                },
+            ]
+            .concat()
+        };
         let cross_chat_context_lookup = !lead_continuation_checkpoint
             && !multi_agent_worker
             && !multi_agent_planning_turn
@@ -12102,12 +12182,15 @@ fn reported_workspace_file_changes_missing(
     tracks_changes && reported_files_len > 0 && normalized_files_len == 0
 }
 
+/// A path under a page another chat made (`held`) is never among them: what the turn changed there
+/// went back, and what else changed there is not the turn's.
 async fn collect_workspace_change_receipts(
     workspace_dir: &Path,
     files: &mut Vec<CodexFileDescriptor>,
     tracks_changes: bool,
     before: Option<&HashMap<String, GitStatusEntry>>,
     earlier_attempt: Option<&HashMap<String, GitStatusEntry>>,
+    held: &space_pages::HeldPages,
 ) -> Result<usize> {
     if tracks_changes
         && files.is_empty()
@@ -12121,11 +12204,13 @@ async fn collect_workspace_change_receipts(
                 .filter(|file| !is_runtime_owned_workspace_path(&file.workspace_path))
                 .collect(),
         )?;
+        held.leave_out_held(files);
     }
     // Retry checks weigh this attempt separately from work a stopped lease saved.
     let own_files_len = files.len();
     if tracks_changes {
         add_resumed_turn_files(files, earlier_attempt, before);
+        held.leave_out_held(files);
     }
     Ok(own_files_len)
 }
@@ -17127,6 +17212,8 @@ impl DirectOwnedWriteScope {
 
 /// Run a write-scoped worker and write its files. Returns the execution and
 /// the files it wrote, for the checkpoint.
+/// A file it returns under a page another chat made (`held`) is never written, and its reply says
+/// which page it didn't change.
 async fn execute_write_scoped_worker_direct(
     workspace_dir: &Path,
     prompt: &str,
@@ -17134,6 +17221,7 @@ async fn execute_write_scoped_worker_direct(
     owned_paths: &[DirectOwnedWriteScope],
     runtime_id: Uuid,
     proxy_config: &DirectWorkerProxyConfig,
+    held: &mut space_pages::HeldPages,
 ) -> Result<(JobExecution, Vec<CodexFileDescriptor>)> {
     let allowed_paths = owned_paths
         .iter()
@@ -17183,7 +17271,7 @@ async fn execute_write_scoped_worker_direct(
     let plan = parse_model_json_object(&response_text)
         .with_context(|| "write-scoped worker did not return a valid JSON object")?;
     let input_request = user_input_request::parse_action(&plan)?;
-    let summary = plan
+    let mut summary = plan
         .get("summary")
         .and_then(JsonValue::as_str)
         .map(str::trim)
@@ -17224,6 +17312,11 @@ async fn execute_write_scoped_worker_direct(
             content_base64: None,
             change: FileChangeDescriptor::parse(json!({ "type": "changed" })),
         };
+        let mut returned = vec![descriptor];
+        held.leave_out_returned(workspace_dir, &mut returned);
+        let Some(descriptor) = returned.pop() else {
+            continue;
+        };
         write_inline_file_change(&owned.target_path, &owned.relative_path, &descriptor)?;
         applied_files.push(json!({
             "path": owned.display_path,
@@ -17231,9 +17324,10 @@ async fn execute_write_scoped_worker_direct(
         }));
         written.push(descriptor);
     }
-    if applied_files.is_empty() && input_request.is_none() {
+    if applied_files.is_empty() && input_request.is_none() && !held.put_a_change_back() {
         bail!("write-scoped worker returned no owned file changes");
     }
+    held.reply(&mut summary, &written);
 
     let mut artifacts = vec![
         json!({
@@ -17255,6 +17349,7 @@ async fn execute_write_scoped_worker_direct(
             }
         }),
     ];
+    artifacts.extend(held.artifact());
     if !prompt_context.is_null() {
         artifacts.push(build_codex_prompt_context_artifact(prompt_context, None));
     }
@@ -19368,22 +19463,47 @@ async fn fetch_agent_context_cards_for_scope(
     Ok(filter_project_context_cards(cards, terms))
 }
 
-fn git_status_command_args(workspace_dir: &Path) -> Vec<String> {
-    let status_args = vec![
-        "status".to_string(),
-        "--porcelain=v1".to_string(),
-        "-z".to_string(),
-        "--no-renames".to_string(),
-        "--untracked-files=all".to_string(),
-    ];
-    // Canonical workspaces keep the repository at `.instafy/.git` with no
-    // top-level `.git`, so a plain `git status` fails and silently disables
-    // the only file-change evidence channel for write jobs.
+/// `args` for the workspace's own repository. Canonical workspaces keep it at `.instafy/.git` with
+/// no top-level `.git`, so a plain `git status` fails and silently disables the only file-change
+/// evidence channel for write jobs, and a plain `git restore` puts nothing back.
+fn workspace_git_args(workspace_dir: &Path, args: &[&str]) -> Vec<String> {
+    let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
     if workspace_uses_instafy_canonical_git(workspace_dir) {
-        canonical_git_args(workspace_dir, &status_args)
+        canonical_git_args(workspace_dir, &args)
     } else {
-        status_args
+        args
     }
+}
+
+/// `git` in the workspace's own repository, as the status read runs it: with that repository's
+/// hooks and file monitor off and only the allowlisted environment. A turn can write the
+/// repository's settings, so nothing in them runs with a job's credentials.
+fn workspace_git_command(workspace_dir: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+        ])
+        .args(workspace_git_args(workspace_dir, args))
+        .current_dir(workspace_dir);
+    apply_allowlisted_tokio_environment(&mut command, &[]);
+    command
+}
+
+fn git_status_command_args(workspace_dir: &Path) -> Vec<String> {
+    workspace_git_args(
+        workspace_dir,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--no-renames",
+            "--untracked-files=all",
+        ],
+    )
 }
 
 async fn collect_git_status_porcelain(
@@ -19410,6 +19530,46 @@ fn git_status_delta_paths(
     paths
 }
 
+/// What a read-only turn changed since `before`, and what of that went back: each changed path
+/// but those `coordination_paths` holds (files a read-only turn may write), as the workspace's
+/// repository holds it. A turn with no step that writes a file (`writes` false: a browser or
+/// granted turn, which has no command and no edit) changed nothing of its own, so whatever changed
+/// while it ran (a site saving a viewer's click, the person's own app) is someone else's and stays.
+async fn put_back_read_only_turn_changes(
+    workspace_dir: &Path,
+    before: Option<&HashMap<String, GitStatusEntry>>,
+    coordination_paths: &HashSet<String>,
+    writes: bool,
+) -> (Vec<String>, Vec<String>) {
+    let Some(before) = before.filter(|_| writes) else {
+        return (Vec::new(), Vec::new());
+    };
+    let Some(after) = collect_git_status_porcelain(workspace_dir).await else {
+        return (Vec::new(), Vec::new());
+    };
+    let changed = git_status_delta_paths(before, &after);
+    let restored = if changed
+        .iter()
+        .any(|path| !coordination_paths.contains(path))
+    {
+        restore_clean_baseline_git_status_delta_excluding(
+            workspace_dir,
+            before,
+            &after,
+            coordination_paths,
+        )
+        .await
+    } else {
+        Vec::new()
+    };
+    (changed, restored)
+}
+
+/// Puts each path that `after` lists as changed and `before` did not back as the workspace's
+/// repository holds it, leaving out `excluded_paths`, and returns those put back: a tracked one is
+/// restored, a new one removed. It runs in the workspace's own repository, as the status read does
+/// ([`workspace_git_command`]): with plain `git`, a space whose repository is its `.instafy/.git`
+/// got nothing back.
 async fn restore_clean_baseline_git_status_delta_excluding(
     workspace_dir: &Path,
     before: &HashMap<String, GitStatusEntry>,
@@ -19440,14 +19600,10 @@ async fn restore_clean_baseline_git_status_delta_excluding(
 
     let mut restored = Vec::new();
     if !restore_paths.is_empty() {
-        let mut command = Command::new("git");
+        let mut command =
+            workspace_git_command(workspace_dir, &["restore", "--worktree", "--staged", "--"]);
         command
-            .arg("restore")
-            .arg("--worktree")
-            .arg("--staged")
-            .arg("--")
             .args(&restore_paths)
-            .current_dir(workspace_dir)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         match command.output().await {
@@ -19470,13 +19626,9 @@ async fn restore_clean_baseline_git_status_delta_excluding(
     }
 
     if !clean_paths.is_empty() {
-        let mut command = Command::new("git");
+        let mut command = workspace_git_command(workspace_dir, &["clean", "-fd", "--"]);
         command
-            .arg("clean")
-            .arg("-fd")
-            .arg("--")
             .args(&clean_paths)
-            .current_dir(workspace_dir)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         match command.output().await {
@@ -29814,6 +29966,7 @@ mod tests {
             tracking,
             Some(&before),
             Some(&earlier),
+            &space_pages::HeldPages::default(),
         )
         .await
         .unwrap();
@@ -29848,6 +30001,7 @@ mod tests {
                 tracking,
                 Some(&before),
                 Some(&earlier),
+                &space_pages::HeldPages::default(),
             )
             .await
             .unwrap();
@@ -29866,7 +30020,8 @@ mod tests {
                 &mut files,
                 tracking,
                 Some(&before),
-                Some(&earlier)
+                Some(&earlier),
+                &space_pages::HeldPages::default(),
             )
             .await
             .unwrap(),
@@ -29904,7 +30059,8 @@ mod tests {
                 &mut unchanged,
                 tracking,
                 Some(&after),
-                None
+                None,
+                &space_pages::HeldPages::default(),
             )
             .await
             .unwrap(),
@@ -29955,6 +30111,7 @@ mod tests {
             tracking,
             Some(&before),
             None,
+            &space_pages::HeldPages::default(),
         )
         .await
         .unwrap();
@@ -30014,6 +30171,7 @@ mod tests {
             records_workspace_change_receipts(true, false),
             Some(&before),
             None,
+            &space_pages::HeldPages::default(),
         )
         .await
         .unwrap();
@@ -36551,6 +36709,143 @@ mod tests {
             git_status_delta_paths(&before, &after),
             vec!["dirty.txt".to_string(), "new.txt".to_string()]
         );
+    }
+
+    /// A read-only turn's changes go back in a space whose repository is its `.instafy/.git`, the
+    /// repository the status read finds there: run as plain `git`, which finds none there, the
+    /// restore put nothing back. A file the turn changed is restored, one it deleted comes back and
+    /// one it added goes; one already changed when the turn began, or one left out, stays. The
+    /// restore runs none of that repository's hooks or file monitor, which a turn can write, and a
+    /// turn with no step that writes a file (a browser turn) puts nothing back: what changed while
+    /// it ran is someone else's.
+    #[tokio::test]
+    async fn a_read_only_turns_changes_go_back_where_the_spaces_repository_is_its_instafy_git() {
+        let workspace = tempdir().expect("workspace");
+        let ws = workspace.path();
+        fs::create_dir_all(ws.join(".instafy")).expect("instafy folder");
+        let git = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+            let output = std::process::Command::new("git")
+                .args(canonical_git_args(ws, &args))
+                .current_dir(ws)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        fs::create_dir_all(ws.join("sites/porto")).expect("page folder");
+        fs::write(ws.join("sites/porto/index.html"), "<h1>Porto</h1>\n").expect("page");
+        fs::write(ws.join("sites/porto/data.json"), "{}\n").expect("data");
+        fs::write(ws.join("notes.md"), "saved\n").expect("notes");
+        git(&["add", "--", "sites", "notes.md"]);
+        git(&[
+            "-c",
+            "user.name=Instafy Test",
+            "-c",
+            "user.email=test@instafy.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "saved",
+        ]);
+        assert!(workspace_uses_instafy_canonical_git(ws));
+        // A hook and a file monitor a turn planted in the space's repository: neither may run.
+        let ran = ws.join(".instafy/ran");
+        let script = ws.join(".instafy/planted.sh");
+        fs::write(
+            &script,
+            format!("#!/bin/sh\necho ran >> '{}'\nexit 0\n", ran.display()),
+        )
+        .expect("script");
+        let hooks = ws.join(".instafy/.git/hooks");
+        fs::create_dir_all(&hooks).expect("hooks");
+        for hook in [
+            "post-index-change",
+            "post-checkout",
+            "reference-transaction",
+        ] {
+            fs::copy(&script, hooks.join(hook)).expect("hook");
+        }
+        for file in std::iter::once(script.clone()).chain(
+            fs::read_dir(&hooks)
+                .unwrap()
+                .map(|entry| entry.unwrap().path()),
+        ) {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(file, fs::Permissions::from_mode(0o755)).expect("executable");
+        }
+        git(&["config", "core.fsmonitor", &script.display().to_string()]);
+        fs::write(ws.join("notes.md"), "an edit from before the turn\n").expect("edit");
+        let before = collect_git_status_porcelain(ws)
+            .await
+            .expect("status before");
+
+        fs::write(ws.join("sites/porto/index.html"), "<h1>Lisbon</h1>\n").expect("turn edit");
+        fs::remove_file(ws.join("sites/porto/data.json")).expect("turn delete");
+        fs::write(ws.join("sites/porto/extra.js"), "x\n").expect("turn add");
+        fs::write(ws.join("notes.md"), "the turn's edit\n").expect("turn edit of notes");
+        fs::write(ws.join("handoff.md"), "kept\n").expect("handoff");
+        let _ = fs::remove_file(&ran);
+        // A turn with no step that writes a file: nothing goes back.
+        let (changed, restored) = put_back_read_only_turn_changes(
+            ws,
+            Some(&before),
+            &HashSet::from(["handoff.md".to_string()]),
+            false,
+        )
+        .await;
+        assert!(changed.is_empty() && restored.is_empty());
+        assert_eq!(
+            fs::read_to_string(ws.join("sites/porto/index.html")).unwrap(),
+            "<h1>Lisbon</h1>\n"
+        );
+        let (changed, restored) = put_back_read_only_turn_changes(
+            ws,
+            Some(&before),
+            &HashSet::from(["handoff.md".to_string()]),
+            true,
+        )
+        .await;
+
+        assert_eq!(
+            changed,
+            [
+                "handoff.md",
+                "notes.md",
+                "sites/porto/data.json",
+                "sites/porto/extra.js",
+                "sites/porto/index.html"
+            ]
+        );
+        assert_eq!(
+            restored,
+            [
+                "sites/porto/data.json",
+                "sites/porto/extra.js",
+                "sites/porto/index.html"
+            ]
+        );
+        assert_eq!(
+            fs::read_to_string(ws.join("sites/porto/index.html")).unwrap(),
+            "<h1>Porto</h1>\n"
+        );
+        assert_eq!(
+            fs::read_to_string(ws.join("sites/porto/data.json")).unwrap(),
+            "{}\n"
+        );
+        assert!(!ws.join("sites/porto/extra.js").exists());
+        assert_eq!(
+            fs::read_to_string(ws.join("notes.md")).unwrap(),
+            "the turn's edit\n"
+        );
+        assert!(ws.join("handoff.md").exists());
+        assert!(!ran.exists(), "a planted hook or file monitor ran");
     }
 
     #[test]

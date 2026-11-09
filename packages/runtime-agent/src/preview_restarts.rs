@@ -1364,7 +1364,7 @@ mod tests {
         assert_eq!(
             crate::jobs::space_pages::space_pages_lines(&sandbox.workspace, Some(&maker), &[]),
             "- The space's pages:\n\
-             \x20 - \"Porto\", in `sites/porto/`: made in another chat.\n\
+             \x20 - \"Porto\", in `sites/porto/`: which chat made it isn't known.\n\
              \x20 - \"Framework laptops\", in `sites/framework-laptops/`: made in this chat.\n"
         );
         Ok(())
