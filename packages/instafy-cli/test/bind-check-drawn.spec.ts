@@ -97,6 +97,8 @@ function check(dir: string, port: number, expectList: string): Promise<{ code: n
       env: {
         PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
         HOME: home,
+        // the page check's screenshots land in this test's folder, which it removes
+        TMPDIR: tmp,
         WORKSPACE_DIR: workspace,
         SPACE_ID: SPACE,
         INSTAFY_SHARED_BROWSER_PLAYWRIGHT_PATH: engine?.playwright ?? "",
