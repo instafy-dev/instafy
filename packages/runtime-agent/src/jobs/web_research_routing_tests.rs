@@ -1478,7 +1478,7 @@ fn the_research_skill_compares_items_and_the_page_lists_unknown_prices_apart() {
     for needle in [
         "Options side by side: each value names the page it was read on and the day; one nobody found reads `Unknown` and why",
         "never a blank or a dash",
-        "an item whose value is unknown is listed apart (\"Price unknown\"), never as within it, on the page, in the lede and in the reply",
+        "an item whose value is unknown is listed apart (\"Price unknown\"), never as within it, on the page or in the reply",
         "it also lists blank values, values without their page or date, a source line with no link, and a filter applied without `site.byFilter`",
     ] {
         assert!(hub.contains(needle), "{needle}");
@@ -1507,12 +1507,12 @@ fn the_research_skill_compares_items_and_the_page_lists_unknown_prices_apart() {
     }
 }
 
-/// A comparison's page cited a maker's home page as the source of "0 of 2 confirmed" reviews, said in its lede how
-/// many models that page names (its menu named one more) and sorted by a value no row had. A count of what was found
-/// cites only what it counts, so none found cites no page; a lede says only what a page read says; and no sort is by a
-/// value no row has. Unedited earlier copies of both skills are upgraded.
+/// A comparison's page cited a maker's home page as the source of "0 of 2 confirmed" reviews and sorted by a value no
+/// row had. A count of what was found cites only what it counts, so none found cites no page, and no sort is by a value
+/// no row has. (Its headline, which said how many models that page names, is now the page's own, from its cells.)
+/// Unedited earlier copies of both skills are upgraded.
 #[test]
-fn a_page_of_options_cites_only_pages_that_give_a_value_and_its_lede_only_what_they_say() {
+fn a_page_of_options_cites_only_pages_that_give_a_value() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let hub_skill = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1530,11 +1530,6 @@ fn a_page_of_options_cites_only_pages_that_give_a_value_and_its_lede_only_what_t
             hub_skill,
             previous_hub,
             "A value cites only a page that gives it: a count of what you found cites only what it counts, so none found cites no page.",
-        ),
-        (
-            hub_skill,
-            previous_hub,
-            "The lede: the verdict, saying only what a page you read says: how many a page lists, or that these are all of them or the latest, only when it says so.",
         ),
         (
             hub_skill,

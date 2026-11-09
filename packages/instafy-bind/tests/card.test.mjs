@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { cardArgs, cardCommand, inSpace, previewShows } from "../src/preview-host.mjs";
+import { cardArgs, cardCommand, inSpace, lookAtPage, previewShows } from "../src/preview-host.mjs";
 import { cardTitle } from "../src/check.mjs";
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "instafy-bind.mjs");
@@ -30,14 +30,21 @@ function space() {
   fs.mkdirSync(home);
   // `instafy` on the turn's PATH, for the card's command a passing check runs: it notes where it ran and with what,
   // writes the page in the space's record of its pages the first time its card is opened, and answers, as
-  // `instafy preview open --json` does
+  // `instafy preview open --json` does. Asked to look at the page (`instafy preview check --json --text`), it answers
+  // with what the test says the page drew (drawn.json), else as a page check that can't start does.
   const bin = path.join(base, "bin");
   const cardLog = path.join(base, "cards.jsonl");
+  const drawnFile = path.join(base, "drawn.json");
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, "card.mjs"), `import fs from "node:fs";
 import path from "node:path";
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(cardLog)}, JSON.stringify({ cwd: process.cwd(), args }) + "\\n");
+if (args[1] === "check") {
+  if (fs.existsSync(${JSON.stringify(drawnFile)})) process.stdout.write(fs.readFileSync(${JSON.stringify(drawnFile)}, "utf8"));
+  else process.stdout.write(JSON.stringify({ ok: false, exitCode: 4, error: "SKIPPED, nothing was checked: Playwright not found (no trusted copy)", skipped: true }) + "\\n");
+  process.exit(fs.existsSync(${JSON.stringify(drawnFile)}) ? 0 : 4);
+}
 const root = fs.realpathSync(process.env.WORKSPACE_PROJECT_DIR || path.join(process.env.WORKSPACE_DIR, process.env.SPACE_ID));
 const file = path.join(root, ".instafy", "pages", "pages.json");
 let pages = [];
@@ -78,6 +85,14 @@ process.stdout.write(JSON.stringify({ status: "live", port: 24087 }, null, 2) + 
     },
     // the card commands a check ran: [{ cwd, args }]
     cards: () => (fs.existsSync(cardLog) ? fs.readFileSync(cardLog, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : []),
+    // what the page check finds the page drew, on each size (the phone's own text when given), and the errors on it;
+    // a size in `unloaded` is one the page check could not load, as it reports one
+    drawn: (text, { phone = text, errors = [], unloaded = [] } = {}) => {
+      const view = (name, shown, own) => (unloaded.includes(name)
+        ? { name, screenshot: null, blank: { blank: true, reason: "the page did not load" }, errors: ["the page did not load: page.goto: Timeout 30000ms exceeded."], warnings: [], blocked: [], text: "" }
+        : { name, screenshot: `/tmp/instafy-preview-check-24087-a/${name}.png`, errors: own, warnings: [], blocked: [], text: shown });
+      fs.writeFileSync(drawnFile, JSON.stringify({ ok: !errors.length && !unloaded.length, url: "http://127.0.0.1:24087/", viewports: [view("desktop", text, errors), view("phone", phone, [])] }));
+    },
     done: () => fs.rmSync(base, { recursive: true, force: true }),
   };
 }
@@ -394,20 +409,152 @@ test("a card's command that fails leaves the check passed, and names the command
   }
 });
 
-test("a page whose text the check cannot read gets the card's command, never MISSING (exit 2)", () => {
+// A page to share drew its text with document.createElement and its sources as HTML from a string. Its check could
+// not read one stop, said "Look at the page itself instead: `instafy preview check --port <its port>`" in its middle and
+// "next: post its card: …" last, and the turn ran only the card's command: nothing ever looked at the page. A check that
+// can't read an item in the files takes both steps itself and gives one answer: it posts a new page's card as a
+// passing check does, has the page check load the page where that card serves it, and answers with what it drew.
+const DRAWS = `site.start({ data: null, render: function () {
+  site.head({ title: "Bookshop hours and metro" });
+  var stops = ["Sao Bento"].concat(window.more || []);
+  var p = document.createElement("p");
+  p.textContent = "Open daily. Metro from " + stops.join(" to ") + " to Aliados.";
+  document.getElementById("list").replaceChildren(p);
+  var src = document.createElement("p");
+  src.innerHTML = 'Sources: <a href="https://example.com/hours">example.com</a>';
+  document.getElementById("list").appendChild(src);
+} });
+`;
+const OPENED = "instafy preview open --title 'Bookshop hours and metro' --serve-cmd 'instafy bind serve . --port {port} --preview' --start --json";
+const LOOK = ["preview", "check", "--port", "24087", "--json", "--text"];
+
+test("a page whose text the check can't read gets one answer from one check: its card, and what the page as drawn shows", () => {
   const s = space();
   try {
     s.run(["init", "sites/visit", "--starter", "blank"]);
-    fs.writeFileSync(path.join(s.project, "sites", "visit", "app.js"), 'document.getElementById("list").innerHTML = "<h2>Opening hours</h2>";\n');
-    const out = s.run(["check", "sites/visit", "--expect", "Opening hours"]);
-    assert.equal(out.status, 2, out.stdout + out.stderr);
-    assert.doesNotMatch(out.stdout, /MISSING/);
-    assert.match(out.stdout, /^UNREAD: app\.js may draw .*, so the check cannot tell whether the page shows: Opening hours\.$/m);
-    assert.equal(lastLine(out.stdout), `next: post its card: (cd sites/visit && ${OPEN})`);
-    const json = JSON.parse(s.run(["check", "sites/visit", "--expect", "Opening hours", "--json"]).stdout);
-    assert.deepEqual([json.unknown, json.next], [["Opening hours"], `post its card: (cd sites/visit && ${OPEN})`]);
+    fs.writeFileSync(path.join(s.project, "sites", "visit", "app.js"), DRAWS);
+    s.drawn("Bookshop hours and metro\n\nOpen daily. Metro from Sao Bento to Aliados.\n\nSources: example.com");
+    const out = s.run(["check", "sites/visit", "--expect", "Sao Bento, Aliados, Open daily"]);
+    assert.equal(out.status, 0, out.stdout + out.stderr);
+    assert.doesNotMatch(out.stdout, /UNREAD|MISSING|next:|Look at the page itself/);
+    assert.match(out.stdout, /^3 of 3 expected item\(s\) shown: Sao Bento, Aliados, Open daily\.$/m);
+    assert.match(out.stdout, /^Looked at the page as drawn on port 24087 \(desktop and phone\) for what its files don't say: Aliados and Open daily\. Screenshots: \/tmp\/instafy-preview-check-24087-a\/desktop\.png, \/tmp\/instafy-preview-check-24087-a\/phone\.png\.$/m);
+    assert.match(out.stdout, new RegExp(`^Posted its card: ran \\(cd sites/visit && ${OPENED.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\), which answered:$`, "m"));
+    // the card first, then the page where it serves it: one card, one look
+    const site = fs.realpathSync(path.join(s.project, "sites", "visit"));
+    assert.deepEqual(s.cards().map((c) => [fs.realpathSync(c.cwd), c.args[1]]), [[site, "open"], [fs.realpathSync(s.project), "check"]]);
+    assert.deepEqual(s.cards()[1].args, LOOK);
+    // the line that draws HTML from a string is named, with what to draw it with, and passes
+    assert.match(out.stdout, /^NOTE: app\.js:8 sets HTML from a string \(src\.innerHTML = 'Sources: <a href="https:\/\/example\.com\/hours">example\.com<\/a>';\): draw its text with site\.h, which sets text as text, and each fact with site\.trust\(fact\), which links its page\.$/m);
+    // a page a preview shows now: no second card; the page is looked at where that preview serves it
+    s.open("sites/visit");
+    const again = JSON.parse(s.run(["check", "sites/visit", "--expect", "Sao Bento, Aliados", "--json"]).stdout);
+    assert.deepEqual([again.ok, again.drawn.port, again.drawn.shown, again.drawn.missing, again.card, again.next], [true, 24087, ["Aliados"], [], undefined, undefined]);
+    assert.deepEqual(again.markup.map((m) => [m.file, m.line]), [["app.js", 8]]);
+    assert.deepEqual(s.cards().map((c) => c.args[1]), ["open", "check", "check"]);
   } finally {
     s.done();
+  }
+});
+
+test("an item the page as drawn doesn't show fails the check, named, and so does an error on the page", () => {
+  const s = space();
+  try {
+    s.run(["init", "sites/visit", "--starter", "blank"]);
+    fs.writeFileSync(path.join(s.project, "sites", "visit", "app.js"), DRAWS);
+    s.drawn("Bookshop hours and metro\n\nOpen daily. Metro from Sao Bento.", { phone: "Bookshop hours and metro" });
+    const out = s.run(["check", "sites/visit", "--expect", "Sao Bento, Aliados, Open daily"]);
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    assert.match(out.stdout, /^MISSING: the request named 2 item\(s\) the page as drawn does not show: Aliados, Open daily \(not on the phone size\)\.$/m);
+    assert.match(out.stdout, /^1 of 3 expected item\(s\) shown: Sao Bento\.$/m);
+    // its card was posted all the same: a failing check never holds it back
+    assert.match(out.stdout, /^Posted its card: ran /m);
+    assert.doesNotMatch(out.stdout, /next:/);
+    s.open("sites/visit");
+    s.drawn("Open daily. Metro from Sao Bento to Aliados.", { errors: ["uncaught: stops is not defined"] });
+    const broken = s.run(["check", "sites/visit", "--expect", "Sao Bento, Aliados"]);
+    assert.equal(broken.status, 1, broken.stdout);
+    assert.match(broken.stdout, /^PAGE: the page as drawn has 1 error\(s\) to fix:\n- desktop: uncaught: stops is not defined$/m);
+  } finally {
+    s.done();
+  }
+});
+
+// The files check never counts a line that only says an item isn't there ("Not found yet: Aliados") as showing it: a
+// page says what it couldn't add, and that line must not pass. The page as drawn is read the same way.
+test("a line of the page as drawn that says an item isn't there never counts as drawing it", () => {
+  const s = space();
+  try {
+    s.run(["init", "sites/visit", "--starter", "blank"]);
+    fs.writeFileSync(path.join(s.project, "sites", "visit", "app.js"), DRAWS);
+    s.drawn("Bookshop hours and metro\n\nOpen daily. Metro from Sao Bento.\nNot found yet: Aliados\n\nStill missing for the route: Aliados");
+    const out = s.run(["check", "sites/visit", "--expect", "Sao Bento, Aliados"]);
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    assert.match(out.stdout, /^MISSING: the request named 1 item\(s\) the page as drawn does not show: Aliados\.$/m);
+    assert.match(out.stdout, /^1 of 2 expected item\(s\) shown: Sao Bento\.$/m);
+  } finally {
+    s.done();
+  }
+});
+
+// A size the page check couldn't load drew nothing anyone saw: that is an error on the page, never an item it leaves
+// out, and the sizes the check looked at are the ones that loaded. With none loaded, nothing looked at the page.
+test("a size the page check couldn't load is an error on the page, never an item it doesn't draw", () => {
+  const s = space();
+  try {
+    s.run(["init", "sites/visit", "--starter", "blank"]);
+    fs.writeFileSync(path.join(s.project, "sites", "visit", "app.js"), DRAWS);
+    s.drawn("Bookshop hours and metro\n\nOpen daily. Metro from Sao Bento to Aliados.", { unloaded: ["phone"] });
+    const out = s.run(["check", "sites/visit", "--expect", "Sao Bento, Aliados"]);
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    assert.doesNotMatch(out.stdout, /MISSING|Add each one/);
+    assert.match(out.stdout, /^PAGE: the page as drawn has 1 error\(s\) to fix:\n- phone: the page did not load: page\.goto: Timeout 30000ms exceeded\.$/m);
+    assert.match(out.stdout, /^2 of 2 expected item\(s\) shown: Sao Bento, Aliados\.$/m);
+    assert.match(out.stdout, /^Looked at the page as drawn on port 24087 \(desktop\) for what its files don't say: Aliados\. Screenshots: \/tmp\/instafy-preview-check-24087-a\/desktop\.png\.$/m);
+    s.open("sites/visit");
+    s.drawn("", { unloaded: ["desktop", "phone"] });
+    const none = s.run(["check", "sites/visit", "--expect", "Sao Bento, Aliados"]);
+    assert.equal(none.status, 2, none.stdout + none.stderr);
+    assert.doesNotMatch(none.stdout, /MISSING|PAGE:|Looked at/);
+    assert.match(none.stdout, /^The page as drawn could not be looked at \(the page did not load: page\.goto: Timeout 30000ms exceeded\.\), so the check cannot tell whether it shows: Aliados\.$/m);
+  } finally {
+    s.done();
+  }
+});
+
+test("a page check that can't start, or a page nothing serves, says plainly the check cannot tell (exit 2)", () => {
+  const s = space();
+  try {
+    s.run(["init", "sites/visit", "--starter", "blank"]);
+    fs.writeFileSync(path.join(s.project, "sites", "visit", "app.js"), DRAWS);
+    // no drawn.json: the page check answers as one with no browser does
+    const out = s.run(["check", "sites/visit", "--expect", "Sao Bento, Aliados"]);
+    assert.equal(out.status, 2, out.stdout + out.stderr);
+    assert.match(out.stdout, /^The page as drawn could not be looked at \(SKIPPED, nothing was checked: Playwright not found \(no trusted copy\)\), so the check cannot tell whether it shows: Aliados\.$/m);
+    assert.doesNotMatch(out.stdout, /MISSING|next:/);
+    assert.match(out.stdout, /^Posted its card: ran /m);
+    // a page the space's record holds, which no preview shows now: its card isn't posted again, so nothing serves it
+    const recorded = s.run(["check", "sites/visit", "--expect", "Sao Bento, Aliados"]);
+    assert.equal(recorded.status, 2, recorded.stdout);
+    assert.match(recorded.stdout, /^Nothing serves the page yet, so the check cannot tell whether it shows: Aliados\. Once its card serves it, check again\.$/m);
+    assert.equal(lastLine(recorded.stdout), `next: post its card: (cd sites/visit && ${OPEN})`);
+    assert.deepEqual(s.cards().map((c) => c.args[1]), ["open", "check"]);
+  } finally {
+    s.done();
+  }
+});
+
+test("the page check is bounded: one that hangs or isn't there gives its reason in time", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-look-"));
+  try {
+    fs.writeFileSync(path.join(dir, "instafy"), "#!/bin/sh\nexec /bin/sleep 30\n", { mode: 0o755 });
+    const started = Date.now();
+    assert.deepEqual(lookAtPage(24087, { timeoutMs: 2000, env: { PATH: dir } }), { error: "the page check did not finish within 2 s" });
+    assert.ok(Date.now() - started < 10_000, `${Date.now() - started} ms`);
+    fs.rmSync(path.join(dir, "instafy"));
+    assert.deepEqual(lookAtPage(24087, { env: { PATH: dir } }), { error: "the instafy command was not found" });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 

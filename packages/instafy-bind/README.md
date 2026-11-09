@@ -201,8 +201,16 @@ item the request named (from its HTML text, its data files, and in its own scrip
 `site.head`, as a blank page's `app.js` does, and the strings of their lists and objects; an `"expect"` array in
 `data.json` is checked too) and exits 1 when one is missing: when no file of the site names it. An item whose words a
 script holds where the check cannot place them (a variable, the HTML given to `innerHTML`), or on a page whose script
-fetches text from another site, is never reported as missing what the check cannot see: it exits 2 and says to look at
-the page itself. On a page of options (the compare and ranked starters' `data.json`) it also exits 1 for a
+fetches text from another site, is never reported missing from the files: the check looks for it on the page as drawn,
+in the same step. Where the page is served for its card (a new page's card is posted first, as a passing check posts
+it, or a preview already shows it), `instafy preview check` loads it in a headless browser on both of its sizes, and
+the check answers with what the page drew, read as its files are (a line that only says an item isn't there never
+shows it): it fails for an item the page doesn't draw, on a size that loaded, or an error on it (a size that did not
+load is one), and exits 2 only when nothing could look at it. It names each line of the page's own scripts that sets
+HTML from a string (`innerHTML`, `outerHTML`, `insertAdjacentHTML`; never one that only empties an element, nor words
+in a string or a comment), to draw with `site.h` (text as text) and `site.trust(fact)` instead; that never fails the
+page. A comparison the compare starter draws writes the line under its title itself, so a `lede` in its `data.json`
+is not read as the page's words, and the check notes that it isn't drawn. On a page of options (the compare and ranked starters' `data.json`) it also exits 1 for a
 value that only says nothing (`"—"`, `"n/a"`: leave out `v` and say why in `note`), a value without the page and day
 it was read (`src`, `url`, `date`), and a filter applied without `site.byFilter`; and it notes the rows the filter
 lists apart because their value is unknown (`site.within` never counts an unknown value as within a limit). A row of a
@@ -211,7 +219,7 @@ page that was read, or, when only a search result names it, `found` names that r
 the compare starter then marks the row "Not checked"). A row with neither, a guess or a placeholder such as "Model 1",
 fails the check, also when `--expect` or `"expect"` names it: that list only says what the page must show. A page the
 person asked for from what Octo knows, with nothing looked up (`"from": "memory"`), cites no page: its rows and values
-pass without one, the compare starter shows each value as "<value>, not checked" and says so in the lede, and any
+pass without one, the compare starter shows each value as "<value>, not checked" and says so under its title, and any
 `src`, `url`, `date`, `asof`, store or filter on it fails the check, as does the mark on a page of another starter.
 On any page, a source line drawn by hand (an element with the class `trust`) fails the check, which names it, unless
 it links a page or says "not checked" or "From what Octo knows" (or only that a value is unknown: "Unknown", "To

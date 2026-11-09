@@ -1,20 +1,20 @@
 /* Compare starter: 2-8 options side by side. A table when the page is wide, a list on phones, same order and ids: a
- * phone's row shows the values found, each with its source line. Under the headline, on every screen, the page names
- * what each row is still missing, from its cells ("Still missing for Option B: Weight (checked 17 Oct on maker.com ↗),
- * Price"), so the lede never has to. You design the content in data.json; keep theme.css and site.js. Restyle only
- * when asked.
+ * phone's row shows the values found, each with its source line. Under the title, on every screen, the page says what
+ * its cells decide, from its own sorts ("Lowest price: Option B · Lowest weight: Option A"), and names what each row is
+ * still missing ("Still missing for Option B: Weight (checked 17 Oct on maker.com ↗), Price"). Neither line is written
+ * in data.json, so neither can say what the cells don't. You design the content in data.json; keep theme.css and
+ * site.js. Restyle only when asked.
  *
  * data.json:
- *   title, lede            the page title and its one-line answer: the verdict ("Option B costs least."). The page says
- *                          what is missing under it. Only what a page you read says: how many a page lists, or that
- *                          these are all of them or the latest, only when it says so.
+ *   title                  the page title. The line under it is the page's own (a "lede" is not drawn).
  *   sort: [{key, label, dir: "asc"|"desc"}]   the first entry is the person's main criterion: phones show its value
  *                          on the right of each row. An entry whose column no row has a value for (nor, for a price, a
- *                          store that can be checked) is left out. With 5 or more options and more than one entry,
- *                          rows are sorted by the first entry left (fresh values first, then ones that may have
- *                          changed, then missing ones), and a "Sort by" select offers the entries left when there are
- *                          two or more. Otherwise rows keep the order of "items", before and after a price check: put
- *                          them in the order the lede talks about them.
+ *                          store that can be checked) is left out. Under the title, each entry whose column every row
+ *                          shows a value for names the row it puts first ("Lowest price: Option B"). With 5 or more
+ *                          options and more than one entry, rows are sorted by the first entry left (fresh values
+ *                          first, then ones that may have changed, then missing ones), and a "Sort by" select offers
+ *                          the entries left when there are two or more. Otherwise rows keep the order of "items",
+ *                          before and after a price check.
  *   columns: [{key, label, type: "price"|"number"|"text"}]   at most 5; a "price" column can be checked live
  *   filter (only for a constraint the person stated): {key, max, label: "Under $160", rest: "over $160",
  *                          unknown?: "Price unknown"}. Only a value the page shows counts: a row whose value is
@@ -33,8 +33,8 @@
  *   from: "memory"         only when the person asked for the page from what Octo knows, with nothing looked up: each
  *                          fact is just {"v"} (or a {"note"}), with no "src", "url" or "date", and no store or filter
  *                          (`instafy bind check` fails them), and reads "<value>, not checked", as a ranked row's value
- *                          without a source does; the lede adds "From what Octo knows; nothing checked." Nothing on the
- *                          page cites a page or offers a check.
+ *                          without a source does; the line under the title says "From what Octo knows; nothing
+ *                          checked." Nothing on the page cites a page or offers a check.
  *   fact: {"v": "$145", "src": "Example Store", "url": "https://…", "date": "2026-10-17", "asof"?: "2026-08-05", "est": false}
  *   Each value cites its page and day ("checked 17 Oct on maker.com ↗"), and no cell is blank: a source you read
  *   without finding the value on it is the fact without "v" ({"src", "url", "date"}): "Not found · checked 17 Oct on
@@ -159,14 +159,11 @@
   /** "1.3 kg, not checked": no source line, date or link. */
   function notChecked(value) { return h("span", { "class": "trust" }, h("span", { "class": "v", text: value + ", not checked" })); }
   /** The page as drawn when it is from what Octo knows: each fact only its value and note, no row cites a page or a
-   * search result or offers a store's price check, no filter counts a value as known, and the lede says nothing was
-   * checked. */
+   * search result or offers a store's price check, and no filter counts a value as known (the line under the title
+   * says nothing was checked: verdict). */
   function asRemembered(data) {
     var plain = function (f) { return f && typeof f === "object" ? { v: f.v, note: f.note } : f; };
-    var lede = String(data.lede || "").trim();
-    if (lede.indexOf(MEMORY_LINE.slice(0, -1)) < 0) lede = (lede ? lede.replace(/([^.!?\u2026])$/, "$1.") + " " : "") + MEMORY_LINE;
     return Object.assign({}, data, {
-      lede: lede,
       map: null,
       filter: null,
       items: (data.items || []).map(function (i) {
@@ -231,11 +228,36 @@
   function lowerFirst(text) { text = String(text || ""); return text.charAt(0).toLowerCase() + text.slice(1); }
   /** "A", "A and B", "A, B and C". */
   function and(list) { return list.length > 1 ? list.slice(0, -1).join(", ") + " and " + list[list.length - 1] : list[0]; }
+  /** The line under the title: what the page's own sorts decide among the rows drawn ("Lowest price: Option B ·
+   * Lowest weight and highest rating: Option A"). A sort decides only when every row drawn shows a value for its
+   * column, none of them one that may have changed, and they are not all the same: it names the rows it puts first,
+   * and criteria the same rows lead are said together. "" when no sort decides anything. A page from what Octo knows
+   * checked nothing, so it says that instead. */
+  function verdict(data, rows) {
+    if (memory) return MEMORY_LINE;
+    var groups = [];
+    if (rows.length < 2) return "";
+    sorts(data).forEach(function (s) {
+      var col = colOf(data, s.key);
+      if (!col) return;
+      var values = rows.map(function (i) { var v = valueOf(i, col); return site.old(v, isPrice(col)) ? null : site.known(v); });
+      if (values.some(function (n) { return n == null; })) return;
+      var best = s.dir === "desc" ? Math.max.apply(null, values) : Math.min.apply(null, values);
+      var names = rows.filter(function (i, k) { return values[k] === best; }).map(function (i) { return String(i.name || i.ref || ""); });
+      if (names.length === rows.length) return;
+      var words = (s.dir === "desc" ? "highest " : "lowest ") + labelWords(col);
+      var same = groups.filter(function (g) { return g.names.join("\n") === names.join("\n"); })[0];
+      if (!same) groups.push({ names: names, words: [words] });
+      else if (same.words.indexOf(words) < 0) same.words.push(words);
+    });
+    return groups.map(function (g) { var said = and(g.words); return said.charAt(0).toUpperCase() + said.slice(1) + ": " + and(g.names); }).join(" · ");
+  }
+  /** A column's label inside a line ("starting price"), keeping one written in capitals ("CPU"). */
+  function labelWords(col) { var label = String(col.label || col.key); return /^.[A-Z]/.test(label) ? label : lowerFirst(label); }
 
   function render(data, st) {
     memory = !!data && data.from === "memory";
     if (memory) data = asRemembered(data);
-    site.head(data);
     var all = data.items || [];
     // unless data.json asks for a sort (5+ options), the rows keep their authored order: nothing moves when a check
     // comes back
@@ -254,6 +276,8 @@
     var hasPrice = columns(data).some(isPrice);
     var cols = sharedSources(data, all);
     var shared = { cols: cols, rows: rowSources(data, all, cols) };
+    // the line under the title says what the rows drawn decide, from their cells: never a headline of data.json's
+    site.head(Object.assign({}, data, { lede: verdict(data, shown.concat(apart)) }));
 
     // the one control row: the sort (5+ options) and the one filter on the left, the one primary button on the right
     var bar = document.getElementById("bar");
@@ -469,7 +493,7 @@
     return groups;
   }
   /** The lines under the headline, on every screen: "Still missing for Option B and Option C: Weight (checked 17 Oct
-   * on maker.com ↗), Price". The lede gives the verdict; these say what is missing, from the cells. */
+   * on maker.com ↗), Price". The line above them says what the cells decide (verdict); these say what is missing. */
   function drawMissing(groups) {
     var lede = document.getElementById("lede");
     var head = lede && lede.parentNode;

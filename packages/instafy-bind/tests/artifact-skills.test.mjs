@@ -38,7 +38,9 @@ test("the cheat sheet: one check per row, one primary button, starters own the f
   assert.match(example, /"Check all prices" as the page's one primary button and no button per row/);
   // the content rules the starters cannot enforce by themselves
   const content = sheet.slice(sheet.indexOf("## Writing the content"), sheet.indexOf("## Worked example"));
-  assert.match(content, /Lede: the verdict, plus the biggest unknown/);
+  // a comparison's line under its title is its own, from its sorts and cells: no lede, and no "biggest unknown" in one
+  assert.match(content, /Lede: the verdict\. A comparison has none of its own: under its title the compare starter names the row each `sort` entry puts first/);
+  assert.doesNotMatch(sheet, /biggest unknown/);
   assert.match(content, /add `asof` when the source dates the fact itself \(shown instead: "seen 5 Aug"; a price over 30 days old also says "may have changed"\)/);
   assert.match(content, /A store known to block checks gets `"readable": false` from the start/);
   assert.match(content, /otherwise rows keep the order in `items`/);
