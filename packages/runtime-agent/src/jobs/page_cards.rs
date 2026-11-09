@@ -9,20 +9,24 @@
 //!
 //! So at a building turn's end, once its change is saved, the runtime takes that step for each
 //! page the turn left without a card, before the reply: a folder under `sites/` whose `index.html`
-//! the turn made or changed and that still holds it, whose card was never opened (the space's
-//! record of its pages, [`space_pages::PAGES_RECORD`], has no row for it, in this chat or another)
-//! and that no preview of the space on this machine shows (the CLI's record of its previews). It
-//! runs the binder's card step from the workspace, `instafy bind card ./<folder> --json`: the step
-//! a check that passes takes, titled from the page as that check titles it, which runs `instafy
-//! preview open --title "<title>" --serve-cmd "instafy bind serve . --port {port} --preview"
-//! --start` in the folder. That serves the page so it outlives the turn, posts its card to the
-//! turn's chat with the turn's own credential, as the turn's own command would, and writes the
-//! page in the record for this chat, so the row under the reply names the page by its title.
+//! the turn made (new in this turn's change) and that still holds it, whose card was never opened
+//! (the space's record of its pages, [`space_pages::PAGES_RECORD`], has no row for it, in this
+//! chat or another) and that no preview of the space on this machine shows (the CLI's record of
+//! its previews). It runs the binder's card step from the workspace, `instafy bind card
+//! ./<folder> --json`: the step a check that passes takes, titled from the page as that check
+//! titles it, which runs `instafy preview open --title "<title>" --serve-cmd "instafy bind serve .
+//! --port {port} --preview" --start` in the folder. That serves the page so it outlives the turn,
+//! posts its card to the turn's chat with the turn's own credential, as the turn's own command
+//! would, and writes the page in the record for this chat, so the row under the reply names the
+//! page by its title.
 //!
 //! Never for a page the record holds (another chat's page, whose folder is that chat's to change,
 //! or this chat's, whose card is in the chat), one a preview shows, a turn that may not write, a
 //! turn that was stopped (its lease is gone, or a Stop comes while the card is posted), or a turn
-//! that changed no page; a turn that failed, or whose save failed, never gets here. A site an
+//! that made no page; a turn that failed, or whose save failed, never gets here. A page that was
+//! there before the turn is left as it was, changed or not: with no row, nothing says which chat
+//! made it or whether its card was opened (before the record began, say), and a card from this
+//! turn would be a second one, or would give another chat's page to this chat. A site an
 //! installed skill serves its own way (a map's host) says nothing in its folder of how it is
 //! served, so the runtime cannot read that skill's command there: a folder that a command of an
 //! installed skill named in the turn is left as it was, and that skill's own steps post its card.
@@ -42,9 +46,9 @@ use tokio::time::Instant;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use super::CodexFileDescriptor;
 use super::preview_pictures::{PREVIEW_STATE_RELATIVE_PATH, changed_paths, reap_group};
 use super::space_pages;
+use super::{CodexFileDescriptor, FileChangeKind};
 use crate::browser_host::process::group;
 use crate::job_cancel::JobCancelSignal;
 use crate::model_environment::{
@@ -101,7 +105,7 @@ async fn post_missing_cards_within(
     if read_only {
         return;
     }
-    let pages = pages_changed(workspace_dir, &changed_paths(files));
+    let pages = pages_made(workspace_dir, files);
     if pages.is_empty() {
         return;
     }
@@ -155,11 +159,20 @@ async fn post_missing_cards_within(
     }
 }
 
-/// The page folders (`sites/<name>`) whose `index.html` the turn made or changed (`changed`,
-/// places in the workspace), each once, that are still folders holding it.
-fn pages_changed(workspace_dir: &Path, changed: &[String]) -> Vec<String> {
+/// The page folders (`sites/<name>`) whose `index.html` the turn made (`files`, as its save lists
+/// them: one it created), each once, that are still folders holding it.
+fn pages_made(workspace_dir: &Path, files: &[CodexFileDescriptor]) -> Vec<String> {
+    let made: Vec<CodexFileDescriptor> = files
+        .iter()
+        .filter(|file| {
+            file.change
+                .as_ref()
+                .is_some_and(|change| change.kind == FileChangeKind::Created)
+        })
+        .cloned()
+        .collect();
     let mut folders: Vec<String> = Vec::new();
-    for path in changed {
+    for path in &changed_paths(&made) {
         let parts: Vec<&str> = path.split('/').collect();
         let [top, name, file] = parts.as_slice() else {
             continue;
@@ -490,10 +503,11 @@ mod tests {
         }})
     }
 
-    // A page is a folder of `sites/` whose own page the turn made or changed, still there: not a
-    // file it only read, another file of the page, a page further down, or one it removed.
+    // A page is a folder of `sites/` whose own page the turn made, still there: not a file it only
+    // read, another file of the page, a page further down, one it removed, or one that was there
+    // before the turn, whatever the turn changed in it.
     #[test]
-    fn a_page_is_a_sites_folder_whose_index_the_turn_made_or_changed() {
+    fn a_page_is_a_sites_folder_whose_index_the_turn_made() {
         let workspace = tempfile::tempdir().unwrap();
         for path in [
             "sites/framework-13-vs-16/index.html",
@@ -530,12 +544,20 @@ mod tests {
             ),
         ];
         assert_eq!(
-            pages_changed(workspace.path(), &changed_paths(&files)),
+            pages_made(workspace.path(), &files),
             strings(&["sites/framework-13-vs-16"])
         );
-        let changed = [file("sites/porto/index.html", FileChangeKind::Changed)];
+        // A page that was there before the turn, which the turn changed: its card may be in a chat
+        // already (opened before the space's record of its pages began), or the page may be
+        // another chat's whose card was never posted. Either way it is not this turn's to card.
+        let changed = [
+            file("sites/porto/index.html", FileChangeKind::Changed),
+            file("sites/porto/data.json", FileChangeKind::Created),
+        ];
+        assert!(pages_made(workspace.path(), &changed).is_empty());
+        let made = [file("./sites/porto/index.html", FileChangeKind::Created)];
         assert_eq!(
-            pages_changed(workspace.path(), &changed_paths(&changed)),
+            pages_made(workspace.path(), &made),
             strings(&["sites/porto"])
         );
     }

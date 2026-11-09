@@ -9,9 +9,12 @@
 //! this chat. Here a stand-in `instafy` notes that step and writes the record's row as the CLI
 //! does; the binder's own test covers the step's title and command, and the CLI's covers the row.
 //!
-//! A page whose card is in the chat, another chat's page, a turn stopped once its change was saved
-//! and a turn that only answers get no card, and a card that could not be posted leaves the reply
-//! as the turn wrote it.
+//! A page whose card is in the chat, another chat's page, a page that was there before the turn
+//! (which the space's record may not know: its card opened before the record began, or another
+//! chat's page whose card was never posted), a turn stopped once its change was saved and a turn
+//! that only answers get no card, and a card that could not be posted leaves the reply as the
+//! turn wrote it. A page the recovery pass made, after a first pass that changed nothing, gets
+//! its card as well: that pass ends the turn.
 
 use super::*;
 use axum::routing::get;
@@ -34,6 +37,10 @@ const MADE: &str =
 const NEW_PAGE: &str = "sites/framework-13-vs-16";
 const NEW_TITLE: &str = "Framework Laptop 13 vs 16";
 const MADE_REPLY: &str = "I made a simple comparison of the Framework Laptop 13 and 16.";
+const EARLIER: &str = "Add the ferry times to the old day-trip page.";
+const EARLIER_PAGE: &str = "sites/day-trip";
+const EARLIER_TITLE: &str = "A day in Aveiro";
+const EARLIER_REPLY: &str = "I added the ferry times.";
 const MINE: &str = "Add the opening hours to the Porto page.";
 const MINE_PAGE: &str = "sites/porto";
 const MINE_REPLY: &str = "I added the opening hours.";
@@ -48,6 +55,13 @@ const QUESTION_REPLY: &str = "The Laptop 13 is lighter.";
 const FAILS: &str = "Make a page of the Porto bookshops.";
 const FAILS_PAGE: &str = "sites/bookshops";
 const FAILS_REPLY: &str = "I made a page of the Porto bookshops.";
+const RETRIED: &str = "Make a page of the Porto viewpoints.";
+const RETRIED_PAGE: &str = "sites/viewpoints";
+const RETRIED_TITLE: &str = "Porto viewpoints";
+const RETRIED_REPLY: &str = "I made a page of the Porto viewpoints.";
+/// The recovery pass's own words, after a first pass that changed none of a required change's
+/// files (as after any first pass it follows).
+const RECOVERY_PASS: &str = "Retry the latest user request now.";
 
 #[test]
 fn a_page_a_turn_made_by_hand_gets_its_card_before_the_reply_via_proxy() -> Result<()> {
@@ -87,6 +101,11 @@ fn message(text: &str) -> Value {
     })
 }
 
+/// A required change's answer, in the final form such a turn asks for.
+fn final_json(text: &str) -> Value {
+    message(&json!({ "summary": text, "code": "", "files": [], "actions": [] }).to_string())
+}
+
 /// A page written by hand, in one command: no binder, no check, no card.
 fn write_page(folder: &str, title: &str) -> Value {
     json!({
@@ -119,8 +138,18 @@ async fn provider_request(Json(body): Json<Value>) -> axum::response::Response {
     let ran = input[start..]
         .iter()
         .any(|item| item["type"] == "function_call_output");
+    // The viewpoints page is made only by the recovery pass: its first pass changes nothing.
+    if asks(RETRIED) {
+        return if !asked.contains(RECOVERY_PASS) || ran {
+            response(final_json(RETRIED_REPLY))
+        } else {
+            response(write_page(RETRIED_PAGE, RETRIED_TITLE))
+        };
+    }
     let (page, reply) = if asks(MADE) {
         (Some((NEW_PAGE, NEW_TITLE)), MADE_REPLY)
+    } else if asks(EARLIER) {
+        (Some((EARLIER_PAGE, EARLIER_TITLE)), EARLIER_REPLY)
     } else if asks(MINE) {
         (Some((MINE_PAGE, "Porto bookshops")), MINE_REPLY)
     } else if asks(THEIRS) {
@@ -223,10 +252,12 @@ async fn run_case() -> Result<()> {
     let runtime_home = TempDir::new()?;
     let project_id = Uuid::new_v4();
     let workspace = workspace_root.path().join(project_id.to_string());
-    // This chat's page and another chat's, both with their cards.
+    // This chat's page and another chat's, both with their cards, and a page from before the
+    // space's record of its pages.
     for (folder, title) in [
         (MINE_PAGE, "Porto bookshops"),
         (THEIR_PAGE, "Three latest Framework laptops"),
+        (EARLIER_PAGE, EARLIER_TITLE),
     ] {
         fs::create_dir_all(workspace.join(folder))?;
         fs::write(
@@ -443,7 +474,7 @@ printf '{{"posted":true,"title":"%s","command":"instafy preview open","answer":{
     let chat = Uuid::new_v4();
     let another_chat = Uuid::new_v4();
     // One turn of the chat: its job, with its own token and its save's.
-    let turn = |prompt: &str| -> Result<(LeaseJob, String)> {
+    let turn_requiring = |prompt: &str, requirement: &str| -> Result<(LeaseJob, String)> {
         let run_id = Uuid::new_v4();
         let token = sign(run_id, &["prompt.execute"])?;
         let job = LeaseJob {
@@ -456,7 +487,7 @@ printf '{{"posted":true,"title":"%s","command":"instafy preview open","answer":{
             credential_id: None,
             payload: json!({
                 "prompt_text": prompt,
-                "metadata": {"execution_mode":"apply","agentRoutingPreflight":{"workspaceFileChangeRequirement":"conditional"}},
+                "metadata": {"execution_mode":"apply","agentRoutingPreflight":{"workspaceFileChangeRequirement":requirement}},
             }),
             proxy: None,
             controller_token: Some(token.clone()),
@@ -477,6 +508,7 @@ printf '{{"posted":true,"title":"%s","command":"instafy preview open","answer":{
         };
         Ok((job, token))
     };
+    let turn = |prompt: &str| turn_requiring(prompt, "conditional");
     let run = |job: LeaseJob, cancel: Option<JobCancelSignal>| {
         let processor = &processor;
         let registration = &registration;
@@ -537,6 +569,28 @@ printf '{{"posted":true,"title":"%s","command":"instafy preview open","answer":{
             message.content
         );
     }
+
+    // A page that was there before the turn, with no row in the record: its card may be in a chat
+    // already, opened before the record began, or it may be another chat's page whose card was
+    // never posted. A turn that changes it doesn't card it, nor take it for its chat.
+    let (job, _) = turn(EARLIER)?;
+    let earlier = run(job, None)
+        .await
+        .context("the turn that changed an earlier page failed")?;
+    assert_eq!(earlier.summary, EARLIER_REPLY);
+    assert_eq!(
+        fs::read_to_string(workspace.join(EARLIER_PAGE).join("index.html"))?,
+        format!("<!doctype html><title>{EARLIER_TITLE}</title><h1>{EARLIER_TITLE}</h1>\n")
+    );
+    assert_eq!(ran().len(), 1, "{:#?}", ran());
+    let rows = record()?;
+    let folders: Vec<&Value> = rows["pages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|row| &row["folder"])
+        .collect();
+    assert_eq!(folders, vec![&json!(NEW_PAGE)], "{rows}");
 
     // This chat's page, whose card is in the chat, and another chat's page: no card.
     record_pages(
@@ -599,6 +653,28 @@ printf '{{"posted":true,"title":"%s","command":"instafy preview open","answer":{
             message.content
         );
     }
+
+    // A required change whose first pass changed nothing, and whose recovery pass made the page:
+    // the card step runs at the end of that pass, before its reply.
+    let (job, token) = turn_requiring(RETRIED, "required")?;
+    let retried = run(job, None).await.context("the viewpoints turn failed")?;
+    assert_eq!(retried.summary, RETRIED_REPLY);
+    assert!(
+        workspace.join(RETRIED_PAGE).join("index.html").is_file(),
+        "the recovery pass made the page"
+    );
+    assert_eq!(ran().last(), Some(&card_step(RETRIED_PAGE, &token)));
+    assert_eq!(ran().len(), 3, "{:#?}", ran());
+    let row = &record()?["pages"][0];
+    assert_eq!(
+        (&row["folder"], &row["title"], &row["conversationId"]),
+        (
+            &json!(RETRIED_PAGE),
+            &json!(RETRIED_TITLE),
+            &json!(chat.to_string())
+        ),
+        "{row}"
+    );
 
     drop(settings);
     drop(proxy_guard);
