@@ -1482,7 +1482,8 @@ async fn post_preview_ready(
         )
         .await
         .map_err(|error| internal_error(format!("failed to record preview card: {error}")))?;
-    // The chat this card went to made the page, unless the record holds the folder already.
+    // The page's row in the space's record of its pages: this card's chat made the page when its
+    // turn made the folder, and otherwise the chat the row holds stays.
     let page = pages::record_opened_page(
         &mut transaction,
         &project_id,
