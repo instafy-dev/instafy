@@ -477,7 +477,7 @@ printf '{{"posted":true,"title":"%s","command":"instafy preview open","answer":{
     let turn_requiring = |prompt: &str, requirement: &str| -> Result<(LeaseJob, String)> {
         let run_id = Uuid::new_v4();
         let token = sign(run_id, &["prompt.execute"])?;
-        let job = LeaseJob {
+        let mut job = LeaseJob {
             id: Uuid::new_v4(),
             intent: Some("feature".to_string()),
             project_id: Some(project_id),
@@ -506,6 +506,12 @@ printf '{{"posted":true,"title":"%s","command":"instafy preview open","answer":{
             grants: Vec::new(),
             grant_token: None,
         };
+        // A required change: the runtime holds the turn to it, as the routing step's requirement
+        // does for a routed message.
+        if requirement == "required" {
+            job.payload["metadata"]["runtimeExpectations"] =
+                json!({ "workspaceFileChanges": true });
+        }
         Ok((job, token))
     };
     let turn = |prompt: &str| turn_requiring(prompt, "conditional");
