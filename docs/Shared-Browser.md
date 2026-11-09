@@ -1992,9 +1992,10 @@ a key, a choice or a sent search that leaves the page at the same address,
 reading as it did before the step, reads it again for up to about 3 seconds:
 a click read a planner before its route was drawn, and the turn said the
 planner showed none. The reading compared is the page's rendered text, its
-open shadow roots' text and what its fields hold, as one digest the page
-works out itself, so a step that only changed a field (an option chosen, a
-box checked) answers at once. A page that still reads as it did then says so
+open shadow roots' text, what its fields hold and where the page is
+scrolled to, as one digest the page works out itself, so a step that only
+changed a field (an option chosen, a box checked) or scrolled the page
+answers at once. A page that still reads as it did then says so
 in the step's `done`: "The page reads as it did before this step. What it
 loads may still be coming: take a snapshot before saying nothing appeared."
 `omittedControls` counts

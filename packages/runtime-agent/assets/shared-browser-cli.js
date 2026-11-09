@@ -4504,9 +4504,10 @@ async function openAddress(page, url) {
 
 // Runs inside the page. What a step's reading is compared with before and
 // after the step: the page's rendered text, the text of its open shadow
-// roots, which the body's text leaves out, and what its fields hold, which no
-// text shows (a field typed into, an option chosen, a box checked), as one
-// short digest the page works out itself: nothing of the page leaves it.
+// roots, which the body's text leaves out, what its fields hold, which no
+// text shows (a field typed into, an option chosen, a box checked), and where
+// the page is scrolled to, which moves what a reading shows, as one short
+// digest the page works out itself: nothing of the page leaves it.
 function pageReadingInPage() {
   const body = document.body;
   if (!body) return "";
@@ -4532,7 +4533,7 @@ function pageReadingInPage() {
     }
   };
   visit(body);
-  const all = `${texts.join("\n")}\u0000${values.join("\u0001")}`;
+  const all = `${Math.round(window.scrollX)},${Math.round(window.scrollY)}\u0000${texts.join("\n")}\u0000${values.join("\u0001")}`;
   let first = 0x811c9dc5;
   let second = 5381;
   for (let index = 0; index < all.length; index += 1) {

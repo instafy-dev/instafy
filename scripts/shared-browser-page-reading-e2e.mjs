@@ -399,15 +399,17 @@ const DRESSED_SIGN_IN = `<h1>Your account</h1>
 </div>`;
 // A journey planner that draws its route in place, without a new document:
 // 1.5 s after its button, 5 s after a slow one, and at once for its fares;
-// a link to another page; a search box with no form, a field and a list.
+// a button that only scrolls to its end; a link to another page; a search
+// box with no form, a field and a list.
 const DRAWS = `<h1>Journey planner</h1>
 <p><input aria-label="From" name="from" value="São Bento"> <select aria-label="Day"><option>Monday</option><option>Tuesday</option></select></p>
 <p><input type="search" aria-label="Search stops"></p>
 <p><button type="button" onclick="setTimeout(() => { document.getElementById('route').textContent = 'Route: Line D towards Hospital São João, 2 stops'; }, 1500)">Plan journey</button>
 <button type="button" onclick="setTimeout(() => { document.getElementById('route').textContent = 'Route: Line A towards Senhor de Matosinhos, 5 stops'; }, 5000)">Plan the slow way</button>
 <button type="button" onclick="document.getElementById('route').textContent = 'Fares: Z2 1.40 euros'">Show fares</button>
+<button type="button" onclick="window.scrollTo(0, document.body.scrollHeight)">Go to the end</button>
 <a href="/reading/visit">Plan your visit</a></p>
-<p id="route"></p>`;
+<p id="route"></p><div style="height:3000px"></div><p>End of the planner</p>`;
 const COVERED = `<h1>Timetable</h1><p style="margin-top:1200px"><a href="/reading/visit" id="lines">All lines</a></p>
 <div id="loading" style="position:fixed;inset:0;background:rgba(255,255,255,.8)"><p>Loading departures</p></div>
 <script>
@@ -1053,14 +1055,19 @@ export async function runSharedBrowserPageReadingFixture() {
     await delay(3_000);
     const later = await ok("GET", "/v1/snapshot");
     assert.match(later.visibleText, /Route: Line A towards Senhor de Matosinhos, 5 stops/u, "the slow route never came");
-    // c. A click that changes the page, in place or by opening another,
-    // answers at once.
+    // c. A click that changes the page, in place, by scrolling it or by
+    // opening another, answers at once.
     reading = await read("/reading/draws");
     started = Date.now();
     const fares = await ok("POST", "/v1/click", { index: control(reading, "Show fares").index, snapshotId: reading.snapshotId });
     measurements.changedClickMs = Date.now() - started;
     assert.match(fares.visibleText, /Fares: Z2 1\.40 euros/u);
     assert.equal(fares.done, undefined, fares.done);
+    reading = await read("/reading/draws");
+    started = Date.now();
+    const scrolled = await ok("POST", "/v1/click", { index: control(reading, "Go to the end").index, snapshotId: reading.snapshotId });
+    measurements.scrolledClickMs = Date.now() - started;
+    assert.equal(scrolled.done, undefined, scrolled.done);
     reading = await read("/reading/draws");
     started = Date.now();
     const visit = await ok("POST", "/v1/click", { index: control(reading, "Plan your visit").index, snapshotId: reading.snapshotId });
@@ -1084,6 +1091,7 @@ export async function runSharedBrowserPageReadingFixture() {
     assert.equal(chosen.done, undefined, chosen.done);
     for (const [name, ms] of [
       ["a click that changed the page", measurements.changedClickMs],
+      ["a click that scrolled the page", measurements.scrolledClickMs],
       ["a click that opened a page", measurements.openedClickMs],
       ["a type step", measurements.typeMs],
       ["a choice", measurements.chooseMs],
@@ -1105,7 +1113,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "a section marked open is no control, and a click whose middle lands on a form's button or a frame inside the control is refused, sending and asking nothing",
         "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, and a cover that goes within a moment is waited for",
         "a cookie notice is never the person's step: its accept is never listed, as a button, a link, an Allow all or an Agree and close, and is counted among the controls left out, while its settings, a limited accept, a refusal no list knows and a button dressed up beside it stay listed, and the policy's refusal of an accept keeps its words; a click under a notice the browser could not decline says where to go instead and never to pause on it; a pause on a notice's buttons is refused as one on anything but fields, outlining, publishing and pressing nothing, in the chat's own tab and in Octo's own; under a bar whose only button accepts the planner's own button works with no prompt",
-        "a click whose result the page draws in place 1.5 s later reads it; one whose page still reads as before a few seconds on says so and to take a snapshot before saying nothing appeared, and a snapshot then reads the result; a click that changes the page or opens another, a type step and a choice answer at once; a search typed and not sent says nothing was searched yet, and another field that nothing was sent yet",
+        "a click whose result the page draws in place 1.5 s later reads it; one whose page still reads as before a few seconds on says so and to take a snapshot before saying nothing appeared, and a snapshot then reads the result; a click that changes the page, scrolls it or opens another, a type step and a choice answer at once; a search typed and not sent says nothing was searched yet, and another field that nothing was sent yet",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",
