@@ -707,7 +707,10 @@ describe("PersonalBrowserSurface", () => {
         />,
       );
     });
+    // The space's browser is named as everywhere else: this space, and the people in it.
+    expect(document.querySelector('[data-testid="browser-location-menu"]')?.getAttribute("aria-label")).toBe("Browser location: This space");
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-location-menu"]')!.click());
+    expect(document.querySelector('[data-testid="browser-location-options"]')?.textContent).not.toMatch(/Workspace|Project members|Shared Browser/);
     const personal = document.querySelector<HTMLButtonElement>(
       '[data-testid="browser-transport-personal"]',
     );
@@ -716,13 +719,13 @@ describe("PersonalBrowserSurface", () => {
     );
     expect(personal?.disabled).toBe(true);
     expect(personal?.getAttribute("aria-label")).toBe("This device");
-    expect(shared?.getAttribute("aria-label")).toBe("Workspace browser");
+    expect(shared?.getAttribute("aria-label")).toBe("This space");
     expect(
       document.getElementById(personal?.getAttribute("aria-describedby") ?? "")?.textContent,
     ).toContain("stay on this device");
     expect(
       document.getElementById(shared?.getAttribute("aria-describedby") ?? "")?.textContent,
-    ).toContain("Project members see the same remote browser");
+    ).toContain("People in this space see the same remote browser");
     await act(async () => shared?.click());
     expect(onModeChange).toHaveBeenCalledWith("shared");
     expect(document.querySelector('[role="dialog"][aria-label="Browser location"]')).toBeNull();
@@ -856,14 +859,14 @@ describe("PersonalBrowserSurface", () => {
     const personal = document.querySelector<HTMLButtonElement>('[data-testid="browser-transport-personal"]')!;
     const shared = document.querySelector<HTMLButtonElement>('[data-testid="browser-transport-shared"]')!;
     expect(personal.textContent).toContain("This device");
-    expect(shared.textContent).toContain("Workspace");
+    expect(shared.textContent).toContain("This space");
     expect(personal.getAttribute("aria-label")).toBe("This device");
     expect(personal.getAttribute("aria-pressed")).toBe("true");
-    expect(shared.getAttribute("aria-label")).toBe("Workspace browser");
+    expect(shared.getAttribute("aria-label")).toBe("This space");
     expect(shared.getAttribute("aria-pressed")).toBe("false");
     const personalDescription = document.getElementById(personal.getAttribute("aria-describedby")!)?.textContent;
-    expect(personalDescription).toContain("follow you across projects");
-    expect(personalDescription).toContain("not copied to Shared Browser or your other devices");
+    expect(personalDescription).toContain("follow you across spaces");
+    expect(personalDescription).toContain("not copied to this space's browser or your other devices");
   });
 
   it("explains that clearing Personal data affects all projects on this device and respects cancellation", async () => {

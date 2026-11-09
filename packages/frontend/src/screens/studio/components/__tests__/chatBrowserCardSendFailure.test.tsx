@@ -295,9 +295,9 @@ describe("a browser card whose press the controller did not take", () => {
   });
 
   // A message Octo sent straight to the browser: Studio opened its card by
-  // itself, and the turn read "Opening Instafy's browser…". Its continuation
-  // did not go out, and nothing joined the chat.
-  it("stops reading as opening, and shows its button, when Studio's own start was not taken", async () => {
+  // itself, and the turn read "Thinking…". Its continuation did not go out,
+  // and nothing joined the chat.
+  it("stops reading as the turn's line, and shows its button, when Studio's own start was not taken", async () => {
     const now = Date.now();
     const ROUTED_JOB = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     const ROUTED_RUN = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
@@ -315,7 +315,7 @@ describe("a browser card whose press the controller did not take", () => {
     await act(async () => root.render(
       <ChatRows messages={messages} cardStates={new Map([[routedKey, { kind: "opening", note: null }]])} />,
     ));
-    expect(read()).toMatchObject({ cards: 0, line: "Opening Instafy's browser…" });
+    expect(read()).toMatchObject({ cards: 0, line: "Thinking…" });
 
     await act(async () => {
       recordSendFailedForPromptSentFromThisPage({ metadata: continuation.metadata });

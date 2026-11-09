@@ -730,7 +730,7 @@ describe("ChatComposerSurface", () => {
     expect(tray.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const row = tray.querySelector('[data-testid="chat-sent-page-attachment"]')!;
     expect(row.textContent).toContain(viewer === "shared" ? "docs.example" : "Release notes");
-    expect(row.textContent).toContain(`Page from docs.example · ${viewer === "personal" ? "This device" : "Workspace"} browser · 1 KB`);
+    expect(row.textContent).toContain(`Page from docs.example · ${viewer === "personal" ? "This device" : "This space"}'s browser · 1 KB`);
     expect(row.querySelector('[title="https://docs.example/releases"]')).not.toBeNull();
     expect(tray.querySelector("img")).toBeNull();
     expect(tray.querySelector('[data-testid^="chat-image-upload-preview-item-"]')).toBeNull();

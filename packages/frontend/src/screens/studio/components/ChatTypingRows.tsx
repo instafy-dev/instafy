@@ -161,7 +161,7 @@ export function ChatTypingRows({
   ) => JSX.Element;
 }) {
   // The newest row already says what the turn is doing (its own line, or a
-  // routed card's "Opening Instafy's browser…"): it holds the place, so this
+  // routed card's "Thinking…"): it holds the place, so this
   // row shows nothing, not even the spacer below, which would be a second
   // face with no words under that row.
   const coveredByNewestRow = isAssistantTyping && isAssistantTypingCoveredByJobThreadPreview;
