@@ -4190,12 +4190,16 @@ const WORKSPACE_IS_CURRENT_RULE: &str = "\
 /// so that chat's page and card showed the new one, twice: the rule it read left it to judge
 /// whether the person named that page, and nothing told it which chat made the folder. Every turn
 /// that may write files reads this, whatever skill it reads and whichever form its answer takes,
-/// with the space's pages after it, each made in this chat or in another
+/// with the space's pages after it, each made in this chat or in another and read-only here
 /// ([`space_pages::space_pages_lines`]): a fact in place of the judgement. It is said here only.
+/// Told that its page was another chat's and that it changed only when the person pointed at it,
+/// a new chat's turn still deleted that page's data and typed it again broken (a local test,
+/// Nov 9): a page made in another chat now changes only from that chat, as an artifact belongs to
+/// its conversation in other chat apps, and the runtime holds it ([`space_pages::HeldPages`]).
 /// It speaks of a page made for the person (a map, a comparison, a page to share), and the list
 /// holds only those: the person's own app or site, from the workspace or a folder of it (an
 /// imported repository), is changed as asked from any chat ("Make the buttons rounder.").
-const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A request for a new page starts a new folder, even on the same subject. A page made for the person in another chat (a map, a comparison, a page to share) changes only when the person points at that page (\"the laptop comparison\", \"that page\").\n";
+const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A request for a new page starts a new folder, even on the same subject. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat.\n";
 
 /// True when a person in this conversation opened a skill setup with
 /// `/skills import ... --start` or `/skills start <name>` and the setup began.
@@ -8254,6 +8258,18 @@ impl JobProcessor {
         {
             turn_start.record(&workspace_dir, status);
         }
+        // A page another chat made is read-only here, and held: what the model changes there goes
+        // back once it is done, from how the folder began this job, as its stopped attempt's work
+        // counts as the job's own.
+        let mut held_pages = if read_only_workspace || is_browser_turn(job) {
+            space_pages::HeldPages::default()
+        } else {
+            space_pages::HeldPages::of_turn(
+                &workspace_dir,
+                job.conversation_id.as_ref(),
+                &space_pages::installed_page_commands(),
+            )
+        };
         let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
         confirm_lease_held(
             cancel_signal.as_ref(),
@@ -8428,6 +8444,16 @@ impl JobProcessor {
                 result => break result,
             }
         };
+        // Whether or not the model's run ended well, a page another chat made is as it was before
+        // anything reads the folder.
+        held_pages
+            .put_back(
+                &workspace_dir,
+                earlier_attempt_status
+                    .as_ref()
+                    .or(git_status_before.as_ref()),
+            )
+            .await;
         let output = match output_result {
             Ok(output) => output,
             Err(error) => {
@@ -8528,6 +8554,7 @@ impl JobProcessor {
         let mut outcome = extract_codex_outcome(&output.final_json)?;
         user_input_request::validate_outcome_scope(job, &outcome)?;
         outcome.read_files = normalize_codex_read_files(&workspace_dir, outcome.read_files);
+        held_pages.leave_out_returned(&workspace_dir, &mut outcome.files);
         // The runtime's no-change line: a required change's prompt asks for it, and a turn's
         // provider thread can keep it from an earlier prompt. It leaves the reply before anything
         // reads or shows it (a plan card carries the reply's words), so the person never reads it.
@@ -8812,9 +8839,12 @@ impl JobProcessor {
                 "accepting successful apply_patch events as workspace file-change evidence despite an empty files list"
             );
         }
+        // A change put back in another chat's page is the turn's result, which its reply says: run
+        // again, the turn would make it again.
         let workspace_file_changes_missing = expects_workspace_file_changes_after_actions
             && outcome.files.is_empty()
-            && !workspace_file_changes_satisfied_by_patch_apply;
+            && !workspace_file_changes_satisfied_by_patch_apply
+            && !held_pages.put_a_change_back();
         // A required change that changed nothing and says why (an answer, a question for the
         // person, or what blocks the work) is the turn's result, as after a recovery pass: that
         // pass, on a thread of its own, asked the same again (a local test, Nov 6: "keep going"
@@ -9224,7 +9254,7 @@ impl JobProcessor {
             // run trace loses the retry's interim evidence.
             let native_retry_prompt =
                 without_project_preferences(&retry_prompt, &project_id, &retry_preferences)?;
-            let retry_output = if let Some(progress) = progress_sender.as_ref() {
+            let retry_output_result = if let Some(progress) = progress_sender.as_ref() {
                 let retry_sender = progress.sender.clone();
                 let retry_status = progress.status.clone();
                 let mut retry_stream_events: Vec<JsonValue> = Vec::new();
@@ -9279,12 +9309,21 @@ impl JobProcessor {
                         Some(&mut retry_event_handler),
                         retry_codex_run_options,
                     )
-                    .await?
+                    .await
             } else {
                 codex
                     .execute_with_options(native_retry_prompt, None, retry_codex_run_options)
-                    .await?
+                    .await
             };
+            held_pages
+                .put_back(
+                    &workspace_dir,
+                    earlier_attempt_status
+                        .as_ref()
+                        .or(git_status_before.as_ref()),
+                )
+                .await;
+            let retry_output = retry_output_result?;
             drop(codex_guard);
             if !codex_run_options.input_images.is_empty() {
                 annotate_prompt_context_native_image_inputs(
@@ -9310,6 +9349,7 @@ impl JobProcessor {
             user_input_request::validate_outcome_scope(job, &retry_outcome)?;
             retry_outcome.read_files =
                 normalize_codex_read_files(&workspace_dir, retry_outcome.read_files);
+            held_pages.leave_out_returned(&workspace_dir, &mut retry_outcome.files);
             suppress_multi_agent_plan_actions_for_worker(job, &mut retry_outcome);
             log_browser_requests_dropped_as_read(job, &retry_output.final_json);
             suppress_browser_requests_where_unsupported(job, &mut retry_outcome);
@@ -9937,6 +9977,8 @@ impl JobProcessor {
                         "kind": REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND,
                         "metadata": { "reason": "no_change_after_recovery" },
                     }));
+                } else if held_pages.put_a_change_back() {
+                    // Its change to another chat's page was put back, and its reply says so.
                 } else {
                     // Nothing changed, and the reply did not say so: it reads
                     // as a promise of a change that was not made.
@@ -10085,6 +10127,7 @@ impl JobProcessor {
                     retry_read_only_coordination_paths,
                 ));
             }
+            retry_artifacts.extend(held_pages.artifact());
 
             let mut retry_messages = merge_skills_kickoff_into_execution(
                 skills_kickoff.take(),
@@ -10165,6 +10208,11 @@ impl JobProcessor {
                 // An empty reply is no reply: the building turn answers.
                 retry_outcome.summary.clear();
             }
+            // The page another chat made that it didn't change, on a line of its own.
+            save_report::append_not_saved(
+                &mut retry_outcome.summary,
+                &Vec::from_iter(held_pages.reply_line()),
+            );
             save_report::append_not_saved(&mut retry_outcome.summary, &retry_not_saved);
             user_input_request::append_outcome_artifact(&mut retry_artifacts, &retry_outcome);
             return Ok(JobExecution {
@@ -10419,6 +10467,7 @@ impl JobProcessor {
                 read_only_coordination_paths,
             ));
         }
+        artifacts.extend(held_pages.artifact());
 
         let interim_messages = merge_skills_kickoff_into_execution(
             skills_kickoff.take(),
@@ -10430,6 +10479,11 @@ impl JobProcessor {
             // An empty reply is no reply: the building turn answers.
             outcome.summary.clear();
         }
+        // The page another chat made that it didn't change, on a line of its own.
+        save_report::append_not_saved(
+            &mut outcome.summary,
+            &Vec::from_iter(held_pages.reply_line()),
+        );
         save_report::append_not_saved(&mut outcome.summary, &not_saved);
         user_input_request::append_outcome_artifact(&mut artifacts, &outcome);
         Ok(JobExecution {
@@ -19344,22 +19398,29 @@ async fn fetch_agent_context_cards_for_scope(
     Ok(filter_project_context_cards(cards, terms))
 }
 
-fn git_status_command_args(workspace_dir: &Path) -> Vec<String> {
-    let status_args = vec![
-        "status".to_string(),
-        "--porcelain=v1".to_string(),
-        "-z".to_string(),
-        "--no-renames".to_string(),
-        "--untracked-files=all".to_string(),
-    ];
-    // Canonical workspaces keep the repository at `.instafy/.git` with no
-    // top-level `.git`, so a plain `git status` fails and silently disables
-    // the only file-change evidence channel for write jobs.
+/// `args` for the workspace's own repository. Canonical workspaces keep it at `.instafy/.git` with
+/// no top-level `.git`, so a plain `git status` fails and silently disables the only file-change
+/// evidence channel for write jobs, and a plain `git restore` puts nothing back.
+fn workspace_git_args(workspace_dir: &Path, args: &[&str]) -> Vec<String> {
+    let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
     if workspace_uses_instafy_canonical_git(workspace_dir) {
-        canonical_git_args(workspace_dir, &status_args)
+        canonical_git_args(workspace_dir, &args)
     } else {
-        status_args
+        args
     }
+}
+
+fn git_status_command_args(workspace_dir: &Path) -> Vec<String> {
+    workspace_git_args(
+        workspace_dir,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--no-renames",
+            "--untracked-files=all",
+        ],
+    )
 }
 
 async fn collect_git_status_porcelain(
@@ -19386,6 +19447,11 @@ fn git_status_delta_paths(
     paths
 }
 
+/// Puts each path that `after` lists as changed and `before` did not back as the workspace's
+/// repository holds it, leaving out `excluded_paths`, and returns those put back: a tracked one is
+/// restored, a new one removed. It runs in the workspace's own repository, as the status read does
+/// ([`workspace_git_args`]): with plain `git`, a space whose repository is its `.instafy/.git` got
+/// nothing back.
 async fn restore_clean_baseline_git_status_delta_excluding(
     workspace_dir: &Path,
     before: &HashMap<String, GitStatusEntry>,
@@ -19418,10 +19484,10 @@ async fn restore_clean_baseline_git_status_delta_excluding(
     if !restore_paths.is_empty() {
         let mut command = Command::new("git");
         command
-            .arg("restore")
-            .arg("--worktree")
-            .arg("--staged")
-            .arg("--")
+            .args(workspace_git_args(
+                workspace_dir,
+                &["restore", "--worktree", "--staged", "--"],
+            ))
             .args(&restore_paths)
             .current_dir(workspace_dir)
             .stdout(Stdio::null())
@@ -19448,9 +19514,7 @@ async fn restore_clean_baseline_git_status_delta_excluding(
     if !clean_paths.is_empty() {
         let mut command = Command::new("git");
         command
-            .arg("clean")
-            .arg("-fd")
-            .arg("--")
+            .args(workspace_git_args(workspace_dir, &["clean", "-fd", "--"]))
             .args(&clean_paths)
             .current_dir(workspace_dir)
             .stdout(Stdio::null())
@@ -36527,6 +36591,92 @@ mod tests {
             git_status_delta_paths(&before, &after),
             vec!["dirty.txt".to_string(), "new.txt".to_string()]
         );
+    }
+
+    /// A read-only turn's changes go back in a space whose repository is its `.instafy/.git`, the
+    /// repository the status read finds there: run as plain `git`, which finds none there, the
+    /// restore put nothing back. A file the turn changed is restored, one it deleted comes back and
+    /// one it added goes; one already changed when the turn began, or one left out, stays.
+    #[tokio::test]
+    async fn a_read_only_turns_changes_go_back_where_the_spaces_repository_is_its_instafy_git() {
+        let workspace = tempdir().expect("workspace");
+        let ws = workspace.path();
+        fs::create_dir_all(ws.join(".instafy")).expect("instafy folder");
+        let git = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+            let output = std::process::Command::new("git")
+                .args(canonical_git_args(ws, &args))
+                .current_dir(ws)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        fs::create_dir_all(ws.join("sites/porto")).expect("page folder");
+        fs::write(ws.join("sites/porto/index.html"), "<h1>Porto</h1>\n").expect("page");
+        fs::write(ws.join("sites/porto/data.json"), "{}\n").expect("data");
+        fs::write(ws.join("notes.md"), "saved\n").expect("notes");
+        git(&["add", "--", "sites", "notes.md"]);
+        git(&[
+            "-c",
+            "user.name=Instafy Test",
+            "-c",
+            "user.email=test@instafy.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "saved",
+        ]);
+        assert!(workspace_uses_instafy_canonical_git(ws));
+        fs::write(ws.join("notes.md"), "an edit from before the turn\n").expect("edit");
+        let before = collect_git_status_porcelain(ws)
+            .await
+            .expect("status before");
+
+        fs::write(ws.join("sites/porto/index.html"), "<h1>Lisbon</h1>\n").expect("turn edit");
+        fs::remove_file(ws.join("sites/porto/data.json")).expect("turn delete");
+        fs::write(ws.join("sites/porto/extra.js"), "x\n").expect("turn add");
+        fs::write(ws.join("notes.md"), "the turn's edit\n").expect("turn edit of notes");
+        fs::write(ws.join("handoff.md"), "kept\n").expect("handoff");
+        let after = collect_git_status_porcelain(ws)
+            .await
+            .expect("status after");
+        let restored = restore_clean_baseline_git_status_delta_excluding(
+            ws,
+            &before,
+            &after,
+            &HashSet::from(["handoff.md".to_string()]),
+        )
+        .await;
+
+        assert_eq!(
+            restored,
+            [
+                "sites/porto/data.json",
+                "sites/porto/extra.js",
+                "sites/porto/index.html"
+            ]
+        );
+        assert_eq!(
+            fs::read_to_string(ws.join("sites/porto/index.html")).unwrap(),
+            "<h1>Porto</h1>\n"
+        );
+        assert_eq!(
+            fs::read_to_string(ws.join("sites/porto/data.json")).unwrap(),
+            "{}\n"
+        );
+        assert!(!ws.join("sites/porto/extra.js").exists());
+        assert_eq!(
+            fs::read_to_string(ws.join("notes.md")).unwrap(),
+            "the turn's edit\n"
+        );
+        assert!(ws.join("handoff.md").exists());
     }
 
     #[test]

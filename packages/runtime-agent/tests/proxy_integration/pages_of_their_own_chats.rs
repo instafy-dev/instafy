@@ -16,8 +16,15 @@
 //! another chat made, and changes the folder its own chat made. The first chat's page is then
 //! unchanged byte for byte, the new chat's fill-in fills its own folder, and a long chat whose page
 //! has left the history it sends still sees the page as its own.
+//!
+//! Told so, a new chat's turn still deleted the first chat's data and typed it again with a stray
+//! "+", and that page was broken until a later turn mended it in passing (a local test, Nov 9). So
+//! a page made in another chat is read-only here, and the runtime holds it: in a space whose
+//! repository is its `.instafy/.git`, as a hosted space's is, the second case's stand-in model
+//! breaks the first chat's page whatever it is told, and the page stays as its last save holds it.
 
 use super::*;
+use runtime_agent::jobs::JobExecution;
 use std::sync::Mutex as StdMutex;
 
 const CHILD: &str = "INSTAFY_PAGES_OF_THEIR_OWN_CHATS_TEST_CHILD";
@@ -43,6 +50,17 @@ const WEIGHED: &str = "I added each one's weight.";
 const WEIGHED_LINE: &str = "weights: added\n";
 /// Where the stand-in model starts a page when it can't tell which folder is its own.
 const NEW_FOLDER: &str = "sites/framework-laptops-2";
+/// The new chat, pointing at the first chat's page.
+const POINTED: &str = "Add the weight of each one to the laptop comparison.";
+const POINTED_REPLY: &str = "I added each one's weight to the comparison.";
+/// The new chat again, while the first chat adds its weights.
+const AGAIN: &str = "Start the comparison again from what you already know.";
+const AGAIN_REPLY: &str = "I started the comparison again.";
+/// What the first chat adds to its own page, beside its data.
+const THEIR_WEIGHTS: &str = "{\"Laptop 12\":\"1.3 kg\"}\n";
+/// The runtime's line when a turn changed the first chat's page.
+const NOT_CHANGED: &str =
+    "I didn't change “Framework Laptop 12, 13 and 16”: it was made in another chat.";
 
 #[test]
 fn a_new_chat_builds_its_own_page_and_leaves_another_chats_page_as_it_is_via_proxy() -> Result<()> {
@@ -69,8 +87,51 @@ fn a_new_chat_builds_its_own_page_and_leaves_another_chats_page_as_it_is_via_pro
         .map_err(|_| anyhow::anyhow!("pages fixture panicked"))?
 }
 
+const HELD_CHILD: &str = "INSTAFY_PAGES_HELD_FOR_THEIR_CHATS_TEST_CHILD";
+
+#[test]
+fn a_page_another_chat_made_stays_as_its_last_save_holds_it_via_proxy() -> Result<()> {
+    if std::env::var(HELD_CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(
+            HELD_CHILD,
+            "pages_of_their_own_chats::a_page_another_chat_made_stays_as_its_last_save_holds_it_via_proxy",
+            "pages-held-for-their-chats",
+        );
+    }
+    const STACK: usize = 32 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("pages-held-proxy".to_string())
+        .stack_size(STACK)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .thread_stack_size(STACK)
+                .build()?
+                .block_on(run_held_case())
+        })?
+        .join()
+        .map_err(|_| anyhow::anyhow!("held pages fixture panicked"))?
+}
+
 struct Provider {
     requests: StdMutex<Vec<Value>>,
+    /// The stand-in model breaks the first chat's page whatever it is told, as the model in the
+    /// local test did, and makes its own page too.
+    breaks_their_page: bool,
+    /// Holds the first chat's request to add its weights until the test lets it go: that turn is
+    /// under way when the new chat's message comes.
+    weights_gate: tokio::sync::Notify,
+}
+
+impl Provider {
+    fn new(breaks_their_page: bool) -> Arc<Self> {
+        Arc::new(Self {
+            requests: StdMutex::new(Vec::new()),
+            breaks_their_page,
+            weights_gate: tokio::sync::Notify::new(),
+        })
+    }
 }
 
 fn response(item: Value) -> axum::response::Response {
@@ -114,8 +175,8 @@ fn last_user_text(request: &Value) -> String {
         .unwrap_or_default()
 }
 
-/// How many commands the turn ran so far.
-fn commands_run(request: &Value) -> usize {
+/// How many steps (commands and patches) the turn ran so far.
+fn steps_run(request: &Value) -> usize {
     let input = request["input"].as_array().cloned().unwrap_or_default();
     let start = input
         .iter()
@@ -123,8 +184,53 @@ fn commands_run(request: &Value) -> usize {
         .unwrap_or(0);
     input[start..]
         .iter()
-        .filter(|item| item["type"] == "function_call_output")
+        .filter(|item| {
+            matches!(
+                item["type"].as_str(),
+                Some("function_call_output" | "custom_tool_call_output")
+            )
+        })
         .count()
+}
+
+/// The stand-in model's patch, in the form the turn offers its patch tool.
+fn patch(request: &Value, id: &str, patch: &str) -> Value {
+    let offered_as_function = request["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|tool| tool["name"] == "apply_patch" && tool["type"] == "function");
+    if offered_as_function {
+        json!({
+            "id":format!("tool_{id}"),"type":"function_call","name":"apply_patch",
+            "call_id":format!("call_{id}"),"status":"completed",
+            "arguments":json!({ "input": patch }).to_string()
+        })
+    } else {
+        json!({
+            "id":format!("tool_{id}"),"type":"custom_tool_call","name":"apply_patch",
+            "call_id":format!("call_{id}"),"status":"completed","input":patch
+        })
+    }
+}
+
+/// The first chat's data deleted, then typed again from memory with a stray "+" on a line, as the
+/// local test's was: two patches, and a page that no longer reads.
+fn break_their_data(request: &Value) -> Vec<Value> {
+    vec![
+        patch(
+            request,
+            "delete",
+            &format!("*** Begin Patch\n*** Delete File: {THEIRS}/data.json\n*** End Patch\n"),
+        ),
+        patch(
+            request,
+            "retype",
+            &format!(
+                "*** Begin Patch\n*** Add File: {THEIRS}/data.json\n+{{\"title\":\"{THEIR_TITLE}\",\"items\":[\n+  \"Laptop 13\"\n++  ],\n+}}\n*** End Patch\n"
+            ),
+        ),
+    ]
 }
 
 /// Which turn a request is, by what its prompt asks last.
@@ -158,6 +264,9 @@ async fn provider_request(
     Json(body): Json<Value>,
 ) -> axum::response::Response {
     state.requests.lock().unwrap().push(body.clone());
+    if state.breaks_their_page {
+        return breaking_request(&state, &body).await;
+    }
     let prompt = last_user_text(&body);
     let (write, reply) = if asks(&body, COMPARE) {
         (
@@ -204,9 +313,67 @@ async fn provider_request(
             WEIGHED,
         )
     };
-    match commands_run(&body) {
-        0 => response(command("write", &write)),
-        _ => response(message(reply)),
+    let steps = vec![command("write", &write)];
+    match steps.get(steps_run(&body)) {
+        Some(step) => response(step.clone()),
+        None => response(message(reply)),
+    }
+}
+
+/// The stand-in model of the second case: it breaks the first chat's page whatever it is told.
+async fn breaking_request(state: &Provider, body: &Value) -> axum::response::Response {
+    let (steps, reply) = if asks(body, COMPARE) {
+        (
+            vec![command(
+                "write",
+                &format!(
+                    "mkdir -p {THEIRS} && printf '%s\\n' '{}' > {THEIRS}/data.json",
+                    THEIR_DATA.trim_end()
+                ),
+            )],
+            COMPARED,
+        )
+    } else if asks(body, FROM_MEMORY) {
+        let mut steps = break_their_data(body);
+        steps.push(command(
+            "own",
+            &format!(
+                "mkdir -p {OWN} && printf '%s\\n' '{}' > {OWN}/data.json",
+                OWN_DATA.trim_end()
+            ),
+        ));
+        (steps, REMEMBERED)
+    } else if asks(body, POINTED) {
+        (
+            vec![command(
+                "weigh",
+                &format!(
+                    "printf '{}' >> {THEIRS}/data.json",
+                    WEIGHED_LINE.replace('\n', "\\n")
+                ),
+            )],
+            POINTED_REPLY,
+        )
+    } else if asks(body, WEIGHTS) {
+        if steps_run(body) == 0 {
+            state.weights_gate.notified().await;
+        }
+        (
+            vec![command(
+                "weights",
+                &format!(
+                    "printf '%s\\n' '{}' > {THEIRS}/weights.json",
+                    THEIR_WEIGHTS.trim_end()
+                ),
+            )],
+            WEIGHED,
+        )
+    } else {
+        (break_their_data(body), AGAIN_REPLY)
+    };
+    match steps.get(steps_run(body)) {
+        Some(step) => response(step.clone()),
+        None => response(message(reply)),
     }
 }
 
@@ -289,128 +456,167 @@ fn record_card(workspace: &Path, conversation_id: Uuid, folder: &str, title: &st
     Ok(())
 }
 
+/// The space a case's turns run in, with the stand-in model behind the real proxy.
+struct Space {
+    project_id: Uuid,
+    workspace: PathBuf,
+    state: Arc<Provider>,
+    processor: JobProcessor,
+    registration: Registration,
+    settings: Vec<EnvGuard>,
+    stub: (ChildGuard, tokio::task::JoinHandle<std::io::Result<()>>),
+    proxy: (ChildGuard, tokio::task::JoinHandle<Result<()>>),
+    _runtime_home: TempDir,
+    _workspace_root: TempDir,
+}
+
+impl Space {
+    async fn start(state: Arc<Provider>) -> Result<Self> {
+        let workspace_root = TempDir::new()?;
+        let runtime_home = TempDir::new()?;
+        let project_id = Uuid::new_v4();
+        let workspace = workspace_root.path().join(project_id.to_string());
+        fs::create_dir_all(&workspace)?;
+        let auth_path = runtime_home.path().join("auth.json");
+        fs::write(
+            &auth_path,
+            json!({"OPENAI_API_KEY":"inert-pages-runtime-key"}).to_string(),
+        )?;
+        let mut settings = vec![EnvGuard::remove("CODEX_BASE_INSTRUCTIONS")];
+        for (key, value) in [
+            ("PROXY_REQUIRE_CONTROLLER_AUTH", "false"),
+            ("PROXY_REQUIRE_CREDENTIAL_CLAIM", "false"),
+            ("OPENAI_API_KEY", "inert-pages-runtime-key"),
+            ("CODEX_API_KEY", "inert-pages-runtime-key"),
+            ("CODEX_MODEL", "gpt-5.5"),
+            ("CODEX_MODEL_PROVIDER", "openai"),
+            ("CODEX_DISABLED", "false"),
+            ("CODEX_PERSIST_STRUCTURED_CONVERSATION_THREAD", "true"),
+            ("CODEX_SANDBOX_MODE", "workspace-write"),
+            ("CODEX_ENABLE_WEB_SEARCH", "false"),
+            ("CODEX_RUNTIME_REASONING_EFFORT", "low"),
+            ("CODEX_RUN_TIMEOUT_SECONDS", "45"),
+            ("CODEX_RETRY_BASE_DELAY_MS", "10"),
+        ] {
+            settings.push(EnvGuard::set(key, value));
+        }
+        settings.push(EnvGuard::set(
+            "CODEX_HOME",
+            runtime_home.path().to_string_lossy(),
+        ));
+        settings.push(EnvGuard::set(
+            "CODEX_AUTH_PATH",
+            auth_path.to_string_lossy(),
+        ));
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let upstream = listener.local_addr()?;
+        let app = Router::new()
+            .route("/backend-api/codex/responses", post(provider_request))
+            .with_state(state.clone());
+        let (stub_shutdown, stub_rx) = oneshot::channel();
+        let stub_task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = stub_rx.await;
+                })
+                .await
+        });
+        let stub_guard = ChildGuard::new(stub_shutdown);
+        let port = reserve_port()?;
+        let proxy_address = SocketAddr::from(([127, 0, 0, 1], port));
+        let credentials = auth::Credentials::ApiKey {
+            key: PROVIDER_KEY.to_string(),
+            endpoint: Some(format!("http://{upstream}/backend-api/codex/responses")),
+            default_model: Some("gpt-5.5".to_string()),
+        };
+        let (proxy_shutdown, proxy_rx) = oneshot::channel();
+        let proxy_task = tokio::spawn(proxy::run_proxy_with_shutdown(
+            proxy_address,
+            Some(credentials),
+            async {
+                let _ = proxy_rx.await;
+            },
+        ));
+        let proxy_guard = ChildGuard::new(proxy_shutdown);
+        wait_for_port(port).await?;
+        settings.push(EnvGuard::set(
+            "OPENAI_BASE_URL",
+            format!("http://{proxy_address}/v1"),
+        ));
+
+        let processor = JobProcessor::new(Arc::new(Config {
+            controller_base_url: Url::parse("http://127.0.0.1:9")?,
+            controller_jwks_url: Url::parse("http://127.0.0.1:9/.well-known/jwks.json")?,
+            project_id,
+            runtime_id: None,
+            runtime_lease_id: None,
+            provider: "test-runtime".to_string(),
+            runtime_version: "test".to_string(),
+            capabilities: json!({}),
+            metadata: json!({}),
+            lease_scope: None,
+            workspace_manifest: None,
+            tenant_projects: Vec::new(),
+            parent_lease_id: None,
+            poll_interval: Duration::from_millis(10),
+            lease_wait: Duration::ZERO,
+            lease_max_jobs: 1,
+            lease_seconds: 30,
+            heartbeat_seconds: 30,
+            workspace_root: workspace_root.path().to_path_buf(),
+            project_workspace_override: None,
+            strict_mode: false,
+            dev_isolation_mode: false,
+            display_name: None,
+            origin: None,
+            codex_bin: None,
+            require_codex_bin: false,
+            runtime_access_token: None,
+            parent_dispositions_runtime_on_shutdown: false,
+        }));
+        Ok(Self {
+            project_id,
+            workspace,
+            state,
+            processor,
+            registration: registration_for_live(Uuid::new_v4()),
+            settings,
+            stub: (stub_guard, stub_task),
+            proxy: (proxy_guard, proxy_task),
+            _runtime_home: runtime_home,
+            _workspace_root: workspace_root,
+        })
+    }
+
+    async fn run(&self, job: LeaseJob) -> Result<JobExecution> {
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            self.processor
+                .run_apply_job(&self.registration, &job, true, None, None, None),
+        )
+        .await
+        .context("the turn timed out")?
+    }
+
+    async fn finish(self) -> Result<()> {
+        drop(self.settings);
+        let (proxy_guard, proxy_task) = self.proxy;
+        let (stub_guard, stub_task) = self.stub;
+        drop(proxy_guard);
+        drop(stub_guard);
+        proxy_task.await??;
+        stub_task.await??;
+        Ok(())
+    }
+}
+
 async fn run_case() -> Result<()> {
     let _env = env_guard().await;
     let home = PathBuf::from(std::env::var("HOME")?);
-    let workspace_root = TempDir::new()?;
-    let runtime_home = TempDir::new()?;
-    let project_id = Uuid::new_v4();
-    let workspace = workspace_root.path().join(project_id.to_string());
-    fs::create_dir_all(&workspace)?;
-    let auth_path = runtime_home.path().join("auth.json");
-    fs::write(
-        &auth_path,
-        json!({"OPENAI_API_KEY":"inert-pages-runtime-key"}).to_string(),
-    )?;
-    let mut settings = vec![EnvGuard::remove("CODEX_BASE_INSTRUCTIONS")];
-    for (key, value) in [
-        ("PROXY_REQUIRE_CONTROLLER_AUTH", "false"),
-        ("PROXY_REQUIRE_CREDENTIAL_CLAIM", "false"),
-        ("OPENAI_API_KEY", "inert-pages-runtime-key"),
-        ("CODEX_API_KEY", "inert-pages-runtime-key"),
-        ("CODEX_MODEL", "gpt-5.5"),
-        ("CODEX_MODEL_PROVIDER", "openai"),
-        ("CODEX_DISABLED", "false"),
-        ("CODEX_PERSIST_STRUCTURED_CONVERSATION_THREAD", "true"),
-        ("CODEX_SANDBOX_MODE", "workspace-write"),
-        ("CODEX_ENABLE_WEB_SEARCH", "false"),
-        ("CODEX_RUNTIME_REASONING_EFFORT", "low"),
-        ("CODEX_RUN_TIMEOUT_SECONDS", "45"),
-        ("CODEX_RETRY_BASE_DELAY_MS", "10"),
-    ] {
-        settings.push(EnvGuard::set(key, value));
-    }
-    settings.push(EnvGuard::set(
-        "CODEX_HOME",
-        runtime_home.path().to_string_lossy(),
-    ));
-    settings.push(EnvGuard::set(
-        "CODEX_AUTH_PATH",
-        auth_path.to_string_lossy(),
-    ));
-
-    let state = Arc::new(Provider {
-        requests: StdMutex::new(Vec::new()),
-    });
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
-    let upstream = listener.local_addr()?;
-    let app = Router::new()
-        .route("/backend-api/codex/responses", post(provider_request))
-        .with_state(state.clone());
-    let (stub_shutdown, stub_rx) = oneshot::channel();
-    let stub_task = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = stub_rx.await;
-            })
-            .await
-    });
-    let stub_guard = ChildGuard::new(stub_shutdown);
-    let port = reserve_port()?;
-    let proxy_address = SocketAddr::from(([127, 0, 0, 1], port));
-    let credentials = auth::Credentials::ApiKey {
-        key: PROVIDER_KEY.to_string(),
-        endpoint: Some(format!("http://{upstream}/backend-api/codex/responses")),
-        default_model: Some("gpt-5.5".to_string()),
-    };
-    let (proxy_shutdown, proxy_rx) = oneshot::channel();
-    let proxy_task = tokio::spawn(proxy::run_proxy_with_shutdown(
-        proxy_address,
-        Some(credentials),
-        async {
-            let _ = proxy_rx.await;
-        },
-    ));
-    let proxy_guard = ChildGuard::new(proxy_shutdown);
-    wait_for_port(port).await?;
-    settings.push(EnvGuard::set(
-        "OPENAI_BASE_URL",
-        format!("http://{proxy_address}/v1"),
-    ));
-
-    let processor = JobProcessor::new(Arc::new(Config {
-        controller_base_url: Url::parse("http://127.0.0.1:9")?,
-        controller_jwks_url: Url::parse("http://127.0.0.1:9/.well-known/jwks.json")?,
-        project_id,
-        runtime_id: None,
-        runtime_lease_id: None,
-        provider: "test-runtime".to_string(),
-        runtime_version: "test".to_string(),
-        capabilities: json!({}),
-        metadata: json!({}),
-        lease_scope: None,
-        workspace_manifest: None,
-        tenant_projects: Vec::new(),
-        parent_lease_id: None,
-        poll_interval: Duration::from_millis(10),
-        lease_wait: Duration::ZERO,
-        lease_max_jobs: 1,
-        lease_seconds: 30,
-        heartbeat_seconds: 30,
-        workspace_root: workspace_root.path().to_path_buf(),
-        project_workspace_override: None,
-        strict_mode: false,
-        dev_isolation_mode: false,
-        display_name: None,
-        origin: None,
-        codex_bin: None,
-        require_codex_bin: false,
-        runtime_access_token: None,
-        parent_dispositions_runtime_on_shutdown: false,
-    }));
-    let registration = registration_for_live(Uuid::new_v4());
-    let run = |job: LeaseJob| {
-        let processor = &processor;
-        let registration = &registration;
-        async move {
-            tokio::time::timeout(
-                Duration::from_secs(60),
-                processor.run_apply_job(registration, &job, true, None, None, None),
-            )
-            .await
-            .context("the turn timed out")?
-        }
-    };
+    let space = Space::start(Provider::new(false)).await?;
+    let (project_id, workspace, state) = (space.project_id, space.workspace.clone(), &space.state);
+    let run = |job: LeaseJob| space.run(job);
     let (first_chat, new_chat) = (Uuid::new_v4(), Uuid::new_v4());
     let read = |folder: &str| fs::read(workspace.join(folder).join("data.json"));
 
@@ -450,12 +656,12 @@ async fn run_case() -> Result<()> {
         .context("the new chat's request")?;
     let prompt = last_user_text(asked);
     assert!(
-        prompt.contains("- A request for a new page starts a new folder, even on the same subject. A page made for the person in another chat (a map, a comparison, a page to share) changes only when the person points at that page (\"the laptop comparison\", \"that page\").\n- The space's pages:\n"),
+        prompt.contains("- A request for a new page starts a new folder, even on the same subject. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat.\n- The space's pages:\n"),
         "{prompt}"
     );
     assert!(
         prompt.contains(&format!(
-            "  - \"{THEIR_TITLE}\", in `{THEIRS}/`: made in another chat.\n"
+            "  - \"{THEIR_TITLE}\", in `{THEIRS}/`: made in another chat, read-only here.\n"
         )),
         "{prompt}"
     );
@@ -522,10 +728,237 @@ async fn run_case() -> Result<()> {
     assert_eq!(read(OWN)?, format!("{OWN_DATA}{FILLED_LINE}").as_bytes());
     assert!(!workspace.join(NEW_FOLDER).exists());
 
-    drop(settings);
-    drop(proxy_guard);
-    drop(stub_guard);
-    proxy_task.await??;
-    stub_task.await??;
-    Ok(())
+    space.finish().await
+}
+
+/// A change the routing step sent straight to the building thread, which must change files: in a
+/// space whose repository counts a turn's changes, as the local test's message was routed.
+fn required_job(
+    project_id: Uuid,
+    conversation_id: Uuid,
+    prompt: &str,
+    history: Vec<Value>,
+) -> LeaseJob {
+    let mut job = job(project_id, conversation_id, prompt, history, None);
+    job.payload["metadata"] = json!({
+        "execution_mode": "apply",
+        "agentRoutingPreflight": { "workspaceFileChangeRequirement": "required" },
+    });
+    job
+}
+
+/// `git` in the space's own repository, its `.instafy/.git`, as a hosted space keeps it.
+fn space_git(workspace: &Path, args: &[&str]) -> Result<()> {
+    let git_dir = workspace.join(".instafy/.git").display().to_string();
+    let work_tree = workspace.display().to_string();
+    let mut all = vec![
+        "--git-dir",
+        git_dir.as_str(),
+        "--work-tree",
+        work_tree.as_str(),
+    ];
+    all.extend_from_slice(args);
+    git_in(workspace, &all)
+}
+
+/// A turn's save, as the space's origin commits a turn's files.
+fn save(workspace: &Path) -> Result<()> {
+    space_git(workspace, &["add", "--", "sites"])?;
+    space_git(
+        workspace,
+        &[
+            "-c",
+            "user.name=Instafy Test",
+            "-c",
+            "user.email=test@instafy.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "saved",
+        ],
+    )
+}
+
+/// The files a turn's reply lists, as Studio's file list, its card and Undo read them.
+fn turn_files(execution: &JobExecution) -> Vec<String> {
+    execution
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact["kind"] == "apply/files")
+        .flat_map(|artifact| artifact["files"].as_array().cloned().unwrap_or_default())
+        .filter_map(|file| file["workspacePath"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// What a turn's artifacts record of a write the runtime held back.
+fn blocked(execution: &JobExecution) -> Option<Value> {
+    execution
+        .artifacts
+        .iter()
+        .find(|artifact| artifact["kind"] == "write-scope/read-only-blocked")
+        .cloned()
+}
+
+async fn run_held_case() -> Result<()> {
+    let _env = env_guard().await;
+    let space = Space::start(Provider::new(true)).await?;
+    let (project_id, workspace) = (space.project_id, space.workspace.clone());
+    fs::create_dir_all(workspace.join(".instafy"))?;
+    space_git(&workspace, &["init", "-q", "-b", "main"])?;
+    let (first_chat, new_chat) = (Uuid::new_v4(), Uuid::new_v4());
+    let read = |path: &str| fs::read(workspace.join(path));
+    let their_data = format!("{THEIRS}/data.json");
+
+    // The first chat's comparison, saved, and its card.
+    let compared = space
+        .run(required_job(
+            project_id,
+            first_chat,
+            COMPARE,
+            vec![person(COMPARE, "run-1")],
+        ))
+        .await
+        .context("the comparison's turn failed")?;
+    assert_eq!(compared.summary, COMPARED);
+    assert_eq!(read(&their_data)?, THEIR_DATA.as_bytes());
+    save(&workspace)?;
+    record_card(&workspace, first_chat, THEIRS, THEIR_TITLE)?;
+
+    // A new chat asks for its own comparison. Its turn is told the first chat's page is read-only
+    // here, deletes that page's data and types it again broken anyway, then makes its own page.
+    let remembered = space
+        .run(required_job(
+            project_id,
+            new_chat,
+            FROM_MEMORY,
+            vec![person(FROM_MEMORY, "run-2")],
+        ))
+        .await
+        .context("the new chat's turn failed")?;
+    let requests = space.state.requests.lock().unwrap().clone();
+    let prompt = requests
+        .iter()
+        .find(|request| asks(request, FROM_MEMORY))
+        .map(last_user_text)
+        .context("the new chat's request")?;
+    assert!(
+        prompt.contains(&format!(
+            "is read-only here: the person changes it in that chat.\n- The space's pages:\n  - \"{THEIR_TITLE}\", in `{THEIRS}/`: made in another chat, read-only here.\n"
+        )),
+        "{prompt}"
+    );
+    // The first chat's page is as its last save holds it, byte for byte; the new chat's page is in
+    // a folder of its own; the reply says which page it didn't change.
+    assert_eq!(read(&their_data)?, THEIR_DATA.as_bytes());
+    assert_eq!(read(&format!("{OWN}/data.json"))?, OWN_DATA.as_bytes());
+    assert_eq!(remembered.summary, format!("{REMEMBERED}\n\n{NOT_CHANGED}"));
+    let held = blocked(&remembered).context("the held write")?;
+    assert_eq!(held["metadata"]["restoredPaths"], json!([their_data]));
+    assert_eq!(
+        held["metadata"]["readOnlyPaths"],
+        json!([format!("{THEIRS}/")])
+    );
+    // No file of the first chat's page in the new chat's reply, so no card names it and no Undo
+    // takes it back there.
+    let files = turn_files(&remembered);
+    assert!(files.contains(&format!("{OWN}/data.json")), "{files:?}");
+    assert!(
+        !files
+            .iter()
+            .any(|file| file.starts_with(&format!("{THEIRS}/"))),
+        "{files:?}"
+    );
+    save(&workspace)?;
+    record_card(&workspace, new_chat, OWN, OWN_TITLE)?;
+
+    // The new chat points at the first chat's page. The page stays as it was, the reply says which
+    // chat's page it is, and the turn is not run again for the change it couldn't keep.
+    let before = space.state.requests.lock().unwrap().len();
+    let pointed = space
+        .run(required_job(
+            project_id,
+            new_chat,
+            POINTED,
+            vec![
+                person(FROM_MEMORY, "run-2"),
+                reply(REMEMBERED, "run-2"),
+                person(POINTED, "run-3"),
+            ],
+        ))
+        .await
+        .context("the pointed turn failed")?;
+    assert_eq!(read(&their_data)?, THEIR_DATA.as_bytes());
+    assert_eq!(pointed.summary, format!("{POINTED_REPLY}\n\n{NOT_CHANGED}"));
+    assert!(blocked(&pointed).is_some());
+    let files = turn_files(&pointed);
+    assert!(
+        !files
+            .iter()
+            .any(|file| file.starts_with(&format!("{THEIRS}/"))),
+        "{files:?}"
+    );
+    let asked = space.state.requests.lock().unwrap()[before..]
+        .iter()
+        .filter(|request| asks(request, POINTED))
+        .count();
+    assert_eq!(asked, 2, "one step and the answer, with no second run");
+
+    // The first chat adds its weights to its own page, and while that turn is under way, the new
+    // chat's next message breaks the page's data again. The runtime runs them one after the
+    // other: the first chat's change, not saved yet when the new chat's turn begins, stays, and
+    // the data the new chat broke is as its last save holds it.
+    let weights = format!("{THEIRS}/weights.json");
+    let first = space.run(required_job(
+        project_id,
+        first_chat,
+        WEIGHTS,
+        vec![
+            person(COMPARE, "run-1"),
+            reply(COMPARED, "run-1"),
+            person(WEIGHTS, "run-4"),
+        ],
+    ));
+    let second = async {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !space
+            .state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| asks(request, WEIGHTS))
+        {
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "the first chat's turn never asked"
+            );
+            sleep(Duration::from_millis(20)).await;
+        }
+        let (again, ()) = tokio::join!(
+            space.run(required_job(
+                project_id,
+                new_chat,
+                AGAIN,
+                vec![person(AGAIN, "run-5")],
+            )),
+            async {
+                sleep(Duration::from_millis(200)).await;
+                space.state.weights_gate.notify_one();
+            }
+        );
+        again
+    };
+    let (weighed, again) = tokio::join!(first, second);
+    let (weighed, again) = (
+        weighed.context("the first chat's turn failed")?,
+        again.context("the new chat's turn failed")?,
+    );
+    assert_eq!(weighed.summary, WEIGHED);
+    assert_eq!(read(&weights)?, THEIR_WEIGHTS.as_bytes());
+    assert_eq!(read(&their_data)?, THEIR_DATA.as_bytes());
+    assert_eq!(again.summary, format!("{AGAIN_REPLY}\n\n{NOT_CHANGED}"));
+    let held = blocked(&again).context("the held write")?;
+    assert_eq!(held["metadata"]["restoredPaths"], json!([their_data]));
+
+    space.finish().await
 }
