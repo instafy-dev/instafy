@@ -304,6 +304,8 @@ function pageOfFiles(entries: ResolvedChatFileChange[]): string | null {
   return page;
 }
 
+const SITE_CREATED = "Created";
+
 /**
  * What the row says for a page's or a site's files, never a file count or the
  * lines in them. Files that are all one page's name that page, in every chat,
@@ -330,7 +332,7 @@ function siteChangeLabel(
   if (page === null && !hasSite) {
     return null;
   }
-  const verb = hasSite && madeTheSite && entries.every((entry) => entry.file.changeType === "created") ? "Created" : "Changed";
+  const verb = hasSite && madeTheSite && entries.every((entry) => entry.file.changeType === "created") ? SITE_CREATED : "Changed";
   return page === null ? `${verb} the site` : `${verb} ${site?.pageTitles.get(page) ?? "a page"}`;
 }
 
@@ -574,8 +576,13 @@ export function ChatFileChangeList({
   // may still be bringing. Once the cards are all here, a page none of them
   // names (deleted, or another chat's) reads "a page".
   const pageOfTheFiles = siteSummary ? pageOfFiles(resolvedFiles) : null;
+  // "Created" by the turn's own card is known. By being the chat's first
+  // change it is not, until the history has settled: an older change may yet
+  // arrive, and the row would turn to "Changed".
+  const createdByOrderAlone = !madeSite && siteLabel !== null && siteLabel.startsWith(`${SITE_CREATED} `);
   const pageWordsPending = pageOfTheFiles !== null &&
-    (chatSiteOrPending === undefined || (!chatSiteSettled && !chatSite?.pageTitles.has(pageOfTheFiles)));
+    (chatSiteOrPending === undefined ||
+      (!chatSiteSettled && (!chatSite?.pageTitles.has(pageOfTheFiles) || createdByOrderAlone)));
   // The chat's site can show up after these files did (a later turn opened its
   // card): its files then fold behind the site's line, unless the person opened them.
   // So do the files of a change that is undone, behind "Undone", before the row

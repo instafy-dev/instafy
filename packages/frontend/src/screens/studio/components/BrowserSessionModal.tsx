@@ -1296,6 +1296,18 @@ export function BrowserSessionModal({
     onContinue: async (message: string) => onContinueAfterHumanInput ? onContinueAfterHumanInput(message) : false,
   };
   const browserHumanInputState = useBrowserHumanInput(browserHumanInputOptions);
+  // A pause that asked this person for something (a sign-in, a code, a cookie
+  // notice): a take-over they chose asks them for nothing. It outlasts its
+  // request, as its row does (a sign-in may go to another site, and the
+  // request runs out), and is over once the row is, or once Octo drives
+  // again because they wrote to it instead.
+  const pauseAskedRef = useRef<string | null>(null);
+  if (browserHumanInputState.request) {
+    pauseAskedRef.current = browserHumanInputOptions.identityKey;
+  } else if (!browserHumanInputState.active || effectiveAgentControlOwner !== null) {
+    pauseAskedRef.current = null;
+  }
+  const pauseAsked = pauseAskedRef.current === browserHumanInputOptions.identityKey;
   // A sign-in in this browser stays in the space's one browser profile.
   const signInNote = sharedBrowserSignInNote(spaceHasTeammates);
   // The pages the agent is reading while it holds this browser: its own tabs
@@ -3583,7 +3595,7 @@ export function BrowserSessionModal({
   const humanInputCanContinue = canLetOctoContinue({ ...browserHumanInputOptions, state: browserHumanInputState });
   // Through a pause this person can end, the toolbar says who it waits for,
   // in the reading row's words for a prompt, until they let Octo continue.
-  const pauseWaitsForYou = humanInputRowShown && humanInputCanContinue && Boolean(browserHumanInputState.request);
+  const pauseWaitsForYou = humanInputRowShown && humanInputCanContinue && pauseAsked;
   const humanInputControls = !shouldCollapseDocked && humanInputIdentityKey
     ? <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} continueInRow={humanInputRowShown} /> : null;
   const panelContent = renderCollapsedConnectedIntoShelf ? (

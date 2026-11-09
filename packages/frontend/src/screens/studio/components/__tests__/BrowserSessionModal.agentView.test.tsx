@@ -618,6 +618,73 @@ describe("Shared Browser view while Octo drives", () => {
     expect(toolbarStatus()?.textContent).toBe("Ready");
   });
 
+  // A sign-in often leaves for another site (a single sign-on), and the
+  // request for the fields runs out; the pause is still on, and its row stays.
+  it("keeps saying Waiting for you when the sign-in goes to another site or its request runs out", async () => {
+    const onContinue = vi.fn(async () => true);
+    const pause = signInPause(3, PAUSE_RUN);
+    const expiresAtMs = Date.now() + 5_000;
+    mocks.actions = [...pauseAfterCard().slice(0, 2), { ...pause, humanInputRequest: { ...pause.humanInputRequest!, expiresAtMs } }];
+    const props = { agentHolds: false, pausedRunId: PAUSE_RUN, earlierRunIds: [CARD_RUN], onContinue };
+    await act(async () => root.render(<Host {...props} />));
+    await advance(1_000);
+    await browserComesUp();
+    expect(toolbarStatus()?.textContent).toBe("Waiting for you");
+    // The sign-in's own site: the fields' request no longer matches the page.
+    await act(async () => root.render(<Host {...props} pageUrl="https://login.example.com/sso" />));
+    await advance(100);
+    expect(pauseRow()).not.toBeNull();
+    expect(toolbarStatus()?.textContent).toBe("Waiting for you");
+    expect(toolbarStatus()?.closest(".sr-only")).toBeNull();
+    // Back on the site, signed in, after the request ran out.
+    await act(async () => root.render(<Host {...props} />));
+    await advance(6_000);
+    expect(Date.now()).toBeGreaterThan(expiresAtMs);
+    expect(pauseRow()).not.toBeNull();
+    expect(toolbarStatus()?.textContent).toBe("Waiting for you");
+    await act(async () => continueButtons()[0]!.click());
+    await advance(50);
+    expect(onContinue).toHaveBeenCalledOnce();
+    expect(pauseRow()).toBeNull();
+    expect(toolbarStatus()?.textContent).toBe("Ready");
+  });
+
+  it("stops saying Waiting for you once Octo drives again because the person wrote to it instead", async () => {
+    mocks.actions = pauseAfterCard();
+    const props = { pausedRunId: PAUSE_RUN, earlierRunIds: [CARD_RUN], onContinue: vi.fn(async () => true), agentPageIds: ["PAGE1"] };
+    await act(async () => root.render(<Host agentHolds={false} {...props} />));
+    await advance(1_000);
+    await browserComesUp();
+    await act(async () => root.render(<Host agentHolds={false} {...props} pageUrl="https://login.example.com/sso" />));
+    await advance(100);
+    expect(toolbarStatus()?.textContent).toBe("Waiting for you");
+    // They wrote in the chat instead of pressing: Octo's new turn takes the browser, then ends.
+    for (const agentHolds of [true, false]) {
+      server.owner = agentHolds ? { kind: "agent", displayName: "Octo" } : { kind: "human", participantId: "self" };
+      await act(async () => {
+        for (const socket of server.sockets) socket.pushState();
+        root.render(<Host agentHolds={agentHolds} {...props} pageUrl="https://login.example.com/account" />);
+      });
+      await advance(200);
+      expect(toolbarStatus()?.textContent ?? "Ready").not.toBe("Waiting for you");
+    }
+    await browserComesUp();
+    expect(toolbarStatus()?.textContent).toBe("Ready");
+  });
+
+  // A narrow toolbar shows no status, whatever it is: the address needs the
+  // room, and the pause's row under it carries Let Octo continue.
+  it("tells a screen reader Waiting for you in a narrow view, where the pause's row is what shows", async () => {
+    mocks.actions = pauseAfterCard();
+    await act(async () => root.render(<Host agentHolds={false} compact pausedRunId={PAUSE_RUN} earlierRunIds={[CARD_RUN]} onContinue={vi.fn(async () => true)} />));
+    await advance(1_000);
+    await browserComesUp();
+    expect(toolbarStatus()?.textContent).toBe("Waiting for you");
+    expect(toolbarStatus()?.getAttribute("role")).toBe("status");
+    expect(toolbarStatus()?.closest(".sr-only")).not.toBeNull();
+    expect(pauseRow()?.contains(continueButtons()[0]!)).toBe(true);
+  });
+
   it("takes control of a browser nobody holds before it continues, and says when the browser does not answer", async () => {
     const onContinue = vi.fn(async () => true);
     mocks.actions = pauseAfterCard();
@@ -715,5 +782,10 @@ describe("Shared Browser view while Octo drives", () => {
     await act(async () => { for (const socket of server.sockets) socket.pushState(); });
     await advance(200);
     expect(pauseRow()?.contains(continueButtons()[0]!)).toBe(true);
+    // A take-over the person chose asked them for nothing: the toolbar does
+    // not say it waits for them.
+    await browserComesUp();
+    expect(pauseRow()?.contains(continueButtons()[0]!)).toBe(true);
+    expect(toolbarStatus()?.textContent).toBe("Ready");
   });
 });
