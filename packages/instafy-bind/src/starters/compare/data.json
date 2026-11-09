@@ -1,6 +1,5 @@
 {
   "title": "Compare three options",
-  "lede": "Option B costs least and Option A is the lightest.",
   "sort": [
     {
       "key": "price",

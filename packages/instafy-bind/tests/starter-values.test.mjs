@@ -459,7 +459,10 @@ test("compare: the page names what is missing under the headline on every screen
   };
   for (const width of [1280, 375]) {
     const { document } = await draw("compare", data, { width, search: "?open=13-pro" });
-    assert.equal(document.getElementById("lede").textContent, data.lede, `${width}px: the lede is the verdict as written`);
+    // with nothing to sort, nothing is decided: the page draws no line of its own there, and never a stored one
+    assert.equal(document.getElementById("lede").textContent, "", `${width}px: no verdict line, and not the stored lede`);
+    assert.equal(document.getElementById("lede").hidden, true, `${width}px`);
+    assert.doesNotMatch(document.body.textContent, /starts lowest/, `${width}px: the stored lede is not drawn`);
     assert.deepEqual(missingLines(document), ["Still missing for Maker Laptop 12 and Maker Laptop 16: Independent reviews (no independent review read)"], `${width}px`);
     const box = document.getElementById("missing");
     assert.equal(box.hidden, false, `${width}px`);
@@ -484,12 +487,72 @@ test("compare: the page names what is missing under the headline on every screen
   assert.equal(document.getElementById("missing").hidden, true);
 });
 
+// A comparison's headline was free text. One said two reviews per laptop were found that its cells showed as missing;
+// the next, asked for the verdict, gave none ("Maker's featured laptops include the 13 Pro, 12 and 16; two independent
+// reviews per model were not found in the pages read.") and named the missing reviews right above the line that names
+// them. The page writes that line itself, from its own sorts and the cells of the rows it draws, and a "lede" in
+// data.json is not drawn: a sort names the row it puts first only when every row drawn shows a fresh value for it.
+test("compare: the line under the title names what the cells decide, from the page's own sorts, never a stored lede", async () => {
+  const at = (v, url) => ({ v, src: "Maker", url: `https://maker.example/${url}`, date: DAY });
+  const laptops = () => ({
+    title: "Three laptops",
+    lede: "Maker's featured laptops include the 13 Pro, 12 and 16; two independent reviews per model were not found in the pages read.",
+    sort: [{ key: "price", label: "Starting price, low to high", dir: "asc" }, { key: "weight", label: "Weight, light first", dir: "asc" },
+      { key: "battery", label: "Battery, largest first", dir: "desc" }],
+    columns: [{ key: "cpu", label: "CPU", type: "text" }, { key: "battery", label: "Battery", type: "text" }, { key: "weight", label: "Weight", type: "text" },
+      { key: "price", label: "Starting price", type: "price" }, { key: "reviews", label: "Independent reviews", type: "text" }],
+    items: [
+      item("13-pro", "Maker Laptop 13 Pro", { cpu: at("Chip Ultra 5", "13pro?tab=specs"), battery: at("74.45 Wh", "13pro?tab=specs"),
+        weight: at("1.41 kg (no cards); 1.44 kg (four cards)", "13pro?tab=specs"), price: at("€1,349", "13pro/configure"), reviews: { note: "two independent reviews not found" } }),
+      item("12", "Maker Laptop 12", { cpu: at("Chip 3", "12?tab=specs"), battery: at("50 Wh", "12?tab=specs"), weight: at("1.3 kg", "12?tab=specs"),
+        price: at("€619", "12/configure"), reviews: { note: "two independent reviews not found" } }),
+      item("16", "Maker Laptop 16", { cpu: at("Chip AI 5", "16?tab=specs"), battery: at("85 Wh", "16?tab=specs"), weight: at("2.10 kg", "16?tab=specs"),
+        price: at("€1,409", "16/configure"), reviews: { note: "two independent reviews not found" } }),
+    ],
+  });
+  const lede = async (data, options = {}) => {
+    const { document } = await draw("compare", data, options);
+    const el = document.getElementById("lede");
+    return { text: el.textContent, hidden: el.hidden, document };
+  };
+  for (const width of [1280, 375]) {
+    const { text, hidden, document } = await lede(laptops(), { width });
+    assert.equal(text, "Lowest starting price and lowest weight: Maker Laptop 12 · Highest battery: Maker Laptop 16", `${width}px`);
+    assert.equal(hidden, false, `${width}px`);
+    // the missing reviews are named once, in the line under it, never by the headline
+    assert.deepEqual(missingLines(document), ["Still missing for Maker Laptop 13 Pro, Maker Laptop 12 and Maker Laptop 16: Independent reviews (two independent reviews not found)"], `${width}px`);
+    for (const id of ["title", "lede", "notes"]) assert.doesNotMatch(document.getElementById(id).textContent, /independent review|featured/i, `${width}px: #${id}`);
+  }
+  // a tie names every row it puts first
+  const tie = laptops();
+  tie.items[0].facts.price = at("€619", "13pro/configure");
+  assert.equal((await lede(tie)).text, "Lowest starting price: Maker Laptop 13 Pro and Maker Laptop 12 · Lowest weight: Maker Laptop 12 · Highest battery: Maker Laptop 16");
+  // a row without the value, or with one that may have changed, decides nothing for that sort
+  const gap = laptops();
+  gap.items[2].facts.weight = { note: "weight not found on maker.example's page" };
+  gap.items[0].facts.price = { ...gap.items[0].facts.price, asof: "2026-01-05" };
+  assert.equal((await lede(gap)).text, "Highest battery: Maker Laptop 16");
+  // values all the same decide nothing, and with nothing decided there is no line
+  const same = laptops();
+  same.sort = [same.sort[0]];
+  for (const i of same.items) i.facts.price = at("€999", "configure");
+  assert.deepEqual(await lede(same).then(({ text, hidden }) => ({ text, hidden })), { text: "", hidden: true });
+  const none = laptops();
+  none.sort = [];
+  assert.deepEqual(await lede(none).then(({ text, hidden }) => ({ text, hidden })), { text: "", hidden: true });
+  // under a stated limit it speaks of the rows drawn: the one over the limit is not among them until "All"
+  const limited = laptops();
+  limited.filter = { key: "price", max: 1400, label: "€1,400 or less", rest: "over €1,400" };
+  assert.equal((await lede(limited)).text, "Lowest starting price and lowest weight: Maker Laptop 12 · Highest battery: Maker Laptop 13 Pro");
+  assert.equal((await lede(limited, { search: "?show=all" })).text, "Lowest starting price and lowest weight: Maker Laptop 12 · Highest battery: Maker Laptop 16");
+});
+
 // A new chat asked for a comparison "from what you already know, without browsing", and every row said "checked 1 Mar
 // 2025 on maker.example ↗": the turn gave each value an address and a day nobody read, since the starter had no honest
 // form for what Octo knows. On a page that says it is from memory ("from": "memory"), each value reads "<value>, not
 // checked", as a ranked row's value without a source does, nothing cites a page or a day (also when the data still
-// gives one), and the lede says so, at every width.
-test("compare: a page from what Octo knows reads each value \"not checked\", cites nothing, and says so in its lede", async () => {
+// gives one), and the line under its title says so, at every width.
+test("compare: a page from what Octo knows reads each value \"not checked\", cites nothing, and says so under its title", async () => {
   const data = {
     title: "Maker Laptop 13 vs 16",
     lede: "The 16 is the bigger one, with room for a graphics card",
@@ -508,7 +571,7 @@ test("compare: a page from what Octo knows reads each value \"not checked\", cit
   };
   for (const width of [1280, 375]) {
     const { document } = await draw("compare", data, { width, search: "?open=13" });
-    assert.equal(document.getElementById("lede").textContent, "The 16 is the bigger one, with room for a graphics card. From what Octo knows; nothing checked.", `${width}px`);
+    assert.equal(document.getElementById("lede").textContent, "From what Octo knows; nothing checked.", `${width}px: that line, and not the stored lede`);
     const thirteen = rowText(document, "option:13");
     for (const value of ["13.5 in", "about 1.3 kg", "from about $1,000"]) assert.ok(thirteen.includes(`${value}, not checked`), `${width}px: ${value}: ${thirteen}`);
     const sixteen = rowText(document, "option:16");

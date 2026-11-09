@@ -105,7 +105,8 @@ test("the example data is neutral and in the one fact shape; bound.json files ar
   };
   for (const name of ["compare", "ranked", "timeline", "checklist"]) {
     const data = JSON.parse(fs.readFileSync(path.join(STARTERS_DIR, name, "data.json"), "utf8"));
-    assert.ok(data.title && data.lede, `${name}: title and lede`);
+    // a comparison's line under its title is its own, from its cells: its data has no lede
+    assert.ok(data.title && (name === "compare" ? !("lede" in data) : data.lede), `${name}: title and lede`);
     const text = strings(data).join("\n");
     assert.doesNotMatch(text, /shoe|sneaker|running|flight|hotel|airport|travel|trip|itinerary/i, `${name}: not shoes or travel`);
     assert.doesNotMatch(text, BANNED, `${name}: plain words`);

@@ -483,7 +483,8 @@ test("an item whose words are in page code the check does not read as a script i
   }
 });
 
-// The check says an item is missing only when it could have seen it.
+// The check says an item is missing only when it could have seen it: one its files don't say is looked for on the page
+// as drawn, and where nothing serves the page (here: outside a space, with no preview) it cannot tell.
 test("an item whose words a script holds where the check cannot place them, or that it fetches from another site, is never reported missing (exit 2)", () => {
   const dir = blankSite(`var heading = "Opening hours";
 var card = document.createElement("article");
@@ -493,11 +494,11 @@ document.getElementById("list").appendChild(card);
   try {
     const out = run("check", dir, "--expect", "New page, Opening hours");
     assert.equal(out.status, 2, out.stdout + out.stderr);
-    assert.doesNotMatch(out.stdout, /MISSING/);
-    assert.match(out.stdout, /^UNREAD: app\.js may draw .*, so the check cannot tell whether the page shows: Opening hours\.$/m);
+    assert.doesNotMatch(out.stdout, /MISSING|UNREAD/);
+    assert.match(out.stdout, /^Nothing serves the page yet, so the check cannot tell whether it shows: Opening hours\. Look at it where it is served: `instafy preview check --port <its port>`\.$/m);
     assert.match(out.stdout, /1 of 2 expected item\(s\) shown: New page\./);
     const json = JSON.parse(run("check", dir, "--expect", "Opening hours", "--json").stdout);
-    assert.deepEqual([json.ok, json.missing, json.unknown, json.unread], [false, [], ["Opening hours"], ["app.js"]]);
+    assert.deepEqual([json.ok, json.missing, json.unknown, json.unread, json.drawn], [false, [], ["Opening hours"], ["app.js"], { port: null, error: "nothing serves the page" }]);
     // every item it can see: a pass
     assert.equal(run("check", dir, "--expect", "New page").status, 0);
     // an item no file names is missing

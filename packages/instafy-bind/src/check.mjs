@@ -8,15 +8,15 @@
 // yet: Tokyo", a data file's "missing" list) does not count as showing it: builders are told to say on the page what
 // they could not add, and that line must not pass the check. An item is missing only when no file of the site names
 // it: one whose words a script holds where the check cannot place them, or that a script fetches from another site, is
-// one it cannot tell about, never one it reports missing. On a page of options it also checks the values and where each
-// row comes from (below). A source line drawn by hand (an element with the class "trust") links the page its fact was
-// read on, unless it says it is not checked: written as plain text, a page to share once gave its sources as two lines
-// nobody could open, where site.trust(fact) would have linked each. So does a fact site.trust draws: one with its source
-// and no page draws a line that links nothing. The check names only a line it can tell links nothing: one with
-// something in it the check cannot read (a name, a function of the page's own) may link its page, and one that only
-// says a value is unknown names no source. A page is served from its own folder, so the check
-// also fails a page that loads a file from outside it ("../another-page/site.js"), and names the command that gives the
-// page its own files. Pure helpers are exported for the tests.
+// one its files can't tell about, which it looks for on the page as drawn (checkReport). On a page of options it also
+// checks the values and where each row comes from (below). A source line drawn by hand (an element with the class
+// "trust") links the page its fact was read on, unless it says it is not checked: written as plain text, a page to
+// share once gave its sources as two lines nobody could open, where site.trust(fact) would have linked each. So does a
+// fact site.trust draws: one with its source and no page draws a line that links nothing. The check names only a line
+// it can tell links nothing: one with something in it the check cannot read (a name, a function of the page's own) may
+// link its page, and one that only says a value is unknown names no source. A page is served from its own folder, so
+// the check also fails a page that loads a file from outside it ("../another-page/site.js"), and names the command that
+// gives the page its own files. Pure helpers are exported for the tests.
 // SPDX-License-Identifier: AGPL-3.0-only
 import fs from "node:fs";
 import path from "node:path";
@@ -177,6 +177,21 @@ const SOURCE = /\.(?:jsx|tsx|m?ts|vue|svelte|astro)$/i;
 const SOURCE_LOADS = /\b(?:fetch|EventSource|WebSocket)\s*\(\s*[`'"]\s*(?:(?:https?|wss?):)?\/\//i;
 /** The starters' shared helpers (site.js) define `site`: their own words are no page's text. */
 const DEFINES_SITE = /\bwindow\.site\s*=\s*\{/;
+/** A line that sets HTML from a string (`el.innerHTML = …`, `+=`, outerHTML, insertAdjacentHTML). The starters draw
+ *  text with site.h, always as text, and a fact with site.trust, which links its page; HTML from a string is text the
+ *  check cannot read, and runs whatever markup it holds. Emptying an element (`el.innerHTML = ""`) draws nothing. */
+const SETS_HTML = /\.\s*(?:innerHTML|outerHTML)\s*\+?=(?!=)|\.\s*insertAdjacentHTML\s*\(/;
+const EMPTIES = /\.\s*(?:innerHTML|outerHTML)\s*=\s*(["'`])\1\s*;?$/;
+/** The lines of a page's own file that set HTML from a string: [{ file, line, code }]. */
+function htmlFromStrings(rel, raw) {
+  const out = [];
+  String(raw).split("\n").forEach((text, index) => {
+    const code = text.trim();
+    if (!SETS_HTML.test(code) || EMPTIES.test(code) || /^(?:\/\/|\/\*|\*)/.test(code)) return;
+    out.push({ file: rel, line: index + 1, code: code.length > 100 ? `${code.slice(0, 99)}…` : code });
+  });
+  return out;
+}
 /** The scripts an HTML page carries in itself: [attributes, source]. */
 const INLINE_SCRIPTS = /<script\b(?![^>]*\bsrc\s*=)([^>]*)>([\s\S]*?)<\/script\s*>/gi;
 /** An inline script's type that is JavaScript (none is too); a JSON block or a template is not the page's script. */
@@ -433,13 +448,15 @@ const before = (version, [major, minor]) => !!version && (version[0] < major || 
  *  "script"), the "expect" list of data.json, its own scripts ([{ file, other, loads }]: a script file, or the
  *  scripts an HTML page carries; `other`, the words they hold where the check cannot place them, and `loads`, whether
  *  they fetch text from another site), the source lines its pages and scripts draw by hand ([{ file, line, linked }]),
- *  what it loads from outside its folder (`outside`) and the starter whose files those are (`starter`). */
+ *  the lines that set HTML from a string (`markup`), what it loads from outside its folder (`outside`) and the starter
+ *  whose files those are (`starter`). */
 export function readSite(dir) {
   const root = path.resolve(dir);
   if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) throw new Error(`no site folder at ${dir}`);
   const parts = [];
   const scripts = [];
   const trust = [];
+  const markup = [];
   let declared = [];
   const files = [];
   for (const file of siteFiles(root)) {
@@ -457,6 +474,7 @@ export function readSite(dir) {
   const otherText = (script) => script.other.filter((text) => !UNAVAILABLE_RE.test(text));
   for (const { file, rel, raw } of files) {
     if (/\.css$/i.test(file)) continue;
+    if (!/\.(geo)?json$/i.test(file) && !DEFINES_SITE.test(raw)) markup.push(...htmlFromStrings(rel, raw));
     if (/\.(geo)?json$/i.test(file)) {
       let value;
       try {
@@ -484,7 +502,7 @@ export function readSite(dir) {
     }
   }
   const { outside, targets } = outsideLoads(files, root);
-  return { root, parts, declared, scripts, trust, outside, starter: outside.length ? borrowedStarter(targets) : null };
+  return { root, parts, declared, scripts, trust, markup, outside, starter: outside.length ? borrowedStarter(targets) : null };
 }
 
 /** Which expected items the site shows, and where; which it leaves out; and which it cannot tell about (`unknown`):
@@ -493,7 +511,8 @@ export function readSite(dir) {
  *  the files its pages, styles and scripts load from outside its folder, and its links to another folder's files, with
  *  the starter whose files those are (`starter`). `unlinked`: the source lines that link no page ([{ file, line }]):
  *  each drawn by hand with nothing in it that links (or that the check cannot read), and each fact site.trust would
- *  draw with its source and no page; never one that says it is not checked, or only that a value is unknown. */
+ *  draw with its source and no page; never one that says it is not checked, or only that a value is unknown.
+ *  `markup`: the lines that set HTML from a string ([{ file, line, code }]). */
 export function checkSite(dir, expect = []) {
   const site = readSite(dir);
   const items = parseExpect([...site.declared, ...parseExpect(expect)]);
@@ -517,7 +536,7 @@ export function checkSite(dir, expect = []) {
     }
   }
   const unlinked = site.trust.filter((t) => t.line && !t.linked && !t.unread && !SAYS_UNCHECKED.test(t.line)).map(({ file, line }) => ({ file, line }));
-  return { items, shown, missing, unknown, unread: [...unread], unlinked, files: site.parts.map((p) => p.file), outside: site.outside, starter: site.starter };
+  return { items, shown, missing, unknown, unread: [...unread], unlinked, markup: site.markup, files: site.parts.map((p) => p.file), outside: site.outside, starter: site.starter };
 }
 
 // ---------- the values of a page of options (the compare and ranked starters' data.json) ----------
@@ -669,7 +688,7 @@ export function memoryCitations(data) {
   const rest = keysIn({ ...data, items: [] });
   if (rest.size) out.push(problem("the page", rest));
   if (data.filter && typeof data.filter === "object") {
-    out.push(`the filter "${String(data.filter.label || data.filter.key || "")}": nothing on a page from what Octo knows was checked, so no value on it counts as within the limit. Leave out "filter", and say in the lede how each compares with it.`);
+    out.push(`the filter "${String(data.filter.label || data.filter.key || "")}": nothing on a page from what Octo knows was checked, so no value on it counts as within the limit. Leave out "filter", and say in the reply how each compares with it.`);
   }
   return out;
 }
@@ -767,7 +786,7 @@ export function checkValues(dir) {
       if (unknown.length) {
         const col = columns?.find((c) => c && c.key === filter.key);
         const title = filter.unknown || `${col?.label ?? (filter.key === "price" ? "Price" : filter.key)} unknown`;
-        notes.push(`${unknown.length} item(s) have no ${String(col?.label ?? filter.key).toLowerCase()} the page can show: ${unknown.join(", ")}. The page lists them apart ("${title}"), never as "${label}"; say so in the lede and the reply, with why for each.`);
+        notes.push(`${unknown.length} item(s) have no ${String(col?.label ?? filter.key).toLowerCase()} the page can show: ${unknown.join(", ")}. The page lists them apart ("${title}"), never as "${label}"; say so in ${columns ? "the reply" : "the lede and the reply"}, with why for each.`);
       }
     }
   }
@@ -821,41 +840,81 @@ function outsideLines(dir, outside, starter) {
   };
 }
 
+/** What the page drew on each size the page check loaded (`report`: `instafy preview check --json --text`), for the
+ *  items its files can't tell about: `{ port, sizes, shown, missing: [{ item, sizes }], errors, shots }`, or null when
+ *  it loaded no size; an item the page drew on one size and not the other is missing on that one. `errors`: the page's
+ *  own, as the page check lists them ("phone: uncaught: …"). */
+export function drawnItems(report, items, port) {
+  const views = (Array.isArray(report?.viewports) ? report.viewports : []).filter((v) => v && typeof v === "object");
+  if (!views.length) return null;
+  const sizes = views.map((v) => String(v.name ?? "page"));
+  const shown = [];
+  const missing = [];
+  for (const item of items) {
+    const without = views.filter((v) => !names(v.text ?? "", item)).map((v) => String(v.name ?? "page"));
+    if (!without.length) shown.push(item);
+    else missing.push({ item, sizes: without.length < views.length ? without : [] });
+  }
+  const errors = [...new Set(views.flatMap((v) => (Array.isArray(v.errors) ? v.errors : []).map((e) => `${v.name}: ${e}`)))];
+  return { port, sizes, shown, missing, errors, shots: views.map((v) => v.screenshot).filter(Boolean) };
+}
+
+/** The port the card's command answered with (`instafy preview open --json`), or null. */
+function answeredPort(output) {
+  const port = Number(answerOf(output)?.port);
+  return Number.isInteger(port) && port > 0 && port < 65536 ? port : null;
+}
+
 /** The CLI's lines and exit code: 0 every item shown and every value fine, 1 an item missing, a value to fix, a source
- *  line that links no page or a file loaded from outside the site's folder, 2 nothing to check, or items the check
- *  cannot tell about because the page draws its text in a way it cannot read. `card`: the command that serves the site
- *  and posts its card, while no preview shows it. A check that passes takes that step itself with `post` (which runs
- *  the command and says what it answered); any other answer ends with the command, since a failing check never holds
- *  the card back, except for a page that loads files from outside its folder: served on its own it can't load them, so
- *  its card waits for the check that passes. */
-export function checkReport(dir, expect, { json = false, card = null, post = null } = {}) {
+ *  line that links no page, a file loaded from outside the site's folder or an error on the page as drawn, 2 nothing to
+ *  check, or items it could tell about neither from the files nor from the page as drawn. `card`: the command that
+ *  serves the site and posts its card, while no preview shows it. A check that passes takes that step itself with
+ *  `post` (which runs the command and says what it answered); any other answer ends with the command, since a failing
+ *  check never holds the card back, except for a page that loads files from outside its folder: served on its own it
+ *  can't load them, so its card waits for the check that passes. An item whose words a script holds where the check
+ *  cannot read them (a page that draws its text with document.createElement, or as HTML from a string) is looked for
+ *  on the page as drawn, in the same step: a new page's card is posted first, as a passing check posts it, and `look`
+ *  runs the page check on the port it is served on (that card's, else `served`'s: a preview that already shows it).
+ *  Each line that sets HTML from a string is named, with how to draw it instead, and never fails the page. */
+export function checkReport(dir, expect, { json = false, card = null, post = null, look = null, served = null } = {}) {
   const { starter, ...result } = checkSite(dir, expect);
   const values = checkValues(dir);
-  const { missing, unknown, unlinked, outside } = result;
+  const { missing, unknown, unlinked, outside, markup } = result;
   const fix = outside.length ? outsideLines(dir, outside, starter) : null;
   const next = card && !fix ? `post its card: ${card}` : null;
   const nextLines = next ? [`next: ${next}`] : [];
+  const markupNotes = markup.slice(0, 5).map((m) => `NOTE: ${m.file}:${m.line} sets HTML from a string (${m.code}): draw its text with site.h, which sets text as text, and each fact with site.trust(fact), which links its page.`);
+  if (markup.length > 5) markupNotes.push(`NOTE: ${markup.length - 5} more line(s) set HTML from a string: draw them the same way.`);
   if (!result.items.length && !values.problems.length && !unlinked.length) {
     const message = 'nothing to check: pass --expect "<item>,<item>" (each item the request named) or put "expect": [...] in data.json';
     const exit = fix ? 1 : 2;
-    if (json) return { exit, lines: [JSON.stringify({ ok: false, error: message, values, ...(fix ? { outside, init: fix.init } : {}), ...(next ? { next } : {}) })] };
-    return { exit, lines: [...(fix ? fix.lines : []), message, ...values.notes.map((n) => `NOTE: ${n}`), ...nextLines] };
+    if (json) return { exit, lines: [JSON.stringify({ ok: false, error: message, values, markup, ...(fix ? { outside, init: fix.init } : {}), ...(next ? { next } : {}) })] };
+    return { exit, lines: [...(fix ? fix.lines : []), message, ...values.notes.map((n) => `NOTE: ${n}`), ...markupNotes, ...nextLines] };
   }
-  const exit = missing.length || values.problems.length || unlinked.length || fix ? 1 : unknown.length ? 2 : 0;
-  // the check that passes posts the card itself, while no preview shows the site
-  const posted = exit === 0 && card && post ? post() : null;
+  const failing = missing.length || values.problems.length || unlinked.length || fix;
+  // the check that passes posts the card itself, while no preview shows the site; so does one that can't read an item
+  // in the files, which then looks for it on the page as drawn, served for that card or for one already showing it
+  const posted = !failing && card && post ? post() : null;
+  let port = null;
+  if (!failing && unknown.length) port = posted ? (posted.ok ? answeredPort(posted.output) ?? served?.() ?? null : null) : served?.() ?? null;
+  const looked = port && look ? look(port) : null;
+  const drawn = looked?.report ? drawnItems(looked.report, unknown, port) : null;
+  const unseen = !failing && unknown.length && !drawn ? (looked?.error ?? (looked ? "the page check loaded no size of it" : port ? "nothing looked at it" : null)) : null;
+  const exit = failing || drawn?.missing.length || drawn?.errors.length ? 1 : unknown.length && !drawn ? 2 : 0;
   if (json) {
     const step = posted ? { card: { posted: posted.ok, command: posted.command, ...(posted.ok ? { answer: answerOf(posted.output) } : { error: posted.error }) }, ...(posted.ok ? {} : { next: `post its card: ${posted.command}` }) } : next ? { next } : {};
-    return { exit, lines: [JSON.stringify({ ok: exit === 0, ...result, values, ...(fix ? { init: fix.init } : {}), ...step })] };
+    const page = drawn ? { drawn } : unknown.length && !failing ? { drawn: { port, error: unseen ?? "nothing serves the page" } } : {};
+    return { exit, lines: [JSON.stringify({ ok: exit === 0, ...result, values, ...(fix ? { init: fix.init } : {}), ...page, ...step })] };
   }
   const lines = [...(fix ? fix.lines : [])];
-  if (missing.length) {
-    lines.push(`MISSING: the request named ${missing.length} item(s) the site does not show: ${missing.join(", ")}.`);
+  const absent = [...missing, ...(drawn ? drawn.missing.map((m) => (m.sizes.length ? `${m.item} (not on the ${listed(m.sizes)} size)` : m.item)) : [])];
+  if (absent.length) {
+    lines.push(`MISSING: the request named ${absent.length} item(s) the ${missing.length ? "site" : "page as drawn"} does not show: ${absent.join(", ")}.`);
     lines.push("Add each one to the page, or say plainly in the reply which are missing and why.");
   }
-  if (unknown.length) {
-    lines.push(`UNREAD: ${result.unread.join(", ")} may draw the page's text in a way the check cannot read (it reads the text a script passes to site.h and site.head, and the strings of its lists and objects), so the check cannot tell whether the page shows: ${unknown.join(", ")}.`);
-    lines.push("Look at the page itself instead: `instafy preview check --port <its port>` loads it as Studio does and saves screenshots of it.");
+  if (drawn?.errors.length) {
+    lines.push(`PAGE: the page as drawn has ${drawn.errors.length} error(s) to fix:`);
+    for (const error of drawn.errors.slice(0, 8)) lines.push(`- ${error}`);
   }
   if (values.problems.length) {
     lines.push(`VALUES: ${values.problems.length} value(s) to fix in data.json:`);
@@ -866,9 +925,17 @@ export function checkReport(dir, expect, { json = false, card = null, post = nul
     lines.push('Draw each fact with site.trust({"v", "src", "url", "date"}), which links the page it was read on ("checked 8 Nov on maker.com ↗"), or link that page in the line. Something no page gave says "not checked".');
   }
   for (const note of values.notes) lines.push(`NOTE: ${note}`);
+  lines.push(...markupNotes);
   if (result.items.length) {
-    lines.push(`${result.shown.length} of ${result.items.length} expected item(s) shown${result.shown.length ? `: ${result.shown.map((s) => s.item).join(", ")}` : ""}.`);
+    const shown = [...result.shown.map((s) => s.item), ...(drawn ? drawn.shown : [])];
+    lines.push(`${shown.length} of ${result.items.length} expected item(s) shown${shown.length ? `: ${shown.join(", ")}` : ""}.`);
     lines.push(`Read ${result.files.length} file(s): the HTML text, the data files, and the text the page's scripts pass to site.h and site.head or hold in their lists and objects.`);
+    if (drawn) lines.push(`Looked at the page as drawn on port ${drawn.port} (${listed(drawn.sizes)}) for what its files don't say: ${listed(unknown)}.${drawn.shots.length ? ` Screenshots: ${drawn.shots.join(", ")}.` : ""}`);
+    else if (unknown.length && failing) lines.push(`Its files don't say whether the page shows ${listed(unknown)}: once the rest passes, the check looks at the page as drawn.`);
+    else if (unknown.length) {
+      const how = unseen ? "" : next ? " Once its card serves it, check again." : " Look at it where it is served: `instafy preview check --port <its port>`.";
+      lines.push(`${unseen ? `The page as drawn could not be looked at (${unseen})` : "Nothing serves the page yet"}, so the check cannot tell whether it shows: ${unknown.join(", ")}.${how}`);
+    }
   } else {
     lines.push('No items to check: pass --expect "<item>,<item>" (each item the request named) or put "expect": [...] in data.json.');
   }

@@ -371,6 +371,9 @@ const LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES: &[&str] = &[
     // From before every saved change reloaded the open views of the sites it changed, so a turn
     // ran no `instafy bind command <dir> reload '{}'` of its own.
     include_str!("legacy/bound-sites-cheatsheet-v4.md"),
+    // From before a comparison's line under its title came from its own sorts and cells (it asked
+    // for a lede with "the biggest unknown").
+    include_str!("legacy/bound-sites-cheatsheet-v5.md"),
 ];
 /// The hub for pages people tap through: it picks the builder from the installed skills (a skill
 /// pack's own skill, bound sites, or a starter site) and shows the result as a preview card.
@@ -430,6 +433,9 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // From before a check that passes posted a bound page's card (it said "Post the card first"
     // for every page), and before the page, not the lede, named what's missing.
     include_str!("legacy/interactive-artifacts-v15.md"),
+    // From before a comparison's line under its title came from its own sorts and cells (it said
+    // "The lede: the verdict, saying only what a page you read says").
+    include_str!("legacy/interactive-artifacts-v16.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),
