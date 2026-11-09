@@ -2541,7 +2541,8 @@ impl CodexClient {
             }
             let mut aggregator =
                 CodexEventStreamAdapter::with_turn_start_token_usage(turn_start_token_usage)
-                    .for_job(options.job_id);
+                    .for_job(options.job_id)
+                    .in_workspace(self.workspace_dir());
         let mut events = Vec::new();
 
         if let Some(configured) = session_configured_event {
@@ -5163,6 +5164,10 @@ pub(crate) struct CodexEventStreamAdapter {
     /// The addresses the browser refused to open because nothing gave them
     /// (`CodexRunOutput::browser_not_given`); never projected.
     browser_not_given: Vec<String>,
+    /// The run's workspace folder, as given and with its links followed. A command's folder is
+    /// projected as a path of it ([`Self::command_folder`]), never as the folder's own path on
+    /// this machine.
+    workspace: Option<(PathBuf, Option<PathBuf>)>,
 }
 
 /// For tests that do not look at usage. Nothing feeds this baseline store, so no turn reports
@@ -5193,6 +5198,7 @@ impl CodexEventStreamAdapter {
             browser_pages: Vec::new(),
             browser_secret_screen: false,
             browser_not_given: Vec::new(),
+            workspace: None,
         }
     }
 
@@ -5220,6 +5226,49 @@ impl CodexEventStreamAdapter {
     pub(crate) fn for_job(mut self, job_id: Option<uuid::Uuid>) -> Self {
         self.job_id = job_id;
         self
+    }
+
+    /// Names the workspace the run's commands are in, so each command's folder is projected as a
+    /// path of it.
+    pub(crate) fn in_workspace(mut self, workspace_dir: &Path) -> Self {
+        let real = std::fs::canonicalize(workspace_dir)
+            .ok()
+            .filter(|real| real != workspace_dir);
+        self.workspace = Some((workspace_dir.to_path_buf(), real));
+        self
+    }
+
+    /// The folder a command ran in, as a `command_execution` item's `cwd`: a path of the run's
+    /// workspace (`.` for the workspace itself, `sites/porto` for a folder of it), or null for a
+    /// folder outside it. None, and no `cwd` at all, when the run's workspace is not known. A
+    /// path a command names is read against it (`jobs::space_pages::TurnSteps`). Every event goes
+    /// to the controller and into the chat's messages, so the folder's own path on this machine
+    /// (a person's home folder, on Desktop) is never projected.
+    fn command_folder(&self, cwd: &Path) -> Option<JsonValue> {
+        let (dir, real) = self.workspace.as_ref()?;
+        let relative = cwd
+            .strip_prefix(dir)
+            .ok()
+            .or_else(|| cwd.strip_prefix(real.as_deref()?).ok());
+        let Some(relative) = relative else {
+            return Some(JsonValue::Null);
+        };
+        let mut parts = Vec::new();
+        for component in relative.components() {
+            match component {
+                std::path::Component::Normal(part) => match part.to_str() {
+                    Some(part) => parts.push(part),
+                    None => return Some(JsonValue::Null),
+                },
+                std::path::Component::CurDir => {}
+                _ => return Some(JsonValue::Null),
+            }
+        }
+        Some(if parts.is_empty() {
+            json!(".")
+        } else {
+            json!(parts.join("/"))
+        })
     }
 
     pub(crate) fn collect(&mut self, event: &Event) -> Vec<JsonValue> {
@@ -5298,7 +5347,7 @@ impl CodexEventStreamAdapter {
                         aggregated_output: String::new(),
                     },
                 );
-                vec![json!({
+                let mut started = json!({
                     "type": "item.started",
                     "item": {
                         "id": command.call_id,
@@ -5309,7 +5358,11 @@ impl CodexEventStreamAdapter {
                         "aggregated_output": "",
                         "exit_code": JsonValue::Null,
                     }
-                })]
+                });
+                if let Some(folder) = self.command_folder(&command.cwd.to_path_buf()) {
+                    started["item"]["cwd"] = folder;
+                }
+                vec![started]
             }
             EventMsg::ExecCommandOutputDelta(delta) => {
                 let Some(state) = self.command_states.get_mut(&delta.call_id) else {
@@ -5338,7 +5391,7 @@ impl CodexEventStreamAdapter {
                     codex_protocol::protocol::ExecCommandStatus::Failed => "failed",
                     codex_protocol::protocol::ExecCommandStatus::Declined => "declined",
                 };
-                vec![json!({
+                let mut completed = json!({
                     "type": "item.completed",
                     "item": {
                         "id": command.call_id,
@@ -5349,7 +5402,11 @@ impl CodexEventStreamAdapter {
                         "aggregated_output": aggregated_output,
                         "exit_code": command.exit_code,
                     }
-                })]
+                });
+                if let Some(folder) = self.command_folder(&command.cwd.to_path_buf()) {
+                    completed["item"]["cwd"] = folder;
+                }
+                vec![completed]
             }
             EventMsg::McpToolCallBegin(tool_call) => {
                 let mut item = json!({
@@ -10783,6 +10840,33 @@ required = true
         ));
     }
 
+    /// A command's folder is projected as a path of the run's workspace, as given or with its
+    /// links followed, and never as its own path on this machine.
+    #[test]
+    fn a_commands_folder_is_projected_as_a_path_of_the_workspace() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let ws = workspace.path();
+        let real = std::fs::canonicalize(ws).expect("real workspace path");
+        let adapter = CodexEventStreamAdapter::default().in_workspace(ws);
+        assert_eq!(adapter.command_folder(ws), Some(json!(".")));
+        assert_eq!(
+            adapter.command_folder(&ws.join("sites/porto")),
+            Some(json!("sites/porto"))
+        );
+        assert_eq!(adapter.command_folder(&real), Some(json!(".")));
+        assert_eq!(
+            adapter.command_folder(&real.join("trip")),
+            Some(json!("trip"))
+        );
+        let elsewhere = tempfile::tempdir().expect("another folder");
+        assert_eq!(
+            adapter.command_folder(elsewhere.path()),
+            Some(JsonValue::Null)
+        );
+        // a run whose workspace is not known says nothing of the folder
+        assert_eq!(CodexEventStreamAdapter::default().command_folder(ws), None);
+    }
+
     #[test]
     fn codex_event_stream_adapter_tracks_command_execution_lifecycle() {
         let mut adapter = CodexEventStreamAdapter::default();
@@ -10812,6 +10896,8 @@ required = true
             started[0]["item"]["command_argv"],
             json!(["bash", "-lc", "ls"])
         );
+        // the run's workspace is not known here: the command's folder is not projected
+        assert!(started[0]["item"].get("cwd").is_none());
 
         let updated = adapter.collect(&Event {
             id: "evt_delta".to_string(),
@@ -10851,6 +10937,7 @@ required = true
             completed[0]["item"]["command_argv"],
             json!(["bash", "-lc", "ls"])
         );
+        assert!(completed[0]["item"].get("cwd").is_none());
         assert_eq!(completed[0]["item"]["aggregated_output"], "README.md\n");
     }
 

@@ -8490,6 +8490,9 @@ impl JobProcessor {
                 .map(|ctx| space_pages::TurnSteps::of_events(&workspace_dir, &ctx.events))
                 .unwrap_or_else(space_pages::TurnSteps::unknown),
         };
+        // The turn's own steps, over each of its runs: a read-only turn puts back only what
+        // these reached ([`put_back_read_only_turn_changes`]).
+        let mut turn_steps = steps.clone();
         held_pages
             .put_back(&workspace_dir, git_status_before.as_ref(), steps)
             .await;
@@ -8712,6 +8715,7 @@ impl JobProcessor {
                 git_status_before.as_ref(),
                 &read_only_coordination_paths,
                 !bounded_execution,
+                &turn_steps,
             )
             .await;
             if reported_files_len > normalized_files_len {
@@ -8859,12 +8863,12 @@ impl JobProcessor {
                 "accepting successful apply_patch events as workspace file-change evidence despite an empty files list"
             );
         }
-        // A change put back in another chat's page is the turn's result, which its reply says: run
-        // again, the turn would make it again.
+        // A change to another chat's page, put back or not, is the turn's result, which its reply
+        // says: run again, the turn would make it again.
         let workspace_file_changes_missing = expects_workspace_file_changes_after_actions
             && outcome.files.is_empty()
             && !workspace_file_changes_satisfied_by_patch_apply
-            && !held_pages.put_a_change_back();
+            && !held_pages.changed_a_page();
 
         // A browser turn that hands the person's message to the building turn
         // has its answer: no reason to run it again.
@@ -9314,6 +9318,7 @@ impl JobProcessor {
                 (result, steps)
             };
             let (retry_output_result, retry_steps) = retry_output_result;
+            turn_steps.add(retry_steps.clone());
             held_pages
                 .put_back(&workspace_dir, git_status_before.as_ref(), retry_steps)
                 .await;
@@ -9409,6 +9414,7 @@ impl JobProcessor {
                     git_status_before.as_ref(),
                     &retry_read_only_coordination_paths,
                     !bounded_execution,
+                    &turn_steps,
                 )
                 .await;
                 if retry_reported_files_len > retry_normalized_files_len {
@@ -9937,8 +9943,10 @@ impl JobProcessor {
                         job_id = %job_id,
                         "accepting successful apply_patch events as workspace file-change evidence after retry"
                     );
-                } else if held_pages.put_a_change_back() {
-                    // Its change to another chat's page was put back, and its reply says so.
+                } else if held_pages.changed_a_page() {
+                    // Its change to another chat's page was put back, or could not be, and its
+                    // reply says which: "Nothing was changed." under it would not be true of a
+                    // page left changed.
                 } else if !has_final_reply_event(&retry_output.events) {
                     // The recovery pass stopped at its reasoning or at a progress note, with no
                     // reply of its own: nothing answers the person, so the turn fails, as it did
@@ -17303,7 +17311,7 @@ async fn execute_write_scoped_worker_direct(
         }));
         written.push(descriptor);
     }
-    if applied_files.is_empty() && input_request.is_none() && !held.put_a_change_back() {
+    if applied_files.is_empty() && input_request.is_none() && !held.changed_a_page() {
         bail!("write-scoped worker returned no owned file changes");
     }
     held.reply(&mut summary, &written);
@@ -19457,6 +19465,11 @@ fn workspace_git_args(workspace_dir: &Path, args: &[&str]) -> Vec<String> {
 /// `git` in the workspace's own repository, as the status read runs it: with that repository's
 /// hooks and file monitor off and only the allowlisted environment. A turn can write the
 /// repository's settings, so nothing in them runs with a job's credentials.
+///
+/// The paths it is given come from the folder's status, so a turn names them, and each is taken
+/// as that path and nothing more (`--literal-pathspecs`). Read as a pattern, `sites/porto/[a].json`
+/// is also `sites/porto/a.json`, and a file named `:(exclude)x` at the top of the workspace is
+/// every path but `x`: putting that one file back took everything else that was not saved.
 fn workspace_git_command(workspace_dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("git");
     command
@@ -19465,6 +19478,7 @@ fn workspace_git_command(workspace_dir: &Path, args: &[&str]) -> Command {
             "core.hooksPath=/dev/null",
             "-c",
             "core.fsmonitor=false",
+            "--literal-pathspecs",
         ])
         .args(workspace_git_args(workspace_dir, args))
         .current_dir(workspace_dir);
@@ -19509,16 +19523,27 @@ fn git_status_delta_paths(
     paths
 }
 
-/// What a read-only turn changed since `before`, and what of that went back: each changed path
-/// but those `coordination_paths` holds (files a read-only turn may write), as the workspace's
-/// repository holds it. A turn with no step that writes a file (`writes` false: a browser or
-/// granted turn, which has no command and no edit) changed nothing of its own, so whatever changed
-/// while it ran (a site saving a viewer's click, the person's own app) is someone else's and stays.
+/// What a read-only turn changed since `before`, and what of that went back as the workspace's
+/// repository holds it.
+///
+/// The turn's own changes are the changed paths one of its `steps` reached
+/// ([`space_pages::TurnSteps::reached_path`]): those go back. So are the paths
+/// `coordination_paths` holds (files a read-only turn may write), which stay. Whatever else
+/// changed while the turn ran is someone else's and stays, in neither list: a file a person
+/// saved from the editor, a site saving a viewer's click, and what the runtime itself keeps in
+/// the folder ([`is_runtime_owned_workspace_path`]: `.instafy/agent/logs/…`), which is never a
+/// turn's to take away. Put back by the folder's status alone, a read-only turn restored or
+/// cleaned every path that changed while it ran, the runtime's own files among them in a space
+/// whose repository is its `.instafy/.git`.
+///
+/// A turn with no step that writes a file (`writes` false: a browser or granted turn, which has no
+/// command and no edit) changed nothing of its own, so nothing goes back.
 async fn put_back_read_only_turn_changes(
     workspace_dir: &Path,
     before: Option<&HashMap<String, GitStatusEntry>>,
     coordination_paths: &HashSet<String>,
     writes: bool,
+    steps: &space_pages::TurnSteps,
 ) -> (Vec<String>, Vec<String>) {
     let Some(before) = before.filter(|_| writes) else {
         return (Vec::new(), Vec::new());
@@ -19526,15 +19551,27 @@ async fn put_back_read_only_turn_changes(
     let Some(after) = collect_git_status_porcelain(workspace_dir).await else {
         return (Vec::new(), Vec::new());
     };
-    let changed = git_status_delta_paths(before, &after);
+    let (changed, others): (Vec<String>, Vec<String>) = git_status_delta_paths(before, &after)
+        .into_iter()
+        .partition(|path| read_only_turn_changed(path, coordination_paths, steps));
+    if !others.is_empty() {
+        tracing::info!(
+            paths = ?others,
+            "left a change that no step of this read-only turn reached"
+        );
+    }
     let restored = if changed
         .iter()
         .any(|path| !coordination_paths.contains(path))
     {
+        let own: HashMap<String, GitStatusEntry> = changed
+            .iter()
+            .filter_map(|path| Some((path.clone(), after.get(path)?.clone())))
+            .collect();
         restore_clean_baseline_git_status_delta_excluding(
             workspace_dir,
             before,
-            &after,
+            &own,
             coordination_paths,
         )
         .await
@@ -19544,11 +19581,24 @@ async fn put_back_read_only_turn_changes(
     (changed, restored)
 }
 
+/// Whether `path`, which changed while a read-only turn ran, is the turn's own change: a file a
+/// read-only turn may write (`coordination_paths`), or a path one of its `steps` reached that the
+/// runtime does not own.
+fn read_only_turn_changed(
+    path: &str,
+    coordination_paths: &HashSet<String>,
+    steps: &space_pages::TurnSteps,
+) -> bool {
+    coordination_paths.contains(path)
+        || (!is_runtime_owned_workspace_path(path) && steps.reached_path(path))
+}
+
 /// Puts each path that `after` lists as changed and `before` did not back as the workspace's
 /// repository holds it, leaving out `excluded_paths`, and returns those put back: a tracked one is
 /// restored, a new one removed. It runs in the workspace's own repository, as the status read does
 /// ([`workspace_git_command`]): with plain `git`, a space whose repository is its `.instafy/.git`
-/// got nothing back.
+/// got nothing back. Each path is that path and no other, whatever its name
+/// (`--literal-pathspecs`).
 async fn restore_clean_baseline_git_status_delta_excluding(
     workspace_dir: &Path,
     before: &HashMap<String, GitStatusEntry>,
@@ -36703,7 +36753,8 @@ mod tests {
     /// one it added goes; one already changed when the turn began, or one left out, stays. The
     /// restore runs none of that repository's hooks or file monitor, which a turn can write, and a
     /// turn with no step that writes a file (a browser turn) puts nothing back: what changed while
-    /// it ran is someone else's.
+    /// it ran is someone else's. The run here kept no record of its steps, so every change counts
+    /// as the turn's.
     #[tokio::test]
     async fn a_read_only_turns_changes_go_back_where_the_spaces_repository_is_its_instafy_git() {
         let workspace = tempdir().expect("workspace");
@@ -36784,6 +36835,7 @@ mod tests {
             Some(&before),
             &HashSet::from(["handoff.md".to_string()]),
             false,
+            &space_pages::TurnSteps::unknown(),
         )
         .await;
         assert!(changed.is_empty() && restored.is_empty());
@@ -36796,6 +36848,7 @@ mod tests {
             Some(&before),
             &HashSet::from(["handoff.md".to_string()]),
             true,
+            &space_pages::TurnSteps::unknown(),
         )
         .await;
 
@@ -36832,6 +36885,218 @@ mod tests {
         );
         assert!(ws.join("handoff.md").exists());
         assert!(!ran.exists(), "a planted hook or file monitor ran");
+    }
+
+    /// A space whose repository is its `.instafy/.git`, as a hosted space's is, with `files`
+    /// saved.
+    fn space_with_its_instafy_git(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let workspace = tempdir().expect("workspace");
+        let ws = workspace.path();
+        fs::create_dir_all(ws.join(".instafy")).expect("instafy folder");
+        let git = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+            let output = std::process::Command::new("git")
+                .args(canonical_git_args(ws, &args))
+                .current_dir(ws)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        for (path, text) in files {
+            fs::create_dir_all(ws.join(path).parent().unwrap()).expect("folder");
+            fs::write(ws.join(path), text).expect("file");
+            git(&["--literal-pathspecs", "add", "--", path]);
+        }
+        git(&[
+            "-c",
+            "user.name=Instafy Test",
+            "-c",
+            "user.email=test@instafy.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "saved",
+        ]);
+        assert!(workspace_uses_instafy_canonical_git(ws));
+        workspace
+    }
+
+    /// An edit step of a run, as the run's events carry it.
+    fn edit_step_event(path: &str) -> JsonValue {
+        json!({"type": "item.completed", "item": {
+            "id": "patch", "type": "file_change", "paths": [path], "status": "completed",
+        }})
+    }
+
+    /// A command of a run, as the run's events carry it.
+    fn command_step_event(command: &str) -> JsonValue {
+        json!({"type": "item.completed", "item": {
+            "id": "command", "type": "command_execution", "command": command,
+            "command_argv": ["bash", "-lc", command], "status": "completed",
+        }})
+    }
+
+    /// A read-only turn puts back what its own steps reached, and nothing else that changed while
+    /// it ran: a file its edit step named, one a command of its named, and one made in a folder a
+    /// command of its ran in. A file another writer made meanwhile stays (a person's upload), so
+    /// does a saved file another writer changed (a page's own server saving a click), and the
+    /// runtime's own files in the folder are never restored or cleaned, though a hosted space's
+    /// status lists them. Put back by the status alone, all of them went. A word a search says is
+    /// no path: it reaches nothing.
+    #[tokio::test]
+    async fn a_read_only_turn_puts_back_only_what_its_own_steps_reached() {
+        let workspace = space_with_its_instafy_git(&[
+            ("notes.md", "saved\n"),
+            ("sites/porto/data.json", "{}\n"),
+            ("tools/gen.js", "// writes out/list.json\n"),
+        ]);
+        let ws = workspace.path();
+        let before = collect_git_status_porcelain(ws)
+            .await
+            .expect("status before");
+
+        // the turn's own steps
+        fs::write(ws.join("notes.md"), "the turn's edit\n").expect("turn edit");
+        fs::create_dir_all(ws.join("scratch")).expect("scratch");
+        fs::write(ws.join("scratch/out.txt"), "x").expect("turn's file");
+        fs::create_dir_all(ws.join("tools/out")).expect("out");
+        fs::write(ws.join("tools/out/list.json"), "[]\n").expect("generated");
+        // meanwhile: a person's upload, a page's own server saving a click, the runtime's own log
+        fs::create_dir_all(ws.join("uploads")).expect("uploads");
+        fs::write(ws.join("uploads/photo.txt"), "a photo\n").expect("upload");
+        fs::write(ws.join("sites/porto/data.json"), "{\"clicks\":1}\n").expect("click");
+        fs::create_dir_all(ws.join(".instafy/agent/logs")).expect("logs");
+        fs::write(ws.join(".instafy/agent/logs/turn.log"), "a line\n").expect("log");
+
+        let steps = space_pages::TurnSteps::of_events(
+            ws,
+            &[
+                edit_step_event(&ws.join("notes.md").display().to_string()),
+                command_step_event("mkdir -p scratch && printf x > scratch/out.txt"),
+                command_step_event("cd tools && node gen.js"),
+                command_step_event("instafy search \"porto uploads and sites\""),
+            ],
+        );
+        // the runtime's log is in the folder's status, as a hosted space's is
+        let after = collect_git_status_porcelain(ws)
+            .await
+            .expect("status after");
+        let delta = git_status_delta_paths(&before, &after);
+        assert!(
+            delta.contains(&".instafy/agent/logs/turn.log".to_string()),
+            "{delta:?}"
+        );
+
+        let (changed, restored) =
+            put_back_read_only_turn_changes(ws, Some(&before), &HashSet::new(), true, &steps).await;
+        assert_eq!(
+            changed,
+            ["notes.md", "scratch/out.txt", "tools/out/list.json"]
+        );
+        assert_eq!(restored, changed);
+        assert_eq!(fs::read_to_string(ws.join("notes.md")).unwrap(), "saved\n");
+        assert!(!ws.join("scratch/out.txt").exists());
+        assert!(!ws.join("tools/out/list.json").exists());
+        assert_eq!(
+            fs::read_to_string(ws.join("uploads/photo.txt")).unwrap(),
+            "a photo\n"
+        );
+        assert_eq!(
+            fs::read_to_string(ws.join("sites/porto/data.json")).unwrap(),
+            "{\"clicks\":1}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(ws.join(".instafy/agent/logs/turn.log")).unwrap(),
+            "a line\n"
+        );
+
+        // A run that kept no record of its steps: every change counts as the turn's, but never
+        // what the runtime keeps in the folder.
+        let (changed, restored) = put_back_read_only_turn_changes(
+            ws,
+            Some(&before),
+            &HashSet::new(),
+            true,
+            &space_pages::TurnSteps::unknown(),
+        )
+        .await;
+        assert_eq!(changed, ["sites/porto/data.json", "uploads/photo.txt"]);
+        assert_eq!(restored, changed);
+        assert_eq!(
+            fs::read_to_string(ws.join(".instafy/agent/logs/turn.log")).unwrap(),
+            "a line\n"
+        );
+    }
+
+    /// A path put back is that path and no other, whatever its name. Read as a pattern,
+    /// `sites/porto/[a].json` is also `sites/porto/a.json`, `n[1].txt` is also `n1.txt`, and a
+    /// file named `:(exclude)keep.txt` at the top of the workspace is every path but `keep.txt`:
+    /// putting those back took another writer's saved change and every file not saved.
+    #[tokio::test]
+    async fn a_path_put_back_is_that_path_and_no_other() {
+        let workspace = space_with_its_instafy_git(&[
+            ("sites/porto/a.json", "saved a\n"),
+            ("sites/porto/[a].json", "saved [a]\n"),
+        ]);
+        let ws = workspace.path();
+        let before = collect_git_status_porcelain(ws)
+            .await
+            .expect("status before");
+
+        // the turn's own steps: a saved file changed, and two files made
+        fs::write(ws.join("sites/porto/[a].json"), "the turn's\n").expect("turn edit");
+        fs::write(ws.join("sites/porto/n[1].txt"), "the turn's\n").expect("turn's file");
+        fs::write(ws.join(":(exclude)keep.txt"), "the turn's\n").expect("turn's file");
+        // meanwhile, another writer's
+        fs::write(ws.join("sites/porto/a.json"), "another writer's\n").expect("other edit");
+        fs::write(ws.join("sites/porto/n1.txt"), "another writer's\n").expect("other file");
+        fs::create_dir_all(ws.join("uploads")).expect("uploads");
+        fs::write(ws.join("uploads/photo.txt"), "a photo\n").expect("upload");
+
+        let steps = space_pages::TurnSteps::of_events(
+            ws,
+            &[
+                edit_step_event("sites/porto/[a].json"),
+                edit_step_event("sites/porto/n[1].txt"),
+                edit_step_event(":(exclude)keep.txt"),
+            ],
+        );
+        let (changed, restored) =
+            put_back_read_only_turn_changes(ws, Some(&before), &HashSet::new(), true, &steps).await;
+        assert_eq!(
+            changed,
+            [
+                ":(exclude)keep.txt",
+                "sites/porto/[a].json",
+                "sites/porto/n[1].txt"
+            ]
+        );
+        assert_eq!(restored, changed);
+        assert_eq!(
+            fs::read_to_string(ws.join("sites/porto/[a].json")).unwrap(),
+            "saved [a]\n"
+        );
+        assert!(!ws.join("sites/porto/n[1].txt").exists());
+        assert!(!ws.join(":(exclude)keep.txt").exists());
+        assert_eq!(
+            fs::read_to_string(ws.join("sites/porto/a.json")).unwrap(),
+            "another writer's\n"
+        );
+        assert_eq!(
+            fs::read_to_string(ws.join("sites/porto/n1.txt")).unwrap(),
+            "another writer's\n"
+        );
+        assert_eq!(
+            fs::read_to_string(ws.join("uploads/photo.txt")).unwrap(),
+            "a photo\n"
+        );
     }
 
     #[test]
