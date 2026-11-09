@@ -704,12 +704,14 @@ impl TurnSteps {
         self.unknown || self.edited.contains(path) || self.pointed_at(folder)
     }
 
-    /// Whether a step reached the page in `folder` at all: an edit step named a path in it, or a
-    /// command pointed at it.
-    fn reached_folder(&self, folder: &str) -> bool {
-        self.unknown
-            || self.edited.iter().any(|path| is_under(path, folder))
-            || self.pointed_at(folder)
+    /// Whether an edit step named a path in the page in `folder`: a step that writes, whatever
+    /// became of it. A command that pointed at the page may only have read it.
+    fn edited_in(&self, folder: &str) -> bool {
+        self.edited.iter().any(|path| is_under(path, folder))
+            || self
+                .edited_elsewhere
+                .iter()
+                .any(|raw| parts_after_run(raw, folder).is_some_and(|after| after > 0))
     }
 
     /// Whether a command pointed at the page in `folder`: it referred to the folder, to a path in
@@ -883,22 +885,21 @@ struct CommandReader<'a> {
 
 impl CommandReader<'_> {
     /// Reads the command of a `command_execution` item with the words `argv`, from the folder
-    /// the item says it ran in (`cwd`), else from the workspace.
+    /// the item says it ran in (`cwd`): a path of the workspace (`.`, `sites/porto`), as the
+    /// run's events give it, or null for a folder outside the workspace, which leaves the place
+    /// unknown. An item that says nothing of it ran in the workspace.
     fn read(&mut self, item: &JsonValue, argv: &[String]) {
-        let mut dir = match item
-            .get("cwd")
-            .or_else(|| item.get("workdir"))
-            .and_then(JsonValue::as_str)
-            .map(str::trim)
-            .filter(|cwd| !cwd.is_empty())
-        {
-            // As the event spells it, else as its links lead (a folder named through a link).
-            Some(cwd) if Path::new(cwd).is_absolute() => self
-                .spellings
-                .inside(Path::new(cwd))
-                .or_else(|| self.spellings.inside(&std::fs::canonicalize(cwd).ok()?)),
-            Some(cwd) => walk(Vec::new(), Path::new(cwd)),
+        let mut dir = match item.get("cwd") {
             None => Some(Vec::new()),
+            Some(cwd) => match cwd.as_str().map(str::trim).filter(|cwd| !cwd.is_empty()) {
+                // As the event spells it, else as its links lead (a folder named through a link).
+                Some(cwd) if Path::new(cwd).is_absolute() => self
+                    .spellings
+                    .inside(Path::new(cwd))
+                    .or_else(|| self.spellings.inside(&std::fs::canonicalize(cwd).ok()?)),
+                Some(cwd) => walk(Vec::new(), Path::new(cwd)),
+                None => None,
+            },
         };
         self.ran_in(dir.as_deref());
         match argv {
@@ -1307,9 +1308,9 @@ fn shell_commands(script: &str) -> Vec<Vec<Word>> {
 /// - The turn's artifacts record a change put back as a blocked write, and its reply says which
 ///   page it didn't change ([`Self::reply`]).
 /// - A change that could not go back is said too, never only logged: the page is then part
-///   changed and not saved, and the person has to know to look at it. So is a page a step
-///   reached when nothing could say what changed there (the folder's status could not be read).
-///   Such a reply never ends "Nothing was changed." ([`Self::changed_a_page`]).
+///   changed and not saved, and the person has to know to look at it. So is a page an edit step
+///   named a path in when nothing could say what changed there (the folder's status could not
+///   be read). Such a reply never ends "Nothing was changed." ([`Self::changed_a_page`]).
 ///
 /// A page is held by its own folder: a path in the folder of a page this chat made, or one whose
 /// chat isn't recorded, within another chat's page's folder stays this turn's.
@@ -1325,9 +1326,9 @@ pub(crate) struct HeldPages {
     /// The paths under a held page the turn changed, and those put back.
     changed: BTreeSet<String>,
     restored: BTreeSet<String>,
-    /// The folders of the held pages a step of the turn reached while nothing could say what
-    /// changed there: the folder's status could not be read, as the turn began or once it was
-    /// done.
+    /// The folders of the held pages an edit step of the turn named a path in while nothing could
+    /// say what changed there: the folder's status could not be read, as the turn began or once
+    /// it was done.
     unchecked: BTreeSet<String>,
     /// The files under a held page the turn returned with their contents, never written.
     returned: BTreeSet<String>,
@@ -1454,12 +1455,13 @@ impl HeldPages {
             None => None,
         };
         let (Some(start), Some(now)) = (start, now) else {
-            // Nothing says what changed: each held page a step reached may be changed, and
-            // nothing can put it back.
+            // Nothing says what changed: each held page an edit step of the turn named a path in
+            // may be changed, and nothing can put it back. A command that pointed at a page may
+            // only have read it, so it alone says nothing here.
             let reached: Vec<String> = self
                 .pages
                 .iter()
-                .filter(|(page, held)| *held && self.steps.reached_folder(&page.folder))
+                .filter(|(page, held)| *held && self.steps.edited_in(&page.folder))
                 .map(|(page, _)| page.folder.clone())
                 .collect();
             if !reached.is_empty() {
@@ -2401,7 +2403,7 @@ mod tests {
         off.leave_out_returned(ws, &mut files);
         off.leave_out_held(&mut files);
         assert_eq!(files.len(), 1);
-        assert!(!off.put_a_change_back());
+        assert!(!off.changed_a_page());
         assert_eq!(off.reply_line(), None);
         assert_eq!(off.artifact(), None);
         let mut reply = "I emptied the comparison.".to_string();
@@ -2863,6 +2865,39 @@ mod tests {
         step
     }
 
+    /// The folder a command ran in as a run's events give it: a path of the workspace, `.` for
+    /// the workspace itself, and null for a folder outside it, where a name alone leads nowhere.
+    #[test]
+    fn a_commands_folder_is_read_as_the_runs_events_give_it() {
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path();
+        let ran_in = |cwd: JsonValue, command: &str| {
+            let mut step = command_step(command);
+            step["item"]["cwd"] = cwd;
+            step
+        };
+        let page = "sites/porto";
+        assert!(reaches(
+            ws,
+            ran_in(json!("sites/porto"), "rm data.json"),
+            page
+        ));
+        assert!(reaches(ws, ran_in(json!("sites"), "rm -rf porto"), page));
+        assert!(reaches(ws, ran_in(json!("."), "rm -rf sites/porto"), page));
+        assert!(!reaches(ws, ran_in(json!("."), "rm -rf porto"), page));
+        assert!(!reaches(ws, ran_in(json!("sites"), "rm -rf braga"), page));
+        // outside the workspace: a path of its own leads nowhere, and one that spells the
+        // page's folder out still counts
+        assert!(!reaches(ws, ran_in(JsonValue::Null, "rm -rf porto"), page));
+        assert!(reaches(
+            ws,
+            ran_in(JsonValue::Null, "rm -rf space/sites/porto/data.json"),
+            page
+        ));
+        let abs = format!("rm -rf {}/sites/porto", ws.display());
+        assert!(reaches(ws, ran_in(JsonValue::Null, &abs), page));
+    }
+
     /// A command of a run with its own words, run with no shell.
     fn exec_step(argv: &[&str]) -> JsonValue {
         json!({"type": "item.completed", "item": {
@@ -2910,10 +2945,12 @@ mod tests {
         assert!(!steps.reached("sites/madrid/data.json", "sites/madrid"));
         assert!(steps.reached("sites/braga/index.html", "sites/braga"));
         assert!(TurnSteps::unknown().reached("sites/any/file", "sites/any"));
-        // the page as a whole: an edit step in it, or a command that pointed at it
-        assert!(steps.reached_folder("sites/porto"));
-        assert!(steps.reached_folder("sites/braga"));
-        assert!(!steps.reached_folder("sites/lisbon"));
+        // the page as a whole: an edit step named a path in it, which a command never does
+        assert!(steps.edited_in("sites/porto"));
+        assert!(steps.edited_in("sites/seville"));
+        assert!(!steps.edited_in("sites/braga"));
+        assert!(!steps.edited_in("sites/lisbon"));
+        assert!(!TurnSteps::unknown().edited_in("sites/porto"));
         // a path in no page: the one an edit step named, one a command named, one in a folder a
         // command ran in, and never one a command only read
         assert!(steps.reached_path("sites/porto/data.json"));
@@ -3242,9 +3279,10 @@ mod tests {
     }
 
     /// When the folder's status could not be read, nothing says what a turn changed in another
-    /// chat's page and nothing can put it back. A page one of the turn's steps reached is then
-    /// said in the reply as one it may have changed; a turn whose steps reached only its own page
-    /// says nothing.
+    /// chat's page and nothing can put it back. A page an edit step of the turn named a path in
+    /// is then said in the reply as one it may have changed. A turn whose edit steps named only
+    /// its own page says nothing, and neither does a command that pointed at the page: it may
+    /// only have read it.
     #[tokio::test]
     async fn a_page_nothing_could_check_is_said_in_the_reply() {
         let (this, other) = (Uuid::new_v4(), Uuid::new_v4());
@@ -3260,6 +3298,7 @@ mod tests {
                 &[
                     edit_step("sites/framework-13-16/data.json"),
                     command_step("instafy search \"framework-laptops weight\""),
+                    command_step("python3 tools/summarize.py sites/framework-laptops/data.json"),
                 ],
             ),
         )
@@ -3319,9 +3358,25 @@ mod tests {
                 page("sites/braga", "Braga", Some(&other), &PAGE_SERVER),
             ],
         );
-        // nothing could check: every held page a step reached
+        // nothing could check: every held page an edit step named a path in. A run that kept
+        // no record of its steps names none.
         let mut held = HeldPages::of_turn(ws, Some(&this), &[], None);
         held.put_back(ws, None, TurnSteps::unknown()).await;
+        assert_eq!(held.reply_line(), None);
+        held.put_back(
+            ws,
+            None,
+            TurnSteps::of_events(
+                ws,
+                &[
+                    edit_step("sites/porto/data.json"),
+                    edit_step("sites/lisbon/data.json"),
+                    edit_step("sites/faro/index.html"),
+                    edit_step(&ws.join("sites/braga/data.json").display().to_string()),
+                ],
+            ),
+        )
+        .await;
         assert_eq!(
             held.reply_line().as_deref(),
             Some(

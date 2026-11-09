@@ -642,7 +642,10 @@ Every Octo turn that may write files is told the space's pages from this record,
 another and read-only there, or with no chat recorded; only a page Instafy's page server (`instafy bind serve`) or an
 installed skill's command serves is listed, never the person's own app. What a turn's own steps change in a page another
 chat made goes back as it was when the turn began, and the reply says which page it didn't change: that page changes in
-the chat that made it. A page reads with no chat, and is held from nobody, when its chat is gone for the person the
+the chat that made it. A step reaches a page when an edit names a file in it, or a command refers to a path in it, to
+its folder or to a folder that holds it, or runs in it; a word a command only says (a search for the page's name) is no
+path, so what the page's own server saves meanwhile stays. A change that could not go back is said in the reply as
+well ("I changed … and couldn't put it back as it was"), and such a reply never ends "Nothing was changed." A page reads with no chat, and is held from nobody, when its chat is gone for the person the
 turn runs for: the chat no longer exists, they moved it to Trash, or it is a thread nobody asks in (an automation's, a
 bound site's). A scheduled run has no chat to ask in, so nothing holds a page for it. A runtime started with
 `INSTAFY_HOLD_PAGES=0` holds no page at all: its turns are told the same, and nothing is put back.
