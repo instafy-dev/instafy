@@ -2006,7 +2006,11 @@ hidden field a page fills as it works; the states the reading gives its
 controls (checked, pressed, selected, open); and where the page is scrolled
 to, as one digest the page works out itself. So a step that only changed a
 field (an option chosen, a box checked), turned a switch on or scrolled the
-page answers at once. Whether a control is turned off is left out: a button
+page answers at once. So does a click on a link to a part of the page it is
+on, once the address names that part of the same document: it loads nothing,
+and a step waited on one and said the page read as before. A link whose "#"
+names no part of the page ("#", "#/inbox") still looks again: a script may
+draw a view for it. Whether a control is turned off is left out: a button
 that turns itself off while its result loads would read as that result. A
 click reads the page with the pointer over its control and the focus on it
 first, as the press is about to put them, and a key with the focus on its
@@ -2077,6 +2081,18 @@ page returned no results. Where Enter, as the box holds the text, is a site
 search that goes without a prompt (below), it reads "Nothing was searched
 yet: press Enter to search (no prompt needed).". A
 click on a checkbox, a radio button or a switch says whether it is checked now.
+A `choose` step's `done` names the option and the list by its own name
+("Chose "Aliados" in "End"."). For a list in a form that has a button of its
+own, on a page the step left on the same document and address, it adds
+"Nothing was sent yet.": a turn chose a planner's two stations, never pressed
+its button and wrote that the planner returned no route. The line names the
+form's button only where a click on it goes without a prompt, by the click
+step's own test ("Nothing was sent yet: the form's button is "Search"
+(pressing it needs no prompt)."); a button whose press asks the person is not
+named. What to do about an unsent form is the browser skill's to say, not the
+step's. The option a list already holds takes no step: the answer is
+""Aliados" was already chosen.", at once, with no prompt and no second look
+at the page.
 
 What the text cannot hold is named where a person sees it: a frame (an
 `iframe`, `frame`, `object` or `embed`) as "[frame not read: <site>]", by the

@@ -624,7 +624,7 @@ fn a_route_comes_from_the_operators_journey_planner() {
     let start = BROWSER_SKILL.find("## Finding a page").expect("section");
     let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
     let section = flat(&BROWSER_SKILL[start..end]);
-    let line = "- A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: its destination is the stop the place's own page names, so read that page first; choose the stations and the day and time the person travels (a daytime hour when they gave none), press its button and read the route off the page it shows), not a listing or a kiosk page: those only lead to it. A route's finding, like your reply, names its end stop, whose pick it is (\"<stop>, Octo's pick: the place's page names no stop\"), what it leaves out (\"the walk to the place isn't in it\") and the day and time its legs run, not the page header's.";
+    let line = "- A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: choose the start, the stop nearest the place (the one its own page names, else your pick), the person's day and time (else a daytime hour); press its button and read the route), not a listing or a kiosk page: those only lead to it. A route's finding, like your reply, names its end stop, whose pick it is (\"<stop>, Octo's pick: the place's page names no stop\"), what it leaves out (\"the walk to the place isn't in it\") and the day and time its legs run, not the page header's.";
     assert!(section.contains(line), "{section}");
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(line));
@@ -1114,14 +1114,14 @@ fn a_route_is_planned_for_the_day_and_time_the_person_travels() {
     let start = BROWSER_SKILL.find("## Finding a page").expect("section");
     let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
     let section = flat(&BROWSER_SKILL[start..end]);
-    let line = "- A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: its destination is the stop the place's own page names, so read that page first; choose the stations and the day and time the person travels (a daytime hour when they gave none), press its button and read the route off the page it shows), not a listing or a kiosk page: those only lead to it. A route's finding, like your reply, names its end stop, whose pick it is (\"<stop>, Octo's pick: the place's page names no stop\"), what it leaves out (\"the walk to the place isn't in it\") and the day and time its legs run, not the page header's.";
+    let line = "- A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: choose the start, the stop nearest the place (the one its own page names, else your pick), the person's day and time (else a daytime hour); press its button and read the route), not a listing or a kiosk page: those only lead to it. A route's finding, like your reply, names its end stop, whose pick it is (\"<stop>, Octo's pick: the place's page names no stop\"), what it leaves out (\"the walk to the place isn't in it\") and the day and time its legs run, not the page header's.";
     assert!(section.contains(line), "{section}");
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(line));
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
 
     let previous = include_str!("legacy/browser-automation-v25.md");
-    assert!(!previous.contains("the day and time the person travels"));
+    assert!(!previous.contains("a daytime hour"));
     let tmp = scaffolded_space();
     let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
     fs::write(&skill, previous).unwrap();
@@ -1684,7 +1684,7 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
         "Prefer available native search for discovery; never invent a page path.",
         "A page that says it is missing (\"not found\", \"are you lost?\"): use that site's own search box or menu.",
         "A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.",
-        "A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: its destination is the stop the place's own page names, so read that page first; choose the stations and the day and time the person travels (a daytime hour when they gave none), press its button and read the route off the page it shows), not a listing or a kiosk page",
+        "A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: choose the start, the stop nearest the place (the one its own page names, else your pick), the person's day and time (else a daytime hour); press its button and read the route), not a listing or a kiosk page",
         "Comparing: list the models a page you read names, its menu included, then open each one's own page. Never names from memory, never placeholders such as \"candidate 1\".",
     ] {
         assert!(carried.contains(needle), "{needle}");
@@ -2303,15 +2303,15 @@ fn a_map_request_is_a_build_and_keep_going_carries_on_what_is_not_confirmed() {
 /// time, never pressed the form's button and replied with no route, the fifth time (a local test,
 /// Nov 3). The browser skill said a route comes from the planner "its stations chosen", and that a
 /// form's own button "sends it, and asks", which reads as a reason to stop. A route is planned to
-/// the end: its stations, a day and a daytime hour, its button, and the route read off the page it
-/// shows; any prompt the button raises is the person's to answer. The form-post approval itself is
+/// the end: its stations, a day and a daytime hour, its button, and the route read; any prompt
+/// the button raises is the person's to answer. The form-post approval itself is
 /// unchanged. Within the part a snapshot carries, without pushing the sign-in rules out of it.
 #[test]
 fn a_route_is_planned_to_the_end_and_a_forms_prompt_is_the_persons() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(
-        "a route from the operator's journey planner: its destination is the stop the place's own page names, so read that page first; choose the stations and the day and time the person travels (a daytime hour when they gave none), press its button and read the route off the page it shows)"
+        "a route from the operator's journey planner: choose the start, the stop nearest the place (the one its own page names, else your pick), the person's day and time (else a daytime hour); press its button and read the route)"
     ));
     // The form's own button sends it, as the `choose` tool says; what it asks is the person's to
     // answer under the run's approvals.
@@ -2390,14 +2390,14 @@ fn a_routes_destination_is_the_stop_the_places_own_page_names() {
     let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
     let section = flat(&BROWSER_SKILL[start..end]);
     for words in [
-        "its destination is the stop the place's own page names, so read that page first;",
+        "the stop nearest the place (the one its own page names, else your pick),",
         "A route's finding, like your reply, names its end stop, whose pick it is",
         "and the day and time its legs run, not the page header's.",
     ] {
         assert!(section.contains(words), "{words}: {section}");
     }
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
-    assert!(carried.contains("its destination is the stop the place's own page names"));
+    assert!(carried.contains("the stop nearest the place (the one its own page names"));
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
 
     let previous = include_str!("legacy/browser-automation-v37.md");
@@ -2433,6 +2433,45 @@ fn a_cookie_notice_is_never_one_of_the_persons_steps() {
     assert!(
         previous.contains("- Treat sign-in, one-time codes, consent, payment and every secret")
     );
+    let tmp = scaffolded_space();
+    let path = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&path, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&path).unwrap(), BROWSER_SKILL);
+}
+
+/// Two turns chose a planner's start and end and never pressed its button, and each wrote that the planner returned no
+/// route; neither had read the place's own page first, though the route line said its destination "is the stop the
+/// place's own page names, so read that page first" (a local test, Nov 9). The route line now says what to choose, the
+/// start, the stop nearest the place and the person's day and time, and to press the planner's button, with no page to
+/// read first. What to do with any unsent form is said once, in general words, among the core rules: the step's own
+/// result only says what it chose and that nothing was sent. Within the part a snapshot carries, the routing section
+/// as it was, and an unedited earlier copy is upgraded.
+#[test]
+fn a_form_is_sent_by_its_button_and_a_route_names_what_to_choose() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
+    let rule = "- A form isn't sent until its button is pressed: press it and read the result.";
+    let route = "a route from the operator's journey planner: choose the start, the stop nearest the place (the one its own page names, else your pick), the person's day and time (else a daytime hour); press its button and read the route)";
+    assert!(carried.contains(rule));
+    assert!(carried.contains(route));
+    // Once: no other line of the skill says when a form is sent.
+    assert_eq!(BROWSER_SKILL.matches("isn't sent until").count(), 1);
+    for earlier in ["so read that page first", "its destination is the stop"] {
+        assert!(!BROWSER_SKILL.contains(earlier), "{earlier}");
+    }
+    // The whole skill is within the part a snapshot carries, the routing section included.
+    assert!(
+        BROWSER_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+        "{} bytes",
+        BROWSER_SKILL.len()
+    );
+    let previous = include_str!("legacy/browser-automation-v41.md");
+    assert!(previous.contains("so read that page first"));
+    assert!(!previous.contains("isn't sent until"));
+    let routing =
+        |text: &str| text[text.find("## Routing preflight").expect("section")..].to_string();
+    assert_eq!(routing(BROWSER_SKILL), routing(previous));
     let tmp = scaffolded_space();
     let path = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
     fs::write(&path, previous).unwrap();

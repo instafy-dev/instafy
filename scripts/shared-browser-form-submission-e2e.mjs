@@ -123,6 +123,9 @@ document.getElementById("moving").addEventListener("keydown", (event) => {
 // A site's own search box: a GET of the page's own origin.
 const SEARCH = `<h1>Places</h1>
 <form action="/search" method="get" role="search"><input type="search" name="q" aria-label="Search places"><input type="hidden" name="lang" value="en"><button>Search</button></form>`;
+// The same search with a list beside its box.
+const FINDER = `<h1>Places</h1>
+<form action="/search" method="get" role="search"><label for="kind">Kind</label><select id="kind" name="kind"><option>Any</option><option>Cafes</option></select><input type="search" name="q" aria-label="Search places"><input type="hidden" name="lang" value="en"><button>Search</button></form>`;
 // Search boxes that still ask, or are refused, under routine browsing, and one
 // whose page turns the search into a post when Enter is pressed.
 const SEARCH_CHECKS = `<h1>Searches</h1>
@@ -332,6 +335,8 @@ export async function runSharedBrowserFormSubmissionFixture() {
         response.end(page("Mall", fill(STRAY)));
       } else if (url.pathname === "/scenario/search") {
         response.end(page("Places", fill(SEARCH)));
+      } else if (url.pathname === "/scenario/finder") {
+        response.end(page("Places", fill(FINDER)));
       } else if (url.pathname === "/scenario/search-checks") {
         response.end(page("Searches", fill(SEARCH_CHECKS)));
       } else if (url.pathname === "/scenario/planner") {
@@ -697,6 +702,28 @@ export async function runSharedBrowserFormSubmissionFixture() {
     assert.deepEqual(promptsSince(start), [], "A click on a site's own search button asks nothing under routine browsing");
     assert.deepEqual(searches, [sentSearch("q=Torre+de+Bel%C3%A9m&lang=en")], "It sent exactly the form's GET");
     assert.deepEqual(searched.activity, { step: "search", url: `${sites().mall}/search?q=Torre+de+Bel%C3%A9m&lang=en`, approval: "free" });
+    // b''. A choose in a form that was not sent says what it chose, in which
+    // list, that nothing was sent, and the form's button, with the words about
+    // a prompt only where a press of that button needs none (the test b' goes
+    // by). A turn chose a stop, read the page as it was and chose again. The
+    // option the list already holds answers the same way, chooses nothing and
+    // asks nothing.
+    await runPage.goto(`${sites().mall}/scenario/finder`);
+    snapshot = await ok("GET", "/v1/snapshot");
+    start = prompts.length;
+    searches.length = 0;
+    const unsentWords = "Nothing was sent yet: the form's button is \"Search\" (pressing it needs no prompt).";
+    let kind = await ok("POST", "/v1/choose", { index: control(snapshot, "Kind").index, snapshotId: snapshot.snapshotId, option: "Cafes" });
+    assert.equal(kind.done, `Chose "Cafes" in "Kind". ${unsentWords}`);
+    assert.equal(kind.activity.step, "choose");
+    kind = await ok("POST", "/v1/choose", { index: control(kind, "Kind").index, snapshotId: kind.snapshotId, option: "Cafes" });
+    assert.equal(kind.done, `"Cafes" was already chosen. ${unsentWords}`);
+    assert.equal(kind.activity.step, "snapshot", "Nothing was chosen, so the step is a reading");
+    assert.equal(control(kind, "Kind").chosen, "Cafes");
+    assert.deepEqual(searches, [], "Choosing sent nothing");
+    searched = await ok("POST", "/v1/click", { index: control(kind, "Search").index, snapshotId: kind.snapshotId });
+    assert.deepEqual(promptsSince(start), [], "Neither the chooses nor the button they name asked");
+    assert.deepEqual(searches, [sentSearch("kind=Cafes&q=&lang=en")], "The button sent the form with the option chosen");
     // c. In one of Octo's own tabs, which refuse every other submission.
     const octoTab = await ok("POST", "/v1/tabs/open", { url: searchPage });
     snapshot = await ok("GET", "/v1/snapshot", { tabId: octoTab.tabId });
@@ -846,6 +873,9 @@ export async function runSharedBrowserFormSubmissionFixture() {
     let chosen = await ok("POST", "/v1/choose", { index: list(snapshot, "Start").index, snapshotId: snapshot.snapshotId, option: "São Bento" });
     assert.equal(list(chosen, "Start").chosen, "São Bento");
     assert.deepEqual(chosen.activity, { step: "choose", url: plannerPage, approval: "routine" });
+    // Its line says the form was not sent, and no more: a press of this
+    // form's button asks the person, so nothing says it would not.
+    assert.equal(chosen.done, "Chose \"São Bento\" in \"Start\". Nothing was sent yet.");
     chosen = await ok("POST", "/v1/choose", { index: list(chosen, "End").index, snapshotId: chosen.snapshotId, option: "trindade" });
     assert.equal(list(chosen, "End").chosen, "Trindade");
     assert.equal(list(chosen, "Start").chosen, "São Bento");
@@ -856,6 +886,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
     // nor its options: its step names the option chosen alone.
     chosen = await ok("POST", "/v1/choose", { index: list(chosen, "All lines").index, snapshotId: chosen.snapshotId, option: "Line D" });
     assert.equal(list(chosen, "Line D").chosen, "Line D");
+    assert.equal(chosen.done, "Chose \"Line D\".", "A list in no form says only what was chosen");
     assert.match(fs.readFileSync(actionsPath, "utf8").trim().split("\n").at(-1), /"label":"Choose \\"Line D\\"","url"/u);
     // An option the list does not have chooses nothing; the answer lists
     // the options, so the next try names one exactly.
@@ -1125,7 +1156,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
         "typing into a site's own search box without submit sends nothing and says nothing was searched yet and to press Enter, with no prompt; typing into a journey planner's field or a search that posts says nothing was sent yet, and into a search of another site that nothing was searched yet, never to press Enter",
         "a key-like typed value, a default button that posts, another site, another subdomain, no form, a sign-out address, a hidden key-like value (also behind a control named elements), a hidden one-time code, a hidden file format and an unnamed field still ask; a new window, a field inside a submit button and a link-only destination are refused before any prompt",
         "a page script that turns a free search into a post to its own site is stopped by the step's guard",
-        "under routine browsing a journey planner's start and end stations are chosen by label with no prompt and nothing sent, its own button asks once naming the fields it sends, and the route is read",
+        "under routine browsing a journey planner's start and end stations are chosen by label with no prompt and nothing sent, its own button asks once naming the fields it sends, and the route is read; a choose says what it chose and in which list, and in a form that was not sent that nothing was sent yet, naming the form's button with the words about a prompt only where a press of it needs none; the option a list already holds says so, chooses nothing and asks nothing",
         "beside a carousel that turns by itself between every snapshot and the step after it, which changes the page's snapshot id and nothing its reading lists, both stations are chosen with the snapshot each step returned, a list that changed itself is refused by its name and counted, and the planner's button asks once with a snapshot from before a turn and the route is read",
         "a list is named by its own label or the option it holds, never its options, and a snapshot says which option it holds",
         "an option a list does not have chooses nothing and the answer lists the options; a control that is no list is refused",

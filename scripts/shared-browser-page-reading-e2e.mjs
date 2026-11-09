@@ -415,6 +415,12 @@ const DRAWS = `<h1>Journey planner</h1>
 <button type="button" onclick="window.scrollTo(0, document.body.scrollHeight)">Go to the end</button>
 <a href="/reading/visit">Plan your visit</a> <a href="/reading/draws">Start over</a></p>
 <p id="route"></p><div style="height:3000px"></div><p>End of the planner</p>`;
+// A short page with links to its own parts, all in view, so a click on one
+// moves nothing but the address; one names no part, and one is the page's
+// own router's.
+const PARTS = `<h1>Timetable</h1>
+<p><a href="#weekend">Weekend times</a> <a href="#nowhere">Night times</a> <a href="#/fares">Fares</a></p>
+<h2 id="weekend">Weekend</h2><p>Every 12 minutes.</p>`;
 // What a step shows in place without changing the page's text, as a person
 // sees it: a section that slides open, a menu that fades in, a drawer and a
 // carousel that move into view, a switch and a toggle button. A planner that
@@ -524,6 +530,7 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/disagree-notice": page("Visit the city", DISAGREE_NOTICE),
       "site.test /reading/covered": page("Timetable", COVERED),
       "site.test /reading/draws": page("Journey planner", DRAWS),
+      "site.test /reading/parts": page("Timetable", PARTS),
       "site.test /reading/reveals": page("Laptop", REVEALS),
       "site.test /reading/hidden-field": page("Journey planner", HIDDEN_FIELD),
       "site.test /reading/hover-tip": page("Journey planner", HOVER_TIP),
@@ -1137,6 +1144,22 @@ export async function runSharedBrowserPageReadingFixture() {
     const again = await ok("POST", "/v1/click", { index: control(reading, "Start over").index, snapshotId: reading.snapshotId });
     measurements.reloadedClickMs = Date.now() - started;
     assert.equal(again.done, undefined, again.done);
+    // A link to a part of the page it is on, already in view, moves nothing
+    // but the address: that part is what the click asked for, so it answers
+    // at once and says nothing of a page that reads as before. A link that
+    // names no part of the page, and one a page's own script may answer,
+    // still look again.
+    reading = await read("/reading/parts");
+    started = Date.now();
+    const part = await ok("POST", "/v1/click", { index: control(reading, "Weekend times").index, snapshotId: reading.snapshotId });
+    measurements.partLinkClickMs = Date.now() - started;
+    assert.equal(new URL(part.url).hash, "#weekend");
+    assert.equal(part.done, undefined, part.done);
+    for (const label of ["Night times", "Fares"]) {
+      reading = await read("/reading/parts");
+      const waited = await ok("POST", "/v1/click", { index: control(reading, label).index, snapshotId: reading.snapshotId });
+      assert.equal(waited.done, `Clicked "${label}". ${UNCHANGED_WORDS}`);
+    }
     // d. A type step answers at once and says nothing was searched, or for a
     // field that is no search sent, yet: a turn typed into a site's search,
     // never sent it, and wrote that it returned no results. A choice that
@@ -1151,7 +1174,14 @@ export async function runSharedBrowserPageReadingFixture() {
     started = Date.now();
     const chosen = await ok("POST", "/v1/choose", { index: control(typedFrom, "Day").index, snapshotId: typedFrom.snapshotId, option: "Tuesday" });
     measurements.chooseMs = Date.now() - started;
-    assert.equal(chosen.done, undefined, chosen.done);
+    assert.equal(chosen.done, "Chose \"Tuesday\" in \"Day\".", "A list in no form says only what was chosen");
+    // The option the list already holds changes nothing: it says so at once,
+    // with no look for a page that reads as before.
+    started = Date.now();
+    const chosenAgain = await ok("POST", "/v1/choose", { index: control(chosen, "Day").index, snapshotId: chosen.snapshotId, option: "Tuesday" });
+    measurements.chooseAgainMs = Date.now() - started;
+    assert.equal(chosenAgain.done, "\"Tuesday\" was already chosen.");
+    assert.equal(control(chosenAgain, "Day").chosen, "Tuesday");
     // e. What a click shows in place counts as the page answering, as the
     // reading shows it, though the page's text was there all along: a section
     // that slides open, a menu that fades in, a drawer and a carousel that
@@ -1202,6 +1232,8 @@ export async function runSharedBrowserPageReadingFixture() {
       ["a click that opened the page it was on", measurements.reloadedClickMs],
       ["a type step", measurements.typeMs],
       ["a choice", measurements.chooseMs],
+      ["a choice of the option already chosen", measurements.chooseAgainMs],
+      ["a click on a link to a part of the page", measurements.partLinkClickMs],
     ]) {
       assert.ok(ms < measurements.unchangedClickMs - 1_500, `${name} waited: ${ms} ms, against ${measurements.unchangedClickMs} ms for a page that read as before`);
     }
@@ -1220,7 +1252,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "a section marked open is no control, and a click whose middle lands on a form's button or a frame inside the control is refused, sending and asking nothing",
         "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, a cover with no role, or one that says it has none, named by the first words a person sees on it, and a cover that goes within a moment is waited for",
         "a cookie notice is never the person's step: its accept is never listed, as a button, a link, an Allow all or an Agree and close, and is counted among the controls left out, while its settings, a limited accept, a refusal no list knows and a button dressed up beside it stay listed, and the policy's refusal of an accept keeps its words; a click under a notice the browser could not decline says where to go instead and never to pause on it; a pause on a notice's buttons is refused as one on anything but fields, outlining, publishing and pressing nothing, in the chat's own tab and in Octo's own; under a bar whose only button accepts the planner's own button works with no prompt",
-        "a click whose result the page draws in place 1.5 s later reads it, after a hidden field, a tip on hover, a suggestion a field drops as it loses focus or the address changed first; one whose page still reads as before a few seconds on says so and to take a snapshot before saying nothing appeared, and a snapshot then reads the result; a click that changes the page, scrolls it, shows a section, menu, drawer or carousel item in place, turns a switch or toggle on, opens another page or loads the same one again, a type step and a choice answer at once; a search typed and not sent says nothing was searched yet, and another field that nothing was sent yet",
+        "a click whose result the page draws in place 1.5 s later reads it, after a hidden field, a tip on hover, a suggestion a field drops as it loses focus or the address changed first; one whose page still reads as before a few seconds on says so and to take a snapshot before saying nothing appeared, and a snapshot then reads the result; a click that changes the page, scrolls it, shows a section, menu, drawer or carousel item in place, turns a switch or toggle on, opens another page, loads the same one again or follows a link to a part of the page it is on, a type step, a choice and a choice of the option already chosen answer at once, while a link that names no part of the page still looks again; a search typed and not sent says nothing was searched yet, and another field that nothing was sent yet",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",
