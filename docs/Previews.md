@@ -19,6 +19,12 @@ Instafy's browser cannot show a space's own sites: its safety policy blocks the 
    so their prompt names the workflow skills that match the request strongly (at most three,
    with the file to read). A direct change emits no browser action, so there the research skill's
    `instafy web read` line takes the browser skill's place, as the way to read a public page. The browser rule on every turn that can ask for Instafy's browser says that it opens public addresses only.
+   A turn that makes or changes a page (`sites/<name>/index.html`) and leaves it with no card gets it from the
+   runtime, once its change is saved and before its reply: `instafy bind card ./sites/<name> --json`, the step a
+   check that passes takes, titled from the page and run with the turn's own credential, so the card goes to the
+   turn's chat. Not for a page the space's record of its pages holds (another chat's, or one whose card was opened
+   before), one a preview shows, a stopped turn, or a site an installed skill's command made, which that skill serves
+   its own way (`jobs/page_cards.rs`).
 2. The CLI checks that something is listening, asks the controller for a preview, starts a rathole client for it and
    tells the controller it is ready. It never prints a URL. Its JSON output has ids, the port, the path, a status and
    `viewerHostSuffix` (for a dev server's allowed-hosts list).
