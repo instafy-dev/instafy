@@ -1,5 +1,0 @@
----
-"@instafy/cli": patch
----
-
-`instafy preview open` no longer gives another chat's page to the chat that happens to open its card first. The space's record of its pages (`.instafy/pages/pages.json`) is outside every save, so a hosted space starts without it after a release or once its checkout is cloned again, and the first open of a page's folder then wrote that chat down as its maker: the chat that really made the page could no longer change it. Now the server keeps which chat made each page and answers with it when the card is posted (`page` in the ready answer), and `open` writes that down. `open` also says whether the folder was made in the turn that opens it (`pageFolder`: `new` or `existing`, from the folders the runtime writes down as each turn begins, `.instafy/pages/turn-folders.json`); a folder that was there before, which neither record holds, is written down with no chat, and so is every unrecorded folder when no such list is there. With a server from before it kept the record, `open` keeps the chat its own file holds for the folder. The page is now written down once its card is posted, not before.
