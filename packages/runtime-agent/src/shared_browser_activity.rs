@@ -97,6 +97,11 @@ fn activity_host(url: &Url) -> Option<String> {
     is_activity_host(&host).then_some(host)
 }
 
+/// The host an address names, as a step's facts name it (`activity_host`).
+pub(crate) fn address_host(raw: &str) -> Option<String> {
+    http_url(raw).as_ref().and_then(activity_host)
+}
+
 /// A key of the page: the address without its fragment, hashed.
 fn page_key(url: &Url) -> String {
     let mut without_fragment = url.clone();
@@ -253,6 +258,35 @@ pub(crate) fn step_page_address(
     Some(url.to_string())
 }
 
+/// The addresses a browser step tried, whatever the browser answered: the one a `navigate` or
+/// `open_tab` asked for, as the step wrote it, and the one the controller said the step's tab
+/// was on (masked, without its fragment), a look's too. Before the browser answers (`payload`
+/// None) only the asked one. Kept so that no finding of a browser turn says a page stopped it
+/// at an address none of its steps tried
+/// (`jobs::browser_hand_back::leave_out_addresses_never_opened`), never projected into a
+/// message.
+pub(crate) fn step_tried_addresses(
+    tool: &str,
+    arguments: Option<&JsonValue>,
+    payload: Option<&JsonValue>,
+) -> Vec<String> {
+    let asked = matches!(tool, "navigate" | "open_tab")
+        .then(|| arguments?.get("url")?.as_str())
+        .flatten()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_string);
+    let reported = payload
+        .and_then(|payload| payload.pointer("/activity/url"))
+        .and_then(JsonValue::as_str)
+        .and_then(http_url)
+        .map(|mut url| {
+            url.set_fragment(None);
+            url.to_string()
+        });
+    asked.into_iter().chain(reported).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +343,53 @@ mod tests {
         }
         assert_eq!(step_page_address("navigate", None, Some(&json!({}))), None);
         assert_eq!(step_page_address("navigate", None, None), None);
+    }
+
+    /// A step tried the address it asked the browser for, whatever the browser answered, and
+    /// the address the browser said its tab was on, a look's too.
+    #[test]
+    fn a_step_names_the_addresses_it_tried() {
+        let asked = json!({ "url": " https://reviews.example/laptop-16 " });
+        let refused = json!({ "error": { "reason": "Three tabs are open already." } });
+        for tool in ["navigate", "open_tab"] {
+            assert_eq!(
+                step_tried_addresses(tool, Some(&asked), None),
+                ["https://reviews.example/laptop-16"],
+                "{tool}"
+            );
+            assert_eq!(
+                step_tried_addresses(tool, Some(&asked), Some(&refused)),
+                ["https://reviews.example/laptop-16"],
+                "{tool}"
+            );
+        }
+        // Sent on to another address: both. A link pressed, or a look: where the tab is.
+        let on = json!({ "activity": { "step": "navigate", "url": "https://reviews.example/sign-in#form" } });
+        assert_eq!(
+            step_tried_addresses("navigate", Some(&asked), Some(&on)),
+            [
+                "https://reviews.example/laptop-16",
+                "https://reviews.example/sign-in"
+            ]
+        );
+        for tool in ["click", "snapshot", "status", "select_tab"] {
+            assert_eq!(
+                step_tried_addresses(tool, Some(&json!({ "ref": "e12" })), Some(&on)),
+                ["https://reviews.example/sign-in"],
+                "{tool}"
+            );
+        }
+        // No address: none. A click's own `url` argument is no address it asked the browser for.
+        assert!(step_tried_addresses("click", Some(&asked), None).is_empty());
+        assert!(step_tried_addresses("navigate", Some(&json!({ "url": " " })), None).is_empty());
+        assert!(
+            step_tried_addresses(
+                "snapshot",
+                None,
+                Some(&json!({ "activity": { "step": "snapshot", "url": "about:blank" } }))
+            )
+            .is_empty()
+        );
     }
 
     /// A banner the browser declined by itself is kept as the controller's one word, and only

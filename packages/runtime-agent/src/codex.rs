@@ -938,6 +938,13 @@ pub struct CodexRunOutput {
     /// (`jobs::browser_hand_back::leave_out_addresses_never_opened`). Kept out of `events`, as
     /// `browser_pages` is.
     pub browser_not_given: Vec<String>,
+    /// The addresses the run's own browser steps tried, once each: the ones they asked the
+    /// browser to open, whatever it answered, and the ones the browser said a step's tab was on
+    /// (`shared_browser_activity::step_tried_addresses`). No finding of the turn says a page
+    /// stopped it at any other address
+    /// (`jobs::browser_hand_back::leave_out_addresses_never_opened`). Kept out of `events`, as
+    /// `browser_pages` is.
+    pub browser_tried: Vec<String>,
 }
 
 /// A failed turn keeps the protocol classification as well as its diagnostic message.
@@ -2685,7 +2692,10 @@ impl CodexClient {
             .turn_wrap_up
             .clone()
             .map(|wrap_up| (tokio::time::Instant::from_std(turn_started) + wrap_up.after, wrap_up.message));
+        // Where the Shared Browser's action log stood when the open now waiting began.
+        let mut browser_log_read = 0u64;
         loop {
+            let open_waiting = aggregator.browser_open_waiting();
             let event = if let Some(receiver) = active_turn_input.as_ref() {
                 tokio::select! {
                     command = receiver.recv() => {
@@ -2710,6 +2720,15 @@ impl CodexClient {
                         }
                         continue;
                     }
+                    _ = browser_open_poll_due(open_waiting) => {
+                        name_the_sites_the_browser_went_to(
+                            &mut aggregator,
+                            &mut browser_log_read,
+                            &mut events,
+                            on_event,
+                        )?;
+                        continue;
+                    }
                     event = next_codex_event(
                         &conversation,
                         cancel_signal.as_ref(),
@@ -2725,6 +2744,15 @@ impl CodexClient {
                             }
                             events.push(note);
                         }
+                        continue;
+                    }
+                    _ = browser_open_poll_due(open_waiting) => {
+                        name_the_sites_the_browser_went_to(
+                            &mut aggregator,
+                            &mut browser_log_read,
+                            &mut events,
+                            on_event,
+                        )?;
                         continue;
                     }
                     event = next_codex_event(
@@ -2752,6 +2780,9 @@ impl CodexClient {
             }
 
             collect_events(&mut aggregator, &event, &mut events, on_event, turn_started)?;
+            if !open_waiting && aggregator.browser_open_waiting() {
+                browser_log_read = crate::shared_browser::action_log_len();
+            }
             // The process supervisor must retain exact counts even if this child later
             // crashes or must be killed. RawResponseCompleted is the same authoritative
             // observation used by TaskUsage, not a restored/estimated TokenCount total.
@@ -2946,6 +2977,7 @@ impl CodexClient {
                 browser_pages: aggregator.browser_pages().to_vec(),
                 browser_secret_screen: aggregator.browser_secret_screen(),
                 browser_not_given: aggregator.browser_not_given().to_vec(),
+                browser_tried: aggregator.browser_tried().to_vec(),
             })
         }
         .await;
@@ -3101,6 +3133,38 @@ async fn turn_wrap_up_due(wrap_up: &Option<(tokio::time::Instant, String)>) {
         Some((at, _)) => tokio::time::sleep_until(*at).await,
         None => std::future::pending::<()>().await,
     }
+}
+
+/// How often a running Shared Browser open looks for its browser going to the address.
+const BROWSER_OPEN_POLL: Duration = Duration::from_millis(200);
+
+/// Resolves a moment later while a Shared Browser open waits for its browser to go to the
+/// address; never while none waits.
+async fn browser_open_poll_due(waiting: bool) {
+    if waiting {
+        tokio::time::sleep(BROWSER_OPEN_POLL).await
+    } else {
+        std::future::pending::<()>().await
+    }
+}
+
+/// The addresses the Shared Browser went to since `read` name their site on the opens still
+/// waiting for it (`CodexEventStreamAdapter::browser_went_to`).
+fn name_the_sites_the_browser_went_to(
+    aggregator: &mut CodexEventStreamAdapter,
+    read: &mut u64,
+    out: &mut Vec<JsonValue>,
+    on_event: &mut Option<&mut (dyn FnMut(&JsonValue) -> Result<()> + Send)>,
+) -> Result<()> {
+    let (addresses, next) = crate::shared_browser::action_log_navigations(*read);
+    *read = next;
+    for value in aggregator.browser_went_to(&addresses) {
+        if let Some(handler) = on_event.as_mut() {
+            handler(&value)?;
+        }
+        out.push(value);
+    }
+    Ok(())
 }
 
 /// Steer the live turn with the wrap-up note. Returns the run-log event that records it.
@@ -5155,6 +5219,9 @@ pub(crate) struct CodexEventStreamAdapter {
     job_id: Option<uuid::Uuid>,
     /// The last host a Shared Browser step named, for a later step that names none yet.
     last_browser_host: Option<String>,
+    /// The Shared Browser's opens still running that its browser has not been seen to go to:
+    /// each step's id, server, tool and arguments (`browser_went_to`). Never projected.
+    browser_opens_waiting: Vec<(String, String, String, Option<JsonValue>)>,
     /// The pages the run's browser steps opened (`CodexRunOutput::browser_pages`); never
     /// projected.
     browser_pages: Vec<String>,
@@ -5164,6 +5231,9 @@ pub(crate) struct CodexEventStreamAdapter {
     /// The addresses the browser refused to open because nothing gave them
     /// (`CodexRunOutput::browser_not_given`); never projected.
     browser_not_given: Vec<String>,
+    /// The addresses the run's browser steps tried (`CodexRunOutput::browser_tried`); never
+    /// projected.
+    browser_tried: Vec<String>,
     /// The run's workspace folder, as given and with its links followed. A command's folder is
     /// projected as a path of it ([`Self::command_folder`]), never as the folder's own path on
     /// this machine.
@@ -5195,9 +5265,11 @@ impl CodexEventStreamAdapter {
             pending_code_mode_cell_calls: HashSet::new(),
             job_id: None,
             last_browser_host: None,
+            browser_opens_waiting: Vec::new(),
             browser_pages: Vec::new(),
             browser_secret_screen: false,
             browser_not_given: Vec::new(),
+            browser_tried: Vec::new(),
             workspace: None,
         }
     }
@@ -5215,6 +5287,76 @@ impl CodexEventStreamAdapter {
     /// The addresses the browser refused to open so far because nothing gave them.
     pub(crate) fn browser_not_given(&self) -> &[String] {
         &self.browser_not_given
+    }
+
+    /// The addresses the run's browser steps tried so far, once each and in order.
+    pub(crate) fn browser_tried(&self) -> &[String] {
+        &self.browser_tried
+    }
+
+    /// Keeps the addresses a browser step tried (`shared_browser_activity::step_tried_addresses`).
+    fn keep_browser_tried(
+        &mut self,
+        tool: &str,
+        arguments: Option<&JsonValue>,
+        payload: Option<&JsonValue>,
+    ) {
+        for address in
+            crate::shared_browser_activity::step_tried_addresses(tool, arguments, payload)
+        {
+            if !self.browser_tried.contains(&address) {
+                self.browser_tried.push(address);
+            }
+        }
+    }
+
+    /// Whether a Shared Browser open is running that its browser has not been seen to go to.
+    pub(crate) fn browser_open_waiting(&self) -> bool {
+        !self.browser_opens_waiting.is_empty()
+    }
+
+    /// The Shared Browser went to these addresses (`shared_browser::action_log_navigations`):
+    /// a running open that asked for the site of one of them names it from here on, as an
+    /// update of its step. Until then its step names no site, and one the browser refuses
+    /// never names it while it runs.
+    pub(crate) fn browser_went_to(&mut self, addresses: &[String]) -> Vec<JsonValue> {
+        use crate::shared_browser_activity::{address_host, browser_step_facts};
+        let hosts: Vec<String> = addresses
+            .iter()
+            .filter_map(|address| address_host(address))
+            .collect();
+        let mut waiting = std::mem::take(&mut self.browser_opens_waiting);
+        let mut updates = Vec::new();
+        waiting.retain(|(id, server, tool, arguments)| {
+            let asked = arguments
+                .as_ref()
+                .and_then(|arguments| arguments.get("url"))
+                .and_then(JsonValue::as_str)
+                .and_then(address_host);
+            if !asked.is_some_and(|host| hosts.contains(&host)) {
+                return true;
+            }
+            let mut item = json!({
+                "id": id,
+                "type": "mcp_tool_call",
+                "server": server,
+                "tool": tool,
+                "status": "in_progress",
+            });
+            if let Some(step) = browser_step_facts(
+                tool,
+                arguments.as_ref(),
+                None,
+                None,
+                &mut self.last_browser_host,
+            ) {
+                item["browserStep"] = step;
+            }
+            updates.push(json!({ "type": "item.updated", "item": item }));
+            false
+        });
+        self.browser_opens_waiting = waiting;
+        updates
     }
 
     fn with_usage_attempt(mut self, usage_attempt: Option<UsageAttempt>, turn_id: &str) -> Self {
@@ -5418,16 +5560,49 @@ impl CodexEventStreamAdapter {
                 });
                 // What the browser step is, for the turn's activity line: only the step's kind
                 // and a host (docs/Chat-Activity.md). Both browsers report the same facts.
-                if is_browser_step_server(&tool_call.invocation.server)
-                    && let Some(step) = crate::shared_browser_activity::browser_step_facts(
+                if is_browser_step_server(&tool_call.invocation.server) {
+                    // An address the Shared Browser is asked to open names no site yet: it may
+                    // refuse it before anything loads. Its browser says when it goes there
+                    // (`browser_went_to`), and the step's end names the site either way.
+                    let waits = tool_call
+                        .invocation
+                        .server
+                        .eq_ignore_ascii_case(SHARED_BROWSER_MCP_SERVER_NAME)
+                        && matches!(tool_call.invocation.tool.as_str(), "navigate" | "open_tab");
+                    let step = if waits {
+                        crate::shared_browser_activity::browser_step_facts(
+                            &tool_call.invocation.tool,
+                            None,
+                            None,
+                            None,
+                            &mut None,
+                        )
+                    } else {
+                        crate::shared_browser_activity::browser_step_facts(
+                            &tool_call.invocation.tool,
+                            tool_call.invocation.arguments.as_ref(),
+                            None,
+                            None,
+                            &mut self.last_browser_host,
+                        )
+                    };
+                    if let Some(step) = step {
+                        item["browserStep"] = step;
+                    }
+                    if waits {
+                        self.browser_opens_waiting.push((
+                            tool_call.call_id.clone(),
+                            tool_call.invocation.server.clone(),
+                            tool_call.invocation.tool.clone(),
+                            tool_call.invocation.arguments.clone(),
+                        ));
+                    }
+                    // The address it asks for is tried, whatever the browser then answers.
+                    self.keep_browser_tried(
                         &tool_call.invocation.tool,
                         tool_call.invocation.arguments.as_ref(),
                         None,
-                        None,
-                        &mut self.last_browser_host,
-                    )
-                {
-                    item["browserStep"] = step;
+                    );
                 }
                 vec![json!({
                     "type": "item.started",
@@ -5470,6 +5645,8 @@ impl CodexEventStreamAdapter {
                 // The step's kind, host, page key and approval from the browser's own result,
                 // and nothing else of it (shared_browser_activity).
                 if is_browser_step_server(&tool_call.invocation.server) {
+                    self.browser_opens_waiting
+                        .retain(|(id, ..)| *id != tool_call.call_id);
                     let terminal_code = terminal_consent
                         .as_ref()
                         .and_then(|signal| signal.get("code"))
@@ -5501,6 +5678,12 @@ impl CodexEventStreamAdapter {
                     {
                         self.browser_pages.push(page);
                     }
+                    // The address the browser said the step's tab is on, a look's too.
+                    self.keep_browser_tried(
+                        &tool_call.invocation.tool,
+                        tool_call.invocation.arguments.as_ref(),
+                        payload,
+                    );
                     // An address the browser refused because no message or page gave it.
                     if !tool_call.is_success()
                         && let Some(address) = crate::shared_browser::address_not_given(
@@ -11295,9 +11478,16 @@ required = true
                 turn_id: "turn-1".to_string(),
             }),
         };
+        // The step names its site once its browser goes there
+        // (`a_shared_browser_open_names_its_site_once_its_browser_goes_there`).
         let started = adapter.collect(&begin);
         assert_eq!(
             started[0]["item"]["browserStep"],
+            json!({"step": "navigate"})
+        );
+        let went = adapter.browser_went_to(&["https://www.visitlisboa.com/en".to_string()]);
+        assert_eq!(
+            went[0]["item"]["browserStep"],
             json!({"step": "navigate", "host": "visitlisboa.com"})
         );
 
@@ -11360,6 +11550,167 @@ required = true
             click[0]["item"]["browserStep"],
             json!({"step": "click", "host": "visitlisboa.com"})
         );
+    }
+
+    /// An address the Shared Browser is asked to open names its site on the step only once the
+    /// browser goes there, before the page has loaded: the browser may still refuse the address,
+    /// and a refused one never reads "Opening" while its step runs. The step's end names the
+    /// site as before, so a step that failed still reads "Tried opening" it. The browser on the
+    /// person's device, which says nothing before its answer, names the site from the start.
+    #[test]
+    fn a_shared_browser_open_names_its_site_once_its_browser_goes_there() {
+        use crate::jobs::activity_labels::browser_step_activity;
+        let mut adapter = CodexEventStreamAdapter::default();
+        let invocation = |server: &str, tool: &str, url: &str| McpInvocation {
+            server: server.to_string(),
+            tool: tool.to_string(),
+            arguments: Some(json!({ "url": url })),
+        };
+        let begin = |call: &str, invocation: McpInvocation| Event {
+            id: "evt_mcp_begin".to_string(),
+            msg: EventMsg::McpToolCallBegin(McpToolCallBeginEvent {
+                call_id: call.to_string(),
+                invocation,
+                connector_id: None,
+                mcp_app_resource_uri: None,
+                mcp_app_ui: None,
+                link_id: None,
+                app_name: None,
+                action_name: None,
+                plugin_id: None,
+                read_only_hint: None,
+                turn_id: "turn-1".to_string(),
+            }),
+        };
+        let end =
+            |call: &str, invocation: McpInvocation, structured: JsonValue, failed: bool| Event {
+                id: "evt_mcp_end".to_string(),
+                msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+                    call_id: call.to_string(),
+                    invocation,
+                    connector_id: None,
+                    mcp_app_resource_uri: None,
+                    link_id: None,
+                    app_name: None,
+                    action_name: None,
+                    plugin_id: None,
+                    duration: Duration::from_millis(1),
+                    result: Ok(CallToolResult {
+                        content: vec![json!({"type": "text", "text": "answer"})],
+                        structured_content: Some(structured),
+                        is_error: Some(failed),
+                        meta: None,
+                    }),
+                    mcp_app_ui: None,
+                    read_only_hint: None,
+                    turn_id: "turn-1".to_string(),
+                }),
+            };
+        let words = |event: &JsonValue| {
+            browser_step_activity(&event["item"]["browserStep"])
+                .expect("the step's activity")
+                .to_string()
+        };
+        const SHARED: &str = "instafy_shared_browser";
+        const SEARCH: &str = "https://www.google.com/search?q=laptop+16+review";
+        const PAGE: &str = "https://maker.example/laptop-13";
+
+        // An address the browser refuses: its step starts with no site, and stays so while it
+        // runs, whatever else the browser goes to.
+        let refused = invocation(SHARED, "navigate", SEARCH);
+        let started = adapter.collect(&begin("call_refused", refused.clone()));
+        assert_eq!(started[0]["type"], "item.started");
+        assert_eq!(
+            started[0]["item"]["browserStep"],
+            json!({"step": "navigate"})
+        );
+        assert!(
+            !words(&started[0]).contains("Opening"),
+            "{}",
+            words(&started[0])
+        );
+        assert!(adapter.browser_open_waiting());
+        assert!(adapter.browser_went_to(&[]).is_empty());
+        assert!(
+            adapter
+                .browser_went_to(&["https://elsewhere.example/".to_string()])
+                .is_empty()
+        );
+        // Its end names the site it tried, as before.
+        let ended = adapter.collect(&end(
+            "call_refused",
+            refused,
+            json!({ "error": { "reason": "Octo opens only addresses it was given." } }),
+            true,
+        ));
+        assert_eq!(ended[0]["item"]["status"], "failed");
+        assert_eq!(
+            ended[0]["item"]["browserStep"],
+            json!({"step": "navigate", "host": "google.com"})
+        );
+        assert!(
+            words(&ended[0]).contains("Opening {host}"),
+            "{}",
+            words(&ended[0])
+        );
+        assert!(!adapter.browser_open_waiting());
+        // A step that ended names nothing more.
+        assert!(adapter.browser_went_to(&[SEARCH.to_string()]).is_empty());
+
+        // An address the browser takes: the step names its site when the browser goes there,
+        // before the step ends, once.
+        let allowed = invocation(SHARED, "open_tab", PAGE);
+        let started = adapter.collect(&begin("call_allowed", allowed.clone()));
+        assert_eq!(
+            started[0]["item"]["browserStep"],
+            json!({"step": "open_tab"})
+        );
+        assert!(
+            !words(&started[0]).contains("Opening"),
+            "{}",
+            words(&started[0])
+        );
+        // The browser writes the address masked; the site is the same.
+        let went = adapter.browser_went_to(&[format!("{PAGE}?ref=***")]);
+        assert_eq!(went.len(), 1, "{went:?}");
+        assert_eq!(went[0]["type"], "item.updated");
+        assert_eq!(
+            went[0]["item"],
+            json!({
+                "id": "call_allowed",
+                "type": "mcp_tool_call",
+                "server": SHARED,
+                "tool": "open_tab",
+                "status": "in_progress",
+                "browserStep": {"step": "open_tab", "host": "maker.example"},
+            })
+        );
+        assert!(
+            words(&went[0]).contains("Opening {host}"),
+            "{}",
+            words(&went[0])
+        );
+        assert!(!adapter.browser_open_waiting());
+        assert!(adapter.browser_went_to(&[PAGE.to_string()]).is_empty());
+        let ended = adapter.collect(&end(
+            "call_allowed",
+            allowed,
+            json!({ "activity": { "step": "open_tab", "url": PAGE, "approval": "free" } }),
+            false,
+        ));
+        assert_eq!(ended[0]["item"]["status"], "completed");
+        assert_eq!(ended[0]["item"]["browserStep"]["host"], "maker.example");
+
+        // The browser on the person's device names the site from the step's start.
+        let device = adapter.collect(&begin(
+            "call_device",
+            invocation("instafy_personal_browser", "navigate", PAGE),
+        ));
+        assert_eq!(
+            device[0]["item"]["browserStep"],
+            json!({"step": "navigate", "host": "maker.example"})
+        );
+        assert!(!adapter.browser_open_waiting());
     }
 
     #[test]
@@ -11524,6 +11875,19 @@ required = true
         );
         assert!(!adapter.browser_secret_screen());
         assert!(adapter.browser_not_given().is_empty());
+        // What its steps tried is more: the address each open asked for, and where the browser
+        // said a step's tab was, a look's and a failed step's too.
+        assert_eq!(
+            adapter.browser_tried(),
+            [
+                "https://start.example/",
+                "https://maker.example/",
+                "https://maker.example/laptop-13",
+                "https://down.example/",
+                "https://refused.example/",
+                "https://reviews.example/laptop-13",
+            ]
+        );
     }
 
     /// The addresses the browser refused to open because no message or page gave them, kept
@@ -11587,6 +11951,15 @@ required = true
             ]
         );
         assert!(adapter.browser_pages().is_empty());
+        // Each address an open asked for is one the turn tried, whatever the browser answered.
+        assert_eq!(
+            adapter.browser_tried(),
+            [
+                search,
+                "https://reviews.example/laptop-12",
+                "https://down.example/page",
+            ]
+        );
     }
 
     /// A browser step that answered with a page that shows a secret marks the run, which then

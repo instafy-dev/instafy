@@ -8645,11 +8645,13 @@ impl JobProcessor {
         let mut codex_fallback_summary_kind =
             classify_internal_codex_fallback_summary(&outcome.summary);
         if first_shared_browser_terminal_consent_failure.is_some() {
-            // The lines it keeps name no address the browser refused it and no step opened.
+            // The lines it keeps name no address the browser refused it and no step opened,
+            // and none its steps never tried.
             browser_hand_back::leave_out_addresses_never_opened(
                 &mut outcome.summary,
                 &output.browser_not_given,
                 &output.browser_pages,
+                &output.browser_tried,
             );
         }
         apply_terminal_shared_browser_summary(
@@ -9463,6 +9465,12 @@ impl JobProcessor {
                     &mut retry_outcome.summary,
                     &retry_output.browser_not_given,
                     &retry_output.browser_pages,
+                    // What the first attempt's steps tried, the turn tried.
+                    &[
+                        output.browser_tried.as_slice(),
+                        retry_output.browser_tried.as_slice(),
+                    ]
+                    .concat(),
                 );
             }
             apply_terminal_shared_browser_summary(
@@ -10179,6 +10187,11 @@ impl JobProcessor {
                         }
                         refused
                     },
+                    tried: [
+                        output.browser_tried.as_slice(),
+                        retry_output.browser_tried.as_slice(),
+                    ]
+                    .concat(),
                     final_json: &retry_output.final_json,
                     progress: progress_sender.as_ref().filter(|_| streaming_active),
                     runtime_id: registration.runtime_id,
@@ -10256,6 +10269,7 @@ impl JobProcessor {
                 refused_a_step: browser_hand_back::refused_a_step(&interim_messages),
                 pages: output.browser_pages.clone(),
                 not_given: output.browser_not_given.clone(),
+                tried: output.browser_tried.clone(),
                 final_json: &output.final_json,
                 progress: progress_sender.as_ref().filter(|_| streaming_active),
                 runtime_id: registration.runtime_id,
@@ -16562,6 +16576,8 @@ pub struct BrowserTurnAnswer<'a> {
     /// The addresses the browser refused to open for its steps because no message or page gave
     /// them (`CodexRunOutput::browser_not_given`).
     pub not_given: Vec<String>,
+    /// The addresses its own steps tried (`CodexRunOutput::browser_tried`).
+    pub tried: Vec<String>,
     /// Its answer as the model wrote it.
     pub final_json: &'a JsonValue,
     /// Where the turn's messages go as it works: a second pass's steps go there too, so the
@@ -16603,7 +16619,8 @@ pub struct BrowserTurnEnd {
 /// by address. A build request that nothing then acts on is said in the reply, never dropped
 /// without a word (`browser_hand_back::BUILD_NOT_MADE_LINE`). A turn that stopped for the person
 /// is left as it is: its reply says what they do next. No pass's line says a page stopped the
-/// turn at an address the browser refused it because nothing gave it, unless a step opened it
+/// turn at an address the browser refused it because nothing gave it, unless a step opened it,
+/// nor at an address no step of either pass tried
 /// (`browser_hand_back::leave_out_addresses_never_opened`). Like a recovery retry or the wrap-up
 /// after a missing answer, neither pass is billed (docs/Credits-Billing.md).
 pub async fn end_browser_turn_answer(
@@ -16626,7 +16643,8 @@ pub async fn end_browser_turn_answer(
         .chain(&second.not_given)
         .cloned()
         .collect();
-    browser_hand_back::leave_out_addresses_never_opened(summary, &not_given, &opened);
+    let tried: Vec<String> = answer.tried.iter().chain(&second.tried).cloned().collect();
+    browser_hand_back::leave_out_addresses_never_opened(summary, &not_given, &opened, &tried);
     let mut ended = BrowserTurnEnd {
         artifacts: second.artifacts,
         messages: second.messages,
@@ -16691,6 +16709,7 @@ pub async fn end_browser_turn_answer(
                             &mut written,
                             &not_given,
                             &opened,
+                            &tried,
                         );
                         lines = browser_hand_back::finding_lines_of(&written).map(|lines| {
                             let closing = browser_hand_back::closing_lines_of(&written);
@@ -16741,6 +16760,7 @@ pub async fn end_browser_turn_answer(
                 summary,
                 &[not_given.as_slice(), read.not_given.as_slice()].concat(),
                 &[opened.as_slice(), read.pages.as_slice()].concat(),
+                &[tried.as_slice(), read.tried.as_slice()].concat(),
             );
             ended.artifacts.extend(read.artifacts);
             ended.messages.extend(read.messages);
@@ -16780,8 +16800,9 @@ fn unread_pages_pass_options(
 
 /// What the second pass of a browser turn added to it ([`read_the_unread_pages`]): its run log
 /// and answer, the messages of its steps, whether it stopped on a step that is the person's, and
-/// the pages its steps opened and the addresses the browser refused them because nothing gave
-/// them (`CodexRunOutput::browser_pages`, `CodexRunOutput::browser_not_given`).
+/// the pages its steps opened, the addresses the browser refused them because nothing gave
+/// them and the addresses they tried (`CodexRunOutput::browser_pages`,
+/// `CodexRunOutput::browser_not_given`, `CodexRunOutput::browser_tried`).
 #[derive(Default)]
 struct UnreadPagesRead {
     /// Whether the second pass started.
@@ -16791,6 +16812,7 @@ struct UnreadPagesRead {
     stopped_for_the_person: bool,
     pages: Vec<String>,
     not_given: Vec<String>,
+    tried: Vec<String>,
 }
 
 /// A browser turn whose findings go back to the building turn ends with the pages its request
@@ -16825,7 +16847,12 @@ async fn read_the_unread_pages(
     // An address the browser refused to open because nothing gave it is no page that stopped the
     // turn: it stays among the pages its unread line names, which a finding line naming it would
     // take it out of, for the second pass to find by the site's own links.
-    browser_hand_back::leave_out_addresses_never_opened(summary, &turn.not_given, &turn.pages);
+    browser_hand_back::leave_out_addresses_never_opened(
+        summary,
+        &turn.not_given,
+        &turn.pages,
+        &turn.tried,
+    );
     let pages = browser_hand_back::take_unread_pages(summary);
     let canceled = turn
         .options
@@ -16908,6 +16935,7 @@ async fn read_the_unread_pages(
     read.messages = with_runtime_metadata_vec(extract_codex_messages(&output.events), &runtime_id);
     read.pages = output.browser_pages.clone();
     read.not_given = output.browser_not_given.clone();
+    read.tried = output.browser_tried.clone();
     if let Some(progress) = turn.progress.filter(|_| streaming) {
         for message in read.messages.iter().skip(streamed) {
             if progress.sender.send(message.clone()).is_err() {
@@ -25605,6 +25633,7 @@ mod tests {
             browser_pages: Vec::new(),
             browser_secret_screen: false,
             browser_not_given: Vec::new(),
+            browser_tried: Vec::new(),
         }
     }
 
@@ -30961,6 +30990,10 @@ mod tests {
             &mut summary,
             &["https://unnamed.example/".to_string()],
             &["https://visit.example/en".to_string()],
+            &[
+                "https://unnamed.example/".to_string(),
+                "https://visit.example/en".to_string(),
+            ],
         );
         let mut fallback = None;
         apply_terminal_shared_browser_summary(
@@ -35461,6 +35494,7 @@ mod tests {
             browser_pages: Vec::new(),
             browser_secret_screen: false,
             browser_not_given: Vec::new(),
+            browser_tried: Vec::new(),
         };
         let outcome = CodexOutcome {
             summary: "ok".to_string(),
