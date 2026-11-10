@@ -14363,3 +14363,59 @@ async fn a_stopped_turns_next_browser_step_is_refused_before_it_acts() {
     drop(guard);
     assert!(!fixture.authority_path.exists());
 }
+
+/// The browser writes a `navigate` action when it goes to an address, after every check on it
+/// and before the page loads. A read from where the log stood gives the addresses of the whole
+/// lines added since, and where the next read starts.
+#[test]
+fn the_action_log_names_the_addresses_the_browser_went_to_since_a_read() {
+    let dir = tempfile::tempdir().expect("a folder");
+    let path = dir.path().join("actions.jsonl");
+    assert_eq!(navigations_logged(&path, 7), (Vec::new(), 0), "no log yet");
+
+    let line =
+        |kind: &str, url: &str| format!("{}\n", json!({ "seq": 1, "type": kind, "url": url }));
+    let earlier = line("navigate", "https://earlier.example/");
+    std::fs::write(&path, &earlier).expect("the log");
+    let read = earlier.len() as u64;
+    assert_eq!(
+        navigations_logged(&path, read),
+        (Vec::new(), read),
+        "nothing new"
+    );
+
+    // A click, an address the browser went to, and a line it is still writing.
+    let added = format!(
+        "{}{}{}",
+        line("click", "https://earlier.example/"),
+        line("navigate", "https://maker.example/laptop-13?q=***"),
+        r#"{"seq":4,"type":"navigate","url":"https://half.exa"#,
+    );
+    let mut log = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("the log");
+    log.write_all(added.as_bytes()).expect("its lines");
+    let whole =
+        read + (added.len() - r#"{"seq":4,"type":"navigate","url":"https://half.exa"#.len()) as u64;
+    assert_eq!(
+        navigations_logged(&path, read),
+        (strings(&["https://maker.example/laptop-13?q=***"]), whole)
+    );
+    // The line once it is whole is read next.
+    log.write_all(b"mple/\"}\n").expect("its end");
+    assert_eq!(
+        navigations_logged(&path, whole),
+        (
+            strings(&["https://half.example/"]),
+            std::fs::metadata(&path).unwrap().len()
+        )
+    );
+
+    // A log that was started over is read from its start.
+    std::fs::write(&path, line("navigate", "https://new.example/")).expect("a new log");
+    assert_eq!(
+        navigations_logged(&path, whole).0,
+        strings(&["https://new.example/"])
+    );
+}

@@ -4787,14 +4787,51 @@ pub fn validate_page_id(raw: &str) -> Result<String> {
     Ok(page_id.to_string())
 }
 
-pub fn action_log_len() -> u64 {
-    let path = std::env::var(ACTIONS_FILE_ENV)
+fn actions_file() -> String {
+    std::env::var(ACTIONS_FILE_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_ACTIONS_FILE.to_string());
-    std::fs::metadata(Path::new(&path))
+        .unwrap_or_else(|| DEFAULT_ACTIONS_FILE.to_string())
+}
+
+pub fn action_log_len() -> u64 {
+    std::fs::metadata(Path::new(&actions_file()))
         .map(|metadata| metadata.len())
         .unwrap_or(0)
+}
+
+/// The addresses the browser recorded going to in the action log from `offset` on, and where
+/// the next read starts. The browser writes a `navigate` action once every check on the
+/// address has passed and before the page loads (shared-browser-cli.js `emitAction`), with the
+/// address masked as it writes it.
+pub fn action_log_navigations(offset: u64) -> (Vec<String>, u64) {
+    navigations_logged(Path::new(&actions_file()), offset)
+}
+
+/// Only whole lines are read: one still being written is read next time. A log shorter than
+/// `offset` was started over, and is read from its start.
+fn navigations_logged(path: &Path, offset: u64) -> (Vec<String>, u64) {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return (Vec::new(), 0);
+    };
+    let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    let start = if offset > len { 0 } else { offset };
+    let mut added = Vec::new();
+    if file.seek(SeekFrom::Start(start)).is_err() || file.read_to_end(&mut added).is_err() {
+        return (Vec::new(), start);
+    }
+    let whole = added
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |end| end + 1);
+    let addresses = added[..whole]
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<JsonValue>(line).ok())
+        .filter(|action| action.get("type").and_then(JsonValue::as_str) == Some("navigate"))
+        .filter_map(|action| action.get("url")?.as_str().map(str::to_string))
+        .collect();
+    (addresses, start + whole as u64)
 }
 
 pub fn execution_evidence_missing(before: Option<u64>, after: u64) -> bool {

@@ -1629,6 +1629,26 @@ and runtime-agent carries them, in memory, into the chat's next runs and into
 no other chat's. A run without the record (one runtime-agent did not start)
 refuses nothing.
 
+**A stop at an address no step tried is no finding.** runtime-agent keeps, for
+each run, the addresses its browser steps tried: each one a `navigate` or
+`open_tab` asked for, whatever the browser answered, each one the browser
+said a step's tab was on, a look's too, and the address of each link a `click`
+or `press` pressed, as the page's reading listed it, wherever the tab then
+ended. A finding line that gives any other
+address as a page that stopped the turn is left out, of any pass of the turn,
+like a line for an address refused as not given: a turn wrote `no-page` for a
+review address none of its steps had tried. A line for an address a step
+opened, reached by a link, pressed, or asked for and was refused or got no
+answer from stays, in the turn's own words. A `link-only` line stays too: the
+browser marks those links, and Octo rightly never opens them. The two are
+compared as pages, not as text: `http` or `https`, a leading `www.`, a closing
+slash or a fragment tells no two apart, and a path a step asked for on its
+tab's own site is that page on any site. A line whose address is no full
+address is left as the turn wrote it. When the addresses a turn's steps tried
+are not all known, this leaves no line out: no step named an address, or a
+step pressed a control of a page reading the run was not given (a press in the
+browser on the person's device names no reading).
+
 Whether the site answered is judged by the load's own request,
 never by the tab's address, which a page's script may change while the load
 waits. A site that answered as the step stopped waiting has its page, which is

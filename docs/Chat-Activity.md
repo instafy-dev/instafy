@@ -515,8 +515,17 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   that can take the tab to another page (`navigate`, `open_tab`, `click`, `choose`, `press`,
   `search`, `submit`) keeps its own kind as its `step`, and the look chooses its words ("Read a
   page on pcworld.com"), so Studio knows the tab may be on another page now; any other step is
-  the look. When the step starts, `navigate`
-  and `open_tab` take the host from the address Octo asked for; any other step, and a step
+  the look. When the step starts, a `navigate` or `open_tab` in the Shared Browser names no
+  host yet ("Using the browser"): the browser may still refuse the address before anything
+  loads. Its host, from the address Octo asked for, comes with the browser's own navigation:
+  the controller writes a `navigate` action to its action log once every check on the address
+  has passed and before the page loads, runtime-agent reads the log while the step runs, and
+  the step then sends one update that names the site ("Opening {host}"). A path on the tab's
+  own site names the site of the page the tab is on. A refused address
+  never reads "Opening {host}" while its step runs; the step's end names the site as before,
+  so Details still read "Tried opening {host}". The browser on the person's device says
+  nothing before its answer, so there the step takes the host from the address Octo asked for
+  when it starts. Any other step, and a step
   whose result names no page, uses the last host the turn's browser steps named. A step the
   person said no to, or left unanswered, never reaches the page, so its kind comes from the tool
   call (typing with submit is `submit`, a form), unless the browser had judged it before it
