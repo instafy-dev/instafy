@@ -2360,9 +2360,8 @@ function quotedControlLabel(description) {
 // in gave up a form after its first field. The line names the field, how many
 // characters went in and what the field holds when that differs, never the
 // text: it may be private. One not sent says so: a turn read the list a page
-// still showed after an unsent search as no result. A select needs none: its
-// reading names the option it holds (`chosen`), as a box's names whether it
-// is `checked`.
+// still showed after an unsent search as no result. A choose step's line is
+// its own (chosenLine).
 const FIELD_READ_MS = 1_000;
 
 function characterCount(count) {
@@ -4244,6 +4243,80 @@ async function freeSiteSearchButton(page, target) {
   }
 }
 
+// Runs inside the page with the form submission rules joined in front
+// (FORM_BUTTON_IN_PAGE), so it must not use anything from this file's scope.
+// The button that sends the form `element` is in: the first of the form's
+// controls a click on which submits it, the one Enter in a field of the form
+// clicks. Null for a control in no form, and for a form with no such button.
+function formButtonInPage(forms, element) {
+  try {
+    const form = element.form;
+    if (!(form instanceof HTMLFormElement)) return null;
+    const controls = Array.from(Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, "elements").get.call(form));
+    return controls.find((control) => {
+      if (forms.keyActivatedButton(control) !== control) return false;
+      const submission = forms.submissionOf(control, null);
+      return Boolean(submission) && submission.form === form && submission.via === "button";
+    }) || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+const FORM_BUTTON_IN_PAGE = new Function(
+  "...args",
+  `return (${formButtonInPage})((${formSubmission.formSubmissionRulesInPage})(), ...args);`,
+);
+
+// What a step that set a control and sent nothing says of the control's form
+// in its result's `done`: nothing for a control in no form, or in a form
+// with no button of its own, else "Nothing was sent yet.", as a type step
+// says. It names the
+// form's button only where a click on it goes without a prompt, by the click
+// step's own test (freeSiteSearchButton), and only on a page whose text may
+// be named: a turn chose a planner's two stations, never pressed its button
+// and wrote that the planner returned no route. A button whose press asks
+// the person is not named. The button is described as a reading describes
+// it, and kept nowhere.
+async function unsentFormLine(page, target, documents) {
+  const found = (async () => target.locator.evaluateHandle(FORM_BUTTON_IN_PAGE))().catch(() => null);
+  const handle = await within(FIELD_READ_MS, found, undefined);
+  if (handle === undefined) {
+    // One that comes late is let go.
+    found.then((late) => late?.dispose()).catch(() => {});
+    return null;
+  }
+  const button = typeof handle?.asElement === "function" ? handle.asElement() : null;
+  if (!button) {
+    await (async () => handle?.dispose())().catch(() => {});
+    return null;
+  }
+  try {
+    const free = async () => {
+      const description = await describeElement(button, target.description.index, null);
+      const goesFree = description !== null && description.disabled !== true && documents !== null &&
+        classifyStep("click", description, { pageUrl: page.url() }).verdict !== "refuse" &&
+        !isConsequentialAction(description) &&
+        (await freeSiteSearchButton(page, { description, locator: button })) &&
+        (await pageTextMayBeNamed(page));
+      return goesFree ? quotedControlLabel(description) : null;
+    };
+    const name = await within(FIELD_READ_MS, free().catch(() => null), null);
+    return name ? `Nothing was sent yet: the form's button is ${name} (pressing it needs no prompt).` : NOT_SENT;
+  } finally {
+    await button.dispose().catch(() => {});
+  }
+}
+
+// What a choose step did, in its result's `done`: the option, masked and cut
+// like a control's name, and the list by its own name, or, for the option the
+// list held already, that it did.
+function chosenLine(option, listName, already = false) {
+  const bounded = (value) => Array.from(value).slice(0, MAX_LABEL_CHARS).join("");
+  const name = `"${bounded(maskedDisplayText(option))}"`;
+  return already ? `${name} was already chosen.` : `Chose ${name}${listName ? ` in "${bounded(listName)}"` : ""}.`;
+}
+
 // A list the page draws as a select: the control `choose` sets. A list a page
 // builds from other elements is clicked and typed into instead.
 function isSelectDescription(description) {
@@ -4263,9 +4336,9 @@ const CHOICE_SELECT_TIMEOUT_MS = 2_000;
 // whose label reads as `request.wanted` (as written, or else with case,
 // accents and spacing aside), how many there are, how many the page lets a
 // person pick, and the first of them, for an answer that lists them. Each
-// gives its label, its index and whether the page turned it off. An option
-// the page hides, alone or in a group, is left out (rule.optionOffered):
-// nobody can pick it.
+// gives its label, its index, whether the page turned it off and whether
+// the list holds it now. An option the page hides, alone or in a group, is
+// left out (rule.optionOffered): nobody can pick it.
 function selectOptionsInPage(rule, element, request) {
   if (!(element instanceof HTMLSelectElement)) {
     return { kind: "select-options", select: false, multiple: false, matches: [], options: [], count: 0, enabled: 0 };
@@ -4285,7 +4358,12 @@ function selectOptionsInPage(rule, element, request) {
   for (const option of Array.from(element.options).slice(0, limit)) {
     if (!rule.optionOffered(option)) continue;
     const label = tidy(option.label || option.text).slice(0, 500);
-    const entry = { index: option.index, label, disabled: option.matches(":disabled") };
+    const entry = {
+      index: option.index,
+      label,
+      disabled: option.matches(":disabled"),
+      selected: option.selected === true,
+    };
     count += 1;
     if (!entry.disabled) enabled += 1;
     if (label === wanted) {
@@ -4331,7 +4409,12 @@ async function selectOptions(target, wanted) {
   const entries = (values) => values
     .filter((option) =>
       option && Number.isSafeInteger(option.index) && option.index >= 0 && typeof option.label === "string")
-    .map((option) => ({ index: option.index, label: option.label.slice(0, 500), disabled: option.disabled === true }));
+    .map((option) => ({
+      index: option.index,
+      label: option.label.slice(0, 500),
+      disabled: option.disabled === true,
+      selected: option.selected === true,
+    }));
   const counted = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : 0);
   return {
     multiple: answer.multiple === true,
@@ -6546,7 +6629,9 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
   // open list. It does not send the form, so it is judged like typing that does
   // not submit: routine browsing takes it without a prompt unless the list's
   // own label or the option says it is risky ("Payment method", "Delete
-  // selected"), and the form is sent by its own button, which asks. While the
+  // selected"), and the form is sent by its own button, which asks. Its
+  // result says what it chose and, for a list in a form, that nothing was
+  // sent (chosenLine, unsentFormLine). While the
   // option changes, the page may send a form to its own site (an older site
   // that reloads a list when it changes) and nowhere else, whoever allowed the
   // choice: its prompt names no other site. In Octo's own tabs, which are for
@@ -6581,6 +6666,19 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const readingStep = routineCovers(step, target.description, { consequential: false }) &&
       !CONSEQUENTIAL_ACTION_PATTERN.test(option.label) && !hasPlacedConsequentialWord(option.label);
     refuseUnlessReadingStep(readingStep);
+    // The option the list holds already takes no step: nothing is chosen, so
+    // nobody is asked and the answer does not wait for the page to change. A
+    // turn chose the option a list held, got the sentence of a page that
+    // reads as before, and wrote that the page showed no result. It says
+    // nothing of the list's form: the page a sent form came back with holds
+    // the option too, and there "Nothing was sent yet." was false. A step
+    // that withholds its page goes on as any other.
+    if (option.selected && !WITHHOLDING_CATEGORIES.has(step.category)) {
+      return withActivity(
+        { ...await snapshotAfterStep(page, false), done: chosenLine(option.label, listName, true) },
+        stepActivity(page, "snapshot", readingApproval()),
+      );
+    }
     const approvedTargetFingerprint = targetFingerprint(target.description);
     const destination = approvalProtocol.destinationBinding(null);
     await allowStepOnce({
@@ -6628,8 +6726,17 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     if (page.url() !== beforeUrl) {
       await emitNavigationResult(page);
     }
+    // The list's form counts as unsent only on the document the option was
+    // chosen on, at the address it had: a list that sends its form as it
+    // changes left for another.
+    const stayed = before !== null && before.documentId !== null && page.url() === before.url &&
+      (await documentOf(page)) === before.documentId;
+    const unsent = stayed ? await unsentFormLine(page, target, documents) : null;
+    const done = [chosenLine(option.label, listName), unsent, unchanged ? PAGE_UNCHANGED : null]
+      .filter(Boolean)
+      .join(" ");
     return withActivity(
-      { ...await snapshotAfterStep(page, withholding), ...(unchanged ? { done: `Chose the option. ${PAGE_UNCHANGED}` } : {}) },
+      { ...await snapshotAfterStep(page, withholding), done },
       stepActivity(page, "choose", stepApproval()),
     );
   }

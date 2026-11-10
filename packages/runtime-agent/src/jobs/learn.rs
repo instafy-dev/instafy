@@ -610,6 +610,9 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // From before a cookie notice stopped being one of the person's steps to pause on: consent
     // left the line that lists them.
     include_str!("legacy/browser-automation-v40.md"),
+    // From before a route's line said what to choose in a planner with no page to read first,
+    // and a core rule said that a form isn't sent until its button is pressed.
+    include_str!("legacy/browser-automation-v41.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,

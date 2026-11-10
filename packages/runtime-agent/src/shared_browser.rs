@@ -3844,7 +3844,7 @@ fn successful_tool_result(tool: &str, payload: JsonValue) -> CallToolResult {
 /// What a step did, in one line: the controller's own words when it has them
 /// (a page it did not show as asked, being blank, withheld, still busy or on a
 /// site not approved yet, a step that ran out of time, a field typed into, a box
-/// checked), else what the step was.
+/// checked, an option chosen), else what the step was.
 fn step_line(tool: &str, payload: &JsonValue) -> String {
     let said = ["message", "done"]
         .into_iter()
