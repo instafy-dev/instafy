@@ -188,6 +188,37 @@ A member can **Present** a site whose page says it can share its view, and the o
   `version: null`. It carries no picture and no description; the latest card for the preview asks `GET` again and
   every card reads the answer.
 
+## Which chat made a page
+
+A page made for a person (a comparison, a map, a page to share) belongs to the chat that made it: another chat's turn
+reads it and never changes it, and the runtime holds it to that. The controller keeps which chat that is, in
+`space_pages` (RLS on, no client policy): one row per space and page folder, the folder the site is served from
+(`serve.cwd`; the workspace itself is the person's own site and has no row).
+
+- **Written when a card is posted.** `POST …/previews/:pid/ready` writes the row with the chat the card went to and
+  answers with it (`page: {folder, conversationId}`, `conversationId` null for a page nobody's). A later card for the
+  same folder keeps the row's chat, whichever chat it goes to.
+- **Only a folder the opening turn made is given to its chat.** `POST …/previews` takes `pageFolder`: `new` when the
+  turn that opens the card made the folder, `existing` when the folder was there before that turn began (the runtime
+  writes down the folders a turn begins with, and `instafy preview open` reads them). A folder with no row that is
+  `existing`, or of which the opener says neither (an older CLI), gets a row with no chat: nothing says who made it,
+  and giving it to the chat that opens it first is how a page changed hands when a hosted space lost its own file. A
+  `new` folder is its chat's whatever an old row says: the folder that row named was taken away, and this is another
+  page of the same name. A card posted in a thread nobody asks in (an automation's, a bound site's) gives its page to
+  no chat.
+- **Given to each leased turn.** A leased job's payload carries the space's rows (`space_pages.pages`: folder, title,
+  how it is served, when it was last opened, and `conversationId`), at most 200, the most recently opened first. A
+  row's chat is left out when it is gone for the person the job runs for: the conversation no longer exists, they moved
+  it to Trash, or nobody asks in it. So a page whose chat is gone is not read-only in every chat. The row keeps the
+  chat: taken out of Trash, it has its page again.
+- **The runtime's file is a copy.** The runtime takes those rows over `.instafy/pages/pages.json` in the space's folder
+  before a turn reads it: a row's chat replaces the file's, a page the file lacks is written down from its row, and a
+  page with no row reads with no chat. That file is outside every save, so a machine that starts without it (after a
+  release, or a checkout cloned again) has each page as its maker's from the first turn. A controller from before the
+  rows sends none, and the file stands as it is.
+- **The switch.** A runtime started with `INSTAFY_HOLD_PAGES=0` holds no page: nothing is put back or left unwritten
+  there. See [`instafy preview open`](CLI.md) for what a turn is told and what goes back.
+
 ## Waking a stopped site
 
 `instafy preview open` records how the site was started: the argv and working directory of the process listening on

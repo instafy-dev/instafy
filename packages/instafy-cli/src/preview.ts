@@ -28,7 +28,7 @@ import {
   type ThumbnailAttempt,
 } from "./preview-thumbnail.js";
 import { resolveRuntimeControllerCredential } from "./runtime-controller-binding.js";
-import { recordPage } from "./space-pages.js";
+import { pageFolder, pageFolderAge, recordPage, recordedServer, serverOf, type PageFolderAge } from "./space-pages.js";
 import {
   buildRatholeConfig,
   cleanUrl,
@@ -72,7 +72,8 @@ export type PreviewOpenOptions = {
   cwd?: string;
   // `--start`: start `serveCmd` in the background, in its own session, without Instafy credentials, logging to
   // .instafy/agent/logs, and wait for the port. Without `port` it picks a free port and puts it in `{port}`. A port that
-  // already answers is used only when it runs this same site; any other site there is refused.
+  // already answers is used only when it runs this same site; any other site there is refused. Without `serveCmd`, in
+  // a page's folder with no toolchain, it starts Instafy's page server there (`pageServeCommand`).
   start?: boolean;
   // How long `start` waits for the port (default 60 s, as a wake does).
   startTimeoutMs?: number;
@@ -905,6 +906,32 @@ export function parseExplicitServeCommand(raw: string): string[] {
   return argv;
 }
 
+/** How Instafy's page server serves a page's folder for its card, on this machine only (`instafy bind card` runs the same). */
+const PAGE_SERVE_COMMAND = `instafy bind serve . --port ${PORT_PLACEHOLDER} --preview`;
+
+/**
+ * What `--start` runs when no `--serve-cmd` is given: Instafy's page server, in a page's own folder (`sites/<name>` in
+ * the space's workspace) that holds an `index.html` and no `package.json`. Null anywhere else: that site's command is
+ * its own to give. Null too in a folder another command serves (an installed skill's host, say), which would get a
+ * second server and a second card: the space's record of its pages names another command for it, or a preview of this
+ * space on this machine was started there with one.
+ */
+export function pageServeCommand(params: { projectId: string | null; cwd?: string; env?: NodeJS.ProcessEnv }): string | null {
+  const root = resolveWorkspaceRoot(params.env ?? process.env, params.projectId);
+  const dir = params.cwd ?? process.cwd();
+  const folder = root ? workspaceRelativeDir(root, dir) : null;
+  const [top, name, ...deeper] = folder?.split("/") ?? [];
+  if (!root || !folder || top !== "sites" || !name || deeper.length > 0) return null;
+  const isFile = (file: string) => fs.statSync(path.join(dir, file), { throwIfNoEntry: false })?.isFile() === true;
+  if (!isFile("index.html") || fs.existsSync(path.join(dir, "package.json"))) return null;
+  const start = { argv: parseExplicitServeCommand(PAGE_SERVE_COMMAND), cwd: folder };
+  const recorded = recordedServer(root, folder);
+  if (recorded && !sameArgv(recorded, serverOf(start.argv))) return null;
+  const startedAnotherWay = (entry: PreviewStateEntry) =>
+    entry.projectId === params.projectId && entry.start?.cwd === folder && !sameStart(entry.start, start);
+  return readStateFile().previews.some(startedAnotherWay) ? null : PAGE_SERVE_COMMAND;
+}
+
 /**
  * How to start the site again when the process that started it exits, or the space sleeps: `--serve-cmd` from the
  * current directory, else the argv and directory of the process listening on the port. `note` says why there is none.
@@ -1346,11 +1373,19 @@ async function createAndStartClient(params: {
   previewId: string;
   entry: PreviewStateEntry;
   current: PreviewStateEntry | null;
+  // The page this open shows, for the space's record of its pages: the workspace it is in, and whether its folder was
+  // made in this turn. Null for the person's own site and for a site with no folder recorded.
+  page: OpenedPageFolder | null;
 }> {
   // The server is asked first, so a server without previews exits 5 before a client is
   // downloaded or started here.
   const { opts, port, title, sitePath, projectId, retryCommand, auth, controllerUrl, serverUrl, log, serve, site, portPicked } = params;
   const conversationId = opts.conversationId?.trim() || undefined;
+  // Read before the server is asked: the server writes the page down when its card is posted, and gives a folder it
+  // does not hold yet to this chat only when the folder was made in this turn.
+  const root = serve ? resolveWorkspaceRoot(process.env, projectId) : null;
+  const folder = serve ? pageFolder(serve.cwd) : null;
+  const page: OpenedPageFolder | null = root && folder ? { root, folder, age: pageFolderAge(root, folder) } : null;
   const created = await controllerRequest({
     controllerUrl,
     auth,
@@ -1366,6 +1401,7 @@ async function createAndStartClient(params: {
       ...(opts.summary ? { summary: opts.summary } : {}),
       metadata: { source: "instafy-cli" },
       ...(serve ? { serve } : {}),
+      ...(page ? { pageFolder: page.age } : {}),
       ...(opts.replace ? { replace: true } : {}),
     },
     retryCommand,
@@ -1468,18 +1504,28 @@ async function createAndStartClient(params: {
     ...(opts.thumbnail === false ? { noThumbnail: true } : {}),
   };
   upsertPreviewState(entry);
-  // The chat that made the page, in the space's record of its pages: kept with the space's files, so it outlasts this
-  // machine, and an open of the same folder from another chat keeps it. A turn that may write files is told the space's
-  // pages from it, each made in its own chat or in another.
-  const root = serve ? resolveWorkspaceRoot(process.env, projectId) : null;
-  if (serve && root) {
-    try {
-      recordPage(root, { folder: serve.cwd, title, argv: serve.argv, opening: cardConversation(auth, conversationId) });
-    } catch (error) {
-      log(`Could not write the page down in the space's record: ${error instanceof Error ? error.message : String(error)}`);
-    }
+  return { grant, previewId, entry, current, page };
+}
+
+/** A page's folder in its space's workspace, and whether the turn that opens it made the folder. */
+type OpenedPageFolder = { root: string; folder: string; age: PageFolderAge };
+
+/** The page the server wrote down for a card it posted (`page` of the ready answer): the chat it holds for the page's
+ *  folder, or null for a page nobody's. Undefined when the server says nothing of it (an older one). */
+function heldPage(readyBody: Record<string, unknown>): { conversationId: string | null } | undefined {
+  const page = readyBody["page"];
+  if (!page || typeof page !== "object" || Array.isArray(page)) return undefined;
+  const chat = (page as Record<string, unknown>)["conversationId"];
+  return { conversationId: typeof chat === "string" && chat.trim() ? chat.trim() : null };
+}
+
+/** The space this command is for, or null when none is configured (the open itself says so further on). */
+function spaceIfAny(project: string | undefined): string | null {
+  try {
+    return resolveProject({ project });
+  } catch {
+    return null;
   }
-  return { grant, previewId, entry, current };
 }
 
 export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpenResult> {
@@ -1489,8 +1535,14 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
   const title = parsePreviewTitle(opts.title);
   const sitePath = parsePreviewPath(opts.path);
   const summary = parsePreviewSummary(opts.summary);
+  // --start with no --serve-cmd, in a page's folder with no toolchain: Instafy's page server serves it.
+  const serveCmd = opts.serveCmd?.trim()
+    ? opts.serveCmd
+    : opts.start
+      ? (pageServeCommand({ projectId: spaceIfAny(opts.project), cwd: opts.cwd }) ?? undefined)
+      : undefined;
   // A malformed --serve-cmd, or one carrying a secret, is refused before anything is probed or asked for.
-  const serveArgv = opts.serveCmd?.trim() ? parseExplicitServeCommand(opts.serveCmd) : null;
+  const serveArgv = serveCmd ? parseExplicitServeCommand(serveCmd) : null;
   if (opts.start && !serveArgv) {
     throw new PreviewCommandError('--start needs --serve-cmd "<command>" to start the site.', PREVIEW_EXIT_NOT_LISTENING);
   }
@@ -1500,7 +1552,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
     }
     if (!serveArgv!.some((arg) => arg.includes(PORT_PLACEHOLDER))) {
       throw new Error(
-        `--serve-cmd needs ${PORT_PLACEHOLDER} where the site's port goes, e.g. --serve-cmd "python3 -m http.server ${PORT_PLACEHOLDER} --bind 127.0.0.1": --start picks the port.`,
+        `--serve-cmd needs ${PORT_PLACEHOLDER} where the site's port goes: --start picks the port.`,
       );
     }
   }
@@ -1514,12 +1566,12 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
   // With --start, the command is checked (one command, from inside the workspace, no secret) before anything runs.
   // Kept as given, `{port}` left in: that, and the directory it runs from, is what makes it this same site next time.
   const start = opts.start
-    ? resolvePreviewServe({ port: explicitPort ?? 0, serveCmd: opts.serveCmd, projectId, cwd: opts.cwd }).serve
+    ? resolvePreviewServe({ port: explicitPort ?? 0, serveCmd, projectId, cwd: opts.cwd }).serve
     : null;
 
   // From choosing the port to the state write, one `instafy preview` command at a time on this machine: two commands
   // never pick the same port, start the same site twice or start two clients for one preview.
-  const { grant, previewId, entry, current, port, site, serve, restartNote } = await withStateLock(async () => {
+  const { grant, previewId, entry, current, page, port, site, serve, restartNote } = await withStateLock(async () => {
     const site = start
       ? await startOrFindSite({
           explicitPort,
@@ -1554,7 +1606,7 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
       // Read before anything else changes on the port: the process listening now is the one to restart later.
       const { serve, note } = resolvePreviewServe({
         port,
-        serveCmd: opts.serveCmd?.split(PORT_PLACEHOLDER).join(String(port)),
+        serveCmd: serveCmd?.split(PORT_PLACEHOLDER).join(String(port)),
         projectId,
         cwd: opts.cwd,
         procRoot: opts.procRoot,
@@ -1619,6 +1671,26 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
     throw error;
   }
   const readyBody = (ready.body && !Array.isArray(ready.body) ? ready.body : {}) as Record<string, unknown>;
+  // The card is posted: the page goes in the space's record of its pages on this machine, with the chat that made it.
+  // The server says which chat that is; without its word (an older server), the record's own chat for the folder
+  // stays, and a folder it does not hold goes to this card's chat only when this turn made the folder. A turn that may
+  // write files is told the space's pages from the record, each made in its own chat or in another.
+  if (page && serve) {
+    try {
+      await withStateLock(async () => {
+        recordPage(page.root, {
+          folder: page.folder,
+          title: entry.title,
+          argv: serve.argv,
+          opening: cardConversation(auth, opts.conversationId?.trim() || undefined),
+          age: page.age,
+          held: heldPage(readyBody),
+        });
+      });
+    } catch (error) {
+      log(`Could not write the page down in the space's record: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   // The server keeps one card per preview and turn: the card this machine got for it before, answered again, means
   // this open posted none.
   const messageId = stringField(readyBody, "messageId");

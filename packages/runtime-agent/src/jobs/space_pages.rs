@@ -8,13 +8,34 @@
 //! made it or another one did: a fact in place of that judgement.
 //!
 //! The fact is the space's record of its pages, [`PAGES_RECORD`] in the space's own folder:
-//! `instafy preview open` writes each page there with the chat its card went to, the first time
-//! that folder's card is opened, and keeps that chat when another one opens the same folder again.
-//! It is kept with the space's files, under `.instafy/` (never saved, published, listed or copied
-//! into a scoped worker's copy), so it outlasts the machine: a stopped space's next machine starts
-//! with a new home folder, where the CLI's own record of the previews it opened is gone. It is read
-//! from the record, not from the chat's history, so a long chat whose own page has left its
-//! history still sees that page as its own.
+//! `instafy preview open` writes each page there with the chat that made it, the first time that
+//! folder's card is opened, and keeps that chat when another one opens the same folder again. It
+//! is read from the record, not from the chat's history, so a long chat whose own page has left
+//! its history still sees that page as its own.
+//!
+//! The record is kept with the space's files, under `.instafy/` (never saved, published, listed
+//! or copied into a scoped worker's copy), so a stopped space's next machine finds it where the
+//! folder itself is kept, though the CLI's own record of its previews, in the home folder, is
+//! gone. It does not outlast the folder: no save holds it, so a hosted space starts without it
+//! after every release (the node that held the folder is replaced) and whenever an idle checkout
+//! is cloned again. The first chat to open a page's card then became its maker, a check that
+//! passes in any chat posts that card, and the chat that really made the page had its edits put
+//! back under a line that said another chat had made it. So:
+//!
+//! - The controller keeps which chat made each page, written when the page's card is posted, and
+//!   gives a leased turn the space's pages (`space_pages` in the job's payload). They are taken
+//!   over the record here before the turn reads it ([`take_the_controllers_pages`]): the record
+//!   in the folder is this machine's copy, and the controller's is the one that decides.
+//! - A page reads with no chat when its chat is gone for the person the turn runs for (it no
+//!   longer exists, they moved it to Trash, or it is a thread nobody asks in): the controller
+//!   leaves that chat out, so such a page is not read-only in every chat for good.
+//! - An open gives a folder the record does not hold to its own chat only when the turn that
+//!   opens it made the folder: as a turn that may write files begins, the folders that are in
+//!   the workspace are written down ([`write_down_the_turns_folders`]), and the CLI reads a
+//!   folder among them as there before the turn, whose open claims it for no chat.
+//!
+//! A controller from before it kept the record sends no pages, and the record here stands as it
+//! is, with the last rule alone.
 //!
 //! A page another chat made is read-only here, and the runtime holds it to that ([`HeldPages`]).
 //! Told so in words, a new chat's turn still deleted another chat's comparison data and typed it
@@ -23,7 +44,9 @@
 //! it was when the turn began once the turn's model is done, a file the turn returns there is never
 //! written, and the reply says which page it didn't change. The person changes that page in the
 //! chat that made it, as an artifact belongs to its conversation in other chat apps. An
-//! automation's run has no chat to ask in: nothing holds a page for it.
+//! automation's run has no chat to ask in: nothing holds a page for it. Holding can be switched
+//! off on a runtime ([`HOLD_PAGES_ENV`]): a turn is then told the same, and nothing is put back
+//! or kept from being written.
 //!
 //! A page whose chat is not recorded is a page from before the record: a wake that starts its site
 //! again ([`record_woken_page`]) writes it down with no chat, so no later open claims it. Nothing
@@ -58,6 +81,36 @@ const MAX_PAGES: usize = 12;
 const MAX_RECORDED: usize = 100;
 /// The longest title the CLI records (its `MAX_TITLE_LENGTH`).
 const MAX_TITLE_CHARS: usize = 120;
+/// The job payload's key for the space's pages as the controller holds them (its
+/// `previews/pages.rs`): `{"pages": [{"folder", "title", "server", "openedAt", "conversationId"?}]}`.
+const CONTROLLERS_PAGES_KEY: &str = "space_pages";
+/// The folders that were in the workspace as the turn began, next to the record: the CLI reads a
+/// page folder among them as there before the turn (its `space-pages.ts`).
+const TURN_FOLDERS_FILE: &str = "turn-folders.json";
+/// How many names deep the turn's folders are written down (`sites/porto`), and how many at most:
+/// past that the list says it is not whole, and the CLI reads every folder as there before.
+const TURN_FOLDERS_DEPTH: usize = 2;
+const MAX_TURN_FOLDERS: usize = 5000;
+/// The most names read in one folder while looking for the folders in it: a folder of many files
+/// is still read whole.
+const MAX_NAMES_IN_A_FOLDER: usize = 50_000;
+/// The runtime's switch for holding another chat's page: on unless this is `0`, `false`, `off` or
+/// `no`. Off, [`HeldPages`] holds nothing: no change is put back and no returned file is left
+/// unwritten, so a problem with holding needs no rollback. A turn is still told which chat made
+/// each page and that another chat's page is read-only.
+pub(crate) const HOLD_PAGES_ENV: &str = "INSTAFY_HOLD_PAGES";
+
+/// Whether this runtime holds another chat's pages ([`HOLD_PAGES_ENV`]).
+pub(crate) fn holding_is_on() -> bool {
+    holding_reads_on(std::env::var(HOLD_PAGES_ENV).ok().as_deref())
+}
+
+fn holding_reads_on(raw: Option<&str>) -> bool {
+    !matches!(
+        raw.map(|raw| raw.trim().to_ascii_lowercase()).as_deref(),
+        Some("0" | "false" | "off" | "no")
+    )
+}
 
 /// The lines a turn of `conversation_id` that may write files reads after the rule on whose page it
 /// changes: the space's pages made for the person, from the record in `workspace_dir`, each still a
@@ -165,6 +218,219 @@ pub(crate) fn record_woken_page(
     let text = serde_json::to_string_pretty(&json!({ "version": 1, "pages": pages }))?;
     dir.replace_file("pages.json", &mut text.as_bytes(), false)?;
     Ok(())
+}
+
+/// Takes the space's pages as the controller holds them (a leased job's `payload`) over the
+/// record in `workspace_dir`, before the turn reads it:
+///
+/// - A page the record holds gets the chat the controller holds for its folder, or none when the
+///   controller holds none for it: a chat that is gone for the person the turn runs for, a page
+///   nobody's, or a folder the controller never wrote down (an entry from before it kept the
+///   record, which nothing vouches for).
+/// - A page the record lacks, whose folder is in the workspace, is written down as the controller
+///   holds it: on a machine that began without the record, each page is its maker's again.
+///
+/// Nothing is taken from a payload with no such pages (a controller from before it kept the
+/// record). The record is written only when it is still the one read.
+pub(crate) fn take_the_controllers_pages(workspace_dir: &Path, payload: &JsonValue) {
+    let Some(theirs) = payload
+        .get(CONTROLLERS_PAGES_KEY)
+        .and_then(|pages| pages.get("pages"))
+        .and_then(JsonValue::as_array)
+    else {
+        return;
+    };
+    let chat_of = |page: &JsonValue| {
+        page.get("conversationId")
+            .and_then(JsonValue::as_str)
+            .and_then(|chat| Uuid::parse_str(chat.trim()).ok())
+    };
+    let mut held: HashMap<String, &JsonValue> = HashMap::new();
+    for page in theirs {
+        if let Some(folder) = entry_folder(page) {
+            held.entry(folder).or_insert(page);
+        }
+    }
+    let record = read_record(workspace_dir);
+    let ours = record
+        .as_ref()
+        .and_then(|record| record.get("pages"))
+        .and_then(JsonValue::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut next = Vec::with_capacity(ours.len());
+    let mut written: HashSet<String> = HashSet::new();
+    for mut entry in ours.iter().cloned() {
+        if let Some(folder) = entry_folder(&entry) {
+            written.insert(folder.clone());
+            if let Some(entry) = entry.as_object_mut() {
+                match held.get(&folder).and_then(|page| chat_of(page)) {
+                    Some(chat) => {
+                        entry.insert("conversationId".to_string(), json!(chat.to_string()));
+                    }
+                    None => {
+                        entry.remove("conversationId");
+                    }
+                }
+            }
+        }
+        next.push(entry);
+    }
+    for page in theirs {
+        let Some(folder) = entry_folder(page) else {
+            continue;
+        };
+        if written.contains(&folder) || !workspace_dir.join(&folder).is_dir() {
+            continue;
+        }
+        let server: Vec<&str> = page
+            .get("server")
+            .and_then(JsonValue::as_array)
+            .map(|words| words.iter().filter_map(JsonValue::as_str).take(2).collect())
+            .unwrap_or_default();
+        let mut entry = json!({
+            "folder": folder,
+            "title": plain_title(page.get("title").and_then(JsonValue::as_str).unwrap_or_default()),
+            "server": server,
+            "openedAt": page.get("openedAt").and_then(JsonValue::as_str).unwrap_or_default(),
+        });
+        if let Some(chat) = chat_of(page) {
+            entry["conversationId"] = json!(chat.to_string());
+        }
+        written.insert(folder);
+        next.push(entry);
+    }
+    next.truncate(MAX_RECORDED);
+    if next == ours {
+        return;
+    }
+    let Ok(text) = serde_json::to_string_pretty(&json!({ "version": 1, "pages": next })) else {
+        return;
+    };
+    let written = (|| -> std::io::Result<()> {
+        let dir = WorkspaceDir::open(workspace_dir)?.create_dir_all(PAGES_RECORD_DIR)?;
+        if dir.entry_kind(".gitignore").is_err() {
+            dir.replace_file(".gitignore", &mut &PAGES_RECORD_IGNORE[..], false)?;
+        }
+        if read_record(workspace_dir) == record {
+            dir.replace_file("pages.json", &mut text.as_bytes(), false)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = written {
+        warn!(%error, "could not take the controller's pages over the space's record");
+    }
+}
+
+/// Writes down the folders that are in `workspace_dir` as the turn of `job_id` begins
+/// ([`TURN_FOLDERS_FILE`]), at most [`TURN_FOLDERS_DEPTH`] names deep, leaving out hidden ones
+/// and `node_modules`: `{"version": 1, "job", "folders", "complete"}`. The CLI gives a page whose
+/// folder the record does not hold to the chat that opens it only when the folder is not among
+/// them, so only a page this turn made.
+///
+/// A turn that takes up an earlier attempt's work keeps that attempt's list, so a page the
+/// earlier attempt made and this one opens is still this turn's: the same job leased again after
+/// a stop, or the job this one carries on (`continues`).
+pub(crate) fn write_down_the_turns_folders(
+    workspace_dir: &Path,
+    job_id: &Uuid,
+    continues: Option<&Uuid>,
+) {
+    let written = (|| -> std::io::Result<()> {
+        let workspace = WorkspaceDir::open(workspace_dir)?;
+        let dir = workspace.create_dir_all(PAGES_RECORD_DIR)?;
+        if dir.entry_kind(".gitignore").is_err() {
+            dir.replace_file(".gitignore", &mut &PAGES_RECORD_IGNORE[..], false)?;
+        }
+        let earlier = dir.open_file(TURN_FOLDERS_FILE).ok().and_then(|mut file| {
+            let mut text = String::new();
+            file.read_to_string(&mut text).ok()?;
+            serde_json::from_str::<JsonValue>(&text).ok()
+        });
+        let earlier_job = earlier
+            .as_ref()
+            .and_then(|list| list.get("job"))
+            .and_then(JsonValue::as_str)
+            .and_then(|job| Uuid::parse_str(job).ok());
+        if earlier_job.as_ref() == Some(job_id) {
+            return Ok(());
+        }
+        let list = match earlier {
+            Some(mut list) if earlier_job.is_some() && earlier_job.as_ref() == continues => {
+                list["job"] = json!(job_id.to_string());
+                list
+            }
+            _ => {
+                let (folders, complete) = folders_in(&workspace);
+                json!({
+                    "version": 1,
+                    "job": job_id.to_string(),
+                    "folders": folders,
+                    "complete": complete,
+                })
+            }
+        };
+        let text = serde_json::to_string(&list)?;
+        dir.replace_file(TURN_FOLDERS_FILE, &mut text.as_bytes(), false)?;
+        Ok(())
+    })();
+    if let Err(error) = written {
+        warn!(%error, "could not write down the folders the turn began with");
+    }
+}
+
+/// The real folders in `workspace`, at most [`TURN_FOLDERS_DEPTH`] names deep, sorted, and whether
+/// that is all of them: a folder that could not be listed, or more than [`MAX_TURN_FOLDERS`], and
+/// the list is not whole. A link is no folder, and is never followed. Hidden folders and
+/// `node_modules` are left out, and the CLI reads a page folder under one as there before.
+fn folders_in(workspace: &WorkspaceDir) -> (Vec<String>, bool) {
+    let mut folders = BTreeSet::new();
+    let mut complete = true;
+    let mut level = vec![String::new()];
+    for _ in 0..TURN_FOLDERS_DEPTH {
+        let mut below = Vec::new();
+        for parent in &level {
+            let dir = if parent.is_empty() {
+                Ok(workspace.clone())
+            } else {
+                workspace.open_dir(parent)
+            };
+            let Ok((dir, names)) = dir.and_then(|dir| {
+                let names = dir.list_names(MAX_NAMES_IN_A_FOLDER)?;
+                Ok((dir, names))
+            }) else {
+                complete = false;
+                continue;
+            };
+            for name in names {
+                let Some(name) = name.to_str() else {
+                    complete = false;
+                    continue;
+                };
+                if name.starts_with('.') || name == "node_modules" {
+                    continue;
+                }
+                if !matches!(
+                    dir.entry_kind(name),
+                    Ok(origin_http_server::workspace_fs::WorkspaceEntryKind::Directory)
+                ) {
+                    continue;
+                }
+                if folders.len() >= MAX_TURN_FOLDERS {
+                    return (folders.into_iter().collect(), false);
+                }
+                let folder = if parent.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{parent}/{name}")
+                };
+                folders.insert(folder.clone());
+                below.push(folder);
+            }
+        }
+        level = below;
+    }
+    (folders.into_iter().collect(), complete)
 }
 
 /// The record in `workspace_dir`, read without following a link.
@@ -333,17 +599,33 @@ fn pages_lines(
 const MAX_KEPT_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_KEPT_BYTES: u64 = 8 * 1024 * 1024;
 
-/// What a turn's own steps reached, from its run's events: the paths its edit steps named, and the
-/// commands it ran that may write. A change under another chat's page is the turn's only when one
-/// of these reached it: anything else that changed there while the turn ran (a page's own server
-/// saving a viewer's click, say) is someone else's.
+/// What a turn's own steps reached, from its run's events: the paths its edit steps named, and
+/// where its commands that may write pointed. A change under another chat's page is the turn's
+/// only when one of these reached it: anything else that changed there while the turn ran (a
+/// page's own server saving a viewer's click, say) is someone else's.
+///
+/// A command points at a path it refers to, never at a word it only says. Told by words alone
+/// (the folder's name anywhere in a command), a search for "porto travel guide" reached
+/// `sites/porto`: what that page's own server saved while the turn ran went back, and the line
+/// about the page took the place of the turn's reply. So a command is read as a shell reads it
+/// ([`CommandReader`]): a word of its own is a path, read against the folder the command is in at
+/// that point (`cd` moves it); in a quoted text (a script, a heredoc, a sentence, a search) only
+/// what is written as a path with a `/` counts; and an address (`https://…`) is no path.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct TurnSteps {
     /// The workspace paths the turn's edit steps (`apply_patch`) named.
     edited: BTreeSet<String>,
-    /// Each command the turn ran that may write, and an edit step's path the workspace's own
-    /// spelling doesn't hold: what names a place the turn may have written.
-    named: Vec<String>,
+    /// An edit step's path the workspace's own spelling doesn't hold, as the step gave it.
+    edited_elsewhere: BTreeSet<String>,
+    /// The workspace paths the turn's commands that may write referred to, never the workspace
+    /// itself.
+    referred: BTreeSet<String>,
+    /// The folders of the workspace those commands ran in, other than the workspace itself.
+    ran_in: BTreeSet<String>,
+    /// A path such a command named that can't be read against the workspace: an absolute one its
+    /// own spelling doesn't hold, one from a variable or the home folder, or a relative one from
+    /// a folder that isn't known.
+    referred_elsewhere: BTreeSet<String>,
     /// No record of the run's steps (it failed before any reached the runtime): every change counts
     /// as the turn's.
     unknown: bool,
@@ -355,16 +637,19 @@ impl TurnSteps {
     /// show`).
     pub(super) fn of_events(workspace_dir: &Path, events: &[JsonValue]) -> Self {
         let mut steps = Self::default();
+        let spellings = Spellings::of(workspace_dir);
         for item in events.iter().filter_map(|event| event.get("item")) {
             match item.get("type").and_then(JsonValue::as_str) {
                 Some("file_change") => {
                     let paths = item.get("paths").and_then(JsonValue::as_array);
                     for raw in paths.into_iter().flatten().filter_map(JsonValue::as_str) {
-                        match workspace_path(workspace_dir, raw) {
+                        match workspace_path(&spellings, raw) {
                             Some(path) => {
                                 steps.edited.insert(path);
                             }
-                            None => steps.name(raw),
+                            None => {
+                                steps.edited_elsewhere.insert(raw.trim().to_string());
+                            }
                         }
                     }
                 }
@@ -383,9 +668,11 @@ impl TurnSteps {
                     if !argv.is_empty() && super::known_safe_command::is_known_safe_command(&argv) {
                         continue;
                     }
-                    if let Some(command) = item.get("command").and_then(JsonValue::as_str) {
-                        steps.name(command);
+                    CommandReader {
+                        spellings: &spellings,
+                        steps: &mut steps,
                     }
+                    .read(item, &argv);
                 }
                 _ => {}
             }
@@ -401,67 +688,603 @@ impl TurnSteps {
         }
     }
 
-    fn name(&mut self, text: &str) {
-        if !self.named.iter().any(|named| named == text) {
-            self.named.push(text.to_string());
-        }
-    }
-
-    fn add(&mut self, other: Self) {
+    /// Adds the steps of another run of the same turn.
+    pub(super) fn add(&mut self, other: Self) {
         self.edited.extend(other.edited);
-        for named in &other.named {
-            self.name(named);
-        }
+        self.edited_elsewhere.extend(other.edited_elsewhere);
+        self.referred.extend(other.referred);
+        self.ran_in.extend(other.ran_in);
+        self.referred_elsewhere.extend(other.referred_elsewhere);
         self.unknown |= other.unknown;
     }
 
     /// Whether a step reached `path`, in the page in `folder`: an edit step named that path, or a
-    /// command named the folder.
+    /// command pointed at the folder.
     fn reached(&self, path: &str, folder: &str) -> bool {
+        self.unknown || self.edited.contains(path) || self.pointed_at(folder)
+    }
+
+    /// Whether an edit step named a path in the page in `folder`: a step that writes, whatever
+    /// became of it. A command that pointed at the page may only have read it.
+    fn edited_in(&self, folder: &str) -> bool {
+        self.edited.iter().any(|path| is_under(path, folder))
+            || self
+                .edited_elsewhere
+                .iter()
+                .any(|raw| parts_after_run(raw, folder).is_some_and(|after| after > 0))
+    }
+
+    /// Whether a command pointed at the page in `folder`: it referred to the folder, to a path in
+    /// it or to a folder that holds it (`rm -rf sites` reaches `sites/porto`), or it ran in the
+    /// folder or under it. So does a path that can't be read against the workspace and still
+    /// spells the folder out: an edit step's, with the folder's parts in a row and a path in it
+    /// after them, and a command's, for a folder of more than one part.
+    fn pointed_at(&self, folder: &str) -> bool {
+        self.referred
+            .iter()
+            .any(|path| path == folder || is_under(path, folder) || is_under(folder, path))
+            || self
+                .ran_in
+                .iter()
+                .any(|dir| dir == folder || is_under(dir, folder))
+            || self.edited_elsewhere.iter().any(|raw| {
+                parts_after_run(raw, folder).is_some_and(|after| after > 0 || folder.contains('/'))
+            })
+            || (folder.contains('/')
+                && self
+                    .referred_elsewhere
+                    .iter()
+                    .any(|raw| parts_after_run(raw, folder).is_some()))
+    }
+
+    /// Whether a step reached `path`, a workspace path in no page: an edit step named it, or a
+    /// command referred to it or to a folder that holds it, or ran in a folder that holds it
+    /// (other than the workspace itself, where most commands run and say nothing of what they
+    /// write). A read-only turn's change goes back only when one did: what another writer changed
+    /// while the turn ran stays.
+    pub(super) fn reached_path(&self, path: &str) -> bool {
         self.unknown
             || self.edited.contains(path)
-            || self.named.iter().any(|named| names_folder(named, folder))
+            || self
+                .referred
+                .iter()
+                .any(|named| named == path || is_under(path, named))
+            || self.ran_in.iter().any(|dir| is_under(path, dir))
+            || self
+                .edited_elsewhere
+                .iter()
+                .any(|raw| parts_after_run(raw, path) == Some(0))
+            || self.referred_elsewhere.iter().any(|raw| {
+                // the path itself, or a folder of more than one part that holds it
+                path.match_indices('/')
+                    .map(|(at, _)| &path[..at])
+                    .chain(std::iter::once(path))
+                    .any(|named| named.contains('/') && parts_after_run(raw, named).is_some())
+            })
     }
 }
 
-/// `raw`, a path an edit step named, as a workspace path, or None outside the workspace.
-fn workspace_path(workspace_dir: &Path, raw: &str) -> Option<String> {
-    let path = Path::new(raw.trim());
-    let relative = if path.is_absolute() {
-        match path.strip_prefix(workspace_dir) {
-            Ok(relative) => relative.to_path_buf(),
-            Err(_) => {
-                let root = std::fs::canonicalize(workspace_dir).ok()?;
-                path.strip_prefix(root).ok()?.to_path_buf()
-            }
-        }
-    } else {
-        path.to_path_buf()
+/// Whether workspace path `path` is in the folder `dir`.
+fn is_under(path: &str, dir: &str) -> bool {
+    path.strip_prefix(dir)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// When `raw`, a path as a step spelled it, holds the parts of workspace path `path` in a row
+/// (`/elsewhere/sites/porto/x` holds `sites/porto`): how many parts follow them.
+fn parts_after_run(raw: &str, path: &str) -> Option<usize> {
+    let parts = |text: &str| -> Vec<String> {
+        text.split('/')
+            .filter(|part| !part.is_empty() && *part != ".")
+            .map(str::to_string)
+            .collect()
     };
-    let mut parts = Vec::new();
+    let (raw, path) = (parts(raw), parts(path));
+    if path.is_empty() || raw.len() < path.len() {
+        return None;
+    }
+    (0..=raw.len() - path.len())
+        .rev()
+        .find(|at| raw[*at..*at + path.len()] == path[..])
+        .map(|at| raw.len() - at - path.len())
+}
+
+/// The workspace as a step's paths spell it: its folder, and that folder with its links followed.
+struct Spellings {
+    dir: std::path::PathBuf,
+    real: Option<std::path::PathBuf>,
+}
+
+impl Spellings {
+    fn of(workspace_dir: &Path) -> Self {
+        Self {
+            dir: workspace_dir.to_path_buf(),
+            real: std::fs::canonicalize(workspace_dir)
+                .ok()
+                .filter(|real| real != workspace_dir),
+        }
+    }
+
+    /// An absolute `path` as the parts of a workspace path (none: the workspace itself), or None
+    /// outside the workspace.
+    fn inside(&self, path: &Path) -> Option<Vec<String>> {
+        let relative = match path.strip_prefix(&self.dir) {
+            Ok(relative) => relative,
+            Err(_) => path.strip_prefix(self.real.as_deref()?).ok()?,
+        };
+        walk(Vec::new(), relative)
+    }
+}
+
+/// `relative` walked from the workspace folder with the parts `from`: the parts of where it leads
+/// (none: the workspace itself), or None when it leaves the workspace.
+fn walk(from: Vec<String>, relative: &Path) -> Option<Vec<String>> {
+    let mut parts = from;
     for component in relative.components() {
         match component {
             Component::Normal(part) => parts.push(part.to_str()?.to_string()),
             Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop()?;
+            }
             _ => return None,
         }
     }
+    Some(parts)
+}
+
+/// `raw`, a path an edit step named, as a workspace path, or None outside the workspace.
+fn workspace_path(spellings: &Spellings, raw: &str) -> Option<String> {
+    let path = Path::new(raw.trim());
+    let parts = if path.is_absolute() {
+        spellings.inside(path)?
+    } else {
+        walk(Vec::new(), path)?
+    };
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 
-/// Whether `text` names the page in `folder` (`sites/porto`): its workspace path, or its own name,
-/// as a whole part of a path.
-fn names_folder(text: &str, folder: &str) -> bool {
-    let name = folder.rsplit('/').next().unwrap_or(folder);
-    let is_name_char = |c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | '.');
-    [folder, name].into_iter().any(|needle| {
-        !needle.is_empty()
-            && text.match_indices(needle).any(|(at, _)| {
-                let before = text[..at].chars().next_back();
-                let after = text[at + needle.len()..].chars().next();
-                !before.is_some_and(is_name_char) && !after.is_some_and(is_name_char)
-            })
+/// A word of a command: its text with the quotes gone, and whether it is a heredoc's body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Word {
+    text: String,
+    body: bool,
+}
+
+impl Word {
+    /// A text, not a path of its own: a quoted script, a sentence, a search, a heredoc's body.
+    fn is_text(&self) -> bool {
+        self.body || self.text.chars().any(char::is_whitespace)
+    }
+}
+
+/// How deep a script in a script is read (`bash -c "bash -c '…'"`).
+const MAX_SCRIPT_DEPTH: usize = 4;
+
+/// Reads where a command that may write pointed into a turn's [`TurnSteps`], as a shell would
+/// read it, without running anything.
+///
+/// - Its script (a shell's `-c`, else its own words) is split into commands at `&&`, `||`, `;`,
+///   `|`, `&`, a new line and `(` `)`, and each command into words at spaces and `<` `>`, with
+///   single quotes, double quotes and `\` as a shell reads them. A heredoc's body is one text.
+/// - `cd` and `pushd` move the folder the commands after them are in. What they name is where
+///   the command goes, not something it refers to. A folder that can't be read (`cd "$DIR"`, a
+///   folder outside the workspace) leaves the place unknown.
+/// - A word with no space in it is a path, and so is what follows `=` in it (`--out=sites/x`):
+///   read against the folder the command is in, or as an absolute path of the workspace. A
+///   pattern (`sites/*/data.json`) names the folder it starts in. The command's own name is no
+///   path unless it has a `/`, nor is an option, nor an address (`https://…`).
+/// - A text (a word with a space in it, a heredoc's body) is no path. The paths written in it
+///   count when they have a `/` (`open('sites/porto/data.json')`), against the folder the
+///   command is in and against the workspace, and a name alone never does ("porto travel
+///   guide"). A shell's own script (`bash -c "…"`) is read as a script.
+struct CommandReader<'a> {
+    spellings: &'a Spellings,
+    steps: &'a mut TurnSteps,
+}
+
+impl CommandReader<'_> {
+    /// Reads the command of a `command_execution` item with the words `argv`, from the folder
+    /// the item says it ran in (`cwd`): a path of the workspace (`.`, `sites/porto`), as the
+    /// run's events give it, or null for a folder outside the workspace, which leaves the place
+    /// unknown. An item that says nothing of it ran in the workspace.
+    fn read(&mut self, item: &JsonValue, argv: &[String]) {
+        let mut dir = match item.get("cwd") {
+            None => Some(Vec::new()),
+            Some(cwd) => match cwd.as_str().map(str::trim).filter(|cwd| !cwd.is_empty()) {
+                // As the event spells it, else as its links lead (a folder named through a link).
+                Some(cwd) if Path::new(cwd).is_absolute() => self
+                    .spellings
+                    .inside(Path::new(cwd))
+                    .or_else(|| self.spellings.inside(&std::fs::canonicalize(cwd).ok()?)),
+                Some(cwd) => walk(Vec::new(), Path::new(cwd)),
+                None => None,
+            },
+        };
+        self.ran_in(dir.as_deref());
+        match argv {
+            [shell, flag, script, ..] if is_shell(shell) && is_script_flag(flag) => {
+                self.script(script, dir, 0);
+            }
+            [] => {
+                let script = item
+                    .get("command")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default();
+                self.script(script, dir, 0);
+            }
+            words => {
+                let words: Vec<Word> = words
+                    .iter()
+                    .map(|word| Word {
+                        text: word.clone(),
+                        body: false,
+                    })
+                    .collect();
+                self.command(&words, &mut dir, 0);
+            }
+        }
+    }
+
+    fn ran_in(&mut self, dir: Option<&[String]>) {
+        if let Some(parts) = dir.filter(|parts| !parts.is_empty()) {
+            self.steps.ran_in.insert(parts.join("/"));
+        }
+    }
+
+    /// Reads a shell script that starts in `dir`, command by command.
+    fn script(&mut self, script: &str, mut dir: Option<Vec<String>>, depth: usize) {
+        for words in shell_commands(script) {
+            self.command(&words, &mut dir, depth);
+        }
+    }
+
+    /// Reads one command, run in `dir`: `cd` moves `dir`, any other command's words are read as
+    /// paths and texts.
+    fn command(&mut self, words: &[Word], dir: &mut Option<Vec<String>>, depth: usize) {
+        let program_at = words.iter().position(|word| {
+            !word.is_text() && !is_shell_keyword(&word.text) && !is_assignment(&word.text)
+        });
+        let program = program_at.map(|at| base_name(&words[at].text));
+        if let (Some(at), Some("cd" | "pushd")) = (program_at, program) {
+            let target = words[at + 1..]
+                .iter()
+                .find(|word| word.text == "-" || !word.text.starts_with('-'));
+            *dir = match target {
+                Some(target) if target.text != "-" => {
+                    match self.place(&target.text, dir.as_deref()) {
+                        Place::Inside(parts) => Some(parts),
+                        Place::Elsewhere | Place::Nowhere => None,
+                    }
+                }
+                _ => None,
+            };
+            self.ran_in(dir.as_deref());
+            return;
+        }
+        for (at, word) in words.iter().enumerate() {
+            if word.is_text() {
+                let shells_script = !word.body
+                    && at >= 2
+                    && is_script_flag(&words[at - 1].text)
+                    && is_shell(&words[at - 2].text);
+                if shells_script && depth < MAX_SCRIPT_DEPTH {
+                    self.script(&word.text, dir.clone(), depth + 1);
+                } else {
+                    self.text(word, dir.as_deref());
+                }
+                continue;
+            }
+            let text = word.text.as_str();
+            if Some(at) == program_at && !text.contains('/') {
+                continue;
+            }
+            if !text.starts_with('-') {
+                self.refer(text, dir.as_deref());
+            }
+            if let Some((_, value)) = text.split_once('=') {
+                self.refer(value, dir.as_deref());
+            }
+        }
+    }
+
+    /// Where `raw`, a path as a command spelled it, is, read from `dir`.
+    fn place(&self, raw: &str, dir: Option<&[String]>) -> Place {
+        let unreadable = || {
+            if raw.contains('/') {
+                Place::Elsewhere
+            } else {
+                Place::Nowhere
+            }
+        };
+        if raw.starts_with('~') || raw.contains(['$', '`']) {
+            return unreadable();
+        }
+        let path = Path::new(raw);
+        if path.is_absolute() {
+            return match self.spellings.inside(path) {
+                Some(parts) => Place::Inside(parts),
+                None => Place::Elsewhere,
+            };
+        }
+        match dir {
+            Some(dir) => match walk(dir.to_vec(), path) {
+                Some(parts) => Place::Inside(parts),
+                None => Place::Nowhere,
+            },
+            None => unreadable(),
+        }
+    }
+
+    /// Takes down a path a command referred to, read from `dir`. A pattern names the folder it
+    /// starts in, and an address is no path.
+    fn refer(&mut self, raw: &str, dir: Option<&[String]>) {
+        if raw.is_empty() || raw.contains("://") {
+            return;
+        }
+        let literal = match raw.find(['*', '?', '[', '{']) {
+            Some(at) => match raw[..at].rfind('/') {
+                Some(0) => "/",
+                Some(slash) => &raw[..slash],
+                None => ".",
+            },
+            None => raw,
+        };
+        self.refer_literal(literal, dir);
+    }
+
+    fn refer_literal(&mut self, literal: &str, dir: Option<&[String]>) {
+        match self.place(literal, dir) {
+            Place::Inside(parts) if !parts.is_empty() => {
+                self.steps.referred.insert(parts.join("/"));
+            }
+            Place::Elsewhere => {
+                self.steps.referred_elsewhere.insert(literal.to_string());
+            }
+            Place::Inside(_) | Place::Nowhere => {}
+        }
+    }
+
+    /// Takes down the paths written in a text: each run of path characters with a `/` in it, read
+    /// from `dir` and from the workspace. A name alone is a word, not a path, and what follows
+    /// `scheme:` is an address. A text that is one line of plain words may be a path with a space
+    /// in its name (`rm -rf "sites/my page"`), and is read as one too.
+    fn text(&mut self, word: &Word, dir: Option<&[String]>) {
+        let text = word.text.as_str();
+        let is_path_char = |c: char| {
+            c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | '~' | '@' | '+' | '%')
+        };
+        if !word.body && text.chars().all(|c| is_path_char(c) || c == ' ') {
+            self.refer_literal(text.trim(), dir);
+        }
+        let mut start = None;
+        let ends = text
+            .char_indices()
+            .chain(std::iter::once((text.len(), ' ')));
+        for (at, c) in ends {
+            if is_path_char(c) {
+                start.get_or_insert(at);
+                continue;
+            }
+            let Some(from) = start.take() else {
+                continue;
+            };
+            let token = text[from..at].trim_end_matches('.');
+            let an_address = token.starts_with("//") && text[..from].ends_with(':');
+            if !token.contains('/') || an_address || !token.chars().any(char::is_alphanumeric) {
+                continue;
+            }
+            self.refer_literal(token, dir);
+            if dir.is_none_or(|dir| !dir.is_empty()) {
+                self.refer_literal(token, Some(&[]));
+            }
+        }
+    }
+}
+
+/// Where a path a command spelled is.
+enum Place {
+    /// In the workspace, by its parts (none: the workspace itself).
+    Inside(Vec<String>),
+    /// Somewhere the workspace's own spelling doesn't hold, or that can't be read.
+    Elsewhere,
+    /// Out of the workspace, or a name alone from a place that isn't known.
+    Nowhere,
+}
+
+fn base_name(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+
+fn is_shell(word: &str) -> bool {
+    matches!(base_name(word), "bash" | "sh" | "zsh" | "dash" | "ksh")
+}
+
+/// A shell's option that takes a script: `-c`, `-lc`, `-ec`.
+fn is_script_flag(word: &str) -> bool {
+    word.strip_prefix('-').is_some_and(|flags| {
+        !flags.is_empty() && flags.chars().all(|c| c.is_ascii_alphabetic()) && flags.contains('c')
     })
+}
+
+/// A word a shell reads before a command's own name.
+fn is_shell_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "{" | "}"
+            | "!"
+            | "if"
+            | "then"
+            | "else"
+            | "elif"
+            | "do"
+            | "while"
+            | "until"
+            | "time"
+            | "command"
+            | "builtin"
+            | "exec"
+    )
+}
+
+/// `NAME=value` before a command's own name.
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// A shell script as its commands, each the words a shell would read: split at `&&`, `||`, `;`,
+/// `|`, `&`, a new line, `(`, `)` and a backtick, with words split at spaces and at `<` and `>`.
+/// Single quotes, double quotes and `\` are read as a shell reads them, a comment is left out,
+/// and a heredoc's body is one word of its own, a text.
+fn shell_commands(script: &str) -> Vec<Vec<Word>> {
+    fn end_word(word: &mut Option<String>, words: &mut Vec<Word>) {
+        if let Some(text) = word.take().filter(|text| !text.is_empty()) {
+            words.push(Word { text, body: false });
+        }
+    }
+    fn end_command(words: &mut Vec<Word>, commands: &mut Vec<Vec<Word>>) {
+        if !words.is_empty() {
+            commands.push(std::mem::take(words));
+        }
+    }
+    let chars: Vec<char> = script.chars().collect();
+    let mut commands = Vec::new();
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    // The heredocs the line being read opens: each one's last line, and whether its tabs go.
+    let mut heredocs: Vec<(String, bool)> = Vec::new();
+    let mut at = 0;
+    while at < chars.len() {
+        match chars[at] {
+            '\\' => {
+                match chars.get(at + 1) {
+                    Some('\n') | None => {}
+                    Some(next) => word.get_or_insert_with(String::new).push(*next),
+                }
+                at += 2;
+            }
+            '\'' => {
+                let text = word.get_or_insert_with(String::new);
+                at += 1;
+                while at < chars.len() && chars[at] != '\'' {
+                    text.push(chars[at]);
+                    at += 1;
+                }
+                at += 1;
+            }
+            '"' => {
+                let text = word.get_or_insert_with(String::new);
+                at += 1;
+                while at < chars.len() && chars[at] != '"' {
+                    match (chars[at], chars.get(at + 1)) {
+                        ('\\', Some('\n')) => at += 2,
+                        ('\\', Some(next @ ('"' | '\\' | '$' | '`'))) => {
+                            text.push(*next);
+                            at += 2;
+                        }
+                        (c, _) => {
+                            text.push(c);
+                            at += 1;
+                        }
+                    }
+                }
+                at += 1;
+            }
+            '#' if word.is_none() => {
+                while at < chars.len() && chars[at] != '\n' {
+                    at += 1;
+                }
+            }
+            ' ' | '\t' | '\r' => {
+                end_word(&mut word, &mut words);
+                at += 1;
+            }
+            '\n' => {
+                end_word(&mut word, &mut words);
+                end_command(&mut words, &mut commands);
+                at += 1;
+                for (last_line, tabs_go) in heredocs.drain(..) {
+                    let mut body = String::new();
+                    while at < chars.len() {
+                        let end = chars[at..]
+                            .iter()
+                            .position(|c| *c == '\n')
+                            .map_or(chars.len(), |offset| at + offset);
+                        let line: String = chars[at..end].iter().collect();
+                        at = (end + 1).min(chars.len());
+                        let read = if tabs_go {
+                            line.trim_start_matches('\t')
+                        } else {
+                            line.as_str()
+                        };
+                        if read == last_line {
+                            break;
+                        }
+                        body.push_str(&line);
+                        body.push('\n');
+                    }
+                    if !body.is_empty() {
+                        commands.push(vec![Word {
+                            text: body,
+                            body: true,
+                        }]);
+                    }
+                }
+            }
+            '<' if chars.get(at + 1) == Some(&'<') && chars.get(at + 2) != Some(&'<') => {
+                end_word(&mut word, &mut words);
+                at += 2;
+                let tabs_go = chars.get(at) == Some(&'-');
+                if tabs_go {
+                    at += 1;
+                }
+                while matches!(chars.get(at), Some(' ' | '\t')) {
+                    at += 1;
+                }
+                let mut last_line = String::new();
+                while let Some(c) = chars.get(at).copied() {
+                    if c.is_whitespace() || ";&|()<>".contains(c) {
+                        break;
+                    }
+                    if !matches!(c, '\'' | '"' | '\\') {
+                        last_line.push(c);
+                    }
+                    at += 1;
+                }
+                if !last_line.is_empty() {
+                    heredocs.push((last_line, tabs_go));
+                }
+            }
+            '<' | '>' => {
+                end_word(&mut word, &mut words);
+                at += 1;
+                while matches!(chars.get(at), Some('<' | '>' | '&' | '|')) {
+                    at += 1;
+                }
+            }
+            // `&>file` sends the command's output to a file: no end of the command.
+            '&' if chars.get(at + 1) == Some(&'>') => {
+                end_word(&mut word, &mut words);
+                at += 1;
+            }
+            ';' | '&' | '|' | '(' | ')' | '`' => {
+                end_word(&mut word, &mut words);
+                end_command(&mut words, &mut commands);
+                at += 1;
+            }
+            c => {
+                word.get_or_insert_with(String::new).push(c);
+                at += 1;
+            }
+        }
+    }
+    end_word(&mut word, &mut words);
+    end_command(&mut words, &mut commands);
+    commands
 }
 
 /// The pages another chat made, held for a turn of this chat that may write files: they are
@@ -472,10 +1295,10 @@ fn names_folder(text: &str, folder: &str) -> bool {
 ///   then as the space's latest save holds it, through the space's own repository; one that wasn't
 ///   to the bytes it held then, which the turn kept as it began.
 /// - What the turn changed is what its own steps reached ([`TurnSteps`]): a path one of its edit
-///   steps named, or anything in a page's folder that one of its commands named. Nothing else
-///   there is touched: a page's own server saving a viewer's click while the turn ran, or work
-///   another turn left there unsaved. A runtime runs one turn at a time, so no other chat's turn
-///   changes a page while this one runs.
+///   steps named, or anything in a page's folder that one of its commands pointed at. Nothing
+///   else there is touched: a page's own server saving a viewer's click while the turn ran, or
+///   work another turn left there unsaved. A runtime runs one turn at a time, so no other chat's
+///   turn changes a page while this one runs.
 /// - A file the turn returns for the runtime to write there is never written
 ///   ([`Self::leave_out_returned`]), and no path under such a page goes in the turn's files, its
 ///   save or its card ([`Self::holds`]).
@@ -484,6 +1307,10 @@ fn names_folder(text: &str, folder: &str) -> bool {
 ///   as the turn began.
 /// - The turn's artifacts record a change put back as a blocked write, and its reply says which
 ///   page it didn't change ([`Self::reply`]).
+/// - A change that could not go back is said too, never only logged: the page is then part
+///   changed and not saved, and the person has to know to look at it. So is a page an edit step
+///   named a path in when nothing could say what changed there (the folder's status could not
+///   be read). Such a reply never ends "Nothing was changed." ([`Self::changed_a_page`]).
 ///
 /// A page is held by its own folder: a path in the folder of a page this chat made, or one whose
 /// chat isn't recorded, within another chat's page's folder stays this turn's.
@@ -499,6 +1326,10 @@ pub(crate) struct HeldPages {
     /// The paths under a held page the turn changed, and those put back.
     changed: BTreeSet<String>,
     restored: BTreeSet<String>,
+    /// The folders of the held pages an edit step of the turn named a path in while nothing could
+    /// say what changed there: the folder's status could not be read, as the turn began or once
+    /// it was done.
+    unchecked: BTreeSet<String>,
     /// The files under a held page the turn returned with their contents, never written.
     returned: BTreeSet<String>,
 }
@@ -513,6 +1344,27 @@ impl HeldPages {
         page_commands: &[String],
         start: Option<&HashMap<String, GitStatusEntry>>,
     ) -> Self {
+        Self::of_turn_when(
+            holding_is_on(),
+            workspace_dir,
+            conversation_id,
+            page_commands,
+            start,
+        )
+    }
+
+    /// [`Self::of_turn`] on a runtime that holds pages (`holding`), and nothing held on one that
+    /// has holding switched off ([`HOLD_PAGES_ENV`]).
+    fn of_turn_when(
+        holding: bool,
+        workspace_dir: &Path,
+        conversation_id: Option<&Uuid>,
+        page_commands: &[String],
+        start: Option<&HashMap<String, GitStatusEntry>>,
+    ) -> Self {
+        if !holding {
+            return Self::default();
+        }
         let pages = read_record(workspace_dir)
             .map(|record| {
                 recorded_pages(&record, page_commands, |folder| {
@@ -598,12 +1450,29 @@ impl HeldPages {
         }
         self.steps.add(steps);
         self.keep_rows(workspace_dir);
-        let Some(start) = start else {
+        let now = match start {
+            Some(_) => super::collect_git_status_porcelain(workspace_dir).await,
+            None => None,
+        };
+        let (Some(start), Some(now)) = (start, now) else {
+            // Nothing says what changed: each held page an edit step of the turn named a path in
+            // may be changed, and nothing can put it back. A command that pointed at a page may
+            // only have read it, so it alone says nothing here.
+            let reached: Vec<String> = self
+                .pages
+                .iter()
+                .filter(|(page, held)| *held && self.steps.edited_in(&page.folder))
+                .map(|(page, _)| page.folder.clone())
+                .collect();
+            if !reached.is_empty() {
+                warn!(pages = ?reached, "the folder's status could not be read: a page another chat made may be changed and was not put back");
+            }
+            self.unchecked.extend(reached);
             return;
         };
-        let Some(now) = super::collect_git_status_porcelain(workspace_dir).await else {
-            return;
-        };
+        // The status is read from the turn's beginning each time, so this reading covers what an
+        // earlier one could not.
+        self.unchecked.clear();
         let held = |status: &HashMap<String, GitStatusEntry>| -> HashMap<String, GitStatusEntry> {
             status
                 .iter()
@@ -662,8 +1531,21 @@ impl HeldPages {
         if !left.is_empty() {
             warn!(paths = ?left, "a change under a page another chat made was not put back");
         }
+        // A path that went back after an earlier run of the turn and not after this one is not
+        // back: the reply says so ([`Self::reply_lines`]).
+        for path in &theirs {
+            if restored.contains(path) {
+                self.restored.insert(path.clone());
+            } else {
+                self.restored.remove(path);
+            }
+        }
         self.changed.extend(theirs);
-        self.restored.extend(restored);
+    }
+
+    /// The paths under a held page the turn changed that did not go back.
+    fn left(&self) -> impl Iterator<Item = &String> {
+        self.changed.difference(&self.restored)
     }
 
     /// Puts back each held page's entry in the space's record as the turn began, when the turn took
@@ -745,14 +1627,19 @@ impl HeldPages {
         self.returned.extend(returned);
     }
 
-    /// Whether the turn changed a held page: what it changed there went back or was never written.
-    pub(super) fn put_a_change_back(&self) -> bool {
-        !self.restored.is_empty() || !self.returned.is_empty()
+    /// Whether the turn changed a held page, or may have: what it changed there went back, was
+    /// never written, could not go back, or could not be checked. The reply says which
+    /// ([`Self::reply`]), and that is the turn's result: run again it would make the change
+    /// again, and "Nothing was changed." under it would not be true of a page left changed.
+    pub(super) fn changed_a_page(&self) -> bool {
+        !self.changed.is_empty() || !self.returned.is_empty() || !self.unchecked.is_empty()
     }
 
-    /// The blocked write a turn's artifacts record when it changed a held page.
+    /// The blocked write a turn's artifacts record when it changed a held page: the paths it
+    /// changed and those put back (a path in the first and not in the second is still changed),
+    /// and the pages nothing could check.
     pub(super) fn artifact(&self) -> Option<JsonValue> {
-        if self.changed.is_empty() && self.returned.is_empty() {
+        if !self.changed_a_page() {
             return None;
         }
         let mut artifact = super::build_read_only_write_blocked_artifact(
@@ -767,50 +1654,131 @@ impl HeldPages {
             .filter(|(_, held)| *held)
             .map(|(page, _)| format!("{}/", page.folder))
             .collect();
+        if !self.unchecked.is_empty() {
+            artifact["metadata"]["uncheckedPaths"] = self
+                .unchecked
+                .iter()
+                .map(|folder| format!("{folder}/"))
+                .collect();
+        }
         Some(artifact)
     }
 
-    /// The reply's last line when the turn changed a held page: "I didn't change “<title>”: it was
-    /// made in another chat." The record keeps no chat's name, so the line can't say which.
-    pub(super) fn reply_line(&self) -> Option<String> {
-        let mut pages: Vec<&RecordedPage> = Vec::new();
-        for path in self.restored.iter().chain(&self.returned) {
-            if let Some(page) = self.page_of(path)
-                && !pages.iter().any(|seen| seen.folder == page.folder)
-            {
-                pages.push(page);
+    /// The held pages the turn changed, each once, by what became of the change: those with a
+    /// change that did not go back, those nothing could check, and those that are as they were.
+    fn pages_by_outcome(&self) -> [Vec<&RecordedPage>; 3] {
+        fn take<'a>(
+            seen: &mut Vec<&'a str>,
+            pages: impl Iterator<Item = &'a RecordedPage>,
+        ) -> Vec<&'a RecordedPage> {
+            let mut taken = Vec::new();
+            for page in pages {
+                if !seen.contains(&page.folder.as_str()) {
+                    seen.push(&page.folder);
+                    taken.push(page);
+                }
             }
+            taken
         }
-        let names: Vec<String> = pages
-            .iter()
-            .map(|page| match &page.title {
-                Some(title) => format!("“{title}”"),
-                None => "a page".to_string(),
-            })
-            .collect();
-        match names.as_slice() {
-            [] => None,
-            [name] => Some(format!(
+        let mut seen = Vec::new();
+        let left = take(&mut seen, self.left().filter_map(|path| self.page_of(path)));
+        let unchecked = take(
+            &mut seen,
+            self.pages
+                .iter()
+                .filter(|(page, held)| *held && self.unchecked.contains(&page.folder))
+                .map(|(page, _)| page),
+        );
+        let back = take(
+            &mut seen,
+            self.restored
+                .iter()
+                .chain(&self.returned)
+                .filter_map(|path| self.page_of(path)),
+        );
+        [left, unchecked, back]
+    }
+
+    /// The lines under a turn's reply when it changed a held page, one for each of what became of
+    /// the change. The record keeps no chat's name, so a line can't say which chat.
+    ///
+    /// - A change that did not go back, in whole or in part: "I changed “<title>” and couldn't put
+    ///   it back as it was: it was made in another chat, and that change is not saved."
+    /// - A page a step reached that nothing could check: "I may have changed “<title>” and
+    ///   couldn't check it or put it back: it was made in another chat."
+    /// - A change that went back, or a file never written: "I didn't change “<title>”: it was made
+    ///   in another chat."
+    fn reply_lines(&self) -> Vec<String> {
+        let names = |pages: &[&RecordedPage]| -> Vec<String> {
+            pages
+                .iter()
+                .map(|page| match &page.title {
+                    Some(title) => format!("“{title}”"),
+                    None => "a page".to_string(),
+                })
+                .collect()
+        };
+        let all = |names: &[String]| match names {
+            [first @ .., last] if !first.is_empty() => format!("{} and {last}", first.join(", ")),
+            _ => names.concat(),
+        };
+        let [left, unchecked, back] = self.pages_by_outcome();
+        let mut lines = Vec::new();
+        match names(&left).as_slice() {
+            [] => {}
+            [name] => lines.push(format!(
+                "I changed {name} and couldn't put it back as it was: it was made in another chat, and that change is not saved."
+            )),
+            several => lines.push(format!(
+                "I changed {} and couldn't put them back as they were: each was made in another chat, and those changes are not saved.",
+                all(several)
+            )),
+        }
+        match names(&unchecked).as_slice() {
+            [] => {}
+            [name] => lines.push(format!(
+                "I may have changed {name} and couldn't check it or put it back: it was made in another chat."
+            )),
+            several => lines.push(format!(
+                "I may have changed {} and couldn't check them or put them back: each was made in another chat.",
+                all(several)
+            )),
+        }
+        match names(&back).as_slice() {
+            [] => {}
+            [name] => lines.push(format!(
                 "I didn't change {name}: it was made in another chat."
             )),
-            [first @ .., last] => Some(format!(
+            [first @ .., last] => lines.push(format!(
                 "I didn't change {} or {last}: each was made in another chat.",
                 first.join(", ")
             )),
         }
+        lines
     }
 
-    /// Ends a turn's reply on [`Self::reply_line`] when the turn changed a held page. When that was
-    /// the turn's only change (`files`, its own, hold none), the line is the reply: the model's
-    /// words would tell of a change no one can see.
+    /// [`Self::reply_lines`] as one line, or None when the turn changed no held page.
+    #[cfg(test)]
+    pub(super) fn reply_line(&self) -> Option<String> {
+        let lines = self.reply_lines();
+        (!lines.is_empty()).then(|| lines.join(" "))
+    }
+
+    /// Ends a turn's reply on [`Self::reply_lines`] when the turn changed a held page. When that
+    /// was the turn's only change (`files`, its own, hold none) and all of it went back, the line
+    /// is the reply: the model's words would tell of a change no one can see. A change that is
+    /// still there, or may be, can be seen: the lines go under the model's reply, never in its
+    /// place.
     pub(super) fn reply(&self, summary: &mut String, files: &[CodexFileDescriptor]) {
-        let Some(line) = self.reply_line() else {
+        let lines = self.reply_lines();
+        if lines.is_empty() {
             return;
-        };
-        if files.iter().any(|file| !file.is_read_reference()) {
-            super::save_report::append_not_saved(summary, &[line]);
+        }
+        let all_back = self.left().next().is_none() && self.unchecked.is_empty();
+        if all_back && !files.iter().any(|file| !file.is_read_reference()) {
+            *summary = lines.join(" ");
         } else {
-            *summary = line;
+            super::save_report::append_not_saved(summary, &lines);
         }
     }
 }
@@ -1173,6 +2141,290 @@ mod tests {
         );
     }
 
+    /// A leased job's payload with the space's pages as the controller holds them.
+    fn leased_with(pages: Vec<JsonValue>) -> JsonValue {
+        json!({ "prompt_text": "hi", "space_pages": { "pages": pages } })
+    }
+
+    fn record_folders(workspace: &Path) -> Vec<(String, Option<String>)> {
+        read_record(workspace).unwrap()["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|page| {
+                (
+                    page["folder"].as_str().unwrap().to_string(),
+                    page["conversationId"].as_str().map(str::to_string),
+                )
+            })
+            .collect()
+    }
+
+    /// A release replaced the machine and the workspace was cloned again: the record in the
+    /// folder is gone. The controller's pages are taken over it before the turn reads it, so the
+    /// page another chat made is still that chat's, read-only to this chat's turn and held, and
+    /// its own chat still changes it. A page the controller holds for no chat is nobody's, and one
+    /// whose folder is not in the workspace is not written down.
+    #[test]
+    fn a_lost_record_is_filled_in_from_the_controllers_pages() {
+        let (maker, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path();
+        for folder in ["sites/framework-laptops", "sites/porto"] {
+            std::fs::create_dir_all(ws.join(folder)).unwrap();
+        }
+        let leased = leased_with(vec![
+            page("sites/porto", "Porto", None, &PAGE_SERVER),
+            page(
+                "sites/framework-laptops",
+                "Framework laptops",
+                Some(&maker),
+                &["instafy", "bind", "serve"],
+            ),
+            page("sites/gone", "Gone", Some(&maker), &PAGE_SERVER),
+            page("../outside", "Outside", Some(&maker), &PAGE_SERVER),
+        ]);
+        assert_eq!(space_pages_lines(ws, Some(&other), &[]), "");
+        take_the_controllers_pages(ws, &leased);
+        assert_eq!(
+            record_folders(ws),
+            [
+                ("sites/porto".to_string(), None),
+                (
+                    "sites/framework-laptops".to_string(),
+                    Some(maker.to_string())
+                ),
+            ]
+        );
+        assert_eq!(
+            space_pages_lines(ws, Some(&other), &[]),
+            "- The space's pages:\n\
+             \x20 - \"Porto\", in `sites/porto/`: which chat made it isn't known.\n\
+             \x20 - \"Framework laptops\", in `sites/framework-laptops/`: made in another chat, read-only here.\n"
+        );
+        assert!(
+            HeldPages::of_turn_when(true, ws, Some(&other), &[], None)
+                .holds("sites/framework-laptops/data.json")
+        );
+        assert!(
+            !HeldPages::of_turn_when(true, ws, Some(&maker), &[], None)
+                .holds("sites/framework-laptops/data.json")
+        );
+        assert_eq!(
+            std::fs::read(ws.join(PAGES_RECORD_DIR).join(".gitignore")).unwrap(),
+            PAGES_RECORD_IGNORE
+        );
+        // taken again, nothing changes
+        let before = std::fs::read(ws.join(PAGES_RECORD)).unwrap();
+        take_the_controllers_pages(ws, &leased);
+        assert_eq!(std::fs::read(ws.join(PAGES_RECORD)).unwrap(), before);
+    }
+
+    /// The record names a chat that is gone for the person the turn runs for: it no longer
+    /// exists, they moved it to Trash, or nobody asks in it. The controller leaves that chat out
+    /// of the page it gives the turn, so the page reads with no chat and nothing holds it: it is
+    /// not read-only in every chat for good. So does a page the controller holds no row for. The
+    /// controller's chat for a page replaces the record's, and a controller that sends no pages
+    /// leaves the record as it is.
+    #[test]
+    fn a_page_whose_chat_is_gone_reads_as_made_in_no_chat() {
+        let (gone, kept, this) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path();
+        for folder in [
+            "sites/trashed",
+            "sites/kept",
+            "sites/unlisted",
+            "sites/moved",
+        ] {
+            std::fs::create_dir_all(ws.join(folder)).unwrap();
+        }
+        let recorded = vec![
+            page("sites/trashed", "Trashed", Some(&gone), &PAGE_SERVER),
+            page("sites/kept", "Kept", Some(&kept), &PAGE_SERVER),
+            page("sites/unlisted", "Unlisted", Some(&gone), &PAGE_SERVER),
+            page("sites/moved", "Moved", Some(&gone), &PAGE_SERVER),
+        ];
+        write_record(ws, recorded.clone());
+        let held = |ws: &Path| HeldPages::of_turn_when(true, ws, Some(&this), &[], None);
+        assert!(held(ws).holds("sites/trashed/data.json"));
+
+        // a controller from before it kept the record: nothing is taken
+        take_the_controllers_pages(ws, &json!({ "prompt_text": "hi" }));
+        take_the_controllers_pages(ws, &json!({ "space_pages": null }));
+        assert_eq!(read_record(ws).unwrap()["pages"], json!(recorded));
+
+        take_the_controllers_pages(
+            ws,
+            &leased_with(vec![
+                page("sites/trashed", "Trashed", None, &PAGE_SERVER),
+                page("sites/kept", "Kept", Some(&kept), &PAGE_SERVER),
+                page("sites/moved", "Moved", Some(&this), &PAGE_SERVER),
+            ]),
+        );
+        assert_eq!(
+            record_folders(ws),
+            [
+                ("sites/trashed".to_string(), None),
+                ("sites/kept".to_string(), Some(kept.to_string())),
+                ("sites/unlisted".to_string(), None),
+                ("sites/moved".to_string(), Some(this.to_string())),
+            ]
+        );
+        let lines = space_pages_lines(ws, Some(&this), &[]);
+        assert_eq!(
+            lines,
+            "- The space's pages:\n\
+             \x20 - \"Trashed\", in `sites/trashed/`: which chat made it isn't known.\n\
+             \x20 - \"Kept\", in `sites/kept/`: made in another chat, read-only here.\n\
+             \x20 - \"Unlisted\", in `sites/unlisted/`: which chat made it isn't known.\n\
+             \x20 - \"Moved\", in `sites/moved/`: made in this chat.\n"
+        );
+        let held = held(ws);
+        assert!(!held.holds("sites/trashed/data.json"));
+        assert!(!held.holds("sites/unlisted/data.json"));
+        assert!(!held.holds("sites/moved/data.json"));
+        assert!(held.holds("sites/kept/data.json"));
+    }
+
+    /// As a turn that may write files begins, the folders that are in the workspace are written
+    /// down, two names deep: real folders only, no hidden one and no `node_modules`. The CLI
+    /// gives a page to the chat that opens it only when its folder is not among them. A turn that
+    /// takes up an earlier attempt keeps that attempt's list: the same job leased again, or the
+    /// job it carries on.
+    #[test]
+    fn the_folders_a_turn_began_with_are_written_down() {
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path();
+        for folder in [
+            "sites/porto/data",
+            "trip",
+            ".hidden/inside",
+            "node_modules/pkg",
+            "sites/.bind",
+        ] {
+            std::fs::create_dir_all(ws.join(folder)).unwrap();
+        }
+        std::fs::write(ws.join("notes.md"), "notes\n").unwrap();
+        std::os::unix::fs::symlink(ws.join("trip"), ws.join("sites/link")).unwrap();
+        let list = |ws: &Path| -> JsonValue {
+            serde_json::from_str(
+                &std::fs::read_to_string(ws.join(PAGES_RECORD_DIR).join(TURN_FOLDERS_FILE))
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let (first, carried_on, later) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        write_down_the_turns_folders(ws, &first, None);
+        assert_eq!(
+            list(ws),
+            json!({
+                "version": 1,
+                "job": first.to_string(),
+                "folders": ["sites", "sites/porto", "trip"],
+                "complete": true,
+            })
+        );
+        assert_eq!(
+            std::fs::read(ws.join(PAGES_RECORD_DIR).join(".gitignore")).unwrap(),
+            PAGES_RECORD_IGNORE
+        );
+        // the turn makes a page; leased again after a stop, its list is the one it began with
+        std::fs::create_dir_all(ws.join("sites/framework-laptops")).unwrap();
+        write_down_the_turns_folders(ws, &first, None);
+        assert_eq!(list(ws)["folders"], json!(["sites", "sites/porto", "trip"]));
+        // so is the list of a job that carries that one on, under its own name
+        write_down_the_turns_folders(ws, &carried_on, Some(&first));
+        assert_eq!(
+            list(ws),
+            json!({
+                "version": 1,
+                "job": carried_on.to_string(),
+                "folders": ["sites", "sites/porto", "trip"],
+                "complete": true,
+            })
+        );
+        // another turn begins with the page there
+        write_down_the_turns_folders(ws, &later, Some(&first));
+        assert_eq!(
+            list(ws),
+            json!({
+                "version": 1,
+                "job": later.to_string(),
+                "folders": ["sites", "sites/framework-laptops", "sites/porto", "trip"],
+                "complete": true,
+            })
+        );
+    }
+
+    /// Holding is on unless the runtime's setting switches it off. Off, a turn holds nothing: a
+    /// change to another chat's page stays, a file returned for it is written, and the reply is
+    /// the model's. The turn is still told which chat made each page.
+    #[tokio::test]
+    async fn with_holding_switched_off_nothing_is_held_or_put_back() {
+        for on in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("true"),
+            Some("on"),
+            Some("anything"),
+        ] {
+            assert!(holding_reads_on(on), "{on:?}");
+        }
+        for off in ["0", "false", "off", "no", " OFF ", "False"] {
+            assert!(!holding_reads_on(Some(off)), "{off}");
+        }
+        let (this, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let workspace = space_with_two_pages(&this, &other);
+        let ws = workspace.path();
+        let start = super::super::collect_git_status_porcelain(ws)
+            .await
+            .unwrap();
+        let their_data = ws.join("sites/framework-laptops/data.json");
+
+        let mut off = HeldPages::of_turn_when(false, ws, Some(&this), &[], Some(&start));
+        assert!(!off.holds("sites/framework-laptops/data.json"));
+        std::fs::write(&their_data, "{\"items\":[]}\n").unwrap();
+        off.put_back(
+            ws,
+            Some(&start),
+            TurnSteps::of_events(ws, &[edit_step("sites/framework-laptops/data.json")]),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(&their_data).unwrap(),
+            "{\"items\":[]}\n"
+        );
+        let mut files = vec![returned_file(
+            "sites/framework-laptops/data.json",
+            Some("{}\n"),
+        )];
+        off.leave_out_returned(ws, &mut files);
+        off.leave_out_held(&mut files);
+        assert_eq!(files.len(), 1);
+        assert!(!off.changed_a_page());
+        assert_eq!(off.reply_line(), None);
+        assert_eq!(off.artifact(), None);
+        let mut reply = "I emptied the comparison.".to_string();
+        off.reply(&mut reply, &files);
+        assert_eq!(reply, "I emptied the comparison.");
+        assert!(space_pages_lines(ws, Some(&this), &[]).contains(
+            "\"Framework Laptop 12, 13 and 16\", in `sites/framework-laptops/`: made in another chat, read-only here."
+        ));
+
+        // switched on, the same change goes back
+        let mut on = HeldPages::of_turn_when(true, ws, Some(&this), &[], Some(&start));
+        on.put_back(
+            ws,
+            Some(&start),
+            TurnSteps::of_events(ws, &[edit_step("sites/framework-laptops/data.json")]),
+        )
+        .await;
+        assert_eq!(std::fs::read_to_string(&their_data).unwrap(), THEIRS);
+        assert_eq!(on.reply_line().as_deref(), Some(NOT_CHANGED));
+    }
+
     fn returned_file(path: &str, content: Option<&str>) -> CodexFileDescriptor {
         CodexFileDescriptor {
             path: path.to_string(),
@@ -1258,7 +2510,7 @@ mod tests {
         held.leave_out_returned(workspace.path(), &mut files);
         let kept: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
         assert_eq!(kept, ["sites/framework-13-16/data.json"]);
-        assert!(held.put_a_change_back());
+        assert!(held.changed_a_page());
         assert_eq!(
             held.reply_line().as_deref(),
             Some("I didn't change “Framework Laptop 12, 13 and 16”: it was made in another chat.")
@@ -1282,7 +2534,7 @@ mod tests {
         )];
         quiet.leave_out_returned(workspace.path(), &mut own);
         assert_eq!(own.len(), 1);
-        assert!(!quiet.put_a_change_back());
+        assert!(!quiet.changed_a_page());
         assert_eq!(quiet.reply_line(), None);
         assert_eq!(quiet.artifact(), None);
     }
@@ -1606,10 +2858,64 @@ mod tests {
         ));
     }
 
-    /// The steps a run's events carry: the paths its edit steps named, as workspace paths, and the
-    /// commands that may write. A read-only command names nothing the turn changed. A command names
-    /// a page by its folder or its own name as a whole part of a path, never a longer name that
-    /// starts the same.
+    /// A command of a run that its event says ran in `cwd`.
+    fn command_step_in(cwd: &Path, command: &str) -> JsonValue {
+        let mut step = command_step(command);
+        step["item"]["cwd"] = json!(cwd);
+        step
+    }
+
+    /// The folder a command ran in as a run's events give it: a path of the workspace, `.` for
+    /// the workspace itself, and null for a folder outside it, where a name alone leads nowhere.
+    #[test]
+    fn a_commands_folder_is_read_as_the_runs_events_give_it() {
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path();
+        let ran_in = |cwd: JsonValue, command: &str| {
+            let mut step = command_step(command);
+            step["item"]["cwd"] = cwd;
+            step
+        };
+        let page = "sites/porto";
+        assert!(reaches(
+            ws,
+            ran_in(json!("sites/porto"), "rm data.json"),
+            page
+        ));
+        assert!(reaches(ws, ran_in(json!("sites"), "rm -rf porto"), page));
+        assert!(reaches(ws, ran_in(json!("."), "rm -rf sites/porto"), page));
+        assert!(!reaches(ws, ran_in(json!("."), "rm -rf porto"), page));
+        assert!(!reaches(ws, ran_in(json!("sites"), "rm -rf braga"), page));
+        // outside the workspace: a path of its own leads nowhere, and one that spells the
+        // page's folder out still counts
+        assert!(!reaches(ws, ran_in(JsonValue::Null, "rm -rf porto"), page));
+        assert!(reaches(
+            ws,
+            ran_in(JsonValue::Null, "rm -rf space/sites/porto/data.json"),
+            page
+        ));
+        let abs = format!("rm -rf {}/sites/porto", ws.display());
+        assert!(reaches(ws, ran_in(JsonValue::Null, &abs), page));
+    }
+
+    /// A command of a run with its own words, run with no shell.
+    fn exec_step(argv: &[&str]) -> JsonValue {
+        json!({"type": "item.completed", "item": {
+            "id": "command", "type": "command_execution", "command": argv.join(" "),
+            "command_argv": argv, "status": "completed",
+        }})
+    }
+
+    /// Whether a run of the one `step` reached the page in `folder`.
+    fn reaches(ws: &Path, step: JsonValue, folder: &str) -> bool {
+        TurnSteps::of_events(ws, &[step]).reached(&format!("{folder}/data.json"), folder)
+    }
+
+    /// The steps a run's events carry: the paths its edit steps named, as workspace paths, and
+    /// where its commands that may write pointed. A read-only command reaches nothing the turn
+    /// changed. A command reaches a page by a path in its folder, never by a longer name that
+    /// starts the same, and an edit step's path that the workspace's own spelling doesn't hold
+    /// still reaches the folder it spells out.
     #[test]
     fn a_turns_steps_reach_what_they_name() {
         let workspace = tempfile::tempdir().unwrap();
@@ -1620,6 +2926,7 @@ mod tests {
                 edit_step(&ws.join("sites/porto/data.json").display().to_string()),
                 edit_step("./sites/seville/index.html"),
                 command_step("cat sites/lisbon/data.json"),
+                command_step("cat docs/readme.md"),
                 command_step("rg -n price sites/faro"),
                 json!({"type": "item.started", "item": {
                     "id": "c2", "type": "command_execution",
@@ -1638,11 +2945,467 @@ mod tests {
         assert!(!steps.reached("sites/madrid/data.json", "sites/madrid"));
         assert!(steps.reached("sites/braga/index.html", "sites/braga"));
         assert!(TurnSteps::unknown().reached("sites/any/file", "sites/any"));
-        assert!(names_folder("/workspace/sites/porto/x", "sites/porto"));
-        assert!(names_folder("'sites/porto'", "sites/porto"));
-        assert!(!names_folder("sites/porto-2/x", "sites/porto"));
-        assert!(!names_folder("porto.pt", "sites/porto"));
-        assert!(!names_folder("transporto", "sites/porto"));
+        // the page as a whole: an edit step named a path in it, which a command never does
+        assert!(steps.edited_in("sites/porto"));
+        assert!(steps.edited_in("sites/seville"));
+        assert!(!steps.edited_in("sites/braga"));
+        assert!(!steps.edited_in("sites/lisbon"));
+        assert!(!TurnSteps::unknown().edited_in("sites/porto"));
+        // a path in no page: the one an edit step named, one a command named, one in a folder a
+        // command ran in, and never one a command only read
+        assert!(steps.reached_path("sites/porto/data.json"));
+        assert!(steps.reached_path("sites/madrid-2/data.json"));
+        assert!(steps.reached_path("sites/braga/index.html"));
+        assert!(steps.reached_path("sites/new-in-the-folder-it-ran-in.txt"));
+        assert!(!steps.reached_path("docs/readme.md"));
+        assert!(!steps.reached_path("notes.md"));
+        assert!(TurnSteps::unknown().reached_path("notes.md"));
+
+        let elsewhere = TurnSteps::of_events(
+            ws,
+            &[
+                edit_step("/elsewhere/sites/porto/data.json"),
+                edit_step("/elsewhere/trip/data.json"),
+            ],
+        );
+        assert!(elsewhere.reached("sites/porto/app.js", "sites/porto"));
+        assert!(elsewhere.reached("trip/app.js", "trip"));
+        assert!(!elsewhere.reached("sites/porto-2/app.js", "sites/porto-2"));
+        // a folder of one part is spelled out only by a path in it
+        assert!(!elsewhere.reached("data.json/app.js", "data.json"));
+        assert!(elsewhere.reached_path("sites/porto/data.json"));
+        assert!(!elsewhere.reached_path("sites/porto/app.js"));
+        assert_eq!(
+            parts_after_run("/elsewhere/sites/porto/x", "sites/porto"),
+            Some(1)
+        );
+        assert_eq!(parts_after_run("./sites/porto/", "sites/porto"), Some(0));
+        assert_eq!(parts_after_run("sites/porto-2/x", "sites/porto"), None);
+        assert_eq!(parts_after_run("transporto/x", "porto"), None);
+    }
+
+    /// A command reaches the page it refers to as a shell would read it: a path in the page's
+    /// folder, read against the folder the command is in (`cd`, the folder its event names), a
+    /// folder that holds the page, a pattern that starts in one, and a path written in a script,
+    /// a heredoc or a shell's own script. A path to another folder, or out of the workspace,
+    /// reaches nothing of the page.
+    #[test]
+    fn a_command_reaches_the_paths_it_refers_to() {
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path();
+        let page = "sites/porto";
+        for command in [
+            "rm -rf sites/porto/data.json",
+            "rm -rf ./sites/porto/",
+            "printf '{}' > sites/porto/data.json",
+            "printf '{}' >> 'sites/porto/data.json'",
+            "uw build &> sites/porto/build.log",
+            "rm -rf \"sites/porto\"/data.json",
+            "node build.js --out=sites/porto/data.json",
+            "OUT=sites/porto node build.js",
+            // the folder the command is in
+            "cd sites && rm -rf porto",
+            "cd sites/porto && npm run build",
+            "cd sites; cd porto; rm data.json",
+            "cd sites/braga && rm -rf ../porto/data.json",
+            "pushd sites/porto >/dev/null && rm data.json",
+            "{ cd sites/porto; rm data.json; }",
+            "if cd sites/porto; then rm data.json; fi",
+            // a folder that holds the page, and a pattern that starts in one
+            "rm -rf sites",
+            "mv sites old-sites",
+            "sed -i s/12/13/ sites/*/data.json",
+            "cd sites && rm -rf *",
+            // a path written in a script, in a heredoc, in a shell's own script
+            "python3 -c \"import json; json.dump({}, open('sites/porto/data.json', 'w'))\"",
+            "python3 - <<'PY'\nopen('sites/porto/data.json', 'w').write('{}')\nPY",
+            "cat > sites/porto/data.json <<EOF\n{\"title\": \"Lisbon\"}\nEOF",
+            "bash -c 'cd sites/porto && rm data.json'",
+            "sudo sh -c \"rm -rf sites/porto\"",
+            // from a folder that can't be read, a path that still spells the folder out
+            "cd \"$WORK\" && rm -rf sites/porto/data.json",
+            "rm -rf \"$PWD/sites/porto\"",
+            "rm -rf /elsewhere/sites/porto/data.json",
+        ] {
+            assert!(reaches(ws, command_step(command), page), "{command}");
+        }
+        // an absolute path of the workspace, as given and with its links followed
+        let real = std::fs::canonicalize(ws).unwrap();
+        for dir in [ws, real.as_path()] {
+            let command = format!("rm -f {}/sites/porto/data.json", dir.display());
+            assert!(reaches(ws, command_step(&command), page), "{command}");
+            // the folder the event says the command ran in
+            assert!(reaches(
+                ws,
+                command_step_in(&dir.join("sites/porto"), "rm data.json"),
+                page
+            ));
+            assert!(reaches(
+                ws,
+                command_step_in(&dir.join("sites"), "rm -rf porto"),
+                page
+            ));
+            assert!(!reaches(
+                ws,
+                command_step_in(&dir.join("sites"), "rm -rf braga"),
+                page
+            ));
+        }
+        // the folder the event names through a link to the workspace
+        std::fs::create_dir_all(ws.join("sites/porto")).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let link = elsewhere.path().join("space");
+        std::os::unix::fs::symlink(ws, &link).unwrap();
+        assert!(reaches(
+            ws,
+            command_step_in(&link.join("sites/porto"), "rm data.json"),
+            page
+        ));
+        // a command with its own words, run with no shell
+        assert!(reaches(ws, exec_step(&["rm", "-rf", "sites/porto"]), page));
+        assert!(reaches(
+            ws,
+            exec_step(&["env", "bash", "-lc", "cd sites/porto && rm data.json"]),
+            page
+        ));
+        assert!(!reaches(ws, exec_step(&["rm", "-rf", "sites/braga"]), page));
+
+        for command in [
+            "rm -rf sites/porto-2",
+            "rm -rf sites/braga",
+            "cd sites && rm -rf braga",
+            "cd sites && cd braga && rm data.json",
+            "cd sites/porto/.. && rm -rf braga",
+            // out of the workspace, or from a folder outside it
+            "rm -rf ../sites/porto",
+            "cd /tmp && rm -rf porto",
+            "cd \"$WORK\" && rm -rf porto",
+            // a file of that name somewhere else
+            "mkdir -p sites/porto-notes && touch porto",
+            "printf x > notes/porto",
+        ] {
+            assert!(!reaches(ws, command_step(command), page), "{command}");
+        }
+        // a page in a folder at the top of the workspace
+        assert!(reaches(ws, command_step("rm -rf trip"), "trip"));
+        assert!(reaches(ws, command_step("uw validate ./trip/"), "trip"));
+        assert!(reaches(
+            ws,
+            command_step("python3 -c \"open('trip/data.json', 'w')\""),
+            "trip"
+        ));
+        assert!(!reaches(ws, command_step("rm -rf trips"), "trip"));
+        assert!(!reaches(
+            ws,
+            command_step("rm -rf /elsewhere/trip/data.json"),
+            "trip"
+        ));
+    }
+
+    /// A word a command only says is no path. A search for "porto travel guide" named the page in
+    /// `sites/porto` when a folder's name anywhere in a command counted: what that page's own
+    /// server saved while the turn ran went back, and the line about the page took the place of
+    /// the turn's reply. Nor is an address a path, or a word in a sentence, a commit's message, a
+    /// script or a heredoc.
+    #[test]
+    fn a_word_a_command_only_says_is_no_path() {
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path();
+        let said = |command: &str, folder: &str| {
+            // a command that may write, so one that is read
+            let argv: Vec<String> = ["bash", "-lc", command].map(str::to_string).to_vec();
+            assert!(
+                !super::super::known_safe_command::is_known_safe_command(&argv),
+                "{command}"
+            );
+            assert!(!reaches(ws, command_step(command), folder), "{command}");
+        };
+        for command in [
+            "instafy search \"porto travel guide\"",
+            "instafy search porto",
+            "instafy search 'porto' --limit 3",
+            "curl -s \"https://example.com/search?q=porto\" -o found.json",
+            "curl -s https://example.com/sites/porto/index.html -o found.html",
+            "curl -s \"https://example.com/sites/porto/ and the rest\" -o found.html",
+            "uw note \"the porto page reads well\"",
+            "git commit -m \"porto: a new introduction\"",
+            "python3 -c \"print('porto')\" > notes.txt",
+            "uw note <<EOF\nporto\nsites and porto\nEOF",
+        ] {
+            said(command, "sites/porto");
+        }
+        // a page in a folder at the top of the workspace is one word, and a sentence with that
+        // word in it still names no path
+        for command in [
+            "uw search \"a trip to Lisbon\"",
+            "uw search \"trip ideas\" --save notes/found.md",
+            "curl -s \"https://example.com/trip/\" -o found.html",
+            "git commit -m \"trip\nplans\"",
+        ] {
+            said(command, "trip");
+        }
+    }
+
+    /// The whole path: while a turn that only searches runs, the other chat's page's own server
+    /// saves a viewer's click and a new record. The search says the page's name and reaches
+    /// nothing of it, so both stay, nothing is put back, and the turn's reply is its own.
+    #[tokio::test]
+    async fn a_search_that_says_a_pages_name_puts_nothing_of_the_page_back() {
+        let (this, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let workspace = space_with_two_pages(&this, &other);
+        let ws = workspace.path();
+        let start = super::super::collect_git_status_porcelain(ws)
+            .await
+            .unwrap();
+        let mut held = HeldPages::of_turn(ws, Some(&this), &[], Some(&start));
+
+        let click = "[{\"ref\":\"laptop:12\",\"price\":\"999\"}]\n";
+        let records = ws.join("sites/framework-laptops/data/records");
+        std::fs::write(records.join("read_offer.json"), click).unwrap();
+        std::fs::write(records.join("read_review.json"), "[]\n").unwrap();
+        let steps = TurnSteps::of_events(
+            ws,
+            &[
+                command_step("instafy search \"framework-laptops weight\""),
+                command_step(
+                    "curl -s \"https://example.com/search?q=framework-laptops\" -o found.json",
+                ),
+            ],
+        );
+        held.put_back(ws, Some(&start), steps).await;
+
+        assert_eq!(
+            std::fs::read_to_string(records.join("read_offer.json")).unwrap(),
+            click
+        );
+        assert_eq!(
+            std::fs::read_to_string(records.join("read_review.json")).unwrap(),
+            "[]\n"
+        );
+        assert!(held.changed.is_empty() && held.restored.is_empty());
+        assert!(!held.changed_a_page());
+        assert_eq!(held.reply_line(), None);
+        assert_eq!(held.artifact(), None);
+        let mut reply = "Here is what I found.".to_string();
+        held.reply(&mut reply, &[]);
+        assert_eq!(reply, "Here is what I found.");
+    }
+
+    const NOT_PUT_BACK: &str = "I changed “Framework Laptop 12, 13 and 16” and couldn't put it back as it was: it was made in another chat, and that change is not saved.";
+    const NOT_CHECKED: &str = "I may have changed “Framework Laptop 12, 13 and 16” and couldn't check it or put it back: it was made in another chat.";
+
+    /// A change that could not go back is said in the reply, never only logged. Here the other
+    /// chat's file was not saved when the turn began and was too large for the turn to keep, so
+    /// its bytes can't go back: the page is left changed and not saved. The line says so under
+    /// the model's reply, never in its place (the change can be seen), and the turn has its
+    /// result, so its reply never ends "Nothing was changed.". With a saved file of the page
+    /// changed too, that one goes back and the line still says the page is not as it was.
+    #[tokio::test]
+    async fn a_change_that_could_not_go_back_is_said_in_the_reply() {
+        let (this, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let workspace = space_with_two_pages(&this, &other);
+        let ws = workspace.path();
+        let export = ws.join("sites/framework-laptops/export.bin");
+        std::fs::write(&export, vec![b'a'; MAX_KEPT_FILE_BYTES as usize + 1]).unwrap();
+        let start = super::super::collect_git_status_porcelain(ws)
+            .await
+            .unwrap();
+        let mut held = HeldPages::of_turn(ws, Some(&this), &[], Some(&start));
+
+        std::fs::write(&export, "mine\n").unwrap();
+        held.put_back(
+            ws,
+            Some(&start),
+            TurnSteps::of_events(
+                ws,
+                &[command_step(
+                    "printf 'mine\\n' > sites/framework-laptops/export.bin",
+                )],
+            ),
+        )
+        .await;
+        assert_eq!(std::fs::read_to_string(&export).unwrap(), "mine\n");
+        assert!(held.restored.is_empty(), "{:?}", held.restored);
+        assert_eq!(
+            held.left().collect::<Vec<_>>(),
+            ["sites/framework-laptops/export.bin"]
+        );
+        assert_eq!(held.reply_line().as_deref(), Some(NOT_PUT_BACK));
+        assert!(held.changed_a_page());
+        let mut reply = "I rewrote the export.".to_string();
+        held.reply(&mut reply, &[]);
+        assert_eq!(reply, format!("I rewrote the export.\n\n{NOT_PUT_BACK}"));
+
+        // a second run of the turn changes a saved file of the page too: that one goes back
+        std::fs::write(ws.join("sites/framework-laptops/data.json"), "{}").unwrap();
+        held.put_back(
+            ws,
+            Some(&start),
+            TurnSteps::of_events(ws, &[edit_step("sites/framework-laptops/data.json")]),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(ws.join("sites/framework-laptops/data.json")).unwrap(),
+            THEIRS
+        );
+        assert_eq!(std::fs::read_to_string(&export).unwrap(), "mine\n");
+        assert_eq!(
+            held.restored,
+            BTreeSet::from(["sites/framework-laptops/data.json".to_string()])
+        );
+        assert_eq!(held.reply_line().as_deref(), Some(NOT_PUT_BACK));
+        let mut reply = "I rewrote the export and the data.".to_string();
+        held.reply(
+            &mut reply,
+            &[returned_file("sites/framework-13-16/index.html", None)],
+        );
+        assert_eq!(
+            reply,
+            format!("I rewrote the export and the data.\n\n{NOT_PUT_BACK}")
+        );
+        let artifact = held.artifact().unwrap();
+        assert_eq!(artifact["kind"], "write-scope/read-only-blocked");
+        assert_eq!(
+            artifact["metadata"]["changedPaths"],
+            json!([
+                "sites/framework-laptops/data.json",
+                "sites/framework-laptops/export.bin"
+            ])
+        );
+        assert_eq!(
+            artifact["metadata"]["restoredPaths"],
+            json!(["sites/framework-laptops/data.json"])
+        );
+    }
+
+    /// When the folder's status could not be read, nothing says what a turn changed in another
+    /// chat's page and nothing can put it back. A page an edit step of the turn named a path in
+    /// is then said in the reply as one it may have changed. A turn whose edit steps named only
+    /// its own page says nothing, and neither does a command that pointed at the page: it may
+    /// only have read it.
+    #[tokio::test]
+    async fn a_page_nothing_could_check_is_said_in_the_reply() {
+        let (this, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let workspace = space_with_two_pages(&this, &other);
+        let ws = workspace.path();
+        let mut held = HeldPages::of_turn(ws, Some(&this), &[], None);
+
+        held.put_back(
+            ws,
+            None,
+            TurnSteps::of_events(
+                ws,
+                &[
+                    edit_step("sites/framework-13-16/data.json"),
+                    command_step("instafy search \"framework-laptops weight\""),
+                    command_step("python3 tools/summarize.py sites/framework-laptops/data.json"),
+                ],
+            ),
+        )
+        .await;
+        assert!(!held.changed_a_page());
+        assert_eq!(held.reply_line(), None);
+        assert_eq!(held.artifact(), None);
+
+        std::fs::write(ws.join("sites/framework-laptops/data.json"), "{}").unwrap();
+        held.put_back(
+            ws,
+            None,
+            TurnSteps::of_events(ws, &[edit_step("sites/framework-laptops/data.json")]),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(ws.join("sites/framework-laptops/data.json")).unwrap(),
+            "{}"
+        );
+        assert!(held.changed_a_page());
+        assert_eq!(held.reply_line().as_deref(), Some(NOT_CHECKED));
+        let mut reply = "I added each one's weight.".to_string();
+        held.reply(&mut reply, &[]);
+        assert_eq!(
+            reply,
+            format!("I added each one's weight.\n\n{NOT_CHECKED}")
+        );
+        let artifact = held.artifact().unwrap();
+        assert_eq!(
+            artifact["metadata"]["uncheckedPaths"],
+            json!(["sites/framework-laptops/"])
+        );
+        // a reading of the folder's status says what changed since: nothing is unknown then
+        let now = super::super::collect_git_status_porcelain(ws)
+            .await
+            .unwrap();
+        held.put_back(ws, Some(&now), TurnSteps::default()).await;
+        assert_eq!(held.reply_line(), None);
+    }
+
+    /// Each line names every page it is about, once, and a page is in one line only: the one
+    /// that says the most about it. A page with no title is "a page".
+    #[tokio::test]
+    async fn the_lines_name_each_page_once_by_what_became_of_its_change() {
+        let (this, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path();
+        for folder in ["sites/porto", "sites/lisbon", "sites/faro", "sites/braga"] {
+            std::fs::create_dir_all(ws.join(folder)).unwrap();
+        }
+        write_record(
+            ws,
+            vec![
+                page("sites/porto", "Porto", Some(&other), &PAGE_SERVER),
+                page("sites/lisbon", "Lisbon", Some(&other), &PAGE_SERVER),
+                page("sites/faro", "", Some(&other), &PAGE_SERVER),
+                page("sites/braga", "Braga", Some(&other), &PAGE_SERVER),
+            ],
+        );
+        // nothing could check: every held page an edit step named a path in. A run that kept
+        // no record of its steps names none.
+        let mut held = HeldPages::of_turn(ws, Some(&this), &[], None);
+        held.put_back(ws, None, TurnSteps::unknown()).await;
+        assert_eq!(held.reply_line(), None);
+        held.put_back(
+            ws,
+            None,
+            TurnSteps::of_events(
+                ws,
+                &[
+                    edit_step("sites/porto/data.json"),
+                    edit_step("sites/lisbon/data.json"),
+                    edit_step("sites/faro/index.html"),
+                    edit_step(&ws.join("sites/braga/data.json").display().to_string()),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(
+            held.reply_line().as_deref(),
+            Some(
+                "I may have changed “Porto”, “Lisbon”, a page and “Braga” and couldn't check them or put them back: each was made in another chat."
+            )
+        );
+        // two pages with a change that did not go back (one of them in part), one nothing could
+        // check, and one that is as it was
+        let mut held = HeldPages::of_turn(ws, Some(&this), &[], None);
+        let paths = |paths: &[&str]| -> BTreeSet<String> {
+            paths.iter().map(|path| path.to_string()).collect()
+        };
+        held.changed = paths(&[
+            "sites/porto/data.json",
+            "sites/porto/app.js",
+            "sites/lisbon/data.json",
+            "sites/braga/data.json",
+        ]);
+        held.restored = paths(&["sites/porto/app.js", "sites/braga/data.json"]);
+        held.unchecked = paths(&["sites/faro", "sites/porto"]);
+        let lines = [
+            "I changed “Lisbon” and “Porto” and couldn't put them back as they were: each was made in another chat, and those changes are not saved.",
+            "I may have changed a page and couldn't check it or put it back: it was made in another chat.",
+            "I didn't change “Braga”: it was made in another chat.",
+        ];
+        assert_eq!(held.reply_line(), Some(lines.join(" ")));
+        let mut reply = "Done.".to_string();
+        held.reply(&mut reply, &[]);
+        assert_eq!(reply, format!("Done.\n\n{}", lines.join("\n\n")));
     }
 
     /// When the turn's change to another chat's page was all it changed, the runtime's line is its
