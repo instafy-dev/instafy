@@ -4754,9 +4754,8 @@ const POINT_AT_CONTROL_MS = 1_000;
 // writes its words there and draws its list after). True when the page still
 // reads as it did then, which the step's result says (PAGE_UNCHANGED). Its
 // fields count with its text, so a step that only changed a field (an option
-// chosen, a box checked) does not wait. Nor does a link to a part of the page
-// it is on (`part`, samePagePartOf): it loads nothing.
-async function settleAfterAction(page, before = null, part = null) {
+// chosen, a box checked) does not wait.
+async function settleAfterAction(page, before = null) {
   const settle = async () => {
     await page.waitForLoadState("domcontentloaded", { timeout: 8_000 }).catch(() => {});
     await page.waitForTimeout(250).catch(() => {});
@@ -4774,10 +4773,6 @@ async function settleAfterAction(page, before = null, part = null) {
     const current = before.documentId === null ? null : await documentOf(page);
     return current === null ? unknown : current !== before.documentId;
   };
-  // The link did all it does once the address names that part of the same
-  // document, so the step neither looks again nor says the page reads as it
-  // did.
-  if (part && before.url !== part && page.url() === part && !(await newDocument(true))) return false;
   const until = Date.now() + UNCHANGED_LOOK_MS;
   for (let looks = 0; ; looks += 1) {
     // Another address is another page, unless the browser says the document
@@ -4798,57 +4793,6 @@ async function settleAfterAction(page, before = null, part = null) {
     if (last) return true;
     await page.waitForTimeout(UNCHANGED_EVERY_MS).catch(() => {});
   }
-}
-
-// Runs inside the page. Whether `fragment`, as written or decoded, names a
-// part of the element's own document: an element by its id or an anchor by
-// its name.
-function namesPartInPage(element, fragment) {
-  try {
-    const doc = element.ownerDocument;
-    const names = [String(fragment || "")];
-    try {
-      const decoded = decodeURIComponent(names[0]);
-      if (decoded !== names[0]) names.push(decoded);
-    } catch (_) {
-      // A fragment that does not decode is looked up as written.
-    }
-    const anchors = Array.from(Document.prototype.querySelectorAll.call(doc, "a[name]")).slice(0, 2_000);
-    return names.some((name) => name !== "" && (
-      Document.prototype.getElementById.call(doc, name) !== null ||
-      anchors.some((anchor) => anchor.getAttribute("name") === name)
-    ));
-  } catch (_) {
-    return false;
-  }
-}
-
-// The address a click on a link to a part of the page it is on leaves the
-// page at: the link's own (`destination`), when it differs from the page's
-// only after the "#" and names a part the document has. Null for any other
-// control, and for a link whose "#" names no part ("#", "#/inbox"): a page's
-// script may draw a view for it, which the step still looks for. A step
-// waited 3 s on such a link and said the page read as before, though the
-// link had done all it does.
-async function samePagePartOf(page, target, destination) {
-  if (!destination || !target.description.href) return null;
-  let fragment;
-  try {
-    const link = new URL(destination);
-    const here = new URL(page.url());
-    fragment = link.hash.slice(1);
-    link.hash = "";
-    here.hash = "";
-    if (!fragment || link.toString() !== here.toString()) return null;
-  } catch (_) {
-    return null;
-  }
-  const named = await within(
-    FIELD_READ_MS,
-    (async () => target.locator.evaluate(namesPartInPage, fragment))().catch(() => false),
-    false,
-  );
-  return named === true ? destination : null;
 }
 
 function resolvedTargetDestination(description, currentUrl) {
@@ -6513,9 +6457,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       ...size,
     });
     const beforeUrl = page.url();
-    const part = await samePagePartOf(page, target, rawDestination);
     const before = await clickControlItself(page, target);
-    const unchanged = await settleAfterAction(page, before, part);
+    const unchanged = await settleAfterAction(page, before);
     page = await resolveExpectedPage(browser);
     await page.bringToFront();
     const moved = page.url() !== beforeUrl;
@@ -6726,15 +6669,13 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // The option the list holds already takes no step: nothing is chosen, so
     // nobody is asked and the answer does not wait for the page to change. A
     // turn chose the option a list held, got the sentence of a page that
-    // reads as before, and wrote that the page showed no result. A step that
-    // withholds its page goes on as any other.
+    // reads as before, and wrote that the page showed no result. It says
+    // nothing of the list's form: the page a sent form came back with holds
+    // the option too, and there "Nothing was sent yet." was false. A step
+    // that withholds its page goes on as any other.
     if (option.selected && !WITHHOLDING_CATEGORIES.has(step.category)) {
-      const unsent = await unsentFormLine(page, target, documents);
       return withActivity(
-        {
-          ...await snapshotAfterStep(page, false),
-          done: [chosenLine(option.label, listName, true), unsent].filter(Boolean).join(" "),
-        },
+        { ...await snapshotAfterStep(page, false), done: chosenLine(option.label, listName, true) },
         stepActivity(page, "snapshot", readingApproval()),
       );
     }

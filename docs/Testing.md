@@ -1667,7 +1667,8 @@ routine browsing it chooses a start and an end station by label with no prompt
 and nothing sent, the planner's own button asks once and the route is read; a
 choose says what it chose and, in a form that was not sent, that nothing was
 sent yet, naming the form's button with the words about a prompt only where a
-press of it needs none, and the option a list already holds says so at once; a
+press of it needs none, and the option a list already holds says only that, at
+once, on the page a sent form came back with too; a
 list is named by its own label or the option it holds; a list the page posts
 when it changes reaches only the page's own site; the same planner under a
 carousel that turns by itself between every snapshot and the step after it
@@ -1775,10 +1776,11 @@ prompt. A click whose route the page draws in place 1.5 s later reads it,
 after a hidden field, a tip on hover, a suggestion a field drops as it loses
 focus or the address changed first, one whose page still reads as before a few
 seconds on says so, and a click that changes the page, shows a section, menu,
-drawer or carousel item in place, turns a switch on, opens a page, loads the
-same one again or follows a link to a part of the page it is on, a type step, a
-choice and a choice of the option already chosen answer at once; a search typed
-and not sent says nothing was searched yet. The Personal
+drawer or carousel item in place, turns a switch on, opens a page or loads the
+same one again, a type step, a choice and a choice of the option already chosen
+answer at once; a link to a part of the page already in view is read with the
+words the page draws for it 1.2 s later; a search typed and not sent says
+nothing was searched yet. The Personal
 Browser's page bridge, host and redaction have unit tests for the same frames,
 pictures, cut line, states, names, codes and count.
 

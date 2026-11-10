@@ -2006,11 +2006,10 @@ hidden field a page fills as it works; the states the reading gives its
 controls (checked, pressed, selected, open); and where the page is scrolled
 to, as one digest the page works out itself. So a step that only changed a
 field (an option chosen, a box checked), turned a switch on or scrolled the
-page answers at once. So does a click on a link to a part of the page it is
-on, once the address names that part of the same document: it loads nothing,
-and a step waited on one and said the page read as before. A link whose "#"
-names no part of the page ("#", "#/inbox") still looks again: a script may
-draw a view for it. Whether a control is turned off is left out: a button
+page answers at once. A link to a part of the page it is on is a click like
+any other: one that moves nothing but the address is looked at again, since a
+page may draw that part a moment after its address names it. Whether a
+control is turned off is left out: a button
 that turns itself off while its result loads would read as that result. A
 click reads the page with the pointer over its control and the focus on it
 first, as the press is about to put them, and a key with the focus on its
@@ -2092,7 +2091,8 @@ step's own test ("Nothing was sent yet: the form's button is "Search"
 named. What to do about an unsent form is the browser skill's to say, not the
 step's. The option a list already holds takes no step: the answer is
 ""Aliados" was already chosen.", at once, with no prompt and no second look
-at the page.
+at the page. It says nothing of the list's form: the page a sent form comes
+back with holds the option too, and the step cannot tell the two apart.
 
 What the text cannot hold is named where a person sees it: a frame (an
 `iframe`, `frame`, `object` or `embed`) as "[frame not read: <site>]", by the

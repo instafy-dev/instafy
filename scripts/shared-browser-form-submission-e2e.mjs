@@ -123,9 +123,12 @@ document.getElementById("moving").addEventListener("keydown", (event) => {
 // A site's own search box: a GET of the page's own origin.
 const SEARCH = `<h1>Places</h1>
 <form action="/search" method="get" role="search"><input type="search" name="q" aria-label="Search places"><input type="hidden" name="lang" value="en"><button>Search</button></form>`;
-// The same search with a list beside its box.
+// The same search with a list beside its box, and the page it comes back
+// with: the same form, holding the option that was sent, over its result.
 const FINDER = `<h1>Places</h1>
 <form action="/search" method="get" role="search"><label for="kind">Kind</label><select id="kind" name="kind"><option>Any</option><option>Cafes</option></select><input type="search" name="q" aria-label="Search places"><input type="hidden" name="lang" value="en"><button>Search</button></form>`;
+const FOUND = `${FINDER.replace("<option>Cafes</option>", "<option selected>Cafes</option>")}
+<p>Result: 3 places of kind Cafes.</p>`;
 // Search boxes that still ask, or are refused, under routine browsing, and one
 // whose page turns the search into a post when Enter is pressed.
 const SEARCH_CHECKS = `<h1>Searches</h1>
@@ -337,6 +340,8 @@ export async function runSharedBrowserFormSubmissionFixture() {
         response.end(page("Places", fill(SEARCH)));
       } else if (url.pathname === "/scenario/finder") {
         response.end(page("Places", fill(FINDER)));
+      } else if (url.pathname === "/search" && url.searchParams.get("kind") === "Cafes") {
+        response.end(page("Places", fill(FOUND)));
       } else if (url.pathname === "/scenario/search-checks") {
         response.end(page("Searches", fill(SEARCH_CHECKS)));
       } else if (url.pathname === "/scenario/planner") {
@@ -706,8 +711,8 @@ export async function runSharedBrowserFormSubmissionFixture() {
     // list, that nothing was sent, and the form's button, with the words about
     // a prompt only where a press of that button needs none (the test b' goes
     // by). A turn chose a stop, read the page as it was and chose again. The
-    // option the list already holds answers the same way, chooses nothing and
-    // asks nothing.
+    // option the list already holds says only that, chooses nothing and asks
+    // nothing.
     await runPage.goto(`${sites().mall}/scenario/finder`);
     snapshot = await ok("GET", "/v1/snapshot");
     start = prompts.length;
@@ -717,13 +722,21 @@ export async function runSharedBrowserFormSubmissionFixture() {
     assert.equal(kind.done, `Chose "Cafes" in "Kind". ${unsentWords}`);
     assert.equal(kind.activity.step, "choose");
     kind = await ok("POST", "/v1/choose", { index: control(kind, "Kind").index, snapshotId: kind.snapshotId, option: "Cafes" });
-    assert.equal(kind.done, `"Cafes" was already chosen. ${unsentWords}`);
+    assert.equal(kind.done, "\"Cafes\" was already chosen.");
     assert.equal(kind.activity.step, "snapshot", "Nothing was chosen, so the step is a reading");
     assert.equal(control(kind, "Kind").chosen, "Cafes");
     assert.deepEqual(searches, [], "Choosing sent nothing");
     searched = await ok("POST", "/v1/click", { index: control(kind, "Search").index, snapshotId: kind.snapshotId });
     assert.deepEqual(promptsSince(start), [], "Neither the chooses nor the button they name asked");
     assert.deepEqual(searches, [sentSearch("kind=Cafes&q=&lang=en")], "The button sent the form with the option chosen");
+    // The page the sent form came back with holds the option too. Choosing it
+    // there says it was already chosen and nothing of the form: "Nothing was
+    // sent yet." under a result would send a turn to press the button again.
+    assert.match(searched.visibleText, /Result: 3 places of kind Cafes\./u);
+    kind = await ok("POST", "/v1/choose", { index: control(searched, "Kind").index, snapshotId: searched.snapshotId, option: "Cafes" });
+    assert.equal(kind.done, "\"Cafes\" was already chosen.", "After the form was sent, nothing says it was not");
+    assert.match(kind.visibleText, /Result: 3 places of kind Cafes\./u);
+    assert.deepEqual(promptsSince(start), []);
     // c. In one of Octo's own tabs, which refuse every other submission.
     const octoTab = await ok("POST", "/v1/tabs/open", { url: searchPage });
     snapshot = await ok("GET", "/v1/snapshot", { tabId: octoTab.tabId });
@@ -1156,7 +1169,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
         "typing into a site's own search box without submit sends nothing and says nothing was searched yet and to press Enter, with no prompt; typing into a journey planner's field or a search that posts says nothing was sent yet, and into a search of another site that nothing was searched yet, never to press Enter",
         "a key-like typed value, a default button that posts, another site, another subdomain, no form, a sign-out address, a hidden key-like value (also behind a control named elements), a hidden one-time code, a hidden file format and an unnamed field still ask; a new window, a field inside a submit button and a link-only destination are refused before any prompt",
         "a page script that turns a free search into a post to its own site is stopped by the step's guard",
-        "under routine browsing a journey planner's start and end stations are chosen by label with no prompt and nothing sent, its own button asks once naming the fields it sends, and the route is read; a choose says what it chose and in which list, and in a form that was not sent that nothing was sent yet, naming the form's button with the words about a prompt only where a press of it needs none; the option a list already holds says so, chooses nothing and asks nothing",
+        "under routine browsing a journey planner's start and end stations are chosen by label with no prompt and nothing sent, its own button asks once naming the fields it sends, and the route is read; a choose says what it chose and in which list, and in a form that was not sent that nothing was sent yet, naming the form's button with the words about a prompt only where a press of it needs none; the option a list already holds says only that, on the page a sent form came back with too, chooses nothing and asks nothing",
         "beside a carousel that turns by itself between every snapshot and the step after it, which changes the page's snapshot id and nothing its reading lists, both stations are chosen with the snapshot each step returned, a list that changed itself is refused by its name and counted, and the planner's button asks once with a snapshot from before a turn and the route is read",
         "a list is named by its own label or the option it holds, never its options, and a snapshot says which option it holds",
         "an option a list does not have chooses nothing and the answer lists the options; a control that is no list is refused",
