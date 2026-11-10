@@ -287,6 +287,88 @@ pub(crate) fn step_tried_addresses(
     asked.into_iter().chain(reported).collect()
 }
 
+/// The links a page's reading listed: the reading's id, and each link's index with its
+/// address. Kept only so that a step that presses one has tried the link's own address
+/// ([`pressed_link`]), never projected into a message.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PageLinks {
+    reading: String,
+    links: Vec<(u64, String)>,
+}
+
+/// The links of the page a browser step's answer read: its `snapshotId` and each of its
+/// `interactiveElements` with an `href`. The browser lists a link on the page's own site as a
+/// path, which is kept in full when the answer names the page's address. None for an answer
+/// with no reading of a page.
+pub(crate) fn step_page_links(payload: Option<&JsonValue>) -> Option<PageLinks> {
+    let payload = payload?;
+    let reading = payload.get("snapshotId")?.as_str()?.to_string();
+    let page = payload
+        .get("url")
+        .and_then(JsonValue::as_str)
+        .and_then(http_url);
+    let links = payload
+        .get("interactiveElements")?
+        .as_array()?
+        .iter()
+        .filter_map(|element| {
+            let index = element.get("index")?.as_u64()?;
+            let href = element.get("href")?.as_str()?.trim();
+            if href.is_empty() || href.len() > MAX_URL_CHARS {
+                return None;
+            }
+            let address = match &page {
+                Some(page) if href.starts_with(['/', '?', '#']) => {
+                    page.join(href).ok()?.to_string()
+                }
+                _ => href.to_string(),
+            };
+            Some((index, address))
+        })
+        .collect();
+    Some(PageLinks { reading, links })
+}
+
+/// What is known of the address a `click` or `press` leads to, from the reading its target
+/// (`index`, `snapshotId`) is of.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PressedLink {
+    /// The step presses nothing, or a control that is no link.
+    None,
+    /// The link's own address, which the step tried wherever its tab then ended.
+    Address(String),
+    /// The step's target is of no reading the run was given, so a link's address there is
+    /// not known.
+    NotKnown,
+}
+
+/// The link a browser step presses, by the reading `links` the run was last given.
+pub(crate) fn pressed_link(
+    tool: &str,
+    arguments: Option<&JsonValue>,
+    links: Option<&PageLinks>,
+) -> PressedLink {
+    if !matches!(tool, "click" | "press") {
+        return PressedLink::None;
+    }
+    let target = arguments.and_then(|arguments| {
+        Some((
+            arguments.get("index")?.as_u64()?,
+            arguments.get("snapshotId")?.as_str()?,
+        ))
+    });
+    match (target, links) {
+        (Some((index, reading)), Some(links)) if links.reading == reading => links
+            .links
+            .iter()
+            .find(|(listed, _)| *listed == index)
+            .map_or(PressedLink::None, |(_, address)| {
+                PressedLink::Address(address.clone())
+            }),
+        _ => PressedLink::NotKnown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,6 +472,79 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    /// A step that presses a link tried the link's own address, as the page's reading listed
+    /// it, wherever its tab then ended. A press on a control of a reading the run was not
+    /// given leads to an address that is not known.
+    #[test]
+    fn a_pressed_link_names_its_own_address() {
+        let reading = json!({
+            "snapshotId": "reading-1",
+            "url": "https://news.example/search?q=laptop#top",
+            "interactiveElements": [
+                { "index": 0, "label": "Search", "tag": "button" },
+                { "index": 1, "label": "Review", "tag": "a", "href": "/reviews/laptop-16?page=2" },
+                { "index": 2, "label": "Maker", "tag": "a", "href": "https://maker.example/laptop-16" },
+                { "index": 3, "label": "Empty", "tag": "a", "href": " " },
+            ],
+        });
+        let links = step_page_links(Some(&reading)).expect("its links");
+        let target = |index: u64, reading: &str| json!({ "index": index, "snapshotId": reading });
+        let pressed =
+            |tool: &str, arguments: &JsonValue| pressed_link(tool, Some(arguments), Some(&links));
+        // A link on the page's own site is listed as a path: its address is on that site.
+        for tool in ["click", "press"] {
+            assert_eq!(
+                pressed(tool, &target(1, "reading-1")),
+                PressedLink::Address("https://news.example/reviews/laptop-16?page=2".to_string()),
+                "{tool}"
+            );
+        }
+        assert_eq!(
+            pressed("click", &target(2, "reading-1")),
+            PressedLink::Address("https://maker.example/laptop-16".to_string())
+        );
+        // A control that is no link, and a step that presses nothing, lead nowhere.
+        assert_eq!(pressed("click", &target(0, "reading-1")), PressedLink::None);
+        assert_eq!(pressed("click", &target(3, "reading-1")), PressedLink::None);
+        assert_eq!(pressed("type", &target(1, "reading-1")), PressedLink::None);
+        assert_eq!(
+            pressed("navigate", &json!({ "url": "/reviews" })),
+            PressedLink::None
+        );
+        // Another reading, no reading at all, or no target: not known.
+        assert_eq!(
+            pressed("click", &target(1, "reading-0")),
+            PressedLink::NotKnown
+        );
+        assert_eq!(
+            pressed("click", &json!({ "index": 1 })),
+            PressedLink::NotKnown
+        );
+        assert_eq!(
+            pressed_link("click", Some(&target(1, "reading-1")), None),
+            PressedLink::NotKnown
+        );
+        // A reading that names no address for its page keeps the path as the browser wrote it.
+        let unnamed = json!({
+            "snapshotId": "reading-2",
+            "interactiveElements": [{ "index": 0, "href": "/reviews/laptop-16" }],
+        });
+        assert_eq!(
+            pressed_link(
+                "click",
+                Some(&target(0, "reading-2")),
+                step_page_links(Some(&unnamed)).as_ref()
+            ),
+            PressedLink::Address("/reviews/laptop-16".to_string())
+        );
+        // An answer with no reading of a page lists no links.
+        assert_eq!(
+            step_page_links(Some(&json!({ "error": { "reason": "No." } }))),
+            None
+        );
+        assert_eq!(step_page_links(None), None);
     }
 
     /// A banner the browser declined by itself is kept as the controller's one word, and only

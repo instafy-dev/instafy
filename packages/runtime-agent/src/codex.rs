@@ -939,12 +939,59 @@ pub struct CodexRunOutput {
     /// `browser_pages` is.
     pub browser_not_given: Vec<String>,
     /// The addresses the run's own browser steps tried, once each: the ones they asked the
-    /// browser to open, whatever it answered, and the ones the browser said a step's tab was on
-    /// (`shared_browser_activity::step_tried_addresses`). No finding of the turn says a page
-    /// stopped it at any other address
+    /// browser to open, whatever it answered, the ones the browser said a step's tab was on
+    /// (`shared_browser_activity::step_tried_addresses`), and the address of a link a step
+    /// pressed, as the page's reading listed it (`shared_browser_activity::pressed_link`). No
+    /// finding of the turn says a page stopped it at any other address
     /// (`jobs::browser_hand_back::leave_out_addresses_never_opened`). Kept out of `events`, as
     /// `browser_pages` is.
-    pub browser_tried: Vec<String>,
+    pub browser_tried: BrowserTried,
+}
+
+/// The addresses a run's own browser steps tried (`CodexRunOutput::browser_tried`), and whether
+/// those are all of them: a step that pressed a control of a page reading the run was not given
+/// may have tried an address the run cannot name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BrowserTried {
+    addresses: Vec<String>,
+    one_not_known: bool,
+}
+
+impl BrowserTried {
+    /// The addresses, when every one the steps tried is known; none otherwise, as for a run
+    /// that took no browser step.
+    pub fn known(&self) -> &[String] {
+        if self.one_not_known {
+            &[]
+        } else {
+            &self.addresses
+        }
+    }
+
+    /// These and the ones another pass of the same turn tried.
+    pub fn with(&self, other: &Self) -> Self {
+        let mut all = self.clone();
+        for address in &other.addresses {
+            all.keep(address.clone());
+        }
+        all.one_not_known |= other.one_not_known;
+        all
+    }
+
+    fn keep(&mut self, address: String) {
+        if !self.addresses.contains(&address) {
+            self.addresses.push(address);
+        }
+    }
+}
+
+impl From<Vec<String>> for BrowserTried {
+    fn from(addresses: Vec<String>) -> Self {
+        Self {
+            addresses,
+            one_not_known: false,
+        }
+    }
 }
 
 /// A failed turn keeps the protocol classification as well as its diagnostic message.
@@ -2977,7 +3024,7 @@ impl CodexClient {
                 browser_pages: aggregator.browser_pages().to_vec(),
                 browser_secret_screen: aggregator.browser_secret_screen(),
                 browser_not_given: aggregator.browser_not_given().to_vec(),
-                browser_tried: aggregator.browser_tried().to_vec(),
+                browser_tried: aggregator.browser_tried().clone(),
             })
         }
         .await;
@@ -5233,7 +5280,11 @@ pub(crate) struct CodexEventStreamAdapter {
     browser_not_given: Vec<String>,
     /// The addresses the run's browser steps tried (`CodexRunOutput::browser_tried`); never
     /// projected.
-    browser_tried: Vec<String>,
+    browser_tried: BrowserTried,
+    /// The links of the page the browser last read for the run
+    /// (`shared_browser_activity::step_page_links`), for the address of one a step presses;
+    /// never projected.
+    browser_links: Option<crate::shared_browser_activity::PageLinks>,
     /// The run's workspace folder, as given and with its links followed. A command's folder is
     /// projected as a path of it ([`Self::command_folder`]), never as the folder's own path on
     /// this machine.
@@ -5269,7 +5320,8 @@ impl CodexEventStreamAdapter {
             browser_pages: Vec::new(),
             browser_secret_screen: false,
             browser_not_given: Vec::new(),
-            browser_tried: Vec::new(),
+            browser_tried: BrowserTried::default(),
+            browser_links: None,
             workspace: None,
         }
     }
@@ -5290,7 +5342,7 @@ impl CodexEventStreamAdapter {
     }
 
     /// The addresses the run's browser steps tried so far, once each and in order.
-    pub(crate) fn browser_tried(&self) -> &[String] {
+    pub(crate) fn browser_tried(&self) -> &BrowserTried {
         &self.browser_tried
     }
 
@@ -5304,9 +5356,19 @@ impl CodexEventStreamAdapter {
         for address in
             crate::shared_browser_activity::step_tried_addresses(tool, arguments, payload)
         {
-            if !self.browser_tried.contains(&address) {
-                self.browser_tried.push(address);
-            }
+            self.browser_tried.keep(address);
+        }
+    }
+
+    /// A step that presses a link tries the link's own address, wherever its tab then ends
+    /// (`shared_browser_activity::pressed_link`). One that presses a control of a reading the
+    /// run was not given may try an address the run cannot name.
+    fn keep_browser_pressed_link(&mut self, tool: &str, arguments: Option<&JsonValue>) {
+        use crate::shared_browser_activity::{PressedLink, pressed_link};
+        match pressed_link(tool, arguments, self.browser_links.as_ref()) {
+            PressedLink::Address(address) => self.browser_tried.keep(address),
+            PressedLink::NotKnown => self.browser_tried.one_not_known = true,
+            PressedLink::None => {}
         }
     }
 
@@ -5332,7 +5394,12 @@ impl CodexEventStreamAdapter {
                 .as_ref()
                 .and_then(|arguments| arguments.get("url"))
                 .and_then(JsonValue::as_str)
-                .and_then(address_host);
+                .map(str::trim);
+            let asked = match asked {
+                // A path is on the site of the page its tab is on.
+                Some(path) if path.starts_with('/') => self.last_browser_host.clone(),
+                asked => asked.and_then(address_host),
+            };
             if !asked.is_some_and(|host| hosts.contains(&host)) {
                 return true;
             }
@@ -5597,11 +5664,16 @@ impl CodexEventStreamAdapter {
                             tool_call.invocation.arguments.clone(),
                         ));
                     }
-                    // The address it asks for is tried, whatever the browser then answers.
+                    // The address it asks for is tried, whatever the browser then answers, and
+                    // so is the address of a link it presses.
                     self.keep_browser_tried(
                         &tool_call.invocation.tool,
                         tool_call.invocation.arguments.as_ref(),
                         None,
+                    );
+                    self.keep_browser_pressed_link(
+                        &tool_call.invocation.tool,
+                        tool_call.invocation.arguments.as_ref(),
                     );
                 }
                 vec![json!({
@@ -5684,6 +5756,10 @@ impl CodexEventStreamAdapter {
                         tool_call.invocation.arguments.as_ref(),
                         payload,
                     );
+                    // The links of the page it read, for a later step that presses one.
+                    if let Some(links) = crate::shared_browser_activity::step_page_links(payload) {
+                        self.browser_links = Some(links);
+                    }
                     // An address the browser refused because no message or page gave it.
                     if !tool_call.is_success()
                         && let Some(address) = crate::shared_browser::address_not_given(
@@ -11701,6 +11777,38 @@ required = true
         assert_eq!(ended[0]["item"]["status"], "completed");
         assert_eq!(ended[0]["item"]["browserStep"]["host"], "maker.example");
 
+        // A path is on the site of the page its tab is on: its step names that site once the
+        // browser goes there, and never for another site.
+        let path = invocation(SHARED, "navigate", "/laptop-16?tab=specs");
+        let started = adapter.collect(&begin("call_path", path.clone()));
+        assert_eq!(
+            started[0]["item"]["browserStep"],
+            json!({"step": "navigate"})
+        );
+        assert!(
+            adapter
+                .browser_went_to(&["https://elsewhere.example/laptop-16".to_string()])
+                .is_empty()
+        );
+        let went = adapter.browser_went_to(&["https://maker.example/***?tab=***".to_string()]);
+        assert_eq!(went.len(), 1, "{went:?}");
+        assert_eq!(
+            went[0]["item"]["browserStep"],
+            json!({"step": "navigate", "host": "maker.example"})
+        );
+        assert!(
+            words(&went[0]).contains("Opening {host}"),
+            "{}",
+            words(&went[0])
+        );
+        assert!(!adapter.browser_open_waiting());
+        adapter.collect(&end(
+            "call_path",
+            path,
+            json!({ "activity": { "step": "navigate", "url": "https://maker.example/laptop-16", "approval": "free" } }),
+            false,
+        ));
+
         // The browser on the person's device names the site from the step's start.
         let device = adapter.collect(&begin(
             "call_device",
@@ -11878,7 +11986,7 @@ required = true
         // What its steps tried is more: the address each open asked for, and where the browser
         // said a step's tab was, a look's and a failed step's too.
         assert_eq!(
-            adapter.browser_tried(),
+            adapter.browser_tried().known(),
             [
                 "https://start.example/",
                 "https://maker.example/",
@@ -11953,13 +12061,140 @@ required = true
         assert!(adapter.browser_pages().is_empty());
         // Each address an open asked for is one the turn tried, whatever the browser answered.
         assert_eq!(
-            adapter.browser_tried(),
+            adapter.browser_tried().known(),
             [
                 search,
                 "https://reviews.example/laptop-12",
                 "https://down.example/page",
             ]
         );
+    }
+
+    /// A step that presses a link tried the link's own address, as the page's reading listed
+    /// it, whatever the browser then answered: a press that failed says nothing of where its
+    /// tab went. A press on a control of a reading the run was not given may have tried an
+    /// address the run cannot name, so the addresses it tried are not all known, nor are a
+    /// turn's whose other pass knows its own. Nothing of this is projected.
+    #[test]
+    fn the_adapter_keeps_the_address_of_a_link_a_step_pressed() {
+        let mut adapter = CodexEventStreamAdapter::default();
+        let invocation = |tool: &str, arguments: JsonValue| McpInvocation {
+            server: "instafy_shared_browser".to_string(),
+            tool: tool.to_string(),
+            arguments: Some(arguments),
+        };
+        let begin = |call: &str, invocation: McpInvocation| Event {
+            id: "evt_mcp_begin".to_string(),
+            msg: EventMsg::McpToolCallBegin(McpToolCallBeginEvent {
+                call_id: call.to_string(),
+                invocation,
+                connector_id: None,
+                mcp_app_resource_uri: None,
+                mcp_app_ui: None,
+                link_id: None,
+                app_name: None,
+                action_name: None,
+                plugin_id: None,
+                read_only_hint: None,
+                turn_id: "turn-1".to_string(),
+            }),
+        };
+        let end =
+            |call: &str, invocation: McpInvocation, structured: JsonValue, failed: bool| Event {
+                id: "evt_mcp_end".to_string(),
+                msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+                    call_id: call.to_string(),
+                    invocation,
+                    connector_id: None,
+                    mcp_app_resource_uri: None,
+                    link_id: None,
+                    app_name: None,
+                    action_name: None,
+                    plugin_id: None,
+                    duration: Duration::from_millis(1),
+                    result: Ok(CallToolResult {
+                        content: vec![json!({"type": "text", "text": "answer"})],
+                        structured_content: Some(structured),
+                        is_error: Some(failed),
+                        meta: None,
+                    }),
+                    mcp_app_ui: None,
+                    read_only_hint: None,
+                    turn_id: "turn-1".to_string(),
+                }),
+            };
+        let target = |index: u64, reading: &str| json!({ "index": index, "snapshotId": reading });
+        const SEARCH: &str = "https://news.example/search?q=laptop";
+        let click = invocation("click", target(2, "reading-1"));
+        for event in [
+            // The page's reading lists a link on its own site as a path.
+            end(
+                "call_look",
+                invocation("snapshot", json!({})),
+                json!({
+                    "snapshotId": "reading-1",
+                    "url": SEARCH,
+                    "interactiveElements": [
+                        { "index": 0, "label": "Search", "tag": "button" },
+                        { "index": 1, "label": "Review", "tag": "a", "href": "/reviews/laptop-16" },
+                        { "index": 2, "label": "Maker", "tag": "a", "href": "https://maker.example/laptop-16" },
+                    ],
+                    "activity": { "step": "snapshot", "url": SEARCH },
+                }),
+                false,
+            ),
+            // A press that failed: its answer names no address.
+            begin("call_click", click.clone()),
+            end(
+                "call_click",
+                click,
+                json!({ "activity": { "step": "click" } }),
+                true,
+            ),
+            begin(
+                "call_press",
+                invocation(
+                    "press",
+                    json!({ "index": 1, "snapshotId": "reading-1", "key": "Enter" }),
+                ),
+            ),
+            // A control that is no link leads to no address of its own.
+            begin("call_button", invocation("click", target(0, "reading-1"))),
+        ] {
+            for projected in adapter.collect(&event) {
+                for address in ["https://", "laptop-16"] {
+                    assert!(!projected.to_string().contains(address), "{projected}");
+                }
+            }
+        }
+        let tried = adapter.browser_tried().clone();
+        assert_eq!(
+            tried.known(),
+            [
+                SEARCH,
+                "https://maker.example/laptop-16",
+                "https://news.example/reviews/laptop-16",
+            ]
+        );
+        // Another pass of the turn adds its own, once each.
+        let other = BrowserTried::from(vec![SEARCH.to_string(), "https://b.example/".to_string()]);
+        assert_eq!(
+            other.with(&tried).known(),
+            [
+                SEARCH,
+                "https://b.example/",
+                "https://maker.example/laptop-16",
+                "https://news.example/reviews/laptop-16",
+            ]
+        );
+        // A press on a control of a reading the run was not given.
+        adapter.collect(&begin(
+            "call_unseen",
+            invocation("click", target(1, "reading-0")),
+        ));
+        assert!(adapter.browser_tried().known().is_empty());
+        assert!(other.with(adapter.browser_tried()).known().is_empty());
+        assert!(adapter.browser_tried().with(&other).known().is_empty());
     }
 
     /// A browser step that answered with a page that shows a secret marks the run, which then

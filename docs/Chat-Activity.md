@@ -520,7 +520,8 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   loads. Its host, from the address Octo asked for, comes with the browser's own navigation:
   the controller writes a `navigate` action to its action log once every check on the address
   has passed and before the page loads, runtime-agent reads the log while the step runs, and
-  the step then sends one update that names the site ("Opening {host}"). A refused address
+  the step then sends one update that names the site ("Opening {host}"). A path on the tab's
+  own site names the site of the page the tab is on. A refused address
   never reads "Opening {host}" while its step runs; the step's end names the site as before,
   so Details still read "Tried opening {host}". The browser on the person's device says
   nothing before its answer, so there the step takes the host from the address Octo asked for

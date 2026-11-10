@@ -8651,7 +8651,7 @@ impl JobProcessor {
                 &mut outcome.summary,
                 &output.browser_not_given,
                 &output.browser_pages,
-                &output.browser_tried,
+                output.browser_tried.known(),
             );
         }
         apply_terminal_shared_browser_summary(
@@ -9466,11 +9466,10 @@ impl JobProcessor {
                     &retry_output.browser_not_given,
                     &retry_output.browser_pages,
                     // What the first attempt's steps tried, the turn tried.
-                    &[
-                        output.browser_tried.as_slice(),
-                        retry_output.browser_tried.as_slice(),
-                    ]
-                    .concat(),
+                    output
+                        .browser_tried
+                        .with(&retry_output.browser_tried)
+                        .known(),
                 );
             }
             apply_terminal_shared_browser_summary(
@@ -10187,11 +10186,7 @@ impl JobProcessor {
                         }
                         refused
                     },
-                    tried: [
-                        output.browser_tried.as_slice(),
-                        retry_output.browser_tried.as_slice(),
-                    ]
-                    .concat(),
+                    tried: output.browser_tried.with(&retry_output.browser_tried),
                     final_json: &retry_output.final_json,
                     progress: progress_sender.as_ref().filter(|_| streaming_active),
                     runtime_id: registration.runtime_id,
@@ -16577,7 +16572,7 @@ pub struct BrowserTurnAnswer<'a> {
     /// them (`CodexRunOutput::browser_not_given`).
     pub not_given: Vec<String>,
     /// The addresses its own steps tried (`CodexRunOutput::browser_tried`).
-    pub tried: Vec<String>,
+    pub tried: crate::codex::BrowserTried,
     /// Its answer as the model wrote it.
     pub final_json: &'a JsonValue,
     /// Where the turn's messages go as it works: a second pass's steps go there too, so the
@@ -16643,8 +16638,13 @@ pub async fn end_browser_turn_answer(
         .chain(&second.not_given)
         .cloned()
         .collect();
-    let tried: Vec<String> = answer.tried.iter().chain(&second.tried).cloned().collect();
-    browser_hand_back::leave_out_addresses_never_opened(summary, &not_given, &opened, &tried);
+    let tried = answer.tried.with(&second.tried);
+    browser_hand_back::leave_out_addresses_never_opened(
+        summary,
+        &not_given,
+        &opened,
+        tried.known(),
+    );
     let mut ended = BrowserTurnEnd {
         artifacts: second.artifacts,
         messages: second.messages,
@@ -16709,7 +16709,7 @@ pub async fn end_browser_turn_answer(
                             &mut written,
                             &not_given,
                             &opened,
-                            &tried,
+                            tried.known(),
                         );
                         lines = browser_hand_back::finding_lines_of(&written).map(|lines| {
                             let closing = browser_hand_back::closing_lines_of(&written);
@@ -16760,7 +16760,7 @@ pub async fn end_browser_turn_answer(
                 summary,
                 &[not_given.as_slice(), read.not_given.as_slice()].concat(),
                 &[opened.as_slice(), read.pages.as_slice()].concat(),
-                &[tried.as_slice(), read.tried.as_slice()].concat(),
+                tried.with(&read.tried).known(),
             );
             ended.artifacts.extend(read.artifacts);
             ended.messages.extend(read.messages);
@@ -16812,7 +16812,7 @@ struct UnreadPagesRead {
     stopped_for_the_person: bool,
     pages: Vec<String>,
     not_given: Vec<String>,
-    tried: Vec<String>,
+    tried: crate::codex::BrowserTried,
 }
 
 /// A browser turn whose findings go back to the building turn ends with the pages its request
@@ -16851,7 +16851,7 @@ async fn read_the_unread_pages(
         summary,
         &turn.not_given,
         &turn.pages,
-        &turn.tried,
+        turn.tried.known(),
     );
     let pages = browser_hand_back::take_unread_pages(summary);
     let canceled = turn
@@ -25633,7 +25633,7 @@ mod tests {
             browser_pages: Vec::new(),
             browser_secret_screen: false,
             browser_not_given: Vec::new(),
-            browser_tried: Vec::new(),
+            browser_tried: Default::default(),
         }
     }
 
@@ -35494,7 +35494,7 @@ mod tests {
             browser_pages: Vec::new(),
             browser_secret_screen: false,
             browser_not_given: Vec::new(),
-            browser_tried: Vec::new(),
+            browser_tried: Default::default(),
         };
         let outcome = CodexOutcome {
             summary: "ok".to_string(),
