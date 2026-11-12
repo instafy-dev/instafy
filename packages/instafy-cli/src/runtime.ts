@@ -14,7 +14,8 @@ import {
 } from "./config.js";
 import { formatAuthRejectedError } from "./errors.js";
 import { findProjectManifest, type ProjectManifest } from "./project-manifest.js";
-import { fetchWithControllerAuth } from "./controller-fetch.js";
+import { resolveSpaceId } from "./space-id.js";
+import { fetchWithControllerAuth, refuseDotSegments } from "./controller-fetch.js";
 
 export interface RuntimeStartOptions {
   project?: string;
@@ -693,13 +694,12 @@ export async function runtimeStart(options: RuntimeStartOptions) {
   }
 
   const manifestInfo = findProjectManifest(cwd);
-  const projectId =
-    options.project ?? env["SPACE_ID"] ?? manifestInfo.manifest?.spaceId ?? null;
-  if (!projectId) {
-    throw new Error(
-      "No space configured. Run `instafy space init` in this folder (recommended) or pass --space.",
-    );
-  }
+  // Saved in the runtime's state and handed to the agent, and both put it into request paths.
+  const projectId = resolveSpaceId(options.project, {
+    variables: ["SPACE_ID"],
+    cwd,
+    missing: "No space configured. Run `instafy space init` in this folder (recommended) or pass --space.",
+  });
   env["SPACE_ID"] = projectId;
   
   const supabaseAccessToken = resolveSupabaseAccessToken(options, env);
@@ -1174,8 +1174,12 @@ async function sendOfflineBeat(state: RuntimeState): Promise<void> {
     ) {
       return;
     }
+    const target = `${controllerUrl.toString().replace(/\/$/, "")}/projects/${encodeURIComponent(state.projectId)}/origin/presence/beat`;
+    // A state file written before space ids were checked can hold "." or "..". The beat is best effort,
+    // so such a space only means no beat is sent.
+    refuseDotSegments(target);
     await fetch(
-      `${controllerUrl.toString().replace(/\/$/, "")}/projects/${encodeURIComponent(state.projectId)}/origin/presence/beat`,
+      target,
       {
         method: "POST",
         headers: {

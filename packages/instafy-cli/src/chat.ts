@@ -1,5 +1,5 @@
-import { findProjectManifest } from "./project-manifest.js";
 import { requestControllerApiJson } from "./api.js";
+import { resolveSpaceId } from "./space-id.js";
 
 type ChatCommonOptions = {
   controllerUrl?: string;
@@ -47,28 +47,9 @@ type RunSnapshot = {
 };
 
 function resolveProjectId(rawProject: string | undefined): string {
-  const explicit = rawProject?.trim();
-  if (explicit) {
-    return explicit;
-  }
-
-  const fromEnv =
-    process.env["SPACE_ID"]?.trim() ||
-    process.env["INSTAFY_SPACE_ID"]?.trim() ||
-    process.env["PROJECT_ID"]?.trim() ||
-    process.env["INSTAFY_PROJECT_ID"]?.trim();
-  if (fromEnv) {
-    return fromEnv;
-  }
-
-  const manifest = findProjectManifest(process.cwd()).manifest;
-  if (manifest?.spaceId?.trim()) {
-    return manifest.spaceId.trim();
-  }
-
-  throw new Error(
-    "No space configured. Pass --space, set SPACE_ID, or run `instafy space init`.",
-  );
+  return resolveSpaceId(rawProject, {
+    missing: "No space configured. Pass --space, set SPACE_ID, or run `instafy space init`.",
+  });
 }
 
 function normalizePrompt(prompt: string): string {
@@ -248,7 +229,7 @@ async function dispatchPrompt(options: ChatPromptOptions): Promise<{
     const conversationId = options.conversation.trim();
     const response = await requestControllerApiJson<DispatchResponse>({
       method: "POST",
-      path: `/conversations/${conversationId}/messages`,
+      path: `/conversations/${encodeURIComponent(conversationId)}/messages`,
       controllerUrl: options.controllerUrl,
       accessToken: options.accessToken,
       serviceToken: options.serviceToken,
@@ -265,7 +246,7 @@ async function dispatchPrompt(options: ChatPromptOptions): Promise<{
   const projectId = resolveProjectId(options.project);
   const response = await requestControllerApiJson<DispatchResponse>({
     method: "POST",
-    path: `/projects/${projectId}/conversations`,
+    path: `/projects/${encodeURIComponent(projectId)}/conversations`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
     serviceToken: options.serviceToken,
@@ -290,7 +271,7 @@ async function pollRunStatus(
 ): Promise<RunSnapshot | null> {
   const runs = await requestControllerApiJson<RunSnapshot[]>({
     method: "GET",
-    path: `/conversations/${conversationId}/runs`,
+    path: `/conversations/${encodeURIComponent(conversationId)}/runs`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
     serviceToken: options.serviceToken,
@@ -307,7 +288,7 @@ async function fetchConversationMessages(
 ): Promise<ConversationMessage[]> {
   const page = await requestControllerApiJson<ConversationMessagesPage>({
     method: "GET",
-    path: `/conversations/${conversationId}/messages`,
+    path: `/conversations/${encodeURIComponent(conversationId)}/messages`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
     serviceToken: options.serviceToken,

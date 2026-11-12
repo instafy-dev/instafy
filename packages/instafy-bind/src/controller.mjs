@@ -105,6 +105,20 @@ function anySignal(signals) {
 /** metadata.purpose of the conversation a binder creates for a site's Octo turns. */
 export const BIND_THREAD_PURPOSE = "bound-site-agent-thread";
 
+// Whether a path has a "." or ".." segment that resolving it as a URL would act on. An id that is one of
+// those passes through encodeURIComponent unchanged, and resolving the URL would move the request, with
+// the person's token, to another route: a space of ".." from a cloned repository's .instafy/space.json
+// would post to /conversations/blank. Like the URL parser, it first drops leading and trailing control
+// characters and spaces and every tab and line break, reads a backslash as a slash, and checks the path
+// of a scheme with no "//" after it. The CLI's refuseDotSegments does the same.
+function hasDotSegment(input) {
+  const afterOrigin = input
+    .replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, "")
+    .replace(/[\t\n\r]/g, "")
+    .replace(/^[a-z][a-z\d+.-]*:(?:[\\/]{2}[^/\\?#]*)?/i, "");
+  return afterOrigin.split(/[?#]/, 1)[0].split(/[\\/]/).some((segment) => /^(?:\.|%2e){1,2}$/i.test(segment));
+}
+
 export class ControllerClient {
   /**
    * @param {{controllerUrl: string, token: string, refreshToken?: () => Promise<string|null>|string|null, fetchImpl?: typeof fetch, timeoutMs?: number}} options
@@ -119,7 +133,11 @@ export class ControllerClient {
   }
 
   async request(method, path, { query = {}, body, signal = null, timeoutMs = this.timeoutMs, retried = false } = {}) {
-    const url = new URL(path.replace(/^\//, ""), this.base);
+    const relativePath = path.replace(/^\//, "");
+    if (hasDotSegment(relativePath)) {
+      throw new ControllerError('refusing a controller request whose path has a "." or ".." segment', { code: "policy" });
+    }
+    const url = new URL(relativePath, this.base);
     if (url.origin !== this.base.origin) throw new ControllerError("refusing a cross-origin controller request", { code: "policy" });
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, String(value));
     const headers = { accept: "application/json" };

@@ -73,6 +73,14 @@ Most commands look for a space manifest at `.instafy/space.json` (walks up from 
 instafy space init
 ```
 
+A repository can commit that file, so the `conversation`, `chat`, `history`, `automations`,
+`agents`, `diagnostics` and `runtime start` commands use a space id only if it is a UUID, whether it
+comes from `--space`, an environment variable such as `SPACE_ID`, or the manifest. Anything else is
+refused before a request is sent, and the error names where the value came from. Every id the CLI
+puts into a request path is encoded, and since encoding leaves an id of `.` or `..` as it is, the
+CLI and `instafy bind` refuse a controller request whose path has such a segment. An id therefore
+cannot send a request to another route.
+
 Invite a teammate to the linked space:
 
 ```bash

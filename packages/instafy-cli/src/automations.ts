@@ -8,11 +8,11 @@ import {
 } from "./config.js";
 import { fetchWithControllerAuth } from "./controller-fetch.js";
 import { formatAuthRejectedError, formatAuthRequiredError } from "./errors.js";
-import { findProjectManifest } from "./project-manifest.js";
 import {
   resolveRuntimeBoundControllerUrl,
   resolveRuntimeControllerCredential,
 } from "./runtime-controller-binding.js";
+import { resolveSpaceId } from "./space-id.js";
 
 type AutomationRecord = {
   id: string;
@@ -110,24 +110,11 @@ function normalizeUuidParam(raw: string): string | null {
 }
 
 function resolveProjectId(project?: string, cwd: string = process.cwd()): string {
-  const explicit = project?.trim();
-  if (explicit) {
-    return explicit;
-  }
-
-  const fromSpaceEnv = process.env["SPACE_ID"]?.trim();
-  if (fromSpaceEnv) {
-    return fromSpaceEnv;
-  }
-
-  const manifest = findProjectManifest(cwd).manifest;
-  if (manifest?.spaceId?.trim()) {
-    return manifest.spaceId.trim();
-  }
-
-  throw new Error(
-    "No space configured. Run `instafy space init` in this folder, set SPACE_ID, or pass --space.",
-  );
+  return resolveSpaceId(project, {
+    variables: ["SPACE_ID"],
+    cwd,
+    missing: "No space configured. Run `instafy space init` in this folder, set SPACE_ID, or pass --space.",
+  });
 }
 
 function resolveControllerAuth(
@@ -340,7 +327,7 @@ export async function automationsList(options: AutomationsCommonOptions) {
 
   const payload = await controllerJsonRequest(auth, "instafy login", {
     method: "GET",
-    path: `/projects/${projectId}/automations`,
+    path: `/projects/${encodeURIComponent(projectId)}/automations`,
   });
 
   const records = listToRecords(payload);
@@ -455,7 +442,7 @@ export async function automationsCreate(options: AutomationsCreateOptions) {
 
   const payload = await controllerJsonRequest(auth, "instafy login", {
     method: "POST",
-    path: `/projects/${projectId}/automations`,
+    path: `/projects/${encodeURIComponent(projectId)}/automations`,
     body,
   });
 
@@ -618,7 +605,7 @@ export async function automationsUpdate(options: AutomationsUpdateOptions) {
   const auth = resolveControllerAuth(options, "instafy login");
   const payload = await controllerJsonRequest(auth, "instafy login", {
     method: "PATCH",
-    path: `/automations/${automationId}`,
+    path: `/automations/${encodeURIComponent(automationId)}`,
     body,
   });
 
@@ -650,7 +637,7 @@ export async function automationsUpdateStatus(options: AutomationsUpdateStatusOp
 
   const payload = await controllerJsonRequest(auth, "instafy login", {
     method: "PATCH",
-    path: `/automations/${automationId}`,
+    path: `/automations/${encodeURIComponent(automationId)}`,
     body: { status: options.status },
   });
 
@@ -671,7 +658,7 @@ export async function automationsRun(options: AutomationsRunOptions) {
 
   await controllerJsonRequest(auth, "instafy login", {
     method: "POST",
-    path: `/automations/${automationId}/run`,
+    path: `/automations/${encodeURIComponent(automationId)}/run`,
   });
 
   if (options.json) {
@@ -691,7 +678,7 @@ export async function automationsDelete(options: AutomationsDeleteOptions) {
 
   await controllerJsonRequest(auth, "instafy login", {
     method: "DELETE",
-    path: `/automations/${automationId}`,
+    path: `/automations/${encodeURIComponent(automationId)}`,
   });
 
   if (options.json) {

@@ -5,7 +5,7 @@ import {
   type ControllerMessageSearchPage,
 } from "@instafy/sdk/conversation-search";
 import { customerControllerJsonRequest, type CustomerControllerAuthOptions } from "./customer-controller.js";
-import { findProjectManifest } from "./project-manifest.js";
+import { resolveSpaceId } from "./space-id.js";
 
 export type ConversationGrepOptions = CustomerControllerAuthOptions & {
   query: string;
@@ -56,10 +56,11 @@ function scopeFor(options: ConversationGrepOptions): { projectId?: string; orgId
   if (options.all) return {};
   if (options.personal) return { personal: true };
   if (options.org) return { orgId: uuid(options.org, "--org") };
-  const project = options.space?.trim() || ["SPACE_ID", "INSTAFY_SPACE_ID", "PROJECT_ID", "INSTAFY_PROJECT_ID"]
-    .map((key) => process.env[key]?.trim()).find(Boolean) || findProjectManifest(process.cwd()).manifest?.spaceId;
-  if (!project) throw new Error("No space configured. Pass --space, --org, --personal or --all, or run `instafy space init`.");
-  return { projectId: uuid(project, "Space id") };
+  const project = resolveSpaceId(options.space, {
+    missing: "No space configured. Pass --space, --org, --personal or --all, or run `instafy space init`.",
+  });
+  // Lowercase, as the controller returns it: every match's projectId is compared with it.
+  return { projectId: project.toLowerCase() };
 }
 
 /** Message text is untrusted terminal output: escape controls rather than executing ANSI sequences. */

@@ -6,6 +6,8 @@ import { text } from "@clack/prompts";
 vi.mock("../src/api.js", () => ({ requestControllerApiJson: vi.fn() }));
 vi.mock("@clack/prompts", () => ({ text: vi.fn(), isCancel: (value: unknown) => typeof value === "symbol" }));
 
+// The commands refuse a space that is not a UUID before sending anything, as the controller would.
+const SPACE_ID = "6f1c2c1e-5b8a-4f1e-9a51-2a3b4c5d6e7f";
 const settings = {
   maxAgentsPerPlan: 64,
   maxConcurrentAgents: 8,
@@ -41,7 +43,7 @@ afterEach(() => {
 describe("interactive multi-agent settings", () => {
   it("uses controller defaults and bounds and sends only changed fields", async () => {
     prompt.mockResolvedValueOnce("64").mockResolvedValueOnce("12");
-    await agentSettings({ project: "space-id", interactive: true });
+    await agentSettings({ project: SPACE_ID, interactive: true });
     expect(prompt.mock.calls.map(([options]) => options.defaultValue)).toEqual(["64", "8"]);
     const validate = prompt.mock.calls[1][0].validate!;
     expect(validate("65")).toBe("Enter a whole number from 1 to 64.");
@@ -54,20 +56,20 @@ describe("interactive multi-agent settings", () => {
 
   it("does not persist a partially entered edit when the second prompt is cancelled", async () => {
     prompt.mockResolvedValueOnce("100").mockResolvedValueOnce(Symbol("cancel"));
-    await expect(agentSettings({ project: "space-id", interactive: true })).rejects.toThrow("No settings were changed");
+    await expect(agentSettings({ project: SPACE_ID, interactive: true })).rejects.toThrow("No settings were changed");
     expect(request).toHaveBeenCalledTimes(1);
     expect(request).toHaveBeenCalledWith(expect.objectContaining({ method: "GET" }));
   });
 
   it("avoids writing unchanged settings", async () => {
     prompt.mockResolvedValueOnce("64").mockResolvedValueOnce("8");
-    await agentSettings({ project: "space-id", interactive: true });
+    await agentSettings({ project: SPACE_ID, interactive: true });
     expect(request).toHaveBeenCalledTimes(1);
   });
 
   it("rejects conflicting automation flags before making a request", async () => {
-    await expect(agentSettings({ project: "space-id", interactive: true, json: true })).rejects.toThrow("without --json or setting flags");
-    await expect(agentSettings({ project: "space-id", interactive: true, maxConcurrentAgents: "12" })).rejects.toThrow("without --json or setting flags");
+    await expect(agentSettings({ project: SPACE_ID, interactive: true, json: true })).rejects.toThrow("without --json or setting flags");
+    await expect(agentSettings({ project: SPACE_ID, interactive: true, maxConcurrentAgents: "12" })).rejects.toThrow("without --json or setting flags");
     expect(request).not.toHaveBeenCalled();
     expect(prompt).not.toHaveBeenCalled();
   });
@@ -83,7 +85,7 @@ describe("native helper settings", () => {
 
   it("patches only the native limit and displays its separate scope", async () => {
     request.mockResolvedValueOnce(nativeSettings).mockResolvedValueOnce({ ...nativeSettings, maxNativeSubagents: 10 });
-    await agentSettings({ project: "space-id", maxNativeSubagents: "10" });
+    await agentSettings({ project: SPACE_ID, maxNativeSubagents: "10" });
     expect(request).toHaveBeenLastCalledWith(expect.objectContaining({ method: "PATCH", jsonBody: { maxNativeSubagents: 10 } }));
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining("native helpers per parent (excluding the parent): 10"));
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining("tracked workers across this space: 8"));
@@ -92,7 +94,7 @@ describe("native helper settings", () => {
   it("edits the advertised native limit with controller-provided bounds", async () => {
     request.mockResolvedValue({ ...nativeSettings, limits: { ...nativeSettings.limits, maxNativeSubagents: { min: 1, max: 16, default: 3 } } });
     prompt.mockResolvedValueOnce("64").mockResolvedValueOnce("8").mockResolvedValueOnce("10");
-    await agentSettings({ project: "space-id", interactive: true });
+    await agentSettings({ project: SPACE_ID, interactive: true });
     expect(prompt.mock.calls.map(([options]) => options.defaultValue)).toEqual(["64", "8", "3"]);
     expect(prompt.mock.calls[2][0].validate!("17")).toBe("Enter a whole number from 1 to 16.");
     expect(request).toHaveBeenLastCalledWith(expect.objectContaining({ method: "PATCH", jsonBody: { maxNativeSubagents: 10 } }));
@@ -101,7 +103,7 @@ describe("native helper settings", () => {
   it("cancels the entire interactive edit at the native setting", async () => {
     request.mockResolvedValue(nativeSettings);
     prompt.mockResolvedValueOnce("100").mockResolvedValueOnce("12").mockResolvedValueOnce(Symbol("cancel"));
-    await expect(agentSettings({ project: "space-id", interactive: true })).rejects.toThrow("No settings were changed");
+    await expect(agentSettings({ project: SPACE_ID, interactive: true })).rejects.toThrow("No settings were changed");
     expect(request).toHaveBeenCalledTimes(1);
   });
 
@@ -111,14 +113,14 @@ describe("native helper settings", () => {
     { ...settings, limits: nativeSettings.limits },
   ])("rejects an unadvertised native flag without sending any partial patch", async (response) => {
     request.mockResolvedValue(response);
-    await expect(agentSettings({ project: "space-id", maxConcurrentAgents: "12", maxNativeSubagents: "10" })).rejects.toThrow("does not support --max-native-subagents");
+    await expect(agentSettings({ project: SPACE_ID, maxConcurrentAgents: "12", maxNativeSubagents: "10" })).rejects.toThrow("does not support --max-native-subagents");
     expect(request).toHaveBeenCalledTimes(1);
     expect(request).toHaveBeenCalledWith(expect.objectContaining({ method: "GET" }));
   });
 
   it("rejects a native value beyond the controller's limit before patching", async () => {
     request.mockResolvedValue(nativeSettings);
-    await expect(agentSettings({ project: "space-id", maxNativeSubagents: "65" })).rejects.toThrow("between 1 and 64");
+    await expect(agentSettings({ project: SPACE_ID, maxNativeSubagents: "65" })).rejects.toThrow("between 1 and 64");
     expect(request).toHaveBeenCalledTimes(1);
   });
 });

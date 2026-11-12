@@ -585,6 +585,9 @@ jobs:
       - name: Test CLI login profiles
         run: pnpm --filter @instafy/cli exec vitest run test/login-profile.e2e.spec.ts test/runtime-env.spec.ts
 
+      - name: Test CLI space ids in request paths
+        run: pnpm --filter @instafy/cli exec vitest run test/space-id-paths.e2e.spec.ts test/agent-settings.test.ts
+
   javascript-desktop:
     name: JavaScript Desktop and runtime
     runs-on: >-

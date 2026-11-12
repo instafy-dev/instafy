@@ -138,7 +138,7 @@ export async function recommendationsList(options: CommonOptions & { limit?: num
   const limit = options.limit ?? 100;
   if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new Error("--limit must be an integer from 1 to 200.");
   const response = await requestControllerApiJson<{ recommendations: Recommendation[] }>({
-    method: "GET", path: `/projects/${id}/recommendations`, query: [`limit=${limit}`],
+    method: "GET", path: `/projects/${encodeURIComponent(id)}/recommendations`, query: [`limit=${limit}`],
     controllerUrl: options.controllerUrl, accessToken: options.accessToken,
   });
   if (!Array.isArray(response?.recommendations)) throw new Error("Invalid recommendations response from controller.");
@@ -151,7 +151,7 @@ export async function recommendationsSubmit(options: CommonOptions & { file: str
   const id = projectId(options.project);
   const proposal = await readProposal(options.file);
   const response = await requestControllerApiJson<Recommendation>({
-    method: "POST", path: `/projects/${id}/recommendations`, jsonBody: proposal,
+    method: "POST", path: `/projects/${encodeURIComponent(id)}/recommendations`, jsonBody: proposal,
     controllerUrl: options.controllerUrl, accessToken: options.accessToken,
   });
   if (!response?.id || !["proposed", "accepted", "dismissed"].includes(response.status)) {
@@ -170,7 +170,7 @@ async function recommendationFeedback(
   if (current === null) throw new Error("No conversation configured. Pass --conversation or set INSTAFY_CONVERSATION_ID.");
   const id = uuid(current, "Conversation ID");
   const response = await requestControllerApiJson<RecommendationFeedback>({
-    method: change ? "PATCH" : "GET", path: `/conversations/${id}/recommendation-feedback`,
+    method: change ? "PATCH" : "GET", path: `/conversations/${encodeURIComponent(id)}/recommendation-feedback`,
     ...(change ? { jsonBody: change } : {}),
     controllerUrl: options.controllerUrl, accessToken: options.accessToken,
   });
