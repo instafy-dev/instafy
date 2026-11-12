@@ -2091,7 +2091,13 @@ pub(crate) async fn cancel_jobs_with_notice(
         job_input_state_updates,
         provider_requests: job_requests,
         refunded_org_ids,
-    } = cancel_jobs_and_runs(transaction, jobs, reason).await?;
+    } = cancel_jobs_and_runs(
+        transaction,
+        jobs,
+        reason,
+        std::slice::from_ref(conversation_id),
+    )
+    .await?;
     provider_requests.extend(job_requests);
 
     let plain_notice = build_interruption_notice(reason, &job_ids, &run_ids);
@@ -2146,10 +2152,19 @@ pub(crate) struct CanceledJobs {
 /// inputs the jobs never acknowledged, and cancel their open provider
 /// requests, without writing a notice. The update has no status guard: pass
 /// only jobs the caller locked while they were still queued or leased.
+///
+/// `writes_into` are the conversations the caller writes into once this
+/// returns, such as a stop's notice. They and their roots are locked
+/// ([`lock_conversations_for_writes`]) once the jobs are canceled, which
+/// expires their questions, and before their inputs, runs and any turn's
+/// reserve, which locks the org's balance: a dispatch locks its
+/// conversation, then reserves the org's credit, so a transaction that held
+/// the balance while it waited for one of them could deadlock with it.
 pub(crate) async fn cancel_jobs_and_runs(
     transaction: &tokio_postgres::Transaction<'_>,
     jobs: &[(Uuid, Option<Uuid>)],
     reason: &str,
+    writes_into: &[Uuid],
 ) -> Result<CanceledJobs, (StatusCode, Json<ApiError>)> {
     let mut job_ids: Vec<Uuid> = Vec::new();
     let mut run_ids: Vec<Uuid> = Vec::new();
@@ -2188,6 +2203,13 @@ pub(crate) async fn cancel_jobs_and_runs(
         .filter(|row| row.get("holds_grants"))
         .map(|row| row.get("id"))
         .collect();
+    lock_conversations_for_writes(transaction, writes_into)
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to lock the canceled jobs' conversations: {error}"
+            ))
+        })?;
 
     let mut job_input_state_updates = Vec::new();
     for job_id in &job_ids {

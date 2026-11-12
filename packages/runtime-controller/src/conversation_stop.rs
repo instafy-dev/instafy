@@ -597,3 +597,7 @@ mod tests {
         anyhow::anyhow!("{}: {}", status, error.message)
     }
 }
+
+#[cfg(test)]
+#[path = "conversation_stop_lock_order_tests.rs"]
+mod lock_order_tests;

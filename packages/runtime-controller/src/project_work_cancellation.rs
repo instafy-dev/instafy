@@ -262,6 +262,7 @@ pub(crate) async fn cancel_project_work_in_transaction(
             transaction,
             &without_conversation,
             SPACE_DELETED_REASON,
+            &[],
         )
         .await?;
         work.canceled_job_ids.extend(canceled.job_ids);
