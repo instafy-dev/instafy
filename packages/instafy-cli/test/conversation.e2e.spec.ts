@@ -78,7 +78,7 @@ function startMockController(
     res.writeHead(404);
     res.end();
   });
-  server.listen(0);
+  server.listen(0, "127.0.0.1");
   return server;
 }
 
@@ -99,7 +99,7 @@ function startCreateConversationMockController(
     res.writeHead(response.status, { "content-type": "application/json" });
     res.end(JSON.stringify(response.body));
   });
-  server.listen(0);
+  server.listen(0, "127.0.0.1");
   return server;
 }
 

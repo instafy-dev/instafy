@@ -6,6 +6,8 @@ import path from "node:path";
 import { once } from "node:events";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
+import { reservedPreviewPorts } from "../src/local-site.js";
+import { unusedLoopbackPort } from "./loopback-servers.mjs";
 import {
   detectListeningProcess,
   parseServeCommand,
@@ -325,14 +327,8 @@ describe("instafy preview open --start", () => {
     return (server.address() as { port: number }).port;
   }
 
-  async function freePort(): Promise<number> {
-    const server = http.createServer();
-    server.listen(0, "127.0.0.1");
-    await once(server, "listening");
-    const port = (server.address() as { port: number }).port;
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    return port;
-  }
+  // Free on both loopback addresses, as the CLI checks, and not one Instafy keeps for itself.
+  const freePort = () => unusedLoopbackPort({ avoid: reservedPreviewPorts({}) });
 
   function stubRathole(): string {
     const dir = tempDir("instafy-stub-rathole-");
@@ -1164,14 +1160,8 @@ describe("instafy preview open --start picks the site's port, and close stops th
     expect(await (await fetch(`http://127.0.0.1:${mine.port}/`)).text()).toBe("hello");
   }, 60000);
 
-  async function freePort(): Promise<number> {
-    const server = http.createServer();
-    server.listen(0, "127.0.0.1");
-    await once(server, "listening");
-    const port = (server.address() as { port: number }).port;
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    return port;
-  }
+  // Free on both loopback addresses, as the CLI checks, and not one Instafy keeps for itself.
+  const freePort = () => unusedLoopbackPort({ avoid: reservedPreviewPorts({}) });
 
   it("close stops the site --start started, its whole process group, and says so", async () => {
     const s = await space();

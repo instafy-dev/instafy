@@ -9,6 +9,7 @@ import { once } from "node:events";
 import { afterAll, describe, expect, it } from "vitest";
 import { PREVIEW_EXIT_PORT_NOT_ALLOWED, PreviewCommandError, noAnswerMessage, parsePreviewPort, probeLocalSite, reservedPreviewPorts } from "../src/local-site.js";
 import { previewOpen } from "../src/preview.js";
+import { ipv6LoopbackAvailable, listenOnIpv6LoopbackOnly, unusedLoopbackPort } from "./loopback-servers.mjs";
 
 const closers: Array<() => void> = [];
 afterAll(() => {
@@ -22,28 +23,7 @@ async function listen(server: http.Server | net.Server, host: string): Promise<n
   return (server.address() as net.AddressInfo).port;
 }
 
-async function freePort(): Promise<number> {
-  const s = net.createServer();
-  s.listen(0, "127.0.0.1");
-  await once(s, "listening");
-  const port = (s.address() as net.AddressInfo).port;
-  await new Promise((r) => s.close(r));
-  return port;
-}
-
-async function ipv6(): Promise<boolean> {
-  const s = net.createServer();
-  try {
-    s.listen(0, "::1");
-    await once(s, "listening");
-    return true;
-  } catch {
-    return false;
-  } finally {
-    s.close();
-  }
-}
-const hasIpv6 = await ipv6();
+const hasIpv6 = await ipv6LoopbackAvailable();
 
 function exitCodeOf(fn: () => unknown): number | null {
   try {
@@ -103,7 +83,7 @@ describe("reserved preview ports", () => {
 
 describe("probeLocalSite", () => {
   it("nothing on either loopback address: no host, and both addresses named", async () => {
-    const port = await freePort();
+    const port = await unusedLoopbackPort();
     const probe = await probeLocalSite(port, "/");
     expect(probe).toMatchObject({ listening: false, status: null, host: null });
     expect(probe.reason).toMatch(/127\.0\.0\.1: ECONNREFUSED/);
@@ -136,13 +116,13 @@ describe("probeLocalSite", () => {
   });
 
   it.skipIf(!hasIpv6)("a server on [::1] only is found there", async () => {
-    const port = await listen(
-      http.createServer((_req, res) => {
-        res.writeHead(200);
-        res.end("ok");
-      }),
-      "::1",
-    );
+    // On a port where nothing answers on 127.0.0.1, which the probe tries first.
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200);
+      res.end("ok");
+    });
+    const port = await listenOnIpv6LoopbackOnly(server);
+    closers.push(() => server.close());
     expect(await probeLocalSite(port, "/")).toMatchObject({ listening: true, status: 200, host: "[::1]" });
   });
 });

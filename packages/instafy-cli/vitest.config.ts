@@ -19,5 +19,8 @@ export default defineConfig({
     environment: "node",
     globals: false,
     include: ["test/**/*.ts"],
+    // Removes the server, session, space and runtime-job variables a shell or a runtime job would
+    // otherwise hand every command the tests run (test/hermetic-env.mjs).
+    setupFiles: ["./test/hermetic-env.mjs"],
   },
 });

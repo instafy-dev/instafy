@@ -161,7 +161,7 @@ function startMockController(token: string) {
     res.end(JSON.stringify({ message: "not found" }));
   });
 
-  server.listen(0);
+  server.listen(0, "127.0.0.1");
   return { server, projectId, state };
 }
 

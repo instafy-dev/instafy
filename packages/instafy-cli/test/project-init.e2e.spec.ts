@@ -34,7 +34,7 @@ function startMockController(spaceId: string, orgId: string, orgName: string) {
     res.writeHead(404);
     res.end();
   });
-  server.listen(0);
+  server.listen(0, "127.0.0.1");
   return { server };
 }
 

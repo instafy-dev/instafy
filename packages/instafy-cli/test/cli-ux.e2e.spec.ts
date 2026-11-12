@@ -8,10 +8,13 @@ import {
   buildInstafyGitCredentialHelperValue,
   isInstafyGitCredentialHelper,
 } from "../src/git-helper.js";
+import { unreachableLocalUrl } from "./loopback-servers.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const cliBin = path.resolve(__dirname, "..", "bin", "instafy.js");
+// Login with no server or Studio URL probes the defaults, where a real controller and Studio may run.
+const unreachable = await unreachableLocalUrl();
 
 function makeTempDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -27,6 +30,8 @@ function runCli(args: string[], options?: { cwd?: string; homeDir?: string }) {
     SUPABASE_ACCESS_TOKEN: "",
     CONTROLLER_ACCESS_TOKEN: "",
     INSTAFY_SERVICE_TOKEN: "",
+    INSTAFY_SERVER_URL: unreachable,
+    INSTAFY_STUDIO_URL: unreachable,
   };
   return spawnSync(process.execPath, [cliBin, ...args], {
     cwd: options?.cwd,
@@ -99,9 +104,9 @@ describe("@instafy/cli UX", () => {
         "--token",
         "test-token",
         "--studio-url",
-        "http://localhost:5173",
+        unreachable,
         "--server-url",
-        "http://127.0.0.1:8788",
+        unreachable,
       ],
       { env, encoding: "utf8" },
     );
@@ -146,9 +151,9 @@ describe("@instafy/cli UX", () => {
         "--token",
         "test-token",
         "--studio-url",
-        "http://localhost:5173",
+        unreachable,
         "--server-url",
-        "http://127.0.0.1:8788",
+        unreachable,
       ],
       { env, encoding: "utf8" },
     );
