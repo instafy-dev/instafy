@@ -369,6 +369,10 @@ const LOST_FINAL_CHECKPOINTS_NEWEST_PER_TICK: i64 = 24;
 /// ...and this many of the oldest, so none waits untried until it is too old
 /// to report: past the longest give-up, a failed attempt gives it up.
 const LOST_FINAL_CHECKPOINTS_OLDEST_PER_TICK: i64 = 8;
+const _: () = assert!(
+    LOST_FINAL_CHECKPOINTS_NEWEST_PER_TICK > 0 && LOST_FINAL_CHECKPOINTS_OLDEST_PER_TICK > 0,
+    "a tick tries both ends"
+);
 
 /// Whether a failed recovery of a group whose workers ended `ended_seconds`
 /// ago is given up: soon for a refusal, later for a failure that may pass. A
@@ -393,13 +397,14 @@ fn lost_final_checkpoint_gives_up(
 /// `$1` seconds, and no lead of any kind was queued.
 /// `recover_deferred_plan_checkpoints` owns the groups with an early lead. It
 /// leaves out what ends a plan without a lead on purpose: a deleted space, a
-/// Stop, a refused or given-up lead (`$2` is the given-up notice's kind), a
-/// question waiting for a person, a last worker a person's runtime stop
-/// expired (`$3` and `$4`; its expiry runs no checkpoint), and a last worker
-/// that planned again (its end never checkpoints its own group). `$5` is the
-/// one conversation to look in, or null for all. The recovery below acts on
-/// these groups and a goal's next turn waits for them
-/// (`conversation_owes_final_lead`), so the two read one definition.
+/// Stop, a lead managed AI refused or the recovery gave up (`$2` is the
+/// given-up notice's kind), a question pending or answered and not yet handed
+/// back, a last worker a person's runtime stop expired (`$3` and `$4`; its
+/// expiry runs no checkpoint), and a last worker that planned again (its end
+/// never checkpoints its own group). `$5` is the one conversation to look in,
+/// or null for all. The recovery below acts on these groups and a goal's next
+/// turn waits for them (`conversation_owes_final_lead`), so the two read one
+/// definition.
 const GROUPS_OWED_A_FINAL_LEAD: &str = "
     select g.plan_group_id, g.trigger_job_id, g.conversation_id, g.completed_at
     from (
@@ -473,6 +478,35 @@ pub(crate) async fn conversation_owes_final_lead(
     Ok(row.get("owed"))
 }
 
+/// The conversations with a group `recover_lost_final_plan_checkpoints` could
+/// try now: owed its lead and past the grace. The sweep reads every
+/// conversation, so the window test, which ticks it, first checks that no other
+/// test's group is among them.
+#[cfg(test)]
+pub(crate) async fn conversations_owing_a_lost_final_lead(
+    client: &impl tokio_postgres::GenericClient,
+) -> Result<Vec<Uuid>, tokio_postgres::Error> {
+    let person_reasons: Vec<&str> = REQUEUE_REASONS_OF_A_PERSON.to_vec();
+    let query = format!(
+        "select distinct g.conversation_id from ({GROUPS_OWED_A_FINAL_LEAD}) g
+         where g.completed_at < now() - ($6::bigint * interval '1 second')"
+    );
+    let rows = client
+        .query(
+            query.as_str(),
+            &[
+                &LOST_FINAL_CHECKPOINT_MAX_AGE_SECONDS,
+                &crate::multi_agent_plan::LEAD_CHECKPOINT_FAILED_CODE,
+                &REQUEUED_JOB_EXPIRED_MESSAGE,
+                &person_reasons,
+                &None::<Uuid>,
+                &LOST_FINAL_CHECKPOINT_GRACE_SECONDS,
+            ],
+        )
+        .await?;
+    Ok(rows.iter().map(|row| row.get(0)).collect())
+}
+
 /// The final lead is queued after the last worker's end commits, by its
 /// settlement (or by the checkpoint a cancellation or a sweep starts), so a
 /// restart or a dispatch error, which is only logged, loses it. Retry each
@@ -480,14 +514,17 @@ pub(crate) async fn conversation_owes_final_lead(
 /// all ended a while ago. The trigger is the group's last worker to end, as
 /// the lost settlement's was, and the group lock rechecks every candidate:
 /// this query grants no dispatch rights. When the conversation moved on after
-/// the workers ended (a person started a new turn, or another turn started),
-/// a late lead would answer out of turn, so the person is told instead. A
-/// message in a turn received before they ended is no new turn, even when the
-/// person writes it after they end: a steer of that turn, an answer to a
-/// question its agent asked, or a send queued before they ended, whose job,
-/// sent once they ended, keeps the time it was queued (`trigger_received_at`,
-/// which only the send queue backdates). A lead for the same agent as such a
-/// turn waits behind it. A goal's next turn waits for the lead
+/// the workers ended (a person wrote in it, or another turn started there), a
+/// late lead would answer out of turn, so the person is told instead. What
+/// belongs to a turn received before they ended does not count, even when it
+/// happens after they end: a person's steer of that turn, a Reply to a
+/// worker's question (it carries the workers' prompt), a send queued before
+/// they ended, whose job, sent once they ended, keeps the time it was queued
+/// (`trigger_received_at`, which only the send queue backdates), and the jobs
+/// of a team such a turn planned, however deep the plans nest
+/// (`parent_job_id`), with a steer of them or a Reply to their questions. The
+/// lead waits while its agent has a job queued or running, for example that
+/// turn or another team's lead. A goal's next turn waits for the lead
 /// (`conversation_owes_final_lead`), so it never moves the conversation on
 /// first. A recovery that keeps failing is given up the same way.
 pub(crate) async fn recover_lost_final_plan_checkpoints(
@@ -503,8 +540,30 @@ pub(crate) async fn recover_lost_final_plan_checkpoints(
     .await
 }
 
+/// SQL that is true when the job `{job}` belongs to a turn received by the
+/// time group `g`'s workers ended: the job was received by then, or a job it
+/// descends from through team plans was (`parent_job_id`, followed however
+/// deep the plans nest). A team belongs to the turn that planned it. It tests
+/// the job's own receive time too, so a caller's filter on that time only
+/// narrows the jobs it runs for.
+fn belongs_to_a_turn_received_by_the_end(job: &str) -> String {
+    format!(
+        "exists (
+             with recursive planner(id) as (
+                 select {job}.id
+                 union
+                 select earlier.parent_job_id
+                 from planner join agent_jobs earlier on earlier.id = planner.id
+             )
+             select 1 from planner join agent_jobs earlier on earlier.id = planner.id
+             where coalesce(earlier.trigger_received_at, earlier.created_at) <= g.completed_at
+         )"
+    )
+}
+
 /// `recover_lost_final_plan_checkpoints` over the `newest` and the `oldest`
-/// groups owed a lead.
+/// groups owed a lead, oldest first, so of two teams whose leads wait for one
+/// agent the team that ended first is tried first.
 pub(crate) async fn recover_lost_final_plan_checkpoints_within(
     state: &AppState,
     tick: &mut TickConnection<'_>,
@@ -512,6 +571,8 @@ pub(crate) async fn recover_lost_final_plan_checkpoints_within(
     oldest: i64,
 ) -> AnyResult<()> {
     let person_reasons: Vec<&str> = REQUEUE_REASONS_OF_A_PERSON.to_vec();
+    let message_belongs = belongs_to_a_turn_received_by_the_end("sent");
+    let job_belongs = belongs_to_a_turn_received_by_the_end("turn");
     let query = format!(
         "with owed as (
              select * from ({GROUPS_OWED_A_FINAL_LEAD}) g
@@ -531,16 +592,17 @@ pub(crate) async fn recover_lost_final_plan_checkpoints_within(
                           select 1 from agent_jobs sent
                           where sent.conversation_id = g.conversation_id
                             and sent.prompt_id = turn.prompt_id
-                            and sent.trigger_received_at <= g.completed_at
+                            and {message_belongs}
                       )
                 ) or exists (
                     select 1 from agent_jobs turn
                     where turn.conversation_id = g.conversation_id
                       and coalesce(turn.trigger_received_at, turn.created_at) > g.completed_at
                       and turn.plan_group_id is distinct from g.plan_group_id
+                      and not {job_belongs}
                 ) as moved_on
          from tried g
-         order by g.completed_at desc, g.trigger_job_id desc"
+         order by g.completed_at, g.trigger_job_id"
     );
     let rows = tick
         .client("lost final checkpoint recovery connection")

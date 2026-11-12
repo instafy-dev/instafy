@@ -1700,8 +1700,12 @@ async fn dispatch_lead_checkpoint(
             .and_then(JsonValue::as_str)
             .and_then(|id| Uuid::parse_str(id).ok());
     }
-    // The lost-handoff recovery admits its lead as a queue drain admits a send:
-    // only while the lead's lane is idle, else 409 `dispatch_lane_busy`.
+    // The lost-handoff recovery admits its lead only while the lead's agent is
+    // free in the conversation, else 409 `dispatch_lane_busy`: no job of that
+    // agent queued or running, no send waiting in the queue for it (a send that
+    // names no agent waits for @octo), and no queued or running job that names
+    // no agent. Unlike a queue drain, it has no queue entry of its own, so every
+    // waiting send counts.
     normalized.expected_lane_idle = waits_for_lane;
     let response = match process_dispatch_prompt(state, &context, normalized).await {
         Ok(response) => response,
