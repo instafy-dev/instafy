@@ -4,6 +4,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { findProjectManifest } from "./project-manifest.js";
+import { shownValue } from "./terminal-text.js";
 
 export interface InstafyCliConfig {
   controllerUrl?: string | null;
@@ -63,13 +64,14 @@ function normalizeProfileName(value: string | null | undefined): string | null {
   if (!trimmed) {
     return null;
   }
+  // INSTAFY_PROFILE or a cloned repository's binding can hold anything, so the value is escaped.
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(trimmed)) {
     throw new Error(
-      `Invalid profile name "${value}". Use letters/numbers plus . _ - (max 64 chars).`,
+      `Invalid profile name ${shownValue(trimmed)}. Use letters/numbers plus . _ - (max 64 chars).`,
     );
   }
   if (trimmed.includes("..")) {
-    throw new Error(`Invalid profile name "${value}".`);
+    throw new Error(`Invalid profile name ${shownValue(trimmed)}.`);
   }
   return trimmed;
 }
@@ -375,24 +377,40 @@ export function clearInstafyProfileConfig(
   writeInstafyProfileConfig(profile, update);
 }
 
-export function resolveActiveProfileName(params?: {
+/** A selected profile and what selected it: --profile, INSTAFY_PROFILE, or a folder's binding. */
+export type ActiveProfile = {
+  name: string;
+  source: { kind: "flag" } | { kind: "environment" } | { kind: "manifest"; path: string };
+};
+
+export function resolveActiveProfile(params?: {
   profile?: string | null;
   cwd?: string | null;
-}): string | null {
+}): ActiveProfile | null {
   const explicit = normalizeProfileName(params?.profile ?? null);
   if (explicit) {
-    return explicit;
+    return { name: explicit, source: { kind: "flag" } };
   }
   const fromEnv = normalizeProfileName(process.env["INSTAFY_PROFILE"] ?? null);
   if (fromEnv) {
-    return fromEnv;
+    return { name: fromEnv, source: { kind: "environment" } };
   }
   const cwd = (params?.cwd ?? process.cwd()).trim();
   if (!cwd) {
     return null;
   }
-  const manifest = findProjectManifest(cwd).manifest;
-  return normalizeProfileName(manifest?.profile ?? null);
+  const found = findProjectManifest(cwd);
+  const fromManifest = normalizeProfileName(found.manifest?.profile ?? null);
+  return fromManifest && found.path
+    ? { name: fromManifest, source: { kind: "manifest", path: found.path } }
+    : null;
+}
+
+export function resolveActiveProfileName(params?: {
+  profile?: string | null;
+  cwd?: string | null;
+}): string | null {
+  return resolveActiveProfile(params)?.name ?? null;
 }
 
 export function resolveConfiguredControllerUrl(params?: {

@@ -24,7 +24,7 @@ By default, `instafy login` also installs a git credential helper so `git clone`
 
 ## Profiles (multiple accounts)
 
-By default, `instafy login` stores a single token globally in `~/.instafy/config.json`.
+With no profile selected, `instafy login` stores a single token globally in `~/.instafy/config.json`.
 
 If you need different users in different folders, use named profiles:
 
@@ -46,7 +46,22 @@ instafy profile list
 instafy logout --profile work
 ```
 
-Resolution order for auth (highest → lowest priority): explicit flags/env tokens → folder `profile` → global config.
+Commands use one saved session: the profile `INSTAFY_PROFILE` names, else the one the nearest
+`.instafy/space.json` names in its `profile` field, else the global `~/.instafy/config.json`.
+(`instafy space defaults refresh` takes the folder's `profile` before `INSTAFY_PROFILE`.) A
+selected profile is used on its own, with no fallback to the global session. An explicit token
+(`--access-token`, `INSTAFY_ACCESS_TOKEN` or `SUPABASE_ACCESS_TOKEN`) takes the place of any saved
+session. `instafy login`, `instafy logout` and `instafy space init` also take `--profile`, which
+comes before both.
+
+`instafy login` and `instafy logout` act on that same session. Plain `instafy login` in a folder
+bound to `work`, or with `INSTAFY_PROFILE=work` set, saves the `work` profile, says which profile
+it saved and what selected it, and leaves `~/.instafy/config.json` alone. `instafy logout` there
+clears the `work` session; if `work` has none, it clears nothing and says so.
+
+Git runs the credential helper `instafy login` installs from the repository's top folder, so `git`
+uses the session selected there, not one a subfolder's `.instafy/space.json` selects. In a
+repository bound in a subfolder, run git with `INSTAFY_PROFILE` set to choose the profile it uses.
 
 ## Core concepts
 
@@ -332,7 +347,7 @@ Changing or unsetting the saved controller origin clears the saved login session
 
 The CLI supports a few ways to authenticate, depending on what you have available:
 
-- **Saved CLI token (recommended)**: run `instafy login` once (stores token in `~/.instafy/config.json`).
+- **Saved CLI token (recommended)**: run `instafy login` once (stores the token in `~/.instafy/config.json`, or in the selected profile's file; see [Profiles](#profiles-multiple-accounts)).
 - **Studio access token** (recommended): pass `--access-token` or set `INSTAFY_ACCESS_TOKEN`.
 - **Supabase session token** (convenient): pass `--supabase-access-token` / `--supabase-access-token-file` or set `SUPABASE_ACCESS_TOKEN`. The CLI will exchange this session for server + runtime/origin tokens automatically.
 - **Pre-minted runtime/origin token**: pass `--runtime-token` / `RUNTIME_ACCESS_TOKEN` (also reused for origin), or `--origin-token` / `ORIGIN_INTERNAL_TOKEN`.

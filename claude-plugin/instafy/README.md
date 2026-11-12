@@ -121,7 +121,8 @@ lists it as failed without starting it.
 
 **Every call says to sign in.** Run the command the error names in a terminal, then retry. That is
 `instafy login`, or `instafy login --profile <name>` when `INSTAFY_PROFILE` or the folder's
-`.instafy/space.json` selects a profile: plain `instafy login` saves only the default session. A
+`.instafy/space.json` selects a profile: plain `instafy login` saves the profile that its own
+terminal and folder select, which may not be the one Claude Code uses. A
 session created with `instafy login --token` cannot refresh itself and will start failing once it
 expires; sign in through the browser flow for a session that renews.
 

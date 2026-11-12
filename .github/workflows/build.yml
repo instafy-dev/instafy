@@ -582,6 +582,9 @@ jobs:
       - name: Test CLI MCP server
         run: pnpm --filter @instafy/cli exec vitest run test/mcp.spec.ts
 
+      - name: Test CLI login profiles
+        run: pnpm --filter @instafy/cli exec vitest run test/login-profile.e2e.spec.ts test/runtime-env.spec.ts
+
   javascript-desktop:
     name: JavaScript Desktop and runtime
     runs-on: >-

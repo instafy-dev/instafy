@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildRuntimeChildEnvironment, buildRuntimeDockerRunArgs } from "../src/runtime.js";
+import os from "node:os";
+import path from "node:path";
+import { buildRuntimeChildEnvironment, buildRuntimeDockerRunArgs, runtimeAgentSessionFile } from "../src/runtime.js";
 
 describe("runtime child environment", () => {
   it("keeps only scoped runtime credentials and removes launcher/user credentials", () => {
@@ -110,5 +112,68 @@ describe("runtime docker launch", () => {
     });
     expect(args.indexOf("--init")).toBeGreaterThan(-1);
     expect(args.indexOf("--init")).toBeLessThan(args.indexOf("instafy-runtime-agent:test"));
+  });
+});
+
+describe("the saved session a runtime agent re-reads", () => {
+  const controller = "https://controller.example";
+  const workFile = path.join(os.homedir(), ".instafy", "profiles", "work.json");
+  const fromSaved = { tokenSource: "config" } as const;
+
+  it("is the selected profile's file when the runtime started from it, on the same controller", () => {
+    const file = runtimeAgentSessionFile({
+      env: { CONTROLLER_BASE_URL: `${controller}/` },
+      profile: "work",
+      savedControllerUrl: controller,
+      ...fromSaved,
+    });
+    expect(file).toBe(workFile);
+    // The process runner's environment keeps it.
+    expect(buildRuntimeChildEnvironment({ INSTAFY_CLI_CONFIG: file! }).INSTAFY_CLI_CONFIG).toBe(file);
+  });
+
+  it("is the agent's default without a profile, on the same controller", () => {
+    expect(
+      runtimeAgentSessionFile({ env: { CONTROLLER_BASE_URL: controller }, profile: null, savedControllerUrl: controller, ...fromSaved }),
+    ).toBeNull();
+  });
+
+  it("is an empty file when no session is saved for the agent's controller, with or without a profile", () => {
+    // The agent sends what it re-reads to its controller, so another controller's session, or the
+    // default one when a profile's is not saved there, must not be re-read.
+    for (const profile of ["work", null]) {
+      expect(
+        runtimeAgentSessionFile({ env: { CONTROLLER_BASE_URL: "https://other.example" }, profile, savedControllerUrl: controller, ...fromSaved }),
+      ).toBe(os.devNull);
+      expect(
+        runtimeAgentSessionFile({ env: { CONTROLLER_BASE_URL: controller }, profile, savedControllerUrl: null, ...fromSaved }),
+      ).toBe(os.devNull);
+    }
+  });
+
+  it("is an empty file when the runtime was started with a token that is not the saved session's", () => {
+    // A runtime started as one account must not carry on as the account whose session is saved.
+    for (const tokenSource of ["explicit", "env", "none"] as const) {
+      for (const profile of ["work", null]) {
+        expect(
+          runtimeAgentSessionFile({ env: { CONTROLLER_BASE_URL: controller }, profile, savedControllerUrl: controller, tokenSource }),
+          `${tokenSource} ${profile}`,
+        ).toBe(os.devNull);
+      }
+    }
+  });
+
+  it("is left to the person when they set INSTAFY_CLI_CONFIG", () => {
+    expect(
+      runtimeAgentSessionFile({
+        env: { INSTAFY_CLI_CONFIG: "/elsewhere/config.json", CONTROLLER_BASE_URL: "https://other.example" },
+        profile: "work",
+        savedControllerUrl: controller,
+        tokenSource: "explicit",
+      }),
+    ).toBeNull();
+    expect(
+      runtimeAgentSessionFile({ env: { INSTAFY_CLI_CONFIG: "  ", CONTROLLER_BASE_URL: controller }, profile: "work", savedControllerUrl: controller, ...fromSaved }),
+    ).toBe(workFile);
   });
 });

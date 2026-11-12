@@ -220,12 +220,15 @@ program
   .description("Log in and save an access token for future CLI commands")
   .option("--studio-url <url>", "Studio web URL (default: staging or localhost)")
   .option("--server-url <url>", "Instafy server/controller URL")
-  .option("--profile <name>", "Save token under a named profile (multi-account support)")
+  .option(
+    "--profile <name>",
+    "Save the session under this profile (default: INSTAFY_PROFILE, then the folder's .instafy/space.json profile, else ~/.instafy/config.json)",
+  )
   .option("--token <token>", "Provide token directly (skips prompt)")
   .option("--email <email>", "Email for non-interactive login (requires SUPABASE_URL + SUPABASE_ANON_KEY)")
   .option("--password <password>", "Password for non-interactive login (requires SUPABASE_URL + SUPABASE_ANON_KEY)")
   .option("--no-git-setup", "Do not configure git credential helper")
-  .option("--no-store", "Do not save token to ~/.instafy/config.json")
+  .option("--no-store", "Do not save the token")
   .option("--json", "Output JSON")
   .option(
     "--wait-for-browser",
@@ -254,7 +257,10 @@ program
 program
   .command("logout")
   .description("Clear the saved CLI access token")
-  .option("--profile <name>", "Clear the token for a named profile")
+  .option(
+    "--profile <name>",
+    "Clear this profile's session (default: INSTAFY_PROFILE, then the folder's .instafy/space.json profile, else ~/.instafy/config.json)",
+  )
   .option("--json", "Output JSON")
   .action(async (opts) => {
     try {

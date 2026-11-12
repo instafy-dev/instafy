@@ -68,12 +68,12 @@ const cancellationWorkflows = [
   // Build includes the reviewed proxy_retry_budget, provider_mcp and read-reference selectors, the
   // code-mode host build, per-model proxy_retry_budget runs, inert native compaction,
   // native chat image, granted turn, native subagent, browser hand-back, stopped turn, thread mode, evidence retry, reply draft stream and page card selectors, the inert run_instructions target, and provider unit tests, independently bound by check-rust-ci, and the CLI git
-  // wrapper, preview check, bound-sites binder, web read (with its offline fixtures), preview picture, web search and link, and MCP server suites bound below, and the local author pseudonym key
+  // wrapper, preview check, bound-sites binder, web read (with its offline fixtures), preview picture, web search and link, and MCP server and login profile suites bound below, and the local author pseudonym key
   // test in the contracts lane, and the tunnel broker test lane in the Rust tests
   // aggregate, also bound by check-rust-ci; other commands and authority are exact.
   // Both hashes are taken after reversing the main-only cache change exactly.
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
-    previousHash: '15f1b8684b866046b6a1aac864dba9f76ac966c71079ea22a462aa7ce49792b4' },
+    previousHash: '8ec404f31a465c719cbc7afac48da13580cddb1d66cedf19699e4d305423f46a' },
   // The Browser UI rendering aggregate came with the lane's split into parts;
   // reversing that split exactly (inside withoutBrowserUiJobBudget) removes it.
   { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),
@@ -383,6 +383,8 @@ test('the complete pre-split command inventory and working directories are uncha
     'Test CLI web search and link': 'c9bd4420ab9b7e09ea0f09c3b1109e3dd39ad94fc4fa0359605f57a0b1323de1',
     // Reviewed addition: `instafy mcp`, the MCP server a local coding agent starts, against local mock controllers only.
     'Test CLI MCP server': '8a027ab4e10da1982213143c705d4a389b4bba1860654e55b1e2f297be9f8f71',
+    // Reviewed addition: `instafy login` and `logout` on the session a profile selects, and the session file a runtime agent re-reads, against local mock servers only.
+    'Test CLI login profiles': '9e9eb5edfe207c4482ab85f55f1459fb7417094d30830e47c5cf13f881251ad4',
     'Build and test desktop runtime': '4404b931ad4c93454f1acb37955f5059b7f3df6ac9cf9ffa81e92d3306481e73',
     'Build and test desktop app': '189e65ceed9465ec56589e5b804be189a9adc623daf4f4f3cee05b4b846a5ba5',
   };
@@ -406,7 +408,7 @@ test('the complete pre-split command inventory and working directories are uncha
 test('the full frontend, CLI, provider artifact and Desktop commands are preserved without filtering', () => {
   const commands = {
     'javascript-frontend': ['pnpm --filter @instafy/frontend lint', 'pnpm --filter @instafy/frontend build', 'pnpm --filter @instafy/frontend test:unit'],
-    'javascript-cli': ['pnpm --filter @instafy/cli test:package', 'npm pack --dry-run --ignore-scripts', 'pnpm --filter @instafy/cli exec vitest run test/automations.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/git-wrapper.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/local-site.spec.ts test/site-check.spec.ts', 'pnpm --filter @instafy/bind test', 'pnpm --filter @instafy/cli exec vitest run test/bind.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/web-read.spec.ts test/web-fixtures.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/preview-thumbnail.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/web-search.spec.ts test/web-search-eval.spec.ts test/web-compare-eval.spec.ts test/web-reference-search.spec.ts test/web-link.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/mcp.spec.ts'],
+    'javascript-cli': ['pnpm --filter @instafy/cli test:package', 'npm pack --dry-run --ignore-scripts', 'pnpm --filter @instafy/cli exec vitest run test/automations.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/git-wrapper.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/local-site.spec.ts test/site-check.spec.ts', 'pnpm --filter @instafy/bind test', 'pnpm --filter @instafy/cli exec vitest run test/bind.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/web-read.spec.ts test/web-fixtures.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/preview-thumbnail.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/web-search.spec.ts test/web-search-eval.spec.ts test/web-compare-eval.spec.ts test/web-reference-search.spec.ts test/web-link.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/mcp.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/login-profile.e2e.spec.ts test/runtime-env.spec.ts'],
     'javascript-desktop': ['pnpm --filter @instafy/desktop-runtime-agent build', 'pnpm --filter @instafy/desktop-runtime-agent exec vitest run', 'pnpm --filter @instafy/desktop-app test'],
   };
   for (const [key, list] of Object.entries(commands)) for (const command of list) {

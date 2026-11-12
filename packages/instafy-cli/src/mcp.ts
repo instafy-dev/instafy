@@ -990,9 +990,9 @@ interface SavedSession {
 }
 
 /**
- * Why the selected profile name cannot be used, saying where it was set and what to change. The
- * CLI's own message repeats the whole raw value, which a cloned repository's binding controls, so
- * it is not passed on; the value is shown quoted and short instead.
+ * Why the selected profile name cannot be used, saying where it was set and what to change, which
+ * the CLI's own message does not say. A cloned repository's binding can set the value, so it is
+ * shown quoted and short.
  */
 function invalidProfileProblem(): string {
   // A blank INSTAFY_PROFILE counts as unset, as it does for every command.
@@ -1012,8 +1012,8 @@ function invalidProfileProblem(): string {
  * The saved session a call will run on, found the way every command finds it: the profile from
  * INSTAFY_PROFILE or the folder's `.instafy/space.json`, then that profile's saved login. It reads
  * files only, so a call with no session is refused before anything is sent. A refusal names the
- * profile and the file it read, because plain `instafy login` saves the default session and would
- * not fix a profile's.
+ * profile and the file it read, because plain `instafy login` saves the session its own terminal
+ * selects, by that terminal's INSTAFY_PROFILE and folder, which need not be this one.
  */
 function savedSession(): SavedSession | { problem: string } {
   const home = homeDirectoryProblem();
@@ -1892,9 +1892,10 @@ function failureDetail(outcome: ChildOutcome, session: SavedSession, secrets: It
   const cleaned = redactCredentials(raw.replace(ANSI_ESCAPE, ""), secrets);
   let detail = cleaned;
   for (const [pattern, replacement] of TERMINAL_ADVICE) detail = detail.replace(pattern, replacement);
-  // Plain `instafy login` saves the default session, which does not fix a profile's. Only the CLI's
-  // own advice is rewritten: its "Run: instafy login" line, and its error line unless that line goes
-  // on with a server's words after "): ". Whatever a server said is left as it is.
+  // Plain `instafy login` saves the session the person's terminal selects, which need not be this
+  // one, so a selected profile is named. Only the CLI's own advice is rewritten: its "Run: instafy
+  // login" line, and its error line unless that line goes on with a server's words after "): ".
+  // Whatever a server said is left as it is.
   if (session.login !== "instafy login") {
     let errorLineSeen = false;
     detail = detail
