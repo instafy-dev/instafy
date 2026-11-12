@@ -182,7 +182,8 @@ update; automatic continuations cannot resume themselves. Workers cannot change
 the parent goal. Verified automatic retries and browser hand-backs do not count
 as new user input. A final team checkpoint can
 inherit its planning job's binding; a planning receipt cannot continue the goal
-before that checkpoint.
+before that checkpoint. If a lost checkpoint is given up, the goal is blocked
+with the reason.
 
 A successful goal turn records one durable wakeup in
 `conversation_goal_continuations`, in the completion transaction. Completion

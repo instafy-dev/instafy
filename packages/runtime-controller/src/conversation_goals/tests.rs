@@ -822,3 +822,102 @@ async fn goal_scheduler_dispatches_once_across_crashes_before_and_after_dispatch
         Err(panic) => std::panic::resume_unwind(panic),
     }
 }
+
+/// A team's final lead that the lost-handoff recovery gave up blocks the goal
+/// its planning turn still holds, once, keeping the revision; it leaves alone
+/// a turn that never delegated, a goal a newer edit or turn replaced, and one
+/// that is no longer active. No wakeup is recorded either way.
+#[tokio::test]
+async fn an_unstarted_team_lead_blocks_only_the_goal_its_planning_turn_holds() -> anyhow::Result<()>
+{
+    let pool = require_origin_test_pool("unstarted team lead goal").await?;
+    let reason = "@octo could not continue the plan after its agents finished. Their results are in the plan.";
+    for case in ["blocked", "no_receipt", "replaced", "superseded", "paused"] {
+        let mut db = pool.get().await?;
+        let tx = db.transaction().await?;
+        let fixture = GoalFixture::seed(&tx).await?;
+        tx.execute(
+            "update agent_jobs set status='completed', outcome='succeeded',
+                 planning_receipt_state = case when $2 then '{}'::jsonb end
+             where id=$1",
+            &[&fixture.job, &(case != "no_receipt")],
+        )
+        .await?;
+        match case {
+            // A goal edit (or a newer person's turn) rotated the revision.
+            "replaced" => {
+                tx.execute(
+                    "update conversations set metadata=jsonb_set(metadata,'{_goalController,revision}',to_jsonb($2::text)) where id=$1",
+                    &[&fixture.conversation, &Uuid::new_v4().to_string()],
+                )
+                .await?;
+            }
+            // A newer job of the same revision carries the goal.
+            "superseded" => {
+                tx.execute(
+                    "insert into agent_jobs(project_id,conversation_id,prompt_id,run_id,status,payload,created_at)
+                     select project_id,conversation_id,prompt_id,run_id,'completed',payload,created_at+interval '1 second'
+                     from agent_jobs where id=$1",
+                    &[&fixture.job],
+                )
+                .await?;
+            }
+            "paused" => {
+                tx.execute(
+                    "update conversations set metadata=jsonb_set(metadata,'{instafyGoal,status}','\"paused\"') where id=$1",
+                    &[&fixture.conversation],
+                )
+                .await?;
+            }
+            _ => {}
+        }
+        let blocked =
+            state::block_for_unstarted_team_lead(&tx, fixture.job, fixture.conversation, reason)
+                .await
+                .map_err(api_error)?;
+        let metadata = fixture.metadata(&tx).await?;
+        assert_eq!(blocked.is_some(), case == "blocked", "{case}");
+        let expected_status = match case {
+            "blocked" => "blocked",
+            "paused" => "paused",
+            _ => "active",
+        };
+        assert_eq!(
+            metadata["instafyGoal"]["status"],
+            json!(expected_status),
+            "{case}"
+        );
+        if case == "blocked" {
+            assert_eq!(metadata["instafyGoal"]["progressSummary"], json!(reason));
+            assert_eq!(
+                metadata["instafyGoal"]["updatedBy"],
+                json!(fixture.owner.to_string())
+            );
+            assert_eq!(
+                metadata["_goalController"]["revision"],
+                json!(fixture.revision.to_string()),
+                "the revision is kept, so a late lead finds the goal inactive"
+            );
+            assert_eq!(
+                blocked.expect("blocked").metadata,
+                Some(metadata.clone()),
+                "the returned record is the blocked one"
+            );
+            assert!(
+                state::block_for_unstarted_team_lead(
+                    &tx,
+                    fixture.job,
+                    fixture.conversation,
+                    reason
+                )
+                .await
+                .map_err(api_error)?
+                .is_none(),
+                "blocked once"
+            );
+        }
+        assert_eq!(fixture.wakeups(&tx).await?, 0, "{case}");
+        tx.rollback().await?;
+    }
+    Ok(())
+}

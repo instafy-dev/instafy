@@ -364,6 +364,64 @@ pub(crate) fn publish_update(state: &AppState, conversation: &ConversationRecord
     );
 }
 
+/// A team's final lead that will never start (the lost-handoff recovery gave it
+/// up) leaves the goal its planning turn still holds blocked, with `reason`: a
+/// planning receipt records no wakeup and the goal sweep skips it, so nothing
+/// else would continue that goal. Blocked as a failed run is in `settle_job`,
+/// and only while that turn holds it: its binding is current, it is the newest
+/// source of its revision, and the goal is active. The revision is kept, so a
+/// late lead, which inherits it, finds the goal inactive. The planning job has
+/// ended and its binding is written once, so its row is not locked; the
+/// conversation lock `load_bound_goal` takes must be the caller's first row
+/// lock, before it writes any row that references the conversation.
+pub(crate) async fn block_for_unstarted_team_lead(
+    transaction: &Transaction<'_>,
+    planning_job_id: Uuid,
+    conversation_id: Uuid,
+    reason: &str,
+) -> StateResult<Option<ConversationRecord>> {
+    let Some(row) = transaction
+        .query_opt(
+            "select payload from agent_jobs where id = $1 and conversation_id = $2",
+            &[&planning_job_id, &conversation_id],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to load a team's planning turn: {error}"))
+        })?
+    else {
+        return Ok(None);
+    };
+    let payload: Value = row.get::<_, PgJson<Value>>("payload").0;
+    let Some(bound) =
+        load_bound_goal(transaction, planning_job_id, &payload, conversation_id).await?
+    else {
+        return Ok(None);
+    };
+    let Some(mut goal) = bound.goal.filter(|goal| goal.status == GoalStatus::Active) else {
+        return Ok(None);
+    };
+    if !bound.planning_receipt
+        || bound.job_status != "completed"
+        || !super::is_current_source(
+            transaction,
+            conversation_id,
+            planning_job_id,
+            bound.revision,
+        )
+        .await?
+    {
+        return Ok(None);
+    }
+    goal.status = GoalStatus::Blocked;
+    goal.progress_summary = Some(reason.to_string());
+    goal.updated_at = Utc::now().to_rfc3339();
+    goal.updated_by = Some(bound.owner.to_string());
+    persist_goal(transaction, conversation_id, bound.metadata, Some(&goal))
+        .await
+        .map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

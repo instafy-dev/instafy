@@ -237,13 +237,19 @@ async fn final_checkpoint_waits_for_early_lead_and_recovers_every_terminal_hando
 /// last worker a person's runtime stop expired, and one whose last worker
 /// planned again. When the conversation moved on, or a refused lead has been
 /// retried long enough, the person is told once instead, and nothing starts
-/// that lead afterwards; a lead refused for less long is retried.
+/// that lead afterwards; a lead refused for less long is retried. A send
+/// queued before the workers ended is answered first and the lead follows it,
+/// even when that takes longer than a refusal is retried; one queued after
+/// they ended counts as moving on. A goal-bound lead carries the planning
+/// turn's goal, and giving up blocks that goal unless a newer turn carries it.
 #[tokio::test]
 async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
         eprintln!("skipping lost final lead recovery: TEST_DATABASE_URL not set");
         return Ok(());
     };
+    let notice_text =
+        "@octo could not continue the plan after its agents finished. Their results are in the plan.";
     for case in [
         "recovered",
         "settling",
@@ -256,10 +262,21 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
         "moved_on",
         "failing",
         "given_up",
+        "queued",
+        "queued_late",
+        "goal_recovered",
+        "goal_given_up",
+        "goal_moved_on",
     ] {
+        // `goal_<base>` is `<base>` with the planning turn holding the conversation's goal.
+        let (goal, base) = match case.strip_prefix("goal_") {
+            Some(base) => (true, base),
+            None => (false, case),
+        };
         let space = ManagedSpace::seed(pool.clone(), "lost-final-lead").await?;
         let result: anyhow::Result<()> = async {
             let state = build_test_state(pool.clone(), space.config("lost-final-lead"));
+            let mut events = state.events.subscribe();
             let tick = || {
                 let (state, pool) = (&state, &pool);
                 async move {
@@ -273,7 +290,13 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                 "lead":{"leadHandle":"octo","continuationPrompt":"Summarize the verified results."}});
             let (conversation, first, _) = insert_finished_plan_lane(&space, None, "alpha", plan.clone(), json!({})).await?;
             let (_, last, _) = insert_finished_plan_lane(&space, Some(conversation), "beta", plan, json!({})).await?;
-            let ended_ago: i64 = match case { "settling" => 30, "too_old" => 3 * 3600, "given_up" => 20 * 60, _ => 5 * 60 };
+            // A queued send keeps the lead's lane busy for longer than a refusal is retried.
+            let ended_ago: i64 = match base {
+                "settling" => 30,
+                "too_old" => 3 * 3600,
+                "given_up" | "queued" => 20 * 60,
+                _ => 5 * 60,
+            };
             let connection = pool.get().await?;
             // The planning job the workers came from: the lead inherits its research budget.
             // It started before the workers ended, so it is no newer turn.
@@ -285,7 +308,25 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                 completed_at=now()-($3::bigint*interval '1 second') where id=$1", &[&first,&group,&(ended_ago+60),&parent_job]).await?;
             connection.execute("update agent_jobs set agent_role='worker',plan_group_id=$2,parent_job_id=$4,summary='LATEST VERIFIED RESULT',
                 completed_at=now()-($3::bigint*interval '1 second') where id=$1", &[&last,&group,&ended_ago,&parent_job]).await?;
-            match case {
+            let (goal_id, revision, owner_revision) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+            if goal {
+                // The person's goal turn planned the team: the planning job holds the goal's
+                // revision, and its receipt leaves the goal to the team's final lead.
+                let prompt = Uuid::new_v4();
+                connection.execute("insert into prompts(id,project_id,conversation_id,user_id,prompt_text)
+                    values($1,$2,$3,$4,'Split this review across a team.')",
+                    &[&prompt,&space.project_id,&conversation,&space.owner_user_id]).await?;
+                connection.execute("update agent_jobs set prompt_id=$2,planning_receipt_state='{}',payload=$3 where id=$1",
+                    &[&parent_job,&prompt,&PgJson(json!({"user_id":space.owner_user_id,"metadata":{"_controllerGoal":
+                        {"revision":revision,"ownerUserId":space.owner_user_id,"userTurn":true}}}))]).await?;
+                connection.execute("update conversations set metadata=coalesce(metadata,'{}'::jsonb)||$2 where id=$1",
+                    &[&conversation,&PgJson(json!({
+                        "instafyGoal":{"id":goal_id,"objective":"Ship the reviewed change","status":"active"},
+                        "_goalController":{"revision":revision,"ownerUserId":space.owner_user_id},
+                    }))]).await?;
+            }
+            let queued_send = Uuid::new_v4();
+            match base {
                 "deleted" => { connection.execute("update projects set status='deleted' where id=$1", &[&space.project_id]).await?; }
                 "stopped" => { connection.execute("insert into conversation_messages(id,conversation_id,project_id,role,content,metadata)
                     values(gen_random_uuid(),$1,$2,'assistant','Stopped.',$3)", &[&conversation,&space.project_id,&PgJson(json!({"source":"controller",
@@ -303,9 +344,27 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                         values($1,$2,'completed',now(),$3,$4,'worker',$5)", &[&space.project_id,&conversation,
                         &PgJson(json!({"metadata":{"multiAgentPlan":{"groupId":inner,"role":"worker"}}})),&inner,&last]).await?;
                 }
-                "moved_on" => { connection.execute("insert into conversation_messages(id,conversation_id,project_id,role,content,metadata,created_by)
-                    values(gen_random_uuid(),$1,$2,'user','Now wire it into the CLI.','{}',$3)",
-                    &[&conversation,&space.project_id,&space.owner_user_id]).await?; }
+                "moved_on" => {
+                    connection.execute("insert into conversation_messages(id,conversation_id,project_id,role,content,metadata,created_by)
+                        values(gen_random_uuid(),$1,$2,'user','Now wire it into the CLI.','{}',$3)",
+                        &[&conversation,&space.project_id,&space.owner_user_id]).await?;
+                    if goal {
+                        // That send replaced the goal turn, as `bind_dispatch` does for a person's own send.
+                        connection.execute("update conversations set metadata=jsonb_set(metadata,'{_goalController,revision}',to_jsonb($2::text)) where id=$1",
+                            &[&conversation,&owner_revision.to_string()]).await?;
+                    }
+                }
+                "queued" | "queued_late" => {
+                    // The person queued a send for the lead's agent while its team worked, or once it had ended.
+                    let queued_ago = if base == "queued" { ended_ago + 30 } else { 0 };
+                    connection.execute("insert into conversation_send_queue(id,project_id,conversation_id,user_id,status,request,created_at)
+                        values($1,$2,$3,$4,'queued',$5,now()-($6::bigint*interval '1 second'))",
+                        &[&queued_send,&space.project_id,&conversation,&space.owner_user_id,&PgJson(json!({
+                            "promptText":"Now summarize a separate document.","intent":"feature",
+                            "metadata":{"agentSelection":{"active":["octo"],"mentions":[]}},
+                            "runtimeId":space.hosted_runtime_id,
+                        })),&queued_ago]).await?;
+                }
                 "failing" | "given_up" => {
                     // A Personal Browser runtime refuses any other job: the lead pinned to it never starts.
                     let pinned = Uuid::new_v4();
@@ -317,6 +376,20 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                 _ => {}
             }
             drop(connection);
+            if matches!(base, "queued" | "queued_late") {
+                // The send goes before the sweep acts: the settlement drains the queue even when its
+                // checkpoint fails, and the queue recovery drains it after a restart.
+                crate::send_queue::spawn_send_queue_drain(state.clone(), conversation);
+                let deadline = tokio::time::Instant::now()+std::time::Duration::from_secs(10);
+                loop {
+                    let row = pool.get().await?.query_one("select status,dispatched_run_id,error_message from conversation_send_queue where id=$1", &[&queued_send]).await?;
+                    let status: String = row.get("status");
+                    if row.get::<_, Option<Uuid>>("dispatched_run_id").is_some() {break;}
+                    anyhow::ensure!(status != "failed", "queued send failed: {:?}", row.get::<_,Option<String>>("error_message"));
+                    anyhow::ensure!(tokio::time::Instant::now()<deadline, "queued send did not drain: {status}");
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
             // Two ticks: a recovered or given-up group is not touched again.
             tick().await?;
             tick().await?;
@@ -330,7 +403,7 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
             };
             let finals = final_checkpoints(&pool, conversation).await?;
             let told = notices().await?;
-            match case {
+            match base {
                 "recovered" => {
                     assert_eq!(finals.len(), 1);
                     assert!(told.is_empty());
@@ -343,25 +416,25 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                     assert_eq!(finals.len(), 1, "the existing lead is the only one");
                     assert!(told.is_empty());
                 }
-                "moved_on" | "given_up" => {
+                "moved_on" | "given_up" | "queued_late" => {
                     assert!(finals.is_empty(), "{case}: no late lead");
                     assert_eq!(told.len(), 1, "{case}: told once");
-                    assert_eq!(told[0].get::<_, String>("content"),
-                        "@octo could not continue the plan after its agents finished. Their results are in the plan.");
+                    assert_eq!(told[0].get::<_, String>("content"), notice_text);
                     let metadata = told[0].get::<_, PgJson<serde_json::Value>>("metadata").0;
                     assert_eq!(metadata["multiAgentPlan"]["groupId"], json!(group.to_string()));
                     assert_eq!(metadata["multiAgentPlan"]["role"], json!("lead_continuation"));
                     assert_eq!(metadata["messageType"], json!("error"));
                 }
+                // `queued`: its lead waits for the queued send's turn, without a notice.
                 _ => {
                     assert!(finals.is_empty(), "{case}: no lead");
                     assert!(told.is_empty(), "{case}: no notice");
                 }
             }
-            if matches!(case, "failing" | "given_up") {
+            if matches!(base, "failing" | "given_up") {
                 // The failure is the pinned runtime's refusal, a 403.
                 let error = crate::multi_agent_plan::recover_lost_final_checkpoint(&state, last).await;
-                if case == "failing" {
+                if base == "failing" {
                     let (status, axum::Json(error)) = error.expect_err("the pinned lead cannot start");
                     assert_eq!(status, StatusCode::FORBIDDEN);
                     assert_eq!(error.message, "Personal Browser runtime is not available to the current user");
@@ -376,8 +449,90 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                 tick().await?;
                 crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(&state, last, &payload).await
                     .map_err(|e| controller_error("replayed completion", e))?;
-                assert_eq!(final_checkpoints(&pool, conversation).await?.len(), usize::from(case == "failing"), "{case}");
-                assert_eq!(notices().await?.len(), usize::from(case == "given_up"), "{case}");
+                assert_eq!(final_checkpoints(&pool, conversation).await?.len(), usize::from(base == "failing"), "{case}");
+                assert_eq!(notices().await?.len(), usize::from(base == "given_up"), "{case}");
+            }
+            if base == "queued" {
+                // The drained send kept the time it was queued, so it is no newer turn: its answer
+                // holds the lead's lane, and the lead starts once that answer has ended.
+                let row = pool.get().await?.query_one(
+                    "select j.id, j.created_at, j.trigger_received_at, q.created_at as queued_at
+                     from conversation_send_queue q join agent_jobs j on j.run_id = q.dispatched_run_id
+                     where q.id = $1", &[&queued_send]).await?;
+                let answer: Uuid = row.get("id");
+                let answered_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
+                assert_eq!(row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("trigger_received_at"),
+                    Some(row.get::<_, chrono::DateTime<chrono::Utc>>("queued_at")), "a drained send is received when it was queued");
+                let (status, axum::Json(error)) = crate::multi_agent_plan::recover_lost_final_checkpoint(&state, last).await
+                    .expect_err("the lead waits for the queued send's answer");
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert_eq!(error.code.as_deref(), Some("dispatch_lane_busy"));
+                pool.get().await?.execute("update agent_jobs set status='completed',outcome='succeeded',completed_at=now() where id=$1",
+                    &[&answer]).await?;
+                tick().await?;
+                let finals = final_checkpoints(&pool, conversation).await?;
+                assert_eq!(finals.len(), 1, "the lead follows the answer");
+                assert!(finals[0].get::<_, chrono::DateTime<chrono::Utc>>("created_at") > answered_at, "after the answer");
+                let payload = finals[0].get::<_, PgJson<serde_json::Value>>("payload").0;
+                assert_eq!(payload["metadata"]["multiAgentPlan"]["triggerJobId"], json!(last));
+                assert!(notices().await?.is_empty(), "no notice");
+            }
+            if goal {
+                let metadata: serde_json::Value = pool.get().await?
+                    .query_one("select metadata from conversations where id=$1", &[&conversation]).await?.get(0);
+                let mut blocked_events = 0;
+                loop {
+                    match events.try_recv() {
+                        Ok(event) => {
+                            if event.kind == "conversation.updated" && event.conversation_id == Some(conversation)
+                                && event.data["metadata"]["instafyGoal"]["status"] == json!("blocked") {
+                                blocked_events += 1;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                        Err(error) => anyhow::bail!("reading goal events: {error}"),
+                    }
+                }
+                let wakeups: i64 = pool.get().await?.query_one(
+                    "select count(*) from conversation_goal_continuations where conversation_id=$1",
+                    &[&conversation]).await?.get(0);
+                assert_eq!(wakeups, 0, "{case}: no wakeup is recorded");
+                match base {
+                    "recovered" => {
+                        let lead: Uuid = finals[0].get("id");
+                        let payload = finals[0].get::<_, PgJson<serde_json::Value>>("payload").0;
+                        assert_eq!(payload["metadata"]["_controllerGoal"], json!({"revision":revision,
+                            "ownerUserId":space.owner_user_id,"userTurn":false,"rootJobId":parent_job}),
+                            "the lead carries the planning turn's goal");
+                        assert_eq!(payload["metadata"]["goal"]["id"], json!(goal_id));
+                        assert_eq!(metadata["instafyGoal"]["status"], json!("active"));
+                        assert_eq!(blocked_events, 0);
+                        // The lead's success wakes the goal's next turn, as a goal turn's does.
+                        let mut db = pool.get().await?;
+                        let tx = db.transaction().await?;
+                        tx.execute("update agent_jobs set status='completed',outcome='succeeded',completed_at=now() where id=$1",
+                            &[&lead]).await?;
+                        crate::conversation_goals::state::settle_job(&tx, lead, &payload, conversation, "succeeded").await
+                            .map_err(|e| controller_error("recovered lead goal settlement", e))?;
+                        let pending: i64 = tx.query_one("select count(*) from conversation_goal_continuations
+                            where source_job_id=$1 and goal_revision=$2 and status='pending'", &[&lead,&revision]).await?.get(0);
+                        assert_eq!(pending, 1, "the recovered lead continues the goal");
+                        tx.rollback().await?;
+                    }
+                    "given_up" => {
+                        assert_eq!(metadata["instafyGoal"]["status"], json!("blocked"), "nothing else would continue it");
+                        assert_eq!(metadata["instafyGoal"]["progressSummary"], json!(notice_text));
+                        assert_eq!(metadata["instafyGoal"]["updatedBy"], json!(space.owner_user_id.to_string()));
+                        assert_eq!(metadata["_goalController"]["revision"], json!(revision.to_string()), "the revision is kept");
+                        assert_eq!(blocked_events, 1, "one conversation.updated carries the blocked goal");
+                    }
+                    "moved_on" => {
+                        assert_eq!(metadata["instafyGoal"]["status"], json!("active"), "the newer turn carries the goal");
+                        assert_eq!(metadata["_goalController"]["revision"], json!(owner_revision.to_string()));
+                        assert_eq!(blocked_events, 0);
+                    }
+                    _ => unreachable!("{case}"),
+                }
             }
             Ok(())
         }.await;

@@ -365,10 +365,17 @@ const LOST_FINAL_CHECKPOINT_TRANSIENT_GIVE_UP_SECONDS: i64 = 60 * 60;
 const LOST_FINAL_CHECKPOINT_MAX_AGE_SECONDS: i64 = 2 * 60 * 60;
 
 /// Whether a failed recovery of a group whose workers ended `ended_seconds`
-/// ago is given up: soon for a refusal, later for a failure that may pass.
-fn lost_final_checkpoint_gives_up(status: StatusCode, ended_seconds: i64) -> bool {
+/// ago is given up: soon for a refusal, later for a failure that may pass. A
+/// lead whose agent's lane is busy (409 `dispatch_lane_busy`) waits like a
+/// failure that may pass; any other 4xx is a refusal.
+fn lost_final_checkpoint_gives_up(
+    status: StatusCode,
+    code: Option<&str>,
+    ended_seconds: i64,
+) -> bool {
+    let refused = status.is_client_error() && code != Some("dispatch_lane_busy");
     ended_seconds
-        >= if status.is_client_error() {
+        >= if refused {
             LOST_FINAL_CHECKPOINT_GIVE_UP_SECONDS
         } else {
             LOST_FINAL_CHECKPOINT_TRANSIENT_GIVE_UP_SECONDS
@@ -388,9 +395,12 @@ fn lost_final_checkpoint_gives_up(status: StatusCode, ended_seconds: i64) -> boo
 /// runs no checkpoint), and a last worker that planned again (its end never
 /// checkpoints its own group). When the conversation moved on after the
 /// workers ended (a person wrote, or another turn started), a late lead would
-/// answer out of turn, so the person is told instead; a recovery that keeps
-/// failing is given up the same way. Newest first, so groups that keep
-/// failing cannot crowd out new ones.
+/// answer out of turn, so the person is told instead. A send queued before
+/// they ended is not such a turn: its job keeps the time it was queued
+/// (`trigger_received_at`, which only the send queue backdates), so the lead
+/// waits behind it instead. A recovery that keeps failing is given up the
+/// same way. Newest first, so groups that keep failing cannot crowd out new
+/// ones.
 pub(crate) async fn recover_lost_final_plan_checkpoints(
     state: &AppState,
     tick: &mut TickConnection<'_>,
@@ -406,10 +416,16 @@ pub(crate) async fn recover_lost_final_plan_checkpoints(
                         select 1 from conversation_messages turn
                         where turn.conversation_id = g.conversation_id and turn.role = 'user'
                           and turn.created_by is not null and turn.created_at > g.completed_at
+                          and not exists (
+                              select 1 from agent_jobs sent
+                              where sent.conversation_id = g.conversation_id
+                                and sent.prompt_id = turn.prompt_id
+                                and sent.trigger_received_at <= g.completed_at
+                          )
                     ) or exists (
                         select 1 from agent_jobs turn
                         where turn.conversation_id = g.conversation_id
-                          and turn.created_at > g.completed_at
+                          and coalesce(turn.trigger_received_at, turn.created_at) > g.completed_at
                           and turn.plan_group_id is distinct from g.plan_group_id
                     ) as moved_on
              from (
@@ -487,14 +503,19 @@ pub(crate) async fn recover_lost_final_plan_checkpoints(
                 }
                 Ok(false) => false,
                 Err((status, Json(error))) => {
-                    warn!(
-                        %trigger_job_id,
-                        status = status.as_u16(),
-                        error = %error.message,
-                        "failed to recover a lost final lead checkpoint"
-                    );
+                    let code = error.code.as_deref();
+                    if code == Some("dispatch_lane_busy") {
+                        debug!(%trigger_job_id, "a lost final lead waits for its agent's lane");
+                    } else {
+                        warn!(
+                            %trigger_job_id,
+                            status = status.as_u16(),
+                            error = %error.message,
+                            "failed to recover a lost final lead checkpoint"
+                        );
+                    }
                     // Otherwise the group stays a candidate and the next tick retries it.
-                    lost_final_checkpoint_gives_up(status, ended_seconds)
+                    lost_final_checkpoint_gives_up(status, code, ended_seconds)
                 }
             }
         };
@@ -3313,23 +3334,49 @@ mod tests {
         let minutes = |m: i64| m * 60;
         assert!(!lost_final_checkpoint_gives_up(
             StatusCode::FORBIDDEN,
+            None,
             minutes(9)
         ));
         assert!(lost_final_checkpoint_gives_up(
             StatusCode::FORBIDDEN,
+            None,
+            minutes(10)
+        ));
+        assert!(!lost_final_checkpoint_gives_up(
+            StatusCode::CONFLICT,
+            None,
+            minutes(9)
+        ));
+        assert!(lost_final_checkpoint_gives_up(
+            StatusCode::CONFLICT,
+            None,
             minutes(10)
         ));
         // A pool timeout or database error after an outage is retried, not reported.
         assert!(!lost_final_checkpoint_gives_up(
             StatusCode::INTERNAL_SERVER_ERROR,
+            None,
             minutes(10)
         ));
         assert!(!lost_final_checkpoint_gives_up(
             StatusCode::SERVICE_UNAVAILABLE,
+            None,
             minutes(59)
         ));
         assert!(lost_final_checkpoint_gives_up(
             StatusCode::INTERNAL_SERVER_ERROR,
+            None,
+            minutes(60)
+        ));
+        // A lead whose agent is still answering a queued send waits for it as long.
+        assert!(!lost_final_checkpoint_gives_up(
+            StatusCode::CONFLICT,
+            Some("dispatch_lane_busy"),
+            minutes(59)
+        ));
+        assert!(lost_final_checkpoint_gives_up(
+            StatusCode::CONFLICT,
+            Some("dispatch_lane_busy"),
             minutes(60)
         ));
     }

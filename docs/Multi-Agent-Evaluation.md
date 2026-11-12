@@ -170,10 +170,18 @@ on purpose:
 If the conversation moved on after the workers ended, because a person wrote or another turn
 started, a late lead would answer out of turn. In that case the conversation instead shows one
 error notice: "@octo could not continue the plan after its agents finished. Their results are
-in the plan." Recovery also gives up with that notice when retries keep failing:
+in the plan." A message the person queued while the agents worked is not such a turn, even
+though it is sent once they end: its job keeps the time it was queued. That message is answered
+first, and the recovered lead waits until its agent is free, so the summary follows the answer.
+Recovery also gives up with the notice when retries keep failing:
 
 - after 10 minutes, if the dispatch refuses the lead;
-- after an hour, if the failure may pass, such as a pool or database error.
+- after an hour, if the failure may pass, such as a pool or database error, or if the lead's
+  agent is still busy.
+
+If the planning turn still holds the conversation's goal, giving up also blocks that goal with
+the same text, since nothing else would continue it; the goal bar then offers Help unblock,
+Resume and Clear. A goal that a newer turn carries is left alone.
 
 No later checkpoint starts the lead after the notice. Groups whose workers ended more than two
 hours ago are not revived. Apply
