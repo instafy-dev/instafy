@@ -329,38 +329,70 @@ async fn sweep(app: &AppState) -> Result<(), Error> {
 /// conversation while it held the job would deadlock with a team delete,
 /// which removes a space's conversations before their jobs, and waiting for
 /// the job would stall the tick behind whoever holds it. A job or
-/// conversation another transaction holds is left for the next tick. So is a
-/// job that fails to settle, which is logged, and the tick goes on to the
-/// next job.
+/// conversation another transaction holds is left for the next tick. A job
+/// that fails to settle is logged, and the tick goes on to the next job.
+///
+/// A job the sweep leaves unsettled is still one it looks for. settle_job
+/// leaves some goals as they are, such as one without an id or one a worker's
+/// turn is bound to, and a job may fail to settle on every try. A tick takes
+/// sixteen jobs, so sixteen of those first in line would keep it from every
+/// other job. The sweep records each job it looked at and left, and takes
+/// the jobs it has never looked at first, in the order they ended, and then
+/// the ones it looked at longest ago. A busy job is not recorded, so it keeps
+/// its place for the next tick.
 async fn settle_ended_jobs(app: &AppState) -> Result<(), Error> {
     let mut conn = app
         .pool
         .get()
         .await
         .map_err(|e| internal_error(format!("goal recovery connection: {e}")))?;
-    let jobs=conn.query("select j.id from agent_jobs j join conversations c on c.id=j.conversation_id where j.status not in ('queued','leased') and j.payload#>>'{metadata,_controllerGoal,revision}'=c.metadata#>>'{_goalController,revision}' and c.metadata#>>'{instafyGoal,status}'='active' and (j.planning_receipt_state is null or j.status<>'completed') and not exists(select 1 from conversation_goal_continuations w where w.source_job_id=j.id) order by j.completed_at limit 16", &[])
-        .await.map_err(|e|internal_error(format!("recover settled goals: {e}")))?;
+    let candidates = format!(
+        "select j.id from agent_jobs j
+         join conversations c on c.id = j.conversation_id
+         left join conversation_goal_recovery_checks r on r.job_id = j.id
+         where {UNSETTLED_JOB}
+         order by r.checked_at nulls first, j.completed_at, j.id
+         limit 16"
+    );
+    let jobs = conn
+        .query(candidates.as_str(), &[])
+        .await
+        .map_err(|e| recovery_failure("recover settled goals", e))?;
     for job in jobs {
         let job_id: Uuid = job.get("id");
         match settle_ended_job(&mut conn, job_id).await {
             Ok(Some(updated)) => state::publish_update(app, &updated),
             Ok(None) => {}
             Err(error) => {
-                tracing::warn!(source_job_id=%job_id,error=%error.1.0.message,"goal recovery could not settle a job; the next tick retries");
+                tracing::warn!(source_job_id=%job_id,error=%error.1.0.message,"goal recovery could not settle a job; a later tick retries");
             }
         }
     }
     Ok(())
 }
 
+/// The jobs [`settle_ended_jobs`] looks for, with `j` the job and `c` its
+/// conversation: a job that ended bound to the current revision of an active
+/// goal, that no wakeup was recorded for, and that is not a completed
+/// planning receipt, whose team's final checkpoint carries the goal on.
+const UNSETTLED_JOB: &str = "j.status not in ('queued', 'leased')
+    and j.payload #>> '{metadata,_controllerGoal,revision}'
+        = c.metadata #>> '{_goalController,revision}'
+    and c.metadata #>> '{instafyGoal,status}' = 'active'
+    and (j.planning_receipt_state is null or j.status <> 'completed')
+    and not exists (
+        select 1 from conversation_goal_continuations w where w.source_job_id = j.id
+    )";
+
 /// Settles one job for [`settle_ended_jobs`], or leaves it when another
 /// transaction holds the job or its conversation. The job may have changed
-/// since it was picked, so it is read again under its lock.
+/// since it was picked, so it is read again under its lock. A job it leaves
+/// unsettled otherwise, or that fails to settle, is recorded as looked at.
 async fn settle_ended_job(
     db: &mut tokio_postgres::Client,
     job_id: Uuid,
 ) -> Result<Option<ConversationRecord>, Error> {
-    let tx = db
+    let mut tx = db
         .transaction()
         .await
         .map_err(|e| recovery_failure("goal recovery transaction", e))?;
@@ -398,22 +430,82 @@ async fn settle_ended_job(
         _ => "failed",
     };
     let outcome: Option<String> = job.get("outcome");
-    let updated = state::settle_job(
-        &tx,
+    // In a savepoint, so that a job that fails to settle is still recorded
+    // under the locks taken above.
+    let attempt = tx
+        .transaction()
+        .await
+        .map_err(|e| recovery_failure("goal recovery savepoint", e))?;
+    let settled = state::settle_job(
+        &attempt,
         job_id,
         &job.get::<_, PgJson<Value>>("payload").0,
         conversation_id,
         outcome.as_deref().unwrap_or(fallback),
     )
-    .await?;
+    .await;
+    let updated = match settled {
+        Ok(updated) => {
+            attempt
+                .commit()
+                .await
+                .map_err(|e| recovery_failure("release goal recovery savepoint", e))?;
+            updated
+        }
+        Err(error) => {
+            attempt
+                .rollback()
+                .await
+                .map_err(|e| recovery_failure("roll back goal recovery savepoint", e))?;
+            record_check(&tx, job_id).await?;
+            tx.commit()
+                .await
+                .map_err(|e| recovery_failure("commit goal recovery check", e))?;
+            return Err(error);
+        }
+    };
+    // settle_job returns the conversation only when it blocked or canceled
+    // the goal. Otherwise it recorded a wakeup or left the job as it was, and
+    // a job left as it was would be taken again.
+    if updated.is_none() && is_unsettled(&tx, job_id).await? {
+        record_check(&tx, job_id).await?;
+    }
     tx.commit()
         .await
         .map_err(|e| recovery_failure("commit recovered goal", e))?;
     Ok(updated)
 }
 
-/// The failure of one of [`settle_ended_job`]'s statements, with the cause
-/// Postgres reported.
+/// Whether `job_id` is still a job [`settle_ended_jobs`] looks for.
+async fn is_unsettled(tx: &Transaction<'_>, job_id: Uuid) -> Result<bool, Error> {
+    let unsettled = format!(
+        "select exists (
+             select 1 from agent_jobs j join conversations c on c.id = j.conversation_id
+             where j.id = $1 and {UNSETTLED_JOB}
+         )"
+    );
+    tx.query_one(unsettled.as_str(), &[&job_id])
+        .await
+        .map(|row| row.get(0))
+        .map_err(|e| recovery_failure("check recovered goal", e))
+}
+
+/// Records that [`settle_ended_jobs`] looked at `job_id` and left it, which
+/// puts it behind the jobs it has not looked at since.
+async fn record_check(tx: &Transaction<'_>, job_id: Uuid) -> Result<(), Error> {
+    tx.execute(
+        "insert into conversation_goal_recovery_checks (job_id, checked_at)
+         values ($1, now())
+         on conflict (job_id) do update set checked_at = excluded.checked_at",
+        &[&job_id],
+    )
+    .await
+    .map_err(|e| recovery_failure("record goal recovery check", e))?;
+    Ok(())
+}
+
+/// The failure of one of the statements of [`settle_ended_jobs`], with the
+/// cause Postgres reported.
 fn recovery_failure(context: &str, error: tokio_postgres::Error) -> Error {
     internal_error(format!(
         "{context}: {}",

@@ -187,7 +187,12 @@ before that checkpoint.
 A successful goal turn records one durable wakeup in
 `conversation_goal_continuations`, in the completion transaction. Completion
 normally wakes it immediately; a staggered 30-second sweep recovers interrupted
-work. Claims expire after five minutes. Ordinary dispatch rechecks conversation
+work. The sweep also settles the goals of bound jobs that ended without settling
+them, such as canceled or expired jobs, each in a transaction of its own. A job
+it looks at and leaves unsettled, because it may not settle that goal or the
+attempt failed, is recorded in `conversation_goal_recovery_checks`; the sweep
+takes the jobs it has never looked at first, so such jobs cannot hold up the
+others. Claims expire after five minutes. Ordinary dispatch rechecks conversation
 and project access, credits, current goal revision, pending user questions and
 queued work. It commits the successor and wakeup result together. Stable message
 IDs and claim tokens prevent replayed callbacks or controller restarts from
@@ -213,6 +218,8 @@ automatic continuation requests are rejected with a refresh message. Jobs that
 predate controller goal bindings are not retroactively enrolled: resume an
 existing goal explicitly after upgrading. Goal state survives closing Studio;
 permissions, cancellation and bounded stopping still govern subsequent turns.
+Apply the migration `20261113143000` before deploying the controller whose sweep
+reads `conversation_goal_recovery_checks`; an older controller ignores the table.
 
 ## Agent Job Trigger
 

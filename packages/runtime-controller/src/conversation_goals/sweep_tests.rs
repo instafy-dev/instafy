@@ -16,6 +16,13 @@
 //! does while it works, and the sweep settles the others without waiting for
 //! it. The fourth makes the first job fail to settle, and the sweep still
 //! settles the jobs after it.
+//!
+//! A tick takes sixteen jobs, the ones that ended first. A job the sweep
+//! leaves unsettled stays a candidate, so sixteen of them kept every later
+//! job, in every space, from being settled. The fifth test puts sixteen jobs
+//! whose goals the sweep may never settle ahead of the others, and the sixth
+//! sixteen that fail to settle on every try. The jobs behind them are settled
+//! within two ticks all the same, and the failed ones once they stop failing.
 
 use std::future::Future;
 use std::time::{Duration, Instant};
@@ -53,11 +60,26 @@ fn controller_error(
     )
 }
 
+/// Why the sweep cannot settle the goal of a stuck conversation's job.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stuck {
+    /// The goal has no id. A metadata update stores a goal as it is sent.
+    GoalWithoutId,
+    /// The job is a person's own turn that says it is a team's worker.
+    WorkerTurn,
+    /// The person who set the goal was deleted, which leaves their prompts
+    /// naming no one.
+    OwnerDeleted,
+    /// An ordinary goal, whose writes the test makes fail.
+    FailsToSettle,
+}
+
 /// A space with a root conversation, a second root and a thread of the first
-/// root, in the order their goals' jobs ended. Each conversation has an active
-/// goal whose job was canceled without settling it, which leaves the goal to
-/// the sweep. A space in a team is marked deleted, as a team delete first
-/// marks its spaces and cancels their jobs.
+/// root, in the order their goals' jobs ended, after the jobs of any stuck
+/// conversations. Each conversation has an active goal whose job was canceled
+/// without settling it, which leaves the goal to the sweep. A space in a team
+/// is marked deleted, as a team delete first marks its spaces and cancels
+/// their jobs.
 struct EndedGoals {
     team_id: Option<Uuid>,
     project_id: Uuid,
@@ -65,6 +87,7 @@ struct EndedGoals {
     root: Uuid,
     held: Uuid,
     thread: Uuid,
+    stuck: Vec<(Uuid, Stuck)>,
 }
 
 impl EndedGoals {
@@ -76,12 +99,25 @@ impl EndedGoals {
             root: Uuid::new_v4(),
             held: Uuid::new_v4(),
             thread: Uuid::new_v4(),
+            stuck: Vec::new(),
         }
     }
 
     fn in_deleted_team() -> Self {
         Self {
             team_id: Some(Uuid::new_v4()),
+            ..Self::new()
+        }
+    }
+
+    /// Behind a stuck conversation for each of `stuck`, whose jobs ended
+    /// first.
+    fn behind(stuck: impl IntoIterator<Item = Stuck>) -> Self {
+        Self {
+            stuck: stuck
+                .into_iter()
+                .map(|stuck| (Uuid::new_v4(), stuck))
+                .collect(),
             ..Self::new()
         }
     }
@@ -103,13 +139,34 @@ impl EndedGoals {
             &[&self.project_id, &label, &self.owner_user_id, &self.team_id],
         )
         .await?;
-        let conversations = [
-            (self.root, None),
-            (self.held, None),
-            (self.thread, Some(self.root)),
-        ];
-        for (ended, (conversation, root)) in (0_i32..).zip(conversations) {
+        let stuck = self
+            .stuck
+            .iter()
+            .map(|&(conversation, stuck)| (conversation, None, Some(stuck)));
+        let conversations = stuck.chain([
+            (self.root, None, None),
+            (self.held, None, None),
+            (self.thread, Some(self.root), None),
+        ]);
+        for (ended, (conversation, root, stuck)) in (0_i32..).zip(conversations) {
             let revision = Uuid::new_v4();
+            // Deleting a person sets their prompts' user to null, and their
+            // goal still names them.
+            let owner_deleted = stuck == Some(Stuck::OwnerDeleted);
+            let goal_owner = if owner_deleted {
+                Uuid::new_v4()
+            } else {
+                self.owner_user_id
+            };
+            let goal = if stuck == Some(Stuck::GoalWithoutId) {
+                json!({"objective": "Document the API", "status": "active"})
+            } else {
+                json!({
+                    "id": Uuid::new_v4(),
+                    "objective": "Document the API",
+                    "status": "active"
+                })
+            };
             seed.execute(
                 "insert into conversations (
                      id, project_id, created_by, metadata, visibility,
@@ -120,14 +177,10 @@ impl EndedGoals {
                     &self.project_id,
                     &self.owner_user_id,
                     &PgJson(json!({
-                        "instafyGoal": {
-                            "id": Uuid::new_v4(),
-                            "objective": "Document the API",
-                            "status": "active"
-                        },
+                        "instafyGoal": goal,
                         "_goalController": {
                             "revision": revision,
-                            "ownerUserId": self.owner_user_id
+                            "ownerUserId": goal_owner
                         }
                     })),
                     &root,
@@ -142,19 +195,30 @@ impl EndedGoals {
                     &prompt_id,
                     &self.project_id,
                     &conversation,
-                    &self.owner_user_id,
+                    &(!owner_deleted).then_some(self.owner_user_id),
                 ],
             )
             .await?;
+            let mut metadata = json!({
+                "_controllerGoal": {
+                    "revision": revision,
+                    "ownerUserId": goal_owner
+                }
+            });
+            // Dispatch takes a job's role from the plan its turn names.
+            let role = (stuck == Some(Stuck::WorkerTurn)).then_some("worker");
+            if let Some(role) = role {
+                metadata["multiAgentPlan"] = json!({"role": role, "groupId": Uuid::new_v4()});
+            }
             // Ended long before any other job, so the sweep takes these first,
             // in this order.
             seed.execute(
                 "insert into agent_jobs (
                      id, project_id, prompt_id, conversation_id, status, outcome,
-                     intent, payload, completed_at
+                     intent, payload, agent_role, completed_at
                  ) values (
-                     $1, $2, $3, $4, 'canceled', 'canceled', 'feature', $5,
-                     timestamptz '2000-01-01 00:00:00+00' + $6::int * interval '1 second'
+                     $1, $2, $3, $4, 'canceled', 'canceled', 'feature', $5, $6,
+                     timestamptz '2000-01-01 00:00:00+00' + $7::int * interval '1 second'
                  )",
                 &[
                     &Uuid::new_v4(),
@@ -166,13 +230,9 @@ impl EndedGoals {
                         "conversation_id": conversation,
                         "user_id": self.owner_user_id,
                         "prompt_text": "Document the API",
-                        "metadata": {
-                            "_controllerGoal": {
-                                "revision": revision,
-                                "ownerUserId": self.owner_user_id
-                            }
-                        }
+                        "metadata": metadata
                     })),
+                    &role,
                     &ended,
                 ],
             )
@@ -312,6 +372,55 @@ async fn would_wait(pool: &PgPool, table: &str, id: Uuid, lock: &str) -> anyhow:
     // Before it returns, so the probe holds nothing afterwards.
     probe.rollback().await?;
     Ok(waits)
+}
+
+/// A trigger that rejects every write of the goals of some conversations, so
+/// their jobs fail to settle, and a sequence that counts the writes it
+/// rejected, which a rollback does not undo.
+struct GoalWriteFailure {
+    name: String,
+}
+
+impl GoalWriteFailure {
+    async fn inject(pool: &PgPool, conversations: &[Uuid]) -> anyhow::Result<Self> {
+        let name = format!("fail_goal_sweep_{}", Uuid::new_v4().simple());
+        let ids = conversations
+            .iter()
+            .map(|conversation| format!("'{conversation}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        pool.get()
+            .await?
+            .batch_execute(&format!(
+                "create sequence {name};
+                 create function {name}() returns trigger language plpgsql as $fn$
+                 begin
+                     perform nextval('{name}');
+                     raise exception 'injected failure in a goal write';
+                 end
+                 $fn$;
+                 create trigger {name} before update on conversations
+                     for each row when (new.id in ({ids})) execute function {name}();"
+            ))
+            .await?;
+        Ok(Self { name })
+    }
+
+    /// Removes the trigger, and gives the number of writes it rejected.
+    async fn remove(self, pool: &PgPool) -> anyhow::Result<i64> {
+        let name = self.name;
+        let connection = pool.get().await?;
+        let count = format!("select case when is_called then last_value else 0 end from {name}");
+        let rejected = connection.query_one(count.as_str(), &[]).await;
+        connection
+            .batch_execute(&format!(
+                "drop trigger {name} on conversations;
+                 drop function {name}();
+                 drop sequence {name};"
+            ))
+            .await?;
+        Ok(rejected?.get::<_, i64>(0))
+    }
 }
 
 #[tokio::test]
@@ -557,44 +666,14 @@ async fn the_sweep_goes_on_past_a_job_that_fails_to_settle() -> anyhow::Result<(
         "goal sweep past a failed job",
         EndedGoals::new(),
         |pool, state, goals| async move {
-            // The root's goal cannot be written while this trigger is in place,
-            // so the first job fails to settle. The sequence counts the
-            // rejected writes, which a rollback does not undo.
-            let failure = format!("fail_goal_sweep_{}", Uuid::new_v4().simple());
-            pool.get()
-                .await?
-                .batch_execute(&format!(
-                    "create sequence {failure};
-                     create function {failure}() returns trigger language plpgsql as $fn$
-                     begin
-                         perform nextval('{failure}');
-                         raise exception 'injected failure in the root';
-                     end
-                     $fn$;
-                     create trigger {failure} before update on conversations
-                         for each row when (new.id = '{root}') execute function {failure}();",
-                    root = goals.root,
-                ))
-                .await?;
+            // The root's goal cannot be written while this is in place, so the
+            // first job fails to settle.
+            let failure = GoalWriteFailure::inject(&pool, &[goals.root]).await?;
             let swept = std::panic::AssertUnwindSafe(super::settle_ended_jobs(&state))
                 .catch_unwind()
                 .await;
             // Removed however the sweep ended, a panic included.
-            let removed = async {
-                let connection = pool.get().await?;
-                let count =
-                    format!("select case when is_called then last_value else 0 end from {failure}");
-                let rejected = connection.query_one(count.as_str(), &[]).await;
-                connection
-                    .batch_execute(&format!(
-                        "drop trigger {failure} on conversations;
-                         drop function {failure}();
-                         drop sequence {failure};"
-                    ))
-                    .await?;
-                anyhow::Ok(rejected?.get::<_, i64>(0))
-            }
-            .await;
+            let removed = failure.remove(&pool).await;
             let swept = swept.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
             let rejected = removed?;
 
@@ -620,6 +699,118 @@ async fn the_sweep_goes_on_past_a_job_that_fails_to_settle() -> anyhow::Result<(
                 "canceled",
                 "the next tick settles it"
             );
+            Ok(())
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn the_sweep_gets_past_jobs_whose_goals_it_cannot_settle() -> anyhow::Result<()> {
+    // A tick's worth, sixteen, of the ways a goal is left to a sweep that may
+    // not settle it.
+    let stuck = [Stuck::GoalWithoutId, Stuck::WorkerTurn, Stuck::OwnerDeleted]
+        .into_iter()
+        .cycle()
+        .take(16);
+    with_ended_goals(
+        "goal sweep behind goals it cannot settle",
+        EndedGoals::behind(stuck),
+        |pool, state, goals| async move {
+            for tick in ["the goal sweep", "the next goal sweep"] {
+                super::settle_ended_jobs(&state)
+                    .await
+                    .map_err(|error| controller_error(tick, error))?;
+            }
+            for conversation in [goals.root, goals.held, goals.thread] {
+                assert_eq!(
+                    goals.goal_status(&pool, conversation).await?,
+                    "canceled",
+                    "the goals behind the stuck ones are settled"
+                );
+            }
+            for &(conversation, stuck) in &goals.stuck {
+                assert_eq!(
+                    goals.goal_status(&pool, conversation).await?,
+                    "active",
+                    "the sweep leaves a goal it cannot settle ({stuck:?}) as it is"
+                );
+            }
+            let mut recorded: Vec<Uuid> = pool
+                .get()
+                .await?
+                .query(
+                    "select j.conversation_id from conversation_goal_recovery_checks r
+                     join agent_jobs j on j.id = r.job_id
+                     where j.project_id = $1",
+                    &[&goals.project_id],
+                )
+                .await?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
+            let mut left: Vec<Uuid> = goals
+                .stuck
+                .iter()
+                .map(|&(conversation, _)| conversation)
+                .collect();
+            recorded.sort();
+            left.sort();
+            assert_eq!(
+                recorded, left,
+                "the sweep records the jobs it left unsettled, and no others"
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn the_sweep_gets_past_jobs_that_keep_failing_to_settle() -> anyhow::Result<()> {
+    with_ended_goals(
+        "goal sweep behind jobs that fail to settle",
+        EndedGoals::behind([Stuck::FailsToSettle; 16]),
+        |pool, state, goals| async move {
+            let failing: Vec<Uuid> = goals
+                .stuck
+                .iter()
+                .map(|&(conversation, _)| conversation)
+                .collect();
+            let failure = GoalWriteFailure::inject(&pool, &failing).await?;
+            let swept = std::panic::AssertUnwindSafe(async {
+                super::settle_ended_jobs(&state).await?;
+                super::settle_ended_jobs(&state).await
+            })
+            .catch_unwind()
+            .await;
+            // Removed however the sweeps ended, a panic included.
+            let removed = failure.remove(&pool).await;
+            let swept = swept.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            let rejected = removed?;
+
+            swept.map_err(|error| controller_error("the goal sweeps", error))?;
+            assert!(
+                rejected >= 16,
+                "the failing jobs' goal writes were rejected, {rejected} times"
+            );
+            for conversation in [goals.root, goals.held, goals.thread] {
+                assert_eq!(
+                    goals.goal_status(&pool, conversation).await?,
+                    "canceled",
+                    "the goals behind the failing ones are settled"
+                );
+            }
+            super::settle_ended_jobs(&state)
+                .await
+                .map_err(|error| controller_error("the goal sweep after the failures", error))?;
+            for conversation in failing {
+                assert_eq!(
+                    goals.goal_status(&pool, conversation).await?,
+                    "canceled",
+                    "a job that failed to settle is tried again"
+                );
+            }
             Ok(())
         },
     )
