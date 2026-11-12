@@ -45,6 +45,7 @@ import { configGet, configList, configPath, configSet, configUnset } from "./con
 import { getInstafyProfileConfigPath, listInstafyProfileNames, readInstafyProfileConfig } from "./config.js";
 import { runInstafyGit, runInstafyGitSync } from "./git-wrapper.js";
 import { runBind } from "./bind.js";
+import { runMcpServer } from "./mcp.js";
 import { registerPreviewCheckCommand } from "./site-check.js";
 import { registerWebCommand } from "./web-read.js";
 import { researchSettings } from "./research-settings.js";
@@ -2085,6 +2086,11 @@ program
   .description("Bound sites: serve a website whose clicks run scripts and stream records back to every viewer (instafy-bind)")
   .allowUnknownOption(true);
 
+program
+  .command("mcp")
+  .description("Serve your Instafy spaces' conversations, agents and diagnostics to a local coding agent over MCP (stdio)")
+  .allowUnknownOption(true);
+
 const tunnelCommand = program
   .command("tunnel")
   .description("Create and manage shareable tunnels");
@@ -2881,11 +2887,22 @@ conversationShowCommand.action(async (targetParts, opts) => {
 
 
 export async function runCli(argv: string[] = process.argv) {
+  // `instafy mcp` runs each tool call as a child of this CLI and reads the child's error line from
+  // stderr. This line marks where the CLI's own output starts, after anything Node or a NODE_OPTIONS
+  // preload wrote first.
+  const stderrMark = process.env.INSTAFY_MCP_STDERR_MARK;
+  if (stderrMark) process.stderr.write(`${stderrMark}\n`);
   if (argv.length <= 2) {
     program.outputHelp();
     return;
   }
   const args = argv.slice(2);
+  if (args[0] === "mcp") {
+    // The MCP server owns stdout for JSON-RPC framing, so it is dispatched before commander, which
+    // would otherwise be free to write help or a version banner there.
+    process.exitCode = await runMcpServer(args.slice(1), pkg.version);
+    return;
+  }
   if (args[0] === "bind") {
     // Every argument after "bind" goes to the binder unchanged (its own --help, --json, --dry-run, ...).
     process.exitCode = await runBind(args.slice(1));

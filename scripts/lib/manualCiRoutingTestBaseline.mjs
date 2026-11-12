@@ -52,8 +52,8 @@ export const MANUAL_CI_BASELINES = {
   // and `instafy bind`), the `instafy web read` suites (its offline fixtures
   // included), the preview picture suite (what a capture may load), and the `instafy web search`
   // (with its fixture evals, the shopping comparison's included, and reference
-  // search) and `instafy web link` suites.
-  "build.yml": { sha256: "0c54a8ef5ae9ea3fb7d58252e43ebdd627d9ffd896864d645992c3677b40d164" },
+  // search) and `instafy web link` suites, and the `instafy mcp` suite.
+  "build.yml": { sha256: "1a68d56c84c6df7bb75d478cf025a77b6e932de773cadf83453439959d847074" },
   "browser-e2e.yml": { sha256: "5a227820568dfe71f344bd816f77fe41c4d1d8980041937792de09ab956c121b" },
   // The reviewed Auth and Controller DB baselines additionally trigger on the
   // GHCR image-mirror helper (and its lock/test for Auth, the serial-pull helper
