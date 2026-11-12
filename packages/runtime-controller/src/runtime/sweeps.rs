@@ -630,11 +630,26 @@ pub(super) struct SettledExpiredJobs {
 /// error_message, lease_attempts, grant_ids` from the failing
 /// `update ... returning`, and
 /// this must run in that update's transaction. `kind` only labels errors.
+///
+/// The jobs' conversations are locked first, threads before roots
+/// ([`crate::conversations::lock_conversations_for_writes`]). Failing a run
+/// can record an activity row that references its conversation, and a refund
+/// locks an org's balance: settling one job after another would otherwise
+/// wait for a conversation while holding a balance, which a dispatch there
+/// takes after the conversation. A sweep that writes into the conversations
+/// afterwards would also wait for a thread while holding that thread's root.
 pub(super) async fn settle_expired_queued_jobs(
     transaction: &mut tokio_postgres::Transaction<'_>,
     rows: &[tokio_postgres::Row],
     kind: &str,
 ) -> AnyResult<SettledExpiredJobs> {
+    let conversation_ids: Vec<Uuid> = rows
+        .iter()
+        .filter_map(|row| row.get::<_, Option<Uuid>>("conversation_id"))
+        .collect();
+    crate::conversations::lock_conversations_for_writes(&*transaction, &conversation_ids)
+        .await
+        .with_context(|| format!("failed to lock the conversations of the expired {kind} jobs"))?;
     let mut job_input_state_updates = Vec::new();
     let mut refunded_org_ids = std::collections::BTreeSet::new();
     for row in rows {
@@ -756,7 +771,8 @@ pub(super) struct FailedQueuedJobs {
 /// message also names the reason a stop requeued the job, if one did
 /// (`interruptionReason`). `rows` must also carry `session_id` and
 /// `prompt_id`. Publish the result with [`publish_failed_queued_jobs`] once
-/// the transaction commits.
+/// the transaction commits. The settle locks every conversation the messages
+/// go into before it writes anything.
 pub(super) async fn settle_failed_queued_jobs_with_message(
     transaction: &mut tokio_postgres::Transaction<'_>,
     rows: &[tokio_postgres::Row],
@@ -5155,6 +5171,10 @@ mod tests {
         .await
     }
 }
+
+#[cfg(test)]
+#[path = "sweeps_lock_order_tests.rs"]
+mod lock_order_tests;
 
 #[cfg(test)]
 #[path = "sweeps_tick_tests.rs"]

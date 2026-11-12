@@ -98,6 +98,13 @@ struct LiveJob {
 /// open. It takes no plan-group lock and locks no runtime or lease row: in a
 /// delete, `transaction` already holds the space's row, and a holder of one
 /// of those locks may itself be waiting for that row.
+///
+/// It locks the space's live jobs, in id order, then its worker questions,
+/// then the conversations it writes a notice into, threads before roots
+/// ([`conversations::lock_conversations_for_writes`]), and only then gives
+/// back managed-AI reserves: a stop takes a conversation's jobs before its
+/// questions, an answer its question before its conversation, and a
+/// dispatch its conversation before the org's balance.
 pub(crate) async fn cancel_project_work_in_transaction(
     config: &crate::config::AppConfig,
     transaction: &mut tokio_postgres::Transaction<'_>,
@@ -106,14 +113,16 @@ pub(crate) async fn cancel_project_work_in_transaction(
     let mut work = ProjectWorkCancellation::default();
 
     // The job cancel has no status guard, so lock exactly the jobs that are
-    // still live; a job that completes first is left as it finished.
+    // still live; a job that completes first is left as it finished. The
+    // lock leaves a job's key free: a plan's dispatch inserts a worker under
+    // its lead while it holds the conversation this cancel then waits for.
     let rows = transaction
         .query(
             "select id, run_id, status, lease_attempts, payload, plan_group_id, conversation_id
              from agent_jobs
              where project_id = $1 and status in ('queued', 'leased')
              order by id
-             for update",
+             for no key update",
             &[&project_id],
         )
         .await
@@ -121,6 +130,10 @@ pub(crate) async fn cancel_project_work_in_transaction(
 
     let mut by_conversation: BTreeMap<Uuid, Vec<LiveJob>> = BTreeMap::new();
     let mut without_conversation: Vec<(Uuid, Option<Uuid>)> = Vec::new();
+    // A queued job no runtime ever held never reached a model, so its
+    // reserve goes back. One a runtime held (leased now, or requeued by a
+    // stop) keeps its charge.
+    let mut never_leased: Vec<(Uuid, Option<Uuid>, i32, Value)> = Vec::new();
     for row in &rows {
         let payload = row.get::<_, PgJson<Value>>("payload").0;
         let job = LiveJob {
@@ -130,34 +143,16 @@ pub(crate) async fn cancel_project_work_in_transaction(
                 .get::<_, Option<Uuid>>("plan_group_id")
                 .or_else(|| crate::active_job_auth::payload_plan_group_id(&payload)),
         };
-        let lease_attempts: i32 = row.get("lease_attempts");
-        // A queued job no runtime ever held never reached a model. One a
-        // runtime held (leased now, or requeued by a stop) keeps its charge.
-        if row.get::<_, String>("status") == "queued" && lease_attempts == 0 {
-            if let Some(org_id) = crate::runtime::refund_managed_ai_reserve_for_expired_job(
-                transaction,
-                &project_id,
-                &job.id,
-                job.run_id,
-                lease_attempts,
-                &payload,
-                SPACE_DELETED_REASON,
-            )
-            .await
-            .map_err(|error| {
-                internal_error(format!(
-                    "failed to refund a deleted space's queued job: {error:#}"
-                ))
-            })? {
-                work.refunded_org_ids.insert(org_id);
-            }
-        }
         let conversation_id = row.get::<_, Option<Uuid>>("conversation_id").or_else(|| {
             payload
                 .get("conversation_id")
                 .and_then(Value::as_str)
                 .and_then(|value| Uuid::parse_str(value.trim()).ok())
         });
+        let lease_attempts: i32 = row.get("lease_attempts");
+        if row.get::<_, String>("status") == "queued" && lease_attempts == 0 {
+            never_leased.push((job.id, job.run_id, lease_attempts, payload));
+        }
         match conversation_id {
             Some(conversation_id) => by_conversation
                 .entry(conversation_id)
@@ -166,6 +161,19 @@ pub(crate) async fn cancel_project_work_in_transaction(
             None => without_conversation.push((job.id, job.run_id)),
         }
     }
+
+    // Completed workers release their lease while awaiting a human. They no
+    // longer appear among live jobs, but a deleted space must not resume
+    // them.
+    work.expired_user_input_requests = crate::user_input_requests::expire_requests(
+        transaction,
+        project_id,
+        None,
+        None,
+        SPACE_DELETED_REASON,
+    )
+    .await?
+    .len() as u64;
 
     // The cancellation notice needs the conversation row. A conversation id
     // only the payload still names (the row is gone) or one of another space
@@ -187,6 +195,30 @@ pub(crate) async fn cancel_project_work_in_transaction(
             .map(|row| (row.get("id"), row.get("session_id")))
             .collect()
     };
+    let noticed: Vec<Uuid> = sessions.keys().copied().collect();
+    conversations::lock_conversations_for_writes(&*transaction, &noticed)
+        .await
+        .map_err(|error| cancel_failure("failed to lock the space's conversations", error))?;
+
+    for (job_id, run_id, lease_attempts, payload) in &never_leased {
+        if let Some(org_id) = crate::runtime::refund_managed_ai_reserve_for_expired_job(
+            transaction,
+            &project_id,
+            job_id,
+            *run_id,
+            *lease_attempts,
+            payload,
+            SPACE_DELETED_REASON,
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to refund a deleted space's queued job: {error:#}"
+            ))
+        })? {
+            work.refunded_org_ids.insert(org_id);
+        }
+    }
 
     for (conversation_id, jobs) in by_conversation {
         let pairs: Vec<(Uuid, Option<Uuid>)> =
@@ -236,18 +268,6 @@ pub(crate) async fn cancel_project_work_in_transaction(
         work.canceled_run_ids.extend(canceled.run_ids);
         work.refunded_org_ids.extend(canceled.refunded_org_ids);
     }
-
-    // Completed workers release their lease while awaiting a human. They no
-    // longer appear among live jobs, but a deleted space must not resume them.
-    work.expired_user_input_requests = crate::user_input_requests::expire_requests(
-        transaction,
-        project_id,
-        None,
-        None,
-        SPACE_DELETED_REASON,
-    )
-    .await?
-    .len() as u64;
 
     // Runs still open with no live job behind them would otherwise show as
     // live work forever.
@@ -395,7 +415,7 @@ mod tests {
         anyhow::anyhow!("{status}: {}", error.message)
     }
 
-    async fn delete_space(
+    pub(super) async fn delete_space(
         state: &AppState,
         project_id: Uuid,
         token: &str,
@@ -432,7 +452,7 @@ mod tests {
 
     /// A job and its run. A `leased` job gets a live lease.
     #[allow(clippy::too_many_arguments)]
-    async fn insert_job(
+    pub(super) async fn insert_job(
         client: &impl GenericClient,
         project_id: Uuid,
         conversation_id: Option<Uuid>,
@@ -485,7 +505,7 @@ mod tests {
         Ok(entry_id)
     }
 
-    async fn refunds(
+    pub(super) async fn refunds(
         client: &impl GenericClient,
         project_id: Uuid,
     ) -> anyhow::Result<Vec<(Option<String>, Option<String>)>> {
@@ -503,7 +523,7 @@ mod tests {
             .collect())
     }
 
-    async fn cancellation_notices(
+    pub(super) async fn cancellation_notices(
         client: &impl GenericClient,
         conversation_id: Uuid,
     ) -> anyhow::Result<Vec<(String, Value)>> {
@@ -521,7 +541,7 @@ mod tests {
 
     /// Runs the body with the seeded org cleaned up however it ends, then
     /// removes what the org's cascade does not reach.
-    async fn with_seeded_space(
+    pub(super) async fn with_seeded_space(
         fixture: &ReservedManagedAiPrompt,
         extra_projects: &[Uuid],
         body: impl std::future::Future<Output = anyhow::Result<()>>,
@@ -1097,7 +1117,7 @@ mod tests {
                         .query_one(
                             "select count(*) from pg_stat_activity
                              where $1 = any(pg_blocking_pids(pid))
-                               and query like '%from agent_jobs%for update%'",
+                               and query like '%from agent_jobs%for no key update%'",
                             &[&steer_pid],
                         )
                         .await?
@@ -1147,3 +1167,7 @@ mod tests {
         .await
     }
 }
+
+#[cfg(test)]
+#[path = "project_work_cancellation_lock_order_tests.rs"]
+mod lock_order_tests;

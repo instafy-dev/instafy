@@ -490,9 +490,13 @@ pub(crate) async fn device_changed(
 /// Cancels the queued and leased turns in `conversation_ids` that hold any of
 /// `grant_ids`, as a stop in their conversation cancels them, and pauses
 /// every live grant naming one of those conversations, as that stop does,
-/// turns or none. It locks the turns, in id order, then the grants, before it
-/// writes anything else. Returns the cancellations, and the requests the
-/// pause canceled.
+/// turns or none. It locks the turns, in id order, then their open
+/// questions, then the grants, before it writes anything else, and then the
+/// conversations it writes into, threads before roots
+/// ([`crate::conversations::lock_conversations_for_writes`]), before it
+/// cancels a turn: the order a stop in a conversation takes them in, and an
+/// answer, which locks its question, then its conversation. Returns the
+/// cancellations, and the requests the pause canceled.
 async fn stop_turns_holding(
     config: &AppConfig,
     transaction: &Transaction<'_>,
@@ -503,13 +507,16 @@ async fn stop_turns_holding(
     (Vec<(Uuid, JobCancellationSet)>, Vec<ProviderRequestRecord>),
     (StatusCode, Json<ApiError>),
 > {
+    // The lock leaves a turn's key free: a plan's dispatch inserts a worker
+    // under its lead while it holds the conversation this stop then waits
+    // for.
     let mut jobs: BTreeMap<Uuid, Vec<(Uuid, Option<Uuid>)>> = BTreeMap::new();
     for job in transaction
         .query(
             "select id, run_id, conversation_id from agent_jobs
               where conversation_id = any($1) and grant_ids && $2
                 and status in ('queued', 'leased')
-              order by id for update",
+              order by id for no key update",
             &[&conversation_ids, &grant_ids],
         )
         .await
@@ -518,6 +525,22 @@ async fn stop_turns_holding(
         jobs.entry(job.get("conversation_id"))
             .or_default()
             .push((job.get("id"), job.get("run_id")));
+    }
+    // A canceled turn's open questions expire with it, by a trigger on the
+    // turn's row.
+    let turn_ids: Vec<Uuid> = jobs.values().flatten().map(|(id, _)| *id).collect();
+    if !turn_ids.is_empty() {
+        transaction
+            .query(
+                "select id from agent_user_input_requests
+                  where job_id = any($1) and status in ('pending', 'answered')
+                  order by id for update",
+                &[&turn_ids],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to lock the turns' questions: {error}"))
+            })?;
     }
     let paused: Vec<Uuid> = transaction
         .query(
@@ -531,6 +554,12 @@ async fn stop_turns_holding(
         .map(|row| row.get(0))
         .collect();
     let requests = pause_grants(transaction, &paused).await?;
+    let written: Vec<Uuid> = jobs.keys().copied().collect();
+    crate::conversations::lock_conversations_for_writes(transaction, &written)
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to lock the turns' conversations: {error}"))
+        })?;
     let mut canceled = Vec::with_capacity(jobs.len());
     for (conversation_id, jobs) in jobs {
         let conversation = load_conversation_record(transaction, &conversation_id).await?;
