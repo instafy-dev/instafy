@@ -451,7 +451,7 @@ async fn tombstone_team_spaces(
 /// spaces still holds a lease generation, so its provider release was not
 /// confirmed, or a live space was added. `Ok(false)` when another delete
 /// removed the team first.
-async fn delete_released_team(
+pub(crate) async fn delete_released_team(
     state: &AppState,
     org_id: &Uuid,
 ) -> Result<bool, (StatusCode, Json<ApiError>)> {

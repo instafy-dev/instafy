@@ -5,6 +5,8 @@ mod request;
 use request::{continuation_metadata, source_requires_explicit_resume};
 pub(crate) mod state;
 #[cfg(test)]
+mod sweep_tests;
+#[cfg(test)]
 mod teammate_tests;
 #[cfg(test)]
 mod tests;
@@ -289,49 +291,7 @@ pub(crate) fn spawn_scheduler(app: AppState) {
 async fn sweep(app: &AppState) -> Result<(), Error> {
     // Covers non-agent terminal paths (cancellation/expiry) and a process dying
     // between settlement and an immediate wake. Only newly bound jobs qualify.
-    let mut conn = app
-        .pool
-        .get()
-        .await
-        .map_err(|e| internal_error(format!("goal recovery connection: {e}")))?;
-    let tx = conn
-        .transaction()
-        .await
-        .map_err(|e| internal_error(format!("goal recovery transaction: {e}")))?;
-    let rows=tx.query("select j.id,j.payload,j.conversation_id,j.outcome,j.status from agent_jobs j join conversations c on c.id=j.conversation_id where j.status not in ('queued','leased') and j.payload#>>'{metadata,_controllerGoal,revision}'=c.metadata#>>'{_goalController,revision}' and c.metadata#>>'{instafyGoal,status}'='active' and (j.planning_receipt_state is null or j.status<>'completed') and not exists(select 1 from conversation_goal_continuations w where w.source_job_id=j.id) order by j.completed_at limit 16", &[])
-        .await.map_err(|e|internal_error(format!("recover settled goals: {e}")))?;
-    let mut updates = Vec::new();
-    for row in rows {
-        let outcome: Option<String> = row.get("outcome");
-        let status: String = row.get("status");
-        let fallback = if status == "completed" {
-            "succeeded"
-        } else if status == "canceled" {
-            "canceled"
-        } else if status == "expired" {
-            "expired"
-        } else {
-            "failed"
-        };
-        if let Some(updated) = state::settle_job(
-            &tx,
-            row.get("id"),
-            &row.get::<_, PgJson<Value>>("payload").0,
-            row.get("conversation_id"),
-            outcome.as_deref().unwrap_or(fallback),
-        )
-        .await?
-        {
-            updates.push(updated);
-        }
-    }
-    tx.commit()
-        .await
-        .map_err(|e| internal_error(format!("commit recovered goals: {e}")))?;
-    drop(conn);
-    for update in updates {
-        state::publish_update(app, &update);
-    }
+    settle_ended_jobs(app).await?;
     // One tick does bounded work, and never holds a pool slot across dispatch.
     for _ in 0..8 {
         let mut conn = app
@@ -354,6 +314,111 @@ async fn sweep(app: &AppState) -> Result<(), Error> {
         process_wakeup(app, &wake).await?;
     }
     Ok(())
+}
+
+/// Settles the goals of bound jobs that ended without settling them.
+///
+/// Each job is settled in a transaction of its own that commits before the
+/// next, so the sweep never holds one conversation while it locks another. A
+/// message written into a thread updates the thread and then its root, and
+/// some writers update several conversations in one transaction, so holding
+/// one while waiting for the next deadlocked with them.
+///
+/// The job is locked before its conversation, the order a completion and a
+/// Stop take them, and the sweep waits for neither. Waiting for the
+/// conversation while it held the job would deadlock with a team delete,
+/// which removes a space's conversations before their jobs, and waiting for
+/// the job would stall the tick behind whoever holds it. A job or
+/// conversation another transaction holds is left for the next tick. So is a
+/// job that fails to settle, which is logged, and the tick goes on to the
+/// next job.
+async fn settle_ended_jobs(app: &AppState) -> Result<(), Error> {
+    let mut conn = app
+        .pool
+        .get()
+        .await
+        .map_err(|e| internal_error(format!("goal recovery connection: {e}")))?;
+    let jobs=conn.query("select j.id from agent_jobs j join conversations c on c.id=j.conversation_id where j.status not in ('queued','leased') and j.payload#>>'{metadata,_controllerGoal,revision}'=c.metadata#>>'{_goalController,revision}' and c.metadata#>>'{instafyGoal,status}'='active' and (j.planning_receipt_state is null or j.status<>'completed') and not exists(select 1 from conversation_goal_continuations w where w.source_job_id=j.id) order by j.completed_at limit 16", &[])
+        .await.map_err(|e|internal_error(format!("recover settled goals: {e}")))?;
+    for job in jobs {
+        let job_id: Uuid = job.get("id");
+        match settle_ended_job(&mut conn, job_id).await {
+            Ok(Some(updated)) => state::publish_update(app, &updated),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(source_job_id=%job_id,error=%error.1.0.message,"goal recovery could not settle a job; the next tick retries");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Settles one job for [`settle_ended_jobs`], or leaves it when another
+/// transaction holds the job or its conversation. The job may have changed
+/// since it was picked, so it is read again under its lock.
+async fn settle_ended_job(
+    db: &mut tokio_postgres::Client,
+    job_id: Uuid,
+) -> Result<Option<ConversationRecord>, Error> {
+    let tx = db
+        .transaction()
+        .await
+        .map_err(|e| recovery_failure("goal recovery transaction", e))?;
+    let Some(job) = tx
+        .query_opt(
+            "select payload, conversation_id, outcome, status from agent_jobs
+             where id = $1 and status not in ('queued', 'leased')
+               and conversation_id is not null
+             for no key update skip locked",
+            &[&job_id],
+        )
+        .await
+        .map_err(|e| recovery_failure("lock recovered goal job", e))?
+    else {
+        return Ok(None);
+    };
+    let conversation_id: Uuid = job.get("conversation_id");
+    // Taken here, the lock settle_job takes, so that it finds the lock held
+    // instead of waiting for it.
+    let conversation = tx
+        .query_opt(
+            "select 1 from conversations where id = $1 for no key update skip locked",
+            &[&conversation_id],
+        )
+        .await
+        .map_err(|e| recovery_failure("lock recovered goal conversation", e))?;
+    if conversation.is_none() {
+        return Ok(None);
+    }
+    let status: String = job.get("status");
+    let fallback = match status.as_str() {
+        "completed" => "succeeded",
+        "canceled" => "canceled",
+        "expired" => "expired",
+        _ => "failed",
+    };
+    let outcome: Option<String> = job.get("outcome");
+    let updated = state::settle_job(
+        &tx,
+        job_id,
+        &job.get::<_, PgJson<Value>>("payload").0,
+        conversation_id,
+        outcome.as_deref().unwrap_or(fallback),
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|e| recovery_failure("commit recovered goal", e))?;
+    Ok(updated)
+}
+
+/// The failure of one of [`settle_ended_job`]'s statements, with the cause
+/// Postgres reported.
+fn recovery_failure(context: &str, error: tokio_postgres::Error) -> Error {
+    internal_error(format!(
+        "{context}: {}",
+        crate::errors::describe_db_error(&error)
+    ))
 }
 
 async fn process_wakeup(app: &AppState, wake: &Wakeup) -> Result<(), Error> {
