@@ -1,0 +1,13 @@
+{
+  "name": "instafy",
+  "displayName": "Instafy workspace",
+  "description": "Work with an Instafy space from your own Claude: read conversations and message history, your agents and their context notes, and run diagnostics.",
+  "author": {
+    "name": "Instafy",
+    "url": "https://github.com/instafy-dev/instafy"
+  },
+  "homepage": "https://github.com/instafy-dev/instafy/tree/main/claude-plugin/instafy",
+  "repository": "https://github.com/instafy-dev/instafy",
+  "license": "AGPL-3.0-only",
+  "keywords": ["instafy", "workspace", "conversations", "agents"]
+}
