@@ -316,7 +316,7 @@ pub(crate) async fn pause_for_user_stop(
 ) -> StateResult<Option<ConversationRecord>> {
     let row = transaction
         .query_one(
-            "select metadata from conversations where id = $1 for update",
+            "select metadata from conversations where id = $1 for no key update",
             &[&conversation_id],
         )
         .await

@@ -616,6 +616,7 @@ pub(crate) async fn cancel_undeliverable_continuation(
         tx,
         &[(job_id, row.get::<_, Option<Uuid>>("run_id"))],
         "The worker question was canceled before continuation.",
+        &[],
     )
     .await?;
     tx.execute(
