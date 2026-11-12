@@ -177,7 +177,7 @@ in the plan." Recovery also gives up with that notice when retries keep failing:
 
 No later checkpoint starts the lead after the notice. Groups whose workers ended more than two
 hours ago are not revived. Apply
-`20261104184700_agent_jobs_lost_final_checkpoint_recovery_idx.sql` before enabling the updated
+`20261112084100_agent_jobs_lost_final_checkpoint_recovery_idx.sql` before enabling the updated
 controller, so this recovery reads only recently ended plan workers.
 
 Profile selection and settings propagation are separate checks. A planner can still create an
