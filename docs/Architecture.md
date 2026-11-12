@@ -189,9 +189,9 @@ checkpoint gives the lead up (once the conversation moved on, after 10 minutes
 for a refusal, or after an hour for other failures), and never once its workers
 ended more than two hours ago. Teams that recovery skips, listed in
 `docs/Multi-Agent-Evaluation.md`, never hold it for their lead; a worker's
-question holds it until it is handed back to its worker or expires. If a lost
-checkpoint is given up while the planning job still holds the goal, the goal is
-blocked with the reason.
+question holds it until it is handed back to its worker or expires. If the final
+lead is refused, or a lost checkpoint is given up, while the planning job still
+holds the goal, the goal is blocked with the reason.
 
 A successful goal turn records one durable wakeup in
 `conversation_goal_continuations`, in the completion transaction. Completion
