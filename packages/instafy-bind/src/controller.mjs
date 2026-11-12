@@ -112,8 +112,13 @@ export const BIND_THREAD_PURPOSE = "bound-site-agent-thread";
 // characters and spaces and every tab and line break, reads a backslash as a slash, and checks the path
 // of a scheme with no "//" after it. The CLI's refuseDotSegments does the same.
 function hasDotSegment(input) {
+  // Trimmed by a scan from each end: an end-anchored pattern takes time in the square of a long run.
+  let start = 0;
+  let end = input.length;
+  while (start < end && input.charCodeAt(start) <= 0x20) start += 1;
+  while (end > start && input.charCodeAt(end - 1) <= 0x20) end -= 1;
   const afterOrigin = input
-    .replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, "")
+    .slice(start, end)
     .replace(/[\t\n\r]/g, "")
     .replace(/^[a-z][a-z\d+.-]*:(?:[\\/]{2}[^/\\?#]*)?/i, "");
   return afterOrigin.split(/[?#]/, 1)[0].split(/[\\/]/).some((segment) => /^(?:\.|%2e){1,2}$/i.test(segment));

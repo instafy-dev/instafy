@@ -286,6 +286,11 @@ describe("a space id cannot move a request to another route", () => {
       expect(new URL(checked, `${base}${against}`).pathname, JSON.stringify(checked)).toBe(resolved);
       expect(() => refuseDotSegments(checked), JSON.stringify(checked)).toThrow(/"\." or "\.\." segment/);
     }
+    // A long run of controls inside a path once made the trim take time in the square of its length.
+    const started = performance.now();
+    expect(() => refuseDotSegments(`/projects/x${"\u0000".repeat(100_000)}x/agents`)).not.toThrow();
+    expect(() => refuseDotSegments(`/projects/${"\u0000".repeat(100_000)}../agents`)).not.toThrow();
+    expect(performance.now() - started).toBeLessThan(500);
     const stays = [
       "/projects/..%2Fagents/conversations",
       "/projects/%252e%252e/conversations",
