@@ -284,7 +284,8 @@ async fn final_checkpoint_waits_for_early_lead_and_recovers_every_terminal_hando
 /// its trigger. It leaves alone a group still settling, one too old to revive,
 /// a deleted space, a stopped group, one whose lead managed AI refused, one
 /// that already has a lead, one whose last worker a person's runtime stop
-/// expired, and one whose last worker planned again. When the conversation
+/// expired, and one whose last worker planned again; another space's jobs
+/// carrying the group's ids are neither its lead nor its plan. When the conversation
 /// moved on, or a refused lead has been retried long enough, the person is
 /// told once instead, and nothing starts that lead afterwards; a lead refused
 /// for less long is retried. What belongs to a turn received before the workers
@@ -319,6 +320,7 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
         "stopped",
         "refused",
         "led",
+        "led_elsewhere",
         "person_stopped",
         "nested",
         "moved_on",
@@ -429,6 +431,20 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                 "led" => { connection.execute("insert into agent_jobs(project_id,conversation_id,status,completed_at,payload,plan_group_id,agent_role)
                     values($1,$2,'failed',now(),$3,$4,'lead_continuation')", &[&space.project_id,&conversation,
                     &PgJson(json!({"metadata":{"multiAgentPlan":{"groupId":group,"role":"lead_continuation"}}})),&group]).await?; }
+                "led_elsewhere" => {
+                    // Another space holds a lead carrying this team's group, and a job naming the
+                    // team's last worker as its parent: neither speaks for this team.
+                    let (elsewhere, chat) = (Uuid::new_v4(), Uuid::new_v4());
+                    connection.execute("insert into projects(id,org_id,owner_user_id,project_type,status)
+                        values($1,$2,$3,'customer','active')", &[&elsewhere,&space.org_id,&space.owner_user_id]).await?;
+                    connection.execute("insert into conversations(id,project_id,created_by,metadata,visibility)
+                        values($1,$2,$3,'{}','public')", &[&chat,&elsewhere,&space.owner_user_id]).await?;
+                    connection.execute("insert into agent_jobs(project_id,conversation_id,status,completed_at,payload,plan_group_id,agent_role)
+                        values($1,$2,'failed',now(),$3,$4,'lead_continuation')", &[&elsewhere,&chat,
+                        &PgJson(json!({"metadata":{"multiAgentPlan":{"groupId":group,"role":"lead_continuation"}}})),&group]).await?;
+                    connection.execute("insert into agent_jobs(project_id,conversation_id,status,completed_at,payload,plan_group_id,agent_role,parent_job_id)
+                        values($1,$2,'completed',now(),'{}',$3,'worker',$4)", &[&elsewhere,&chat,&Uuid::new_v4(),&last]).await?;
+                }
                 "person_stopped" => { connection.execute("update agent_jobs set status='failed',outcome='expired',error_message=$2,
                     payload=jsonb_set(payload,'{requeuedReason}','\"user_stop\"') where id=$1",
                     &[&last,&crate::runtime::REQUEUED_JOB_EXPIRED_MESSAGE]).await?; }
@@ -624,7 +640,7 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
             let finals = final_checkpoints(&pool, conversation, group).await?;
             let told = notices().await?;
             match base {
-                "recovered" | "steered" | "answered" | "follow_on" | "two_lost" => {
+                "recovered" | "led_elsewhere" | "steered" | "answered" | "follow_on" | "two_lost" => {
                     assert_eq!(finals.len(), 1, "{case}: the lead is recovered");
                     assert!(told.is_empty(), "{case}: no notice");
                     let payload = finals[0].get::<_, PgJson<serde_json::Value>>("payload").0;

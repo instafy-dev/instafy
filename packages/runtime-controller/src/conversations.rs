@@ -1281,6 +1281,26 @@ pub(crate) fn strip_client_group_participation_claims(value: &mut JsonValue) {
     }
 }
 
+/// Only the controller says a job or a message belongs to a team's plan. A
+/// job's `multiAgentPlan` becomes its `parent_job_id`, `plan_group_id` and
+/// `agent_role` (`agent::enqueue_agent_job_record`), which the team's
+/// checkpoints, its lost lead's recovery and its time budget trust, and Studio
+/// reads a message's for the team card. So what a member sends or records
+/// keeps no copy of one, nested copies included. The controller's own plan
+/// dispatches (its workers, leads and reruns) are service-role and keep theirs.
+pub(crate) fn strip_client_plan_claims(value: &mut JsonValue) {
+    let Some(map) = value.as_object_mut() else {
+        return;
+    };
+    map.remove("multiAgentPlan");
+    map.remove("multi_agent_plan");
+    for key in ["details", "prompt_metadata", "promptMetadata"] {
+        if let Some(nested) = map.get_mut(key) {
+            strip_client_plan_claims(nested);
+        }
+    }
+}
+
 pub(crate) fn sanitize_client_recorded_message_metadata(
     mut metadata: JsonValue,
     trusted_service_role: bool,
@@ -1302,10 +1322,7 @@ pub(crate) fn sanitize_client_recorded_message_metadata(
     // Only the controller says a message belongs to a team's plan: Studio reads a message's
     // `multiAgentPlan` for the team card's lanes and for which lane a later run replaced, so a
     // member's own record must not claim one.
-    if let Some(map) = metadata.as_object_mut() {
-        map.remove("multiAgentPlan");
-        map.remove("multi_agent_plan");
-    }
+    strip_client_plan_claims(&mut metadata);
     let reserved = strip_reserved_controller_notice_claims(&mut metadata);
     if reserved {
         let Some(map) = metadata.as_object_mut() else {

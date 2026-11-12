@@ -24709,12 +24709,27 @@ fn human_recorded_messages_cannot_claim_a_teams_plan() {
             "continuation": { "of": "2f0c4d2e-0000-4000-8000-000000000002" }
         },
         "multi_agent_plan": { "rateLimitRetry": { "of": "2f0c4d2e-0000-4000-8000-000000000002" } },
+        "details": { "multiAgentPlan": { "groupId": "g", "role": "lead_continuation" }, "note": "kept" },
+        "prompt_metadata": { "details": { "multi_agent_plan": { "groupId": "g" } } },
+        "promptMetadata": { "multiAgentPlan": { "groupId": "g" } },
         "custom": "kept"
     });
     let sanitized =
         crate::conversations::sanitize_client_recorded_message_metadata(forged.clone(), false);
     assert!(sanitized.get("multiAgentPlan").is_none(), "{sanitized}");
     assert!(sanitized.get("multi_agent_plan").is_none(), "{sanitized}");
+    // nor a nested copy
+    assert!(
+        sanitized["details"].get("multiAgentPlan").is_none(),
+        "{sanitized}"
+    );
+    assert_eq!(sanitized["details"]["note"], "kept");
+    assert_eq!(
+        sanitized["prompt_metadata"]["details"],
+        json!({}),
+        "{sanitized}"
+    );
+    assert_eq!(sanitized["promptMetadata"], json!({}), "{sanitized}");
     assert_eq!(sanitized["custom"], "kept");
     // the controller's own records keep it
     assert_eq!(

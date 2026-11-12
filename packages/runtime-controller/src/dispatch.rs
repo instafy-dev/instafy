@@ -1074,6 +1074,12 @@ pub(crate) async fn process_dispatch_prompt_timed(
         if let Some(map) = request.metadata.as_object_mut() {
             map.remove("agent");
         }
+        // Only the controller says a turn belongs to a team's plan, as on the
+        // record path: a job's `multiAgentPlan` fills its `parent_job_id`,
+        // `plan_group_id` and `agent_role`, which the team's checkpoints and its
+        // lost lead's recovery trust. A runtime posts its plan as a message and
+        // the controller dispatches the team itself, as the service role.
+        conversations::strip_client_plan_claims(&mut request.metadata);
     }
     // Browser control is bound to the runtime that owns the visible page.
     // Capture the caller's explicit runtime before project/conversation
