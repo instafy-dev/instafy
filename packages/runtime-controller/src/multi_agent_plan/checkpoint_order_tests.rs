@@ -18,7 +18,8 @@ async fn final_checkpoints(
 
 /// Wakes the goal from `source`'s wakeup as a completion does, once it is due,
 /// and returns how the wake left it: `pending` when the goal's next turn waits
-/// (it is retried in 30 s), else `dispatched` or the like.
+/// (it is retried in 30 s), else `dispatched` or the like. A wait is a conflict,
+/// so it records neither an attempt nor an error, unlike a failed dispatch's retry.
 async fn wake_goal(state: &AppState, pool: &PgPool, source: Uuid) -> anyhow::Result<String> {
     let connection = pool.get().await?;
     connection
@@ -33,13 +34,19 @@ async fn wake_goal(state: &AppState, pool: &PgPool, source: Uuid) -> anyhow::Res
     loop {
         let row = connection
             .query_one(
-                "select status, next_attempt_at > now() + interval '15 seconds' as deferred
+                "select status, next_attempt_at > now() + interval '15 seconds' as deferred,
+                attempts, error
             from conversation_goal_continuations where source_job_id=$1",
                 &[&source],
             )
             .await?;
         let status: String = row.get("status");
         if status != "claimed" && (status != "pending" || row.get::<_, bool>("deferred")) {
+            let error: Option<String> = row.get("error");
+            anyhow::ensure!(
+                status != "pending" || (row.get::<_, i32>("attempts") == 0 && error.is_none()),
+                "the goal's wake failed instead of waiting: {error:?}"
+            );
             return Ok(status);
         }
         anyhow::ensure!(
@@ -267,18 +274,21 @@ async fn final_checkpoint_waits_for_early_lead_and_recovers_every_terminal_hando
 /// The idle sweep queues that lead once the settlement has had its grace
 /// period, exactly once, from a fresh group snapshot with the last worker as
 /// its trigger. It leaves alone a group still settling, one too old to revive,
-/// a deleted space, a stopped group, one that already has a lead, one whose
-/// last worker a person's runtime stop expired, and one whose last worker
-/// planned again. When the conversation moved on, or a refused lead has been
-/// retried long enough, the person is told once instead, and nothing starts
-/// that lead afterwards; a lead refused for less long is retried. A send
-/// queued before the workers ended is answered first and the lead follows it,
-/// even when that takes longer than a refusal is retried; one queued after
-/// they ended, or a steer of a turn after they ended, counts as moving on. A
-/// goal-bound lead carries the planning turn's goal, and giving up blocks that
-/// goal unless a newer turn carries it. The goal's next turn waits for every
-/// group the sweep still owes a lead, from the moment its workers end: after
-/// a queued answer it follows the summary instead of giving it up.
+/// a deleted space, a stopped group, one whose lead managed AI refused, one
+/// that already has a lead, one whose last worker a person's runtime stop
+/// expired, and one whose last worker planned again. When the conversation
+/// moved on, or a refused lead has been retried long enough, the person is
+/// told once instead, and nothing starts that lead afterwards; a lead refused
+/// for less long is retried. A message in a turn received before the workers
+/// ended is no new turn, even when it is written after they end: a steer of a
+/// turn still running, an answer to a worker's question, and a send queued
+/// before they ended, which is answered first while the lead follows it, even
+/// when that takes longer than a refusal is retried. A send queued after they
+/// ended counts as moving on. A goal-bound lead carries the planning turn's
+/// goal, and giving up blocks that goal unless a newer turn carries it. The
+/// goal's next turn waits for exactly the groups of its conversation the sweep
+/// still owes a lead, from the moment their workers end: after a queued answer
+/// it follows the summary instead of giving it up.
 #[tokio::test]
 async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
@@ -293,6 +303,7 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
         "too_old",
         "deleted",
         "stopped",
+        "refused",
         "led",
         "person_stopped",
         "nested",
@@ -302,10 +313,12 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
         "queued",
         "queued_late",
         "steered",
+        "answered",
         "goal_recovered",
         "goal_given_up",
         "goal_moved_on",
         "goal_queued",
+        "goal_answered",
     ] {
         // `goal_<base>` is `<base>` with the planning turn holding the conversation's goal.
         let (goal, base) = match case.strip_prefix("goal_") {
@@ -370,11 +383,29 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                     }))]).await?;
             }
             let queued_send = Uuid::new_v4();
+            let mut other_conversation = None;
             match base {
                 "deleted" => { connection.execute("update projects set status='deleted' where id=$1", &[&space.project_id]).await?; }
-                "stopped" => { connection.execute("insert into conversation_messages(id,conversation_id,project_id,role,content,metadata)
-                    values(gen_random_uuid(),$1,$2,'assistant','Stopped.',$3)", &[&conversation,&space.project_id,&PgJson(json!({"source":"controller",
-                    "kind":"run_cancellation","details":{"stopRequested":true,"suppressedPlanGroupIds":[group]}}))]).await?; }
+                "stopped" => {
+                    connection.execute("insert into conversation_messages(id,conversation_id,project_id,role,content,metadata)
+                        values(gen_random_uuid(),$1,$2,'assistant','Stopped.',$3)", &[&conversation,&space.project_id,&PgJson(json!({"source":"controller",
+                        "kind":"run_cancellation","details":{"stopRequested":true,"suppressedPlanGroupIds":[group]}}))]).await?;
+                    // Another conversation's team just ended and is owed its own lead.
+                    let other_group = Uuid::new_v4();
+                    let (other, other_worker, _) = insert_finished_plan_lane(&space, None, "gamma",
+                        json!({"groupId":other_group,"role":"worker","mode":"read_only","lead":{"leadHandle":"octo"}}), json!({})).await?;
+                    connection.execute("update agent_jobs set agent_role='worker',plan_group_id=$2 where id=$1",
+                        &[&other_worker,&other_group]).await?;
+                    other_conversation = Some(other);
+                }
+                "refused" => {
+                    // Managed AI refused the lead and said so: it never starts, and nothing retries it.
+                    connection.execute("insert into conversation_messages(id,conversation_id,project_id,role,content,metadata)
+                        values(gen_random_uuid(),$1,$2,'assistant','Instafy AI runs on Instafy-hosted runtimes.',$3)",
+                        &[&conversation,&space.project_id,&PgJson(json!({"source":"controller",
+                        "kind":crate::dispatch::MANAGED_AI_HOSTED_RUNTIME_REQUIRED_CODE,"messageType":"error",
+                        "multiAgentPlan":{"groupId":group,"role":"lead_continuation","checkpointKind":"final"}}))]).await?;
+                }
                 "led" => { connection.execute("insert into agent_jobs(project_id,conversation_id,status,completed_at,payload,plan_group_id,agent_role)
                     values($1,$2,'failed',now(),$3,$4,'lead_continuation')", &[&space.project_id,&conversation,
                     &PgJson(json!({"metadata":{"multiAgentPlan":{"groupId":group,"role":"lead_continuation"}}})),&group]).await?; }
@@ -398,7 +429,7 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                             &[&conversation,&owner_revision.to_string()]).await?;
                     }
                 }
-                "queued" | "queued_late" | "steered" => {
+                "queued" | "queued_late" => {
                     // The person queued a send for the lead's agent while its team worked, or once it had ended.
                     let queued_ago = if base == "queued_late" { 0 } else { ended_ago + 30 };
                     connection.execute("insert into conversation_send_queue(id,project_id,conversation_id,user_id,status,request,created_at)
@@ -408,22 +439,42 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                             "metadata":{"agentSelection":{"active":["octo"],"mentions":[]}},
                             "runtimeId":space.hosted_runtime_id,
                         })),&queued_ago]).await?;
-                    if base == "steered" {
-                        // Before the workers ended, the person asked @scribe something; once they
-                        // ended, the person steered that still-running turn. A steer adds a message
-                        // to the turn it steers and starts no job.
-                        let prompt = Uuid::new_v4();
-                        connection.execute("insert into prompts(id,project_id,conversation_id,user_id,prompt_text)
-                            values($1,$2,$3,$4,'Check the release notes.')",
-                            &[&prompt,&space.project_id,&conversation,&space.owner_user_id]).await?;
-                        connection.execute("insert into agent_jobs(project_id,conversation_id,prompt_id,status,created_at,trigger_received_at,payload)
-                            values($1,$2,$3,'leased',now()-($4::bigint*interval '1 second'),now()-($4::bigint*interval '1 second'),$5)",
-                            &[&space.project_id,&conversation,&prompt,&(ended_ago+90),
-                              &PgJson(json!({"metadata":{"agent":{"handle":"scribe"}}}))]).await?;
-                        connection.execute("insert into conversation_messages(id,conversation_id,project_id,role,content,metadata,created_by,prompt_id)
-                            values(gen_random_uuid(),$1,$2,'user','Also check the changelog.','{}',$3,$4)",
-                            &[&conversation,&space.project_id,&space.owner_user_id,&prompt]).await?;
-                    }
+                }
+                "steered" => {
+                    // Before the workers ended, the person asked @scribe something; once they
+                    // ended, the person steered that still-running turn. A steer adds a message
+                    // to the turn it steers and starts no job.
+                    let prompt = Uuid::new_v4();
+                    connection.execute("insert into prompts(id,project_id,conversation_id,user_id,prompt_text)
+                        values($1,$2,$3,$4,'Check the release notes.')",
+                        &[&prompt,&space.project_id,&conversation,&space.owner_user_id]).await?;
+                    connection.execute("insert into agent_jobs(project_id,conversation_id,prompt_id,status,created_at,trigger_received_at,payload)
+                        values($1,$2,$3,'leased',now()-($4::bigint*interval '1 second'),now()-($4::bigint*interval '1 second'),$5)",
+                        &[&space.project_id,&conversation,&prompt,&(ended_ago+90),
+                          &PgJson(json!({"metadata":{"agent":{"handle":"scribe"}}}))]).await?;
+                    connection.execute("insert into conversation_messages(id,conversation_id,project_id,role,content,metadata,created_by,prompt_id)
+                        values(gen_random_uuid(),$1,$2,'user','Also check the changelog.',$3,$4,$5)",
+                        &[&conversation,&space.project_id,&PgJson(json!({"sendIntent":{"mode":"steer","state":"delivered"}})),
+                          &space.owner_user_id,&prompt]).await?;
+                }
+                "answered" => {
+                    // The last worker asked the person a question and ended. Once the team had
+                    // ended, the person answered it, but the answer expired without resuming the
+                    // worker (no team time left, say). The answer belongs to the workers' turn:
+                    // they share the plan's prompt, as dispatch gives it to them.
+                    let (prompt, request, answer) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+                    connection.execute("insert into prompts(id,project_id,conversation_id,user_id,prompt_text)
+                        values($1,$2,$3,$4,'Split this review across a team.')",
+                        &[&prompt,&space.project_id,&conversation,&space.owner_user_id]).await?;
+                    connection.execute("update agent_jobs set prompt_id=$2 where id=any($1)", &[&vec![first,last],&prompt]).await?;
+                    connection.execute("insert into conversation_messages(id,conversation_id,project_id,role,content,metadata,created_by,prompt_id)
+                        values($1,$2,$3,'user','Use the staging data.',$4,$5,$6)",
+                        &[&answer,&conversation,&space.project_id,&PgJson(json!({"userInputRequestId":request})),
+                          &space.owner_user_id,&prompt]).await?;
+                    connection.execute("insert into agent_user_input_requests(id,project_id,conversation_id,job_id,prompt_id,lease_attempt,
+                            group_id,agent_handle,questions,continuation_note,status,expired_reason,answers,answer_message_id,answered_by,answered_at)
+                        values($1,$2,$3,$4,$5,1,$6,'beta','[]','Continue with the answer.','expired','team_time','{}',$7,$8,now())",
+                        &[&request,&space.project_id,&conversation,&last,&prompt,&group,&answer,&space.owner_user_id]).await?;
                 }
                 "failing" | "given_up" => {
                     // A Personal Browser runtime refuses any other job: the lead pinned to it never starts.
@@ -436,7 +487,7 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                 _ => {}
             }
             drop(connection);
-            if matches!(base, "queued" | "queued_late" | "steered") {
+            if matches!(base, "queued" | "queued_late") {
                 // The send goes before the sweep acts: the settlement drains the queue even when its
                 // checkpoint fails, and the queue recovery drains it after a restart.
                 crate::send_queue::spawn_send_queue_drain(state.clone(), conversation);
@@ -450,22 +501,29 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 }
             }
-            // The goal's next turn waits for exactly the groups the sweep still owes a lead,
-            // from the moment their workers end. In `nested` that is the team the last worker
-            // planned, whose worker just ended: its own lead is owed, inside the grace.
-            let owes = || {
+            // The goal's next turn waits for exactly the groups of its conversation the sweep still
+            // owes a lead, from the moment their workers end. In `nested` that is the team the last
+            // worker planned, whose worker just ended: its own lead is owed, inside the grace.
+            let owes_in = |conversation: Uuid| {
                 let pool = &pool;
                 async move {
                     let connection = pool.get().await?;
                     Ok::<_, anyhow::Error>(crate::runtime::conversation_owes_final_lead(&*connection, conversation).await?)
                 }
             };
-            assert_eq!(owes().await?, !matches!(base, "too_old" | "deleted" | "stopped" | "led" | "person_stopped"),
+            let owes = || owes_in(conversation);
+            assert_eq!(owes().await?, !matches!(base, "too_old" | "deleted" | "stopped" | "refused" | "led" | "person_stopped"),
                 "{case}: owed before the sweep");
+            if let Some(other) = other_conversation {
+                assert!(owes_in(other).await?, "{case}: the other conversation's team is owed its lead");
+            }
             // Two ticks: a recovered or given-up group is not touched again.
             tick().await?;
             tick().await?;
             assert_eq!(owes().await?, matches!(base, "settling" | "failing" | "queued" | "nested"), "{case}: owed after the sweep");
+            if let Some(other) = other_conversation {
+                assert!(owes_in(other).await?, "{case}: the other team is still inside its grace");
+            }
             let notices = || {
                 let pool = &pool;
                 async move {
@@ -477,9 +535,9 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
             let finals = final_checkpoints(&pool, conversation).await?;
             let told = notices().await?;
             match base {
-                "recovered" => {
-                    assert_eq!(finals.len(), 1);
-                    assert!(told.is_empty());
+                "recovered" | "steered" | "answered" => {
+                    assert_eq!(finals.len(), 1, "{case}: the lead is recovered");
+                    assert!(told.is_empty(), "{case}: no notice");
                     let payload = finals[0].get::<_, PgJson<serde_json::Value>>("payload").0;
                     assert!(payload["prompt_text"].as_str().unwrap().contains("LATEST VERIFIED RESULT"), "fresh group snapshot");
                     assert_eq!(payload["metadata"]["multiAgentPlan"]["triggerJobId"], json!(last), "the last worker to end triggers");
@@ -489,7 +547,7 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                     assert_eq!(finals.len(), 1, "the existing lead is the only one");
                     assert!(told.is_empty());
                 }
-                "moved_on" | "given_up" | "queued_late" | "steered" => {
+                "moved_on" | "given_up" | "queued_late" => {
                     assert!(finals.is_empty(), "{case}: no late lead");
                     assert_eq!(told.len(), 1, "{case}: told once");
                     assert_eq!(told[0].get::<_, String>("content"), notice_text);
@@ -586,8 +644,8 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                     assert_eq!(next[0].get::<_, PgJson<serde_json::Value>>("payload").0["metadata"]["_controllerGoal"]["revision"],
                         answer_payload["metadata"]["_controllerGoal"]["revision"], "from the answer's turn");
                     tick().await?;
-                    assert!(notices().await?.is_empty(), "the goal's turn does not give the lead up");
-                    assert_eq!(final_checkpoints(&pool, conversation).await?.len(), 1);
+                    assert!(notices().await?.is_empty(), "no notice after the summary");
+                    assert_eq!(final_checkpoints(&pool, conversation).await?.len(), 1, "and no second lead");
                 }
             }
             if goal {
@@ -611,7 +669,7 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                     &[&conversation]).await?.get(0);
                 assert_eq!(wakeups, i64::from(base == "queued"), "{case}: only the queued answer records a wakeup");
                 match base {
-                    "recovered" => {
+                    "recovered" | "answered" => {
                         let lead: Uuid = finals[0].get("id");
                         let payload = finals[0].get::<_, PgJson<serde_json::Value>>("payload").0;
                         assert_eq!(payload["metadata"]["_controllerGoal"], json!({"revision":revision,
@@ -658,5 +716,67 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
         result.map_err(|error| error.context(case))?;
         cleanup?;
     }
+    Ok(())
+}
+
+/// More groups can be owed a lead than one tick tries. Each tick takes the
+/// newest, so groups that keep failing cannot crowd out new ones, and the
+/// oldest, so no group waits untried until it is too old to report.
+#[tokio::test]
+async fn a_tick_tries_the_newest_and_the_oldest_lost_final_leads() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping lost final lead window: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = ManagedSpace::seed(pool.clone(), "lost-final-lead-window").await?;
+    let result: anyhow::Result<()> = async {
+        let state = build_test_state(pool.clone(), space.config("lost-final-lead-window"));
+        // Three teams, each in its own conversation, whose workers ended 15, 10 and 5 minutes ago.
+        let mut teams = Vec::new();
+        for ended_minutes in [15_i64, 10, 5] {
+            let (group, parent_job) = (Uuid::new_v4(), Uuid::new_v4());
+            let plan = json!({"groupId":group,"role":"worker","mode":"read_only",
+                "parentJobId":parent_job,"parentRuntimeId":space.hosted_runtime_id,
+                "lead":{"leadHandle":"octo","continuationPrompt":"Summarize the verified results."}});
+            let (conversation, worker, _) =
+                insert_finished_plan_lane(&space, None, "alpha", plan, json!({})).await?;
+            let connection = pool.get().await?;
+            connection.execute("insert into agent_jobs(id,project_id,conversation_id,status,outcome,created_at,trigger_received_at,completed_at,payload)
+                values($1,$2,$3,'completed','succeeded',now()-($4::bigint*interval '1 minute'),now()-($4::bigint*interval '1 minute'),
+                    now()-($5::bigint*interval '1 minute'),'{}'::jsonb)",
+                &[&parent_job,&space.project_id,&conversation,&(ended_minutes+5),&(ended_minutes+2)]).await?;
+            connection.execute("update agent_jobs set agent_role='worker',plan_group_id=$2,parent_job_id=$3,
+                created_at=now()-(($4::bigint+2)*interval '1 minute'),trigger_received_at=now()-(($4::bigint+2)*interval '1 minute'),
+                completed_at=now()-($4::bigint*interval '1 minute') where id=$1",
+                &[&worker,&group,&parent_job,&ended_minutes]).await?;
+            teams.push(conversation);
+        }
+        // A tick that tries one newest group and one oldest.
+        let tick = || {
+            let (state, pool) = (&state, &pool);
+            async move {
+                crate::runtime::recover_lost_final_plan_checkpoints_within(state, &mut TickConnection::new(pool), 1, 1).await
+            }
+        };
+        let leads = || {
+            let (pool, teams) = (&pool, &teams);
+            async move {
+                let mut leads = Vec::new();
+                for conversation in teams {
+                    leads.push(final_checkpoints(pool, *conversation).await?.len());
+                }
+                Ok::<_, anyhow::Error>(leads)
+            }
+        };
+        tick().await?;
+        assert_eq!(leads().await?, vec![1, 0, 1], "the oldest and the newest first");
+        tick().await?;
+        assert_eq!(leads().await?, vec![1, 1, 1], "then the one between");
+        Ok(())
+    }
+    .await;
+    let cleanup = space.cleanup().await;
+    result?;
+    cleanup?;
     Ok(())
 }

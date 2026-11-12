@@ -363,6 +363,12 @@ const LOST_FINAL_CHECKPOINT_GIVE_UP_SECONDS: i64 = 10 * 60;
 const LOST_FINAL_CHECKPOINT_TRANSIENT_GIVE_UP_SECONDS: i64 = 60 * 60;
 /// A group whose workers ended longer ago is never revived or reported.
 const LOST_FINAL_CHECKPOINT_MAX_AGE_SECONDS: i64 = 2 * 60 * 60;
+/// One tick tries this many of the newest groups owed a lead, so groups that
+/// keep failing cannot crowd out new ones...
+const LOST_FINAL_CHECKPOINTS_NEWEST_PER_TICK: i64 = 24;
+/// ...and this many of the oldest, so none waits untried until it is too old
+/// to report: past the longest give-up, a failed attempt gives it up.
+const LOST_FINAL_CHECKPOINTS_OLDEST_PER_TICK: i64 = 8;
 
 /// Whether a failed recovery of a group whose workers ended `ended_seconds`
 /// ago is given up: soon for a refusal, later for a failure that may pass. A
@@ -474,22 +480,48 @@ pub(crate) async fn conversation_owes_final_lead(
 /// all ended a while ago. The trigger is the group's last worker to end, as
 /// the lost settlement's was, and the group lock rechecks every candidate:
 /// this query grants no dispatch rights. When the conversation moved on after
-/// the workers ended (a person wrote, or another turn started), a late lead
-/// would answer out of turn, so the person is told instead. A send queued
-/// before they ended is not such a turn: its job, sent once they ended, keeps
-/// the time it was queued (`trigger_received_at`, which only the send queue
-/// backdates), so a lead for the same agent waits behind it instead. A goal's
-/// next turn waits for the lead (`conversation_owes_final_lead`), so it never
-/// moves the conversation on first. A recovery that keeps failing is given up
-/// the same way. Newest first, so groups that keep failing cannot crowd out
-/// new ones.
+/// the workers ended (a person started a new turn, or another turn started),
+/// a late lead would answer out of turn, so the person is told instead. A
+/// message in a turn received before they ended is no new turn, even when the
+/// person writes it after they end: a steer of that turn, an answer to a
+/// question its agent asked, or a send queued before they ended, whose job,
+/// sent once they ended, keeps the time it was queued (`trigger_received_at`,
+/// which only the send queue backdates). A lead for the same agent as such a
+/// turn waits behind it. A goal's next turn waits for the lead
+/// (`conversation_owes_final_lead`), so it never moves the conversation on
+/// first. A recovery that keeps failing is given up the same way.
 pub(crate) async fn recover_lost_final_plan_checkpoints(
     state: &AppState,
     tick: &mut TickConnection<'_>,
 ) -> AnyResult<()> {
+    recover_lost_final_plan_checkpoints_within(
+        state,
+        tick,
+        LOST_FINAL_CHECKPOINTS_NEWEST_PER_TICK,
+        LOST_FINAL_CHECKPOINTS_OLDEST_PER_TICK,
+    )
+    .await
+}
+
+/// `recover_lost_final_plan_checkpoints` over the `newest` and the `oldest`
+/// groups owed a lead.
+pub(crate) async fn recover_lost_final_plan_checkpoints_within(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+    newest: i64,
+    oldest: i64,
+) -> AnyResult<()> {
     let person_reasons: Vec<&str> = REQUEUE_REASONS_OF_A_PERSON.to_vec();
     let query = format!(
-        "select g.trigger_job_id,
+        "with owed as (
+             select * from ({GROUPS_OWED_A_FINAL_LEAD}) g
+             where g.completed_at < now() - ($6::bigint * interval '1 second')
+         ), tried as (
+             (select * from owed order by completed_at desc, trigger_job_id desc limit $7)
+             union
+             (select * from owed order by completed_at, trigger_job_id limit $8)
+         )
+         select g.trigger_job_id,
                 extract(epoch from now() - g.completed_at)::bigint as ended_seconds,
                 exists (
                     select 1 from conversation_messages turn
@@ -499,7 +531,6 @@ pub(crate) async fn recover_lost_final_plan_checkpoints(
                           select 1 from agent_jobs sent
                           where sent.conversation_id = g.conversation_id
                             and sent.prompt_id = turn.prompt_id
-                            and sent.created_at > g.completed_at
                             and sent.trigger_received_at <= g.completed_at
                       )
                 ) or exists (
@@ -508,10 +539,8 @@ pub(crate) async fn recover_lost_final_plan_checkpoints(
                       and coalesce(turn.trigger_received_at, turn.created_at) > g.completed_at
                       and turn.plan_group_id is distinct from g.plan_group_id
                 ) as moved_on
-         from ({GROUPS_OWED_A_FINAL_LEAD}) g
-         where g.completed_at < now() - ($6::bigint * interval '1 second')
-         order by g.completed_at desc
-         limit $7"
+         from tried g
+         order by g.completed_at desc, g.trigger_job_id desc"
     );
     let rows = tick
         .client("lost final checkpoint recovery connection")
@@ -525,7 +554,8 @@ pub(crate) async fn recover_lost_final_plan_checkpoints(
                 &person_reasons,
                 &None::<Uuid>,
                 &LOST_FINAL_CHECKPOINT_GRACE_SECONDS,
-                &32_i64,
+                &newest,
+                &oldest,
             ],
         )
         .await

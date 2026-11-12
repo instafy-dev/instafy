@@ -162,31 +162,41 @@ on purpose:
 
 - a deleted space;
 - a Stop;
-- a refused lead;
+- a lead that managed AI refused because it needs an Instafy-hosted runtime;
 - a question that is still waiting for a person;
 - a last worker that expired after a person stopped its runtime;
 - a last worker that planned again.
 
-If the conversation moved on after the workers ended, because a person wrote (a steer
-included) or another turn started, a late lead would answer out of turn. In that case the
-conversation instead shows one error notice: "@octo could not continue the plan after its
-agents finished. Their results are in the plan." A message held in the conversation's send
-queue while the agents worked is not such a turn, even though it is sent once they end: its job
-keeps the time it was queued. A message for the lead's agent is answered first, and the
-recovered lead waits until that agent is free, so the summary follows the answer; a message for
-another agent is answered alongside the summary. Recovery also gives up with the notice when
-retries keep failing:
+If the conversation moved on after the workers ended, because a person started a new turn or
+another turn started, a late lead would answer out of turn. In that case the conversation
+instead shows one error notice: "@octo could not continue the plan after its agents finished.
+Their results are in the plan." A message in a turn received before the workers ended does not
+start a new turn, even when the person writes it after they end:
+
+- a steer of a turn that is still running;
+- an answer to a question its agent asked, a worker's included;
+- a message held in the conversation's send queue while the agents worked, which is sent once
+  they end but keeps the time it was queued.
+
+A recovered lead for the same agent as such a turn waits until that agent is free, so the
+summary follows that turn's answer; one for another agent runs alongside it. Recovery also
+gives up with the notice when retries keep failing:
 
 - after 10 minutes, if the dispatch refuses the lead;
 - after an hour, if the failure may pass, such as a pool or database error, or if the lead's
   agent is still busy.
 
-The conversation's goal waits for the lead too: while a group is owed its final lead, from the
-moment its workers end, the goal does not start its next turn, which would move the
-conversation on first. If the planning turn still holds the goal when recovery gives up, the
-goal is blocked with the same text, since nothing else would continue it; the goal bar then
-offers Help unblock, Resume and Clear. A goal that a newer turn carries is left alone, and goes
-on once the lead has run or the notice is shown.
+Each idle tick tries the newest groups owed a lead, so groups that keep failing do not crowd out
+new ones, and the oldest, so every group is tried before it is too old to report.
+
+The conversation's goal waits for the lead too: while a group of that conversation is owed its
+final lead, from the moment its workers end, the goal does not start its next turn, which would
+move the conversation on first. A lead that keeps failing holds the goal until recovery gives
+it up, so for up to 10 minutes or an hour. If the planning turn still holds the goal when
+recovery gives up, the goal is blocked with the same text, since nothing else would continue
+it; the goal bar then offers Help unblock, Resume and Clear. A goal that a newer turn carries is
+left alone, and goes on once the lead has run or the notice is shown. A group the recovery skips
+never holds the goal, and no group holds it once its workers ended more than two hours ago.
 
 No later checkpoint starts the lead after the notice. Groups whose workers ended more than two
 hours ago are not revived. Apply
