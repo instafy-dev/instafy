@@ -182,7 +182,16 @@ update; automatic continuations cannot resume themselves. Workers cannot change
 the parent goal. Verified automatic retries and browser hand-backs do not count
 as new user input. A final team checkpoint can
 inherit its planning job's binding; a planning receipt cannot continue the goal
-before that checkpoint.
+before that checkpoint. A team without an early checkpoint also holds the goal's
+next turn from the moment its workers end until its final checkpoint is queued,
+the team is stopped, managed AI refuses its lead, or the recovery of a lost
+checkpoint gives the lead up (once the conversation moved on, after 10 minutes
+for a refusal, or after an hour for other failures), and never once its workers
+ended more than two hours ago. Teams that recovery skips, listed in
+`docs/Multi-Agent-Evaluation.md`, never hold it for their lead; a worker's
+question holds it until it is handed back to its worker or expires. If a lost
+checkpoint is given up while the planning job still holds the goal, the goal is
+blocked with the reason.
 
 A successful goal turn records one durable wakeup in
 `conversation_goal_continuations`, in the completion transaction. Completion

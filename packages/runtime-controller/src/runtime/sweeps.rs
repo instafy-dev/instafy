@@ -109,7 +109,7 @@ const AUTO_STOP_STALE_RUNTIMES_QUERY: &str = "select id from runtimes
 /// instead of silently re-running whenever a runtime next appears.
 pub(super) const REQUEUED_JOB_EXPIRY_SECONDS: i64 = 15 * 60;
 /// What an expired stop-requeued job tells the person who sent it.
-const REQUEUED_JOB_EXPIRED_MESSAGE: &str = "This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it.";
+pub(crate) const REQUEUED_JOB_EXPIRED_MESSAGE: &str = "This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it.";
 /// The `failureCode` of a run, and the `kind` of the chat message, when the
 /// requeued-job expiry gives up an interrupted turn.
 pub(super) const INTERRUPTED_RUN_EXPIRED_CODE: &str = "interrupted_run_expired";
@@ -232,6 +232,7 @@ pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
     settle_plan_agents_out_of_team_time(state, &mut tick).await?;
     recover_worker_input_requests(state, &mut tick).await?;
     recover_deferred_plan_checkpoints(state, &mut tick).await?;
+    recover_lost_final_plan_checkpoints(state, &mut tick).await?;
     auto_recover_stuck_queued_runtimes(state, &mut tick).await?;
     cleanup_terminal_runtime_records(state, &mut tick).await?;
     fail_platform_jobs_stranded_on_private_runtimes(state, &mut tick).await?;
@@ -273,8 +274,10 @@ async fn recover_worker_input_requests(
 }
 
 /// Completion commits before its settlement queues the next lead. Recover that
-/// handoff after a restart, including early leads failed or canceled elsewhere.
-/// The group lock rechecks every candidate; this query grants no dispatch rights.
+/// handoff after a restart for a group with an ended early lead, including
+/// early leads failed or canceled elsewhere; `recover_lost_final_plan_checkpoints`
+/// recovers the groups without one. The group lock rechecks every candidate;
+/// this query grants no dispatch rights.
 pub(crate) async fn recover_deferred_plan_checkpoints(
     state: &AppState,
     tick: &mut TickConnection<'_>,
@@ -347,6 +350,327 @@ pub(crate) async fn recover_deferred_plan_checkpoints(
             .map_err(|(_, Json(error))| {
                 anyhow::anyhow!("deferred plan checkpoint: {}", error.message)
             })?;
+    }
+    Ok(())
+}
+
+/// How long a plan group's last worker end is left to its own settlement,
+/// which queues the final lead after billing, before the recovery below acts.
+const LOST_FINAL_CHECKPOINT_GRACE_SECONDS: i64 = 2 * 60;
+/// A lead the dispatch refuses (a 4xx) is given up once the group is this old.
+const LOST_FINAL_CHECKPOINT_GIVE_UP_SECONDS: i64 = 10 * 60;
+/// Any other failure, such as a pool or database error, is retried for longer.
+const LOST_FINAL_CHECKPOINT_TRANSIENT_GIVE_UP_SECONDS: i64 = 60 * 60;
+/// A group whose workers ended longer ago is never revived or reported.
+const LOST_FINAL_CHECKPOINT_MAX_AGE_SECONDS: i64 = 2 * 60 * 60;
+/// One tick tries this many of the newest groups owed a lead, so groups that
+/// keep failing cannot crowd out new ones...
+const LOST_FINAL_CHECKPOINTS_NEWEST_PER_TICK: i64 = 24;
+/// ...and this many of the oldest, so none waits untried until it is too old
+/// to report: past the longest give-up, a failed attempt gives it up.
+const LOST_FINAL_CHECKPOINTS_OLDEST_PER_TICK: i64 = 8;
+const _: () = assert!(
+    LOST_FINAL_CHECKPOINTS_NEWEST_PER_TICK > 0 && LOST_FINAL_CHECKPOINTS_OLDEST_PER_TICK > 0,
+    "a tick tries both ends"
+);
+
+/// Whether a failed recovery of a group whose workers ended `ended_seconds`
+/// ago is given up: soon for a refusal, later for a failure that may pass. A
+/// lead whose agent's lane is busy (409 `dispatch_lane_busy`) waits like a
+/// failure that may pass; any other 4xx is a refusal.
+fn lost_final_checkpoint_gives_up(
+    status: StatusCode,
+    code: Option<&str>,
+    ended_seconds: i64,
+) -> bool {
+    let refused = status.is_client_error() && code != Some("dispatch_lane_busy");
+    ended_seconds
+        >= if refused {
+            LOST_FINAL_CHECKPOINT_GIVE_UP_SECONDS
+        } else {
+            LOST_FINAL_CHECKPOINT_TRANSIENT_GIVE_UP_SECONDS
+        }
+}
+
+/// The plan groups still owed their final lead, one row per group with its
+/// last worker to end (`trigger_job_id`): every worker ended, the last within
+/// `$1` seconds, and no lead of any kind was queued.
+/// `recover_deferred_plan_checkpoints` owns the groups with an early lead. It
+/// leaves out what ends a plan without a lead on purpose: a deleted space, a
+/// Stop, a lead managed AI refused or the recovery gave up (`$2` is the
+/// given-up notice's kind), a question pending or answered and not yet handed
+/// back, a last worker a person's runtime stop expired (`$3` and `$4`; its
+/// expiry runs no checkpoint), and a last worker that planned again (its end
+/// never checkpoints its own group). `$5` is the one conversation to look in,
+/// or null for all. The recovery below acts on these groups and a goal's next
+/// turn waits for them (`conversation_owes_final_lead`), so the two read one
+/// definition.
+const GROUPS_OWED_A_FINAL_LEAD: &str = "
+    select g.plan_group_id, g.trigger_job_id, g.conversation_id, g.completed_at
+    from (
+        select distinct on (w.plan_group_id) w.plan_group_id, w.id as trigger_job_id,
+               w.project_id, w.conversation_id, w.completed_at, w.status, w.outcome,
+               w.error_message, w.payload
+        from agent_jobs w
+        where w.agent_role = 'worker' and w.plan_group_id is not null
+          and w.status in ('completed','failed','canceled','cancelled','expired')
+          and w.completed_at > now() - ($1::bigint * interval '1 second')
+          and w.payload #>> '{metadata,multiAgentPlan,groupId}' = w.plan_group_id::text
+          and ($5::uuid is null or w.conversation_id = $5)
+        order by w.plan_group_id, w.completed_at desc, w.id desc
+    ) g
+    join projects p on p.id = g.project_id and p.status <> 'deleted'
+    join conversations c on c.id = g.conversation_id and c.project_id = g.project_id
+    where not exists (
+          select 1 from agent_jobs j
+          where j.plan_group_id = g.plan_group_id
+            and (j.status not in ('completed','failed','canceled','cancelled','expired')
+                or j.agent_role in ('lead_continuation','synthesis'))
+      )
+      and not exists (
+          select 1 from agent_user_input_requests q
+          where q.project_id = g.project_id and q.group_id = g.plan_group_id
+            and q.status in ('pending','answered')
+      )
+      and not exists (
+          select 1 from conversation_messages m
+          where m.project_id = g.project_id and m.conversation_id = g.conversation_id
+            and m.created_by is null and m.metadata->>'source' = 'controller'
+            and ((m.metadata->>'kind' = 'run_cancellation'
+                  and m.metadata #> '{details,stopRequested}' = 'true'::jsonb
+                  and m.metadata #> '{details,suppressedPlanGroupIds}'
+                      @> jsonb_build_array(g.plan_group_id::text))
+                or (m.metadata->>'kind' in ('managed_ai_hosted_runtime_required', $2)
+                    and m.metadata #>> '{multiAgentPlan,groupId}' = g.plan_group_id::text))
+      )
+      and not (g.status = 'failed' and g.outcome = 'expired'
+          and g.error_message = $3 and g.payload->>'requeuedReason' = any($4))
+      and not exists (
+          select 1 from agent_jobs child
+          where child.parent_job_id = g.trigger_job_id
+            and child.plan_group_id is distinct from g.plan_group_id
+      )";
+
+/// Whether a plan group of `conversation_id` is still owed its final lead
+/// (`GROUPS_OWED_A_FINAL_LEAD`), from the moment its workers end, so within
+/// the settlement's grace too. The settlement or the recovery below queues
+/// that lead; until then the team's turn is not over, and the conversation's
+/// goal does not start its next turn (`conversation_goals::ensure_idle`),
+/// which would move the conversation on before the summary.
+pub(crate) async fn conversation_owes_final_lead(
+    client: &impl tokio_postgres::GenericClient,
+    conversation_id: Uuid,
+) -> Result<bool, tokio_postgres::Error> {
+    let person_reasons: Vec<&str> = REQUEUE_REASONS_OF_A_PERSON.to_vec();
+    let query = format!("select exists ({GROUPS_OWED_A_FINAL_LEAD}) as owed");
+    let row = client
+        .query_one(
+            query.as_str(),
+            &[
+                &LOST_FINAL_CHECKPOINT_MAX_AGE_SECONDS,
+                &crate::multi_agent_plan::LEAD_CHECKPOINT_FAILED_CODE,
+                &REQUEUED_JOB_EXPIRED_MESSAGE,
+                &person_reasons,
+                &Some(conversation_id),
+            ],
+        )
+        .await?;
+    Ok(row.get("owed"))
+}
+
+/// The conversations with a group `recover_lost_final_plan_checkpoints` could
+/// try now: owed its lead and past the grace. The sweep reads every
+/// conversation, so the window test, which ticks it, first checks that no other
+/// test's group is among them.
+#[cfg(test)]
+pub(crate) async fn conversations_owing_a_lost_final_lead(
+    client: &impl tokio_postgres::GenericClient,
+) -> Result<Vec<Uuid>, tokio_postgres::Error> {
+    let person_reasons: Vec<&str> = REQUEUE_REASONS_OF_A_PERSON.to_vec();
+    let query = format!(
+        "select distinct g.conversation_id from ({GROUPS_OWED_A_FINAL_LEAD}) g
+         where g.completed_at < now() - ($6::bigint * interval '1 second')"
+    );
+    let rows = client
+        .query(
+            query.as_str(),
+            &[
+                &LOST_FINAL_CHECKPOINT_MAX_AGE_SECONDS,
+                &crate::multi_agent_plan::LEAD_CHECKPOINT_FAILED_CODE,
+                &REQUEUED_JOB_EXPIRED_MESSAGE,
+                &person_reasons,
+                &None::<Uuid>,
+                &LOST_FINAL_CHECKPOINT_GRACE_SECONDS,
+            ],
+        )
+        .await?;
+    Ok(rows.iter().map(|row| row.get(0)).collect())
+}
+
+/// The final lead is queued after the last worker's end commits, by its
+/// settlement (or by the checkpoint a cancellation or a sweep starts), so a
+/// restart or a dispatch error, which is only logged, loses it. Retry each
+/// group still owed its lead (`GROUPS_OWED_A_FINAL_LEAD`) once its workers
+/// all ended a while ago. The trigger is the group's last worker to end, as
+/// the lost settlement's was, and the group lock rechecks every candidate:
+/// this query grants no dispatch rights. When the conversation moved on after
+/// the workers ended (a person wrote in it, or another turn started there), a
+/// late lead would answer out of turn, so the person is told instead. What
+/// belongs to a turn received before they ended does not count, even when it
+/// happens after they end: a person's steer of that turn, a Reply to a
+/// worker's question (it carries the workers' prompt), a send queued before
+/// they ended, whose job, sent once they ended, keeps the time it was queued
+/// (`trigger_received_at`, which only the send queue backdates), and the jobs
+/// of a team such a turn planned, however deep the plans nest
+/// (`parent_job_id`), with a steer of them or a Reply to their questions. The
+/// lead waits while its agent has a job queued or running, for example that
+/// turn or another team's lead. A goal's next turn waits for the lead
+/// (`conversation_owes_final_lead`), so it never moves the conversation on
+/// first. A recovery that keeps failing is given up the same way.
+pub(crate) async fn recover_lost_final_plan_checkpoints(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    recover_lost_final_plan_checkpoints_within(
+        state,
+        tick,
+        LOST_FINAL_CHECKPOINTS_NEWEST_PER_TICK,
+        LOST_FINAL_CHECKPOINTS_OLDEST_PER_TICK,
+    )
+    .await
+}
+
+/// SQL that is true when the job `{job}` belongs to a turn received by the
+/// time group `g`'s workers ended: the job was received by then, or a job it
+/// descends from through team plans was (`parent_job_id`, followed however
+/// deep the plans nest). A team belongs to the turn that planned it. It tests
+/// the job's own receive time too, so a caller's filter on that time only
+/// narrows the jobs it runs for.
+fn belongs_to_a_turn_received_by_the_end(job: &str) -> String {
+    format!(
+        "exists (
+             with recursive planner(id) as (
+                 select {job}.id
+                 union
+                 select earlier.parent_job_id
+                 from planner join agent_jobs earlier on earlier.id = planner.id
+             )
+             select 1 from planner join agent_jobs earlier on earlier.id = planner.id
+             where coalesce(earlier.trigger_received_at, earlier.created_at) <= g.completed_at
+         )"
+    )
+}
+
+/// `recover_lost_final_plan_checkpoints` over the `newest` and the `oldest`
+/// groups owed a lead, oldest first, so of two teams whose leads wait for one
+/// agent the team that ended first is tried first.
+pub(crate) async fn recover_lost_final_plan_checkpoints_within(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+    newest: i64,
+    oldest: i64,
+) -> AnyResult<()> {
+    let person_reasons: Vec<&str> = REQUEUE_REASONS_OF_A_PERSON.to_vec();
+    let message_belongs = belongs_to_a_turn_received_by_the_end("sent");
+    let job_belongs = belongs_to_a_turn_received_by_the_end("turn");
+    let query = format!(
+        "with owed as (
+             select * from ({GROUPS_OWED_A_FINAL_LEAD}) g
+             where g.completed_at < now() - ($6::bigint * interval '1 second')
+         ), tried as (
+             (select * from owed order by completed_at desc, trigger_job_id desc limit $7)
+             union
+             (select * from owed order by completed_at, trigger_job_id limit $8)
+         )
+         select g.trigger_job_id,
+                extract(epoch from now() - g.completed_at)::bigint as ended_seconds,
+                exists (
+                    select 1 from conversation_messages turn
+                    where turn.conversation_id = g.conversation_id and turn.role = 'user'
+                      and turn.created_by is not null and turn.created_at > g.completed_at
+                      and not exists (
+                          select 1 from agent_jobs sent
+                          where sent.conversation_id = g.conversation_id
+                            and sent.prompt_id = turn.prompt_id
+                            and {message_belongs}
+                      )
+                ) or exists (
+                    select 1 from agent_jobs turn
+                    where turn.conversation_id = g.conversation_id
+                      and coalesce(turn.trigger_received_at, turn.created_at) > g.completed_at
+                      and turn.plan_group_id is distinct from g.plan_group_id
+                      and not {job_belongs}
+                ) as moved_on
+         from tried g
+         order by g.completed_at, g.trigger_job_id"
+    );
+    let rows = tick
+        .client("lost final checkpoint recovery connection")
+        .await?
+        .query(
+            query.as_str(),
+            &[
+                &LOST_FINAL_CHECKPOINT_MAX_AGE_SECONDS,
+                &crate::multi_agent_plan::LEAD_CHECKPOINT_FAILED_CODE,
+                &REQUEUED_JOB_EXPIRED_MESSAGE,
+                &person_reasons,
+                &None::<Uuid>,
+                &LOST_FINAL_CHECKPOINT_GRACE_SECONDS,
+                &newest,
+                &oldest,
+            ],
+        )
+        .await
+        .context("load lost final plan checkpoints")?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    tick.release();
+    for row in rows {
+        let trigger_job_id: Uuid = row.get("trigger_job_id");
+        let ended_seconds: i64 = row.get("ended_seconds");
+        let give_up = if row.get::<_, bool>("moved_on") {
+            true
+        } else {
+            match crate::multi_agent_plan::recover_lost_final_checkpoint(state, trigger_job_id)
+                .await
+            {
+                Ok(true) => {
+                    info!(%trigger_job_id, "recovered a lost final lead checkpoint");
+                    false
+                }
+                Ok(false) => false,
+                Err((status, Json(error))) => {
+                    let code = error.code.as_deref();
+                    if code == Some("dispatch_lane_busy") {
+                        debug!(%trigger_job_id, "a lost final lead waits for its agent's lane");
+                    } else {
+                        warn!(
+                            %trigger_job_id,
+                            status = status.as_u16(),
+                            error = %error.message,
+                            "failed to recover a lost final lead checkpoint"
+                        );
+                    }
+                    // Otherwise the group stays a candidate and the next tick retries it.
+                    lost_final_checkpoint_gives_up(status, code, ended_seconds)
+                }
+            }
+        };
+        if give_up {
+            match crate::multi_agent_plan::give_up_lost_final_checkpoint(state, trigger_job_id)
+                .await
+            {
+                Ok(true) => info!(%trigger_job_id, "gave up a lost final lead checkpoint"),
+                Ok(false) => {}
+                Err((status, Json(error))) => warn!(
+                    %trigger_job_id,
+                    status = status.as_u16(),
+                    error = %error.message,
+                    "failed to give up a lost final lead checkpoint"
+                ),
+            }
+        }
     }
     Ok(())
 }
@@ -3134,12 +3458,72 @@ pub(super) async fn stop_runtimes_of_deleted_projects(
 #[cfg(test)]
 mod tests {
     use super::{
-        runtime_heartbeat_stale_for_queued_recovery, should_recover_stuck_queued_runtime,
-        should_request_runtime_recovery, AUTO_STOP_STALE_RUNTIMES_QUERY,
+        lost_final_checkpoint_gives_up, runtime_heartbeat_stale_for_queued_recovery,
+        should_recover_stuck_queued_runtime, should_request_runtime_recovery,
+        AUTO_STOP_STALE_RUNTIMES_QUERY,
     };
+    use axum::http::StatusCode;
     use chrono::Duration as ChronoDuration;
     use chrono::Utc;
     use uuid::Uuid;
+
+    #[test]
+    fn a_lost_final_lead_is_given_up_soon_when_refused_and_late_when_it_may_pass() {
+        let minutes = |m: i64| m * 60;
+        assert!(!lost_final_checkpoint_gives_up(
+            StatusCode::FORBIDDEN,
+            None,
+            minutes(9)
+        ));
+        assert!(lost_final_checkpoint_gives_up(
+            StatusCode::FORBIDDEN,
+            None,
+            minutes(10)
+        ));
+        assert!(!lost_final_checkpoint_gives_up(
+            StatusCode::CONFLICT,
+            None,
+            minutes(9)
+        ));
+        assert!(lost_final_checkpoint_gives_up(
+            StatusCode::CONFLICT,
+            None,
+            minutes(10)
+        ));
+        // A pool timeout or database error after an outage is retried, not reported.
+        assert!(!lost_final_checkpoint_gives_up(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            None,
+            minutes(10)
+        ));
+        assert!(!lost_final_checkpoint_gives_up(
+            StatusCode::SERVICE_UNAVAILABLE,
+            None,
+            minutes(59)
+        ));
+        assert!(lost_final_checkpoint_gives_up(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            None,
+            minutes(60)
+        ));
+        // A lead whose agent is still answering a queued send waits for it as long.
+        assert!(!lost_final_checkpoint_gives_up(
+            StatusCode::CONFLICT,
+            Some("dispatch_lane_busy"),
+            minutes(59)
+        ));
+        assert!(lost_final_checkpoint_gives_up(
+            StatusCode::CONFLICT,
+            Some("dispatch_lane_busy"),
+            minutes(60)
+        ));
+        // Any other coded refusal is a refusal.
+        assert!(lost_final_checkpoint_gives_up(
+            StatusCode::CONFLICT,
+            Some("managed_ai_hosted_runtime_required"),
+            minutes(10)
+        ));
+    }
 
     #[tokio::test]
     async fn stale_runtime_selector_excludes_removed_rows() -> anyhow::Result<()> {

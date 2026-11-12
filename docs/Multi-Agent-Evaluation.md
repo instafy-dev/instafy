@@ -154,6 +154,68 @@ updated controller so idle recovery uses the partial early-checkpoint index rath
 scanning ordinary job history. The recovery query still checks historical early checkpoints
 for a final result; it is not a constant-cost queue.
 
+A group with no early checkpoint has its own idle recovery. The final lead is queued after the
+last worker's end commits, so a controller restart or a dispatch error, which is only logged,
+can lose it. Two minutes after the last worker ends, recovery queues that lead from a fresh
+group snapshot, with the last worker as its trigger. It skips groups that end without a lead
+on purpose:
+
+- a deleted space;
+- a Stop;
+- a lead that managed AI refused because it needs an Instafy-hosted runtime;
+- a worker's question that is still waiting for a person, or answered and not yet handed back
+  to its worker;
+- a last worker that expired after a person stopped its runtime;
+- a last worker that planned again.
+
+If the conversation moved on after the workers ended, a late lead would answer out of turn. In
+that case the conversation instead shows one error notice: "@octo could not continue the plan
+after its agents finished. Their results are in the plan." The conversation moved on when a
+person wrote in it, even a message that starts no turn, such as a `/goal` command, or when
+another turn started there, including one Instafy starts by itself, such as a browser
+hand-back, an automatic retry or a card's browser turn. A message that belongs to a turn
+received before the workers ended does not count, even when the person writes it after they
+end:
+
+- a steer of a turn that is still running;
+- an answer to a worker's question given with Reply (an ordinary message that answers it
+  starts a turn of its own);
+- a message held in the conversation's send queue while the agents worked, which is sent once
+  they end but keeps the time it was queued.
+
+A team belongs to the turn that planned it, so the work of a team that such a turn planned
+does not count either, however deep its plans nest: its helpers and its lead, even when they
+start after the workers ended, and a steer of them or an answer given with Reply to their
+questions. A recovered lead waits while its agent has a job queued or running in the
+conversation, or a send queued for it, such as that turn's answer or another team's lead, so
+the summary follows it. A queued or running job there that names no agent holds it too. A lead
+for another agent runs alongside it. So does a team still at work: its own lead has not started
+yet, so the summary can come before that lead. Of two teams whose leads wait for the same agent,
+the one whose workers ended first is tried first. Recovery also gives up with the notice when
+retries keep failing:
+
+- after 10 minutes, if the dispatch refuses the lead;
+- after an hour, if the failure may pass, such as a pool or database error, or if the lead's
+  agent is still busy.
+
+Each idle tick tries the newest groups owed a lead, so groups that keep failing do not crowd out
+new ones, and the oldest, so every group is tried before it is too old to report.
+
+The conversation's goal waits for the lead too: while a group of that conversation is owed its
+final lead, from the moment its workers end, the goal does not start its next turn, which would
+move the conversation on first. A lead that keeps failing holds the goal until recovery gives
+it up, so for up to 10 minutes or an hour. If the planning turn still holds the goal when
+recovery gives up, the goal is blocked with the same text, since nothing else would continue
+it; the goal bar then offers Help unblock, Resume and Clear. A goal that a newer turn carries is
+left alone, and goes on once the lead has run or the notice is shown. A group the recovery skips
+never holds the goal for its lead (a worker's question still holds it until it is handed back to
+its worker or expires), and no group holds it once its workers ended more than two hours ago.
+
+No later checkpoint starts the lead after the notice. Groups whose workers ended more than two
+hours ago are not revived. Apply
+`20261112084100_agent_jobs_lost_final_checkpoint_recovery_idx.sql` before enabling the updated
+controller, so this recovery reads only recently ended plan workers.
+
 Profile selection and settings propagation are separate checks. A planner can still create an
 ephemeral worker when a request names a saved profile. Verify the controller-stamped profile ID
 before attributing a run to that profile, then inspect the effective worker settings. Correct

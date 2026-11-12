@@ -195,6 +195,17 @@ async fn ensure_idle(
             "The goal is waiting for its team's final checkpoint.",
         ));
     }
+    // A team whose workers ended is still owed its final lead until the
+    // settlement or the lost-handoff recovery queues it; the summary comes
+    // before the goal's next turn, which would otherwise move past it.
+    if crate::runtime::conversation_owes_final_lead(tx, conversation_id)
+        .await
+        .map_err(|e| internal_error(format!("check goal team lead: {e}")))?
+    {
+        return Err(conflict(
+            "The goal is waiting for its team's final checkpoint.",
+        ));
+    }
     Ok(())
 }
 
