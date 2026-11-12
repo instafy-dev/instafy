@@ -382,104 +382,150 @@ fn lost_final_checkpoint_gives_up(
         }
 }
 
+/// The plan groups still owed their final lead, one row per group with its
+/// last worker to end (`trigger_job_id`): every worker ended, the last within
+/// `$1` seconds, and no lead of any kind was queued.
+/// `recover_deferred_plan_checkpoints` owns the groups with an early lead. It
+/// leaves out what ends a plan without a lead on purpose: a deleted space, a
+/// Stop, a refused or given-up lead (`$2` is the given-up notice's kind), a
+/// question waiting for a person, a last worker a person's runtime stop
+/// expired (`$3` and `$4`; its expiry runs no checkpoint), and a last worker
+/// that planned again (its end never checkpoints its own group). `$5` is the
+/// one conversation to look in, or null for all. The recovery below acts on
+/// these groups and a goal's next turn waits for them
+/// (`conversation_owes_final_lead`), so the two read one definition.
+const GROUPS_OWED_A_FINAL_LEAD: &str = "
+    select g.plan_group_id, g.trigger_job_id, g.conversation_id, g.completed_at
+    from (
+        select distinct on (w.plan_group_id) w.plan_group_id, w.id as trigger_job_id,
+               w.project_id, w.conversation_id, w.completed_at, w.status, w.outcome,
+               w.error_message, w.payload
+        from agent_jobs w
+        where w.agent_role = 'worker' and w.plan_group_id is not null
+          and w.status in ('completed','failed','canceled','cancelled','expired')
+          and w.completed_at > now() - ($1::bigint * interval '1 second')
+          and w.payload #>> '{metadata,multiAgentPlan,groupId}' = w.plan_group_id::text
+          and ($5::uuid is null or w.conversation_id = $5)
+        order by w.plan_group_id, w.completed_at desc, w.id desc
+    ) g
+    join projects p on p.id = g.project_id and p.status <> 'deleted'
+    join conversations c on c.id = g.conversation_id and c.project_id = g.project_id
+    where not exists (
+          select 1 from agent_jobs j
+          where j.plan_group_id = g.plan_group_id
+            and (j.status not in ('completed','failed','canceled','cancelled','expired')
+                or j.agent_role in ('lead_continuation','synthesis'))
+      )
+      and not exists (
+          select 1 from agent_user_input_requests q
+          where q.project_id = g.project_id and q.group_id = g.plan_group_id
+            and q.status in ('pending','answered')
+      )
+      and not exists (
+          select 1 from conversation_messages m
+          where m.project_id = g.project_id and m.conversation_id = g.conversation_id
+            and m.created_by is null and m.metadata->>'source' = 'controller'
+            and ((m.metadata->>'kind' = 'run_cancellation'
+                  and m.metadata #> '{details,stopRequested}' = 'true'::jsonb
+                  and m.metadata #> '{details,suppressedPlanGroupIds}'
+                      @> jsonb_build_array(g.plan_group_id::text))
+                or (m.metadata->>'kind' in ('managed_ai_hosted_runtime_required', $2)
+                    and m.metadata #>> '{multiAgentPlan,groupId}' = g.plan_group_id::text))
+      )
+      and not (g.status = 'failed' and g.outcome = 'expired'
+          and g.error_message = $3 and g.payload->>'requeuedReason' = any($4))
+      and not exists (
+          select 1 from agent_jobs child
+          where child.parent_job_id = g.trigger_job_id
+            and child.plan_group_id is distinct from g.plan_group_id
+      )";
+
+/// Whether a plan group of `conversation_id` is still owed its final lead
+/// (`GROUPS_OWED_A_FINAL_LEAD`), from the moment its workers end, so within
+/// the settlement's grace too. The settlement or the recovery below queues
+/// that lead; until then the team's turn is not over, and the conversation's
+/// goal does not start its next turn (`conversation_goals::ensure_idle`),
+/// which would move the conversation on before the summary.
+pub(crate) async fn conversation_owes_final_lead(
+    client: &impl tokio_postgres::GenericClient,
+    conversation_id: Uuid,
+) -> Result<bool, tokio_postgres::Error> {
+    let person_reasons: Vec<&str> = REQUEUE_REASONS_OF_A_PERSON.to_vec();
+    let query = format!("select exists ({GROUPS_OWED_A_FINAL_LEAD}) as owed");
+    let row = client
+        .query_one(
+            query.as_str(),
+            &[
+                &LOST_FINAL_CHECKPOINT_MAX_AGE_SECONDS,
+                &crate::multi_agent_plan::LEAD_CHECKPOINT_FAILED_CODE,
+                &REQUEUED_JOB_EXPIRED_MESSAGE,
+                &person_reasons,
+                &Some(conversation_id),
+            ],
+        )
+        .await?;
+    Ok(row.get("owed"))
+}
+
 /// The final lead is queued after the last worker's end commits, by its
 /// settlement (or by the checkpoint a cancellation or a sweep starts), so a
 /// restart or a dispatch error, which is only logged, loses it. Retry each
-/// group whose workers all ended a while ago with no lead of any kind;
-/// `recover_deferred_plan_checkpoints` owns the groups with an early lead.
-/// The trigger is the group's last worker to end, as the lost settlement's
-/// was, and the group lock rechecks every candidate: this query grants no
-/// dispatch rights. It leaves out what ends a plan without a lead on purpose:
-/// a deleted space, a Stop, a refused or given-up lead, a question waiting
-/// for a person, a last worker a person's runtime stop expired (its expiry
-/// runs no checkpoint), and a last worker that planned again (its end never
-/// checkpoints its own group). When the conversation moved on after the
-/// workers ended (a person wrote, or another turn started), a late lead would
-/// answer out of turn, so the person is told instead. A send queued before
-/// they ended is not such a turn: its job keeps the time it was queued
-/// (`trigger_received_at`, which only the send queue backdates), so the lead
-/// waits behind it instead. A recovery that keeps failing is given up the
-/// same way. Newest first, so groups that keep failing cannot crowd out new
-/// ones.
+/// group still owed its lead (`GROUPS_OWED_A_FINAL_LEAD`) once its workers
+/// all ended a while ago. The trigger is the group's last worker to end, as
+/// the lost settlement's was, and the group lock rechecks every candidate:
+/// this query grants no dispatch rights. When the conversation moved on after
+/// the workers ended (a person wrote, or another turn started), a late lead
+/// would answer out of turn, so the person is told instead. A send queued
+/// before they ended is not such a turn: its job, sent once they ended, keeps
+/// the time it was queued (`trigger_received_at`, which only the send queue
+/// backdates), so a lead for the same agent waits behind it instead. A goal's
+/// next turn waits for the lead (`conversation_owes_final_lead`), so it never
+/// moves the conversation on first. A recovery that keeps failing is given up
+/// the same way. Newest first, so groups that keep failing cannot crowd out
+/// new ones.
 pub(crate) async fn recover_lost_final_plan_checkpoints(
     state: &AppState,
     tick: &mut TickConnection<'_>,
 ) -> AnyResult<()> {
     let person_reasons: Vec<&str> = REQUEUE_REASONS_OF_A_PERSON.to_vec();
+    let query = format!(
+        "select g.trigger_job_id,
+                extract(epoch from now() - g.completed_at)::bigint as ended_seconds,
+                exists (
+                    select 1 from conversation_messages turn
+                    where turn.conversation_id = g.conversation_id and turn.role = 'user'
+                      and turn.created_by is not null and turn.created_at > g.completed_at
+                      and not exists (
+                          select 1 from agent_jobs sent
+                          where sent.conversation_id = g.conversation_id
+                            and sent.prompt_id = turn.prompt_id
+                            and sent.created_at > g.completed_at
+                            and sent.trigger_received_at <= g.completed_at
+                      )
+                ) or exists (
+                    select 1 from agent_jobs turn
+                    where turn.conversation_id = g.conversation_id
+                      and coalesce(turn.trigger_received_at, turn.created_at) > g.completed_at
+                      and turn.plan_group_id is distinct from g.plan_group_id
+                ) as moved_on
+         from ({GROUPS_OWED_A_FINAL_LEAD}) g
+         where g.completed_at < now() - ($6::bigint * interval '1 second')
+         order by g.completed_at desc
+         limit $7"
+    );
     let rows = tick
         .client("lost final checkpoint recovery connection")
         .await?
         .query(
-            "select g.trigger_job_id,
-                    extract(epoch from now() - g.completed_at)::bigint as ended_seconds,
-                    exists (
-                        select 1 from conversation_messages turn
-                        where turn.conversation_id = g.conversation_id and turn.role = 'user'
-                          and turn.created_by is not null and turn.created_at > g.completed_at
-                          and not exists (
-                              select 1 from agent_jobs sent
-                              where sent.conversation_id = g.conversation_id
-                                and sent.prompt_id = turn.prompt_id
-                                and sent.trigger_received_at <= g.completed_at
-                          )
-                    ) or exists (
-                        select 1 from agent_jobs turn
-                        where turn.conversation_id = g.conversation_id
-                          and coalesce(turn.trigger_received_at, turn.created_at) > g.completed_at
-                          and turn.plan_group_id is distinct from g.plan_group_id
-                    ) as moved_on
-             from (
-                 select distinct on (w.plan_group_id) w.plan_group_id, w.id as trigger_job_id,
-                        w.project_id, w.conversation_id, w.completed_at, w.status, w.outcome,
-                        w.error_message, w.payload
-                 from agent_jobs w
-                 where w.agent_role = 'worker' and w.plan_group_id is not null
-                   and w.status in ('completed','failed','canceled','cancelled','expired')
-                   and w.completed_at > now() - ($3::bigint * interval '1 second')
-                   and w.payload #>> '{metadata,multiAgentPlan,groupId}' = w.plan_group_id::text
-                 order by w.plan_group_id, w.completed_at desc, w.id desc
-             ) g
-             join projects p on p.id = g.project_id and p.status <> 'deleted'
-             join conversations c on c.id = g.conversation_id and c.project_id = g.project_id
-             where g.completed_at < now() - ($2::bigint * interval '1 second')
-               and not exists (
-                   select 1 from agent_jobs j
-                   where j.plan_group_id = g.plan_group_id
-                     and (j.status not in ('completed','failed','canceled','cancelled','expired')
-                         or j.agent_role in ('lead_continuation','synthesis'))
-               )
-               and not exists (
-                   select 1 from agent_user_input_requests q
-                   where q.project_id = g.project_id and q.group_id = g.plan_group_id
-                     and q.status in ('pending','answered')
-               )
-               and not exists (
-                   select 1 from conversation_messages m
-                   where m.project_id = g.project_id and m.conversation_id = g.conversation_id
-                     and m.created_by is null and m.metadata->>'source' = 'controller'
-                     and ((m.metadata->>'kind' = 'run_cancellation'
-                           and m.metadata #> '{details,stopRequested}' = 'true'::jsonb
-                           and m.metadata #> '{details,suppressedPlanGroupIds}'
-                               @> jsonb_build_array(g.plan_group_id::text))
-                         or (m.metadata->>'kind' in ('managed_ai_hosted_runtime_required', $4)
-                             and m.metadata #>> '{multiAgentPlan,groupId}' = g.plan_group_id::text))
-               )
-               and not (g.status = 'failed' and g.outcome = 'expired'
-                   and g.error_message = $5 and g.payload->>'requeuedReason' = any($6))
-               and not exists (
-                   select 1 from agent_jobs child
-                   where child.parent_job_id = g.trigger_job_id
-                     and child.plan_group_id is distinct from g.plan_group_id
-               )
-             order by g.completed_at desc
-             limit $1",
+            query.as_str(),
             &[
-                &32_i64,
-                &LOST_FINAL_CHECKPOINT_GRACE_SECONDS,
                 &LOST_FINAL_CHECKPOINT_MAX_AGE_SECONDS,
                 &crate::multi_agent_plan::LEAD_CHECKPOINT_FAILED_CODE,
                 &REQUEUED_JOB_EXPIRED_MESSAGE,
                 &person_reasons,
+                &None::<Uuid>,
+                &LOST_FINAL_CHECKPOINT_GRACE_SECONDS,
+                &32_i64,
             ],
         )
         .await
@@ -3378,6 +3424,12 @@ mod tests {
             StatusCode::CONFLICT,
             Some("dispatch_lane_busy"),
             minutes(60)
+        ));
+        // Any other coded refusal is a refusal.
+        assert!(lost_final_checkpoint_gives_up(
+            StatusCode::CONFLICT,
+            Some("managed_ai_hosted_runtime_required"),
+            minutes(10)
         ));
     }
 

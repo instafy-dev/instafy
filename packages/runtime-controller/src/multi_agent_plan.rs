@@ -1230,9 +1230,10 @@ async fn load_last_plan_worker(
 /// the final lead, because the controller restarted or the dispatch failed
 /// and was only logged. A send queued behind the workers has usually gone
 /// already, because that settlement and the send-queue recovery drain it.
-/// The lead then waits for that send's agent: while its lane is busy, the
-/// dispatch is refused with 409 `dispatch_lane_busy` and the sweep retries.
-/// An error is returned for the caller to retry or give up.
+/// The lead then waits for its own agent, which may be answering that send:
+/// while that agent's lane is busy, the dispatch is refused with 409
+/// `dispatch_lane_busy` and the sweep retries. An error is returned for the
+/// caller to retry or give up.
 pub(crate) async fn recover_lost_final_checkpoint(
     state: &AppState,
     trigger_job_id: Uuid,
