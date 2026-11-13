@@ -12,13 +12,14 @@ yours. These notes override `AGENTS.md` where the two differ.
   still running. You have no equivalent. Run commands with your own shell tool, and before you
   reply or use what a command makes, wait for it to finish. When one needs to outlive the call,
   start it in the background and read its output rather than writing to a session id.
-- **`instafy preview open … --start`.** `AGENTS.md` starts servers with it. Outside an Instafy job
-  it opens a private Instafy preview, with a tunnel and a card in Studio, and needs a login and a
-  conversation. Start a server in the background with your own shell instead, and do not open an
-  Instafy preview unless the person asks for one.
-- **`instafy web search`.** It answers only inside an Instafy job, which this session is not. Find
-  links with your own search, then read the pages with `instafy web read <address>`, as
-  `AGENTS.md` says.
+- **`instafy preview open … --start`.** `AGENTS.md` starts servers with it. In a Claude Code
+  session, including one Instafy started from its chat, it opens a private Instafy preview as the
+  signed-in person, with a tunnel and a card in Studio, and needs a conversation. Start a server in
+  the background with your own shell instead, and do not open an Instafy preview unless the person
+  asks for one.
+- **`instafy web search`.** It answers only in turns Instafy's own agent runs, never in a Claude
+  Code session, including one Instafy started from its chat. Find links with your own search, then
+  read the pages with `instafy web read <address>`, as `AGENTS.md` says.
 
 ## Skills are not in your memory path
 

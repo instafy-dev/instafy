@@ -6170,6 +6170,13 @@ fn project_memory_version_title(snapshot: &OriginReadSnapshot) -> &'static str {
     }
 }
 
+/// The one-line `CLAUDE.md` that was the bundled template before it held notes
+/// of its own. A repository can keep exactly this as its own CLAUDE.md, and the
+/// bootstrap records a file that already equals the template as if it wrote
+/// it, so a team's own one-line file is recorded like Instafy's seed. A
+/// CLAUDE.md recorded with this text's hash is therefore never replaced.
+const ONE_LINE_CLAUDE_DOC: &str = "@AGENTS.md\n";
+
 /// What the bootstrap writes given what the origin holds: missing templates,
 /// templates still exactly as last applied (so a changed template reaches
 /// them), retired bundled site policies, and the managed state file when it
@@ -6185,6 +6192,7 @@ fn plan_project_memory_writes(
         BTreeMap::new();
     let mut next_unreadable = std::collections::BTreeSet::new();
     let mut files_to_write: Vec<ProjectMemoryWriteFile> = Vec::new();
+    let one_line_claude_doc_hash = sha256_hex(ONE_LINE_CLAUDE_DOC);
 
     for template in PROJECT_MEMORY_TEMPLATE_FILES {
         let path = template.path.to_string();
@@ -6224,6 +6232,20 @@ fn plan_project_memory_writes(
                         applied_sha256: template_hash,
                     },
                 );
+            }
+            // Recorded as the one-line file, which may be the team's own (see
+            // `ONE_LINE_CLAUDE_DOC`): keep the file and its record, so no
+            // later bootstrap replaces it either.
+            Some(_)
+                if template.path == "CLAUDE.md"
+                    && tracked_hash == Some(one_line_claude_doc_hash.as_str()) =>
+            {
+                if let Some(entry) = existing_managed_state
+                    .as_ref()
+                    .and_then(|managed| managed.files.get(&path))
+                {
+                    next_state_files.insert(path, entry.clone());
+                }
             }
             Some(current_content) => {
                 let current_hash = sha256_hex(current_content);
@@ -6644,10 +6666,12 @@ mod project_access_tests {
         // No `exec`/`write_stdin` protocol: commands run in Claude's own shell, which still waits
         // for a command before replying.
         "You have no equivalent. Run commands with your own shell tool, and before you reply or use what a command makes, wait for it to finish.",
-        // Servers run in Claude's own shell; an Instafy preview opens only when the person asks.
-        "needs a login and a conversation. Start a server in the background with your own shell instead, and do not open an Instafy preview unless the person asks for one.",
-        // Search answers only in a job; public pages are still read with `instafy web read`.
-        "**`instafy web search`.** It answers only inside an Instafy job, which this session is not. Find links with your own search, then read the pages with `instafy web read <address>`, as `AGENTS.md` says.",
+        // Servers run in Claude's own shell, in a session Instafy started too; an Instafy preview
+        // opens only when the person asks.
+        "In a Claude Code session, including one Instafy started from its chat, it opens a private Instafy preview as the signed-in person, with a tunnel and a card in Studio, and needs a conversation. Start a server in the background with your own shell instead, and do not open an Instafy preview unless the person asks for one.",
+        // Search answers only in turns Instafy's own agent runs, never in a Claude Code session,
+        // one Instafy started included; public pages are still read with `instafy web read`.
+        "**`instafy web search`.** It answers only in turns Instafy's own agent runs, never in a Claude Code session, including one Instafy started from its chat. Find links with your own search, then read the pages with `instafy web read <address>`, as `AGENTS.md` says.",
         // Nothing under `.agents/` is loaded, so a skill is read as a file.
         "and nothing under `.agents/` is loaded into your context automatically.",
         "When a task touches a workspace convention, read the relevant `SKILL.md` directly before acting",
@@ -7318,6 +7342,126 @@ mod project_memory_bootstrap_tests {
             next["files"]["AGENTS.py"]["appliedSha256"],
             json!(sha256_hex(&agents_py))
         );
+    }
+
+    /// CLAUDE.md as it was bundled before its notes held in a Claude Code
+    /// session Instafy starts from its chat.
+    const PREVIOUS_CLAUDE_DOC: &str =
+        include_str!("../../runtime-agent/src/jobs/legacy/claude-doc-v1.md");
+
+    /// The text the bootstrap writes to `path`.
+    fn template_text(path: &str) -> String {
+        load_project_memory_template_content(
+            PROJECT_MEMORY_TEMPLATE_FILES
+                .iter()
+                .find(|template| template.path == path)
+                .unwrap_or_else(|| panic!("{path} is a managed default")),
+        )
+    }
+
+    /// Plans a bootstrap of a space whose state records `recorded` as the
+    /// bootstrap's last write of CLAUDE.md (a space with no state when it is
+    /// `None`), and whose CLAUDE.md holds `current` (missing when `None`).
+    /// Returns every planned write, what is written to CLAUDE.md, and the
+    /// record the next state keeps for CLAUDE.md.
+    fn plan_claude_md(
+        recorded: Option<&str>,
+        current: Option<&str>,
+    ) -> (Vec<(String, String)>, Option<String>, Value) {
+        let state = recorded.map(|text| {
+            json!({
+                "version": 1,
+                "files": { "CLAUDE.md": { "appliedSha256": sha256_hex(text) } },
+            })
+            .to_string()
+        });
+        let mut files = Vec::new();
+        if let Some(state) = &state {
+            files.push((PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH, state.as_str()));
+        }
+        if let Some(current) = current {
+            files.push(("CLAUDE.md", current));
+        }
+        let writes: Vec<(String, String)> = plan_project_memory_writes(&snapshot_with(&files))
+            .expect("plan")
+            .into_iter()
+            .map(|write| (write.path, write.content))
+            .collect();
+        let written = |path: &str| {
+            writes
+                .iter()
+                .find(|(written_path, _)| written_path == path)
+                .map(|(_, content)| content.clone())
+        };
+        let next: Value = serde_json::from_str(
+            &written(PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH).expect("state written"),
+        )
+        .expect("state JSON");
+        let claude_md = written("CLAUDE.md");
+        (writes, claude_md, next["files"]["CLAUDE.md"].clone())
+    }
+
+    /// A space whose own CLAUDE.md was the one-line `@AGENTS.md` while that
+    /// was the template is recorded like Instafy's seed. The bootstrap keeps
+    /// the file and its record, and so does every later bootstrap.
+    #[test]
+    fn a_claude_md_recorded_as_the_one_line_file_is_kept_with_its_record() {
+        let one_line = "@AGENTS.md\n";
+        let (writes, written, record) = plan_claude_md(Some(one_line), Some(one_line));
+        assert_eq!(written, None);
+        assert_eq!(record, json!({ "appliedSha256": sha256_hex(one_line) }));
+
+        // Once the other defaults are written, a later bootstrap writes nothing.
+        let mut files: Vec<(&str, &str)> = writes
+            .iter()
+            .map(|(path, content)| (path.as_str(), content.as_str()))
+            .collect();
+        files.push(("CLAUDE.md", one_line));
+        assert!(plan_project_memory_writes(&snapshot_with(&files))
+            .expect("plan")
+            .is_empty());
+    }
+
+    /// A CLAUDE.md still holding the template the bootstrap last wrote is
+    /// brought up to date, and its record follows.
+    #[test]
+    fn a_claude_md_still_holding_the_previous_template_is_replaced() {
+        let current = template_text("CLAUDE.md");
+        assert_ne!(PREVIOUS_CLAUDE_DOC, current);
+        let (_, written, record) =
+            plan_claude_md(Some(PREVIOUS_CLAUDE_DOC), Some(PREVIOUS_CLAUDE_DOC));
+        assert_eq!(written.as_deref(), Some(current.as_str()));
+        assert_eq!(record, json!({ "appliedSha256": sha256_hex(&current) }));
+    }
+
+    /// A CLAUDE.md edited after the bootstrap wrote it is kept, with the
+    /// record of what the bootstrap wrote.
+    #[test]
+    fn a_claude_md_edited_after_the_bootstrap_is_kept() {
+        let edited = PREVIOUS_CLAUDE_DOC.replace("# Claude-specific notes", "# Our Claude notes");
+        assert_ne!(edited, PREVIOUS_CLAUDE_DOC);
+        let (_, written, record) = plan_claude_md(Some(PREVIOUS_CLAUDE_DOC), Some(&edited));
+        assert_eq!(written, None);
+        assert_eq!(
+            record,
+            json!({ "appliedSha256": sha256_hex(PREVIOUS_CLAUDE_DOC) })
+        );
+    }
+
+    /// A missing CLAUDE.md is written, in a new space and in one that recorded
+    /// the one-line file: only a file that is there is kept.
+    #[test]
+    fn a_missing_claude_md_is_written() {
+        let current = template_text("CLAUDE.md");
+        for recorded in [None, Some("@AGENTS.md\n")] {
+            let (_, written, record) = plan_claude_md(recorded, None);
+            assert_eq!(written.as_deref(), Some(current.as_str()), "{recorded:?}");
+            assert_eq!(
+                record,
+                json!({ "appliedSha256": sha256_hex(&current) }),
+                "{recorded:?}"
+            );
+        }
     }
 
     #[tokio::test]

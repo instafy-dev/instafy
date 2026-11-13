@@ -171,6 +171,15 @@ const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/CLAUDE.md"
 ));
+/// Earlier bundled copies of `CLAUDE.md` a scaffold may replace. A team's own `CLAUDE.md`, or an
+/// edited copy, is kept. The one-line `@AGENTS.md` file bundled before these is left out: a
+/// repository can keep exactly that as its own `CLAUDE.md`, and the upgrade matches bytes only, so
+/// it cannot tell Instafy's old seed from a team's file.
+const LEGACY_CLAUDE_DOC_TEMPLATES: &[&str] = &[
+    // From before its notes on `instafy preview open` and `instafy web search` covered a Claude
+    // Code session Instafy starts from its chat: they said this session was not an Instafy job.
+    include_str!("legacy/claude-doc-v1.md"),
+];
 const AGENTS_SCRIPT_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/AGENTS.py"
@@ -859,7 +868,12 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
         wrote_any = true;
     }
 
-    if write_missing_memory_file(workspace_dir, &claude_doc_path, CLAUDE_DOC_TEMPLATE) {
+    if upgrade_bundled_skill(
+        workspace_dir,
+        &claude_doc_path,
+        LEGACY_CLAUDE_DOC_TEMPLATES,
+        CLAUDE_DOC_TEMPLATE,
+    ) {
         wrote_any = true;
     }
 
@@ -2174,10 +2188,12 @@ mod tests {
         // No `exec`/`write_stdin` protocol: commands run in Claude's own shell, which still waits
         // for a command before replying.
         "You have no equivalent. Run commands with your own shell tool, and before you reply or use what a command makes, wait for it to finish.",
-        // Servers run in Claude's own shell; an Instafy preview opens only when the person asks.
-        "needs a login and a conversation. Start a server in the background with your own shell instead, and do not open an Instafy preview unless the person asks for one.",
-        // Search answers only in a job; public pages are still read with `instafy web read`.
-        "**`instafy web search`.** It answers only inside an Instafy job, which this session is not. Find links with your own search, then read the pages with `instafy web read <address>`, as `AGENTS.md` says.",
+        // Servers run in Claude's own shell, in a session Instafy started too; an Instafy preview
+        // opens only when the person asks.
+        "In a Claude Code session, including one Instafy started from its chat, it opens a private Instafy preview as the signed-in person, with a tunnel and a card in Studio, and needs a conversation. Start a server in the background with your own shell instead, and do not open an Instafy preview unless the person asks for one.",
+        // Search answers only in turns Instafy's own agent runs, never in a Claude Code session,
+        // one Instafy started included; public pages are still read with `instafy web read`.
+        "**`instafy web search`.** It answers only in turns Instafy's own agent runs, never in a Claude Code session, including one Instafy started from its chat. Find links with your own search, then read the pages with `instafy web read <address>`, as `AGENTS.md` says.",
         // Nothing under `.agents/` is loaded, so a skill is read as a file.
         "and nothing under `.agents/` is loaded into your context automatically.",
         "When a task touches a workspace convention, read the relevant `SKILL.md` directly before acting",
@@ -2234,6 +2250,37 @@ mod tests {
                 claude_doc.contains(correction),
                 "CLAUDE.md no longer says: {correction}"
             );
+        }
+    }
+
+    /// The bundled CLAUDE.md said its session is not an Instafy job, which is false for a
+    /// local-engine turn: a folder still holding that copy is upgraded. The one-line `@AGENTS.md`
+    /// file bundled before it is kept, since a repository can keep exactly that as its own, and so
+    /// is an edited copy.
+    #[test]
+    fn scaffold_upgrades_a_bundled_claude_md_and_keeps_the_one_line_file_and_edits() {
+        let previous = include_str!("legacy/claude-doc-v1.md");
+        assert!(previous.contains("which this session is not"));
+        assert!(!CLAUDE_DOC_TEMPLATE.contains("which this session is not"));
+
+        // A missing CLAUDE.md is written.
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join(CLAUDE_DOC_FILENAME);
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), CLAUDE_DOC_TEMPLATE);
+
+        // The bundled copy from before is upgraded.
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), CLAUDE_DOC_TEMPLATE);
+
+        // The one-line file and an edited copy are kept.
+        let edited = previous.replace("# Claude-specific notes", "# Our Claude notes");
+        assert_ne!(edited, previous);
+        for theirs in ["@AGENTS.md\n", edited.as_str()] {
+            fs::write(&path, theirs).unwrap();
+            ensure_project_memory_scaffold(workspace.path());
+            assert_eq!(fs::read_to_string(&path).unwrap(), theirs);
         }
     }
 
